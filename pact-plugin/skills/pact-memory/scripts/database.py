@@ -19,11 +19,12 @@ import hashlib
 import json
 import logging
 import os
+import re
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 # Try to import pysqlite3 which has extension loading enabled.
 # Standard library sqlite3 has enable_load_extension disabled for security.
@@ -37,6 +38,7 @@ except ImportError:
 
 from .config import (
     DERIVED_STORE_ORIGINS,
+    read_only_scope_active,
     resolve_db_path,
     store_path_origin,
     store_scope,
@@ -241,7 +243,12 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
         db_path: Optional custom database path. Uses default if not provided.
 
     Returns:
-        SQLite connection configured with WAL mode and foreign keys.
+        SQLite connection with foreign keys and a busy timeout set. The
+        journal mode is WAL when this call CREATES the store or opens one that
+        already holds data; an EMPTY store is left for `init_schema` to switch,
+        because the pragma writes the database header and a read that returns
+        nothing must not leave one behind. A connection opened inside a read
+        scope never switches an existing store's journal mode.
 
     `db_path` IS AN INPUT TO THE RESOLVER, NOT A RIVAL OF IT. This used to read
     `db_path or get_db_path()`, which was a second rule for the same question:
@@ -271,24 +278,66 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
 
-    # Enable WAL mode for corruption prevention and better concurrency
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
+    # THE TIMEOUT GOES BEFORE ANY JOURNAL-MODE SWITCH. Converting a
+    # delete-mode store to WAL contends for the database; with the timeout
+    # still at sqlite's default ZERO, two concurrent opens can race that
+    # conversion into `database is locked`. The timeout is a connection
+    # setting and costs nothing on the no-op path.
     conn.execute("PRAGMA busy_timeout=5000")
+    conn.execute("PRAGMA foreign_keys=ON")
 
-    # Harden WAL sidecar files only on first creation (avoids redundant
-    # syscall on every connection). WAL sidecars are created by the
-    # PRAGMA journal_mode=WAL statement above.
+    # THE WAL SWITCH IS DEFERRED ON AN EMPTY STORE. `PRAGMA journal_mode=WAL`
+    # WRITES the database header (measured: a 0-byte file becomes 4096 bytes),
+    # so running it here makes even a read that returns nothing leave a
+    # database behind. On an uninitialized store the switch moves to
+    # `init_schema`, the shared CREATE point, so every path that creates a
+    # store (`ensure_initialized`, `initialize_database`/`setup`) leaves it in
+    # WAL. A store that already has content switches here as before.
+    try:
+        empty_store = path.stat().st_size == 0
+    except OSError:
+        empty_store = False
+    # A READ NEVER SWITCHES AN EXISTING STORE'S JOURNAL MODE, and an EMPTY
+    # store is left for `init_schema` (the pragma writes the header, so a read
+    # that returns nothing must not leave a database behind). A store THIS
+    # call creates, or one that already holds data, is switched here as
+    # before; only a read scope is exempt, so a read cannot convert a
+    # DELETE-mode store. On an already-WAL store the pragma is a no-op.
+    if (is_new or not empty_store) and not read_only_scope_active():
+        # Enable WAL mode for corruption prevention and better concurrency
+        conn.execute("PRAGMA journal_mode=WAL")
+
+    # Harden WAL sidecar files on first creation (avoids a redundant syscall
+    # on every connection). For a NEW store the WAL pragma above is what will
+    # create them on the first write; `init_schema` also hardens after its own
+    # WAL switch, because an existing 0-byte store is switched there instead.
     if is_new:
-        for suffix in ("-wal", "-shm"):
-            sidecar = Path(str(path) + suffix)
-            if sidecar.exists():
-                try:
-                    os.chmod(str(sidecar), 0o600)
-                except OSError:
-                    pass
+        _harden_sidecars(path)
 
     return conn
+
+
+def _harden_sidecars(path) -> None:
+    """chmod `-wal` and `-shm` to 0600 where they exist. Never raises.
+
+    ONE HELPER FOR EVERY SITE that switches a store to WAL: `get_connection`
+    for a new store and `init_schema` for an existing empty one. A sidecar
+    can already hold memory content, so a mode inherited from the process
+    umask is a disclosure, not a cosmetic difference.
+
+    AN EMPTY PATH IS NO PATH. `PRAGMA database_list` reports `""` for an
+    in-memory or temporary database, and `"" + "-wal"` would name a file in
+    the current directory.
+    """
+    if not path:
+        return
+    for suffix in ("-wal", "-shm"):
+        sidecar = Path(str(path) + suffix)
+        try:
+            if sidecar.exists():
+                os.chmod(str(sidecar), 0o600)
+        except OSError:
+            pass
 
 
 @contextmanager
@@ -440,6 +489,25 @@ def init_schema(conn: sqlite3.Connection) -> None:
 
     # Attempt to create vector table for semantic search
     _init_vector_table(conn)
+
+    # THE SHARED CREATE POINT SETS WAL, AFTER the CREATE statements.
+    # `get_connection` deliberately does not switch an EMPTY store (the pragma
+    # writes the header), so every path that creates the schema must switch
+    # here — otherwise `initialize_database` (and the production `setup` path)
+    # would build a NON-WAL store, losing crash safety and making a later
+    # concurrent conversion contend. A read-only connection has already raised
+    # on the CREATEs, so this line is only reached on a create path.
+    conn.execute("PRAGMA journal_mode=WAL")
+    # HARDEN THE SIDECARS THE SWITCH MAY HAVE CREATED. `get_connection` cannot
+    # do it for an existing 0-byte store (it deliberately leaves an empty
+    # store alone), so the create point must. The store path comes from the
+    # connection: row_factory is not guaranteed for a raw test connection, so
+    # the file column is read by position.
+    try:
+        row = conn.execute("PRAGMA database_list").fetchone()
+        _harden_sidecars(row[2] if row is not None else None)
+    except (sqlite3.Error, IndexError, TypeError):
+        pass
 
     conn.commit()
     logger.info("Database schema initialized successfully")
@@ -598,19 +666,36 @@ def ensure_initialized(conn: sqlite3.Connection) -> None:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='memories'"
     )
     if cursor.fetchone() is None:
+        if read_only_scope_active():
+            # A READ MUST NOT CREATE THE SCHEMA. The read verbs refuse a
+            # store without `memories` before opening it, so this is only the
+            # backstop for a store truncated between that guard and this
+            # call; creating it here would be the write the guard exists to
+            # prevent.
+            return
+        # `init_schema` performs the WAL switch itself: it is the shared CREATE
+        # point, so every initializer (this one, `initialize_database`, the
+        # `setup` path) leaves the store in WAL. A read-only connection
+        # raises SQLITE_READONLY there, which the caller's read-side fail-soft
+        # handles.
         init_schema(conn)
     else:
+        if read_only_scope_active():
+            # NO MIGRATIONS ON A READ. `_migrate_ct_fields` issues ALTERs and
+            # `_init_vector_table` issues a CREATE; both are writes, and a
+            # read of an existing store must emit neither.
+            return
         _migrate_ct_fields(conn)
         _init_vector_table(conn)
 
 
 # =============================================================================
-# Column allow-list (issue #374 — bug 2 fix)
+# Column allow-list
 # =============================================================================
 #
 # The `memories` table allows the following columns in write paths. Any unknown
 # key passed to save_memory() or update_memory() raises ValueError instead of
-# being silently dropped (which was the old bug 2 behavior). This matters
+# being silently dropped (the old behavior). This matters
 # because typos in payloads — especially sub-object keys that looked like
 # top-level keys (`description` instead of `notes`) — used to disappear with
 # no warning, causing silent data loss.
@@ -679,8 +764,8 @@ def _reject_unknown_columns(
 
     The error message lists both the unknown keys (for debugging) and the
     allowed-field set (for discoverability). This is the primary public
-    contract for bug 2 — callers rely on the message shape in the JSON
-    error envelope rendered by cli.py::cmd_update.
+    contract for the unknown-key refusal — callers rely on the message
+    shape in the JSON error envelope rendered by cli.py::cmd_update.
 
     The prose list is DERIVED from `allowed` by subtracting the server-owned
     fields, and THE SAME DERIVED LIST IS ATTACHED TO THE RAISED EXCEPTION as
@@ -703,7 +788,7 @@ def _reject_unknown_columns(
     same call depending on which half a caller read.
     """
     # The allowed_fields list is intentionally exposed in error envelopes —
-    # it is the primary public contract for bug-2 discoverability.
+    # it is how a caller discovers which keys are allowed.
     unknown = sorted(set(updates) - allowed)
     if not unknown:
         return
@@ -734,10 +819,10 @@ def _reject_unknown_columns(
 
 
 # =============================================================================
-# Bug 1 fix (#374) — additive list-field merge with content-hash dedup
+# Additive list-field merge with content-hash dedup
 # =============================================================================
 #
-# Before PR #374, update_memory() replaced list fields wholesale: passing
+# update_memory() used to replace list fields wholesale: passing
 # {"lessons_learned": ["c"]} to a memory whose lessons_learned was ["a", "b"]
 # would overwrite it to ["c"], silently losing the two existing items. The
 # pinned "snapshot the current get(); read-merge-write-back with the FULL
@@ -793,12 +878,12 @@ def _canonicalize_dict_item(
     """
     Round-trip a dict list item through its dataclass to produce a canonical
     shape for content hashing. Also provides the write-path strict validation
-    hook for bug 3 (unknown sub-object keys → ValueError) when strict=True.
+    hook (unknown sub-object keys → ValueError) when strict=True.
 
     - A string input is treated as the primary field value (Entity("X") etc.).
     - A dict input is validated with strict=<flag>; strict=True raises on
       unknown keys (write path), strict=False drops them (read/hash path for
-      legacy rows — see R2-5 in _merge_with_dedup).
+      legacy rows — see the lenient fallback in _merge_with_dedup).
     - Anything else raises TypeError to avoid silent data loss.
     """
     cls = _get_dict_field_class(field)
@@ -867,7 +952,8 @@ def _merge_with_dedup(
     Incoming dict items are canonicalized via _canonicalize_dict_item so the
     OUTPUT list contains the canonical (round-tripped) form. This matters
     because write-path strict validation happens inside _canonicalize_dict_item
-    — we get the bug-3 enforcement "for free" as a side effect of dedup.
+    — we get the unknown-sub-object-key refusal "for free" as a side
+    effect of dedup.
     """
     seen: Set[str] = set()
     out: List[Any] = []
@@ -890,7 +976,7 @@ def _merge_with_dedup(
             # (legacy stray key, unusual shape). Do NOT raise on the read
             # side — that would brick updates to legacy rows.
             #
-            # R2-5: before falling back to repr(), try lenient
+            # LENIENT FALLBACK: before falling back to repr(), try lenient
             # canonicalization (strict=False drops unknown sub-object keys).
             # This makes existing legacy items hash-compatible with incoming
             # items that pass strict validation — preventing asymmetric
@@ -1053,6 +1139,826 @@ def _unusable_identifier(value: object) -> bool:
     )
 
 
+# =============================================================================
+# Project identity: the canonical grammar and the write-ingress rule
+# =============================================================================
+#
+# ONE DEFINITION EACH, in this module, because the write ingress
+# (`create_memory`, `update_memory`) and the identity canonicaliser must agree
+# on what an identifier is. `project_identity` imports these; this module does
+# not import `project_identity`, so there is no cycle.
+#
+# THE CANONICAL GRAMMAR DESCRIBES AN ID; it does not parse a remote URL. The
+# remote-to-canonical canonicaliser lives in `project_identity`, and the shape
+# below is what it must produce: `host[:port]/<segment>[/<segment>...]`.
+#
+# THE SHAPE IS ALSO A DISCRIMINATOR: every canonical id contains at least one
+# `/`, and no POSIX basename can, so a legacy folder-name bucket can never be
+# mistaken for a canonical id. Do not relax the `/` requirement.
+
+CANONICAL_ID_MAX_LENGTH = 255
+
+# Host: lowercase, alnum at BOTH ends, dots and hyphens only inside. The
+# optional port sits in the HOST position and nowhere else; a colon anywhere
+# else is refused by the segment class. `[1-9]` rejects a leading zero (and
+# zero itself); the 65535 ceiling is checked numerically because a regex
+# cannot express it. Path case is PRESERVED — owner/repo are case-sensitive
+# on a case-sensitive host, so folding them would silently merge two
+# repositories.
+# `fullmatch` is used below rather than `$`-anchored `match`: in Python `$`
+# also matches just BEFORE a trailing newline, so `host/owner/repo\n` would
+# pass an anchored pattern. The newline is git's record terminator and is
+# dropped by the parser; a value that still carries one is not an id.
+# An uppercase `%XX` is an RFC 3986 percent-encoding of a byte outside the
+# unreserved and sub-delimiter set.
+CANONICAL_ID_RE = re.compile(
+    r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?"
+    r"(?::([1-9][0-9]{0,4}))?"
+    r"(?:/(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-F]{2})+)+"
+)
+
+
+def is_canonical_id(value: object) -> bool:
+    """Whether `value` is a canonical `host[:port]/owner/repo` id.
+
+    Pure and total: any object is accepted and answers False rather than
+    raising, because this runs on values that arrived from a remote, an
+    override file, an environment variable and a stored row.
+
+    This answers only whether a FINISHED id is in canonical shape. The
+    parser's own rules that leave no trace in the result — one `.git` strip,
+    default-port dropping, userinfo stripping — belong to the canonicaliser
+    that produces the id, not here.
+    """
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > CANONICAL_ID_MAX_LENGTH
+    ):
+        return False
+    match = CANONICAL_ID_RE.fullmatch(value)
+    if match is None:
+        return False
+    port = match.group(1)
+    if port is not None and int(port) > 65535:
+        return False
+    path = value.split("/", 1)[1]
+    return not any(segment in (".", "..") for segment in path.split("/"))
+
+
+def validate_identifier_for_write(value: object) -> None:
+    """The write-ingress rule for project ids, session ids and ids.
+
+    `_unusable_identifier` plus a 255-character cap. NO printable-ASCII
+    restriction: a non-Latin directory name is a legitimate project basename,
+    and refusing it would reject real stores. The cap matches the canonical
+    grammar's own limit, so an id that can be detected can also be written.
+
+    Raises:
+        ValueError: naming the rule, never the value. A rejected value may
+            hold control characters or a credential-bearing remote, and the
+            remedy text is what callers surface.
+    """
+    if isinstance(value, str) and len(value) > CANONICAL_ID_MAX_LENGTH:
+        raise ValueError(
+            f"identifier must be at most {CANONICAL_ID_MAX_LENGTH} "
+            "characters; nothing was written."
+        )
+    if _unusable_identifier(value):
+        raise ValueError(
+            "identifier must be a non-empty string without control characters "
+            "(U+0000-U+001F, U+007F-U+009F) or lone surrogates "
+            "(U+D800-U+DFFF); nothing was written."
+        )
+
+
+# =============================================================================
+# Union read scope: one normalisation and one predicate for every seam
+# =============================================================================
+
+def normalise_project_scopes(
+    project_ids: Optional[Union[str, Sequence[str]]],
+) -> Optional[Tuple[str, ...]]:
+    """Normalise a union read scope for every seam.
+
+    `None` keeps its whole-store meaning (no filter). A single string is a
+    ONE-ELEMENT scope, not a sequence of characters. An empty sequence — and
+    an empty string, which is the same thing to this rule — normalises to
+    `()`, which every caller MUST treat as NO ROWS, never as unscoped.
+
+    THAT EMPTINESS IS THE TRAP: the seams below used to decide "apply a
+    filter?" with a truthiness test, so a falsy scope silently dropped the
+    predicate and turned a single-project read into a whole-store read. This
+    function is the one place the distinction is made; callers test
+    `is None`, never truthiness.
+
+    Elements that are not non-empty strings are dropped: no row can carry
+    them, and `IN (NULL)` never matches. A repeated id is kept once, in
+    first-seen order, because a per-scope loop (one KNN per scope) would
+    otherwise return the same memory twice.
+    """
+    if project_ids is None:
+        return None
+    if isinstance(project_ids, str):
+        return (project_ids,) if project_ids else ()
+    return tuple(dict.fromkeys(
+        scope for scope in project_ids
+        if isinstance(scope, str) and scope
+    ))
+
+
+def project_scope_predicate(
+    column: str, scopes: Sequence[str]
+) -> Tuple[str, Tuple[str, ...]]:
+    """The SQL predicate for a NON-EMPTY scope, with its bound parameters.
+
+    An empty scope returns `("0", ())` — a predicate that matches no row.
+    Never render `IN ()` (SQLite rejects it) and never drop the clause (that
+    would return the whole store).
+
+    `column` is a SQL identifier chosen by our own code, never caller input;
+    only the values are parameterised.
+    """
+    if not scopes:
+        return "0", ()
+    placeholders = ",".join("?" for _ in scopes)
+    return f"{column} IN ({placeholders})", tuple(scopes)
+
+
+# =============================================================================
+# Store primitives for the identity resolver
+# =============================================================================
+
+def count_project_memories(conn: sqlite3.Connection, project_id: str) -> int:
+    """Count memories stored under one project id.
+
+    One indexed COUNT (`idx_memories_project`), used by the resolver's
+    two-count decision. A NULL-project row is not this project's row and is
+    not counted, exactly as a scoped read excludes it.
+
+    PRECONDITION: the store's schema is present. This is an identity read
+    primitive, reached from read-only probes, so it never calls
+    `ensure_initialized` (which would attempt migrations and the vector-table
+    CREATE); on a store without the table it raises
+    `sqlite3.OperationalError`, and the caller checks the schema first.
+    """
+    cursor = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE project_id = ?",
+        (project_id,),
+    )
+    return cursor.fetchone()[0]
+
+
+def project_bucket_counts(conn: sqlite3.Connection) -> Dict[str, int]:
+    """Every NON-NULL project id with its memory count, in one query.
+
+    Feeds three callers: the resolver's exact-case candidate lookup against
+    the stored bucket set, the per-bucket disclosure split, and the
+    `project-id show/status` counts.
+
+    NULL is excluded by construction: it is a real bucket in the store but
+    never a project scope, and `IN (NULL)` never matches, so surfacing it as
+    a candidate would produce a filter that silently selects nothing.
+
+    PRECONDITION: the store's schema is present. This is an identity read
+    primitive, reached from read-only probes, so it never calls
+    `ensure_initialized` (which would attempt migrations and the vector-table
+    CREATE); on a store without the table it raises
+    `sqlite3.OperationalError`, and the caller checks the schema first.
+    """
+    cursor = conn.execute(
+        "SELECT project_id, COUNT(*) AS n FROM memories "
+        "WHERE project_id IS NOT NULL GROUP BY project_id"
+    )
+    return {row[0]: row[1] for row in cursor.fetchall()}
+
+
+def bucket_session_ids(conn: sqlite3.Connection, project_id: str) -> List[str]:
+    """Every session id that wrote a memory into `project_id`, newest first.
+
+    The legacy-admission evidence check reads this: a session that wrote into
+    the bucket, whose recorded project directory is this repository, and
+    which started after the repository's `description` file was created is
+    evidence the bucket belongs here (see `_legacy_session_evidence`). NULL and empty session ids are
+    excluded, because no session record can be found for them. Ordered by
+    each session's most recent memory (newest first, ties by id), so a caller
+    that stops at the first hit tries the sessions most likely to still have
+    a record on disk.
+
+    PRECONDITION: the store's schema is present. This is an identity read
+    primitive, reached from read-only probes, so it never calls
+    `ensure_initialized` (which would attempt migrations and the vector-table
+    CREATE); on a store without the table it raises
+    `sqlite3.OperationalError`, and the caller checks the schema first.
+    """
+    cursor = conn.execute(
+        "SELECT session_id FROM memories "
+        "WHERE project_id = ? AND session_id IS NOT NULL AND session_id != '' "
+        "GROUP BY session_id ORDER BY MAX(created_at) DESC, session_id",
+        (project_id,),
+    )
+    return [row[0] for row in cursor.fetchall()]
+
+
+LEGACY_PLAUSIBLE_VERIFIED = "verified"
+LEGACY_PLAUSIBLE_UNVERIFIED = "unverified"
+LEGACY_PLAUSIBLE_EXCLUDED = "excluded"
+
+
+def _gate_root_paths(roots: Any) -> Tuple[str, ...]:
+    """Resolve the containment roots the legacy gate accepts.
+
+    A single `Path`/`str` is ONE root, never a sequence of characters. A
+    sequence is every checkout the caller knows about. Falsy entries are
+    dropped and every surviving spelling is resolved with `realpath`, so a
+    symlinked checkout and its target compare equal. NEVER case-fold: the
+    repository's containment rule is validate-as-given, anchor raw, and a
+    fold that passes on a case-insensitive filesystem would miss here.
+    Duplicates are removed so a caller that passes a main root already
+    present in a worktree list does not test the same prefix twice.
+    """
+    if roots is None:
+        return ()
+    if isinstance(roots, (str, os.PathLike)):
+        candidates = [roots]
+    else:
+        candidates = list(roots)
+    resolved: list = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        root = os.path.realpath(str(candidate))
+        if root not in resolved:
+            resolved.append(root)
+    return tuple(resolved)
+
+
+def _gitfile_target(marker: str) -> Optional[str]:
+    """The real path a `gitdir: <path>` file names, or None. Never raises."""
+    try:
+        with open(marker, encoding="utf-8") as handle:
+            first = handle.readline(4096).strip()
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+    if not first.startswith("gitdir:"):
+        return None
+    target = first[len("gitdir:"):].strip()
+    if not target:
+        return None
+    if not os.path.isabs(target):
+        target = os.path.join(os.path.dirname(marker), target)
+    try:
+        return os.path.realpath(target)
+    except (OSError, ValueError):
+        return None
+
+
+def _worktree_admin_of(root: str, root_common: str, name: str) -> bool:
+    """Whether `<root_common>/worktrees/<name>` is the admin dir of `root`.
+
+    Read from the COMMON DIR's side, never from the root's own `.git`: the
+    admin dir's `gitdir` file must name `<root>/.git` back. Never raises.
+    """
+    admin = os.path.join(root_common, "worktrees", name)
+    try:
+        with open(os.path.join(admin, "gitdir"), encoding="utf-8") as handle:
+            back = handle.readline(4096).strip()
+        if not back:
+            return False
+        if not os.path.isabs(back):
+            back = os.path.join(admin, back)
+        return os.path.realpath(back) == os.path.realpath(os.path.join(root, ".git"))
+    except (OSError, UnicodeDecodeError, ValueError):
+        return False
+
+
+def _owns_row_instead_of(
+    directory: str, root: str, root_common: Optional[str]
+) -> bool:
+    """Whether a `.git` at `directory` makes it a different checkout of `root`.
+
+    A ROOT'S OWN SUBMODULE STILL BELONGS TO THE ROOT: its `.git` is a file
+    naming a git dir under `<root_common>/modules/`, or, when `root` is a
+    linked worktree, under `<root_common>/worktrees/<root's admin>/modules/`
+    (git keeps a worktree's submodules in that worktree's own admin dir), and
+    a superproject session's rows inside it are the superproject's. Any other
+    `.git` (a directory, or a file naming a git dir anywhere else) is a
+    separate checkout, which owns the rows below it.
+
+    `root_common` IS THE COMMON DIR GIT REPORTED for the root, never one this
+    module re-derives from the root's own `.git` and `commondir` files: a
+    second parser accepts shapes git refuses, so the exemption's anchor would
+    be a value git never verified. None means no verified value, and then no
+    nested `.git` is exempt.
+    """
+    marker = os.path.join(directory, ".git")
+    if not os.path.lexists(marker):
+        return False
+    if root_common is None or os.path.isdir(marker) or os.path.islink(marker):
+        return True
+    target = _gitfile_target(marker)
+    if target is None:
+        return True
+    if target.startswith(os.path.join(root_common, "modules") + os.sep):
+        return False
+    worktrees = os.path.join(root_common, "worktrees") + os.sep
+    if not target.startswith(worktrees):
+        return True
+    name, _, rest = target[len(worktrees):].partition(os.sep)
+    if not name or not rest.startswith("modules" + os.sep):
+        return True
+    return not _worktree_admin_of(root, root_common, name)
+
+
+def _contained_by_root(
+    resolved: str, root: str, nested: Dict[tuple, bool], root_common: Optional[str]
+) -> bool:
+    """Whether `resolved` belongs to the checkout at `root` itself.
+
+    Under the root is not enough. A directory strictly between the root and
+    the row that is a separate checkout (`_owns_row_instead_of`: a nested
+    repository, or one unpacked inside another) owns the row, so an ancestor
+    root must not count it; the root's own submodules do not end its claim.
+    `root_common` is git's verified common dir for the root (None: no
+    exemption). `nested` caches each answer for one gate call.
+    """
+    if resolved != root and not resolved.startswith(root + os.sep):
+        return False
+    directory = os.path.dirname(resolved)
+    while directory != root and directory.startswith(root + os.sep):
+        key = (root, directory)
+        if key not in nested:
+            nested[key] = _owns_row_instead_of(directory, root, root_common)
+        if nested[key]:
+            return False
+        directory = os.path.dirname(directory)
+    return True
+
+
+def legacy_candidate_plausibility(
+    conn: sqlite3.Connection,
+    candidate_id: str,
+    roots: Optional[Union[Path, str, Sequence[Union[Path, str]]]],
+    *,
+    root_common: Optional[Union[Path, str]] = None,
+) -> Tuple[str, Dict[str, int]]:
+    """Whether a legacy basename bucket plausibly belongs to `roots`.
+
+    The gate decides whether a populated legacy bucket joins the read scope.
+    Evidence is the bucket's own absolute `files.path` rows: `_normalize_path`
+    stores an absolute path as given, so such a row records where the bucket
+    was actually used. A RELATIVE path carries no location and is not
+    evidence — it is counted but never used to decide.
+
+    `roots` IS A SEQUENCE, NOT ONE ROOT, AND THAT IS THE WORKTREE FIX. The
+    identity root a linked worktree resolves to is the MAIN checkout — by
+    design, so every worktree of one repository shares one id — but a row
+    saved while the process sat in the worktree records the WORKTREE's
+    absolute path. Gating on the main checkout alone then calls the bucket
+    `excluded` and collapses the read scope to the canonical id, so the
+    operator's own pre-upgrade rows disappear from reads and the disclosure
+    tells them to rekey a bucket that is already theirs. The CALLER computes
+    the set (the identity root plus every non-bare path from
+    `git worktree list --porcelain`) and passes it in; this module does not
+    run git. A single `Path`/`str` is still accepted and treated as a
+    one-element sequence, so an existing single-root caller keeps working.
+
+    Returns `(outcome, detail)` where outcome is one of:
+      - `verified`   — at least one absolute row lies under SOME root;
+      - `unverified` — no roots, or no absolute rows exist at all, so the
+                       store cannot judge; the caller reads the bucket only
+                       on session evidence (a recorded session from this
+                       repository wrote into it), disclosed as
+                       `included_unverified`, and otherwise reports it
+                       `unproven` and does not read it;
+      - `excluded`   — absolute rows exist and none lies under ANY root.
+
+    A ROW UNDER A NESTED CHECKOUT IS NOT CONTAINED. A row counts for a root
+    only when no directory strictly between the root and the row is a
+    separate checkout (`_contained_by_root`): an identity root that is an
+    ANCESTOR of another checkout must not claim that checkout's rows. The
+    root's own registered submodules are part of it, not separate, and
+    "registered" is judged against `root_common`: the common dir GIT reported
+    for the roots (the identity root and its listed worktrees share one). The
+    caller passes it; this module never derives it. Without it no nested
+    `.git` is exempt, the fail-closed direction.
+
+    Containment RESOLVES BOTH SIDES (`realpath` on the row path and on each
+    root) and then does a literal prefix comparison, with no case folding: a
+    row written through a symlinked spelling resolves to its target, so it
+    matches a root spelled either way, while a fold would pass on a
+    case-insensitive filesystem and miss on a case-sensitive one. Resolution
+    also normalises `..`, so a path escaping a root cannot be counted as
+    inside it.
+
+    AN UNRESOLVABLE ROW IS EVIDENCE AND IS NEVER CONTAINED, AND IT NEVER
+    RAISES. `realpath` raises `ValueError` for a path carrying an embedded NUL
+    byte (a corrupt or hostile `files.path`), and this gate runs on every
+    read, so letting it escape would fail EVERY read for the project from a
+    check that only decides whether to WIDEN the scope. Swallowing it silently
+    is the other failure: a row the store cannot read would then buy the
+    bucket an INCLUDE. So the row counts in `absolute_rows` and can never count
+    in `contained_rows`: a bucket whose only absolute rows are unreadable lands
+    in `excluded`, which is DISCLOSED with its counts and no rekey command
+    (its rows are taken to belong to the repository their paths name),
+    rather than being read on the strength of a row nobody can judge. The write
+    seam (`graph.track_file`) refuses a NUL path so such rows cannot be created
+    in the first place; this is the read-side backstop for rows already stored.
+
+    PRECONDITION: the store's schema is present. This is an identity read
+    primitive, reached from read-only probes, so it never calls
+    `ensure_initialized` (which would attempt migrations and the vector-table
+    CREATE); on a store without the table it raises
+    `sqlite3.OperationalError`, and the caller checks the schema first.
+    """
+    cursor = conn.execute(
+        "SELECT path FROM files WHERE project_id = ?",
+        (candidate_id,),
+    )
+    root_paths = _gate_root_paths(roots)
+    nested: Dict[tuple, bool] = {}
+    verified_common: Optional[str] = None
+    if root_common:
+        try:
+            verified_common = os.path.realpath(str(root_common))
+        except (OSError, ValueError):
+            verified_common = None
+    file_rows = 0
+    absolute_rows = 0
+    contained_rows = 0
+    for row in cursor.fetchall():
+        file_rows += 1
+        path = row["path"]
+        if not path or not os.path.isabs(path):
+            continue
+        absolute_rows += 1
+        try:
+            resolved = os.path.realpath(path)
+        except (OSError, ValueError):
+            # Counted as absolute evidence above; never as contained. See AN
+            # UNRESOLVABLE ROW above.
+            continue
+        if any(
+            _contained_by_root(resolved, root, nested, verified_common)
+            for root in root_paths
+        ):
+            contained_rows += 1
+
+    detail = {
+        "file_rows": file_rows,
+        "absolute_rows": absolute_rows,
+        "contained_rows": contained_rows,
+        "roots": len(root_paths),
+    }
+    if not root_paths or absolute_rows == 0:
+        # Nothing to test against, or no absolute row to test: not proof
+        # either way. A bucket holding ONLY relative paths is the measured
+        # case for this repo's own legacy bucket, and it must never be
+        # reported as verified OR excluded.
+        return LEGACY_PLAUSIBLE_UNVERIFIED, detail
+    if contained_rows > 0:
+        return LEGACY_PLAUSIBLE_VERIFIED, detail
+    return LEGACY_PLAUSIBLE_EXCLUDED, detail
+
+
+def rekey_project(
+    conn: sqlite3.Connection,
+    from_id: str,
+    to_id: str,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Move an ENTIRE project bucket from `from_id` to `to_id`, atomically.
+
+    This is the only path that rewrites rows. The read union never moves
+    anything, and a save binds the canonical id, so a rekey is an explicit
+    operator action: `--dry-run` is the default posture.
+
+    THIS FUNCTION OWNS ITS TRANSACTION. A connection with an open transaction
+    is refused with ValueError, because the move must be one unit and a
+    caller's pending writes would otherwise be committed with it or rolled
+    back with it. Apply runs `BEGIN IMMEDIATE ... COMMIT`; a failure before
+    COMMIT leaves the old bucket intact, never a partial move.
+
+    DRY RUN IS THE SAME CODE PATH, ROLLED BACK. A SAVEPOINT wraps the work
+    and is rolled back and released before returning, so the reported
+    counters are what an apply would produce.
+
+    NO SCHEMA IS EVER CREATED. A store without the `memories` table has
+    nothing to move: the zero counters come back with `schema_absent: True`
+    and no DDL runs, in a dry run or an apply.
+
+    FILES. `UNIQUE(path, project_id)` means a path can already exist under
+    both ids. A path present only under `from` is updated in place, and its
+    links follow the file id unchanged. A CONFLICTING path keeps the target
+    row: its memory links and its file relations are re-pointed and the old
+    row is then deleted. `relations_repointed` counts the row's own incident
+    edges before and after the move, so a SELF-relation is one edge.
+
+    MEMORY LINKS USE A DETERMINISTIC KEEPER RULE. `memory_files` is keyed
+    `(memory_id, file_id)`, so when the target already carries a link for the
+    same pair, the TARGET's relationship is kept and the moved one is
+    DROPPED. `links_repointed` counts the links on file rows MERGED into an
+    existing target row (links on files moved in place are not re-pointed and
+    are not counted), and `links_conflicted` counts the ones whose
+    relationship was dropped because the target named that pair differently.
+
+    VECTORS. A vec0 partition key cannot be UPDATEd in place, so each moved
+    memory's row is read, deleted and re-inserted under the target with the
+    SAME embedding blob. A missing vector is skipped. When the vector table
+    cannot be OPENED, nothing is touched and `vectors_pending` reports the
+    number of moved memories; the partition-aware catch-up repairs them.
+
+    NULL-PROJECT ROWS ARE NEVER MOVED and are reported in
+    `null_project_memories` and `null_project_files`: NULL is a real bucket,
+    not a basename, and moving it would change what every scoped read sees.
+
+    `from_bucket_empty` is True when no memory and no file row was filed
+    under `from_id` at the start: a typo, or a bucket already moved.
+
+    A FAILURE ALWAYS PROPAGATES AS ITSELF. Cleanup runs only while SQLite
+    still reports an open transaction, so a statement that made SQLite roll
+    back on its own is not masked by a "no such savepoint" from the cleanup.
+
+    Args:
+        conn: A database connection with NO open transaction.
+        from_id: The entire bucket to retire.
+        to_id: The canonical id to move it to.
+        dry_run: True computes and rolls back; False commits.
+
+    Returns:
+        The counters dict. Every key is always present.
+
+    Raises:
+        ValueError: an id fails the write-ingress rule, the target is not
+            canonical, or `conn` already has an open transaction.
+    """
+    validate_identifier_for_write(from_id)
+    validate_identifier_for_write(to_id)
+    # THE LIBRARY ENFORCES THE CLI'S TARGET RULE: a rekey may move rows only
+    # INTO a canonical bucket. Without this a library caller could create the
+    # basename bucket the CLI refuses, which is the misfile the rekey command
+    # exists to prevent. `from_id` is deliberately NOT required canonical — it
+    # names the legacy bucket being retired. `from_id == to_id` is a no-op
+    # that moves nothing, so it keeps working for a non-canonical id.
+    if from_id != to_id and not is_canonical_id(to_id):
+        raise ValueError(
+            "the rekey target must be a canonical host/owner/repo id; moving "
+            "rows into a non-canonical bucket is refused. Nothing was moved."
+        )
+    if conn.in_transaction:
+        raise ValueError(
+            "rekey_project owns its transaction; pass a connection with no "
+            "open transaction. Nothing was moved."
+        )
+
+    counters: Dict[str, Any] = {
+        "from": from_id,
+        "to": to_id,
+        "dry_run": dry_run,
+        "memories": 0,
+        "files_in_place": 0,
+        "files_conflicted": 0,
+        "links_repointed": 0,
+        "links_conflicted": 0,
+        "relations_repointed": 0,
+        "vectors_moved": 0,
+        "vectors_pending": 0,
+        "null_project_memories": 0,
+        "null_project_files": 0,
+        "from_bucket_empty": True,
+        "schema_absent": False,
+    }
+
+    # A SCHEMA CHECK, NOT `ensure_initialized`: that initialiser creates the
+    # schema on an empty store and commits as it migrates, and a rekey (a dry
+    # run above all) must do neither.
+    if conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'"
+    ).fetchone() is None:
+        counters["schema_absent"] = True
+        return counters
+
+    counters["from_bucket_empty"] = (
+        conn.execute(
+            "SELECT 1 FROM memories WHERE project_id = ? LIMIT 1", (from_id,)
+        ).fetchone() is None
+        and conn.execute(
+            "SELECT 1 FROM files WHERE project_id = ? LIMIT 1", (from_id,)
+        ).fetchone() is None
+    )
+
+    # TAKEN BEFORE THE NO-OP RETURN, so every outcome reports the store's
+    # NULL rows. They are never moved, so the count is the same before and
+    # after the move.
+    counters["null_project_memories"] = conn.execute(
+        "SELECT COUNT(*) FROM memories WHERE project_id IS NULL"
+    ).fetchone()[0]
+    counters["null_project_files"] = conn.execute(
+        "SELECT COUNT(*) FROM files WHERE project_id IS NULL"
+    ).fetchone()[0]
+
+    if from_id == to_id:
+        return counters
+
+    savepoint = "rekey_project_work"
+    if dry_run:
+        conn.execute(f"SAVEPOINT {savepoint}")
+    else:
+        conn.execute("BEGIN IMMEDIATE")
+
+    try:
+        # Collect the moved memories BEFORE the UPDATE: afterwards they share
+        # the target id with rows that were never in `from`.
+        moved_ids = [
+            row[0]
+            for row in conn.execute(
+                "SELECT id FROM memories WHERE project_id = ?", (from_id,)
+            ).fetchall()
+        ]
+        counters["memories"] = len(moved_ids)
+
+        conn.execute(
+            "UPDATE memories SET project_id = ? WHERE project_id = ?",
+            (to_id, from_id),
+        )
+
+        old_files = conn.execute(
+            "SELECT id, path FROM files WHERE project_id = ? ORDER BY path",
+            (from_id,),
+        ).fetchall()
+
+        for old_id, old_path in old_files:
+            target = conn.execute(
+                "SELECT id FROM files WHERE path = ? AND project_id = ?",
+                (old_path, to_id),
+            ).fetchone()
+
+            if target is None:
+                conn.execute(
+                    "UPDATE files SET project_id = ? WHERE id = ?",
+                    (to_id, old_id),
+                )
+                counters["files_in_place"] += 1
+                continue
+
+            target_id = target[0]
+            counters["files_conflicted"] += 1
+
+            # A MEMORY LINK'S PRIMARY KEY IS (memory_id, file_id), so a target
+            # link for the same pair KEEPS ITS OWN RELATIONSHIP and the moved
+            # one is dropped; every dropped relationship is counted in
+            # `links_conflicted` instead of vanishing.
+            old_links = conn.execute(
+                "SELECT memory_id, relationship FROM memory_files "
+                "WHERE file_id = ?",
+                (old_id,),
+            ).fetchall()
+            counters["links_repointed"] += len(old_links)
+            for link_memory_id, link_relationship in old_links:
+                existing = conn.execute(
+                    "SELECT relationship FROM memory_files "
+                    "WHERE memory_id = ? AND file_id = ?",
+                    (link_memory_id, target_id),
+                ).fetchone()
+                if existing is not None:
+                    if existing[0] != link_relationship:
+                        counters["links_conflicted"] += 1
+                    continue
+                conn.execute(
+                    "INSERT INTO memory_files (memory_id, file_id, relationship) "
+                    "VALUES (?, ?, ?)",
+                    (link_memory_id, target_id, link_relationship),
+                )
+            conn.execute(
+                "DELETE FROM memory_files WHERE file_id = ?", (old_id,)
+            )
+
+            # COUNT THE EDGES THE ROW ACTUALLY HAD, not the two INSERT
+            # rowcounts. A SELF-RELATION is why: the outgoing statement
+            # inserts `target -> old`, and the incoming scan then sees that
+            # new row and inserts `target -> target`, so summing both
+            # rowcounts reports 2 for one edge.
+            relations_before = conn.execute(
+                "SELECT COUNT(*) FROM file_relations "
+                "WHERE source_file = ? OR target_file = ?",
+                (old_id, old_id),
+            ).fetchone()[0]
+
+            conn.execute(
+                "INSERT OR IGNORE INTO file_relations "
+                "(source_file, target_file, relationship) "
+                "SELECT ?, target_file, relationship FROM file_relations "
+                "WHERE source_file = ?",
+                (target_id, old_id),
+            )
+            conn.execute(
+                "DELETE FROM file_relations WHERE source_file = ?", (old_id,)
+            )
+
+            conn.execute(
+                "INSERT OR IGNORE INTO file_relations "
+                "(source_file, target_file, relationship) "
+                "SELECT source_file, ?, relationship FROM file_relations "
+                "WHERE target_file = ?",
+                (target_id, old_id),
+            )
+            conn.execute(
+                "DELETE FROM file_relations WHERE target_file = ?", (old_id,)
+            )
+
+            relations_after = conn.execute(
+                "SELECT COUNT(*) FROM file_relations "
+                "WHERE source_file = ? OR target_file = ?",
+                (old_id, old_id),
+            ).fetchone()[0]
+            counters["relations_repointed"] += relations_before - relations_after
+
+            # Every reference to the old row (`memory_files.file_id` and the
+            # two `file_relations` endpoints) was re-pointed and deleted
+            # above, so the row is retired unconditionally.
+            conn.execute("DELETE FROM files WHERE id = ?", (old_id,))
+
+        # Vectors: delete+insert with the SAME blob, inside this transaction.
+        # THE TABLE MAY NOT EXIST when the extension or its init failed; a
+        # missing table means there is nothing to move, not a pending repair.
+        vector_table_present = conn.execute(
+            "SELECT 1 FROM sqlite_master "
+            "WHERE type='table' AND name='vec_memories'"
+        ).fetchone() is not None
+
+        vector_ready = False
+        if moved_ids and vector_table_present and SQLITE_EXTENSIONS_ENABLED:
+            try:
+                conn.enable_load_extension(True)
+                import sqlite_vec
+                sqlite_vec.load(conn)
+                vector_ready = True
+            except Exception as exc:  # noqa: BLE001 - degrade, never fail the move
+                logger.debug(f"rekey_project: vector table unavailable: {exc}")
+
+        if vector_ready:
+            for memory_id in moved_ids:
+                # PER-VECTOR SAVEPOINT: a failed delete+insert must restore
+                # that memory's ORIGINAL vector, not leave it deleted. One bad
+                # row reports as pending and never fails the whole move.
+                conn.execute("SAVEPOINT rekey_vector")
+                try:
+                    vector = conn.execute(
+                        "SELECT embedding FROM vec_memories WHERE memory_id = ?",
+                        (memory_id,),
+                    ).fetchone()
+                    if vector is None:
+                        conn.execute("RELEASE rekey_vector")
+                        continue
+                    conn.execute(
+                        "DELETE FROM vec_memories WHERE memory_id = ?",
+                        (memory_id,),
+                    )
+                    conn.execute(
+                        "INSERT INTO vec_memories "
+                        "(memory_id, project_id, embedding) VALUES (?, ?, ?)",
+                        (memory_id, to_id, vector[0]),
+                    )
+                    conn.execute("RELEASE rekey_vector")
+                    counters["vectors_moved"] += 1
+                except Exception as exc:  # noqa: BLE001 - one row, not the move
+                    # SQLITE ROLLED THE WHOLE TRANSACTION BACK: the move is
+                    # already undone, so continuing would write the remaining
+                    # vectors in autocommit. Propagate the original error.
+                    if not conn.in_transaction:
+                        raise
+                    logger.debug(
+                        f"rekey_project: vector move failed for {memory_id!r}: {exc}"
+                    )
+                    conn.execute("ROLLBACK TO rekey_vector")
+                    conn.execute("RELEASE rekey_vector")
+                    counters["vectors_pending"] += 1
+        elif moved_ids and vector_table_present:
+            # The table exists but cannot be opened, so a delete is impossible
+            # too. Leave every row where it is; the catch-up repairs them.
+            counters["vectors_pending"] = len(moved_ids)
+
+        if dry_run:
+            conn.execute(f"ROLLBACK TO {savepoint}")
+            conn.execute(f"RELEASE {savepoint}")
+        else:
+            conn.commit()
+
+        return counters
+
+    except BaseException:
+        # GUARDED ON `in_transaction`: when SQLite has already rolled the
+        # transaction back, the savepoint is gone and cleanup would raise a
+        # second error that replaces the real one.
+        if conn.in_transaction:
+            if dry_run:
+                conn.execute(f"ROLLBACK TO {savepoint}")
+                conn.execute(f"RELEASE {savepoint}")
+            else:
+                conn.rollback()
+        raise
+
+
 def create_memory(
     conn: sqlite3.Connection,
     memory: Dict[str, Any]
@@ -1078,6 +1984,15 @@ def create_memory(
     Returns:
         The ID of the created memory.
     """
+    # THE WRITE-INGRESS RULE IS SHARED AND INCLUDES THE 255 CAP. A
+    # payload-supplied project id reaches the TEXT binding below, so the cap
+    # is applied HERE, before any store work. Only a supplied VALUE is
+    # validated: an absent id keeps its existing meaning (the NULL bucket)
+    # for callers that fill it in upstream.
+    supplied_project = memory.get("project_id")
+    if supplied_project is not None:
+        validate_identifier_for_write(supplied_project)
+
     ensure_initialized(conn)
 
     # Generate ID if not provided
@@ -1099,7 +2014,7 @@ def create_memory(
             )
     memory_id = supplied_id or generate_id()
 
-    # STRICT validation — unknown keys raise before any DB write (bug 2 fix).
+    # STRICT validation — unknown keys raise before any DB write.
     # ALLOWED_CREATE_COLUMNS includes 'id' and 'created_at' so create payloads
     # may pass them through; ALLOWED_UPDATE_COLUMNS does not, so update_memory
     # rejects them. Splitting the allowlists keeps both call sites honest about
@@ -1109,7 +2024,7 @@ def create_memory(
     )
 
     # STRICT sub-object validation — symmetric with update_memory's merge path
-    # (bug 3 part 2, #374). The first bug-3 fix wired strict=True into
+    # (the save-ingress half). An earlier fix wired strict=True into
     # _canonicalize_dict_item, but that hook only fires from _merge_with_dedup
     # inside update_memory. The save ingress bypassed it, so create_memory
     # silently stored dict-list items with unknown sub-object keys (e.g.
@@ -1121,7 +2036,7 @@ def create_memory(
     # shorthand (e.g. entities=["Redis"]) still works — _canonicalize_dict_item
     # routes str inputs through the non-strict cls.from_dict(str) path.
     #
-    # Within-batch dedup (M6, #374 remediation): create_memory previously
+    # Within-batch dedup: create_memory previously
     # canonicalized each item but did not deduplicate within the incoming
     # batch. update_memory dedupes even on replace=True, so the same payload
     # behaves differently at the create and update ingresses. We now run
@@ -1186,7 +2101,7 @@ def resolve_memory_id_prefix(
     conn: sqlite3.Connection,
     prefix: str,
     *,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     descriptor_chars: int = 60,
 ) -> Optional[str]:
     """
@@ -1211,9 +2126,11 @@ def resolve_memory_id_prefix(
     Args:
         conn: Active database connection.
         prefix: Memory-ID prefix (>= MIN_PREFIX_LENGTH chars; full IDs allowed).
-        project_id: Optional project scope. When not None, every query is
-            restricted to rows stored under that project; a NULL-project row
-            is NOT another project's row and is excluded from a scoped read.
+        project_id: Optional project scope: one id, or a sequence of ids for
+            the derived read union. When not None, every query is restricted
+            to rows stored under one of those projects; a NULL-project row is
+            NOT another project's row and is excluded. An empty sequence
+            matches no row (never the whole store).
         descriptor_chars: Length of the context snippet attached to each match
             on ambiguity (for terse disambiguation output). Security-relevant
             knob if multi-tenant access is ever introduced — context may carry
@@ -1245,15 +2162,20 @@ def resolve_memory_id_prefix(
     lo = prefix
     hi = prefix + _PREFIX_UPPER_BOUND_CHAR
 
-    # ONE SCOPE CLAUSE, APPLIED TO EVERY QUERY BELOW. `project_id = ?`
-    # rather than the null-safe `IS` form is deliberate: a scoped caller's
-    # project is a non-empty string (the write guards refuse anything else),
-    # so a NULL-keyed row is not this project's row and must not match.
+    # ONE SCOPE CLAUSE, APPLIED TO EVERY QUERY BELOW. `IN (?,...)` rather than
+    # the null-safe `IS` form is deliberate: a scoped caller's projects are
+    # non-empty strings (the write guards refuse anything else), so a
+    # NULL-keyed row is not any of their rows and must not match.
+    # AN EMPTY SCOPE IS NO ROWS, never unscoped: it resolves as no row at all
+    # rather than dropping the clause and matching the whole store.
+    scopes = normalise_project_scopes(project_id)
+    if scopes is not None and not scopes:
+        return None
     scope_sql = ""
-    scope_params: tuple = ()
-    if project_id is not None:
-        scope_sql = " AND project_id = ?"
-        scope_params = (project_id,)
+    scope_params: Tuple[str, ...] = ()
+    if scopes is not None:
+        predicate, scope_params = project_scope_predicate("project_id", scopes)
+        scope_sql = " AND " + predicate
 
     # LIMIT 2 short-circuits the common case (unique match): we only need to
     # know whether more than one row matches before issuing a wider query.
@@ -1355,7 +2277,7 @@ def update_memory(
         memory_id: The unique memory identifier.
         updates: Dictionary of fields to update.
         replace: If True, list-valued fields are replaced wholesale (the
-            legacy pre-#374 behavior). If False (the default), list-valued
+            legacy behavior). If False (the default), list-valued
             fields are appended to the existing values with content-hash
             deduplication — repeat calls are idempotent and never clobber
             history. Scalar fields (context, goal, project_id, session_id)
@@ -1370,6 +2292,16 @@ def update_memory(
             unknown keys. Validation happens BEFORE any DB write, so a
             rejected update leaves the row unchanged.
     """
+    # THE WRITE-INGRESS RULE AGAIN, AS IN create_memory: a supplied
+    # project id replaces the stored TEXT and must obey the 255 cap and the
+    # control/surrogate rule. An explicit None keeps its de-key meaning at
+    # THIS layer; the API layer refuses it upstream, so a library
+    # caller that reaches here with None has asked for a change the layer
+    # below is allowed to make.
+    supplied_project = updates.get("project_id")
+    if supplied_project is not None:
+        validate_identifier_for_write(supplied_project)
+
     ensure_initialized(conn)
 
     # Check if memory exists
@@ -1406,7 +2338,7 @@ def update_memory(
                 # additive merge path below, so we skip adding to it here.
                 normalized[key] = _merge_with_dedup(key, [], list_value)
             else:
-                # F6 (#374 remediation): on the additive path, an empty
+                # On the additive path, an empty
                 # incoming list is a no-op (existing items + zero new items
                 # = existing items). Skip the SELECT + UPDATE entirely.
                 if not list_value:
@@ -1431,7 +2363,8 @@ def update_memory(
     needs_merge = bool(touched_lists)
     # Scalar fields the caller explicitly set. Even if they happen to equal
     # the current DB value, we still bump updated_at — scalar equality checks
-    # are out of scope for R2-4 (only content-no-op list merges are covered).
+    # are out of scope for the content no-op short-circuit below (only
+    # content-no-op list merges are covered).
     scalar_fields_present = bool(
         set(normalized.keys()) - touched_lists
     )
@@ -1466,7 +2399,7 @@ def update_memory(
                 if merged != existing:
                     changed_lists.add(key)
 
-            # R2-4: content no-op short-circuit. If no list field actually
+            # CONTENT NO-OP SHORT-CIRCUIT: if no list field actually
             # changed AND no scalar fields were set, the UPDATE would write
             # identical data and bump updated_at pointlessly. Close the
             # transaction and return without touching the row — extends the
@@ -1552,7 +2485,7 @@ def delete_memory(
 
 def list_memories(
     conn: sqlite3.Connection,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     session_id: Optional[str] = None,
     limit: int = 20,
     offset: int = 0
@@ -1560,26 +2493,37 @@ def list_memories(
     """
     List memories with optional filtering.
 
+    THE SCOPE MAY BE A UNION, AND THE LIMIT APPLIES TO THE MERGED RESULT:
+    this is ONE statement, so `LIMIT ? OFFSET ?` selects from the union rather
+    than from each bucket. An empty scope returns no rows, never the store.
+
     Args:
         conn: Active database connection.
-        project_id: Optional project filter.
+        project_id: Optional project scope: one id, or a sequence of ids for
+            the derived read union. `None` means no filter.
         session_id: Optional session filter.
         limit: Maximum number of results (default 20).
         offset: Number of results to skip (default 0).
 
     Returns:
         List of memory dictionaries, ordered by created_at DESC. Two records
-        sharing a created_at come newest-inserted first.
+        sharing a created_at come newest-inserted first; `rowid` is
+        table-global, so that order is deterministic across the union.
     """
     ensure_initialized(conn)
+
+    scopes = normalise_project_scopes(project_id)
+    if scopes is not None and not scopes:
+        return []
 
     query = "SELECT * FROM memories"
     params: List[Any] = []
     conditions = []
 
-    if project_id is not None:
-        conditions.append("project_id = ?")
-        params.append(project_id)
+    if scopes is not None:
+        predicate, scope_params = project_scope_predicate("project_id", scopes)
+        conditions.append(predicate)
+        params.extend(scope_params)
 
     if session_id is not None:
         conditions.append("session_id = ?")
@@ -1607,7 +2551,7 @@ def list_memories(
 def search_memories_by_text(
     conn: sqlite3.Connection,
     search_term: str,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     limit: int = 10
 ) -> List[Dict[str, Any]]:
     """
@@ -1617,16 +2561,25 @@ def search_memories_by_text(
     reasoning_chains, agreements_reached, and disagreements_resolved fields.
     For semantic search, use the search module with embeddings.
 
+    THE SCOPE MAY BE A UNION, AND THE LIMIT APPLIES TO THE MERGED RESULT:
+    one statement, so the recency ORDER BY and its LIMIT select from the
+    union, not per bucket. An empty scope returns no rows, never the store.
+
     Args:
         conn: Active database connection.
         search_term: Text to search for.
-        project_id: Optional project filter.
+        project_id: Optional project scope: one id, or a sequence of ids for
+            the derived read union. `None` means no filter.
         limit: Maximum number of results.
 
     Returns:
         List of matching memory dictionaries.
     """
     ensure_initialized(conn)
+
+    scopes = normalise_project_scopes(project_id)
+    if scopes is not None and not scopes:
+        return []
 
     # Escape SQL LIKE wildcards in the search term so literal % and _ are matched.
     # NOTE: ESCAPE '\\' is SQLite-specific syntax; update if migrating to another DB dialect.
@@ -1647,9 +2600,10 @@ def search_memories_by_text(
     """
     params = [search_pattern] * 7
 
-    if project_id is not None:
-        query += " AND project_id = ?"
-        params.append(project_id)
+    if scopes is not None:
+        predicate, scope_params = project_scope_predicate("project_id", scopes)
+        query += " AND " + predicate
+        params.extend(scope_params)
 
     # SAFE BECAUSE THIS ORDER CARRIES NO RELEVANCE, NOT BECAUSE NOTHING READS
     # IT. Something does: the hybrid scorer's keyword-fallback branch turns a
@@ -1673,28 +2627,38 @@ def search_memories_by_text(
 
 def get_memory_count(
     conn: sqlite3.Connection,
-    project_id: Optional[str] = None
+    project_id: Optional[Union[str, Sequence[str]]] = None
 ) -> int:
     """
     Get the total count of memories.
 
+    THE UNION TOTAL IS EXACT, not an approximation: a memory row carries
+    exactly one `project_id`, so a union of ids counts each row once and the
+    sum equals a single `COUNT(*)` over the same predicate. The per-bucket
+    split for disclosure comes from `project_bucket_counts`.
+
     Args:
         conn: Active database connection.
-        project_id: Optional project filter.
+        project_id: Optional project scope: one id, or a sequence of ids for
+            the derived read union. `None` counts the whole store (including
+            NULL-keyed rows, which no scoped read can see).
 
     Returns:
-        Number of memories matching the criteria.
+        Number of memories matching the criteria. An empty scope is zero.
     """
     ensure_initialized(conn)
 
-    if project_id is not None:
-        cursor = conn.execute(
-            "SELECT COUNT(*) FROM memories WHERE project_id = ?",
-            (project_id,)
-        )
-    else:
+    scopes = normalise_project_scopes(project_id)
+    if scopes is None:
         cursor = conn.execute("SELECT COUNT(*) FROM memories")
-
+        return cursor.fetchone()[0]
+    if not scopes:
+        return 0
+    predicate, params = project_scope_predicate("project_id", scopes)
+    cursor = conn.execute(
+        f"SELECT COUNT(*) FROM memories WHERE {predicate}",
+        params,
+    )
     return cursor.fetchone()[0]
 
 

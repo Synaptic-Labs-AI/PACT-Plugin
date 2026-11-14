@@ -1,0 +1,1548 @@
+"""Remediation arms for the security/hardening findings on repository identity.
+
+Each arm names the defect it would catch, not the implementation it reads:
+a wrong classification, a redirect that binds another repository, a command
+that cannot be pasted, a log line a directory name can forge.
+"""
+
+from __future__ import annotations
+
+import ast
+import json
+import logging
+import os
+import re
+import subprocess
+import sys
+import threading
+from pathlib import Path
+
+import pytest
+
+import scripts.project_identity as pi
+from scripts.database import CANONICAL_ID_MAX_LENGTH
+
+NO_PORTABLE_ORIGIN = pi.OUTCOME_NO_PORTABLE_ORIGIN
+DECLINE = pi.OUTCOME_DECLINE
+CANONICAL = pi.OUTCOME_CANONICAL
+
+
+# ---------------------------------------------------------------------------
+# Classification: BOM, leading whitespace, colon-in-userinfo
+# ---------------------------------------------------------------------------
+
+class TestLeadingBytesClassification:
+    def test_a_leading_bom_declines_in_both_spellings(self):
+        """Catches a BOM absorbed into the scp userinfo: the same value must
+        not be refused in URL form and accepted in scp form."""
+        assert pi.classify_remote_origin("\ufeffhttps://h/o/r")[0] == DECLINE
+        assert pi.classify_remote_origin("\ufeffgit@h:o/r")[0] == DECLINE
+        assert pi.normalize_remote_url("\ufeffgit@h:o/r") is None
+
+    def test_leading_whitespace_declines_instead_of_basename(self):
+        """Catches the asymmetry where trailing space declined and leading
+        space silently fell back to a folder name."""
+        assert pi.classify_remote_origin(" https://h/o/r")[0] == DECLINE
+        assert pi.classify_remote_origin("https://h/o/r ")[0] == DECLINE
+
+    def test_a_leading_space_before_a_local_path_stays_local(self):
+        """The classification strip must not turn local paths into declines."""
+        assert pi.classify_remote_origin(" /srv/git/repo")[0] == NO_PORTABLE_ORIGIN
+
+
+class TestAbsoluteScpRemotes:
+    """Bugbot: an ABSOLUTE scp path named the same endpoint as the URL form,
+    but left its leading slash in the path, produced an empty first segment,
+    and declined — so a present network remote silently failed to bind."""
+
+    def test_an_absolute_scp_path_matches_its_url_spellings(self):
+        """Three spellings, ONE id — the equivalence the fix exists for."""
+        spellings = (
+            "git@host:/srv/git/repo.git",
+            "ssh://host/srv/git/repo.git",
+            "https://host/srv/git/repo",
+        )
+        ids = {pi.normalize_remote_url(value) for value in spellings}
+        assert ids == {"host/srv/git/repo"}, ids
+        for value in spellings:
+            assert pi.classify_remote_origin(value) == (
+                CANONICAL, "host/srv/git/repo"
+            ), value
+
+    def test_a_single_segment_absolute_scp_path_is_canonical(self):
+        assert pi.classify_remote_origin("git@host:/repo") == (CANONICAL, "host/repo")
+
+    def test_relative_scp_controls_are_unchanged(self):
+        assert pi.normalize_remote_url("git@host:owner/repo.git") == "host/owner/repo"
+        assert pi.normalize_remote_url("git@host:owner/repo") == "host/owner/repo"
+
+    def test_a_doubled_separator_still_declines_in_both_spellings(self):
+        """The one-slash strip MIRRORS partition rather than deleting every
+        leading slash: a doubled separator must stay a decline in both forms,
+        or a typo would silently name a different path."""
+        assert pi.normalize_remote_url("git@host://srv/x") is None
+        assert pi.normalize_remote_url("https://host//srv/x") is None
+        assert pi.normalize_remote_url("git@host:/") is None
+
+
+class TestSchemeLessColonUserinfo:
+    def test_a_colon_in_userinfo_declines(self):
+        """Catches the CI shape `deploy-token:<token>@host/path` being filed
+        under the folder basename with no warning."""
+        assert pi.classify_remote_origin(
+            "deploy-token:SECRET@github.com/owner/repo"
+        ) == (DECLINE, None)
+        assert pi.classify_remote_origin(
+            "gitlab-ci-token:abc@gitlab.com/g/p"
+        ) == (DECLINE, None)
+
+    def test_a_user_less_host_path_follows_gits_scp_rule(self, monkeypatch):
+        """Catches a rule narrower than git's: git treats any `host:path` with
+        no `/` before the first `:` as an ssh remote, user or not, and a drive
+        prefix exists only on Windows."""
+        assert pi.classify_remote_origin("github.com:owner/repo") == (
+            CANONICAL, "github.com/owner/repo"
+        )
+        # POSIX: a one-letter host is an ssh host (an ssh_config alias), as
+        # it is to git.
+        assert pi.classify_remote_origin("C:/repo") == (CANONICAL, "c/repo")
+        # A backslash is refused in every spelling, and a network-shaped
+        # value that cannot be represented declines.
+        assert pi.classify_remote_origin("C:\\repo") == (DECLINE, None)
+        monkeypatch.setattr(pi.os, "name", "nt")
+        assert pi.classify_remote_origin("C:/repo") == (NO_PORTABLE_ORIGIN, None)
+        assert pi.classify_remote_origin("C:\\repo") == (NO_PORTABLE_ORIGIN, None)
+        assert pi.classify_remote_origin("github.com:owner/repo") == (
+            CANONICAL, "github.com/owner/repo"
+        )
+
+    def test_a_local_path_containing_at_is_still_local(self):
+        assert pi.classify_remote_origin("/srv/mirrors/team@repo.git") == (
+            NO_PORTABLE_ORIGIN, None
+        )
+        assert pi.classify_remote_origin("team@repo.git") == (NO_PORTABLE_ORIGIN, None)
+
+
+# ---------------------------------------------------------------------------
+# The length cap is ONE constant
+# ---------------------------------------------------------------------------
+
+def test_the_identifier_cap_comes_from_database():
+    """Catches a second 255 that can drift from the grammar's own cap."""
+    identifier = "h/" + "a" * (CANONICAL_ID_MAX_LENGTH - 2)
+    assert pi.normalize_remote_url(f"https://{identifier}") == identifier
+    over = "h/" + "a" * (CANONICAL_ID_MAX_LENGTH - 1)
+    assert pi.normalize_remote_url(f"https://{over}") is None
+
+
+# ---------------------------------------------------------------------------
+# Override reader: the non-regular hardening and its contract
+# ---------------------------------------------------------------------------
+
+class TestOverrideContract:
+    def test_a_fifo_is_refused_without_blocking(self, tmp_path):
+        """Catches a regression to a plain open(), which would hang every
+        memory operation that resolves an identity. The read runs on a daemon
+        thread, so that regression fails by assertion after a bounded wait
+        instead of hanging the suite."""
+        fifo = tmp_path / "pact-project-id"
+        os.mkfifo(fifo)
+        result = []
+        reader = threading.Thread(
+            target=lambda: result.append(pi.read_override(tmp_path)), daemon=True
+        )
+        reader.start()
+        reader.join(timeout=10)
+        hung = reader.is_alive()
+        if hung:
+            # Open the write end so the blocked open returns and the thread
+            # ends instead of outliving the test.
+            try:
+                release = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                release = None
+            if release is not None:
+                os.close(release)
+            reader.join(timeout=10)
+        assert not hung, "read_override blocked on a FIFO for 10 s"
+        assert len(result) == 1
+        read = result[0]
+        assert read.value is None
+        assert read.reason == "not_regular"
+        assert read.path == fifo
+
+    def test_a_symlink_is_refused(self, tmp_path):
+        target = tmp_path / "elsewhere"
+        target.write_text("github.com/owner/repo\n", encoding="utf-8")
+        (tmp_path / "pact-project-id").symlink_to(target)
+        read = pi.read_override(tmp_path)
+        assert read.value is None
+        assert read.reason == "not_regular"
+
+    def test_the_reason_token_is_documented(self):
+        """Catches a reason token that no consumer can anticipate."""
+        assert "not_regular" in (pi.OverrideRead.__doc__ or "")
+
+
+# ---------------------------------------------------------------------------
+# Redirected checkouts must not bind another repository's identity
+# ---------------------------------------------------------------------------
+
+def _repo(path: Path, origin: str) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(
+        ["git", "-C", str(path), "remote", "add", "origin", origin], check=True
+    )
+    subprocess.run(
+        ["git", "-C", str(path), "-c", "user.email=a@b", "-c", "user.name=a",
+         "commit", "-q", "--allow-empty", "-m", "init"],
+        check=True,
+    )
+    return path
+
+
+def _common(root: Path) -> Path:
+    out = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--git-common-dir"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+    path = Path(out)
+    return (path if path.is_absolute() else root / path).resolve()
+
+
+class TestRedirectedCheckouts:
+    def test_a_direct_gitfile_redirect_declines(self, tmp_path):
+        """Catches a `.git` FILE pointing at another repository's `.git`."""
+        victim = _repo(tmp_path / "victim", "https://github.com/victim/private")
+        forged = tmp_path / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
+        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        identity = pi.detect_id_for_root(forged, _common(victim))
+        assert identity.project_id is None
+        assert identity.source == "declined"
+
+    def test_a_relative_gitfile_redirect_declines(self, tmp_path):
+        victim = _repo(tmp_path / "victim", "https://github.com/victim/private")
+        forged = tmp_path / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text("gitdir: ../victim/.git\n", encoding="utf-8")
+        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+
+    def test_a_forged_direct_pointer_still_binds_the_victims_pin(self, tmp_path):
+        """THE ACKNOWLEDGED NARROWING, pinned so it cannot widen silently: the
+        origin is suppressed, but an override the VICTIM wrote still answers."""
+        victim = _repo(tmp_path / "victim", "https://github.com/victim/private")
+        (victim / ".git" / "pact-project-id").write_text(
+            "github.com/victim/pinned\n", encoding="utf-8"
+        )
+        forged = tmp_path / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
+        identity = pi.detect_id_for_root(forged, _common(victim))
+        assert identity.project_id == "github.com/victim/pinned"
+        assert identity.source == "override file"
+
+    def test_a_submodule_gitfile_is_not_a_redirect(self, tmp_path):
+        """Catches a rule that refuses the legitimate `.../modules/<name>`
+        shape."""
+        src = _repo(tmp_path / "src", "https://github.com/owner/src")
+        superrepo = _repo(tmp_path / "super", "https://github.com/owner/super")
+        subprocess.run(
+            ["git", "-C", str(superrepo), "-c", "protocol.file.allow=always",
+             "submodule", "add", str(src), "submod"],
+            check=True, capture_output=True,
+        )
+        assert pi._gitfile_points_at_foreign_gitdir(superrepo / "submod") is False
+
+    def test_the_measured_separate_git_dir_exception_is_refused(self, tmp_path):
+        """The one legitimate layout the predicate refuses, PINNED as a known
+        exception so a future change makes it visible rather than silent."""
+        store = tmp_path / "store" / ".git"
+        store.parent.mkdir()
+        checkout = tmp_path / "checkout"
+        subprocess.run(
+            ["git", "init", "-q", f"--separate-git-dir={store}", str(checkout)],
+            check=True,
+        )
+        assert pi._gitfile_points_at_foreign_gitdir(checkout) is True
+
+    def test_the_separate_git_dir_exception_is_recoverable_with_one_pin(self, tmp_path):
+        """Catches a refusal placed BEFORE the override read, which would make
+        this legitimate layout permanently unusable."""
+        store = tmp_path / "store" / ".git"
+        store.parent.mkdir()
+        checkout = tmp_path / "checkout"
+        subprocess.run(
+            ["git", "init", "-q", f"--separate-git-dir={store}", str(checkout)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(checkout), "remote", "add", "origin",
+             "https://github.com/owner/sep"],
+            check=True,
+        )
+        assert pi.detect_id_for_root(checkout, store.resolve()).project_id is None
+        (store / "pact-project-id").write_text(
+            "github.com/owner/pinned-sep\n", encoding="utf-8"
+        )
+        identity = pi.detect_id_for_root(checkout, store.resolve())
+        assert identity.project_id == "github.com/owner/pinned-sep"
+        assert identity.source == "override file"
+
+    def test_a_linked_worktree_is_not_a_redirect(self, tmp_path):
+        from scripts.memory_api import _worktree_redirect
+
+        repo = _repo(tmp_path / "repo", "https://github.com/owner/repo")
+        worktree = tmp_path / "wt"
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q", str(worktree), "-b", "wt"],
+            check=True,
+        )
+        assert _worktree_redirect(worktree, _common(repo)) is False
+
+    def test_a_forged_worktree_admin_pointer_is_a_redirect(self, tmp_path):
+        from scripts.memory_api import _worktree_redirect
+
+        repo = _repo(tmp_path / "repo", "https://github.com/owner/repo")
+        subprocess.run(
+            ["git", "-C", str(repo), "worktree", "add", "-q",
+             str(tmp_path / "wt"), "-b", "wt2"],
+            check=True,
+        )
+        admin = next((repo / ".git" / "worktrees").iterdir())
+        forged = tmp_path / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        assert _worktree_redirect(forged, _common(repo)) is True
+
+    def test_a_plain_checkout_and_a_submodule_are_not_redirects(self, tmp_path):
+        from scripts.memory_api import _worktree_redirect
+
+        repo = _repo(tmp_path / "repo", "https://github.com/owner/repo")
+        assert _worktree_redirect(repo, _common(repo)) is False
+
+
+# ---------------------------------------------------------------------------
+# The rendered remedy must be runnable and store-accurate
+# ---------------------------------------------------------------------------
+
+class TestRunnableRekeyCommand:
+    def test_the_command_carries_an_interpreter_and_a_script_path(self):
+        """Catches the bare `pact-memory` verb, which no executable provides."""
+        command = pi_module_render("host/owner/repo")
+        words = command.split(" ", 2)
+        assert words[0] == "python3"
+        assert words[1].endswith("cli.py"), words[1]
+        assert "project-id rekey --from" in command
+
+    def test_the_command_carries_the_store_when_known(self, tmp_path):
+        """Catches a remedy that reports against the DEFAULT store while the
+        bucket was found in another one."""
+        command = pi_module_render("host/owner/repo", db_path=tmp_path / "x.db")
+        assert "--db-path" in command
+        assert str(tmp_path / "x.db") in command
+
+    def test_a_hostile_id_stays_one_argument(self):
+        import shlex
+
+        hostile = "Legacy; echo PWNED"
+        words = shlex.split(pi_module_render(hostile))
+        assert f"--from={hostile}" in words, words
+
+
+def pi_module_render(project_id, db_path=None):
+    from scripts.memory_api import render_rekey_command
+
+    return render_rekey_command(project_id, "host/owner/repo", db_path=db_path)
+
+
+# ---------------------------------------------------------------------------
+# A `.git`-marked directory git cannot answer for must DECLINE, not basename
+# ---------------------------------------------------------------------------
+
+def _broken_repo(path: Path) -> Path:
+    """A directory carrying a `.git` FILE whose gitdir target does not exist."""
+    path.mkdir(parents=True, exist_ok=True)
+    (path / ".git").write_text(
+        f"gitdir: {path / 'gone' / '.git'}\n", encoding="utf-8"
+    )
+    return path
+
+
+class TestBrokenRepositoryDeclines:
+    def test_a_cwd_inside_a_broken_repository_declines(self, tmp_path, monkeypatch):
+        broken = _broken_repo(tmp_path / "broken")
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(broken)
+        from scripts.memory_api import PACTMemory
+
+        memory = PACTMemory(db_path=tmp_path / "store" / "memory.db")
+        assert memory.project_id is None
+        assert memory._project_id_source == "unresolved"
+
+    def test_a_declared_subdirectory_of_a_broken_repository_declines(
+        self, tmp_path, monkeypatch
+    ):
+        """Catches a SUBDIRECTORY name becoming the project id."""
+        broken = _broken_repo(tmp_path / "broken")
+        sub = broken / "sub"
+        sub.mkdir()
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(sub))
+        # Run INSIDE the broken tree, so the git rung cannot rescue the
+        # answer from the suite's own checkout, and neutralise the record
+        # rung, which would otherwise legitimately answer.
+        monkeypatch.chdir(broken)
+        import scripts.memory_api as memory_api
+
+        monkeypatch.setattr(
+            memory_api, "get_project_dir_from_session_record", lambda: None
+        )
+        from scripts.memory_api import PACTMemory
+
+        memory = PACTMemory(db_path=tmp_path / "store" / "memory.db")
+        assert memory.project_id is None, memory.project_id
+        assert memory._project_id_source == "unresolved"
+
+    def test_a_plain_umbrella_keeps_its_designed_basename(self, tmp_path, monkeypatch):
+        """The narrowing that must survive: a non-git folder basenames."""
+        umbrella = tmp_path / "my-workspace"
+        umbrella.mkdir()
+        (umbrella / "CLAUDE.md").write_text("x", encoding="utf-8")
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(umbrella)
+        from scripts.memory_api import PACTMemory
+
+        memory = PACTMemory(db_path=tmp_path / "store" / "memory.db")
+        assert memory.project_id == "my-workspace"
+
+    def test_a_broken_repository_declines_before_the_user_setting(
+        self, tmp_path, monkeypatch
+    ):
+        """Catches a stale/broken repository being absorbed by config.json."""
+        memory_dir = tmp_path / "mem"
+        memory_dir.mkdir()
+        (memory_dir / "config.json").write_text(
+            '{"project_id": "user.example.com/me/pinned"}', encoding="utf-8"
+        )
+        broken = _broken_repo(tmp_path / "broken")
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(broken)
+        from scripts.memory_api import PACTMemory
+
+        memory = PACTMemory(db_path=tmp_path / "store" / "memory.db")
+        assert memory.project_id is None
+        assert memory._project_id_source == "unresolved"
+
+
+# ---------------------------------------------------------------------------
+# The legacy gate must not RAISE on a read path (integration)
+# ---------------------------------------------------------------------------
+
+class TestTheGateDoesNotRaiseOnAReadPath:
+    def test_a_user_setting_identity_reads_unproven_instead_of_raising(
+        self, tmp_path, monkeypatch
+    ):
+        """End-to-end: canonical id from config.json, no
+        CLAUDE_PROJECT_DIR, no session record, cwd outside any repository, and
+        a populated legacy bucket.
+
+        THIS IS THE SHAPE THAT USED TO RAISE. An earlier caller resolved its
+        root set through `backlog.checkout_roots()`, which refuses with
+        BacklogWriteError exactly here, so a READ raised a write-oriented
+        error. The production path no longer touches that helper; the
+        negative control below is kept to pin the FIXTURE, so a later
+        simplification cannot quietly turn this into a shape that never
+        exercised the defect.
+
+        The folder is not a repository, so it has no `description` file to
+        date the recorded session against: the bucket is unproven, not read,
+        and the read still answers without raising.
+        """
+        memory_dir = tmp_path / "mem"
+        memory_dir.mkdir()
+        (memory_dir / "config.json").write_text(
+            '{"project_id": "user.example.com/me/pinned"}', encoding="utf-8"
+        )
+        umbrella = tmp_path / "my-workspace"
+        umbrella.mkdir()
+        (umbrella / "CLAUDE.md").write_text("x", encoding="utf-8")
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+
+        from fixtures.identity_git import seed_session_evidence
+        from scripts.database import create_memory, db_connection
+
+        with db_connection(str(store)) as conn:
+            create_memory(
+                conn,
+                {
+                    "project_id": "my-workspace",
+                    "context": "legacy row",
+                    "session_id": "workspace-session",
+                },
+            )
+        # A recorded session of this workspace wrote the row, but a folder
+        # with no repository cannot date it, so it is no evidence.
+        seed_session_evidence(
+            tmp_path / "home" / ".claude", umbrella.resolve(), "workspace-session"
+        )
+
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(umbrella)
+
+        import scripts.memory_api as memory_api
+
+        monkeypatch.setattr(
+            memory_api, "get_project_dir_from_session_record", lambda: None
+        )
+
+        # NEGATIVE CONTROL: the refusal must be live, or this arm is vacuous.
+        from shared.backlog import BacklogWriteError, checkout_roots
+
+        with pytest.raises(BacklogWriteError):
+            checkout_roots()
+
+        memory = memory_api.PACTMemory(db_path=store)
+        rows = memory.list(limit=10)
+        assert not any(
+            "legacy row" in (getattr(row, "context", "") or "") for row in rows
+        ), rows
+        state = memory._legacy_scope_state
+        assert state is not None, "the legacy gate never ran"
+        assert state["unproven"] is True and state["session_evidence"] is False, state
+
+
+# ---------------------------------------------------------------------------
+# GIT_DISCOVERY_ACROSS_FILESYSTEM must parse like git, not like Python
+# ---------------------------------------------------------------------------
+
+class TestGitEnvBoolMatchesGit:
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            ("1", True),
+            ("true", True),
+            ("YES", True),
+            ("on", True),
+            ("2", True),
+            ("0", False),
+            ("false", False),
+            ("NO", False),
+            ("off", False),
+            ("", False),
+            ("maybe", False),
+            (" true", False),
+        ],
+    )
+    def test_boolean_values(self, value, expected, monkeypatch):
+        """Catches Python truthiness: bool("0") is True, git reads FALSE."""
+        from scripts.project_identity import _git_env_bool
+
+        monkeypatch.setenv("PACT_PROBE_BOOL", value)
+        assert _git_env_bool("PACT_PROBE_BOOL") is expected
+
+    def test_unset_is_false(self, monkeypatch):
+        from scripts.project_identity import _git_env_bool
+
+        monkeypatch.delenv("PACT_PROBE_BOOL", raising=False)
+        assert _git_env_bool("PACT_PROBE_BOOL") is False
+
+    def test_a_device_boundary_stops_the_walk_unless_git_would_cross(
+        self, tmp_path, monkeypatch
+    ):
+        """End-to-end: a false value must NOT cross a st_dev boundary.
+
+        Before the fix `bool("0")` was True, so the walk crossed and found a
+        marker git would never have found — a false decline.
+        """
+        from scripts import memory_api
+
+        outer = tmp_path / "outer"
+        outer.mkdir()
+        (outer / ".git").mkdir()
+        inner = outer / "inner"
+        inner.mkdir()
+
+        real_stat = os.stat
+
+        def fake_stat(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            device = 1 if str(path).endswith("inner") else 2
+            return os.stat_result(
+                (result.st_mode, result.st_ino, device, result.st_nlink,
+                 result.st_uid, result.st_gid, result.st_size,
+                 result.st_atime, result.st_mtime, result.st_ctime)
+            )
+
+        monkeypatch.setattr(memory_api.os, "stat", fake_stat)
+        monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
+        assert memory_api._unanswerable_repository(inner) is None
+
+        monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+        assert memory_api._unanswerable_repository(inner) == outer / ".git"
+
+        for false_value in ("0", "false", "no", "off", "maybe"):
+            monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", false_value)
+            assert memory_api._unanswerable_repository(inner) is None, false_value
+
+
+# ---------------------------------------------------------------------------
+# Cold re-check: deleted cwd, submodule-admin redirect, cache-key identity root
+# ---------------------------------------------------------------------------
+
+class TestDeletedCwdDoesNotRaise:
+    def test_the_user_setting_rung_survives_a_deleted_cwd(self, tmp_path, monkeypatch):
+        """Catches `Path.cwd()` raising FileNotFoundError at construction.
+
+        The user-setting rung is reachable with a deleted cwd: no declaration,
+        no repository, and the process's directory has been removed.
+        """
+        memory_dir = tmp_path / "mem"
+        memory_dir.mkdir()
+        (memory_dir / "config.json").write_text(
+            '{"project_id": "user.example.com/me/pinned"}', encoding="utf-8"
+        )
+        doomed = tmp_path / "doomed"
+        doomed.mkdir()
+
+        import scripts.memory_api as memory_api
+
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.setattr(
+            memory_api, "get_project_dir_from_session_record", lambda: None
+        )
+
+        previous = os.getcwd()
+        os.chdir(doomed)
+        try:
+            os.rmdir(doomed)
+            memory = memory_api.PACTMemory(db_path=tmp_path / "store" / "memory.db")
+        finally:
+            os.chdir(previous)
+
+        assert memory.project_id == "user.example.com/me/pinned"
+        assert memory._legacy_project_basename is None
+        assert memory._project_identity_root is None
+
+
+class TestSubmoduleAdminRedirect:
+    def _submodule(self, tmp_path):
+        src = _repo(tmp_path / "src", "https://github.com/owner/subsrc")
+        superrepo = _repo(tmp_path / "super", "https://github.com/owner/super")
+        subprocess.run(
+            ["git", "-C", str(superrepo), "-c", "protocol.file.allow=always",
+             "submodule", "add", str(src), "submod"],
+            check=True, capture_output=True,
+        )
+        return superrepo, superrepo / "submod", superrepo / ".git" / "modules" / "submod"
+
+    def test_a_genuine_submodule_is_not_a_redirect(self, tmp_path):
+        superrepo, checkout, _admin = self._submodule(tmp_path)
+        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        assert pi._admin_dir_names_another_checkout(
+            superrepo / ".git" / "modules" / "submod", checkout
+        ) is False
+
+    def test_a_separate_git_dir_checkout_is_not_a_redirect(self, tmp_path):
+        """POSITIVE CONTROL for the core.worktree discriminator: an external
+        store has no `core.worktree` recorded, so there is nothing to
+        contradict and the layout must resolve normally."""
+        store = tmp_path / "store" / "ext.git"
+        store.parent.mkdir()
+        checkout = tmp_path / "sep"
+        subprocess.run(
+            ["git", "init", "-q", f"--separate-git-dir={store}", str(checkout)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(checkout), "remote", "add", "origin",
+             "https://github.com/owner/sep"],
+            check=True,
+        )
+        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        identity = pi.detect_id_for_root(checkout, store.resolve())
+        assert identity.project_id == "github.com/owner/sep"
+        assert identity.source == "origin remote"
+
+    def test_a_subdirectory_of_a_genuine_submodule_is_not_a_redirect(self, tmp_path):
+        """POSITIVE CONTROL for the walk-up: the marker is found one level up,
+        and the comparison is against the MARKER's directory, so a genuine
+        submodule's own subdirectory must not be refused."""
+        _super, checkout, _admin = self._submodule(tmp_path)
+        (checkout / "pkg").mkdir()
+        assert pi._gitfile_points_at_foreign_gitdir(checkout / "pkg") is False
+
+    def test_a_subdirectory_of_a_forged_pointer_is_a_redirect(self, tmp_path):
+        """Catches testing only `<dir>/.git`: a declared path one level below
+        the forged checkout kept the victim bound."""
+        _super, _checkout, admin = self._submodule(tmp_path)
+        forged = tmp_path / "forged-sub"
+        (forged / "sub").mkdir(parents=True)
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        assert pi._gitfile_points_at_foreign_gitdir(forged / "sub") is True
+
+    def test_a_gitfile_pointing_at_a_submodule_admin_dir_declines(self, tmp_path):
+        """Catches a pointer at `<other>/.git/modules/<name>`: its git dir
+        EQUALS its common dir, so the listing check cannot see it and the
+        basename is `<name>`, not `.git`."""
+        superrepo, checkout, admin = self._submodule(tmp_path)
+        forged = tmp_path / "forged-sub"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+
+        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        identity = pi.detect_id_for_root(forged, admin.resolve())
+        assert identity.project_id is None
+        assert identity.source == "declined"
+
+
+# THE FORBIDDEN VALUE AND THE FIXTURE URL ARE NOT THE SAME STRING.
+# A remote must be a SCHEME-BEARING URL to classify as canonical; using the
+# bare id as the remote made every redirected origin fall back to a basename,
+# so the matrix passed 15/15 with the guard removed. This is that defect,
+# pinned: the fixture uses the URL, the assertion forbids the ID.
+VICTIM_URL = "https://github.com/victim/secret-lib"
+VICTIM_ID = "github.com/victim/secret-lib"
+
+
+def _forged_shapes(tmp_path):
+    """One forged pointer per shape, each aimed at the VICTIM's real git dir.
+
+    Every victim carries a PORTABLE (https) origin, so a basename fallback
+    cannot make a green arm mean nothing.
+    """
+    victim = _repo(tmp_path / "victim", VICTIM_URL)
+    subprocess.run(
+        ["git", "-C", str(victim), "worktree", "add", "-q",
+         str(tmp_path / "victim-wt"), "-b", "wt"],
+        check=True,
+    )
+    admin_worktree = next((victim / ".git" / "worktrees").iterdir())
+
+    src = _repo(tmp_path / "subsrc", VICTIM_URL)
+    superrepo = _repo(tmp_path / "super", "https://github.com/owner/super")
+    subprocess.run(
+        ["git", "-C", str(superrepo), "-c", "protocol.file.allow=always",
+         "submodule", "add", str(src), "submod"],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(superrepo / "submod"), "remote", "set-url",
+         "origin", VICTIM_URL],
+        check=True,
+    )
+    admin_modules = superrepo / ".git" / "modules" / "submod"
+
+    shapes = {
+        "worktree-admin": admin_worktree,
+        "modules-admin": admin_modules,
+        "direct": victim / ".git",
+    }
+    roots = {}
+    for name, target in shapes.items():
+        forged = tmp_path / f"forged-{name}"
+        (forged / "sub").mkdir(parents=True)
+        (forged / ".git").write_text(f"gitdir: {target}\n", encoding="utf-8")
+        roots[name] = forged
+    return roots, victim, superrepo, admin_worktree, admin_modules
+
+
+ROUTES = ("cwd", "declared-root", "declared-sub", "record-root", "record-sub")
+
+
+class TestForgedPointerMatrix:
+    """ROUTES x SHAPES: no cell may bind the victim's id.
+
+    The per-shape arms each pinned one cell; this matrix runs them end to
+    end on these five routes and three shapes. The class over every route
+    and every shape is pinned by test_identity_rung_parity.py's
+    test_no_hostile_shape_binds_the_victim, which reads both from
+    fixtures/identity_routes.py. Every assertion is `!= VICTIM_ID` rather than
+    `is None`, because a declined declaration legitimately falls through to
+    later rungs — what must never happen is binding the victim.
+    """
+
+    @pytest.mark.parametrize("shape", ("worktree-admin", "modules-admin", "direct"))
+    @pytest.mark.parametrize("route", ROUTES)
+    def test_no_route_binds_the_victim(self, shape, route, tmp_path, monkeypatch):
+        import scripts.memory_api as memory_api
+
+        roots, _victim, _superrepo, _aw, _am = _forged_shapes(tmp_path)
+        forged = roots[shape]
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path / "mem"))
+        (tmp_path / "mem").mkdir()
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+        declared = forged if route.endswith("root") else forged / "sub"
+        if route == "cwd":
+            monkeypatch.setattr(
+                memory_api, "get_project_dir_from_session_record", lambda: None
+            )
+            monkeypatch.chdir(forged)
+        elif route.startswith("declared"):
+            monkeypatch.setattr(
+                memory_api, "get_project_dir_from_session_record", lambda: None
+            )
+            monkeypatch.chdir(tmp_path)
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+        else:  # the session-record rung
+            monkeypatch.setattr(
+                memory_api, "get_project_dir_from_session_record",
+                lambda: str(declared),
+            )
+            monkeypatch.chdir(tmp_path)
+
+        memory = memory_api.PACTMemory(db_path=store)
+        assert memory.project_id != VICTIM_ID, (
+            f"route={route} shape={shape} bound the victim: {memory.project_id!r}"
+        )
+
+
+class TestGenuineLayoutsStillResolve:
+    """POSITIVE CONTROLS, so a matrix full of declines cannot be green for
+    the wrong reason."""
+
+    def test_a_genuine_linked_worktree_resolves(self, tmp_path):
+        victim = _repo(tmp_path / "repo", "https://github.com/owner/repo")
+        worktree = tmp_path / "wt"
+        subprocess.run(
+            ["git", "-C", str(victim), "worktree", "add", "-q", str(worktree), "-b", "wt"],
+            check=True,
+        )
+        identity = pi.detect_id_for_root(worktree, _common(victim))
+        assert identity.project_id == "github.com/owner/repo"
+
+    def test_a_genuine_submodule_with_an_https_origin_resolves(self, tmp_path):
+        src = _repo(tmp_path / "src", "https://github.com/owner/subsrc")
+        superrepo = _repo(tmp_path / "super2", "https://github.com/owner/super")
+        subprocess.run(
+            ["git", "-C", str(superrepo), "-c", "protocol.file.allow=always",
+             "submodule", "add", str(src), "submod"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(superrepo / "submod"), "remote", "set-url",
+             "origin", "https://github.com/owner/subsrc"],
+            check=True,
+        )
+        checkout = superrepo / "submod"
+        admin = superrepo / ".git" / "modules" / "submod"
+        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        identity = pi.detect_id_for_root(checkout, admin.resolve())
+        assert identity.project_id == "github.com/owner/subsrc"
+
+    def test_an_external_separate_git_dir_resolves(self, tmp_path):
+        store = tmp_path / "ext.git"
+        checkout = tmp_path / "sep"
+        subprocess.run(
+            ["git", "init", "-q", f"--separate-git-dir={store}", str(checkout)],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(checkout), "remote", "add", "origin",
+             "https://github.com/owner/sep"], check=True,
+        )
+        identity = pi.detect_id_for_root(checkout, store.resolve())
+        assert identity.project_id == "github.com/owner/sep"
+
+
+class TestWalkBoundariesMatchGit:
+    def test_a_ceiling_directory_stops_the_marker_walk(self, tmp_path, monkeypatch):
+        """Catches an unbounded walk: git never inspects a ceiling directory,
+        so a marker above one must not be found."""
+        _super, _checkout, admin = TestSubmoduleAdminRedirect()._submodule(tmp_path)
+        outer = tmp_path / "outer"
+        (outer / "sub").mkdir(parents=True)
+        (outer / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is True
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(outer))
+        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is False
+
+    def test_a_device_boundary_stops_the_walk_unless_git_would_cross(
+        self, tmp_path, monkeypatch
+    ):
+        _super, _checkout, admin = TestSubmoduleAdminRedirect()._submodule(tmp_path)
+        outer = tmp_path / "outer2"
+        (outer / "sub").mkdir(parents=True)
+        (outer / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+
+        real_stat = os.stat
+
+        def fake_stat(path, *args, **kwargs):
+            result = real_stat(path, *args, **kwargs)
+            device = 1 if str(path).endswith("sub") else 2
+            return os.stat_result(
+                (result.st_mode, result.st_ino, device, result.st_nlink,
+                 result.st_uid, result.st_gid, result.st_size,
+                 result.st_atime, result.st_mtime, result.st_ctime)
+            )
+
+        monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+        monkeypatch.setattr(pi.os, "stat", fake_stat)
+        monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
+        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is False
+        monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
+        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is True
+
+
+class TestForgedWorktreeAdminViaDeclaration:
+    def _fixture(self, tmp_path):
+        victim = _repo(tmp_path / "victim", "https://github.com/victim/secret-lib")
+        subprocess.run(["git", "-C", str(victim), "worktree", "add", "-q",
+                        str(tmp_path / "victim-wt"), "-b", "wt"], check=True)
+        admin = next((victim / ".git" / "worktrees").iterdir())
+        forged = tmp_path / "forged-admin"
+        (forged / "sub").mkdir(parents=True)
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        return victim, forged
+
+    def test_a_declared_forged_worktree_admin_dir_binds_no_victim(
+        self, tmp_path, monkeypatch
+    ):
+        """Catches the DECLARED route: `main_repo_root` refuses the redirect
+        and returns None, and the fall-through then paired the declared dir
+        with the victim's common dir. Measured: both the root and a
+        subdirectory bound the victim."""
+        import scripts.memory_api as memory_api
+
+        victim, forged = self._fixture(tmp_path)
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path / "mem"))
+        (tmp_path / "mem").mkdir()
+        monkeypatch.setattr(
+            memory_api, "get_project_dir_from_session_record", lambda: None
+        )
+        monkeypatch.chdir(tmp_path)
+
+        for declared in (forged, forged / "sub"):
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+            memory = memory_api.PACTMemory(db_path=store)
+            assert memory.project_id != "github.com/victim/secret-lib", declared
+
+
+class TestSaveIngressRejectsNulFilePaths:
+    def test_a_nul_file_path_is_refused_before_any_row_is_written(self, tmp_path):
+        """Catches a save that raises 'nothing was written' AFTER the memory
+        row is committed — measured: the row persisted. The refusal must come
+        before the connection is opened."""
+        import scripts.memory_api as memory_api
+
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        memory = memory_api.PACTMemory(project_id="some-bucket", db_path=store)
+
+        with pytest.raises(ValueError) as caught:
+            memory.save(
+                {"context": "nul file path"},
+                files=["bad\x00path.py"],
+                sync_to_claude=False,
+            )
+        assert "must not contain a NUL" in str(caught.value)
+        # NOTHING WRITTEN. `_ensure_ready()` legitimately creates the store
+        # FILE, so the assertion is on ROWS: before the fix the memory row
+        # persisted while the error text claimed nothing was written.
+        import sqlite3
+
+        rows = 0
+        if store.exists():
+            check = sqlite3.connect(str(store))
+            try:
+                found = check.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='memories'"
+                ).fetchone()
+                if found:
+                    rows = check.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            finally:
+                check.close()
+        assert rows == 0, f"the refused save left {rows} memory row(s)"
+
+    def test_a_NUL_FREE_bytes_path_is_refused_before_any_row(self, tmp_path):
+        """Catches a revert to decode-then-check: a NUL-free bytes path passes
+        a NUL test either way, so only this arm distinguishes "refused the
+        type" from "decoded it and let the original bytes through" — measured
+        under the old handling: 1 memory row, 0 file rows."""
+        import sqlite3
+
+        import scripts.memory_api as memory_api
+
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        memory = memory_api.PACTMemory(project_id="some-bucket", db_path=store)
+        with pytest.raises(ValueError) as caught:
+            memory.save(
+                {"context": "nul-free bytes"},
+                files=[b"/tmp/ok.py"],
+                sync_to_claude=False,
+            )
+        assert "must be str, not bytes" in str(caught.value)
+        counts = {}
+        if store.exists():
+            check = sqlite3.connect(str(store))
+            try:
+                for table in ("memories", "files"):
+                    found = check.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                        (table,),
+                    ).fetchone()
+                    counts[table] = (
+                        check.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                        if found
+                        else 0
+                    )
+            finally:
+                check.close()
+        assert counts.get("memories", 0) == 0, (
+            f"the refused save left {counts['memories']} memory row(s)"
+        )
+        assert counts.get("files", 0) == 0, (
+            f"the refused save left {counts['files']} file row(s)"
+        )
+
+    def test_a_bytes_path_with_a_nul_is_refused_before_any_row(self, tmp_path):
+        """Catches `str(b'bad\\x00.py')`, which renders the NUL as an ESCAPE
+        and so slipped past a character check on `str(...)`; measured: the
+        memory row was committed and the file layer raised TypeError later.
+        The row count is checked BEFORE the error type, so that regression
+        reds at the row count whichever exception the late failure raises."""
+        import sqlite3
+
+        import scripts.memory_api as memory_api
+
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        memory = memory_api.PACTMemory(project_id="some-bucket", db_path=store)
+        with pytest.raises(Exception) as caught:
+            memory.save(
+                {"context": "bytes nul"},
+                files=[b"/tmp/bad\x00.py"],
+                sync_to_claude=False,
+            )
+        rows = 0
+        if store.exists():
+            check = sqlite3.connect(str(store))
+            try:
+                found = check.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='memories'"
+                ).fetchone()
+                if found:
+                    rows = check.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            finally:
+                check.close()
+        assert rows == 0, f"the refused save left {rows} memory row(s)"
+        assert caught.type is ValueError, caught.value
+
+
+class TestForgedSubmoduleAdminEndToEnd:
+    def test_constructing_from_the_forged_dir_declines(self, tmp_path, monkeypatch):
+        """THE PRODUCTION PATH, which my unit arm above did not exercise.
+
+        `main_repo_root` follows the forged gitfile's `core.worktree` to the
+        VICTIM's checkout, so `detect_id_for_root` receives a genuine
+        submodule as `root` and reads the victim's origin. The predicate must
+        therefore be evaluated on the ASKED directory.
+        """
+        import scripts.memory_api as memory_api
+
+        victim = _repo(tmp_path / "victimlib", "https://github.com/victim/secret-lib")
+        sup = _repo(tmp_path / "super", "https://github.com/owner/super")
+        subprocess.run(
+            ["git", "-C", str(sup), "-c", "protocol.file.allow=always",
+             "submodule", "add", str(victim), "submod"],
+            check=True, capture_output=True,
+        )
+        admin = sup / ".git" / "modules" / "submod"
+        forged = tmp_path / "forged-sub"
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+
+        # The victim's origin must be a PORTABLE URL, or the redirect only
+        # reaches a basename and the arm would pass for the wrong reason.
+        subprocess.run(
+            ["git", "-C", str(sup / "submod"), "remote", "set-url", "origin",
+             "https://github.com/victim/secret-lib"],
+            check=True,
+        )
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path / "mem"))
+        (tmp_path / "mem").mkdir()
+        monkeypatch.setattr(
+            memory_api, "get_project_dir_from_session_record", lambda: None
+        )
+        monkeypatch.chdir(forged)
+
+        memory = memory_api.PACTMemory(db_path=tmp_path / "store" / "memory.db")
+        assert memory.project_id != "github.com/victim/secret-lib"
+        assert memory.project_id is None
+        assert memory._project_id_source == "unresolved"
+
+        # THE DECLARED PATHS, including a SUBDIRECTORY of the forged dir:
+        # `<subdir>/.git` does not exist, so the marker must be found by
+        # walking up. In this suite the cwd is a real repository, so a
+        # declined declaration legitimately falls through to it — what must
+        # never appear is the VICTIM's id.
+        monkeypatch.chdir(tmp_path)
+        (forged / "sub").mkdir()
+        for declared in (forged, forged / "sub"):
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+            declared_memory = memory_api.PACTMemory(
+                db_path=tmp_path / "store" / "memory.db"
+            )
+            assert declared_memory.project_id != "github.com/victim/secret-lib"
+            assert declared_memory._project_id_source != "origin remote" or (
+                declared_memory.project_id
+                != "github.com/victim/secret-lib"
+            )
+
+
+class TestReadScopeCacheKeyIncludesTheIdentityRoot:
+    def test_two_roots_with_the_same_scope_do_not_share_a_verdict(self, tmp_path):
+        """Catches a cache key without the identity root: the plausibility
+        verdict is computed AGAINST that root, so two same-named checkouts of
+        one repository would serve each other's include/exclude decision."""
+        import scripts.memory_api as memory_api
+        from scripts.database import create_memory, db_connection
+        from scripts.graph import track_file
+
+        # Two checkouts with the SAME folder name and the SAME origin, so the
+        # canonical scope and the legacy basename are identical for both.
+        left = _repo(tmp_path / "left" / "PACT-prompt", "https://github.com/o/PACT-prompt")
+        right = _repo(tmp_path / "right" / "PACT-prompt", "https://github.com/o/PACT-prompt")
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+
+        with db_connection(str(store)) as conn:
+            create_memory(conn, {"project_id": "PACT-prompt", "context": "legacy"})
+            track_file(conn, str(left / "src" / "x.py"), "PACT-prompt")
+
+        # CLEARED ONCE, NEVER BETWEEN THE TWO CALLS: a per-call clear would
+        # make this arm pass even with the identity root missing from the key,
+        # because the second call would recompute instead of hitting.
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        memory_api._EXCLUSION_WARNED.clear()
+
+        def verdict(checkout):
+            memory = memory_api.PACTMemory(
+                project_id="github.com/o/PACT-prompt", db_path=store
+            )
+            # `project_id` supplied means no detection; pin the root by hand,
+            # which is exactly the input under test.
+            memory._project_identity_root = checkout
+            memory._legacy_project_basename = "PACT-prompt"
+            return memory._read_project_scopes()
+
+        # Warm the cache from the FIRST root, then ask with the second.
+        assert verdict(left) == ("github.com/o/PACT-prompt", "PACT-prompt")
+        # The identity root is a KEY COMPONENT, not merely used in the verdict:
+        # asserted directly so the arm does not depend on which entry survives.
+        assert any(
+            str(left.resolve()) in key for key in memory_api._LEGACY_SCOPE_CACHE
+        ), memory_api._LEGACY_SCOPE_CACHE
+        assert verdict(right) == ("github.com/o/PACT-prompt",)
+        # SAME-ROOT CONTROL: asking again with the first root must include,
+        # so the exclusion above is the ROOT's verdict and not "the second
+        # call always excludes".
+        assert verdict(left) == ("github.com/o/PACT-prompt", "PACT-prompt")
+
+
+class TestProjectIdShowRoots:
+    def test_repo_root_is_the_identity_root_and_the_process_root_is_named(
+        self, tmp_path
+    ):
+        """Catches a primary field named `repo_root` that names the PROCESS's
+        repository: in a declared-repo session that is a different tree from
+        the one the legacy gate used, and it was the misdirection the finding
+        was about."""
+        cli = Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "scripts" / "cli.py"
+        process_repo = _repo(tmp_path / "process-repo", "https://github.com/owner/process")
+        declared_repo = _repo(tmp_path / "declared-repo", "https://github.com/owner/declared")
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        env = dict(
+            os.environ,
+            PACT_TEST_MEMORY_DIR=str(store.parent),
+            CLAUDE_PROJECT_DIR=str(declared_repo),
+        )
+
+        from scripts.database import db_connection
+
+        with db_connection(str(store)):
+            pass
+
+        show = subprocess.run(
+            [sys.executable, str(cli), "project-id", "show", "--db-path", str(store)],
+            capture_output=True, text=True, env=env, cwd=str(process_repo),
+            timeout=120,
+        )
+        assert show.returncode == 0, show.stderr
+        payload = json.loads(show.stdout)["result"]
+
+        assert payload["repo_root"] == str(declared_repo.resolve())
+        assert payload["process_repo_root"] == str(process_repo.resolve())
+        assert "identity_root" not in payload
+
+
+# ---------------------------------------------------------------------------
+# The exclusion warning must not assert an unread row's location
+# ---------------------------------------------------------------------------
+
+class TestExclusionWarningHedgesTheLocation:
+    def test_the_warning_says_could_be_located_not_lies_under(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """Catches a warning that asserts an unverified fact: for a row the
+        gate could not READ, whether it sits under the root is UNKNOWN, and
+        'none ... lies under' sends an operator hunting paths when the cause
+        is a corrupt row."""
+        from scripts.database import create_memory, db_connection
+        from scripts.graph import track_file
+
+        checkout = _repo(
+            tmp_path / "repo" / "PACT-prompt", "https://github.com/o/PACT-prompt"
+        )
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        with db_connection(str(store)) as conn:
+            create_memory(conn, {"project_id": "PACT-prompt", "context": "legacy"})
+            track_file(conn, str(elsewhere / "x.py"), "PACT-prompt")
+
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(checkout))
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(store.parent))
+        import scripts.memory_api as memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        memory_api._EXCLUSION_WARNED.clear()
+
+        with caplog.at_level(logging.WARNING):
+            memory = memory_api.PACTMemory(db_path=store)
+            memory._read_project_scopes()
+
+        text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "could be located under" in text, text
+        assert "lies under" not in text, text
+        assert "unknown location" in text, text
+
+
+# ---------------------------------------------------------------------------
+# THE DELIVERABLE: the printed remedy must execute
+# ---------------------------------------------------------------------------
+
+class TestTheRenderedCommandExecutes:
+    def test_the_printed_remedy_runs_against_the_store_it_names(self, tmp_path):
+        """Takes the string a real surface printed and RUNS it.
+
+        Catches both halves of an unrunnable remedy: the bare `pact-memory` verb (argparse exit
+        2) and the missing `--db-path` (a success envelope reporting 0 moved
+        from the DEFAULT store while the real bucket sat untouched).
+        """
+        cli = Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "scripts" / "cli.py"
+        store = tmp_path / "store" / "memory.db"
+        store.parent.mkdir()
+        # The checkout's folder name IS the legacy bucket, so the bucket is
+        # this checkout's own candidate and the census renders its command,
+        # which names the canonical target explicitly.
+        checkout = _repo(tmp_path / "Legacy-Bucket", "https://github.com/owner/target")
+        env = dict(
+            os.environ,
+            PACT_TEST_MEMORY_DIR=str(store.parent),
+            CLAUDE_PROJECT_DIR=str(checkout),
+        )
+
+        from scripts.database import create_memory, db_connection
+
+        with db_connection(str(store)) as conn:
+            create_memory(conn, {"project_id": "Legacy-Bucket", "context": "x"})
+
+        show = subprocess.run(
+            [sys.executable, str(cli), "project-id", "show", "--db-path", str(store)],
+            capture_output=True, text=True, env=env, cwd=str(tmp_path),
+            timeout=120,
+        )
+        assert show.returncode == 0, show.stderr
+        rows = json.loads(show.stdout)["result"]["candidates"]
+        rendered = next(row["rekey"] for row in rows if row["id"] == "Legacy-Bucket")
+        assert "--to=github.com/owner/target" in rendered, rendered
+
+        run = subprocess.run(
+            rendered, shell=True, capture_output=True, text=True,
+            env=env, cwd=str(tmp_path),
+            timeout=120,
+        )
+        assert run.returncode == 0, (rendered, run.stderr)
+        payload = json.loads(run.stdout)["result"]
+        assert payload["dry_run"] is True
+        assert payload["from"] == "Legacy-Bucket"
+        assert payload["to"] == "github.com/owner/target"
+        # The store it names is the store that answered.
+        assert payload["memories"] == 1
+
+
+# ---------------------------------------------------------------------------
+# The user-setting rung must keep the pre-change basename
+# ---------------------------------------------------------------------------
+
+class TestUserSettingRungCarriesTheLegacyCandidate:
+    def test_an_umbrella_with_a_config_knob_keeps_its_legacy_bucket(
+        self, tmp_path, monkeypatch
+    ):
+        """Catches the rung returning a bare id: every row filed under the
+        folder name disappears from reads and the backlog writer refuses."""
+        memory_dir = tmp_path / "mem"
+        memory_dir.mkdir()
+        (memory_dir / "config.json").write_text(
+            '{"project_id": "user.example.com/me/pinned"}', encoding="utf-8"
+        )
+        umbrella = tmp_path / "my-workspace"
+        umbrella.mkdir()
+        (umbrella / "CLAUDE.md").write_text("x", encoding="utf-8")
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(umbrella)
+
+        from scripts.memory_api import PACTMemory
+
+        memory = PACTMemory(db_path=tmp_path / "store" / "memory.db")
+        assert memory._project_id == "user.example.com/me/pinned"
+        assert memory._project_id_source == "user setting"
+        assert memory._legacy_project_basename == "my-workspace"
+        assert memory._project_identity_root is not None
+
+
+# ---------------------------------------------------------------------------
+# No user-facing text may name a `pact-memory <verb>` executable
+# ---------------------------------------------------------------------------
+
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "scripts"
+
+def _cli_verbs() -> set:
+    """Every verb the memory CLI accepts, read from its own parser: each
+    subcommand and each subcommand's own actions, so a verb added to the CLI
+    is covered without editing this module."""
+    import argparse
+
+    from scripts.cli import build_parser
+
+    verbs, parsers = set(), [build_parser()]
+    while parsers:
+        parser = parsers.pop()
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                verbs.update(action.choices)
+                parsers.extend(action.choices.values())
+    return verbs
+
+
+# The executable name, as a whole word: `pact-memory-x`, `pact-memoryx` and
+# `compact-memory` are other words.
+_EXECUTABLE = re.compile(r"(?<![\w-])pact-memory(?![\w-])")
+
+# The occurrences the scan cannot judge from their own text, each with its
+# reason. A key is (file, enclosing function, the constant's whole value, the
+# constant's form); `path-segment` is the right operand of `/`.
+_NAMED_UNREADABLE = [
+    # The store folder: `Path.home() / ".claude" / "pact-memory"`. The right
+    # operand of `/` joins onto a Path and the function returns that Path, so
+    # the name is the last folder of a location, never a command word.
+    ("config.py", "get_memory_dir", "pact-memory", "path-segment"),
+]
+
+
+def _pact_memory_census(tree: ast.AST, verbs: set) -> tuple:
+    """(offences, unreadable): every occurrence of the executable name in a
+    string of `tree`, each READ or REPORTED, never skipped.
+
+    ANCHOR: the word `pact-memory` (`_EXECUTABLE`) in any str or bytes
+    constant, f-string pieces and docstrings included (comments are
+    invisible to the AST).
+
+    An occurrence is judged ONLY by the text that follows it inside the same
+    constant, never by where the constant sits. Each form the scan reads, and
+    the check on that text that makes it safe:
+    - whitespace, then a CLI verb: an OFFENCE (an invocation of an executable
+      that does not exist). This is checked before every other form;
+    - a `/` or `\\` directly after the name: a folder inside a path, because
+      the path continues in the same text;
+    - whitespace, then a word that starts with a letter (an opening quote or
+      parenthesis may precede it) and is not a verb: prose, because the token
+      after the name is visible and is not a verb;
+    - sentence punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `)`), then
+      whitespace or the end of the constant, or a possessive `'s`: prose,
+      because the sentence ends or pauses on the name.
+    Every other occurrence is UNREADABLE, a constant that ends on the name
+    included: what follows it comes from outside the constant (an f-string
+    piece, a `+` or `%` operand, a list element, or a variable a command is
+    later built from), so its own text cannot show that no verb follows. Each
+    unreadable site is (line, enclosing function, value, form), the form being
+    `path-segment` for the right operand of `/` and otherwise the parent
+    node's type."""
+    parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+    def enclosing_function(node):
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return node.name
+        return None
+
+    offences, unreadable = [], []
+    verb = re.compile(
+        r"[`'\"]?\s+[`'\"]?(" + "|".join(re.escape(v) for v in sorted(verbs, key=len, reverse=True)) + r")\b"
+    )
+    word = re.compile(r"[`'\"]?\s+[`'\"(]?[A-Za-z]")
+    punctuation = re.compile(r"[`'\"]?(?:'s\b|[.,;:!?)]+[`'\"]?(?:\s|\Z))")
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))):
+            continue
+        text = node.value if isinstance(node.value, str) else node.value.decode("latin-1")
+        for match in _EXECUTABLE.finditer(text):
+            after = text[match.end():]
+            site = f"{node.lineno}: {text[max(0, match.start() - 20):match.end() + 20]!r}"
+            if verb.match(after):
+                offences.append(site)
+            elif after.startswith(("/", "\\")) or word.match(after) or punctuation.match(after):
+                continue
+            else:
+                parent = parents.get(node)
+                form = (
+                    "path-segment"
+                    if isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Div) and parent.right is node
+                    else type(parent).__name__
+                )
+                unreadable.append((node.lineno, enclosing_function(node), text, form))
+    return offences, unreadable
+
+
+def test_no_user_facing_text_names_a_pact_memory_executable():
+    """Catches a remedy that tells the operator to run an executable that
+    does not exist: `pact-memory` followed by any verb the CLI accepts, in a
+    string anywhere in the memory scripts. Comments are exempt (`cli.py`'s
+    explanation of the bug). FAILS CLOSED (`_pact_memory_census`): an
+    occurrence the scan cannot judge fails as unreadable unless it is in
+    `_NAMED_UNREADABLE`, and a second occurrence matching a named entry
+    fails too."""
+    verbs = _cli_verbs()
+    assert {"project-id", "rekey", "save"} <= verbs, verbs
+    offences, unreadable, scanned, occurrences = [], [], 0, 0
+    for path in sorted(_SCRIPTS_DIR.glob("*.py")):
+        scanned += 1
+        source = path.read_text(encoding="utf-8")
+        occurrences += len(_EXECUTABLE.findall(source))
+        found, unread = _pact_memory_census(ast.parse(source), verbs)
+        offences += [f"{path.name}:{site}" for site in found]
+        unreadable += [(path.name, *site) for site in unread]
+    assert scanned >= 10, scanned
+    assert occurrences >= 10, "the anchor matched nothing: the census read no text"
+    assert offences == [], offences
+    assert [site[:1] + site[2:] for site in unreadable] == _NAMED_UNREADABLE, (
+        f"pact-memory in a form the scan cannot judge: {unreadable}"
+    )
+
+
+def test_the_executable_name_is_matched_as_a_whole_word():
+    """Catches an `_EXECUTABLE` that matches inside another word: a longer
+    word that contains the name is not the executable."""
+    assert _EXECUTABLE.search("run pact-memory rekey")
+    assert _EXECUTABLE.search("`pact-memory` rekey")
+    for other in ("compact-memory save", "pact-memoryx rekey", "pact-memory-x rekey", "pact-memory_x rekey"):
+        assert not _EXECUTABLE.search(other), other
+
+
+def test_the_executable_census_reads_or_reports_every_form():
+    """Live control for `_pact_memory_census`: each form is an offence,
+    unreadable, named or read as benign, as its comment says. A source is
+    scanned as a file named `config.py`, so `named` means it matched
+    `_NAMED_UNREADABLE` exactly."""
+    verbs = {"project-id", "rekey", "save"}
+    cases = {
+        # Offences: a verb visible after the name.
+        '"run `pact-memory project-id rekey`"': "offence",
+        'b"pact-memory rekey"': "offence",
+        'f"run {root}/pact-memory rekey"': "offence",
+        '"compact-memory save"': "read",
+        '"pact-memoryx rekey"': "read",
+        # The name ends its constant: a neighbour supplies what follows.
+        'shlex.join(["pact-memory", "project-id", "rekey"])': "unreadable",
+        '" ".join(["pact-memory", "rekey"])': "unreadable",
+        'f"run `pact-memory {verb}`"': "unreadable",
+        '"pact-memory " + verb': "unreadable",
+        '"pact-memory %s" % verb': "unreadable",
+        '"{} {}".format("pact-memory", "rekey")': "unreadable",
+        '{"cmd": "pact-memory"}["cmd"] + " rekey"': "unreadable",
+        'warn("the executable `pact-memory")': "unreadable",
+        '_EXE = "pact-memory"\ncmd = f"run {_EXE} rekey"': "unreadable",
+        'def name():\n    return "pact-memory"\ncmd = name() + " rekey"': "unreadable",
+        'cmd = f"{\'pact-memory\'}{verb}"': "unreadable",
+        'cmd = f"{root}/pact-memory {verb}"': "unreadable",
+        'Path.home() / ".claude" / "pact-memory"': "unreadable",
+        # A form the scan reads, followed by text that is not one.
+        '"pact-memory --db-path=x rekey"': "unreadable",
+        '"pact-memory.exe rekey"': "unreadable",
+        '"pact-memory 2 rekey"': "unreadable",
+        # The named entry, and commands placed where it sits.
+        'def get_memory_dir():\n    return Path.home() / ".claude" / "pact-memory"': "named",
+        'def get_memory_dir():\n    return f"{\'pact-memory\'} rekey"': "unreadable",
+        'def get_memory_dir():\n    name = "pact-memory"\n    return Path.home() / name': "unreadable",
+        'def get_memory_dir():\n    return Path.home() / (".claude/" + "pact-memory" + " rekey")': "unreadable",
+        'def other():\n    return Path.home() / ".claude" / "pact-memory"': "unreadable",
+        # Benign: prose and paths whose own text decides them.
+        '"see the pact-memory skill"': "read",
+        '"see the pact-memory\\nskill"': "read",
+        '"skills/pact-memory/scripts"': "read",
+        '"~/.claude/pact-memory/memory.db"': "read",
+        '"pact-memory-cache"': "read",
+        '"""Docstring: `~/.claude/pact-memory` (the default)."""': "read",
+        'helper = "named pact-memory."': "read",
+        'warn("run setup for pact-memory.")': "read",
+        'note = "pact-memory\'s store"': "read",
+        '# pact-memory rekey\nx = 1': "read",
+    }
+    verdicts = {}
+    for source, _expected in cases.items():
+        offences, unreadable = _pact_memory_census(ast.parse(source), verbs)
+        keys = [("config.py", *site[1:]) for site in unreadable]
+        verdicts[source] = (
+            "offence" if offences
+            else "named" if keys and keys == _NAMED_UNREADABLE
+            else "unreadable" if keys
+            else "read"
+        )
+    assert verdicts == cases
+
+
+def test_a_newline_in_a_repo_path_does_not_forge_a_warning_line(
+    tmp_path, monkeypatch, caplog
+):
+    """Catches `%s` on a path argument: a directory name carrying a newline
+    lands on its own stderr line, which an agent then reads as a message."""
+    from scripts.memory_api import PACTMemory
+
+    hostile = tmp_path / "hostile\ndir"
+    _repo(hostile, "https://github.invalid")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(hostile))
+    with caplog.at_level(logging.WARNING):
+        PACTMemory(db_path=tmp_path / "store" / "memory.db")
+    records = [r.getMessage() for r in caplog.records]
+    # THE SPECIFIC CAUSE, NOT THE GENERIC SENTENCE. The remote here is
+    # present but unrepresentable (`https://github.invalid` has no path), so
+    # the decline token is `origin_unrepresentable` and the warning must name
+    # that cause. The old generic sentence is the fallback for a reason-less
+    # decline and sends the operator to inspect a remote that may be fine.
+    assert any(
+        "origin remote is present but cannot be represented as a project id"
+        in r
+        for r in records
+    ), records
+    assert all("\n" not in r for r in records), records

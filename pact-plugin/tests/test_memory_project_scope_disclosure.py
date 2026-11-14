@@ -262,13 +262,26 @@ def test_agreement_does_not_certify_the_subject(mem):
 
 
 @pytest.mark.parametrize(
-    "key", ["project_id", "source", "cwd_repo", "location_divergence"]
+    "key",
+    [
+        "project_id",
+        "source",
+        "id_shape",
+        "cwd_repo",
+        "override_ignored",
+        "legacy_scope",
+        "location_divergence",
+    ],
 )
-def test_every_documented_key_is_present(mem, key):
-    """The property's docstring names four keys; all four must be emitted.
+def test_every_emitted_key_is_present(mem, key):
+    """Each listed key is present on a successful save — a PRESENCE SUBSET.
 
-    Guards the doc/behaviour pairing this whole arc has been about: a
-    documented key the code does not emit is the same defect one level over.
+    The parameter list is the seven keys the emitted shape carries
+    (`project_id`, `source`, `id_shape`, `cwd_repo`, `override_ignored`,
+    `legacy_scope`, `location_divergence`), matching the corrected docstring.
+    This arm proves every listed key IS emitted, one key per case; it does NOT
+    prove the dict has exactly seven keys and no others — an extra key would
+    not redden it, and the arm claims no more than the subset it asserts.
     """
     assert key in _save(mem, Path("/repos/PACT-prompt"))
 

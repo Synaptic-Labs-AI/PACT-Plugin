@@ -389,9 +389,10 @@ class TestTheEnvelopeNamesItsProjectOnEveryOutcome:
         # anchor declared, which is the guard's refusal shape.
         envelope = _envelope(project, db)
 
+        project_id = self._project_id(project, db)
         assert envelope == {
             "sync_status": "refused", "projected": 0, "memory_ids": [],
-            "project_id": self._project_id(project, db),
+            "project_id": project_id, "read_scope": [project_id],
         }
         assert (project / "CLAUDE.md").read_bytes() == before
 
@@ -404,9 +405,10 @@ class TestTheEnvelopeNamesItsProjectOnEveryOutcome:
 
         envelope = _envelope(project, db, "--claude-md-root", str(project))
 
+        project_id = self._project_id(project, db)
         assert envelope == {
             "sync_status": "failed", "projected": 0, "memory_ids": [],
-            "project_id": self._project_id(project, db),
+            "project_id": project_id, "read_scope": [project_id],
         }
 
     def test_the_same_project_writes_when_the_obstruction_is_gone(self, stocked):

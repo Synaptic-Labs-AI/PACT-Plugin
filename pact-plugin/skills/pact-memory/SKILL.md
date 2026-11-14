@@ -64,11 +64,13 @@ costs as much as a write that goes incorrectly.
 
 ### What you must not do, and why
 
-- Do not run a pact-memory CLI verb to inspect the store. The CLI opens a
-  read-write connection and runs `PRAGMA journal_mode=WAL` on it, which
-  creates `memory.db-wal` and `memory.db-shm`. A CLI read is thus a write
-  to the store directory. A CLI run also reaches the same functions an import
-  reaches, so it defeats the next rule.
+- Do not run a pact-memory CLI verb to inspect the store. A read does NOT
+  create or migrate the schema of an existing store, but it still opens the
+  store READ-WRITE and, on a store holding data, runs `PRAGMA
+  journal_mode=WAL`, which can create `memory.db-wal` and `memory.db-shm`.
+  That is a write to the store directory even though no row is written. A CLI
+  run also reaches the same functions an import reaches, so it defeats the
+  next rule.
 - Do not import a module below `skills/pact-memory/scripts/`. In that package,
   functions create the live store directory as a side result of a path
   resolution, so an import puts each of them one call away. Do not read an
@@ -251,6 +253,15 @@ spaces, Cf formatting characters, bidi overrides, zero-width characters
 and noncharacters, is accepted by design; the residual is display
 spoofing only.
 
+A session whose detected project id is a repository identity never writes into
+a folder-name bucket: `save` and `update` refuse a payload `project_id` that is
+not a canonical `host/owner/repo` id, and `update` refuses a `session_id`
+change on a row stored under a folder-name bucket. Both exit 2 and write
+nothing. To move rows, run `project-id rekey --from=FOLDER_NAME --to=host/owner/repo`,
+with the folder-name bucket and the canonical id filled in; to write a
+folder-name bucket, save from a folder whose project id is that name
+(`project-id show` reports it).
+
 A `project_id` or `session_id` DETECTED from the environment or the session
 context is held to the same rule, and the outcome depends on the operation. A
 write that would bind the value is refused at that point, and the message
@@ -310,12 +321,138 @@ Addressing mode, not the verb name, decides scope: `list`, `search` and `search_
 | `update <id\|prefix> -` | Update from piped JSON (`-` = stdin sentinel) | `{"memory_id": "<hex>"}` |
 | `update <id\|prefix> <json> --replace` | Replace list fields wholesale instead of merging | `{"memory_id": "<hex>"}` |
 | `delete <id\|prefix>` | Delete a memory. Same prefix-resolution rules as `get`; ambiguous prefix is refused | `{"deleted": true, "memory_id": "<hex>"}` |
-| `sync` | Rebuild CLAUDE.md's Working Memory from this project's newest 3 memories (replaces the section; `--claude-md-root` bounds the write) | `{"sync_status": "wrote", "projected": 3, "memory_ids": [...], "project_id": "..."}` |
+| `sync` | Rebuild CLAUDE.md's Working Memory from this project's newest 3 memories (replaces the section; `--claude-md-root` bounds the write). `read_scope` lists every project id the records were read under, and is `[]` when no identity resolves | `{"sync_status": "wrote", "projected": 3, "memory_ids": [...], "project_id": "...", "read_scope": [...]}` |
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
+| `project-id show` | Report the detected project id, its `id_shape`, its `source`, the resolved read scope, and every populated bucket in `candidates`. Each candidate row is `{id, memory_count, relation, rekey}`, with `relation` one of `current`, `legacy_candidate`, `case_variant` or `other`; only a `legacy_candidate` row that is not excluded and a `case_variant` row carry a `rekey` command, and every other row's `rekey` is `null`. `repo_root` is the IDENTITY root this verb resolved and the legacy gate compared rows against; `process_repo_root` is the repository the process itself sits in — they differ in a declared-repo session, and `repo_root` is the one that explains the id. `decline_reason` is `{source, reason, override_path}` whenever resolution declined for a named cause, and `null` otherwise: `source` is the rung that declined, `reason` is one of `origin_unreadable`, `origin_unrepresentable`, `gitfile_redirect`, `broken_git_marker`, `no_working_tree`, `submodule_checkout` or `declaration_unresolved`, and `override_path` is the `<git-common-dir>/pact-project-id` file that remedies it, or `null` in two cases. First, when no override file can remedy the decline: that is the case for `gitfile_redirect`, `no_working_tree`, `broken_git_marker` and `declaration_unresolved`. Second, for any other cause when the checkout's `.git` points at a git directory outside it that is neither a linked worktree's nor a submodule's admin directory: a pin there may remedy the decline, but the path is withheld because a forged pointer looks the same, so pinning that git directory is the user's decision, as for `gitfile_redirect` below. For `gitfile_redirect`: Fix or remove the `.git` file, or run from the repository it points at. A `git init --separate-git-dir` layout of your own is a user decision: see the pact-memory skill. Such a layout is recovered by a pin at `<dir>/.git/pact-project-id`, in the git directory its `.git` file names, but only the user writes it, after confirming that directory is theirs. An agent never writes this pin and asks the user instead: a forged `.git` file naming another repository's git directory has the same shape, and the pin would re-pin that repository. `case_variant` lists a case-differing bucket the case gate did NOT include (present-but-not-included, with its rekey command), distinct from `excluded`, which means the plausibility gate disproved it. Reads an existing store and creates none | `{"project_id": "...", "id_shape": "canonical", "source": "...", "decline_reason": null, "repo_root": "...", "process_repo_root": "...", "read_scope": [...], "legacy_scope": {"candidate": "...", "case_variant": [], "case_variant_rekey": [], ...}, "candidates": [{"id": "...", "memory_count": N, "relation": "legacy_candidate", "rekey": "..."}]}` |
+| `project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply]`, or `project-id rekey --candidates` alone | Move an ENTIRE project bucket to a canonical id in one transaction: memories, file rows, graph links and vector partitions. `--dry-run` is the default posture. `--candidates` lists the buckets as `show` does and takes no other option. An omitted `--to` is accepted only when `--from` is this checkout's own legacy candidate and it is neither excluded nor unproven; otherwise the move is refused with `REKEY_REFUSED`. Exit codes: 0 clean plan or applied move, 1 refused (`REKEY_REFUSED`; `PROJECT_IDENTITY_UNRESOLVED` when no canonical identity resolves; `DB_PATH_NOT_FOUND` when `--db-path` names a store that is not present, and nothing is created), 2 bad input, 3 operational failure (nothing moved). When the default store does not exist yet, the command answers `store_absent: true` and creates nothing; a `--from` bucket with no rows answers `from_bucket_empty: true`. The envelope also carries `target_defaulted` and `legacy_verdict`. A merged memory link keeps the TARGET's relationship; `links_repointed` counts the links on file rows merged into an existing target row, and `links_conflicted` counts relationship types dropped | `{"from": "...", "to": "...", "dry_run": true, "memories": N, "links_repointed": N, "links_conflicted": N, "vectors_moved": N, "from_bucket_empty": false, "target_defaulted": true, "legacy_verdict": "verified", ...}` |
 
-On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row: the memory's file links are re-pointed to a `(path, new project)` file row created on demand, and its vector is re-stored under the new project. The old file row is left in place, so `file_relations` recorded against it stay there and are invisible from the new project, and the old project still counts that row in its file total. A `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
+WHEN A PROJECT RETURNS NO MEMORIES, run `project-id show` before concluding
+anything. It reports the identity this session resolved, how it was decided,
+and every populated bucket; the rows it offers a command for carry a literal,
+runnable rekey command that names its target — interpreter-prefixed
+(`python3 "<skill>/scripts/cli.py" project-id rekey --from=<id> --to=<canonical> --db-path=<store>`),
+because there is no `pact-memory` executable on PATH. Run that command with
+`--apply` ONLY with the user's explicit approval, and NEVER for an excluded
+bucket or for another repository's canonical id: a rekey merges rows into the
+target and cannot be undone. The dry run, the default, changes nothing. A bucket can hold
+thousands of records that this session's read scope does not include — an
+identity it cannot derive, or a legacy bucket left `excluded` or `unproven` —
+and an empty result never means those records do not exist. A full id still
+resolves by id, so `get <id>` is a way to check one record when you know it.
+
+A WIDENED READ IS NOT A CLAIM OF OWNERSHIP. An `included_unverified` bucket is
+read because a recorded session from this repository wrote into it, not because
+its file rows place it here, so a result can contain rows from another checkout
+that shares the folder name, including one that used this exact folder before
+this repository was moved into it. Treat it as a discovery to review, not as proof
+that every row belongs here.
+
+`legacy_scope` carries the same keys in every state: `candidate`,
+`memory_count`, `file_paths`, `rekey`, `included`, `verified`,
+`included_unverified`, `excluded`, `unproven`, `session_evidence`, `ambiguous`,
+`canonical_count`, `detail`, `case_variant`, `case_variant_rekey`,
+`suppressed`, `suppressed_candidate` and `degraded`. It is `null` only when no
+identity resolves or the id is not canonical. When `candidate` is set, exactly
+one of `included`, `excluded` and `unproven` is true:
+
+- `included`: the bucket is read. `verified` means an absolute file row places
+  it in this repository. `included_unverified` means no file row places it but
+  a recorded session from this repository wrote into it (`session_evidence` is
+  `true`). A recorded session counts only when it ran in this repository or
+  one of its linked worktrees, and `<git-common-dir>/description` is a regular
+  file whose ctime is earlier than the session's start. A session folder that
+  was cleaned up counts the same way through the line recorded for it when it
+  was removed.
+- `excluded`: its absolute file rows place it in another repository, and it is
+  not read.
+- `unproven`: no file row places it and no recorded session from this
+  repository wrote into it (`session_evidence` is `false`). It is not read, and
+  its `rekey` command is printed once per process. A repository that was
+  moved, copied, restored or cloned again, a repository with no `description`
+  file, and a folder that is not a repository all read as `unproven` too. A
+  session folder that an earlier version of the plugin removed left no line,
+  so a project whose writing sessions were all removed that way reads as
+  `unproven` until its rows are moved with that rekey command and `--apply`,
+  which needs the user's explicit approval.
+
+`suppressed` is set for a submodule checkout, as `{source:
+submodule_admin_dir, reason: repository_chosen_name, override_path: null,
+memory_count: N}`. The reason `repository_chosen_name` appears only here, never
+in `decline_reason`. `degraded` is `no schema` or `store_unreadable` when the
+store could not be checked, else `null`.
+
+### Choosing a Project Identity
+
+Two operator surfaces answer, and they are deliberately ordered:
+
+- `<git-common-dir>/pact-project-id` — a REPOSITORY-scoped pin. Only the user
+  writes it: it decides which bucket every checkout of the repository reads
+  and writes, so an agent that meets a remedy naming this file asks the user
+  for the id instead of writing it. It follows the
+  repository that won resolution (the identity root), not the process's
+  working directory. Its first non-blank, non-`#` line is the id, and only a
+  canonical `host/owner/repo` id is accepted: a folder-name value is reported
+  as `override_ignored` with reason `not_canonical`, and resolution continues
+  without it. To move a copied store's folder-name bucket, use
+  `project-id rekey --from=<old> --to=<canonical>`. It must be a regular file: a FIFO or a symlink in that position is refused, and an
+  unusable file is reported as `override_ignored` and resolution continues
+  without it. The file is never read, so nothing is reported, when the
+  repository has no working tree, when the checkout's `.git` names a linked
+  worktree's admin directory that does not link back to it, when the checkout
+  the session is in is the user's home directory (a linked worktree
+  included), or when no git directory is found (a broken `.git` marker or a declaration that cannot be
+  resolved). When git cannot see that home checkout from the working
+  directory, the user-scope `project_id` below binds there if it is set. A
+  session in a checkout outside the home directory reads its pin even when
+  the repository's main checkout is the home directory.
+- `config.json` → `"project_id"` in the user memory directory, the directory
+  that holds the default `memory.db` named under Storage — a USER-scoped
+  setting, read there whatever store a command names: `--db-path` does not
+  move it. It
+  answers ONLY when no declaration was present and no repository was found,
+  from the working directory or by walking up to its project marker (a home
+  directory the walk reaches is not asked, as above), so a repository pin
+  outranks it wherever one is read: when the session's checkout is the home
+  directory no pin is read, and when git cannot see that home from the
+  working directory this setting binds there. Use it for a non-repository working
+  directory that should share one identity. Only the user sets it: it changes
+  the identity of every session it answers for, so an agent asks the user
+  instead of writing it.
+
+A project id keeps its remote's percent-encoding, so it can contain an
+uppercase `%XX`, for example `dev.azure.com/fabrikam/My%20Project/_git/repo`.
+Azure DevOps Services spells one repository several ways (https, ssh, and the
+older `visualstudio.com` hosts), and all of them resolve to that one
+`dev.azure.com/<org>/<project>/_git/<repo>` id.
+
+One repository can still produce two ids, and two repositories can share one.
+The host is lowercased but the path keeps its case, so
+`https://GitHub.com/Owner/Repo` and `https://github.com/owner/repo` are two ids
+even on a host that ignores path case: `project-id show` lists the other
+spelling as an ordinary bucket with no command, and only an explicit
+`project-id rekey --from=<id> --to=<id>` joins them. A relative and an absolute
+scp path are one id (`git@host:srv/repo` and `git@host:/srv/repo` both give
+`host/srv/repo`), so two different repositories at `~/srv/repo` and
+`/srv/repo` on one plain ssh server share a bucket. The login is dropped too,
+so `alice@host:repo` and `bob@host:repo` are one id even when each names a
+repository in its own home directory.
+
+On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row: the memory's file links are re-pointed to a `(path, new project)` file row created on demand, and its vector is re-stored under the new project. A file link whose recorded path cannot be re-tracked stays on the old project, is counted in the `update` envelope's `last_cascade_skipped`, and does not stop the rest of the re-key. The old file row is left in place, so `file_relations` recorded against it stay there and are invisible from the new project, and the old project still counts that row in its file total. A `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
+
+### A Short Search Is Not an Empty Project
+
+`search` returns **at most** `--limit`, not exactly it. Every hit is confirmed
+against its stored project before it is returned, and the confirmation widens
+the fetch only up to a fixed budget of 200 candidates. On a store where many
+vector rows belong to another project — a rekey that could not move its
+vectors, or a copied store — a search can return fewer results than you asked
+for, including none, while matching memories exist.
+
+So a short or empty search is **not evidence** that this project has no
+memories. Check the read scope and any excluded bucket with the
+`project-id show` verb, then retry with a narrower query.
 
 ### Exit Codes
 
@@ -324,7 +461,9 @@ On `update`, an omitted `project_id` leaves the row's project unchanged and an e
 | 0 | Success |
 | 1 | User error (bad args, invalid JSON, not found) |
 | 2 | Validation error (unknown field name, unknown sub-object key; unusable supplied `project_id` or `session_id` on `save` or `update`) — the error envelope includes an `allowed_fields` list |
-| 3 | `project-file` only: this session's project memory file is unavailable; the printed line names why |
+| 3 | `project-file`: this session's project memory file is unavailable; the printed line names why. `project-id rekey`: an operational failure; nothing was moved |
+
+`project-id rekey` exits 1 when it refuses — `--to` is omitted and no canonical identity resolves, or `--to` is omitted and `--from` is not this checkout's own legacy candidate that is neither excluded nor unproven, or `--db-path` names a store that is not present — and 2 for bad input.
 
 ### Update Semantics
 
@@ -444,6 +583,8 @@ Memories are stored in `~/.claude/pact-memory/memory.db` (matches a default-root
 - WAL mode for crash safety
 - Vector extensions for semantic search
 - Graph tables for file relationships
+
+A read verb never initializes an existing store. In a derived location the first memory operation creates the store directory and schema; a `--db-path` you supply must already exist.
 
 ## Command Line Usage
 

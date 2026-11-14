@@ -238,13 +238,45 @@ def _memory_api():
     return memory_api
 
 
+# One detection per process per input. Keyed by the location, the declared
+# directory, the session id that selects the session record (written once at
+# session start), and the detector itself, so a different input or detector
+# is a fresh answer.
+_PROJECT_NAMES: Dict[tuple, Optional[str]] = {}
+
+
+def _project_name() -> Optional[str]:
+    """This location's pre-change project name, detected once per input."""
+    detector = _memory_api().PACTMemory._detect_project_basename
+    try:
+        cwd: Optional[str] = os.getcwd()
+    except OSError:
+        cwd = None
+    key = (
+        cwd,
+        os.environ.get("CLAUDE_PROJECT_DIR"),
+        os.environ.get("CLAUDE_CODE_SESSION_ID"),
+        detector,
+    )
+    if key not in _PROJECT_NAMES:
+        _PROJECT_NAMES[key] = detector()
+    return _PROJECT_NAMES[key]
+
+
 def store_path(backlog_dir: Optional[Path] = None) -> Path:
     """Absolute path of this project's backlog file.
 
     Raises BacklogWriteError when the project id will not resolve. A default
     slug would write a backlog nobody can find again.
     """
-    project = _memory_api().PACTMemory._detect_project_id()
+    # THE PRE-CHANGE FOLDER NAME, DELIBERATELY, NOT THE PROJECT ID. This value
+    # is a path component, and the canonical id contains `/`: using it here
+    # would nest the file as `<dir>/host/owner/repo.json` and orphan every
+    # existing `<basename>.json` with no recovery path. It is the pre-change
+    # value, including where the pre-change resolver refused, so this writer
+    # refuses in exactly the states it always did. Do not "fix" this to the
+    # canonical detector.
+    project = _project_name()
     if not project:
         raise BacklogWriteError(
             "project id did not resolve, so there is no name to write under. "
@@ -1449,7 +1481,7 @@ def _gh_repo_view_slug(project_path: Optional[str] = None) -> Optional[Tuple[str
 def _is_github_url(url: Any) -> bool:
     """`url` is an http(s) URL on github.com itself (not a subdomain, not GHE).
 
-    A backslash or an `@` is refused outright, as for remotes (S-F6): GitHub's
+    A backslash or an `@` is refused outright, as for remotes: GitHub's
     web URL never carries userinfo, and `urlsplit` reads
     `https://evil.com@github.com/...` as github.com.
     """

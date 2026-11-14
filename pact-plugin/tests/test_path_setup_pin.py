@@ -21,8 +21,8 @@ Matched mutation forms: sys.path.insert/append/extend calls, slice-assignment
 insert were added after review findings that they dodged every arm while
 being plausible honest-mistake forms, not adversarial constructions. `sys`
 means any name the file binds to the sys module (`import sys as X`), and
-`sys.path` also any name bound by `from sys import path [as P]`, in any
-scope of the file.
+`sys.path` also any name bound by `from sys import path [as P]` or assigned
+sys.path (`entries = sys.path`), in any scope of the file.
 ACCEPTED UNDER-BLOCK (adversarial-only, documented boundary): wholesale
 rebinding (`sys.path = [...]`), `getattr(sys.path, ...)` with a verb string, and
 slice-assign/augmented forms with exotic spacing inside codegen strings —
@@ -74,6 +74,11 @@ _MODULE_ALLOWLIST = {
     "tests/test_task_claim_gate.py",
     "tests/test_task_utils.py",
     "tests/test_working_memory_concurrency.py",
+    # A FRESH-SUBPROCESS WORKER: it runs WITHOUT pytest's conftest (the arm
+    # spawns it once per verb, so `memory_init._initialized` starts clean), so
+    # it must locate the plugin root and put `scripts.*` on the path itself at
+    # module level. This entry reaches `_KEEP_SET` through the union below.
+    "tests/fixtures/zero_create_worker.py",
 }
 
 _KEEP_SET = _MODULE_ALLOWLIST | {
@@ -97,6 +102,8 @@ _KEEP_SET = _MODULE_ALLOWLIST | {
     "tests/test_pin_marker_writer_adversarial.py",
     "tests/test_pinned_section_parser_migration.py",
     "tests/test_project_dir_resolution.py",
+    # embeds a sys.path line in a child-script codegen fixture
+    "tests/test_project_identity_union.py",
     "tests/test_sync_result_contract.py",
     # classifier input data: path-mutation sources it parses, never runs
     "tests/test_fast_suite_selection.py",
@@ -182,6 +189,20 @@ def _sys_names(tree):
                 not node.level):
             paths.update(a.asname or a.name for a in node.names
                          if a.name == "path")
+    # A name assigned sys.path (`entries = sys.path`) holds the same list,
+    # so a mutation through it is a path mutation; followed to a fixed point.
+    changed = True
+    while changed:
+        changed = False
+        names = (frozenset(modules), frozenset(paths))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
+                    and _is_sys_path(node.value, names):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id not in paths:
+                        paths.add(target.id)
+                        changed = True
     return frozenset(modules), frozenset(paths)
 
 
@@ -254,18 +275,54 @@ def _module_level_mutations(path):
     return lines
 
 
+def _reads_a_docstring(tree):
+    """Whether `tree` can read a docstring as data: a `__doc__` name or
+    attribute, a `"__doc__"` string (`getattr`, `vars`), or `getdoc`. A
+    docstring is exempt only where nothing reads one, since a read turns it
+    into a value the code can use."""
+    return any(
+        (isinstance(node, ast.Name) and node.id in ("__doc__", "getdoc"))
+        or (isinstance(node, ast.Attribute) and node.attr in ("__doc__", "getdoc"))
+        or (isinstance(node, ast.Constant) and node.value == "__doc__")
+        for node in ast.walk(tree)
+    )
+
+
+def _docstrings(tree):
+    """The ids of every docstring node: the leading string of a module,
+    class or function body, or none in a module that reads a docstring
+    (`_reads_a_docstring`). A docstring documents a path mutation; it never
+    runs one, so it is not codegen."""
+    found = set()
+    if _reads_a_docstring(tree):
+        return found
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = node.body
+            if (
+                body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                found.add(id(body[0].value))
+    return found
+
+
 def _any_form_present(path):
     """True if the file contains a path mutation at any level OR embeds a
     mutation token in a string constant (codegen). Comments are
-    AST-invisible and never match."""
+    AST-invisible and never match, and docstrings are skipped: they
+    describe a mutation, they do not run one."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     names = _sys_names(tree)
+    docstrings = _docstrings(tree)
     for node in ast.walk(tree):
         if _is_path_mutation(node, names):
             return True
         if (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
+            and id(node) not in docstrings
             and any(tok in node.value for tok in _STR_TOKENS)
         ):
             return True
@@ -341,6 +398,53 @@ def test_the_data_only_check_sees_a_function_level_insert():
     tree = ast.parse("import sys\ndef f():\n    sys.path" + ".insert(0, 'x')\n")
     assert [node.lineno for node in ast.walk(tree)
             if _is_path_mutation(node)] == [3]
+
+
+def test_a_name_holding_sys_path_is_followed(tmp_path):
+    """Control for the alias leg of `_sys_names`: a mutation through a name
+    assigned sys.path (directly or through another such name) is a path
+    mutation; a mutation of a copy of the list is not."""
+    module = tmp_path / "aliased.py"
+    module.write_text(
+        "import sys\n"
+        "entries = sys.path\n"
+        "entries.insert(0, 'x')\n"
+        "again = entries\n"
+        "again += ['y']\n"
+        "snapshot = list(sys.path)\n"
+        "snapshot.insert(0, 'x')\n",
+        encoding="utf-8",
+    )
+    assert _module_level_mutations(module) == [3, 5]
+
+
+def test_a_docstring_naming_a_mutation_is_not_codegen(tmp_path):
+    """A docstring that names a path mutation describes it and never runs
+    it, so it is not a form; a docstring its module reads as data is, and so
+    are a string assigned for a child process to run and a real mutation."""
+    needle = "sys.path" + ".insert(0, 'x')"
+    documented = tmp_path / "documented.py"
+    documented.write_text(
+        f'"""Never {needle} here."""\n\n'
+        f'def helper():\n    """Do not {needle}."""\n    return None\n',
+        encoding="utf-8",
+    )
+    codegen = tmp_path / "codegen.py"
+    codegen.write_text(f'CHILD = "import sys; {needle}"\n', encoding="utf-8")
+    real = tmp_path / "real.py"
+    real.write_text(f"import sys\n{needle}\n", encoding="utf-8")
+    read_doc = tmp_path / "read_doc.py"
+    read_doc.write_text(
+        f'def helper():\n    """import sys; {needle}"""\n\n\nCHILD = helper.__doc__\n',
+        encoding="utf-8",
+    )
+    assert not _any_form_present(documented)
+    assert _any_form_present(read_doc)
+    for read in ("f.__doc__", "getattr(f, '__doc__')", "inspect.getdoc(f)", "vars(f)['__doc__']", "__doc__"):
+        assert _reads_a_docstring(ast.parse(read)), read
+    assert not _reads_a_docstring(ast.parse("f.__name__"))
+    assert _any_form_present(codegen)
+    assert _any_form_present(real)
 
 
 def test_negative_fixture_flags_every_matcher_leg():

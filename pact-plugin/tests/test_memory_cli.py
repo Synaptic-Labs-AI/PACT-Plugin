@@ -33,7 +33,7 @@ import pytest
 from helpers import create_test_schema, make_cli_memory_dict
 
 from scripts.cli import build_parser, cmd_save, cmd_search, cmd_list, cmd_get, cmd_status, cmd_setup, cmd_update, cmd_delete, main, _COMMANDS, _refuse_live_db_under_pytest
-from scripts.memory_api import PACTMemory
+from scripts.memory_api import PACTMemory, _DetectedIdentity
 
 
 # ---------------------------------------------------------------------------
@@ -295,8 +295,29 @@ class TestCliArgParsing:
         assert exc_info.value.code == 2
 
     def test_dispatch_table_covers_all_subcommands(self):
-        expected = {"save", "search", "list", "get", "status", "setup", "update", "delete", "sync", "project-file"}
+        expected = {"save", "search", "list", "get", "status", "setup", "update", "delete", "sync", "project-file", "project-id"}
         assert set(_COMMANDS.keys()) == expected
+
+    def test_the_project_id_rows_are_documented_and_dispatched(self):
+        """The SKILL.md rows and the CLI dispatch table agree.
+
+        The rows tell an agent to run `project-id show` when a project looks
+        empty, so a row for a verb the dispatcher does not accept is an
+        agent-facing dead end. Anchoring on `_COMMANDS` keeps the doc and the
+        parser from drifting apart in either direction.
+        """
+        skill = Path(__file__).parent.parent / "skills" / "pact-memory" / "SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+
+        assert "project-id" in _COMMANDS, (
+            "SKILL.md documents a verb the dispatch table does not carry"
+        )
+        for subcommand in ("show", "rekey"):
+            assert f"project-id {subcommand}" in text, (
+                f"SKILL.md does not document `project-id {subcommand}`"
+            )
+        for flag in ("--from", "--candidates", "--apply", "--dry-run"):
+            assert flag in text, f"SKILL.md's project-id rows omit {flag}"
 
 
 # ---------------------------------------------------------------------------
@@ -2762,14 +2783,58 @@ class TestSearchWindowContainment:
     margins here (10 verbatim fillers vs a zero-overlap target for the
     below-5 arm; an 11-record store against a 20 window for the visible arm)
     are chosen so rank wobble inside those margins cannot flip either arm.
+
+    BOTH ARMS HOLD ONLY ON THE VECTOR PATH, so that path is a checked
+    precondition rather than an assumption. When the CLI child cannot embed
+    the query, `search` silently falls back to keyword text search, which
+    never returns the zero-overlap target: the default-window arm would then
+    fail as a missing target, which reads as a search defect. The seed must
+    therefore store a vector for every record, and the CLI child's own cold
+    start must produce a usable embedding service. Either failing fails the arm
+    with that cause named.
     """
 
     FILLER_QUERY = "orchestration cadence telemetry"
     FILLERS = 10
+    VECTOR_PATH_MARKER = "PACT_VECTOR_PATH="
+
+    # Runs IN THE CLI CHILD and WRAPS the real CLI entry point without warming
+    # anything, so the search's own first embedding is the cold start a user's
+    # fresh process makes. After the CLI exits it reports, from the same
+    # process, whether that cold start produced a usable embedding service
+    # (the per-process singleton the CLI's search created) with extensions
+    # enabled. `prewarmed` means something loaded the service before the CLI
+    # ran, which would make the arm measure the wrapper instead of the CLI.
+    _CHILD_WRAPPER = (
+        "import runpy, sys\n"
+        "from pathlib import Path\n"
+        "cli = sys.argv[1]\n"
+        "sys.path.insert(0, str(Path(cli).resolve().parent.parent))\n"
+        "from scripts import database, embeddings\n"
+        "cold = embeddings._service is None\n"
+        "sys.argv = sys.argv[1:]\n"
+        "code = 0\n"
+        "try:\n"
+        "    runpy.run_path(cli, run_name='__main__')\n"
+        "except SystemExit as exc:\n"
+        "    code = exc.code\n"
+        "service = embeddings._service\n"
+        "if not cold:\n"
+        "    state = 'prewarmed'\n"
+        "elif (service is not None and service.is_available()\n"
+        "      and database.SQLITE_EXTENSIONS_ENABLED):\n"
+        "    state = 'ready'\n"
+        "else:\n"
+        "    state = 'unavailable'\n"
+        "sys.stderr.write('PACT_VECTOR_PATH=' + state + '\\n')\n"
+        "sys.stderr.flush()\n"
+        "raise SystemExit(code)\n"
+    )
 
     def _seed(self, db_path):
         """Seed in-process: one model load for all saves, not one per save."""
         memory = PACTMemory(db_path=db_path)
+        statuses = []
         for i in range(self.FILLERS):
             memory.save(
                 {
@@ -2778,21 +2843,42 @@ class TestSearchWindowContainment:
                 },
                 sync_to_claude=False,
             )
-        return memory.save(
+            statuses.append(memory.last_embedding_status)
+        target_id = memory.save(
             {
                 "context": "zebra quorum calibration note",
                 "goal": "distinctive target marker",
             },
             sync_to_claude=False,
         )
+        statuses.append(memory.last_embedding_status)
+        # PRECONDITION: `last_embedding_status` is None when the record's
+        # vector was stored, and names the degradation otherwise.
+        assert statuses == [None] * (self.FILLERS + 1), (
+            "vector search unavailable for the seed: a record was saved "
+            f"without a vector (embedding statuses {statuses!r}), so the "
+            "ranked window this arm measures does not exist"
+        )
+        return target_id
 
     def _search(self, cli_script_path, db_path, *extra):
         result = subprocess.run(
-            [sys.executable, cli_script_path, "search", self.FILLER_QUERY,
-             "--db-path", str(db_path), *extra],
+            [sys.executable, "-c", self._CHILD_WRAPPER, cli_script_path,
+             "search", self.FILLER_QUERY, "--db-path", str(db_path), *extra],
             capture_output=True, text=True, timeout=300,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
+        markers = [
+            line for line in result.stderr.splitlines()
+            if line.startswith(self.VECTOR_PATH_MARKER)
+        ]
+        assert markers == [self.VECTOR_PATH_MARKER + "ready"], (
+            "the CLI child's own cold start did not give it a vector path "
+            "(`unavailable`: its search fell back to keyword text search; "
+            "`prewarmed`: something loaded the service first), so the window "
+            "cannot be measured: "
+            f"markers {markers!r}, stderr {result.stderr!r}"
+        )
         return json.loads(result.stdout)["result"]
 
     def test_target_below_window_invisible_at_5_visible_at_default(
@@ -4277,7 +4363,7 @@ class TestCliSyncSubprocess:
         expected_id = self._project_id(cli_script_path, project, cli_db)
         assert expected_id, "status reported no project id; the agreement pin below is vacuous"
         assert result == {"sync_status": "empty", "projected": 0, "memory_ids": [],
-                          "project_id": expected_id}
+                          "project_id": expected_id, "read_scope": [expected_id]}
         assert (project / "CLAUDE.md").read_bytes() == before
 
     def test_sync_projects_the_records_under_their_own_dates(
@@ -4417,8 +4503,10 @@ class TestTheSyncEnvelopeFoldsAnUnusableProjectId:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (value, "cwd")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(value, "cwd", None, None, None)
+            ),
         )
 
     def test_an_unusable_detected_id_is_null_and_matches_status(
@@ -4487,8 +4575,10 @@ class TestTheSyncAndStatusEnvelopesCarryDisplayUnsafeIdsRaw:
         detected = f"proj{char}X"
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (detected, "cwd")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(detected, "cwd", None, None, None)
+            ),
         )
 
         with patch("scripts.memory_api._ensure_ready"), patch(
@@ -4553,6 +4643,13 @@ class TestTheDiagnosticEnvelopesSplitPayloadFromMessage:
         monkeypatch.setattr(
             "scripts.memory_api.main_repo_root",
             lambda *args, **kwargs: Path("/repo") / bidi,
+        )
+        # The patched root is NOT a repository here, so the resolver takes its
+        # designed basename branch and the raw spelling flows through. A
+        # DECLINE path yields None instead (no folder pseudo-id).
+        monkeypatch.setattr(
+            "scripts.memory_api.main_repo_common_dir",
+            lambda *args, **kwargs: None,
         )
         with patch("scripts.memory_api._ensure_ready"), patch(
             "scripts.memory_api.sync_to_claude_md"
@@ -4632,8 +4729,10 @@ class TestTheDiagnosticEnvelopesSplitPayloadFromMessage:
         )
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(None, "unresolved", None, None, None)
+            ),
         )
         with pytest.raises(SystemExit) as exit_info:
             main([
@@ -5129,8 +5228,10 @@ class TestThePrefixCallSiteIsScopedAndRefusesWithoutIdentity:
         _seed_scoped_rows(cli_db, [(_ROW_A1, "proj-A")])
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(None, "unresolved", None, None, None)
+            ),
         )
         memory = PACTMemory(db_path=cli_db)
         assert memory.project_id is None, "precondition: identity is unresolved"
@@ -5220,8 +5321,10 @@ class TestTheUnresolvedPrefixRefusalHasItsOwnEnvelope:
         _seed_scoped_rows(cli_db, [(_ROW_A1, "proj-A")])
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(None, "unresolved", None, None, None)
+            ),
         )
         capfd.readouterr()
         with patch("scripts.memory_api._ensure_ready"), \

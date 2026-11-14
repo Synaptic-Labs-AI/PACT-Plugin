@@ -26,6 +26,7 @@ import shutil
 import stat
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 # Add hooks directory to path for shared package imports
@@ -37,6 +38,7 @@ from shared.error_output import hook_error_json
 from shared import check_pr_state
 import shared.pact_context as pact_context
 from shared.pact_context import (
+    PRUNE_LEDGER_NAME,
     _UNSAFE_SLUG_CHARS_RE,
     get_project_dir,
     get_session_id,
@@ -567,6 +569,9 @@ def _reap_slug_dir(
                     if _journal_carries_unharvested_handoffs(
                         str(entry)
                     ) is False:
+                        # The evidence line goes BEFORE the removal, and it
+                        # never raises, so it cannot keep a folder alive.
+                        _record_pruned_session(slug_dir, entry)
                         shutil.rmtree(entry, ignore_errors=True)
             except Exception:
                 # Wider than OSError, and the width is load-bearing HERE
@@ -581,6 +586,96 @@ def _reap_slug_dir(
                 continue
     except OSError:
         pass
+
+
+def _aware_iso_timestamp(value: object) -> bool:
+    """Whether `value` is an ISO-8601 timestamp that carries its time zone.
+
+    The prune ledger's `started_at` is compared with a file's ctime, so a
+    naive timestamp (no zone) would have to be guessed at, and is refused.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
+
+
+def _pruned_session_line(entry: Path) -> str | None:
+    """The prune-ledger line for the session folder `entry`, or None.
+
+    `{session_id, project_dir, started_at}` copied from the folder's own
+    `pact-session-context.json`. None when the context is absent, a symlink or
+    malformed, when its sanitized session id is not the folder's name, when
+    `started_at` is not a zone-aware ISO-8601 timestamp, or when `project_dir`
+    no longer exists. Reads only; never raises.
+    """
+    try:
+        context_file = entry / "pact-session-context.json"
+        if not stat.S_ISREG(os.lstat(context_file).st_mode):
+            return None
+        context = json.loads(context_file.read_text(encoding="utf-8"))
+        if not isinstance(context, dict):
+            return None
+        session_id = context.get("session_id")
+        project_dir = context.get("project_dir")
+        started_at = context.get("started_at")
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        if not isinstance(project_dir, str) or not project_dir:
+            return None
+        if _UNSAFE_SLUG_CHARS_RE.sub("_", session_id) != entry.name:
+            return None
+        if not _aware_iso_timestamp(started_at):
+            return None
+        os.stat(project_dir)
+        return json.dumps({
+            "session_id": session_id,
+            "project_dir": project_dir,
+            "started_at": started_at,
+        }) + "\n"
+    except Exception:
+        return None
+
+
+def _append_ledger_line(slug_dir: Path, line: str) -> None:
+    """Append `line` to the slug's prune ledger. Never raises.
+
+    Refuses a ledger that is a symlink or not a regular file. O_NOFOLLOW
+    refuses a symlink planted after the lstat, and O_NONBLOCK keeps a planted
+    FIFO from hanging the hook on open.
+    """
+    try:
+        ledger = slug_dir / PRUNE_LEDGER_NAME
+        try:
+            if not stat.S_ISREG(os.lstat(ledger).st_mode):
+                return
+        except FileNotFoundError:
+            pass
+        fd = os.open(
+            ledger,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600,
+        )
+        try:
+            if stat.S_ISREG(os.fstat(fd).st_mode):
+                os.write(fd, line.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except Exception:
+        return
+
+
+def _record_pruned_session(slug_dir: Path, entry: Path) -> None:
+    """Record `entry`'s evidence in the slug's prune ledger before it is reaped.
+
+    A failure here must never keep a folder alive or raise out of the hook;
+    both halves are silent on every error.
+    """
+    line = _pruned_session_line(entry)
+    if line is not None:
+        _append_ledger_line(slug_dir, line)
 
 
 def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:

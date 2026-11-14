@@ -1045,6 +1045,7 @@ EXPECTED_EXCLUSIONS = (
       'hooks/shared/stale_session.py',
       'hooks/staleness.py',
       'skills/pact-memory/scripts/__init__.py',
+      'skills/pact-memory/scripts/cli.py',
       'skills/pact-memory/scripts/config.py',
       'skills/pact-memory/scripts/database.py',
       'skills/pact-memory/scripts/embeddings.py',

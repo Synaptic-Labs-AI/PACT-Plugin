@@ -23,6 +23,7 @@ method returned None.
 """
 
 import ast
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -46,6 +47,38 @@ def clean_env_no_claude_project_dir():
     env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
     with patch.dict(os.environ, env, clear=True):
         yield
+
+
+def _rev_parse_mock(*, common, toplevel=None, git_dir=None, default_rc=1):
+    """A `subprocess.run` side_effect answering each `rev-parse` subcommand.
+
+    `main_repo_root` issues `--show-toplevel` and `--git-dir` IN ADDITION to
+    `--git-common-dir`, so a blanket `return_value` mock would feed the
+    common-dir answer to all three and describe a repository that cannot
+    exist. Any other git call (the origin `config` read) answers the default: exit 1,
+    which is "no key set" — a repository with no origin, NOT an unreadable
+    one. A higher default would model a broken repository and legitimately
+    DECLINE.
+    """
+
+    answers = {
+        "--git-common-dir": common,
+        "--show-toplevel": toplevel,
+        "--git-dir": git_dir,
+    }
+
+    def _run(command, **_kwargs):
+        result = MagicMock()
+        for option, stdout in answers.items():
+            if option in command and stdout is not None:
+                result.returncode = 0
+                result.stdout = stdout
+                return result
+        result.returncode = default_rc
+        result.stdout = ""
+        return result
+
+    return _run
 
 
 def _isolate_walkup_to(monkeypatch, tmp_path):
@@ -164,6 +197,37 @@ def _extract_method_body(source_path, method_name):
     return segment.strip() if segment is not None else None
 
 
+def _function_code(source_path, function_name):
+    """One function's CODE, without its docstring or comments.
+
+    `_extract_method_body` returns the source segment, docstring and comments
+    included, so a marker the docstring happens to mention satisfies a
+    presence assertion even when the code no longer carries it. This returns
+    `ast.unparse` of the function with its leading docstring removed: only
+    statements the interpreter runs can satisfy an assertion on it.
+    """
+    tree = ast.parse(source_path.read_text(encoding="utf-8"))
+    wanted = function_name.split(".")
+    matches = [
+        node
+        for node, qualified in _walk_qualified_functions(tree)
+        if qualified[-len(wanted):] == wanted
+    ]
+    assert len(matches) == 1, (
+        f"{function_name!r}: expected one definition, found {len(matches)}"
+    )
+    node = matches[0]
+    body = node.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    return ast.unparse(ast.Module(body=body, type_ignores=[]))
+
+
 class TestMethodBodyExtractor:
     """The instrument's own controls.
 
@@ -193,10 +257,10 @@ class TestMethodBodyExtractor:
     def test_x1_qualified_name_addresses_a_class_method(self):
         """A dotted qualified name reaches a method; a bare one still works."""
         dotted = _extract_method_body(
-            _MEMORY_API_PATH, "PACTMemory._detect_project_id_with_source"
+            _MEMORY_API_PATH, "PACTMemory._detect_project_identity_with_legacy"
         )
         bare = _extract_method_body(
-            _MEMORY_API_PATH, "_detect_project_id_with_source"
+            _MEMORY_API_PATH, "_detect_project_identity_with_legacy"
         )
         assert dotted is not None and bare is not None
         assert dotted == bare
@@ -265,10 +329,11 @@ class TestSourceEquivalence:
     def test_source_equivalence(self):
         """Pin the real detector's strategy markers and ordering directly.
 
-        Reads _detect_project_id_with_source, NOT _detect_project_id: the
-        latter is a one-line delegation, so the strategy markers and their
-        order live in the former. The delegation itself is pinned separately
-        by test_detect_project_id_still_delegates_with_its_signature.
+        Reads _detect_project_identity_with_legacy, NOT
+        _detect_project_id_with_source: the latter is now a one-line
+        delegation, so the strategy markers and their order live in the
+        former. The delegation itself is pinned separately by
+        test_detect_project_id_still_delegates_with_its_signature.
 
         Verifies key implementation markers are present AND ordered correctly:
         Strategy 1 (env var) before Strategy 1.5 (session record) before
@@ -276,39 +341,67 @@ class TestSourceEquivalence:
         strategy reordering that substring checks alone miss. The 1.5 position
         is load-bearing: BELOW env and ABOVE git, because in a multi-repo
         workspace the cwd's git root can be the wrong scope.
+
+        The repository override is NOT a rung and has no position in this
+        order: it follows the identity root, so each rung's root reads its own
+        `<git-common-dir>/pact-project-id` inside `detect_id_for_root`. The
+        assertions below pin that the resolver does not pre-read the cwd
+        repository's override.
         """
         real_source = _extract_method_body(
-            _MEMORY_API_PATH, "_detect_project_id_with_source"
+            _MEMORY_API_PATH, "_detect_project_identity_with_legacy"
         )
         assert real_source is not None, (
-            "Could not find _detect_project_id_with_source in memory_api.py"
+            "Could not find _detect_project_identity_with_legacy in "
+            "memory_api.py"
         )
 
         # Check key implementation lines are present
         assert 'os.environ.get("CLAUDE_PROJECT_DIR")' in real_source
         # The env and record strategies name a project from a declared directory
-        # through the shared _project_name_for_declared_dir helper; the git
-        # derivation markers that used to sit inline moved with it and are
-        # pinned on the helper by
-        # test_declared_dir_helper_carries_the_main_repo_rewrite.
-        assert "_project_name_for_declared_dir(project_dir," in real_source
+        # through the shared _declared_dir_identity helper; the git derivation
+        # markers that used to sit inline moved with it and are pinned on the
+        # helper by test_declared_dir_helper_carries_the_main_repo_rewrite.
+        assert "_declared_dir_identity(" in real_source
+        assert "project_dir, \"CLAUDE_PROJECT_DIR\"" in real_source
         # Strategy 1.5: the session-record rung between env and git.
         assert "get_project_dir_from_session_record()" in real_source
-        assert "_project_name_for_declared_dir(record_dir," in real_source
-        # Strategy 2 reaches git through the module-level main_repo_root()
-        # helper rather than spawning its own subprocess. The subprocess
-        # markers this assertion used to carry moved with it and are pinned on
-        # the helper by test_main_repo_root_carries_the_git_derivation.
-        assert "repo_root = main_repo_root()" in real_source
-        # Strategy 3 now walks up from cwd to find the nearest project marker.
-        assert "_find_project_root(Path.cwd())" in real_source
+        assert 'record_dir, "session record"' in real_source
+        # The repository override is NOT a rung of its own any more: it
+        # follows the identity root, so `detect_id_for_root` reads it at the
+        # root each rung resolved. The resolver must not pre-read the cwd
+        # repo's override, because that is what let a cwd pin retarget a
+        # declared session.
+        assert "read_override(cwd_common_dir)" not in real_source
+        # Every root rung derives its id through the one root helper, which
+        # is the only caller of `detect_id_for_root` in the resolver. Both
+        # checks read CODE (docstring and comments dropped), so a sentence
+        # naming either call cannot satisfy them once the call is gone.
+        assert "_identity_at_root(" in _function_code(
+            _MEMORY_API_PATH, "PACTMemory._detect_project_identity_with_legacy"
+        )
+        assert "detect_id_for_root(" in _function_code(
+            _MEMORY_API_PATH, "PACTMemory._identity_at_root"
+        )
+        # Strategy 2 reaches git through the module-level common-dir helper
+        # rather than spawning its own subprocess. The subprocess markers this
+        # assertion used to carry moved with it and are pinned on the helper by
+        # test_main_repo_root_carries_the_git_derivation.
+        assert "repo_root = main_repo_root(common=cwd_common_dir)" in real_source
+        # Strategy 3 walks up to the nearest project marker. THE CALL TOKEN,
+        # NOT ITS ARGUMENT: the cwd is resolved once, guardedly, and passed in
+        # (`cwd_start`, or `setting_start` for the user-setting rung), so
+        # pinning the literal argument would redden a behaviour-equivalence
+        # arm on a signature or argument-name change.
+        assert "_find_project_root(" in real_source
 
         # Verify strategy ordering in the CODE (not docstring).
         # Use code-specific markers that won't appear in the docstring.
         pos_env = real_source.index('os.environ.get("CLAUDE_PROJECT_DIR")')
         pos_record = real_source.index("get_project_dir_from_session_record()")
-        pos_git = real_source.index("repo_root = main_repo_root()")
-        pos_cwd = real_source.index("_find_project_root(Path.cwd())")
+        pos_git = real_source.index("repo_root = main_repo_root(common=cwd_common_dir)")
+        pos_cwd = real_source.index("_find_project_root(")
+
 
         assert pos_env < pos_record, (
             f"Strategy ordering violation: env var (pos {pos_env}) should appear "
@@ -328,15 +421,19 @@ class TestSourceEquivalence:
         declared-directory strategies (env, session record) share.
 
         These markers moved out of _detect_project_id when Strategy 1's inline
-        derivation collapsed onto _project_name_for_declared_dir, so they are
-        pinned here rather than dropped — the same migration pattern as
+        derivation collapsed onto the declared-dir helper, so they are pinned
+        here rather than dropped — the same migration pattern as
         test_main_repo_root_carries_the_git_derivation.
+
+        The helper is `_declared_dir_identity`; the old
+        `_project_name_for_declared_dir` façade was removed in this batch, so
+        the markers are pinned on the helper that now carries them.
         """
-        helper_body = _extract_method_body(_MEMORY_API_PATH, "_project_name_for_declared_dir")
-        assert helper_body is not None, "_project_name_for_declared_dir must exist in memory_api.py"
-        assert "main_repo_root(declared_dir)" in helper_body
+        helper_body = _extract_method_body(_MEMORY_API_PATH, "_declared_dir_identity")
+        assert helper_body is not None, "_declared_dir_identity must exist in memory_api.py"
+        assert "main_repo_common_dir(declared_dir)" in helper_body
         assert "os.path.normcase" in helper_body
-        assert "declared_root or Path(declared_dir)" in helper_body
+        assert "declared_main_root or declared_root or Path(declared_dir)" in helper_body
         # The dead-path consult: when the declared path is gone, the helper
         # asks the worktree identity record (recorded_main_root) before
         # declining — presence pin only; the behavior is proven in
@@ -352,17 +449,26 @@ class TestSourceEquivalence:
         returns a bare ".git" at a repo root, and a caller joining a relative
         base against a path would get a cwd-relative result.
         """
-        helper_body = _extract_method_body(_MEMORY_API_PATH, "main_repo_root")
-        assert helper_body is not None, "main_repo_root must exist in memory_api.py"
+        helper_body = _extract_method_body(_MEMORY_API_PATH, "main_repo_common_dir")
+        assert helper_body is not None, "main_repo_common_dir must exist in memory_api.py"
         assert '"rev-parse", "--git-common-dir"' in helper_body
         assert "timeout=5" in helper_body
-        # ValueError joined the tuple with the #1653 path-byte fix: an
-        # undecodable git answer is "could not answer", not a crash.
+        # ValueError is in the tuple because an undecodable git answer is
+        # "could not answer", not a crash.
         assert (
             "(subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError)"
             in helper_body
         )
-        assert "if not common_dir.is_absolute():" in helper_body
+        assert "if not common.is_absolute():" in helper_body
+        # THE WRAPPER'S CODE, NOT ITS SOURCE TEXT. Its docstring explains why
+        # `common.parent` is NOT always the root, so a presence check on the
+        # source segment was satisfied by that sentence. The root is
+        # `--show-toplevel`, except in a linked worktree, where it is the
+        # main checkout: the common dir's parent.
+        root_code = _function_code(_MEMORY_API_PATH, "main_repo_root")
+        assert "main_repo_common_dir(start)" in root_code
+        assert "'--show-toplevel'" in root_code
+        assert "return common_path.parent" in root_code
 
     def test_main_repo_root_bases_a_relative_result_on_its_start_argument(self):
         """A relative git result resolves against `start`, not unconditionally
@@ -373,7 +479,7 @@ class TestSourceEquivalence:
         a worktree. A helper that always joined against the cwd would change
         Strategy 1 silently, in the one case the caller exists to handle.
         """
-        helper_body = _extract_method_body(_MEMORY_API_PATH, "main_repo_root")
+        helper_body = _extract_method_body(_MEMORY_API_PATH, "main_repo_common_dir")
         assert helper_body is not None
         assert "Path(start) if start is not None else Path.cwd()" in helper_body
 
@@ -387,10 +493,11 @@ class TestSourceEquivalence:
         split out, so the check follows it there.
         """
         real_source = _extract_method_body(
-            _MEMORY_API_PATH, "_detect_project_id_with_source"
+            _MEMORY_API_PATH, "_detect_project_identity_with_legacy"
         )
         assert real_source is not None
         assert "main_repo_root =" not in real_source
+        assert "main_repo_common_dir =" not in real_source
 
     def test_detect_project_id_still_delegates_with_its_signature(self):
         """The bare-string detector must survive as a delegation.
@@ -466,12 +573,12 @@ class TestDetectProjectId:
         all sessions of the project share one key, rather than the worktree's
         own (fragmenting) basename.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/some/git/repo/.git\n"
-
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/env/var/project"}), \
-             patch("subprocess.run", return_value=mock_result):
+             patch("subprocess.run", side_effect=_rev_parse_mock(
+                 common="/some/git/repo/.git\n",
+                 toplevel="/some/git/repo\n",
+                 git_dir="/some/git/repo/.git\n",
+             )):
             result = PACTMemory._detect_project_id()
         assert result == "repo"
 
@@ -483,12 +590,12 @@ class TestDetectProjectId:
         repo basename — aligning Strategy 1 with the repo-root semantics of
         Strategies 2 and 3 and preventing per-subdirectory key fragmentation.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/home/user/myrepo/.git\n"
-
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": "/home/user/myrepo/src/mod"}), \
-             patch("subprocess.run", return_value=mock_result):
+             patch("subprocess.run", side_effect=_rev_parse_mock(
+                 common="/home/user/myrepo/.git\n",
+                 toplevel="/home/user/myrepo\n",
+                 git_dir="/home/user/myrepo/.git\n",
+             )):
             result = PACTMemory._detect_project_id()
         assert result == "myrepo"
 
@@ -499,13 +606,13 @@ class TestDetectProjectId:
         shared .git, so it resolves to the main basename like the worktree root
         and an in-repo subdirectory do.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/home/user/myrepo/.git\n"
-
         with patch.dict(os.environ,
                         {"CLAUDE_PROJECT_DIR": "/home/user/wt-feature/src/mod"}), \
-             patch("subprocess.run", return_value=mock_result):
+             patch("subprocess.run", side_effect=_rev_parse_mock(
+                 common="/home/user/myrepo/.git\n",
+                 toplevel="/home/user/myrepo\n",
+                 git_dir="/home/user/myrepo/.git\n",
+             )):
             result = PACTMemory._detect_project_id()
         assert result == "myrepo"
 
@@ -514,14 +621,14 @@ class TestDetectProjectId:
         back to the root itself, so the rewrite does not fire and the env
         basename is kept.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = ".git\n"
-
         project = tmp_path / "myrepo"
         project.mkdir()
         with patch.dict(os.environ, {"CLAUDE_PROJECT_DIR": str(project)}), \
-             patch("subprocess.run", return_value=mock_result):
+             patch("subprocess.run", side_effect=_rev_parse_mock(
+                 common=".git\n",
+                 toplevel=str(project) + "\n",
+                 git_dir=".git\n",
+             )):
             result = PACTMemory._detect_project_id()
         assert result == "myrepo"
 
@@ -548,21 +655,21 @@ class TestDetectProjectId:
         --git-common-dir returns the .git directory path; the code resolves
         its parent to get the repo root, then takes .name for project_id.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/users/dev/awesome-repo/.git\n"
-
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("subprocess.run", side_effect=_rev_parse_mock(
+            common="/users/dev/awesome-repo/.git\n",
+            toplevel="/users/dev/awesome-repo\n",
+            git_dir="/users/dev/awesome-repo/.git\n",
+        )):
             result = PACTMemory._detect_project_id()
         assert result == "awesome-repo"
 
     def test_git_strips_whitespace_from_output(self, clean_env_no_claude_project_dir):
         """Should strip trailing whitespace/newline from git output."""
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "  /path/to/repo/.git  \n"
-
-        with patch("subprocess.run", return_value=mock_result):
+        with patch("subprocess.run", side_effect=_rev_parse_mock(
+            common="  /path/to/repo/.git  \n",
+            toplevel="  /path/to/repo  \n",
+            git_dir="  /path/to/repo/.git  \n",
+        )):
             result = PACTMemory._detect_project_id()
         assert result == "repo"
 
@@ -631,23 +738,44 @@ class TestDetectProjectId:
 
     def test_git_called_with_correct_args_and_timeout(self, clean_env_no_claude_project_dir):
         """Should call git with capture_output, text=True, timeout=5."""
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/some/repo/.git\n"
-
-        with patch("subprocess.run", return_value=mock_result) as mock_run:
+        with patch("subprocess.run", side_effect=_rev_parse_mock(
+            common="/some/repo/.git\n",
+            toplevel="/some/repo\n",
+            git_dir="/some/repo/.git\n",
+        )) as mock_run:
             PACTMemory._detect_project_id()
 
-        assert mock_run.call_count == 1
-        args, kwargs = mock_run.call_args
-        assert args[0] == ["git", "rev-parse", "--git-common-dir"]
-        assert kwargs["capture_output"] is True
-        # BYTES, decoded by os.fsdecode in the production helper: a path can
-        # contain bytes invalid in the locale, and locale decoding would raise.
-        assert kwargs["text"] is False
-        assert kwargs["timeout"] == 5
-        assert "env" in kwargs
-        assert "CLAUDE_PROJECT_DIR" not in kwargs["env"]
+        # FOUR calls since the identity change: `--git-common-dir`,
+        # `--show-toplevel` and `--git-dir` describe the repository shape,
+        # then `config --local --includes -z --get-all` reads the origin.
+        # `common.parent` alone cannot
+        # name the identity root for a submodule or a
+        # `--separate-git-dir` repository.
+        assert mock_run.call_count == 4
+        expected = (
+            ["git", "rev-parse", "--git-common-dir"],
+            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "rev-parse", "--git-dir"],
+        )
+        for index, command in enumerate(expected):
+            args, kwargs = mock_run.call_args_list[index]
+            assert args[0] == command
+            assert kwargs["capture_output"] is True
+            # BYTES, decoded by os.fsdecode in the production helper: a path
+            # can contain bytes invalid in the locale, and locale decoding
+            # would raise.
+            assert kwargs["text"] is False
+            assert kwargs["timeout"] == 5
+            assert "env" in kwargs
+            assert "CLAUDE_PROJECT_DIR" not in kwargs["env"]
+
+        origin_args, origin_kwargs = mock_run.call_args_list[3]
+        assert origin_args[0] == [
+            "git", "-C", "/some/repo", "config", "--local", "--includes", "-z",
+            "--get-all", "remote.origin.url",
+        ]
+        assert origin_kwargs["text"] is False
+        assert origin_kwargs["timeout"] == 5
 
 
 class TestFindProjectRoot:
@@ -753,20 +881,48 @@ class TestCwdSubdirectoryDetection:
     of a project should return the PROJECT's basename, not the subdirectory's.
     """
 
-    def test_cwd_from_subdirectory_returns_project_basename(
-        self, clean_env_no_claude_project_dir, tmp_path
+    def test_cwd_from_subdirectory_under_a_broken_marker_declines(
+        self, clean_env_no_claude_project_dir, tmp_path, caplog, monkeypatch
     ):
-        """Running from project/.claude/ should return 'project', not '.claude'."""
+        """A `.git` marker git cannot answer for DECLINES, naming the marker.
+
+        The walk still lands on the project (not `.claude`), but a broken
+        marker must not be silent-basenamed: that files the session under a
+        folder name nobody can re-derive. The plain-marker basename shape is
+        held by `test_cwd_from_nested_subdirectory` (a CLAUDE.md marker) and
+        `test_cwd_no_markers_falls_back_to_cwd_basename`.
+
+        ORDER-ROBUST BY CONSTRUCTION. Every higher rung is neutralised here,
+        not inherited from whatever ran before this test: a session record
+        enabled by an earlier module, a user-scope setting, or a
+        `GIT_CEILING_DIRECTORIES` value (which `_unanswerable_repository`
+        honours and which stops the marker walk) would otherwise change the
+        cwd rung's answer and make this arm depend on the run's order.
+        """
         project = tmp_path / "my-real-project"
         subdir = project / ".claude"
         subdir.mkdir(parents=True)
         (project / ".git").mkdir()
 
-        with patch("subprocess.run", side_effect=FileNotFoundError()), \
+        monkeypatch.setattr(
+            "scripts.memory_api.get_project_dir_from_session_record", lambda: ""
+        )
+        monkeypatch.setattr(
+            "scripts.memory_api.read_user_setting", lambda *a, **k: None
+        )
+        monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+        monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
+
+        with caplog.at_level(logging.WARNING), \
+             patch("subprocess.run", side_effect=FileNotFoundError()), \
              patch("pathlib.Path.cwd", return_value=subdir):
             result = PACTMemory._detect_project_id()
 
-        assert result == "my-real-project"
+        assert result is None, "a broken .git marker was basenamed"
+        messages = " ".join(record.message for record in caplog.records)
+        assert "could not answer" in messages, (
+            f"the decline did not report the unanswerable repository: {messages!r}"
+        )
 
     def test_cwd_from_nested_subdirectory(
         self, clean_env_no_claude_project_dir, tmp_path
@@ -783,10 +939,15 @@ class TestCwdSubdirectoryDetection:
 
         assert result == "deep-project"
 
-    def test_cwd_from_project_root_unchanged(
+    def test_cwd_from_project_root_under_a_broken_marker_declines(
         self, clean_env_no_claude_project_dir, tmp_path
     ):
-        """Running from project root returns project root basename."""
+        """From the root, a `.git` marker git cannot answer for DECLINES.
+
+        The unchanged-root-basename intent still holds for a marker git CAN
+        answer for and for a plain non-git marker; this arm pins the broken
+        marker's new outcome.
+        """
         project = tmp_path / "root-project"
         project.mkdir()
         (project / ".git").mkdir()
@@ -795,7 +956,7 @@ class TestCwdSubdirectoryDetection:
              patch("pathlib.Path.cwd", return_value=project):
             result = PACTMemory._detect_project_id()
 
-        assert result == "root-project"
+        assert result is None, "a broken .git marker was basenamed"
 
     @pytest.mark.claude_md_ambient  # §11.3.1 (a): marker-absence detection — the fixture's CLAUDE.md IS a project marker
     def test_cwd_no_markers_falls_back_to_cwd_basename(

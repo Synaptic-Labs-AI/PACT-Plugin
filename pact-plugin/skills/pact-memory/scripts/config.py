@@ -151,6 +151,37 @@ def store_scope(db_path: Optional[Path]) -> Iterator[None]:
         _STORE_DB_PATH.reset(token)
 
 
+_READ_ONLY_SCOPE: ContextVar[bool] = ContextVar(
+    "pact_memory_read_only_scope", default=False
+)
+
+
+@contextmanager
+def read_only_scope() -> Iterator[None]:
+    """Declare that this block must not write to the store.
+
+    The read verbs wrap their store work in this so `ensure_initialized`
+    SKIPS migrations and the vector-table CREATE: a READ must not emit schema
+    DDL on a store it is only reporting on. It is a DECLARATION, not a
+    connection mode — a caller that genuinely needs a write must stay outside
+    the scope, and none of the read verbs does.
+
+    The same thread caveat as `store_scope` applies: this package starts no
+    thread today, and a ContextVar set here is not visible in a thread
+    started later.
+    """
+    token = _READ_ONLY_SCOPE.set(True)
+    try:
+        yield
+    finally:
+        _READ_ONLY_SCOPE.reset(token)
+
+
+def read_only_scope_active() -> bool:
+    """Whether the current block declared that it must not write."""
+    return _READ_ONLY_SCOPE.get()
+
+
 def get_memory_dir() -> Path:
     """Return the base directory for the PACT memory DATABASE.
 
@@ -184,6 +215,22 @@ def get_memory_dir() -> Path:
     if override:
         return Path(override).expanduser()
     return Path.home() / ".claude" / "pact-memory"
+
+
+def get_user_memory_dir() -> Path:
+    """The USER's memory directory, whatever store a block has bound.
+
+    `get_memory_dir` with the store scope set aside: the test variable when
+    set, else the default root. A user-scoped setting is read from here,
+    because `get_memory_dir` follows a `--db-path`, and a setting read
+    through it would change which identity a session resolves whenever a
+    command names a different store. Creates nothing.
+    """
+    token = _STORE_DB_PATH.set(None)
+    try:
+        return get_memory_dir()
+    finally:
+        _STORE_DB_PATH.reset(token)
 
 
 def resolve_db_path() -> Path:

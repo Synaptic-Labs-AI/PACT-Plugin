@@ -12,6 +12,7 @@ Tests cover:
 8. TOCTOU mitigation: atomic file pre-creation, race handling, WAL sidecar chmod
 """
 import json
+import logging
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -1717,9 +1718,10 @@ class TestBug1LegacyRowGracefulDegradation:
         should fire for the legacy item so the merge succeeds and the new
         item is appended.
 
-        Fixture choice (post-R2-5): we use a non-dict, non-str item (a raw
-        integer) to defeat BOTH strict AND lenient canonicalization. R2-5
-        added a lenient path that drops unknown keys on legacy dicts, so a
+        Fixture choice (after the lenient fallback): we use a non-dict,
+        non-str item (a raw integer) to defeat BOTH strict AND lenient
+        canonicalization. The lenient fallback in _merge_with_dedup is a
+        path that drops unknown keys on legacy dicts, so a
         plain stray-key dict no longer triggers the safety valve — the
         lenient path succeeds and no WARNING fires. A non-dict/non-str
         item hits the TypeError branch of _canonicalize_dict_item in
@@ -2031,7 +2033,8 @@ class TestBug1EmptyListBranches:
 
 
 class TestBug1ContentNoopSuppressesUpdatedAt:
-    """Content no-op suppresses updated_at bump (#374 R2-4).
+    """Content no-op suppresses updated_at bump (the content no-op
+    short-circuit in update_memory).
 
     When an additive update's incoming items are ALL already-present
     duplicates, the content-hash dedup reduces the merge result to the
@@ -2044,7 +2047,7 @@ class TestBug1ContentNoopSuppressesUpdatedAt:
     so updated_at stays stable.
 
     If task #10 has not yet landed, this test WILL fail. That's expected —
-    it's the red-before-green for R2-4.
+    it's the red-before-green for the content no-op short-circuit.
     """
 
     def _get_updated_at(self, db_conn, mem_id):
@@ -2258,8 +2261,8 @@ class TestTheDetectedProjectIdIsValidated:
 
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (value, source)),
+            "_detect_project_identity_with_legacy",
+            staticmethod(lambda: memory_api._DetectedIdentity(value, source, None, None, None)),
         )
         return PACTMemory(
             project_id=None,
@@ -2831,8 +2834,12 @@ class TestTrackFileAdoptsARaceLoser:
         assert [row["id"] for row in rows] == [seen["winner_id"]]
 
 
-class TestAnEmptyScopeMeansWholeStore:
-    """`project_id=""` is the old whole-store scope, not a filter for ""."""
+class TestAnEmptyStringScopeMatchesNoRows:
+    """`project_id=""` is an EMPTY scope: no rows, never the whole store.
+
+    `None` stays the whole-store scope, so each arm keeps the `None` call as
+    the control that the fixture's rows are reachable at all.
+    """
 
     def _fixture(self, tmp_path):
         # The UNPROJECTED rows: an unscoped call resolves the NULL-project
@@ -2851,7 +2858,7 @@ class TestAnEmptyScopeMeansWholeStore:
         conn.commit()
         return db_path, conn
 
-    def test_search_by_file_treats_an_empty_scope_as_unscoped(self, tmp_path):
+    def test_search_by_file_treats_an_empty_string_as_no_rows(self, tmp_path):
         from scripts import search
         from scripts.config import store_scope
 
@@ -2861,10 +2868,10 @@ class TestAnEmptyScopeMeansWholeStore:
         ), patch("scripts.graph.ensure_initialized"):
             empty = search.search_by_file("/repo/a.py", project_id="")
             absent = search.search_by_file("/repo/a.py", project_id=None)
-        assert [memory.id for memory in empty] == ["m-null"]
+        assert empty == []
         assert [memory.id for memory in absent] == ["m-null"]
 
-    def test_vector_search_treats_an_empty_scope_as_unscoped(self, tmp_path):
+    def test_vector_search_treats_an_empty_string_as_no_rows(self, tmp_path):
         import struct
 
         import sqlite_vec
@@ -2893,20 +2900,18 @@ class TestAnEmptyScopeMeansWholeStore:
         ):
             empty = search.vector_search(conn, "q", "", limit=3)
             absent = search.vector_search(conn, "q", None, limit=3)
-        assert empty == absent == [("m-p1", 0.0)]
+        assert empty == []
+        assert absent == [("m-p1", 0.0)]
 
-    def test_graph_enhanced_search_treats_an_empty_scope_as_unscoped(
+    def test_graph_enhanced_search_treats_an_empty_string_as_no_rows(
         self, tmp_path, monkeypatch
     ):
-        """The public entry whose normalisation was unpinned.
+        """The public entry whose ranking leg adds ids without a project check.
 
-        `graph_enhanced_search` applies the stored-project BELT, which reads
-        the scope by `is not None`: with `""` bound as a filter every real
-        row's project differs from it and the belt drops the lot, so the
-        whole-store search answers empty. Normalise once at the entry (as
-        the other four entries do) and `""` matches `None`. The ranking is
-        stubbed so the arm measures the scope contract, not the embedding
-        backend.
+        The ranking is stubbed to return a NULL-project memory, so only the
+        stored-project belt stands between an empty scope and that row. RED
+        WHEN `""` is folded to `None` (the belt is then skipped and the row is
+        returned) or the belt is dropped.
         """
         from scripts import search
         from scripts.config import store_scope
@@ -2922,13 +2927,10 @@ class TestAnEmptyScopeMeansWholeStore:
         ), patch("scripts.graph.ensure_initialized"):
             empty = search.graph_enhanced_search("q", project_id="")
             absent = search.graph_enhanced_search("q", project_id=None)
-        assert [memory.id for memory in empty] == ["m-null"], (
-            "graph_enhanced_search bound the empty scope as a filter and the "
-            "belt dropped every row"
+        assert empty == [], (
+            "graph_enhanced_search read the empty scope as the whole store"
         )
-        assert [memory.id for memory in empty] == [
-            memory.id for memory in absent
-        ]
+        assert [memory.id for memory in absent] == ["m-null"]
 
 
 class TestTheConfirmationFiltersOverFetch:
@@ -3216,8 +3218,8 @@ class TestUpdatePayloadProjectIdGuard:
 
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(lambda: memory_api._DetectedIdentity(None, "unresolved", None, None, None)),
         )
         memory = PACTMemory(session_id="s", db_path=db_path)
         assert memory.project_id is None, (
@@ -3474,6 +3476,94 @@ class TestUpdatePayloadProjectIdGuard:
         assert [row[0] for row in rows] == ["projB"], (
             "the duplicate link aborted the cascade or left the old link "
             f"behind: {[row[0] for row in rows]!r}"
+        )
+
+    def test_a_poisoned_file_link_is_quarantined_not_fatal(
+        self, tmp_path, caplog
+    ):
+        """The cascade half: `update_memory` commits the row's NEW project
+        before the cascade runs, so a refusal that escaped here would leave
+        the update half applied — row moved, link stranded under the old
+        project — and re-issuing the update would hit the same row forever.
+
+        The unrepairable link is skipped (left in place, never deleted) and
+        reported once; every other link still moves; the row still moves.
+
+        RED WHEN: the cascade lets track_file's ValueError escape (this call
+        raises), or it "cleans up" the quarantined link (the anchor assertion
+        fails), or the quarantine goes unreported.
+        """
+        db_path = tmp_path / "poisoned-cascade.db"
+        memory = PACTMemory(
+            project_id="projA", session_id="s", db_path=db_path
+        )
+        memory_id = memory.save(
+            {"context": "POISONED-LINK"}, sync_to_claude=False
+        )
+        poisoned = "/tmp/x\x00y.py"
+        with db_connection(db_path) as conn:
+            ensure_initialized(conn)
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                ("poisoned-file", poisoned, "projA"),
+            )
+            conn.execute(
+                "INSERT INTO memory_files "
+                "(memory_id, file_id, relationship) VALUES (?, ?, 'modified')",
+                (memory_id, "poisoned-file"),
+            )
+            conn.commit()
+
+        with caplog.at_level(logging.WARNING):
+            assert memory.update(
+                memory_id, {"project_id": "projB"}
+            ) == memory_id
+
+        with db_connection(db_path) as conn:
+            assert conn.execute(
+                "SELECT project_id FROM memories WHERE id = ?", (memory_id,)
+            ).fetchone()[0] == "projB", (
+                "the memory row did not move; the cascade fix is beside the "
+                "point"
+            )
+            anchored = [
+                tuple(row)
+                for row in conn.execute(
+                    "SELECT f.id, f.path, f.project_id "
+                    "FROM files f JOIN memory_files mf ON mf.file_id = f.id "
+                    "WHERE mf.memory_id = ?",
+                    (memory_id,),
+                )
+            ]
+        assert anchored == [("poisoned-file", poisoned, "projA")], (
+            "the quarantined link was moved or deleted instead of left in "
+            f"place: {anchored!r}"
+        )
+        assert "left 1 file link" in caplog.text, (
+            f"the quarantine was not reported: {caplog.text!r}"
+        )
+        assert memory.last_cascade_skipped == 1, (
+            "the counter did not report the quarantined link: "
+            f"{memory.last_cascade_skipped}"
+        )
+
+        # THE RETRY MUST NOT RAISE EITHER. The stranded link is still there,
+        # so the same cascade runs again and must skip it again.
+        with caplog.at_level(logging.WARNING):
+            assert memory.update(
+                memory_id, {"project_id": "projB"}
+            ) == memory_id
+        assert memory.last_cascade_skipped == 1, (
+            "the re-issue did not re-report the stranded link: "
+            f"{memory.last_cascade_skipped}"
+        )
+
+        # PER CALL, NOT CUMULATIVE: an update that runs no cascade reports 0.
+        clean_id = memory.save({"context": "CLEAN"}, sync_to_claude=False)
+        assert memory.update(clean_id, {"context": "CLEAN-2"}) == clean_id
+        assert memory.last_cascade_skipped == 0, (
+            "a clean update inherited an earlier call's skip count: "
+            f"{memory.last_cascade_skipped}"
         )
 
     def test_a_disagreement_refusal_precedes_the_payload_guard(
@@ -3870,8 +3960,8 @@ class TestConstructorValidatesSuppliedIdentifiers:
     ):
         """The guard sits INSIDE the truthy branch, and this is its boundary."""
         monkeypatch.setattr(
-            PACTMemory, "_detect_project_id_with_source",
-            staticmethod(lambda: ("detected-proj", "cwd")),
+            PACTMemory, "_detect_project_identity_with_legacy",
+            staticmethod(lambda: memory_api._DetectedIdentity("detected-proj", "cwd", None, None, None)),
         )
         monkeypatch.setattr(
             PACTMemory, "_detect_session_id",
@@ -3965,8 +4055,8 @@ class TestGetStatusFoldsAnUnusableDetectedSessionId:
         if project is not None:
             monkeypatch.setattr(
                 PACTMemory,
-                "_detect_project_id_with_source",
-                staticmethod(lambda: (project, "CLAUDE_PROJECT_DIR")),
+                "_detect_project_identity_with_legacy",
+                staticmethod(lambda: memory_api._DetectedIdentity(project, "CLAUDE_PROJECT_DIR", None, None, None)),
             )
         return PACTMemory(
             project_id=None if project is not None else "P",
@@ -4098,8 +4188,8 @@ class TestTheStatusCountersBindTheRawProjectScope:
 
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (project, "cwd")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(lambda: memory_api._DetectedIdentity(project, "cwd", None, None, None)),
         )
         memory = PACTMemory(
             project_id=None, session_id="s", db_path=db_path
@@ -4132,8 +4222,8 @@ class TestTheStatusEnvelopeCarriesTheDbPathRaw:
         if detected is not None:
             monkeypatch.setattr(
                 PACTMemory,
-                "_detect_project_id_with_source",
-                staticmethod(lambda: (detected, "cwd")),
+                "_detect_project_identity_with_legacy",
+                staticmethod(lambda: memory_api._DetectedIdentity(detected, "cwd", None, None, None)),
             )
             return PACTMemory(
                 project_id=None,
@@ -4157,14 +4247,20 @@ class TestTheStatusEnvelopeCarriesTheDbPathRaw:
         assert memory.db_path == tmp_path / "store\u202eX.db", (
             "the programmatic accessor must return the RAW path"
         )
-        # ROUND TRIP: the reported path opens the same store.
+        # ROUND TRIP: the reported path opens the same store. The read must
+        # NOT have initialised it (the scoped zero-CREATE rule), so the file
+        # opens with NO tables — that emptiness is what proves both halves:
+        # the raw path reaches this store, and the read left it uninitialised.
         from scripts.database import get_connection
 
         conn = get_connection(Path(status["db_path"]))
         try:
             assert conn.execute(
-                "SELECT COUNT(*) FROM memories"
-            ).fetchone()[0] == 0
+                "SELECT name FROM sqlite_master"
+            ).fetchall() == [], (
+                "a read initialised the store it reported; on an absent "
+                "caller path the zeroed envelope must leave no schema"
+            )
         finally:
             conn.close()
 
@@ -4188,6 +4284,13 @@ class TestTheSaveDisclosureStaysRawOnTheInstance:
         monkeypatch.setattr(
             "scripts.memory_api.main_repo_root",
             lambda *args, **kwargs: Path("/repo") / bidi,
+        )
+        # The patched root is NOT a repository here, so the resolver takes its
+        # designed basename branch and the raw spelling flows through. A
+        # DECLINE path yields None instead (no folder pseudo-id).
+        monkeypatch.setattr(
+            "scripts.memory_api.main_repo_common_dir",
+            lambda *args, **kwargs: None,
         )
         memory = PACTMemory(
             project_id="P", session_id="s", db_path=tmp_path / "raw.db"
