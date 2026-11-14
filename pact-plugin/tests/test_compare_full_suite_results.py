@@ -583,12 +583,15 @@ def test_a_census_line_only_in_captured_output_does_not_explain_the_exit(tmp_pat
 
 
 HOME_CENSUS_INFO = "HOME CENSUS: installed, 812 launches checked, 0 refused"
+HOME_CENSUS_INFO_ONE = "HOME CENSUS: installed, 1 launch checked, 0 refused"
 
 
 @pytest.mark.parametrize("finish", [
     (HOME_CENSUS_INFO,),
     ("." * 40 + " [100%]" + HOME_CENSUS_INFO,),
-], ids=["own-line", "after-xdist-progress"])
+    (HOME_CENSUS_INFO_ONE,),
+    ("." * 40 + " [100%]" + HOME_CENSUS_INFO_ONE,),
+], ids=["own-line", "after-xdist-progress", "singular-own-line", "singular-after-progress"])
 def test_a_green_run_carrying_the_home_census_information_line_is_clean(tmp_path, finish):
     first = make_run(tmp_path, "one", finish_lines=finish)
     second = make_run(tmp_path, "two", 101, finish_lines=finish)
@@ -736,17 +739,18 @@ def test_the_information_line_the_real_home_census_writes_is_no_census_failure(m
     monkeypatch.setitem(census._state, "misses", [])
     monkeypatch.setitem(census._state, "forwarded", [])
     monkeypatch.setitem(census._state, "installed", True)
-    monkeypatch.setitem(census._state, "checked", 812)
-    monkeypatch.setitem(census._state, "forwarded_checked", 0)
-    written = []
-    reporter = types.SimpleNamespace(write_line=written.append)
-    session = types.SimpleNamespace(
-        exitstatus=0, config=types.SimpleNamespace(
-            pluginmanager=types.SimpleNamespace(get_plugin=lambda _name: reporter)))
-    census.finish(session)
-    assert session.exitstatus == 0
-    assert written == [HOME_CENSUS_INFO]
-    assert comparator._census_failures(written) == []
+    for checked, line in ((812, HOME_CENSUS_INFO), (1, HOME_CENSUS_INFO_ONE)):
+        monkeypatch.setitem(census._state, "checked", checked)
+        monkeypatch.setitem(census._state, "forwarded_checked", 0)
+        written = []
+        reporter = types.SimpleNamespace(write_line=written.append)
+        session = types.SimpleNamespace(
+            exitstatus=0, config=types.SimpleNamespace(
+                pluginmanager=types.SimpleNamespace(get_plugin=lambda _name: reporter)))
+        census.finish(session)
+        assert session.exitstatus == 0
+        assert written == [line]
+        assert comparator._census_failures(written) == []
 
 
 RIG_CONFTEST = """\

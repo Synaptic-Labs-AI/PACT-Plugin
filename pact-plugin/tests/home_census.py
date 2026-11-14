@@ -36,8 +36,9 @@ test that raises) is recorded as a fault line and fails the session; that
 launch is not aborted.
 
 A run with no refusal ends with one information line from the controller (or a
-session without xdist), `HOME CENSUS: installed, N launches checked, 0 refused`,
-where N counts the launch events the census judged, every worker's included.
+session without xdist), `HOME CENSUS: installed, N launches checked, 0 refused`
+(`1 launch checked` when N is 1), where N counts the launch events the census
+judged, every worker's included.
 One launch can raise both events (a Popen that starts its child through
 posix_spawn), so N counts events, not children.
 
@@ -45,10 +46,12 @@ THE ONE EXEMPTION: `@pytest.mark.child_env_without_home(reason="...")` on a
 test, its class or its module, with a non-empty string reason, exempts every
 launch made while that test runs: its setup, call and teardown, including a
 launch a shared fixture makes then. A marker without such a reason exempts
-nothing; the refusal line says the reason is missing. The marker takes effect
-only for tests under pact-plugin/tests/, whose conftest tells the census which
-test is running; a launch from a test elsewhere (pact-plugin/skills/) is still
-judged, but no marker exempts it.
+nothing; the refusal line says the reason is missing. The census is installed,
+and told which test is running, by pact-plugin/tests/conftest.py, whose
+pytest_runtest_protocol pytest runs for every test of a session that loads it:
+there a marked test under pact-plugin/skills/ is exempt like any other. A session
+that does not load that conftest, such as a run of pact-plugin/skills/ tests
+alone, has no census installed: it judges no launch and prints no census line.
 
 NOT SEEN, AND OUTSIDE THE CENSUS:
 - os.spawn* and os.exec*, and os.fork() followed by an exec: on POSIX the exec
@@ -188,8 +191,9 @@ def finish(session):
     write = reporter.write_line if reporter is not None else (lambda line: print(line, file=sys.stderr))
     if not problems:
         if _state["installed"]:
-            write("HOME CENSUS: installed, %d launches checked, 0 refused"
-                  % (_state["checked"] + _state["forwarded_checked"]))
+            checked = _state["checked"] + _state["forwarded_checked"]
+            write("HOME CENSUS: installed, %d %s checked, 0 refused"
+                  % (checked, "launch" if checked == 1 else "launches"))
         return
     write("HOME CENSUS: %d child(ren) started without HOME" % len(problems))
     for line in problems:

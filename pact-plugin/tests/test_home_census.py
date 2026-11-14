@@ -373,6 +373,24 @@ def test_finish_with_no_refusal_reports_the_launches_checked(census_state):
     assert reporter.lines == ["HOME CENSUS: installed, 7 launches checked, 0 refused"]
 
 
+def test_one_launch_checked_is_reported_in_the_singular(census_state):
+    census_state["misses"][:] = []
+    census_state["forwarded"][:] = []
+    census_state["checked"], census_state["forwarded_checked"] = 1, 0
+    reporter = _Reporter()
+    census.finish(_Session(_Config(reporter)))
+    assert reporter.lines == ["HOME CENSUS: installed, 1 launch checked, 0 refused"]
+
+
+def test_no_launch_checked_is_reported_in_the_plural(census_state):
+    census_state["misses"][:] = []
+    census_state["forwarded"][:] = []
+    census_state["checked"], census_state["forwarded_checked"] = 0, 0
+    reporter = _Reporter()
+    census.finish(_Session(_Config(reporter)))
+    assert reporter.lines == ["HOME CENSUS: installed, 0 launches checked, 0 refused"]
+
+
 def test_a_census_never_installed_reports_nothing_on_a_clean_run(census_state, monkeypatch):
     census_state["misses"][:] = []
     census_state["forwarded"][:] = []
@@ -499,8 +517,83 @@ def test_under_xdist_a_child_with_home_passes_the_run(tmp_path):
     assert "started without HOME" not in output, output
     # The workers' launches (the test's own and any its session makes) reach
     # the controller's information line.
-    assert re.search(r"HOME CENSUS: installed, [1-9][0-9]* launches checked, 0 refused",
+    assert re.search(r"HOME CENSUS: installed, [1-9][0-9]* launch(es)? checked, 0 refused",
                      output), output
+
+
+_SKILLS_RIG_TESTS = '''
+import os
+import subprocess
+
+import pytest
+
+
+@pytest.mark.child_env_without_home(reason="rig: a marked skills test")
+def test_marked_in_skills():
+    subprocess.run(["true"], env={"PATH": os.defpath})
+
+
+def test_unmarked_in_skills():
+    try:
+        subprocess.run(["true"], env={"PATH": os.defpath})
+    except Exception:
+        pass
+'''
+
+
+@pytest.mark.parametrize("order", [("tests", "skills"), ("skills", "tests")],
+                         ids=["tests-first", "skills-first"])
+def test_the_marker_exempts_a_skills_test_in_a_session_that_loads_the_conftest(tmp_path, order):
+    """A session that loads tests/conftest.py runs its pytest_runtest_protocol for
+    every test, so a marked test under skills/ is exempt and its unmarked twin is
+    refused, whichever directory is collected first. The rig mirrors the plugin's
+    layout: the conftest under tests/, the tests under skills/<skill>/."""
+    plugin = tmp_path / "pact-plugin"
+    (plugin / "tests").mkdir(parents=True)
+    (plugin / "skills" / "rig-skill").mkdir(parents=True)
+    (plugin / "tests" / "conftest.py").write_text(
+        _RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
+    (plugin / "tests" / "test_plain.py").write_text("def test_plain():\n    pass\n",
+                                                    encoding="utf-8")
+    (plugin / "skills" / "rig-skill" / "test_rig_skill.py").write_text(
+        _SKILLS_RIG_TESTS, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    proc = subprocess.run(
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly", *order],
+        cwd=plugin, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    assert "3 passed" in output, output
+    assert proc.returncode == 1, output
+    assert "HOME CENSUS: 1 child(ren) started without HOME" in output, output
+    assert "test_unmarked_in_skills" in output and "test_marked_in_skills" not in output, output
+
+
+def _real_session(*paths):
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    proc = subprocess.run(
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly", *paths],
+        cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True,
+        timeout=300)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+_SKILLS_TEST = "skills/pact-handoff-harvest/test_skill_loading_harvest.py"
+
+
+def test_a_session_of_skills_tests_alone_has_no_census():
+    """A real session over a skills/ test alone does not load tests/conftest.py,
+    so no census is installed and no census line is printed; its twin, which adds
+    a tests/ module, loads the conftest and prints the census line."""
+    if not (Path(__file__).resolve().parents[1] / _SKILLS_TEST).is_file():
+        pytest.skip("SKIPPED, NOT PASSED: %s is not in this tree" % _SKILLS_TEST)
+    rc, output = _real_session(_SKILLS_TEST)
+    assert rc == 0 and re.search(r"^[0-9]+ passed", output, re.M), output
+    assert "HOME CENSUS" not in output, output
+    rc, output = _real_session(_SKILLS_TEST, "tests/test_session_home_sandbox.py")
+    assert rc == 0 and re.search(r"^[0-9]+ passed", output, re.M), output
+    assert re.search(r"HOME CENSUS: installed, [0-9]+ launch(es)? checked, 0 refused", output), output
 
 
 def _git_rig(*args, cwd):
