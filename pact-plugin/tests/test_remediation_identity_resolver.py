@@ -22,6 +22,8 @@ from fixtures.identity_git import (
     run_git,
     seed_session_evidence,
     start_after_description,
+    unread_class_references,
+    unread_reason_keys,
     write_common_dir_override,
 )
 from scripts.memory_api import PACTMemory
@@ -73,6 +75,11 @@ class TestOneDeclineRecord:
             f"memory_api.py builds a decline dict by hand at lines {offenders}; "
             "build it with project_identity.decline_record through _decline"
         )
+        unread = unread_reason_keys(tree, frozenset(exempt))
+        assert unread == [], (
+            f"memory_api.py uses a `reason` key at lines {unread} in a form the "
+            "scan cannot classify; build the decline with decline_record"
+        )
         # The suppression builder's own dict is found when not exempt, so
         # the scan is reading the module.
         assert reason_dict_sites(tree), "the scan found no reason dict at all"
@@ -85,6 +92,11 @@ class TestOneDeclineRecord:
         assert positional == [], (
             f"_DetectedIdentity is built positionally at lines {positional}; "
             "every field must be passed by keyword"
+        )
+        unread = unread_class_references(_module_tree(), "_DetectedIdentity")
+        assert unread == [], (
+            f"_DetectedIdentity is used as a value at lines {unread}, where the "
+            "scan cannot see how it is built; call it with every field by keyword"
         )
 
     def test_the_construction_scan_reads_every_form(self):
@@ -174,6 +186,52 @@ class TestOneDeclineRecord:
         assert {
             number: ("positional" if number in found else "keyword") for number in expected
         } == expected
+
+    def test_a_class_used_as_a_value_fails_closed(self):
+        """Live control for `unread_class_references`: each fixture line
+        carries `unread` (the class used where the construction scan cannot
+        see how it is built) or `read` (a form that scan reads, or no
+        construction at all)."""
+        import textwrap
+
+        source = textwrap.dedent("""
+            import functools
+            import itertools
+            from typing import Optional
+
+            def build(ids, rows, flag, record: "_DetectedIdentity", other: Optional[_DetectedIdentity]) -> _DetectedIdentity:
+                list(map(_DetectedIdentity, ids))  # unread
+                list(itertools.starmap(_DetectedIdentity, rows))  # unread
+                (_DetectedIdentity if flag else None)("a")  # unread
+                factories = [_DetectedIdentity]  # unread
+                table = {"d": _DetectedIdentity}  # unread
+                list(map(_DetectedIdentity._make, rows))  # unread
+                _DetectedIdentity(project_id="a")  # read
+                alias = _DetectedIdentity  # read
+                functools.partial(_DetectedIdentity, project_id="a")  # read
+                isinstance(record, _DetectedIdentity)  # read
+                isinstance(record, (_DetectedIdentity, str))  # read
+                _DetectedIdentity._fields  # read
+                _DetectedIdentity._make(rows)  # read
+                return _DetectedIdentity  # unread
+
+            class Narrowed(_DetectedIdentity):  # read
+                @classmethod
+                def every(cls, rows):
+                    return list(map(cls, rows))  # unread
+
+                def copy(self):
+                    return [type(self)]  # unread
+        """)
+        expected = {
+            number: line.rsplit("# ", 1)[1]
+            for number, line in enumerate(source.splitlines(), start=1)
+            if line.rstrip().endswith(("# unread", "# read"))
+        }
+        assert len(expected) == 17, expected
+        found = set(unread_class_references(ast.parse(source), "_DetectedIdentity"))
+        assert {number: ("unread" if number in found else "read") for number in expected} == expected
+        assert found <= set(expected), sorted(found - set(expected))
 
     def test_the_suppression_record_has_one_builder(self):
         """The exemption above names a function that exists and is used."""

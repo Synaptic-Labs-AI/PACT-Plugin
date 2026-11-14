@@ -1524,11 +1524,18 @@ class _DetectionGraph:
 
     def target(self, call, module: str):
         """The (module, def) a call reaches in a project module: a function by
-        name or through an import (re-exports followed), or a method through
-        its class, `self` or `cls`. None for anything else."""
+        name or through an import (re-exports followed), a method through its
+        class, `self` or `cls`, or a dotted path through an imported package
+        (`shared.project_scope.f()` after `import shared.project_scope`).
+        None for anything else."""
+        return self.refers_to(call.func, module)
+
+    def refers_to(self, func, module: str):
+        """The (module, def) the expression `func` names, as `target`."""
         import ast
 
-        func = call.func
+        from fixtures.identity_git import qualified_name
+
         if isinstance(func, ast.Name):
             if (module, func.id) in self.defs:
                 return module, func.id
@@ -1542,7 +1549,36 @@ class _DetectionGraph:
             other = self.aliases[module].get(base, "")
             if other:
                 return self.follow(f"{other}.{func.attr}")
+        if isinstance(func, ast.Attribute):
+            dotted = qualified_name(func, self.aliases[module])
+            return self.follow(dotted) if dotted else None
         return None
+
+    def references(self, node, module: str):
+        """Yield (expression, (module, def)) for each call into a project
+        function inside `node`, and for each project function used as a
+        value there (passed, stored or returned), which is counted as a call
+        because the scan cannot see where the value is called."""
+        import ast
+
+        callees, bases = set(), set()
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                callees.add(id(sub.func))
+            elif isinstance(sub, ast.Attribute):
+                bases.add(id(sub.value))
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Call):
+                found = self.target(sub, module)
+                if found is not None:
+                    yield sub.func, found
+            elif (
+                isinstance(sub, (ast.Name, ast.Attribute)) and isinstance(sub.ctx, ast.Load)
+                and id(sub) not in callees and id(sub) not in bases
+            ):
+                found = self.refers_to(sub, module)
+                if found is not None:
+                    yield sub, found
 
 
 def _env_reads(node, module: str, function: str, graph: "_DetectionGraph"):
@@ -1599,11 +1635,19 @@ def route_inputs() -> tuple:
     call. ANY other use of the environment (a key that cannot be resolved, a
     copy, an iteration, the mapping passed along) is `("env", "<...>")`
     naming the function and the expression, which nothing classifies unless
-    NOT_A_ROUTE names it, so the census fails closed.
+    NOT_A_ROUTE names it, so the census fails closed. A project function used
+    as a value (passed, stored, returned) counts as a call where it is named,
+    so the function it reaches is read even when the call is elsewhere.
 
-    NOT COVERED: a call through a variable holding a function, `getattr` or
-    `exec`; modules outside the plugin (the standard library, third-party
-    packages); and an environment read reached only through such a call.
+    The process and home directories are each ONE condition, `("cwd",)` and
+    `("home",)`, whichever function reads them, so a new reader of either is
+    absorbed by the condition already there: a new rung keyed on the process
+    directory is the rung-parity census's to catch, and a new setting read
+    from the home directory is not caught here.
+
+    NOT COVERED: a call through `getattr`, `exec` or `importlib`; modules
+    outside the plugin (the standard library, third-party packages); and an
+    environment read reached only through such a call.
     """
     import ast
 
@@ -1622,17 +1666,12 @@ def route_inputs() -> tuple:
         if key in reached:
             continue
         reached.add(key)
-        for node in ast.walk(graph.defs[key]):
-            if not isinstance(node, ast.Call):
-                continue
-            target = graph.target(node, key[0])
-            if target is None:
-                continue
+        for expression, target in graph.references(graph.defs[key], key[0]):
             here = entry
             if key[0] in DETECTION_MODULES and target[0] not in DETECTION_MODULES:
-                spelled = (qualified_name(node.func, graph.aliases[key[0]]) or "").rpartition(".")[2]
+                spelled = (qualified_name(expression, graph.aliases[key[0]]) or "").rpartition(".")[2]
                 here = ("call", spelled)
-                outward.setdefault(here, set()).add(f"{key[0]}.py:{node.lineno}")
+                outward.setdefault(here, set()).add(f"{key[0]}.py:{expression.lineno}")
             pending.append((target, here))
 
     def params(node):
@@ -1752,10 +1791,12 @@ class TestEveryRouteEntryConditionIsARoute:
     as driven when a route replaces it or sets an input read inside it.
     Every input must be driven or be listed in NOT_A_ROUTE, and every route
     input must still be read. A new route through any rung, a new reader of
-    a record or setting, or a new environment variable in any form therefore
-    reds an arm here until a route drives it or an exclusion names it. A new
-    rung call site is the rung-parity test's census (every `_root_guard` and
-    `_identity_at_root` call site must run).
+    a record or setting in another project module, or a new environment
+    variable in any form therefore reds an arm here until a route drives it
+    or an exclusion names it. A new reader of the process or home directory
+    joins the one `("cwd",)` or `("home",)` condition already there and
+    reds nothing here. A new rung call site is the rung-parity test's census
+    (every `_root_guard` and `_identity_at_root` call site must run).
     """
 
     # Inputs the detection path reads that no route sets, each with the reason

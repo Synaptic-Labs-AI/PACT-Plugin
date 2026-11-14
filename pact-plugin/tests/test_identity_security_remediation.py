@@ -1347,7 +1347,9 @@ def test_no_user_facing_text_names_a_pact_memory_executable():
     """Catches a remedy that tells the operator to run an executable that
     does not exist: `pact-memory` followed by any verb the CLI accepts, in a
     string anywhere in the memory scripts. Comments are exempt (`cli.py`'s
-    explanation of the bug)."""
+    explanation of the bug). A string piece that ends on `pact-memory` and
+    whitespace, or puts a placeholder after it, takes its verb from another
+    piece (an f-string field, a `+`, a `%` or `.format`), so it fails closed."""
     import ast
     import re
 
@@ -1358,16 +1360,24 @@ def test_no_user_facing_text_names_a_pact_memory_executable():
         + "|".join(re.escape(verb) for verb in sorted(verbs, key=len, reverse=True))
         + r")\b"
     )
+    assembled = re.compile(r"\bpact-memory\s+(?:$|%|\{)")
     offences, scanned = [], 0
     for path in sorted(_SCRIPTS_DIR.glob("*.py")):
         scanned += 1
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
-                if invocation.search(node.value):
+                if invocation.search(node.value) or assembled.search(node.value):
                     offences.append((path.name, node.value[:80]))
     assert scanned >= 10, scanned
     assert not offences, offences
     assert invocation.search("run `pact-memory project-id rekey`"), "the pattern is dead"
+    pieces = [
+        node.value
+        for node in ast.walk(ast.parse('f"run `pact-memory {verb}`"; "pact-memory %s" % verb'))
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    ]
+    assert [bool(assembled.search(piece)) for piece in pieces] == [True, False, True], pieces
+    assert not assembled.search("skills/pact-memory/scripts"), "a path segment is not an invocation"
 
 
 def test_a_newline_in_a_repo_path_does_not_forge_a_warning_line(

@@ -354,37 +354,69 @@ def reason_dict_sites(tree: ast.AST, exempt: frozenset = frozenset()) -> list:
     `dict(...)` call with a `reason` keyword or a `("reason", ...)` pair;
     `.update(...)` with a `reason` keyword or a list of pairs holding one;
     `.setdefault("reason", ...)`; and a subscript store whose key is the
-    constant `reason`, written inline or through a name bound to it.
+    constant `reason`, written inline, through a name bound to it, or through
+    a class attribute bound to it (`Keys.REASON`).
     `has_path` is True when the same construct also sets `path`, so a caller
     can exempt the `{path, reason}` pair. Nodes whose `id()` is in `exempt`
     (a builder's own body) are skipped.
 
+    A `reason` key in any other form is returned by `unread_reason_keys`,
+    which a caller asserts empty, so the census fails closed on a form this
+    function does not read.
+
     NOT COVERED: a key or keyword name that cannot be resolved statically (a
     parameter, a call's result such as `dict(zip(keys, values))`, a
     comprehension's loop target such as `{k: v for k, v in pairs}`, `**kwargs`
-    built at run time). Flagging every such store would flag ordinary dict
-    code.
+    built at run time, a constant imported from another module). Flagging
+    every such store would flag ordinary dict code.
     """
     aliases = import_aliases(tree) if isinstance(tree, ast.Module) else {}
     module = tree if isinstance(tree, ast.Module) else ast.Module(body=[tree], type_ignores=[])
+    class_keys = _class_attributes_bound_to(module, "reason")
     sites, seen = [], set()
     for nodes, scope_bindings in scopes(module):
         for node in nodes:
             if id(node) in exempt or id(node) in seen:
                 continue
             seen.add(id(node))
-            site = _reason_site(node, aliases, scope_bindings)
+            site = _reason_site(node, aliases, scope_bindings, class_keys)
             if site is not None:
                 sites.append(site)
     return sorted(set(sites))
 
 
-def _reason_site(node, aliases: dict, scope_bindings: dict):
+def _class_attributes_bound_to(module: ast.Module, value: str) -> frozenset:
+    """The attribute names a class body binds to the string `value`."""
+    names = set()
+    for owner in ast.walk(module):
+        if not isinstance(owner, ast.ClassDef):
+            continue
+        owner_bindings = bindings(owner, top_level_only=True)
+        for name, values in owner_bindings.items():
+            if any(resolve_constant(item, owner_bindings) == value for item in values):
+                names.add(name)
+    return frozenset(names)
+
+
+def _names_key(node, scope_bindings: dict, class_keys: frozenset, value: str) -> bool:
+    if isinstance(node, ast.Attribute) and node.attr in class_keys:
+        return value == "reason"
+    return resolve_constant(node, scope_bindings) == value
+
+
+def _builds_dict(call: ast.Call, aliases: dict) -> bool:
+    """A `dict(...)` call or a `.update(...)` call: a keyword or a pair
+    argument names a key of the mapping it builds."""
+    method = call.func.attr if isinstance(call.func, ast.Attribute) else None
+    return qualified_name(call.func, aliases) == "dict" or method == "update"
+
+
+def _reason_site(node, aliases: dict, scope_bindings: dict, class_keys: frozenset = frozenset()):
     def is_reason(key):
-        return resolve_constant(key, scope_bindings) == "reason"
+        return _names_key(key, scope_bindings, class_keys, "reason")
 
     def is_path(key):
-        return resolve_constant(key, scope_bindings) == "path"
+        return _names_key(key, scope_bindings, class_keys, "path")
 
     if isinstance(node, ast.Dict):
         if any(key is not None and is_reason(key) for key in node.keys):
@@ -393,9 +425,8 @@ def _reason_site(node, aliases: dict, scope_bindings: dict):
     if isinstance(node, ast.Call):
         names = {kw.arg for kw in node.keywords}
         pairs = [key for argument in node.args for key in _pair_keys(argument)]
-        target = qualified_name(node.func, aliases)
         method = node.func.attr if isinstance(node.func, ast.Attribute) else None
-        if target == "dict" or method == "update":
+        if _builds_dict(node, aliases):
             if "reason" in names or any(is_reason(key) for key in pairs):
                 return (node.lineno, "path" in names or any(is_path(key) for key in pairs))
         elif method == "setdefault":
@@ -408,6 +439,92 @@ def _reason_site(node, aliases: dict, scope_bindings: dict):
         if any(isinstance(t, ast.Subscript) and is_reason(t.slice) for t in targets):
             return (node.lineno, False)
     return None
+
+
+def unread_reason_keys(
+    tree: ast.AST, exempt: frozenset = frozenset(), callees: frozenset = frozenset()
+) -> list:
+    """Line of each `reason` key in a form neither `reason_dict_sites` nor a
+    plain read accounts for, so a census over reason dicts FAILS CLOSED on a
+    form it cannot classify. A caller asserts the list is empty.
+
+    A `reason` key is the constant, a name bound to it, a class attribute
+    bound to it, or a `reason=` keyword. It is accounted for as: a key of a
+    dict display; the target of a plain subscript store; the first argument
+    of `.get`, `.pop` or `.setdefault`; the key of a pair passed to `dict()`
+    or `.update()`; the left side of an `in` test; a subscript read or
+    delete; the value bound to a name (whose uses are checked in turn); or a
+    keyword of `dict()`, `.update()`, a function defined in the module, or a
+    name in `callees`. Anything else (a subscript inside a tuple target, a
+    keyword of another mapping type such as `OrderedDict(reason=...)`, a key
+    passed to `operator.setitem`) is returned. Nodes whose `id()` is in
+    `exempt` are skipped."""
+    aliases = import_aliases(tree) if isinstance(tree, ast.Module) else {}
+    module = tree if isinstance(tree, ast.Module) else ast.Module(body=[tree], type_ignores=[])
+    class_keys = _class_attributes_bound_to(module, "reason")
+    defined = {
+        node.name for node in ast.walk(module)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    } | set(callees)
+    parents = {
+        id(child): parent for parent in ast.walk(module) for child in ast.iter_child_nodes(parent)
+    }
+    lines = set()
+    for nodes, scope_bindings in scopes(module):
+        for node in nodes:
+            if id(node) in exempt:
+                continue
+            if isinstance(node, ast.keyword):
+                call = parents[id(node)]
+                callee = (qualified_name(call.func, aliases) or "").rpartition(".")[2]
+                if node.arg == "reason" and not (_builds_dict(call, aliases) or callee in defined):
+                    lines.add(call.lineno)
+                continue
+            if isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Load):
+                continue
+            if not isinstance(node, (ast.Constant, ast.Name, ast.Attribute)):
+                continue
+            if not _names_key(node, scope_bindings, class_keys, "reason"):
+                continue
+            if not _reason_key_is_read(node, parents, aliases):
+                lines.add(node.lineno)
+    return sorted(lines)
+
+
+def _reason_key_is_read(node, parents: dict, aliases: dict) -> bool:
+    parent = parents.get(id(node))
+    if isinstance(parent, ast.Dict):
+        return any(key is node for key in parent.keys)
+    if isinstance(parent, ast.Subscript) and parent.slice is node:
+        if not isinstance(parent.ctx, ast.Store):
+            return True
+        holder = parents.get(id(parent))
+        targets = (
+            holder.targets if isinstance(holder, ast.Assign)
+            else [holder.target] if isinstance(holder, (ast.AugAssign, ast.AnnAssign))
+            else []
+        )
+        return any(target is parent for target in targets)
+    if isinstance(parent, ast.Call):
+        return (
+            isinstance(parent.func, ast.Attribute)
+            and parent.func.attr in ("get", "pop", "setdefault")
+            and bool(parent.args) and parent.args[0] is node
+        )
+    if isinstance(parent, (ast.Tuple, ast.List)) and parent.elts and parent.elts[0] is node:
+        pairs = parents.get(id(parent))
+        call = parents.get(id(pairs))
+        return (
+            isinstance(pairs, (ast.List, ast.Tuple)) and isinstance(call, ast.Call)
+            and _builds_dict(call, aliases) and any(argument is pairs for argument in call.args)
+        )
+    if isinstance(parent, ast.Compare):
+        return parent.left is node and all(isinstance(op, (ast.In, ast.NotIn)) for op in parent.ops)
+    if isinstance(parent, ast.Assign):
+        return parent.value is node and all(isinstance(t, ast.Name) for t in parent.targets)
+    if isinstance(parent, ast.AnnAssign):
+        return parent.value is node and isinstance(parent.target, ast.Name)
+    return False
 
 
 def positional_constructions(tree: ast.AST, class_name: str) -> list:
@@ -425,9 +542,27 @@ def positional_constructions(tree: ast.AST, class_name: str) -> list:
     positional arguments to it, or when the partial's result is called with
     positional arguments.
 
-    NOT COVERED: a class reached through `getattr`, a registry or a call's
-    result, which only adversarial code would write.
+    The class used in any other way, as a value, is returned by
+    `unread_class_references`, which a caller asserts empty, so the census
+    fails closed on a construction this function does not read (the class
+    passed to `map`, chosen by a conditional expression, held in a
+    container).
+
+    NOT COVERED: a class reached through `getattr`, a registry keyed by a
+    string or a call's result, which only adversarial code would write.
     """
+    imports, names, is_class = _class_names(tree, class_name)
+    lines = set(_positional_calls(ast.walk(tree), is_class, imports))
+    for _owner, method, refers in _own_methods(tree, names, imports):
+        lines.update(_positional_calls(
+            ast.walk(method), lambda node, refers=refers: is_class(node) or refers(node),
+            imports,
+        ))
+    return sorted(lines)
+
+
+def _class_names(tree: ast.AST, class_name: str):
+    """(imports, every name bound to the class or a subclass, predicate)."""
     imports = import_aliases(tree) if isinstance(tree, ast.Module) else {}
     names = {name for name, target in imports.items() if target.split(".")[-1] == class_name}
     names.add(class_name)
@@ -449,18 +584,82 @@ def positional_constructions(tree: ast.AST, class_name: str) -> list:
                 if name not in names:
                     names.add(name)
                     changed = True
-    lines = set(_positional_calls(ast.walk(tree), is_class, imports))
+    return imports, names, is_class
+
+
+def _own_methods(tree: ast.AST, names: set, imports: dict):
+    """(class, method, self-reference predicate) for each method of the class
+    or a subclass that can name its own class."""
     for owner in ast.walk(tree):
         if not (isinstance(owner, ast.ClassDef) and owner.name in names):
             continue
         for method in owner.body:
             refers = _self_reference(method, imports)
             if refers is not None:
-                lines.update(_positional_calls(
-                    ast.walk(method), lambda node, refers=refers: is_class(node) or refers(node),
-                    imports,
-                ))
+                yield owner, method, refers
+
+
+def unread_class_references(tree: ast.AST, class_name: str) -> list:
+    """Line of each use of `class_name` (in every form
+    `positional_constructions` recognises, a method's own `cls`,
+    `type(self)` and `self.__class__` included) that is not a form that
+    census reads, so it FAILS CLOSED on a construction it cannot see. A
+    caller asserts the list is empty.
+
+    Read forms: the callee of a call, the class bound to a name (an alias,
+    itself checked), a base class, an attribute of the class other than an
+    uncalled `_make`, the first argument of `functools.partial`, the class
+    tested by `isinstance`/`issubclass`, and any use inside an annotation.
+    Anything else (the class passed to `map` or `starmap`, chosen by a
+    conditional expression, held in a list or dict, returned) is returned."""
+    imports, names, is_class = _class_names(tree, class_name)
+    parents = {id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    annotations = set()
+    for node in ast.walk(tree):
+        for field in ("annotation", "returns"):
+            value = getattr(node, field, None)
+            if isinstance(value, ast.AST):
+                annotations.update(id(inner) for inner in ast.walk(value))
+    lines = {
+        node.lineno for node in ast.walk(tree)
+        if is_class(node) and _class_use_is_unread(node, parents, imports, annotations)
+    }
+    for _owner, method, refers in _own_methods(tree, names, imports):
+        lines.update(
+            node.lineno for node in ast.walk(method)
+            if refers(node) and _class_use_is_unread(node, parents, imports, annotations)
+        )
     return sorted(lines)
+
+
+def _class_use_is_unread(node, parents: dict, imports: dict, annotations: set) -> bool:
+    if not isinstance(getattr(node, "ctx", ast.Load()), ast.Load) or id(node) in annotations:
+        return False
+    parent = parents.get(id(node))
+    if isinstance(parent, ast.Call):
+        if parent.func is node:
+            return False
+        if is_partial(parent, imports) and parent.args and parent.args[0] is node:
+            return False
+        tested = (qualified_name(parent.func, imports) or "") in ("isinstance", "issubclass")
+        return not (tested and len(parent.args) == 2 and parent.args[1] is node)
+    if isinstance(parent, ast.Tuple):
+        holder = parents.get(id(parent))
+        return not (
+            isinstance(holder, ast.Call)
+            and (qualified_name(holder.func, imports) or "") in ("isinstance", "issubclass")
+            and len(holder.args) == 2 and holder.args[1] is parent
+        )
+    if isinstance(parent, ast.Assign):
+        return not (parent.value is node and all(isinstance(t, ast.Name) for t in parent.targets))
+    if isinstance(parent, ast.ClassDef):
+        return not any(base is node for base in parent.bases)
+    if isinstance(parent, ast.Attribute) and parent.value is node:
+        if parent.attr != "_make":
+            return False
+        call = parents.get(id(parent))
+        return not (isinstance(call, ast.Call) and call.func is parent)
+    return True
 
 
 def _self_reference(method, imports: dict):

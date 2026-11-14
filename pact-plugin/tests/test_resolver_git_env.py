@@ -8,8 +8,10 @@ Summary: The resolvers that pick a CLAUDE.md or a project root run git without
 Used by: pytest.
 """
 import ast
+import asyncio
 import collections
 import inspect
+import os
 import subprocess
 import textwrap
 from pathlib import Path
@@ -201,6 +203,33 @@ def _command_runners() -> dict:
 _SUBPROCESS_CALLS = _command_runners()
 
 
+def _other_runners() -> dict:
+    """{qualified name: position of the program argument} for every os and
+    asyncio callable that runs a command (`os.system`, `os.popen`, the
+    `os.exec*`, `os.spawn*` and `os.posix_spawn*` families,
+    `asyncio.create_subprocess_*`), read from the modules. None of them is
+    checked for the location-free environment, so a git call through one
+    never passes: run git through subprocess with the environment."""
+    runners = {}
+    for name in dir(os):
+        if name.startswith(("system", "popen", "exec", "spawn", "posix_spawn")) and callable(
+            getattr(os, name)
+        ):
+            runners[f"os.{name}"] = 1 if name.startswith("spawn") else 0
+    for name in dir(asyncio):
+        if name.startswith("create_subprocess"):
+            runners[f"asyncio.{name}"] = 0
+    return runners
+
+
+_OTHER_RUNNERS = _other_runners()
+
+
+def _is_git(program: str) -> bool:
+    """`git`, named bare or by a path (`/usr/bin/git`, `git.exe`)."""
+    return os.path.basename(program) in ("git", "git.exe")
+
+
 def _program(node, bindings: dict, seen: frozenset = frozenset()):
     """The program an argv expression runs, or None when it cannot be
     resolved statically.
@@ -284,13 +313,23 @@ def _git_calls(scope, scope_bindings: dict = None, aliases: dict = None):
         if not isinstance(node, ast.Call):
             continue
         keyword, first = _runner(node.func, aliases), 0
-        if keyword is None and is_partial(node, aliases) and node.args:
+        wrapped = is_partial(node, aliases) and bool(node.args)
+        if keyword is None and wrapped:
             keyword, first = _runner(node.args[0], aliases), 1
         if keyword is None:
+            callee = node.args[0] if wrapped else node.func
+            position = _OTHER_RUNNERS.get(qualified_name(callee, aliases) or "")
+            if position is None:
+                continue
+            position += 1 if wrapped else 0
+            argv = node.args[position] if len(node.args) > position else None
+            program = _program(argv, scope_bindings) if argv is not None else None
+            if program is None or _is_git(program):
+                yield node, False
             continue
         argv = call_argument(node, first, keyword)
         program = _program(argv, scope_bindings) if argv is not None else None
-        if program is not None and program != "git":
+        if program is not None and not _is_git(program):
             continue
         passes = any(
             kw.arg == "env" and (
@@ -343,6 +382,41 @@ def _is_key_filter_of_it(node) -> bool:
     )
 
 
+def _unread_runner_references(source: str) -> list:
+    """Line of each use of a command runner (`_SUBPROCESS_CALLS`,
+    `_OTHER_RUNNERS`) other than as the callee of a call or the function a
+    `functools.partial` wraps, outside annotations. A runner held in a name
+    or a container, or passed as an argument, is called where the scan
+    cannot read its argv or its environment, so the guard FAILS CLOSED on
+    it."""
+    tree = ast.parse(source)
+    aliases = import_aliases(tree)
+    parents = {id(child): parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    annotations = set()
+    for node in ast.walk(tree):
+        for field in ("annotation", "returns"):
+            value = getattr(node, field, None)
+            if isinstance(value, ast.AST):
+                annotations.update(id(inner) for inner in ast.walk(value))
+    lines = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load)):
+            continue
+        if id(node) in annotations or (
+            _runner(node, aliases) is None
+            and (qualified_name(node, aliases) or "") not in _OTHER_RUNNERS
+        ):
+            continue
+        parent = parents.get(id(node))
+        if isinstance(parent, ast.Call) and (
+            parent.func is node
+            or (is_partial(parent, aliases) and parent.args and parent.args[0] is node)
+        ):
+            continue
+        lines.append(node.lineno)
+    return sorted(lines)
+
+
 def _function(source: str, name: str) -> ast.FunctionDef:
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.FunctionDef) and node.name == name:
@@ -379,26 +453,33 @@ def test_every_resolver_git_call_passes_the_location_free_env():
     string, a list or tuple, a starred splice, a `+` concatenation, a name
     bound in the scope, an enclosing function or the module); an argv that
     cannot be resolved (a call's return value, an imported constant) is
-    treated as git. A git call added in that directory in any of those
-    forms without the environment fails here.
+    treated as git, and git named by a path (`/usr/bin/git`) is git. A call
+    of an os or asyncio command runner (`_OTHER_RUNNERS`) whose program is
+    git or cannot be resolved never passes. A runner used as a value (held
+    in a name or a container, passed as an argument) fails closed
+    (`_unread_runner_references`). A git call added in that directory in
+    any of those forms without the environment fails here.
 
-    NOT COVERED: a subprocess function reached through `getattr`, `exec` or
-    a re-export from another module, and a call of a partial's RESULT that
-    overrides the environment the partial bound (the partial itself is
-    checked), which only adversarial code would write."""
-    missing, counts = [], {}
+    NOT COVERED: a runner reached through `getattr`, `exec` or a re-export
+    from another module, and a call of a partial's RESULT that overrides
+    the environment the partial bound (the partial itself is checked),
+    which only adversarial code would write."""
+    missing, counts, unread = [], {}, []
     for path in sorted((_PLUGIN / _SCRIPTS_DIR).glob("*.py")):
-        calls = _module_git_calls(path.read_text(encoding="utf-8"))
+        source = path.read_text(encoding="utf-8")
+        calls = _module_git_calls(source)
         counts[path.name] = len(calls)
         missing += [
             f"{_SCRIPTS_DIR}/{path.name}::{name}:{call.lineno}"
             for name, call, passes in calls if not passes
         ]
+        unread += [f"{_SCRIPTS_DIR}/{path.name}:{line}" for line in _unread_runner_references(source)]
     for name, floor in _GIT_CALL_FLOORS.items():
         assert counts.get(name, 0) >= floor, (
             f"{name}: found {counts.get(name, 0)} git calls, expected at least {floor}"
         )
     assert missing == [], f"git calls without env=git_env_without_location(): {missing}"
+    assert unread == [], f"command runners used as values, where the scan cannot read them: {unread}"
 
 
 def test_the_scan_resolves_every_argv_form_and_fails_closed():
@@ -415,6 +496,8 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
         from subprocess import run
         from subprocess import run as launch
         from subprocess import getoutput
+        import asyncio
+        import os
         import functools
         from functools import partial
         BASE = ["git"]
@@ -463,6 +546,16 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
             subprocess.getstatusoutput(cmd="git status")  # bad
             subprocess.getoutput("ls -l")  # skip
             getoutput("git log")  # bad
+            subprocess.run(["/usr/bin/git", "log"])  # bad
+            subprocess.run(["/usr/bin/gitk"])  # skip
+            os.system("git status")  # bad
+            os.system("ls -l")  # skip
+            os.popen(args)  # bad
+            os.execvp("git", ["git", "log"])  # bad
+            os.spawnlp(os.P_WAIT, "git", "git", "log")  # bad
+            os.spawnlp(os.P_WAIT, "ls", "ls")  # skip
+            asyncio.create_subprocess_exec("git", "log", env=git_env_without_location())  # bad
+            functools.partial(os.system, "git status")  # bad
             functools.partial(subprocess.run, ["git", "log"])  # bad
             functools.partial(subprocess.run, ["git", "log"], env=git_env_without_location())  # ok
             functools.partial(subprocess.run, ["ls"])  # skip
@@ -496,10 +589,45 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
         call.lineno: ("ok" if passes else "bad")
         for _name, call, passes in _module_git_calls(source)
     }
-    assert len(expected) == 45, expected  # every marked fixture line was read
+    assert len(expected) == 55, expected  # every marked fixture line was read
     got = {number: seen.get(number, "skip") for number in expected}
     assert got == expected
     assert sorted(seen) == sorted(n for n, v in expected.items() if v != "skip")
+
+
+def test_a_runner_used_as_a_value_fails_closed():
+    """Live control for `_unread_runner_references`: each fixture line
+    carries `unread` (a runner held or passed where the scan cannot read the
+    call) or `read` (a call, a partial, an annotation, a non-runner)."""
+    source = textwrap.dedent("""
+        import os
+        import subprocess
+        import functools
+        from subprocess import run as launch
+
+        def resolver(argv, proc: subprocess.Popen) -> subprocess.Popen:
+            runner = subprocess.run  # unread
+            table = {"run": subprocess.run}  # unread
+            list(map(subprocess.check_output, argv))  # unread
+            hooks = [launch]  # unread
+            shell = os.system  # unread
+            subprocess.run(argv)  # read
+            launch(argv)  # read
+            functools.partial(subprocess.run, argv)  # read
+            os.system("ls")  # read
+            subprocess.CompletedProcess  # read
+            subprocess.CalledProcessError  # read
+            os.path.join("a", "b")  # read
+    """)
+    expected = {
+        number: line.rsplit("# ", 1)[1]
+        for number, line in enumerate(source.splitlines(), start=1)
+        if line.rstrip().endswith(("# unread", "# read"))
+    }
+    assert len(expected) == 12, expected
+    found = set(_unread_runner_references(source))
+    assert {number: ("unread" if number in found else "read") for number in expected} == expected
+    assert found <= set(expected), sorted(found - set(expected))
 
 
 # THE THREE SOURCE SCANNERS GUARD PROPERTIES OVER THE SAME SCRIPTS, so each

@@ -21,6 +21,7 @@ from fixtures.identity_git import (
     reason_dict_sites,
     run_git,
     seed_session_evidence,
+    unread_reason_keys,
     write_common_dir_override,
 )
 
@@ -645,6 +646,60 @@ class TestOneDeclineRecord:
         assert [line for line, has_path in sites if not has_path] == []
         # The override_ignored pairs are found, so the scan is reading the module.
         assert len(sites) >= 2, sites
+        # A `reason` key in a form the scan cannot classify fails closed.
+        assert unread_reason_keys(tree, inside) == []
+
+    def test_a_reason_key_in_an_unread_form_fails_closed(self):
+        """Live control for `unread_reason_keys`: each fixture line carries
+        `unread` (a `reason` key the dict scan cannot classify) or `read` (a
+        form the dict scan or a plain read accounts for)."""
+        import ast
+        import textwrap
+
+        source = textwrap.dedent("""
+            import collections
+            import operator
+            KEY = "reason"  # read
+
+            class Keys:
+                REASON = "reason"  # read
+
+            def helper(reason=None):
+                return reason
+
+            def build(record, reason, rows):
+                record["reason"], record["rung"] = reason, "git"  # unread
+                collections.OrderedDict(reason=reason)  # unread
+                operator.setitem(record, "reason", reason)  # unread
+                record.__setitem__(KEY, reason)  # unread
+                labels = ("reason", "path")  # unread
+                for record[KEY] in rows:  # unread
+                    pass
+                record[Keys.REASON] = reason  # read
+                record["reason"] = reason  # read
+                record[KEY] += reason  # read
+                value = record["reason"]  # read
+                del record["reason"]  # read
+                record.get("reason")  # read
+                record.pop(KEY, None)  # read
+                "reason" in record  # read
+                dict([("reason", reason)])  # read
+                dict(reason=reason)  # read
+                helper(reason=reason)  # read
+                return {Keys.REASON: reason}  # read
+        """)
+        expected = {
+            number: line.rsplit("# ", 1)[1]
+            for number, line in enumerate(source.splitlines(), start=1)
+            if line.rstrip().endswith(("# unread", "# read"))
+        }
+        assert len(expected) == 20, expected
+        found = set(unread_reason_keys(ast.parse(source)))
+        assert {number: ("unread" if number in found else "read") for number in expected} == expected
+        assert found <= set(expected), sorted(found - set(expected))
+        # A class-attribute key is a site the dict scan reports, not an unread one.
+        sites = {line for line, _has_path in reason_dict_sites(ast.parse(source))}
+        assert {n for n, line in enumerate(source.splitlines(), 1) if "Keys.REASON" in line} <= sites
 
     def test_the_reason_scan_reads_every_form(self):
         """Live control for the scan above. Each line in the fixture carries
