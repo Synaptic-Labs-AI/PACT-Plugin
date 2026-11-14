@@ -1475,6 +1475,18 @@ class _DetectionGraph:
 
     def __init__(self):
         self.defs, self.aliases, self.constants, self._files = {}, {}, {}, {}
+        # {module: names a relative import binds to a module that cannot be
+        # found}; a use of one fails closed in `route_inputs`.
+        self.unresolved = {}
+
+    @staticmethod
+    def _path(name: str):
+        for root in _PROJECT_ROOTS:
+            for candidate in (root / (name.replace(".", "/") + ".py"),
+                              root / name.replace(".", "/") / "__init__.py"):
+                if candidate.is_file():
+                    return candidate
+        return None
 
     def load(self, module: str) -> bool:
         import ast
@@ -1483,17 +1495,32 @@ class _DetectionGraph:
 
         if module in self._files:
             return self._files[module] is not None
-        name = module.lstrip(".")
-        path = next(
-            (root / (name.replace(".", "/") + ".py") for root in _PROJECT_ROOTS
-             if (root / (name.replace(".", "/") + ".py")).is_file()),
-            None,
-        )
+        path = self._path(module)
         self._files[module] = path
         if path is None:
             return False
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        self.aliases[module] = import_aliases(tree)
+        aliases = import_aliases(tree)
+        # A relative import names a module in the importing module's own
+        # package (`from .paths import f` in `shared.project_scope` is
+        # `shared.paths.f`), which `import_aliases` records without its dots.
+        package = module.split(".")[:-1] if path.name != "__init__.py" else module.split(".")
+        self.unresolved[module] = set()
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.ImportFrom) and node.level):
+                continue
+            base = package[: len(package) - (node.level - 1)] if node.level - 1 <= len(package) else None
+            for alias in node.names:
+                bound = alias.asname or alias.name
+                if base is None:
+                    self.unresolved[module].add(bound)
+                    continue
+                owner = ".".join([*base, *([node.module] if node.module else [])])
+                target = f"{owner}.{alias.name}" if owner else alias.name
+                aliases[bound] = target
+                if self._path(owner or alias.name) is None and self._path(target) is None:
+                    self.unresolved[module].add(bound)
+        self.aliases[module] = aliases
         constants = {}
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -1688,6 +1715,10 @@ def route_inputs() -> tuple:
         module, node = key[0], graph.defs[key]
         names = graph.aliases[module]
         site = f"{module}.py"
+        for sub in ast.walk(node):
+            if isinstance(sub, ast.Name) and sub.id in graph.unresolved.get(module, ()):
+                add(("call", f"<unresolved relative import {module}: {sub.id}>"),
+                    f"{site}:{sub.lineno}", key)
         for read, shown in _env_reads(node, module, key[1], graph):
             if isinstance(read, ast.Constant) and isinstance(read.value, str):
                 add(("env", read.value), f"{site}:{read.lineno}", key)
@@ -1824,6 +1855,13 @@ class TestEveryRouteEntryConditionIsARoute:
             "where get_user_memory_dir finds the user-scope setting; read inside "
             "get_user_memory_dir, which the user-setting route replaces"
         ),
+        ("env", "<shared.paths.get_claude_config_dir: os.environ if env is None else env>"): (
+            "reads CLAUDE_CONFIG_DIR, the config root under which _session_record_on_disk "
+            "opens a session record; reached only through the two session-record "
+            "readers, which return nothing in a test process before they read it, and "
+            "whose records the session-record and worktree identity record routes "
+            "replace whole"
+        ),
         ("env", "<shared.project_scope.git_env_without_location: os.environ.items>"): (
             "copies the environment for git subprocesses with the location "
             "variables removed; it selects nothing"
@@ -1876,3 +1914,36 @@ class TestEveryRouteEntryConditionIsARoute:
         conditions = route_entry_conditions()
         for known in (("env", "CLAUDE_PROJECT_DIR"), ("call", "get_project_dir_from_session_record")):
             assert known in conditions and known in route_driven_conditions, known
+
+    def test_the_graph_resolves_relative_imports_and_fails_closed(self, tmp_path, monkeypatch):
+        """Control for `_DetectionGraph.load`: a relative import resolves
+        against the importing module's package, and one that names a missing
+        module or climbs above the package is recorded as unresolved, which
+        `route_inputs` turns into a condition no exclusion names."""
+        import sys
+
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "helper.py").write_text(
+            "import os\n\ndef read():\n    return os.environ.get('X')\n"
+        )
+        (package / "main.py").write_text(
+            "from .helper import read\n"
+            "from . import helper\n"
+            "from .missing import gone\n"
+            "from ...outside import far\n\n"
+            "def entry():\n"
+            "    read()\n"
+            "    helper.read()\n"
+            "    gone()\n"
+            "    far()\n"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path,))
+        graph = _DetectionGraph()
+        assert graph.load("pkg.main")
+        assert graph.aliases["pkg.main"]["read"] == "pkg.helper.read"
+        assert graph.aliases["pkg.main"]["helper"] == "pkg.helper"
+        assert graph.unresolved["pkg.main"] == {"gone", "far"}
+        targets = {target for _node, target in graph.references(graph.defs[("pkg.main", "entry")], "pkg.main")}
+        assert targets == {("pkg.helper", "read")}
