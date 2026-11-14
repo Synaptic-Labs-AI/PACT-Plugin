@@ -1345,63 +1345,83 @@ def _cli_verbs() -> set:
     return verbs
 
 
-# The executable name, as a whole word (`pact-memory-x` is another word).
-_EXECUTABLE = re.compile(r"(?<![\\w-])pact-memory(?![\\w-])")
-# Calls whose string arguments are path segments.
-_PATH_CALLS = {"Path", "PurePath", "PosixPath", "join", "joinpath"}
+# The executable name, as a whole word: `pact-memory-x`, `pact-memoryx` and
+# `compact-memory` are other words.
+_EXECUTABLE = re.compile(r"(?<![\w-])pact-memory(?![\w-])")
+
+# The occurrences the scan cannot judge from their own text, each with its
+# reason. A key is (file, enclosing function, the constant's whole value, the
+# constant's form); `path-segment` is the right operand of `/`.
+_NAMED_UNREADABLE = [
+    # The store folder: `Path.home() / ".claude" / "pact-memory"`. The right
+    # operand of `/` joins onto a Path and the function returns that Path, so
+    # the name is the last folder of a location, never a command word.
+    ("config.py", "get_memory_dir", "pact-memory", "path-segment"),
+]
 
 
 def _pact_memory_census(tree: ast.AST, verbs: set) -> tuple:
     """(offences, unreadable): every occurrence of the executable name in a
     string of `tree`, each READ or REPORTED, never skipped.
 
-    ANCHOR: the word `pact-memory` in any str or bytes constant, f-string
-    pieces included, docstrings included (comments are invisible to the
-    AST). Each occurrence is READ when the scan can judge it:
-    - a path segment: a `/` or `\\` beside it, or a whole constant used as
-      an operand of `/` or an argument of a path call (`_PATH_CALLS`);
-    - followed, inside the same string, by whitespace and a word: a CLI verb
-      there is an OFFENCE (an invocation of an executable that does not
-      exist), any other word is prose;
-    - followed by punctuation (`.`, `,`, `)`, a possessive `'s`): prose,
-      wherever the string sits, since no neighbour can turn it into a verb;
-    - a whole, stand-alone string that ends on the name (with at most a
-      closing quote): a name, not a command.
-    Every other occurrence is UNREADABLE: the name is a piece whose
-    neighbour supplies the rest (a list or tuple element, a dict value, an
-    argument to `join`, `format` or `%`, a `+` operand, an f-string piece),
-    so the scan cannot see whether a verb follows it."""
+    ANCHOR: the word `pact-memory` (`_EXECUTABLE`) in any str or bytes
+    constant, f-string pieces and docstrings included (comments are
+    invisible to the AST).
+
+    An occurrence is judged ONLY by the text that follows it inside the same
+    constant, never by where the constant sits. Each form the scan reads, and
+    the check on that text that makes it safe:
+    - whitespace, then a CLI verb: an OFFENCE (an invocation of an executable
+      that does not exist). This is checked before every other form;
+    - a `/` or `\\` directly after the name: a folder inside a path, because
+      the path continues in the same text;
+    - whitespace, then a word that starts with a letter (an opening quote or
+      parenthesis may precede it) and is not a verb: prose, because the token
+      after the name is visible and is not a verb;
+    - sentence punctuation (`.`, `,`, `;`, `:`, `!`, `?`, `)`), then
+      whitespace or the end of the constant, or a possessive `'s`: prose,
+      because the sentence ends or pauses on the name.
+    Every other occurrence is UNREADABLE, a constant that ends on the name
+    included: what follows it comes from outside the constant (an f-string
+    piece, a `+` or `%` operand, a list element, or a variable a command is
+    later built from), so its own text cannot show that no verb follows. Each
+    unreadable site is (line, enclosing function, value, form), the form being
+    `path-segment` for the right operand of `/` and otherwise the parent
+    node's type."""
     parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+    def enclosing_function(node):
+        while node in parents:
+            node = parents[node]
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return node.name
+        return None
+
     offences, unreadable = [], []
     verb = re.compile(
         r"[`'\"]?\s+[`'\"]?(" + "|".join(re.escape(v) for v in sorted(verbs, key=len, reverse=True)) + r")\b"
     )
-    word = re.compile(r"[`'\"]?\s+[`'\"]?\w")
-    punctuation = re.compile(r"[`'\"]?(?:[.,;:!?)]|'s\b)")
-    ending = re.compile(r"[`'\"]?$")
+    word = re.compile(r"[`'\"]?\s+[`'\"(]?[A-Za-z]")
+    punctuation = re.compile(r"[`'\"]?(?:'s\b|[.,;:!?)]+[`'\"]?(?:\s|\Z))")
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Constant) and isinstance(node.value, (str, bytes))):
             continue
         text = node.value if isinstance(node.value, str) else node.value.decode("latin-1")
-        parent = parents.get(node)
-        whole = not isinstance(parent, (ast.JoinedStr, ast.BinOp, ast.List, ast.Tuple, ast.Set, ast.Dict, ast.Call, ast.keyword, ast.Starred, ast.Subscript))
-        path_position = (
-            (isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Div))
-            or (isinstance(parent, ast.Call) and getattr(parent.func, "attr", getattr(parent.func, "id", None)) in _PATH_CALLS)
-        )
         for match in _EXECUTABLE.finditer(text):
-            before, after = text[:match.start()], text[match.end():]
+            after = text[match.end():]
             site = f"{node.lineno}: {text[max(0, match.start() - 20):match.end() + 20]!r}"
-            if before.endswith(("/", "\\")) or after.startswith(("/", "\\")):
-                continue
             if verb.match(after):
                 offences.append(site)
-            elif word.match(after) or punctuation.match(after):
-                continue
-            elif ending.match(after) and (whole or path_position):
+            elif after.startswith(("/", "\\")) or word.match(after) or punctuation.match(after):
                 continue
             else:
-                unreadable.append(site)
+                parent = parents.get(node)
+                form = (
+                    "path-segment"
+                    if isinstance(parent, ast.BinOp) and isinstance(parent.op, ast.Div) and parent.right is node
+                    else type(parent).__name__
+                )
+                unreadable.append((node.lineno, enclosing_function(node), text, form))
     return offences, unreadable
 
 
@@ -1410,8 +1430,9 @@ def test_no_user_facing_text_names_a_pact_memory_executable():
     does not exist: `pact-memory` followed by any verb the CLI accepts, in a
     string anywhere in the memory scripts. Comments are exempt (`cli.py`'s
     explanation of the bug). FAILS CLOSED (`_pact_memory_census`): an
-    occurrence the scan cannot judge, such as the name as a list element of
-    a command `shlex.join` prints, fails as unreadable."""
+    occurrence the scan cannot judge fails as unreadable unless it is in
+    `_NAMED_UNREADABLE`, and a second occurrence matching a named entry
+    fails too."""
     verbs = _cli_verbs()
     assert {"project-id", "rekey", "save"} <= verbs, verbs
     offences, unreadable, scanned, occurrences = [], [], 0, 0
@@ -1421,19 +1442,38 @@ def test_no_user_facing_text_names_a_pact_memory_executable():
         occurrences += len(_EXECUTABLE.findall(source))
         found, unread = _pact_memory_census(ast.parse(source), verbs)
         offences += [f"{path.name}:{site}" for site in found]
-        unreadable += [f"{path.name}:{site}" for site in unread]
+        unreadable += [(path.name, *site) for site in unread]
     assert scanned >= 10, scanned
     assert occurrences >= 10, "the anchor matched nothing: the census read no text"
     assert offences == [], offences
-    assert unreadable == [], f"pact-memory in a form the scan cannot judge: {unreadable}"
+    assert [site[:1] + site[2:] for site in unreadable] == _NAMED_UNREADABLE, (
+        f"pact-memory in a form the scan cannot judge: {unreadable}"
+    )
+
+
+def test_the_executable_name_is_matched_as_a_whole_word():
+    """Catches an `_EXECUTABLE` that matches inside another word: a longer
+    word that contains the name is not the executable."""
+    assert _EXECUTABLE.search("run pact-memory rekey")
+    assert _EXECUTABLE.search("`pact-memory` rekey")
+    for other in ("compact-memory save", "pact-memoryx rekey", "pact-memory-x rekey", "pact-memory_x rekey"):
+        assert not _EXECUTABLE.search(other), other
 
 
 def test_the_executable_census_reads_or_reports_every_form():
     """Live control for `_pact_memory_census`: each form is an offence,
-    unreadable or read as benign, as its comment says."""
+    unreadable, named or read as benign, as its comment says. A source is
+    scanned as a file named `config.py`, so `named` means it matched
+    `_NAMED_UNREADABLE` exactly."""
     verbs = {"project-id", "rekey", "save"}
     cases = {
+        # Offences: a verb visible after the name.
         '"run `pact-memory project-id rekey`"': "offence",
+        'b"pact-memory rekey"': "offence",
+        'f"run {root}/pact-memory rekey"': "offence",
+        '"compact-memory save"': "read",
+        '"pact-memoryx rekey"': "read",
+        # The name ends its constant: a neighbour supplies what follows.
         'shlex.join(["pact-memory", "project-id", "rekey"])': "unreadable",
         '" ".join(["pact-memory", "rekey"])': "unreadable",
         'f"run `pact-memory {verb}`"': "unreadable",
@@ -1441,20 +1481,44 @@ def test_the_executable_census_reads_or_reports_every_form():
         '"pact-memory %s" % verb': "unreadable",
         '"{} {}".format("pact-memory", "rekey")': "unreadable",
         '{"cmd": "pact-memory"}["cmd"] + " rekey"': "unreadable",
-        'b"pact-memory rekey"': "offence",
+        'warn("the executable `pact-memory")': "unreadable",
+        '_EXE = "pact-memory"\ncmd = f"run {_EXE} rekey"': "unreadable",
+        'def name():\n    return "pact-memory"\ncmd = name() + " rekey"': "unreadable",
+        'cmd = f"{\'pact-memory\'}{verb}"': "unreadable",
+        'cmd = f"{root}/pact-memory {verb}"': "unreadable",
+        'Path.home() / ".claude" / "pact-memory"': "unreadable",
+        # A form the scan reads, followed by text that is not one.
+        '"pact-memory --db-path=x rekey"': "unreadable",
+        '"pact-memory.exe rekey"': "unreadable",
+        '"pact-memory 2 rekey"': "unreadable",
+        # The named entry, and commands placed where it sits.
+        'def get_memory_dir():\n    return Path.home() / ".claude" / "pact-memory"': "named",
+        'def get_memory_dir():\n    return f"{\'pact-memory\'} rekey"': "unreadable",
+        'def get_memory_dir():\n    name = "pact-memory"\n    return Path.home() / name': "unreadable",
+        'def get_memory_dir():\n    return Path.home() / (".claude/" + "pact-memory" + " rekey")': "unreadable",
+        'def other():\n    return Path.home() / ".claude" / "pact-memory"': "unreadable",
+        # Benign: prose and paths whose own text decides them.
         '"see the pact-memory skill"': "read",
+        '"see the pact-memory\\nskill"': "read",
         '"skills/pact-memory/scripts"': "read",
-        'Path.home() / ".claude" / "pact-memory"': "read",
+        '"~/.claude/pact-memory/memory.db"': "read",
         '"pact-memory-cache"': "read",
+        '"""Docstring: `~/.claude/pact-memory` (the default)."""': "read",
         'helper = "named pact-memory."': "read",
         'warn("run setup for pact-memory.")': "read",
         'note = "pact-memory\'s store"': "read",
-        'warn("the executable `pact-memory")': "unreadable",
+        '# pact-memory rekey\nx = 1': "read",
     }
     verdicts = {}
     for source, _expected in cases.items():
         offences, unreadable = _pact_memory_census(ast.parse(source), verbs)
-        verdicts[source] = "offence" if offences else "unreadable" if unreadable else "read"
+        keys = [("config.py", *site[1:]) for site in unreadable]
+        verdicts[source] = (
+            "offence" if offences
+            else "named" if keys and keys == _NAMED_UNREADABLE
+            else "unreadable" if keys
+            else "read"
+        )
     assert verdicts == cases
 
 
