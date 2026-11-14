@@ -275,11 +275,27 @@ def _module_level_mutations(path):
     return lines
 
 
+def _reads_a_docstring(tree):
+    """Whether `tree` can read a docstring as data: a `__doc__` name or
+    attribute, a `"__doc__"` string (`getattr`, `vars`), or `getdoc`. A
+    docstring is exempt only where nothing reads one, since a read turns it
+    into a value the code can use."""
+    return any(
+        (isinstance(node, ast.Name) and node.id in ("__doc__", "getdoc"))
+        or (isinstance(node, ast.Attribute) and node.attr in ("__doc__", "getdoc"))
+        or (isinstance(node, ast.Constant) and node.value == "__doc__")
+        for node in ast.walk(tree)
+    )
+
+
 def _docstrings(tree):
     """The ids of every docstring node: the leading string of a module,
-    class or function body. A docstring documents a path mutation; it never
+    class or function body, or none in a module that reads a docstring
+    (`_reads_a_docstring`). A docstring documents a path mutation; it never
     runs one, so it is not codegen."""
     found = set()
+    if _reads_a_docstring(tree):
+        return found
     for node in ast.walk(tree):
         if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
             body = node.body
@@ -404,8 +420,8 @@ def test_a_name_holding_sys_path_is_followed(tmp_path):
 
 def test_a_docstring_naming_a_mutation_is_not_codegen(tmp_path):
     """A docstring that names a path mutation describes it and never runs
-    it, so it is not a form; a string assigned for a child process to run
-    still is, and so is a real mutation."""
+    it, so it is not a form; a docstring its module reads as data is, and so
+    are a string assigned for a child process to run and a real mutation."""
     needle = "sys.path" + ".insert(0, 'x')"
     documented = tmp_path / "documented.py"
     documented.write_text(
@@ -417,7 +433,16 @@ def test_a_docstring_naming_a_mutation_is_not_codegen(tmp_path):
     codegen.write_text(f'CHILD = "import sys; {needle}"\n', encoding="utf-8")
     real = tmp_path / "real.py"
     real.write_text(f"import sys\n{needle}\n", encoding="utf-8")
+    read_doc = tmp_path / "read_doc.py"
+    read_doc.write_text(
+        f'def helper():\n    """import sys; {needle}"""\n\n\nCHILD = helper.__doc__\n',
+        encoding="utf-8",
+    )
     assert not _any_form_present(documented)
+    assert _any_form_present(read_doc)
+    for read in ("f.__doc__", "getattr(f, '__doc__')", "inspect.getdoc(f)", "vars(f)['__doc__']", "__doc__"):
+        assert _reads_a_docstring(ast.parse(read)), read
+    assert not _reads_a_docstring(ast.parse("f.__name__"))
     assert _any_form_present(codegen)
     assert _any_form_present(real)
 

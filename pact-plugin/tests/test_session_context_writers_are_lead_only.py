@@ -227,7 +227,8 @@ def _derives_a_session_path(function):
 
 
 # ANCHOR of the name census: the context file's name or a piece of it, in
-# any string constant or f-string piece outside a docstring. `pact-sessions`
+# any string constant or f-string piece outside a docstring (a docstring
+# counts too in a module that reads one, `_reads_a_docstring`). `pact-sessions`
 # (the sessions root) is another word, and `context.json` counts only as the
 # file's own tail (`context.json`, `-context.json`, `session-context.json`),
 # not inside another name such as `planted-context.json`.
@@ -237,6 +238,19 @@ _NAME_ANCHOR = re.compile(
 # A complete literal file name in the sessions folder other than the context
 # file: `pact-session-<word>.<ext>`, no placeholder.
 _OTHER_SESSION_FILE = re.compile(r"pact-session-(?!context\b)[a-z0-9_]+\.[a-z]+\b")
+
+
+def _reads_a_docstring(tree):
+    """Whether `tree` can read a docstring as data: a `__doc__` name or
+    attribute, a `"__doc__"` string (`getattr`, `vars`), or `getdoc`. A
+    docstring is exempt only where nothing reads one, since a read turns it
+    into a value the code can use."""
+    return any(
+        (isinstance(node, ast.Name) and node.id in ("__doc__", "getdoc"))
+        or (isinstance(node, ast.Attribute) and node.attr in ("__doc__", "getdoc"))
+        or (isinstance(node, ast.Constant) and node.value == "__doc__")
+        for node in ast.walk(tree)
+    )
 
 
 def _unreadable_name(text):
@@ -296,6 +310,7 @@ class _Census(ast.NodeVisitor):
         self.rel = rel
         self.stack = []
         self.docstrings = set()
+        self.reads_docstrings = _reads_a_docstring(tree)
         self.api_refs = Counter()
         self.name_sites = Counter()
         self.unreadable_names = []
@@ -327,6 +342,8 @@ class _Census(ast.NodeVisitor):
 
     def _note_docstring(self, node):
         body = getattr(node, "body", [])
+        if self.reads_docstrings:
+            return
         if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
             self.docstrings.add(id(body[0].value))
 
@@ -716,7 +733,8 @@ class TestCensus:
         """Positive control for the census's fail-closed branch: a name built
         from a `%` template lands in the unreadable list, while a complete
         name beside it is a name site and another session file's name is
-        neither."""
+        neither. A docstring holding the template is exempt, unless its
+        module reads a docstring as data."""
         hooks = tmp_path / "hooks"
         hooks.mkdir()
         (hooks / "seeded.py").write_text(
@@ -727,10 +745,24 @@ class TestCensus:
             "def other(base):\n"
             "    return base / 'pact-session-journal.json'\n"
         )
+        (hooks / "documented.py").write_text(
+            "def f():\n"
+            "    \"\"\"pact-session-%s.json\"\"\"\n"
+        )
+        (hooks / "read_doc.py").write_text(
+            "def f(base):\n"
+            "    \"\"\"pact-session-%s.json\"\"\"\n"
+            "    return base / (f.__doc__ % 'context')\n"
+        )
         found = _python_census(tmp_path)
-        assert found["unreadable_names"] == ["hooks/seeded.py:2: 'pact-session-%s.json'"], (
-            found["unreadable_names"])
+        assert sorted(found["unreadable_names"]) == [
+            "hooks/read_doc.py:2: 'pact-session-%s.json'",
+            "hooks/seeded.py:2: 'pact-session-%s.json'",
+        ], found["unreadable_names"]
         assert found["name_sites"] == Counter({("hooks/seeded.py", "named"): 1})
+        for read in ("f.__doc__", "getattr(f, '__doc__')", "inspect.getdoc(f)", "vars(f)['__doc__']", "__doc__"):
+            assert _reads_a_docstring(ast.parse(read)), read
+        assert not _reads_a_docstring(ast.parse("f.__name__"))
 
     def test_a_str_replace_is_not_a_relocation(self, tmp_path):
         """Path.replace takes one argument; str.replace takes two."""
