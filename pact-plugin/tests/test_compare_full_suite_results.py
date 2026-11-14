@@ -9,9 +9,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
+import types
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -35,6 +37,9 @@ SHA = "a" * 40
 ALPHA = "tests/test_example.py::test_alpha"
 BETA = "tests/test_example.py::test_beta"
 GAMMA = "tests/test_example.py::test_gamma"
+
+
+SESSION_BANNER_TEXT = "=" * 29 + " test session starts " + "=" * 30
 
 
 def case(node_id, outcome="pass", reason=None, duration=0.01):
@@ -90,7 +95,9 @@ def environment_steps():
 
 def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
              record_updates=None, collection_updates=None, metadata_updates=None,
-             teardown_after_pass=(), collection_skips=()):
+             teardown_after_pass=(), collection_skips=(), command=None, seeds=(),
+             header_lines=(), captured=(), banner=True, finish_lines=(),
+             census_failed=False):
     directory = root / name
     artifact = directory / "artifact"
     artifact.mkdir(parents=True)
@@ -109,12 +116,14 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
               "xfailed": counts["xfail"], "xpassed": counts["xpass"]}
     summary = summary_for(totals)
     red = totals["failed"] or totals["errors"]
+    # A census fails a green session with exit 1: the job and verifier read red.
+    failing = red or census_failed
     skip_counts = Counter((item["node_id"].split("::", 1)[0], item["reason"] or "")
                           for item in cases if item["outcome"] == "skip")
     for file, reason in collection_skips:
         skip_counts[(file, reason)] += 1
     record = {"schema_version": 3, "collected": len(nodes), **totals,
-              "deselected": 0, "exitstatus": int(bool(red)), "summary_line": summary,
+              "deselected": 0, "exitstatus": int(bool(failing)), "summary_line": summary,
               "terminal_node_ids": nodes, "items_before_modifyitems": len(nodes),
               "items_after_modifyitems": len(nodes), "run_id": str(run_id),
               "run_attempt": "1", "owner_pid": 123,
@@ -132,10 +141,10 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
                 "workflowDatabaseId": comparator.WORKFLOW_DATABASE_ID,
                 "displayTitle": name, "event": "workflow_dispatch", "headSha": SHA,
                 "headBranch": "issue-1714", "status": "completed",
-                "conclusion": "failure" if red else "success",
+                "conclusion": "failure" if failing else "success",
                 "url": f"https://example.invalid/runs/{run_id}",
                 "jobs": [{"name": "full-suite",
-                          "conclusion": "failure" if red else "success",
+                          "conclusion": "failure" if failing else "success",
                           "steps": environment_steps()}]}
     metadata.update(metadata_updates or {})
     write_json(directory / "metadata.json", metadata)
@@ -171,21 +180,40 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
     # The replica is the workflow's own run text: Actions echoes it unexpanded,
     # so shlex sees $DIST. `dist=` builds the legacy literal form (older logs
     # and the observation arm); no current workflow emits it.
-    command = (ci_contract.WORKFLOW_TEST_CMD if dist is None
-               else f'python -m pytest -ra -n 4 --dist "{dist}" '
-                    '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+    # `seeds=` writes one pytest-randomly header line per value.
+    if command is None:
+        command = (ci_contract.WORKFLOW_TEST_CMD if dist is None
+                   else f'python -m pytest -ra -n 4 --dist "{dist}" '
+                        '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+    # The report header mirrors a real full-suite step: one banner after the
+    # echoed command, the header block, then a blank line before the results.
+    # `seeds=` and `header_lines=` add lines inside that block; `captured=`
+    # adds lines to a failing test's captured stdout, outside it. `finish_lines=`
+    # adds lines to the session-finish span after the header, where a census
+    # writes.
+    header = [SESSION_BANNER_TEXT] if banner else []
+    header += ["platform linux -- Python 3.12.3, pytest-9.2.0, pluggy-1.7.0",
+               *(f"Using --randomly-seed={seed}" for seed in seeds), *header_lines,
+               "rootdir: /home/runner/work/PACT-Plugin/PACT-Plugin",
+               "configfile: pyproject.toml", "plugins: xdist-3.8.0",
+               "created: 4/4 workers", f"4 workers [{len(nodes)} items]", ""]
     lines = [
         actions_line(f"##[group]Run {command}", bom=True),
         actions_line(command),
-        actions_line("platform linux -- Python 3.12.3, pytest-9.2.0, pluggy-1.7.0"),
+        *map(actions_line, header),
+        *map(actions_line, finish_lines),
         actions_line("CI environment matches constraints-ci.txt."),
         actions_line(f"FULL-COLLECTION-OK 1 test files and {len(nodes)} items match discovery; subject={SHA}"),
     ]
+    if captured:
+        lines.extend(map(actions_line, [
+            "=" * 35 + " FAILURES " + "=" * 35, "_" * 30 + " test_beta " + "_" * 30,
+            "-" * 29 + " Captured stdout call " + "-" * 29, *captured]))
     lines.extend(actions_line(f"XPASS {item['node_id']}" +
                               (f" - {item['reason']}" if item["reason"] else ""))
                  for item in cases if item["outcome"] == "xpass")
     lines.append(actions_line(f"===== {summary} ====="))
-    if red:
+    if failing:
         lines.append(actions_line("RUN-VERIFY-FAILURE FAILED: synthetic test outcome"))
     else:
         lines.append(actions_line(
@@ -358,6 +386,492 @@ def test_dynamic_command_mutations_remain_invalid(tmp_path, mutation):
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, (mutation, comparison)
     assert comparison["status"] == "invalid"
+
+
+# The two accepted run-line shapes, written out here so the shape check is
+# pinned independently of ci_contract; the shipped line must be the seeded one.
+ORDERED_COMMAND = ('python -m pytest -ra -n 4 --dist "$DIST" '
+                   '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+SEEDED_COMMAND = ('python -m pytest -ra -n 4 --dist "$DIST" '
+                  '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed} '
+                  '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
+SEED_TOKENS = ["${SEED:+-p", "randomly", "--randomly-seed=$SEED",
+               "--randomly-dont-reset-seed}"]
+
+
+def read_runs(output):
+    return [json.loads(line) for line in (output / "runs.jsonl").read_text().splitlines()]
+
+
+def test_the_shipped_run_line_is_the_seeded_shape():
+    assert shlex.split(ci_contract.WORKFLOW_TEST_CMD) == shlex.split(SEEDED_COMMAND)
+    assert comparator._command_argv([ci_contract.WORKFLOW_TEST_CMD])[8:12] == SEED_TOKENS
+
+
+def test_seeded_run_line_is_accepted_and_its_seed_is_recorded(tmp_path):
+    first = make_run(tmp_path, "one", command=SEEDED_COMMAND, seeds=(7,))
+    second = make_run(tmp_path, "two", 101, command=SEEDED_COMMAND)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [7, None]
+    runs = read_runs(output)
+    assert [run["shuffle_seed"] for run in runs] == [7, None]
+    assert runs[0]["argv"][8:12] == SEED_TOKENS
+    assert "shuffle_seed" not in runs[0]["environment"]
+    assert runs[0]["environment"] == runs[1]["environment"]
+
+
+def test_ordered_run_line_has_no_seed(tmp_path):
+    first = make_run(tmp_path, "one", command=ORDERED_COMMAND)
+    second = make_run(tmp_path, "two", 101, command=ORDERED_COMMAND)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [None, None]
+    assert len(read_runs(output)[0]["argv"]) == 9
+
+
+@pytest.mark.parametrize("command, seeds, expected", [
+    (ORDERED_COMMAND, (), None),
+    (ORDERED_COMMAND, (4,), "refused"),
+    (SEEDED_COMMAND, (), None),     # every ordered post-change run logs this
+    (SEEDED_COMMAND, (4,), 4),
+], ids=["9-unseeded", "9-seeded", "13-unseeded", "13-seeded"])
+def test_run_line_shape_and_seed_line_agree(tmp_path, command, seeds, expected):
+    first = make_run(tmp_path, "one", command=command, seeds=seeds)
+    second = make_run(tmp_path, "two", 101, command=command)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    if expected == "refused":
+        assert completed.returncode == 2, comparison
+        assert comparison["evidence_errors"] == [
+            {"run": "one", "error": "a pytest-randomly seed line sits beside the "
+             "9-token run line, which has no seed option and cannot load "
+             "pytest-randomly"}]
+        return
+    assert completed.returncode == 0, comparison
+    assert comparison["input_runs"][0]["shuffle_seed"] == expected
+
+
+def test_shuffled_run_with_a_real_delta_is_different_not_invalid(tmp_path):
+    """A seed must never make a shuffled-versus-ordered delta unattributable."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, seeds=(3,),
+                      cases=[case(ALPHA), case(BETA, "failure", "order")])
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["status"] == "different"
+    assert comparison["evidence_errors"] == []
+    assert [(delta["type"], delta["name"]) for delta in comparison["deltas"]] == [
+        ("outcome", "test_beta")]
+    assert not any(item["type"] == "environment" for item in comparison["observations"])
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [None, 3]
+
+
+@pytest.mark.parametrize("decoy", [
+    "    Using --randomly-seed=9",       # indented, as inside a traceback
+    "E   Using --randomly-seed=9",       # an assertion-detail line
+    "Using --randomly-seed=9 (echo)",    # trailing text
+    "Using --randomly-seed=nine",
+])
+def test_only_a_whole_seed_header_line_is_a_seed(tmp_path, decoy):
+    first = make_run(tmp_path, "one", header_lines=(decoy,))
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, (decoy, comparison)
+    assert comparison["input_runs"][0]["shuffle_seed"] is None
+
+
+@pytest.mark.parametrize("seed_text, expected", [
+    ("4294967295", 4294967295),          # the largest 32-bit seed, 10 digits
+    ("12345678901", "refused"),          # 11 digits
+    ("1" * 5000, "refused"),             # past int()'s default digit limit
+    ("١٢٣", "refused"),   # Arabic-Indic digits
+    ("７", "refused"),               # a fullwidth digit
+], ids=["10-digits", "11-digits", "5000-digits", "arabic-indic", "fullwidth"])
+def test_seed_line_must_be_one_to_ten_ascii_digits(tmp_path, seed_text, expected):
+    first = make_run(tmp_path, "one",
+                     header_lines=(f"Using --randomly-seed={seed_text}",))
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    if expected == "refused":
+        assert completed.returncode == 2, comparison
+        assert comparison["evidence_errors"] == [
+            {"run": "one",
+             "error": "pytest-randomly seed line is not 1 to 10 ASCII digits"}]
+        return
+    assert completed.returncode == 0, comparison
+    assert comparison["input_runs"][0]["shuffle_seed"] == expected
+
+
+@pytest.mark.parametrize("seeds, captured, expected", [
+    ((), ("Using --randomly-seed=99",), None),
+    ((3,), ("Using --randomly-seed=99",), 3),
+    ((), ("Using --randomly-seed=" + "1" * 5000,), None),
+], ids=["captured-only", "header-and-captured", "captured-hostile"])
+def test_a_seed_in_captured_output_is_not_the_runs_seed(tmp_path, seeds, captured,
+                                                        expected):
+    first = make_run(tmp_path, "one", seeds=seeds, captured=captured)
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["input_runs"][0]["shuffle_seed"] == expected
+
+
+def test_a_banner_from_an_earlier_step_does_not_anchor_the_header(tmp_path):
+    first = make_run(tmp_path, "one", seeds=(6,))
+    second = make_run(tmp_path, "two", 101)
+    log = first / "run.log"
+    earlier = [actions_line(text) for text in (
+        SESSION_BANNER_TEXT, "Using --randomly-seed=1", "")]
+    log.write_text("\n".join(earlier) + "\n" + log.read_text(encoding="utf-8"),
+                   encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["input_runs"][0]["shuffle_seed"] == 6
+
+
+def test_a_missing_session_banner_is_refused_not_read_as_ordered(tmp_path):
+    first = make_run(tmp_path, "one", banner=False)
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "one", "error": "no pytest session-start banner follows the "
+         "full-suite run command; the run's seed header cannot be located"}]
+
+
+CHILD_CENSUS_HEADER = ("CHILD PYTEST CENSUS: 1 pytest child(ren) started without "
+                       "blocking pytest-randomly")
+CLOCK_CENSUS_HEADER = "clock-shift census: 1 problem(s); this run did not shift every clock"
+HOME_CENSUS_HEADER = "HOME CENSUS: 1 child(ren) started without HOME"
+
+
+@pytest.mark.parametrize("finish, name", [
+    ((CHILD_CENSUS_HEADER, "  [gw0] test_x (call): pytest child [python -m pytest]"),
+     "child_pytest"),
+    ((CLOCK_CENSUS_HEADER, "  the shim did not load in children"), "clock_shift"),
+    (("." * 40 + " [100%]" + CHILD_CENSUS_HEADER, "  [gw1] test_y (call): child"),
+     "child_pytest"),
+    ((HOME_CENSUS_HEADER, "  [gw0] test_z (call): child [git status] is given an "
+      "environment without HOME"), "home"),
+    (("." * 40 + " [100%]" + HOME_CENSUS_HEADER, "  [gw2] test_w (call): child"),
+     "home"),
+], ids=["child", "clock", "child-after-xdist-progress", "home", "home-after-xdist-progress"])
+def test_a_census_failed_green_run_names_the_census(tmp_path, finish, name):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=finish)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["status"] == "different"
+    assert comparison["deltas"] == [
+        {"type": "census", "run": "two", "before": [], "after": [name]}]
+    assert [run["validity"] for run in comparison["input_runs"]] == [
+        "clean", "census_outcome"]
+    assert read_runs(output)[1]["census_failures"] == [
+        {"census": name, "problems": 1, "lines": [finish[1].strip()]}]
+
+
+def test_a_census_line_only_in_captured_output_does_not_explain_the_exit(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      captured=(CHILD_CENSUS_HEADER,))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": "green test outcomes have an inconsistent overall conclusion"}]
+
+
+HOME_CENSUS_INFO = "HOME CENSUS: installed, 812 launches checked, 0 refused"
+HOME_CENSUS_INFO_ONE = "HOME CENSUS: installed, 1 launch checked, 0 refused"
+
+
+@pytest.mark.parametrize("finish", [
+    (HOME_CENSUS_INFO,),
+    ("." * 40 + " [100%]" + HOME_CENSUS_INFO,),
+    (HOME_CENSUS_INFO_ONE,),
+    ("." * 40 + " [100%]" + HOME_CENSUS_INFO_ONE,),
+], ids=["own-line", "after-xdist-progress", "singular-own-line", "singular-after-progress"])
+def test_a_green_run_carrying_the_home_census_information_line_is_clean(tmp_path, finish):
+    first = make_run(tmp_path, "one", finish_lines=finish)
+    second = make_run(tmp_path, "two", 101, finish_lines=finish)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["deltas"] == [] and comparison["evidence_errors"] == []
+    assert [run["validity"] for run in comparison["input_runs"]] == ["clean", "clean"]
+    assert [run["census_failures"] for run in read_runs(output)] == [[], []]
+
+
+def test_the_home_census_failure_header_still_fails_beside_a_run_with_the_information_line(
+        tmp_path):
+    first = make_run(tmp_path, "one", finish_lines=(HOME_CENSUS_INFO,))
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(HOME_CENSUS_HEADER, "  [gw0] test_z (call): child [x]"))
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["deltas"] == [
+        {"type": "census", "run": "two", "before": [], "after": ["home"]}]
+    assert read_runs(output)[1]["census_failures"] == [
+        {"census": "home", "problems": 1, "lines": ["[gw0] test_z (call): child [x]"]}]
+
+
+def test_a_census_line_beside_a_clean_exit_is_refused(tmp_path):
+    """A census that fails a session raises its status to 1, so exit 0 contradicts it."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, finish_lines=(CHILD_CENSUS_HEADER,))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["deltas"] == []
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": "the child_pytest census reported a failure beside exit status 0; "
+                  "a census raises a clean exit status to 1, so the run record and "
+                  "the log disagree"}]
+
+
+@pytest.mark.parametrize("exitstatus", [2, 3, 4])
+def test_a_census_line_beside_an_exit_status_a_census_cannot_set_is_refused(
+        tmp_path, exitstatus):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(CLOCK_CENSUS_HEADER,),
+                      record_updates={"exitstatus": exitstatus})
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": f"the clock_shift census reported a failure beside exit status "
+                  f"{exitstatus}, which a census does not produce, so another cause "
+                  f"set the exit status"}]
+
+
+@pytest.mark.parametrize("exitstatus", [1, 2, 3])
+def test_a_red_run_with_a_census_line_keeps_its_test_outcome(tmp_path, exitstatus):
+    """The census-status refusal is for green runs: a red run's exit status has a
+    test failure behind it, so any status beside a census line is consistent."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA), case(BETA, "failure", "boom")],
+                      finish_lines=(CHILD_CENSUS_HEADER,),
+                      record_updates={"exitstatus": exitstatus})
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["evidence_errors"] == []
+    run = read_runs(output)[1]
+    assert run["validity"] == "test_outcome"
+    assert [failure["census"] for failure in run["census_failures"]] == ["child_pytest"]
+
+
+def test_every_output_carries_schema_version_2(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["schema_version"] == 2
+    assert [run["schema_version"] for run in read_runs(output)] == [2, 2]
+    refused = make_run(tmp_path, "three", 102, seeds=(7, 8))
+    completed, comparison, output = invoke(tmp_path, refused, second, "out2")
+    assert completed.returncode == 2, comparison
+    assert comparison["schema_version"] == 2
+    assert [run["schema_version"] for run in read_runs(output)] == [2, 2]
+
+
+def test_a_red_run_records_its_census_and_ignores_a_captured_one(tmp_path):
+    first = make_run(tmp_path, "one")
+    captured_shape = CHILD_CENSUS_HEADER.replace(": 1 ", ": 9 ")
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA), case(BETA, "failure", "boom")],
+                      finish_lines=(CLOCK_CENSUS_HEADER, "  the shim did not load"),
+                      captured=(captured_shape,))
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert sorted(delta["type"] for delta in comparison["deltas"]) == ["census", "outcome"]
+    assert read_runs(output)[1]["validity"] == "test_outcome"
+    assert read_runs(output)[1]["census_failures"] == [
+        {"census": "clock_shift", "problems": 1, "lines": ["the shim did not load"]}]
+
+
+def test_the_census_comparison_is_by_name_not_by_count(tmp_path):
+    first = make_run(tmp_path, "one", census_failed=True,
+                     finish_lines=(CHILD_CENSUS_HEADER.replace(": 1 ", ": 2 "),))
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(CHILD_CENSUS_HEADER.replace(": 1 ", ": 3 "),))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["deltas"] == []
+
+
+@pytest.mark.parametrize("module_name", ["child_pytest_census", "clock_shift_census",
+                                         "home_census"])
+def test_each_census_header_written_by_finish_is_recognised(monkeypatch, module_name):
+    """The comparator's census patterns match the line each real finish() writes."""
+    if module_name == "child_pytest_census":
+        import child_pytest_census as census
+        name = "child_pytest"
+        monkeypatch.setitem(census._state, "misses", ["a miss"])
+        monkeypatch.setitem(census._state, "forwarded", [])
+    elif module_name == "home_census":
+        import home_census as census
+        name = "home"
+        monkeypatch.setitem(census._state, "misses", ["a miss"])
+        monkeypatch.setitem(census._state, "forwarded", [])
+    else:
+        from clock_shift import clock_shift_census as census
+        name = "clock_shift"
+        monkeypatch.setitem(census._state, "installed", True)
+        monkeypatch.setitem(census._state, "misses", ["a miss"])
+        monkeypatch.setitem(census._state, "workers", [])
+        monkeypatch.setitem(census._state, "python_children", 0)
+    written = []
+    reporter = types.SimpleNamespace(write_line=written.append)
+    session = types.SimpleNamespace(
+        exitstatus=0, config=types.SimpleNamespace(
+            pluginmanager=types.SimpleNamespace(get_plugin=lambda _name: reporter)))
+    census.finish(session)
+    assert session.exitstatus == 1
+    assert comparator._census_failures(written) == [
+        {"census": name, "problems": 1, "lines": ["a miss"]}]
+
+
+
+def test_the_information_line_the_real_home_census_writes_is_no_census_failure(monkeypatch):
+    import home_census as census
+    monkeypatch.setitem(census._state, "misses", [])
+    monkeypatch.setitem(census._state, "forwarded", [])
+    monkeypatch.setitem(census._state, "installed", True)
+    for checked, line in ((812, HOME_CENSUS_INFO), (1, HOME_CENSUS_INFO_ONE)):
+        monkeypatch.setitem(census._state, "checked", checked)
+        monkeypatch.setitem(census._state, "forwarded_checked", 0)
+        written = []
+        reporter = types.SimpleNamespace(write_line=written.append)
+        session = types.SimpleNamespace(
+            exitstatus=0, config=types.SimpleNamespace(
+                pluginmanager=types.SimpleNamespace(get_plugin=lambda _name: reporter)))
+        census.finish(session)
+        assert session.exitstatus == 0
+        assert written == [line]
+        assert comparator._census_failures(written) == []
+
+
+RIG_CONFTEST = """\
+import child_pytest_census
+
+
+def pytest_configure(config):
+    child_pytest_census.install()
+
+
+def pytest_testnodedown(node, error):
+    child_pytest_census.collect(node)
+
+
+def pytest_sessionfinish(session):
+    child_pytest_census.finish(session)
+"""
+RIG_TESTS = """\
+import subprocess
+import sys
+
+
+def test_starts_an_unblocked_child():
+    try:
+        subprocess.run([sys.executable, "-m", "pytest", "--version"], check=False)
+    except Exception:
+        pass
+
+
+def test_prints_a_census_shaped_line():
+    print({shape!r})
+    assert False
+"""
+
+
+@pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
+def test_real_census_output_lands_in_the_session_finish_span(tmp_path, parallel):
+    """Real pytest output: the census header is read where pytest writes it, and a
+    census-shaped line a failing test prints is not."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "conftest.py").write_text(RIG_CONFTEST, encoding="utf-8")
+    shape = CHILD_CENSUS_HEADER.replace(": 1 ", ": 9 ")
+    (rig / "test_rig.py").write_text(RIG_TESTS.format(shape=shape), encoding="utf-8")
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parent)}
+    env.pop("PYTEST_ADDOPTS", None)
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
+         "-p", "no:randomly", *parallel],
+        cwd=rig, env=env, capture_output=True, text=True, check=False)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert shape in completed.stdout  # the decoy reached the captured output
+    lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
+    _header, finish_span = comparator._session_spans(lines)
+    failures = comparator._census_failures(finish_span)
+    assert [(failure["census"], failure["problems"]) for failure in failures] == [
+        ("child_pytest", 1)], completed.stdout
+
+
+def test_two_seed_lines_are_refused(tmp_path):
+    first = make_run(tmp_path, "one", seeds=(7, 8))
+    second = make_run(tmp_path, "two", 101, seeds=(7,))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["status"] == "invalid"
+    assert comparison["evidence_errors"] == [
+        {"run": "one", "error": "more than one pytest-randomly seed line"}]
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [None, 7]
+
+
+@pytest.mark.parametrize("mutation", [
+    "literal_seed", "no_wrapper", "extra_token", "seed_after_junit", "wrong_junit",
+    "previous_seeded_line", "dont_reset_outside_expansion"])
+def test_seeded_shape_is_exact(tmp_path, mutation):
+    """The second shape admits exactly four tokens in exactly one place."""
+    seed_text = '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}'
+    if mutation == "previous_seeded_line":
+        changed = SEEDED_COMMAND.replace(" --randomly-dont-reset-seed}", "}")
+    elif mutation == "dont_reset_outside_expansion":
+        changed = SEEDED_COMMAND.replace(" --randomly-dont-reset-seed}",
+                                         "} --randomly-dont-reset-seed")
+    elif mutation == "literal_seed":
+        changed = SEEDED_COMMAND.replace('--randomly-seed="$SEED"', "--randomly-seed=7")
+    elif mutation == "no_wrapper":
+        changed = SEEDED_COMMAND.replace(
+            seed_text, '-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed')
+    elif mutation == "extra_token":
+        changed = SEEDED_COMMAND.replace("--junitxml=", "-x --junitxml=")
+    elif mutation == "seed_after_junit":
+        changed = ORDERED_COMMAND + " " + seed_text
+    else:
+        changed = SEEDED_COMMAND.replace(".full-suite-results.xml", ".other.xml")
+    assert changed != SEEDED_COMMAND
+    first = make_run(tmp_path, "one", command=changed)
+    second = make_run(tmp_path, "two", 101, command=SEEDED_COMMAND)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, (mutation, comparison)
+    assert "unexpected full-suite pytest argv" in (
+        comparison["evidence_errors"][0]["error"]), (mutation, comparison)
+
+
+def test_internal_error_comparison_still_records_each_seed(tmp_path, monkeypatch):
+    """The invalid-comparison builder reports the same input_runs fields."""
+    first = make_run(tmp_path, "one", seeds=(5,))
+    second = make_run(tmp_path, "two", 101)
+    normalize = comparator._normalize_run
+
+    def crash_on_two(logical, directory, expected_sha):
+        if logical == "two":
+            raise RuntimeError("synthetic crash")
+        return normalize(logical, directory, expected_sha)
+
+    monkeypatch.setattr(comparator, "_normalize_run", crash_on_two)
+    output = tmp_path / "out"
+    code = comparator.main(["--expected-sha", SHA, "--output-dir", str(output),
+                            f"--run=one={first}", f"--run=two={second}"])
+    comparison = json.loads((output / "comparison.json").read_text(encoding="utf-8"))
+    assert code == 3
+    assert comparison["status"] == "invalid"
+    assert comparison["schema_version"] == 2
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [5, None]
 
 
 def test_repeated_run_identity_is_invalid(tmp_path):
@@ -1026,10 +1540,15 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     env.pop("PYTEST_ADDOPTS", None)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
-         f"--junitxml={xml}"],
+         "-p", "no:randomly", f"--junitxml={xml}"],
         cwd=child, env=env, capture_output=True, text=True, check=False)
     assert completed.returncode == 1, (
         completed.stdout + completed.stderr + "\n" + where)
+    stdout_lines = completed.stdout.splitlines()
+    banner_index = next(index for index, line in enumerate(stdout_lines)
+                        if comparator.SESSION_BANNER.fullmatch(line))
+    header_end = stdout_lines.index("", banner_index)
+    real_header = stdout_lines[banner_index:header_end + 1]
     record = json.loads((workspace / ".full-run-record.json").read_text(encoding="utf-8"))
     assert (record["collected"], record["passed"], record["failed"],
             record["errors"], record["skipped"], record["skipped_at_collection"],
@@ -1107,7 +1626,9 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
                       "conclusion": "failure", "steps": environment_steps()}]})
         (directory / "run.log").write_text("\n".join([
             actions_line(ci_contract.WORKFLOW_TEST_CMD),
-            actions_line("platform linux -- Python 3.12.3"),
+            # The real child's own banner and report header, so the header
+            # anchor is exercised against pytest's actual output.
+            *map(actions_line, real_header),
             actions_line("CI environment matches constraints-ci.txt."),
             actions_line(f"FULL-COLLECTION-OK 2 test files and "
                          f"{run_record['collected']} items match discovery; subject={SHA}"),
@@ -1449,7 +1970,7 @@ def test_module_skips_loudly_outside_the_repo_layout(tmp_path):
     shutil.copy(Path(__file__), copied)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", str(copied), "-q", "-rA",
-         "--noconftest", "-p", "no:cacheprovider"],
+         "--noconftest", "-p", "no:cacheprovider", "-p", "no:randomly"],
         cwd=layout, capture_output=True, text=True, check=False)
     output = completed.stdout + completed.stderr
     # 5 is pytest's "no tests collected": the module skipped instead of failing

@@ -36,7 +36,8 @@
 #
 # WHY THE FULL CONSTRAINTS INSTALL
 #   scripts/verify_ci_environment.py requires the installed distribution set
-#   to EQUAL the constraints-ci.txt closure. Installing "only what the
+#   to EQUAL the constraints-ci.txt closure, and pip's hash mode refuses a
+#   partial install of the lock. Installing "only what the
 #   selected tests need" would report MISSING pins and fail. The full install
 #   is a correctness requirement, not a convenience.
 #
@@ -104,8 +105,7 @@ jobs:
 
       - name: Install test dependencies
         run: |
-          python -m pip install --upgrade -c constraints-ci.txt pip
-          python -m pip install -r constraints-ci.txt
+          python -m pip install --only-binary=:all: --require-hashes -r constraints-ci.txt
 
       - name: Warm and verify the embedding model
         working-directory: pact-plugin

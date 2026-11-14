@@ -30,27 +30,39 @@ VERIFY_CMD = "python scripts/verify_ci_environment.py"
 TEST_CMD = "python -m pytest -ra -n 4 --dist loadfile"
 WORKFLOW_TEST_CMD = (
     "python -m pytest -ra -n 4 --dist \"$DIST\" "
+    "${SEED:+-p randomly --randomly-seed=\"$SEED\" --randomly-dont-reset-seed} "
     "--junitxml=\"$GITHUB_WORKSPACE/.full-suite-results.xml\""
 )
 UPLOAD_ARTIFACT_ACTION = (
     "actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9"
 )
 # The name expression admits only the two declared dispatch values, so the
-# filename sink is enum-constrained like the shell sink is by `DIST`.
+# filename sink is enum-constrained like the shell sink is by `DIST`. The
+# last suffix is the seed guard's validated `order` output (`ordered` or
+# `seed-N`), never the raw shuffle_seed input.
 UPLOAD_ARTIFACT_NAME = (
     "full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}"
     "-${{ inputs.dist == 'load' && 'load' || 'loadfile' }}"
+    "-${{ steps.order.outputs.order || 'unguarded' }}"
 )
 _DIST_VARIABLE = "$DIST"
 _JUNIT_ARGUMENT = "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"
+# shlex's view of the unquoted
+# `${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}`.
+# With SEED empty the shell expands it to no words, so the static default
+# argv drops these four tokens.
+_SEED_EXPANSION = ("${SEED:+-p", "randomly", "--randomly-seed=$SEED",
+                   "--randomly-dont-reset-seed}")
 
 
 def normalized_workflow_test_argv(command=WORKFLOW_TEST_CMD):
     """Resolve the exact diagnostic command to its static default argv.
 
-    The workflow passes the dispatch value through the job-level `DIST`
-    environment key and never embeds an expression in the `run:` text, so
-    shlex sees a shell variable, not a space-bearing expression. Any spelling
+    The workflow passes the dispatch values through the job-level `DIST` and
+    `SEED` environment keys and never embeds an expression in the `run:`
+    text, so shlex sees shell variables, not a space-bearing expression. The
+    seed expansion adds no words when SEED is empty, which is the merge
+    gate's case, so the normalized argv drops it. Any spelling
     or argument drift is a parse failure: a normalizer that accepted more than
     the reviewed command could hide a scope regression, and an expression
     reintroduced into the run text is drift too.
@@ -67,7 +79,7 @@ def normalized_workflow_test_argv(command=WORKFLOW_TEST_CMD):
     normalized = [
         "loadfile" if word == _DIST_VARIABLE else word
         for word in words
-        if word != _JUNIT_ARGUMENT
+        if word != _JUNIT_ARGUMENT and word not in _SEED_EXPANSION
     ]
     assert normalized == TEST_CMD.split(), (
         f"PARSE FAILURE: normalized argv {normalized!r} differs from the "
@@ -268,7 +280,7 @@ def probe_options(probe_dir, args=(), timeout=120):
         "def test_second_probe():\n    assert True\n",
         encoding="utf-8")
     command = [sys.executable, "-m", "pytest", "--collect-only", "-q",
-               "-p", "no:cacheprovider", *args]
+               "-p", "no:cacheprovider", "-p", "no:randomly", *args]
     proc = subprocess.run(
         command, cwd=str(probe_dir), capture_output=True, text=True,
         timeout=timeout)

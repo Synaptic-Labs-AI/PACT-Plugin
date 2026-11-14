@@ -27,12 +27,11 @@ Two layers:
   that get_enum is correct in isolation.
 """
 import importlib
-import os
-import sys
 
 import pytest
 
 import shared.pact_config as pact_config
+from fixtures.gate_reload import restored_env_and_reloaded
 
 
 _ALLOWED = frozenset({"warn", "deny", "shadow"})
@@ -79,19 +78,16 @@ def _old_resolve(raw, default="warn", invalid_fallback=None):
 
 @pytest.fixture(scope="module", autouse=True)
 def _restore_gate_modules():
-    """After this file's tests, reload both gate modules under a CLEAN env so a
-    later test file sees their shipped default constants ("warn" for the inline
-    gate, "deny" for the dispatch-variety gate). We must NOT evict
+    """After this file's tests, restore both mode variables to the values they
+    had before it ran (set or absent) and reload both gate modules, so a later
+    test file sees the constants it saw before this module. We must NOT evict
     them from sys.modules -- sibling files import them at collection time and
     call importlib.reload, which raises if the module is missing from
     sys.modules."""
-    yield
-    for name in (INLINE, VARIETY):
-        os.environ.pop(name, None)
-    for mod_name in ("dispatch_gate", "handoff_ordering_gate"):
-        module = sys.modules.get(mod_name)
-        if module is not None:
-            importlib.reload(module)
+    with restored_env_and_reloaded(
+        (INLINE, VARIETY), ("dispatch_gate", "handoff_ordering_gate")
+    ):
+        yield
 
 
 @pytest.fixture

@@ -25,8 +25,8 @@ WHAT THIS MUST NEVER DO
 PATH DOMAINS (the single easiest thing to get wrong)
   Manifest paths, discovered corpus paths, and Selection members are
   PLUGIN-RELATIVE (relative to pact-plugin/).
-  selection_machinery, value_inert_keys, constraints-ci.txt and pyproject.toml
-  are REPO-RELATIVE, because git reports repo-relative paths.
+  selection_machinery, value_inert_keys, constraints-ci.txt, constraints-ci.in
+  and pyproject.toml are REPO-RELATIVE, because git reports repo-relative paths.
   repo_to_plugin() is the only conversion, and it is table-tested.
 """
 
@@ -85,7 +85,7 @@ EXPECTED_GUARD_FILES = frozenset({
     "tests/test_import_hygiene.py",
     "tests/test_local_lint_parity.py",
     "tests/test_path_setup_pin.py",
-    "tests/test_suite_home_isolation.py",
+    "tests/test_session_home_sandbox.py",
     "tests/test_conftest_config_root_isolation.py",
     "tests/test_audit_protocol.py",
     "tests/test_memory_store_isolation.py",
@@ -95,7 +95,7 @@ EXPECTED_GUARD_FILES = frozenset({
 
 EXPECTED_EXCLUSION_COUNT = 24
 
-_DEPENDENCY_PINS = ("constraints-ci.txt", "pyproject.toml")
+_DEPENDENCY_PINS = ("constraints-ci.txt", "constraints-ci.in", "pyproject.toml")
 # The files every PR's version bump touches. A broad exclusion ignores a
 # change to them unless its closure names one or scans a tree.
 BUMP_TRIO = ("CHANGELOG.md", "README.md", ".claude-plugin/marketplace.json")
@@ -867,9 +867,15 @@ def _literal_script(value: str, plugin_root: Path,
 
     Tests that run a hook as a subprocess name it as a string, which no
     import edge sees. Test-tree files and conftests are skipped: a literal
-    there is a fixture file name, not a dependency.
+    there is a fixture file name, not a dependency. A bare "__init__.py" is
+    skipped too: it is the package marker joined onto some directory
+    (`package / "__init__.py"`), and resolved against every root it would
+    match each root's own package marker, never the file the code names.
+    A path that carries its directory ("hooks/__init__.py") still resolves.
     """
     if not value.endswith(".py") or "\n" in value or len(value) > 200:
+        return []
+    if value == "__init__.py":
         return []
     hits: list[Path] = []
     for base in (plugin_root, *roots):

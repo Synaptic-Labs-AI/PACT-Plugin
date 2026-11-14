@@ -22,6 +22,7 @@
     "scripts/fast_suite_exclusions.json",
     ".github/workflows/fast-tests.yml",
     "constraints-ci.txt",
+    "constraints-ci.in",
     "pyproject.toml"
   ],
   "value_inert_keys": {
@@ -72,6 +73,11 @@
       "reason": "Path(mgc.__file__).read_text() reads hooks/shared/merge_guard_common.py, a closure member that is also a seam. exec(compile(...)) runs that mutated source in a fresh module namespace and reads no file. The vendored baselines come from merge_guard_baseline_loader (reviewed separately), whose fixture directory is declared in that review's extra_reads. The flagged exec() at 227 is that in-memory mutant run. Line 225 sets __file__ on the fresh types.ModuleType it builds for that mutant, so compile() names the real source; it is not patched into any loaded module.",
       "extra_reads": []
     },
+    "tests/test_merge_guard_refused_is_mintable.py": {
+      "sha256": "f625fa7cc050ab05772e4c76d063c05f07833a01b1fa4877c579d97862936be4",
+      "reason": "Flagged site 132 is the corpus read: path.read_text() on each path tracked_glob(_TESTS, '**/*.py') returns, which is only the git-indexed .py files under pact-plugin/tests, so the read stays inside the tests tree the exclusion's scanned_tree root already names. The arm test_the_corpus_reads_only_tracked_test_files rebinds _TESTS with monkeypatch to a git init rig under tmp_path and reads only that rig. Nothing else is read.",
+      "extra_reads": []
+    },
     "tests/test_merge_guard_substitution_mint.py": {
       "sha256": "1b58021a0647c14c690bd2b10100c09f98b4eefd0928bd2eb2ba3b20830d28b6",
       "reason": "Flagged sites 259-266 are the _hook/_approve rig: it runs plugin hooks (hooks/merge_guard_*.py, in the closure) with sys.executable, cwd and HOME set to the caller's root, and every caller passes tmp_path. os.environ.get('PATH') only forwards the search path. It reads and writes nothing outside tmp_path and the plugin hooks. Line 1765 patches gh.check_pr_state with a lambda that records the cwd it is asked about and returns `state`, a PR-state literal ('MERGED' or 'OPEN') from the test's parametrize.",
@@ -93,7 +99,7 @@
     "tests/test_import_hygiene.py",
     "tests/test_local_lint_parity.py",
     "tests/test_path_setup_pin.py",
-    "tests/test_suite_home_isolation.py",
+    "tests/test_session_home_sandbox.py",
     "tests/test_conftest_config_root_isolation.py",
     "tests/test_audit_protocol.py",
     "tests/test_memory_store_isolation.py",

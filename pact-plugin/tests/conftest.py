@@ -47,6 +47,24 @@ _SESSION_HOME_DIR = tempfile.mkdtemp(prefix="pact-home-suite-")
 os.makedirs(os.path.join(_SESSION_HOME_DIR, ".claude"))
 os.environ["HOME"] = _SESSION_HOME_DIR
 os.environ.pop("CLAUDE_CONFIG_DIR", None)
+# The sandbox HOME drops the operator's global git config; this drops the
+# machine's system file, the remaining git config a test or child could read.
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+
+# NO HYPOTHESIS EXAMPLE DATABASE, AND NO HYPOTHESIS STORAGE IN THE TREE.
+# Hypothesis otherwise saves failing examples under .hypothesis/ in the working
+# directory and replays them in later runs, so one run's outcome would depend on
+# what an earlier run left there. With the database off it still writes a
+# constants cache under the same directory, so its storage moves to the session
+# HOME; children inherit the variable.
+os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = os.path.join(_SESSION_HOME_DIR, ".hypothesis")
+try:
+    from hypothesis import settings as _hypothesis_settings
+except ImportError:
+    _hypothesis_settings = None
+else:
+    _hypothesis_settings.register_profile("pact-suite", database=None)
+    _hypothesis_settings.load_profile("pact-suite")
 
 # Add tests directory to path for helpers + fixtures module imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -71,7 +89,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "pact-coding-st
 # Add plugin-level scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-# The clock-shift census; tests/ is on sys.path from the insert above.
+# The clock-shift, child-pytest and HOME censuses and the pytest-randomly seed
+# gate; tests/ is on sys.path from the insert above.
+import child_pytest_census  # noqa: E402
+import home_census  # noqa: E402
+import randomly_seed_gate  # noqa: E402
 from clock_shift import clock_shift_census  # noqa: E402
 
 # Direct-import helpers for the CLAUDE.md redirect fixture below; tests/ is
@@ -81,6 +103,7 @@ from fixtures.claude_md_seed import seed_claude_md  # noqa: E402
 from fixtures.hf_cache import hf_cache_env  # noqa: E402
 from fixtures.root_guard import MARKER as _NON_ROOT_MARKER  # noqa: E402
 from fixtures.root_guard import non_root_skip_reason  # noqa: E402
+from fixtures.session_marker import remove_importer_markers  # noqa: E402
 
 # These copy names from shared modules at first import; loading them here keeps a test patch from being copied.
 # tests/test_conftest_import_guard.py derives which modules need a line here.
@@ -136,6 +159,9 @@ def pytest_configure(config):
     count, where a reviewer reading "N skipped" cannot tell an intentional
     environmental exclusion from a test quietly disabled to buy a green.
     """
+    # A loaded pytest-randomly must carry an explicit seed.
+    randomly_seed_gate.refuse_unseeded(config)
+
     config.addinivalue_line(
         "markers",
         "requires_embedding_backend: exercises the real pact-memory CLI "
@@ -204,6 +230,24 @@ def pytest_configure(config):
     # sweep command is in tests/clock_shift/clock_shift_shim.py.
     clock_shift_census.install()
 
+    # CHILD-PYTEST CENSUS. Always on: refuses a pytest child whose argv does not
+    # block pytest-randomly.
+    child_pytest_census.install()
+
+    # HOME CENSUS. Always on: refuses a child process started without HOME.
+    config.addinivalue_line("markers", home_census.MARKER_HELP)
+    home_census.install()
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_protocol(item, nextitem):
+    """Tell the HOME census which test is running, for its opt-out marker."""
+    home_census.enter(item)
+    try:
+        yield
+    finally:
+        home_census.leave()
+
 
 def pytest_runtest_setup(item):
     """Skip a `requires_non_root` test when the suite runs as root."""
@@ -214,9 +258,21 @@ def pytest_runtest_setup(item):
         pytest.skip(reason)
 
 
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    """Collect the census findings an xdist worker handed over."""
+    clock_shift_census.collect(node)
+    child_pytest_census.collect(node)
+    home_census.collect(node)
+
+
 def pytest_sessionfinish(session):
-    """Fail a clock-shift sweep in which a child ran on the real clock."""
+    """Fail a clock-shift sweep in which a child ran on the real clock, a run in
+    which a pytest child started without blocking pytest-randomly, and a run in
+    which a child started without HOME."""
     clock_shift_census.finish(session)
+    child_pytest_census.finish(session)
+    home_census.finish(session)
 
 
 @pytest.fixture
@@ -357,6 +413,25 @@ def _reset_specialist_registry_cache():
     dispatch_helpers._specialist_registry.cache_clear()
     yield
     dispatch_helpers._specialist_registry.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_merge_guard_git_caches():
+    """Clear ``merge_guard_common``'s two git lookups before and after every test.
+
+    ``_git_config_aliases`` and ``_git_commands`` memoize what git reports, keyed
+    on the cwd (None for the process's own directory) but not on
+    ``os.environ``, so without this the first test in a worker to read them fixes
+    the answer for every later test there, whatever git config those tests set.
+    """
+    import shared.merge_guard_common as merge_guard_common
+
+    caches = (merge_guard_common._git_config_aliases, merge_guard_common._git_commands)
+    for cache in caches:
+        cache.cache_clear()
+    yield
+    for cache in caches:
+        cache.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -862,6 +937,25 @@ def _scrub_session_id_from_test_env(monkeypatch):
     upgrade rather than a safety guarantee.
     """
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _refuse_a_marker_under_an_importer_session_id():
+    """Fail a test after which an importer session id's embedding marker exists.
+
+    A module constant from `fixtures.session_marker.importer_session_id()` is
+    bound once by every module that imports it, so a save that reaches
+    `maybe_embed_pending()` under it would leave a marker shared by every later
+    test in the process. The id is unique to this process, so the marker is
+    this process's own: remove it, then fail with the remedy.
+    """
+    yield
+    removed = remove_importer_markers()
+    assert not removed, (
+        f"a save reached the embedding marker under an importer session id "
+        f"({', '.join(str(path) for path in removed)}). Give the test its own "
+        f"session id with fixtures.session_marker.fresh_session_id."
+    )
 
 
 @pytest.fixture(autouse=True)

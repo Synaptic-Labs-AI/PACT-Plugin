@@ -38,6 +38,7 @@ SELECTION_MACHINERY = (
     "scripts/fast_suite_exclusions.json",
     ".github/workflows/fast-tests.yml",
     "constraints-ci.txt",
+    "constraints-ci.in",
     "pyproject.toml",
 )
 # The exact ten discovery/isolation guards the manifest pins. The loader
@@ -47,7 +48,7 @@ GUARD_FILES = (
     "tests/test_import_hygiene.py",
     "tests/test_local_lint_parity.py",
     "tests/test_path_setup_pin.py",
-    "tests/test_suite_home_isolation.py",
+    "tests/test_session_home_sandbox.py",
     "tests/test_conftest_config_root_isolation.py",
     "tests/test_audit_protocol.py",
     "tests/test_memory_store_isolation.py",
@@ -218,6 +219,8 @@ class TestAddBacks:
          "selection-machinery"),
         ("constraints-pin", ("constraints-ci.txt",), "ok",
          "selection-machinery"),
+        ("constraints-input", ("constraints-ci.in",), "ok",
+         "selection-machinery"),
         ("pyproject-pin", ("pyproject.toml",), "ok", "selection-machinery"),
         # A changed conftest with no classification cannot be cleared.
         ("conftest-without-verdict", ("pact-plugin/tests/conftest.py",), "ok",
@@ -254,11 +257,12 @@ def test_changed_test_wins_over_changed_seam(core):
     assert result.added_back[0].reason == "changed_test"
 
 
-@pytest.mark.parametrize("pin", ["constraints-ci.txt", "pyproject.toml"])
+@pytest.mark.parametrize("pin", ["constraints-ci.txt", "constraints-ci.in", "pyproject.toml"])
 def test_the_dependency_pins_select_all_without_a_machinery_entry(core, pin):
     """The hard-coded pin rule fires on its own, not via the manifest list."""
     machinery = tuple(path for path in SELECTION_MACHINERY
-                      if path not in ("constraints-ci.txt", "pyproject.toml"))
+                      if path not in ("constraints-ci.txt", "constraints-ci.in",
+                                      "pyproject.toml"))
     result = _select(core, changed=[pin], machinery=machinery)
     assert result.select_all_reason == "selection-machinery"
     _assert_select_all(result)
@@ -1115,6 +1119,28 @@ class TestImportClosure:
         assert "conftest.py" not in closure
         assert "hooks/shared/unrelated.py" not in closure
         assert "tests/helper.py" not in closure
+
+    def test_a_bare_package_marker_literal_is_not_a_script(self, core, tmp_path):
+        """`package / "__init__.py"` names the marker of whatever directory
+        it is joined to. Resolved bare against every root it would match
+        each root's own __init__.py, and with it that package's imports."""
+        plugin = self._rig(tmp_path)
+        _write(plugin / "hooks" / "__init__.py", "import shared.direct\n")
+        _write(plugin / "tests" / "test_c.py",
+               "from pathlib import Path\n\n"
+               "def marker(package):\n"
+               "    return Path(package) / \"__init__.py\"\n")
+        closure = core.import_closure(plugin, ["tests/test_c.py"])
+        assert closure == {"tests/test_c.py"}, sorted(closure)
+
+    def test_a_package_marker_path_with_its_directory_is_followed(
+            self, core, tmp_path):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "hooks" / "__init__.py", "import shared.direct\n")
+        _write(plugin / "tests" / "test_d.py",
+               'MARKER = "hooks/__init__.py"\n')
+        closure = core.import_closure(plugin, ["tests/test_d.py"])
+        assert {"hooks/__init__.py", "hooks/shared/direct.py"} <= closure
 
 
 class TestScanIndex:

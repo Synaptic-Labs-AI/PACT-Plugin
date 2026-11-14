@@ -192,7 +192,7 @@ def main(argv: list[str] | None = None) -> int:
         return _failure("PARSE FAILURE", "; ".join(config_problems))
 
     argv = [sys.executable, "-m", "pytest", "--collect-only", "-q",
-            "-p", "no:cacheprovider"]
+            "-p", "no:cacheprovider", "-p", "no:randomly"]
     try:
         completed = subprocess.run(
             argv, cwd=str(plugin_root), capture_output=True, text=True,

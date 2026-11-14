@@ -39,12 +39,14 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from fixtures.claude_md_seed import seed_claude_md
+from fixtures.session_marker import embedding_marker, fresh_session_id
 from fixtures.project_dir import (
     child_env,
     enable_record_discovery,
@@ -92,7 +94,22 @@ _MEMORY_CLI = (
 _BACKLOG_CLI = Path(__file__).parent.parent / "hooks" / "shared" / "backlog.py"
 _SESSION_INIT = Path(__file__).parent.parent / "hooks" / "session_init.py"
 _PACT_MEMORY_ROOT = Path(__file__).parent.parent / "skills" / "pact-memory"
-SID = "record-rung-session-0001"
+# Bound per test by _per_test_session_id. Saves in this module reach the
+# embedding marker /tmp/pact_embedding_attempted_<SID>, so a fixed id would
+# share one marker across tests, workers and runs. Read SID at call time only.
+SID = None
+_SEEN_SIDS: set[str] = set()
+
+
+def _new_record_sid() -> str:
+    return f"record-rung-{uuid.uuid4().hex}"
+
+
+@pytest.fixture(autouse=True)
+def _per_test_session_id(monkeypatch):
+    with fresh_session_id(monkeypatch, sys.modules[__name__], "SID",
+                          _new_record_sid, _SEEN_SIDS) as session_id:
+        yield session_id
 
 
 def _arm_record(monkeypatch, tmp_path, record_dir) -> None:
@@ -611,6 +628,29 @@ class TestWorkingMemoryDisagreementGuard:
 # Cross-process: the CLI envelope carries the refusal on stderr
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("nosystem", [True, False], ids=["child_env", "control"])
+def test_a_child_env_child_ignores_the_system_git_config(tmp_path, nosystem):
+    """A child built by child_env must not read the machine's system git config.
+
+    The system file is pointed at a tmp file holding a marker key. The control
+    row drops GIT_CONFIG_NOSYSTEM from the same env and must read the marker,
+    so a git that ignored GIT_CONFIG_SYSTEM cannot make the first row pass."""
+    system_config = tmp_path / "system-gitconfig"
+    system_config.write_text("[pact]\n\tmarker = system\n", encoding="utf-8")
+    env = child_env(tmp_path / "config", home=tmp_path)
+    assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+    env["GIT_CONFIG_SYSTEM"] = str(system_config)
+    if not nosystem:
+        del env["GIT_CONFIG_NOSYSTEM"]
+    proc = subprocess.run(["git", "config", "--get", "pact.marker"],
+                          capture_output=True, text=True, env=env, cwd=str(tmp_path),
+                          timeout=30)
+    if nosystem:
+        assert (proc.returncode, proc.stdout) == (1, ""), proc
+    else:
+        assert (proc.returncode, proc.stdout.strip()) == (0, "system"), proc
+
+
 class TestCliRefusalEnvelope:
     def test_memory_save_cli_envelopes_the_refusal_on_stderr(self, tmp_path):
         """The full boundary: a child process with a constructed env discovers
@@ -1074,9 +1114,21 @@ class TestR5EnvFileSeam:
     def test_r5_session_init_writes_record_and_export_and_a_bash_child_inherits(
         self, tmp_path
     ):
+        sid5 = f"r5-env-file-{uuid.uuid4().hex}"
+        marker = embedding_marker(sid5)
+        try:
+            self._r5_body(tmp_path, sid5)
+            assert marker.exists(), (
+                "session_init did not reach the embedding marker for this "
+                "test's session id, so the cleanup below is not exercised"
+            )
+        finally:
+            marker.unlink(missing_ok=True)
+        assert not marker.exists(), f"the test left its marker behind: {marker}"
+
+    def _r5_body(self, tmp_path, sid5):
         umbrella = make_umbrella(tmp_path)
         env_file = tmp_path / "session-env.sh"
-        sid5 = "r5-env-file-session-0001"
         env = child_env(
             umbrella.config_root, home=tmp_path, session_id=sid5,
             project_dir=umbrella.project, memory_dir=tmp_path / "memdir",
@@ -1895,3 +1947,35 @@ class TestDeclinedDeclaration:
             "an embedded NUL either crashed the resolver or produced a "
             "basename instead of the decline"
         )
+
+
+class TestPerTestSessionIdsLeaveNoMarker:
+    """A save in this module reaches the embedding marker for its session id.
+    Each test gets its own id, and that id's marker is removed afterwards, so
+    no run inherits an "already attempted" marker from an earlier one."""
+
+    def test_a_save_marks_the_current_id_and_the_scope_removes_the_marker(
+        self, tmp_path, monkeypatch
+    ):
+        seen: set[str] = set()
+        with fresh_session_id(monkeypatch, sys.modules[__name__], "SID",
+                              _new_record_sid, seen) as session_id:
+            assert SID == session_id
+            marker = embedding_marker(session_id)
+            assert not marker.exists()
+            umbrella = make_umbrella(tmp_path)
+            seed_claude_md(umbrella.project)
+            write_session_context(umbrella.config_root, SID, umbrella.project)
+            env = child_env(umbrella.config_root, home=tmp_path, session_id=SID)
+            save = subprocess.run(
+                [sys.executable, str(_MEMORY_CLI), "save",
+                 json.dumps({"context": "MARKER-ARM-SAVE", "goal": "g"})],
+                capture_output=True, text=True, env=carry_clock_shift(env),
+                cwd=str(umbrella.project), timeout=120,
+            )
+            assert save.returncode == 0, f"save failed: {save.stderr[:400]!r}"
+            assert marker.exists(), (
+                "the save did not reach the embedding marker for this test's "
+                "session id, so this arm proves nothing about its cleanup"
+            )
+        assert not marker.exists()

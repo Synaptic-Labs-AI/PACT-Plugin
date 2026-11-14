@@ -27,7 +27,7 @@ GUARD_FILES = (
     "tests/test_import_hygiene.py",
     "tests/test_local_lint_parity.py",
     "tests/test_path_setup_pin.py",
-    "tests/test_suite_home_isolation.py",
+    "tests/test_session_home_sandbox.py",
     "tests/test_conftest_config_root_isolation.py",
     "tests/test_audit_protocol.py",
     "tests/test_memory_store_isolation.py",
@@ -42,6 +42,7 @@ SELECTION_MACHINERY = (
     "scripts/fast_suite_exclusions.json",
     ".github/workflows/fast-tests.yml",
     "constraints-ci.txt",
+    "constraints-ci.in",
     "pyproject.toml",
 )
 BASELINE = {

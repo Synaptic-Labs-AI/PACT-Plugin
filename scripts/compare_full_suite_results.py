@@ -46,6 +46,10 @@ if _SCRIPTS_DIR not in sys.path:
 from verify_full_run import SCHEMA_VERSION as RUN_RECORD_SCHEMA_VERSION  # noqa: E402
 
 COLLECTION_RECORD_SCHEMA_VERSION = 1
+# The shape of this tool's own outputs: comparison.json and every runs.jsonl
+# record. 2 added shuffle_seed, census_failures, the census delta type and the
+# census_outcome validity.
+OUTPUT_SCHEMA_VERSION = 2
 
 # The `tests.yml` workflow's immutable database id, read with
 # `gh api repos/{owner}/{repo}/actions/workflows/tests.yml --jq .id`. There is
@@ -63,6 +67,32 @@ TIMESTAMP = re.compile("^" + OPTIONAL_BOM + TIMESTAMP_TEXT)
 ACTIONS_ENVELOPE = re.compile(
     r"^[^\t\r\n]*\t[^\t\r\n]*\t" + OPTIONAL_BOM + TIMESTAMP_TEXT)
 SHA = re.compile(r"[0-9a-fA-F]{40}")
+# The run line's unexpanded
+# `${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}`, as
+# shlex splits it, and pytest-randomly's own report-header line. SEED_LINE is
+# the only accepted spelling: 1 to 10 ASCII digits holds every 32-bit seed.
+# SEED_LIKE_LINE is the same line with any run of Unicode digits; a header line
+# that matches it but not SEED_LINE is refused rather than read.
+_SEED_ARGV = ["${SEED:+-p", "randomly", "--randomly-seed=$SEED",
+              "--randomly-dont-reset-seed}"]
+SEED_LINE = re.compile(r"Using --randomly-seed=([0-9]{1,10})")
+SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=\d+")
+SESSION_BANNER = re.compile(r"=+ test session starts =+")
+SECTION_SEPARATOR = re.compile(r"[=_-]{3,}( .*)?")
+# The header line each census's finish() writes when it fails the session.
+# Under xdist the controller writes it straight after the last progress
+# marker, on the same line, so an optional progress prefix is allowed.
+_PROGRESS_PREFIX = r"(?:[^\[]*\[ *[0-9]{1,3}%\])?"
+CENSUS_HEADERS = {
+    "child_pytest": re.compile(
+        _PROGRESS_PREFIX + r"CHILD PYTEST CENSUS: ([0-9]{1,9}) pytest child\(ren\) "
+        r"started without blocking pytest-randomly"),
+    "clock_shift": re.compile(
+        _PROGRESS_PREFIX + r"clock-shift census: ([0-9]{1,9}) problem\(s\); "
+        r"this run did not shift every clock"),
+    "home": re.compile(
+        _PROGRESS_PREFIX + r"HOME CENSUS: ([0-9]{1,9}) child\(ren\) started without HOME"),
+}
 COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
 # A wide-encoding document hides an ASCII token behind interleaved NUL bytes, so
 # the DOCTYPE/ENTITY byte scan cannot see it; the UTF-16 LE mark also opens
@@ -181,31 +211,114 @@ def _junit_key(node_id: str) -> tuple[str, str]:
     return ".".join(parts[:-1]), parts[-1]
 
 
+def _command_text(line: str) -> str | None:
+    """The echoed pytest command on this line, or None when it carries none."""
+    stripped = line.strip()
+    if stripped.startswith("##[group]Run "):
+        stripped = stripped[len("##[group]Run "):]
+    return stripped if stripped.startswith("python -m pytest ") else None
+
+
 def _command_argv(lines: list[str]) -> list[str]:
     candidates = []
     for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("##[group]Run "):
-            stripped = stripped[len("##[group]Run "):]
-        if stripped.startswith("python -m pytest "):
+        command = _command_text(line)
+        if command is not None:
             try:
-                candidates.append(shlex.split(stripped))
+                candidates.append(shlex.split(command))
             except ValueError as exc:
                 raise EvidenceError(f"unparseable pytest command: {exc}") from exc
     if (len(candidates) not in (1, 2)
             or len(candidates) == 2 and candidates[0] != candidates[1]):
         raise EvidenceError("expected one command, optionally repeated by the Actions group header")
     argv = candidates[0]
-    # `$DIST` is the shipped workflow's own text: Actions echoes the `run:` body
-    # unexpanded, so a real log carries the variable, not the resolved value.
-    # The fixed tokens and the literal JUnit argument still pin the command
-    # shape, so this widens the accepted VALUE, never the command.
-    if (len(argv) != 9 or argv[:7] != [
+    # `$DIST` and `${SEED:+…}` are the shipped workflow's own text: Actions
+    # echoes the `run:` body unexpanded, so a real log carries the variables,
+    # not the resolved values. The argv text is therefore the same for every
+    # seed and cannot tell a shuffled run from an ordered one; the seed comes
+    # from pytest-randomly's header line instead. Exactly two shapes are
+    # accepted: the 9-token ordered line, and the same with the four seed tokens
+    # before the literal JUnit argument. This widens the accepted VALUE and
+    # adds one reviewed shape, never an open-ended command.
+    seeded_length = 9 + len(_SEED_ARGV)
+    if (len(argv) not in (9, seeded_length) or argv[:7] != [
             "python", "-m", "pytest", "-ra", "-n", "4", "--dist"]
             or argv[7] not in ("loadfile", "load", "$DIST")
-            or argv[8] != "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"):
+            or len(argv) == seeded_length and argv[8:-1] != _SEED_ARGV
+            or argv[-1] != "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"):
         raise EvidenceError(f"unexpected full-suite pytest argv: {argv!r}")
     return argv
+
+
+def _session_spans(lines: list[str]) -> tuple[list[str], list[str]]:
+    """The full-suite step's pytest report header and its session-finish span.
+
+    The header starts after the first session-start banner that follows the
+    step's echoed run command, so a banner from an earlier step cannot anchor
+    it, and ends at the first blank line or section separator. The
+    session-finish span runs from there to the next section separator: it holds
+    the progress lines and what pytest_sessionfinish writes, and no test's
+    captured output, which pytest prints only inside a later section. A missing
+    banner is refused: reading no seed would look like a valid ordered run.
+    """
+    commands = [index for index, line in enumerate(lines)
+                if _command_text(line) is not None]
+    start = next((index for index in range(commands[-1] + 1, len(lines))
+                  if SESSION_BANNER.fullmatch(lines[index])), None)
+    if start is None:
+        raise EvidenceError(
+            "no pytest session-start banner follows the full-suite run command; "
+            "the run's seed header cannot be located")
+    end = start + 1
+    while (end < len(lines) and lines[end].strip()
+           and not SECTION_SEPARATOR.fullmatch(lines[end])):
+        end += 1
+    finish = end
+    while finish < len(lines) and not SECTION_SEPARATOR.fullmatch(lines[finish]):
+        finish += 1
+    return lines[start + 1:end], lines[end:finish]
+
+
+def _census_failures(finish_span: list[str]) -> list[dict]:
+    """Every census that failed the session, with its problem lines.
+
+    Read from the session-finish span only, so a census-shaped line in a test's
+    captured output is never counted.
+    """
+    failures = []
+    for index, line in enumerate(finish_span):
+        for name, pattern in CENSUS_HEADERS.items():
+            match = pattern.fullmatch(line)
+            if match is None:
+                continue
+            problems = []
+            for detail in finish_span[index + 1:]:
+                if not detail.startswith("  "):
+                    break
+                problems.append(detail.strip())
+            failures.append({"census": name, "problems": int(match.group(1)),
+                             "lines": problems})
+    return sorted(failures, key=lambda failure: failure["census"])
+
+
+def _shuffle_seed(header: list[str]) -> int | None:
+    """The pytest-randomly seed from the report header, or None for an ordered run.
+
+    Only header lines count, so a seed line a test prints in its captured output
+    is ignored. Each line is matched as-is. A seed-like line that is not 1 to 10
+    ASCII digits, or a second seed line, is refused.
+    """
+    seeds = []
+    for line in header:
+        match = SEED_LINE.fullmatch(line)
+        if match is None and SEED_LIKE_LINE.fullmatch(line):
+            raise EvidenceError(
+                "pytest-randomly seed line is not 1 to 10 ASCII digits")
+        if match is not None:
+            seeds.append(match.group(1))
+    if len(seeds) > 1:
+        raise EvidenceError("more than one pytest-randomly seed line")
+    return int(seeds[0]) if seeds else None
 
 
 def _junit_bytes(path: Path) -> bytes:
@@ -689,24 +802,47 @@ def _validate_junit(record: dict, lines: list[str], terminal: list[str],
 
 
 def _validate_run_outcomes(record: dict, metadata: dict, lines: list[str],
-                           overall_conclusion: str) -> tuple[str, list[str], bool]:
-    """Reconcile exit status, verifier disposition, and the workflow conclusion."""
+                           overall_conclusion: str,
+                           census_failures: list[dict]) -> tuple[str, list[str], str]:
+    """Reconcile exit status, verifier disposition, and the workflow conclusion.
+
+    A green run that a census failed is a census outcome, checked like a red
+    run: the censuses raise only a clean status, so its exit status must be 1.
+    """
     full_run_ok = [line for line in lines if line.startswith("FULL-RUN-OK ")]
     verifier_state, verifier_failures = _full_run_verifier(
         metadata, lines, bool(full_run_ok))
     red = record["failed"] > 0 or record["errors"] > 0
-    if red and overall_conclusion != "failure":
-        raise EvidenceError("red test outcomes have an inconsistent overall conclusion")
-    if not red and overall_conclusion != "success":
+    if census_failures and not red and record["exitstatus"] != 1:
+        names = " and ".join(failure["census"] for failure in census_failures)
+        if record["exitstatus"] == 0:
+            raise EvidenceError(
+                f"the {names} census reported a failure beside exit status 0; a "
+                "census raises a clean exit status to 1, so the run record and "
+                "the log disagree")
+        raise EvidenceError(
+            f"the {names} census reported a failure beside exit status "
+            f"{record['exitstatus']}, which a census does not produce, so another "
+            "cause set the exit status")
+    census = not red and bool(census_failures)
+    failing = red or census
+    if failing and overall_conclusion != "failure":
+        raise EvidenceError(
+            "red test outcomes have an inconsistent overall conclusion" if red
+            else "a census failure has an inconsistent overall conclusion")
+    if not failing and overall_conclusion != "success":
         raise EvidenceError("green test outcomes have an inconsistent overall conclusion")
-    if red and (record["exitstatus"] == 0 or full_run_ok or verifier_state == "missing"):
-        raise EvidenceError("red outcomes lack consistent exit and verifier evidence")
-    if not red and record["exitstatus"] != 0:
+    if failing and (record["exitstatus"] == 0 or full_run_ok or verifier_state == "missing"):
+        raise EvidenceError(
+            "red outcomes lack consistent exit and verifier evidence" if red
+            else "a census failure lacks consistent exit and verifier evidence")
+    if not failing and record["exitstatus"] != 0:
         raise EvidenceError("nonzero exit without a test outcome is invalid infrastructure")
-    clean = not red and record["exitstatus"] == 0
+    clean = not failing and record["exitstatus"] == 0
     if clean and (len(full_run_ok) != 1 or record["passed"] <= 0 or verifier_failures):
         raise EvidenceError("a clean run needs positive passes and one FULL-RUN-OK")
-    return verifier_state, verifier_failures, clean
+    validity = "clean" if clean else "census_outcome" if census else "test_outcome"
+    return verifier_state, verifier_failures, validity
 
 
 def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
@@ -718,19 +854,31 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     collected, terminal = _validate_records(metadata, record, collection, expected_sha)
     lines, argv, summary, environment_passes = _validate_log(
         directory, record, expected_sha)
+    header, finish_span = _session_spans(lines)
+    shuffle_seed = _shuffle_seed(header)
+    census_failures = _census_failures(finish_span)
+    if shuffle_seed is not None and len(argv) == 9:
+        raise EvidenceError(
+            "a pytest-randomly seed line sits beside the 9-token run line, "
+            "which has no seed option and cannot load pytest-randomly")
     overall_conclusion = _require_environment_step_success(metadata)
     cases, skip_sites, collection_skip_sites = _validate_junit(
         record, lines, terminal, artifact)
-    verifier_state, verifier_failures, clean = _validate_run_outcomes(
-        record, metadata, lines, overall_conclusion)
+    verifier_state, verifier_failures, validity = _validate_run_outcomes(
+        record, metadata, lines, overall_conclusion, census_failures)
     return {
         "logical_name": logical, "raw_paths": RAW_PATHS, "evidence_errors": [],
-        "validity": "clean" if clean else "test_outcome",
+        "validity": validity,
         "identity": {"database_id": metadata["databaseId"],
                      "workflow_database_id": metadata["workflowDatabaseId"],
                      "attempt": 1, "head_sha": expected_sha,
                      "head_branch": metadata.get("headBranch"),
                      "url": metadata.get("url")},
+        # Beside identity, never in environment: a seed is the variable under
+        # test, so it must not make a delta unattributable.
+        "shuffle_seed": shuffle_seed,
+        # Outcome evidence, not environment: a census failure is a suite failure.
+        "census_failures": census_failures,
         "argv": argv,
         "environment": {
             "overall_conclusion": overall_conclusion,
@@ -875,11 +1023,17 @@ def _classify_environment(comparison: dict, reference: dict,
     comparison["status"] = "invalid"
 
 
+def _input_runs(runs: list[dict]) -> list[dict]:
+    """One summary per input run; a run refused during normalization has no
+    identity or seed, so both read None."""
+    return [{"logical_name": run["logical_name"], "identity": run.get("identity"),
+             "shuffle_seed": run.get("shuffle_seed"), "validity": run["validity"]}
+            for run in runs]
+
+
 def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
-    comparison = {"schema_version": 1, "expected_sha": expected_sha,
-                  "input_runs": [{"logical_name": run["logical_name"],
-                                  "identity": run.get("identity"),
-                                  "validity": run["validity"]} for run in runs],
+    comparison = {"schema_version": OUTPUT_SCHEMA_VERSION, "expected_sha": expected_sha,
+                  "input_runs": _input_runs(runs),
                   "status": "invalid" if errors else "identical",
                   "deltas": [], "observations": [], "evidence_errors": errors}
     if errors:
@@ -902,6 +1056,11 @@ def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
             comparison["deltas"].append({"type": "skip_sites", "run": label,
                                          "before": reference["collection_skip_sites"],
                                          "after": run["collection_skip_sites"]})
+        census_before = sorted({failure["census"] for failure in reference["census_failures"]})
+        census_after = sorted({failure["census"] for failure in run["census_failures"]})
+        if census_after != census_before:
+            comparison["deltas"].append({"type": "census", "run": label,
+                                         "before": census_before, "after": census_after})
         if run["argv"] != reference["argv"]:
             comparison["observations"].append({"type": "argv", "run": label})
         duration_changes = _material_duration_changes(reference_durations, run)
@@ -988,10 +1147,8 @@ def _reject_repeated_identities(runs: list[dict], errors: list[dict]) -> None:
 
 def _invalid_comparison(expected_sha: str, runs: list[dict],
                         errors: list[dict]) -> dict:
-    return {"schema_version": 1, "expected_sha": expected_sha,
-            "input_runs": [{"logical_name": run["logical_name"],
-                            "identity": run.get("identity"),
-                            "validity": run["validity"]} for run in runs],
+    return {"schema_version": OUTPUT_SCHEMA_VERSION, "expected_sha": expected_sha,
+            "input_runs": _input_runs(runs),
             "status": "invalid", "deltas": [], "observations": [],
             "evidence_errors": errors}
 
@@ -1059,7 +1216,8 @@ def main(argv: list[str] | None = None) -> int:
         comparison["status"] = "invalid"
     try:
         _atomic_write(args.output_dir / "runs.jsonl", "".join(
-            json.dumps(run, sort_keys=True) + "\n" for run in runs))
+            json.dumps({"schema_version": OUTPUT_SCHEMA_VERSION, **run}, sort_keys=True)
+            + "\n" for run in runs))
         _atomic_write(args.output_dir / "comparison.json",
                       json.dumps(comparison, indent=2, sort_keys=True) + "\n")
     except OSError as exc:

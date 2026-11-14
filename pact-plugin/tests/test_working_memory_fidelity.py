@@ -55,7 +55,8 @@ def _run(env, cwd, *args):
     # added without it. Measured: this module's children attempted 57 model
     # loads without it, each one a cold-cache download on a machine with no
     # warm cache (i.e. CI).
-    env = {**env, **hf_cache_env()}
+    # HOME is read from the caller's env, so a caller that dropped it fails here.
+    env = {**env, **hf_cache_env(), "HOME": env["HOME"]}
     proc = subprocess.run(
         [sys.executable, str(_CLI), *args],
         env=env, cwd=str(cwd), capture_output=True, text=True, timeout=180,
