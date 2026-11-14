@@ -569,11 +569,19 @@ def test_the_marker_exempts_a_skills_test_in_a_session_that_loads_the_conftest(t
     assert "test_unmarked_in_skills" in output and "test_marked_in_skills" not in output, output
 
 
-def _real_session(*paths):
+def _real_session(*paths, plugin_dir=None, marker=None):
+    """A child pytest session over real tracked paths, rooted at the plugin.
+    With `plugin_dir`, it also loads the launch probe plugin written there, which
+    writes the outcome of one HOME-less launch to `marker`."""
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    extra = []
+    if plugin_dir is not None:
+        env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(plugin_dir), env.get("PYTHONPATH")]))
+        env["HOME_CENSUS_PROBE_MARKER"] = str(marker)
+        extra = ["-p", "home_census_launch_probe"]
     proc = subprocess.run(
-        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly", *paths],
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly", *extra, *paths],
         cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True,
         timeout=300)
     return proc.returncode, proc.stdout + proc.stderr
@@ -581,19 +589,53 @@ def _real_session(*paths):
 
 _SKILLS_TEST = "skills/pact-handoff-harvest/test_skill_loading_harvest.py"
 
+# A plugin, not a test file: a test file outside the plugin tree would make the
+# child collect from the common ancestor of the two paths. At the end of the
+# session it makes one launch without HOME and records whether it ran.
+_LAUNCH_PROBE = '''
+import os
+import subprocess
 
-def test_a_session_of_skills_tests_alone_has_no_census():
+import pytest
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionfinish(session):
+    try:
+        subprocess.run(["true"], env={"PATH": os.defpath}, check=True)
+        outcome = "ran"
+    except Exception as exc:
+        outcome = "refused: %r" % (exc,)
+    with open(os.environ["HOME_CENSUS_PROBE_MARKER"], "w", encoding="utf-8") as handle:
+        handle.write(outcome)
+'''
+
+
+def test_a_session_of_skills_tests_alone_has_no_census(tmp_path):
     """A real session over a skills/ test alone does not load tests/conftest.py,
-    so no census is installed and no census line is printed; its twin, which adds
-    a tests/ module, loads the conftest and prints the census line."""
+    so no census is installed: a launch without HOME made in that session runs,
+    and no census line is printed. Its twins load the conftest by adding a tests/
+    module: one prints the census line, and in the other the same launch is
+    refused, which shows the probe's launch is one an installed census judges."""
     if not (Path(__file__).resolve().parents[1] / _SKILLS_TEST).is_file():
         pytest.skip("SKIPPED, NOT PASSED: %s is not in this tree" % _SKILLS_TEST)
-    rc, output = _real_session(_SKILLS_TEST)
+    (tmp_path / "home_census_launch_probe.py").write_text(_LAUNCH_PROBE, encoding="utf-8")
+    marker = tmp_path / "outcome"
+    rc, output = _real_session(_SKILLS_TEST, plugin_dir=tmp_path, marker=marker)
     assert rc == 0 and re.search(r"^[0-9]+ passed", output, re.M), output
+    assert marker.read_text(encoding="utf-8") == "ran", output
     assert "HOME CENSUS" not in output, output
+
     rc, output = _real_session(_SKILLS_TEST, "tests/test_session_home_sandbox.py")
     assert rc == 0 and re.search(r"^[0-9]+ passed", output, re.M), output
     assert re.search(r"HOME CENSUS: installed, [0-9]+ launch(es)? checked, 0 refused", output), output
+
+    marker.unlink()
+    rc, output = _real_session(_SKILLS_TEST, "tests/test_session_home_sandbox.py",
+                               plugin_dir=tmp_path, marker=marker)
+    assert marker.read_text(encoding="utf-8").startswith("refused: HomeCensusError"), output
+    assert "HOME CENSUS: 1 child(ren) started without HOME" in output, output
+    assert rc == 1, output
 
 
 def _git_rig(*args, cwd):
