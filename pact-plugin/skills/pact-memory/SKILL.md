@@ -412,7 +412,9 @@ Two operator surfaces answer, and they are deliberately ordered:
   answers ONLY when no declaration was present and no repository was found,
   from the working directory or by walking up to its project marker (a home
   directory the walk reaches is not asked, as above), so a repository pin
-  always outranks it. Use it for a non-repository working
+  outranks it wherever one is read: in a home directory that is itself a
+  repository no pin is read, and when git cannot see that home from the
+  working directory this setting binds there. Use it for a non-repository working
   directory that should share one identity. Only the user sets it: it changes
   the identity of every session it answers for, so an agent asks the user
   instead of writing it.

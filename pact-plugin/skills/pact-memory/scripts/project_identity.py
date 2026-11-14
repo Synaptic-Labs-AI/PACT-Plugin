@@ -1008,8 +1008,10 @@ def read_user_setting(config_path: Path) -> Optional[str]:
     """The `project_id` from `<memory_dir>/config.json`, or None.
 
     The user-scope fallback for a session with no repository at all. Applied
-    by the caller ONLY when no repository resolves, so a repo-scoped override
-    always wins. Never raises.
+    by the caller only when no repository is found, so a repo-scoped override
+    wins wherever one is read. In a home directory that is itself a
+    repository no override is read, and the cwd-marker route applies this
+    setting there. Never raises.
     """
     try:
         payload = json.loads(Path(config_path).read_text(encoding="utf-8"))

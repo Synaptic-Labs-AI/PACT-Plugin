@@ -1083,10 +1083,11 @@ def pinned_answers(tmp_path_factory):
 
 
 class TestARepositoryPinOutranksTheUserSetting:
-    """A canonical pin binds on every route, so no rung (the user setting
-    over a cwd marker included) can answer before the repository the route
-    finds. The unusable-pin report on the same route is the parity matrix's
-    override column."""
+    """A canonical pin binds on every route in every own layout, so no rung
+    (the user setting over a cwd marker included) can answer before the
+    repository the route finds. No own layout is a home directory, where no
+    rung reads a pin. The unusable-pin report on the same route is the
+    parity matrix's override column."""
 
     def test_every_route_binds_the_pin(self, pinned_answers):
         wrong = {

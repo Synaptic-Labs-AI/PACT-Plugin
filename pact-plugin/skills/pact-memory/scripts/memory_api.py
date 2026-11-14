@@ -1999,9 +1999,10 @@ class PACTMemory:
                         directory's marker walk finds (each reading its
                         repository's override file, then its origin), then
                         the user-scope setting (only
-                        with no declaration and no repository found), then
-                        the working directory's folder name (home scope
-                        warns).
+                        with no declaration and no repository found; a home
+                        directory the marker walk reaches is not asked, so
+                        it counts as none), then the working directory's
+                        folder name (home scope warns).
                         Measured git subprocesses per detection, by layout
                         and rung, as the fewest to the most over that rung's
                         routes (each takes about 1 ms):
@@ -2560,9 +2561,11 @@ class PACTMemory:
         the user-scope setting is consulted: a stale declaration must not be
         silently absorbed by a user setting. The setting answers only when no
         declaration was present at all and no repository was found, so a
-        repository pin outranks it on every route. On the cwd-marker route a
-        HOME directory is a landing that never asks git, so a home that is
-        itself a repository binds the user setting there when one exists.
+        repository pin outranks it wherever one is read. No rung reads a pin
+        in a HOME directory that is itself a repository: the git-root and
+        declared rungs land there on its folder name, and the cwd-marker
+        rung, whose HOME landing never asks git, binds the user setting there
+        when one exists.
         """
         # A DECLARATION THAT WAS PRESENT BUT NAMED NO PROJECT. Local only: no
         # instance, module or thread state.
