@@ -121,12 +121,13 @@ def start_after_description(project_dir: Path) -> str:
 
     The evidence rule needs the description STRICTLY earlier than the start,
     and the start is written to the microsecond, so the margin must clear
-    that rounding (a zero margin failed 17 tests). It must stay below the
-    time a re-clone takes to write a new description, or a seed followed by
-    a re-clone would date after the new one too: a 1 s margin made both
-    re-clone arms read evidence that is not there. The description is found
-    through the git common dir, so a linked worktree dates against the
-    shared one.
+    that rounding: with no margin, 15 to 21 of the seeding tests failed
+    across five runs. It must stay below the time a re-clone takes to write
+    a new description, or a seed followed by a re-clone would date after
+    the new one too: with a 1 s margin, both re-clone arms in
+    test_remediation_identity_resolver.py read evidence that is not there
+    and fail. The description is found through the git common dir, so a
+    linked worktree dates against the shared one.
     """
     from datetime import datetime, timezone
 
@@ -163,7 +164,7 @@ def seed_session_evidence(
     the wall clock: the evidence rule compares against the description's
     ctime, and a wall-clock start passes only while the filesystem clock
     does not lead the process clock by more than the git-init-to-seed gap
-    (3.7 ms to 264 ms in this suite; a 50 ms lead failed 14 seeding tests).
+    (0.7 ms to 458 ms in this suite; a 50 ms lead failed 14 seeding tests).
     A test that needs a start EARLIER than the description, or one that
     re-creates the repository after seeding, passes its own.
     `config_dir` is the isolated config root the file must land under (the

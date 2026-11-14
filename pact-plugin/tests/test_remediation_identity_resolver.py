@@ -901,10 +901,7 @@ class TestTheSessionMustPostdateTheRepository:
         self, identity_env, monkeypatch, caplog
     ):
         repo = self._checkout(identity_env, monkeypatch)
-        seed_session_evidence(
-            _config_root(identity_env), repo, "legacy-session",
-            started_at=self._iso(-60),
-        )
+        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
         self._reclone(repo, monkeypatch)
         with caplog.at_level(logging.WARNING):
             scopes, state = self._state(identity_env)
@@ -1000,10 +997,7 @@ class TestTheSessionMustPostdateTheRepository:
         self, identity_env, monkeypatch
     ):
         repo = self._checkout(identity_env, monkeypatch)
-        context = seed_session_evidence(
-            _config_root(identity_env), repo, "legacy-session",
-            started_at=self._iso(-60),
-        )
+        context = seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
         self._reap(context)
         self._reclone(repo, monkeypatch)
         scopes, state = self._state(identity_env)
@@ -1022,7 +1016,7 @@ class TestTheSessionMustPostdateTheRepository:
             started_at=self._iso(-self.HOUR),
         )
         line = {"session_id": "legacy-session", "project_dir": str(repo),
-                "started_at": self._iso(0)}
+                "started_at": start_after_description(repo)}
         self._ledger(context).write_text(json.dumps(line) + "\n", encoding="utf-8")
         scopes, state = self._state(identity_env)
         assert scopes == (CANONICAL,) and state["unproven"], state
