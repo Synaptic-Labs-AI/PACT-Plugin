@@ -587,38 +587,41 @@ FLOOR_LAYOUTS = {
 # dot-git store, a bind through a pin, counted in the pinned table.
 NOT_A_FLOOR_LAYOUT = {
     # Every truthy return of the three predicates below reaches one place:
-    # detect_id_for_root's `if _gitfile_points_at_foreign_gitdir(asked)`,
-    # which returns a `gitfile_redirect` decline (project_identity.py:1515-1529).
-    # Nothing else calls them. A usable pin is read before that check
-    # (project_identity.py:1489-1493), so a pinned checkout binds its pin.
+    # detect_id_for_root's `if _gitfile_points_at_foreign_gitdir(asked)`
+    # check, which returns a `gitfile_redirect` decline. Nothing else calls
+    # them. A usable pin is read before that check, so a pinned checkout
+    # binds its pin.
     "_gitfile_points_at_foreign_gitdir": (
-        "its one truthy return is `_redirect_target_is_foreign` for the "
-        "marker's target (project_identity.py:1384), so it is true for "
-        "exactly the cases the next reason lists, and declines "
-        "`gitfile_redirect` at project_identity.py:1515-1529. The one own "
-        "layout it reaches is the user's `--separate-git-dir=<dir>/.git` "
-        "store: unpinned it declines there too, and pinned it binds through "
-        "the pin read first (TestTheGitCallFloorWithAPin)"
+        "its one truthy return hands the `.git` marker's target to "
+        "`_redirect_target_is_foreign`, so it is true for exactly the cases "
+        "the next reason lists, and each declines `gitfile_redirect` at "
+        "detect_id_for_root's redirect check. The one own layout it reaches "
+        "is the user's `--separate-git-dir=<dir>/.git` store: unpinned it "
+        "declines there too, and pinned it binds through the pin read first "
+        "(TestTheGitCallFloorWithAPin)"
     ),
     "_redirect_target_is_foreign": (
-        "true at project_identity.py:1332 for a target named `.git` (the "
-        "foreign_gitdir, relative_foreign_gitdir and symlinked_git shapes "
-        "decline `gitfile_redirect`; the user's own dot-git store is the "
-        "pinned exception above), and at project_identity.py:1334 whenever "
-        "`_admin_dir_names_another_checkout` is true for a submodule admin "
-        "dir with no `commondir` file"
+        "true when the target is named `.git` (the foreign_gitdir, "
+        "relative_foreign_gitdir and symlinked_git shapes decline "
+        "`gitfile_redirect`; the user's own dot-git store is the pinned "
+        "exception above), and whenever `_admin_dir_names_another_checkout` "
+        "is true for a submodule admin dir with no `commondir` file"
     ),
     "_admin_dir_names_another_checkout": (
         "true for a submodule admin dir whose recorded checkout cannot be "
-        "proven to be the asked one. Reached by a shape: the recorded "
-        "checkout is another one, a forgery (project_identity.py:1294; the "
+        "proven to be the asked one. Reached by a shape: `os.path.samefile` "
+        "says the recorded checkout is another one, a forgery (the "
         "forged_submodule_admin and symlinked_submodule_admin shapes decline "
-        "`gitfile_redirect`). Reached by no fixture shape, and declining "
-        "through the same check at project_identity.py:1515-1529: git cannot "
-        "run (:1271), `git config core.worktree` exits non-zero or prints "
-        "nothing, i.e. it is unset as `git submodule deinit` leaves it, or "
-        "git failed (:1280), the recorded or the asked path cannot be "
-        "resolved (:1288), and the recorded path does not exist (:1298)"
+        "`gitfile_redirect`). Reached by no fixture shape, and declining at "
+        "the same redirect check when reached: `git config core.worktree` "
+        "cannot run, or exits non-zero or prints nothing (unset, as `git "
+        "submodule deinit` leaves it, or a git failure); or the recorded or "
+        "the asked path cannot be resolved. When `samefile` raises because "
+        "the recorded checkout does not exist, the return is reached only by "
+        "a direct call or a mocked `samefile`: with the checkout really "
+        "deleted, the git-root, CLAUDE_PROJECT_DIR and cwd-marker routes "
+        "decline `broken_git_marker` in their root guard before this "
+        "predicate is called"
     ),
     "_git_env_bool": "reads a git environment flag, not the `.git` layout",
 }
@@ -637,30 +640,151 @@ def _bool_shaped(value) -> bool:
     )
 
 
-def _return_kind(function) -> tuple:
+# The typing generics an annotation may be built from and still be read as a
+# non-bool type, checked by identity against `typing`, with every argument
+# checked in turn.
+NON_BOOL_GENERICS = (
+    "Optional", "Tuple", "List", "Dict", "Set", "FrozenSet",
+    "Iterable", "Iterator", "Sequence", "Mapping",
+)
+_UNRESOLVED = object()
+
+
+def _resolved(name: str):
+    """What `name` means in project_identity: its module global, else the
+    builtin, else _UNRESOLVED."""
+    import builtins
+
+    namespace = vars(pi)
+    if name in namespace:
+        return namespace[name]
+    return getattr(builtins, name, _UNRESOLVED)
+
+
+def _not_a_bool_type(node) -> "str | None":
+    """None when the annotation `node` is positively a type no bool belongs
+    to, else why it is not known to be one. Admitted, each by a check on the
+    value it names:
+    - the constant None (inside a union or a generic);
+    - a name that resolves in project_identity to a class that `bool` is not
+      a subclass of (so `int`, `object`, `typing.Any` and a bool alias are
+      refused);
+    - a NON_BOOL_GENERICS generic, resolved by identity, whose every
+      argument is admitted;
+    - `X | Y` with both sides admitted.
+    Every other form (TypeGuard, TypeIs, Annotated, Literal, a string, an
+    attribute, an unresolved name) is refused."""
+    import inspect
+    import typing
+
+    if isinstance(node, ast.Constant) and node.value is None:
+        return None
+    if isinstance(node, ast.Name):
+        value = _resolved(node.id)
+        if value is typing.Any or not inspect.isclass(value):
+            return f"{node.id!r} does not resolve to a class"
+        if issubclass(bool, value):
+            return f"{node.id!r} resolves to {value.__name__}, which a bool is an instance of"
+        return None
+    if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+        generic = _resolved(node.value.id)
+        if not any(generic is getattr(typing, known) for known in NON_BOOL_GENERICS):
+            return f"{ast.unparse(node.value)!r} is not a generic the walk reads"
+        arguments = node.slice.elts if isinstance(node.slice, ast.Tuple) else [node.slice]
+        for argument in arguments:
+            why = _not_a_bool_type(argument)
+            if why:
+                return why
+        return None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+        return _not_a_bool_type(node.left) or _not_a_bool_type(node.right)
+    return f"{ast.unparse(node)!r} is not a form the walk reads"
+
+
+def _predicate_results(function, defined: dict, seen: frozenset) -> dict:
+    """{id(returned node): predicate name} for each value `function` returns
+    that is a project_identity function's result not proven to be a non-bool:
+    a direct call, or a name assigned from such a call in the body."""
+    def predicate_call(node):
+        if (
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            and node.func.id in defined
+        ):
+            name = node.func.id
+            if name in seen or _return_kind(defined[name], defined, seen)[0] != "not a predicate":
+                return name
+        return None
+
+    assigned = {}
+    for node in ast.walk(function):
+        if isinstance(node, ast.Assign):
+            name = predicate_call(node.value)
+            if name:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        assigned[target.id] = name
+    found = {}
+    for node in ast.walk(function):
+        if isinstance(node, ast.Return) and node.value is not None:
+            name = predicate_call(node.value)
+            if name is None and isinstance(node.value, ast.Name):
+                name = assigned.get(node.value.id)
+            if name:
+                found[id(node.value)] = name
+    return found
+
+
+def _return_kind(function, defined: "dict | None" = None, seen: frozenset = frozenset()) -> tuple:
     """("predicate" or "not a predicate", None), or (None, why the walk
-    cannot classify `function`). The walk reads two forms and no others:
-    - PREDICATE: the return annotation is the bare name `bool`;
-    - NOT A PREDICATE: an annotation that names neither `bool` nor `Any` nor
-      `object`, holds no constant other than None (so no string annotation
-      and no `Literal`), and a body with no bool-shaped return.
-    Anything else, a missing annotation included, is unreadable."""
+    cannot classify `function`). The walk reads these forms and no others,
+    each admitted by a check on what it names:
+    - PREDICATE: the annotation is the bare name `bool`, and `bool` is not
+      rebound in project_identity;
+    - NOT A PREDICATE, `-> None`: every return in the body is bare or
+      returns None;
+    - NOT A PREDICATE, any other annotation: `_not_a_bool_type` admits it,
+      no return in the body is bool-shaped, and none returns the result of
+      a project_identity function that is not itself not a predicate.
+    Anything else, a missing annotation included, is unreadable. LIMIT: a
+    function annotated with a non-bool class that returns a bool from a
+    call outside project_identity is read as its annotation says."""
+    import builtins
+
+    if defined is None:
+        tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
+        defined = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    seen = seen | {function.name}
     returns = function.returns
+    returned = [
+        node.value for node in ast.walk(function)
+        if isinstance(node, ast.Return) and node.value is not None
+    ]
     if isinstance(returns, ast.Name) and returns.id == "bool":
+        if _resolved("bool") is not builtins.bool:
+            return None, "is annotated `bool`, but `bool` is rebound in project_identity"
         return "predicate", None
     if returns is None:
         return None, "has no return annotation"
-    parts = list(ast.walk(returns))
-    names = {n.id for n in parts if isinstance(n, ast.Name)}
-    names |= {n.attr for n in parts if isinstance(n, ast.Attribute)}
-    constants = [n for n in parts if isinstance(n, ast.Constant) and n.value is not None]
-    if constants or names & {"bool", "Any", "object"}:
-        return None, f"has the return annotation {ast.unparse(returns)!r}, a form the walk does not read"
-    for node in ast.walk(function):
-        if isinstance(node, ast.Return) and node.value is not None and _bool_shaped(node.value):
+    if isinstance(returns, ast.Constant) and returns.value is None:
+        for value in returned:
+            if not (isinstance(value, ast.Constant) and value.value is None):
+                return None, f"is annotated None but returns {ast.unparse(value)!r}"
+        return "not a predicate", None
+    why = _not_a_bool_type(returns)
+    if why:
+        return None, f"has the return annotation {ast.unparse(returns)!r}: {why}"
+    for value in returned:
+        if _bool_shaped(value):
             return None, (
                 f"is annotated {ast.unparse(returns)!r} but returns "
-                f"{ast.unparse(node.value)!r} at line {node.lineno}"
+                f"{ast.unparse(value)!r} at line {value.lineno}"
+            )
+    for value in returned:
+        callee = _predicate_results(function, defined, seen).get(id(value))
+        if callee:
+            return None, (
+                f"is annotated {ast.unparse(returns)!r} but returns the result "
+                f"of {callee}, which is not known to be a non-bool, at line {value.lineno}"
             )
     return "not a predicate", None
 
@@ -682,7 +806,7 @@ def _layout_predicate_forms() -> tuple:
     unresolved, predicates = [], set()
     while frontier:
         function = defined[frontier.pop()]
-        kind, why = _return_kind(function)
+        kind, why = _return_kind(function, defined)
         if kind == "predicate":
             predicates.add(function.name)
         elif kind is None:
