@@ -1657,12 +1657,18 @@ class _DetectionGraph:
 
     def _is_data(self, owner: str, name: str) -> bool:
         """EVERY module-level binding of `name` in `owner` (`_module_bindings`)
-        is a value that runs no project code when its methods are called: a
-        literal (a constant, or a dict, list, set or tuple display), a
-        compiled pattern (`re.compile`) or a logger (`logging.getLogger`). A
-        name bound in any other way as well (a call, an augmented assignment,
-        a loop target, an import, a `global` assignment in a function) is not
-        data, whichever binding comes last."""
+        is a value PROVED to run no project code when its methods are called:
+        - a LITERAL: `ast.literal_eval` accepts it, so it holds constants only
+          (a display holding a call or a name, which runs at import, is not);
+        - a COMPILED PATTERN: `re.compile` whose arguments are literals or
+          `re` flags;
+        - a LOGGER: `logging.getLogger` of a literal or `__name__`, and only
+          while `_logging_untouched()` holds (no project code can make a
+          logger call reach project code).
+        A name bound in any other way as well (a call, an augmented assignment,
+        a loop target, an import, an `except ... as` or `match` capture, a
+        `global` assignment in a function) is not data, whichever binding
+        comes last."""
         import ast
 
         from fixtures.identity_git import qualified_name
@@ -1670,24 +1676,102 @@ class _DetectionGraph:
         if not self.load(owner):
             return False
         values = self.bindings.get(owner, {}).get(name, [])
+        aliases = self.aliases[owner]
+
+        def literal(value):
+            try:
+                ast.literal_eval(value)
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                return False
+            return True
+
+        def flag(value):
+            if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+                return flag(value.left) and flag(value.right)
+            return (qualified_name(value, aliases) or "").startswith("re.")
 
         def data(value):
-            if isinstance(value, (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple)):
+            if literal(value):
                 return True
-            return isinstance(value, ast.Call) and (
-                qualified_name(value.func, self.aliases[owner]) in ("re.compile", "logging.getLogger")
-            )
+            if not isinstance(value, ast.Call):
+                return False
+            arguments = list(value.args) + [keyword.value for keyword in value.keywords]
+            called = qualified_name(value.func, aliases)
+            if called == "re.compile":
+                return all(literal(argument) or flag(argument) for argument in arguments)
+            if called == "logging.getLogger":
+                return all(
+                    literal(argument) or (isinstance(argument, ast.Name) and argument.id == "__name__")
+                    for argument in arguments
+                ) and self._logging_untouched()
+            return False
 
         return bool(values) and all(value is not None and data(value) for value in values)
 
+    def _logging_untouched(self) -> bool:
+        """No module of the plugin (outside its tests) can make a logger call
+        run project code: none subclasses a `logging` class (a Filter, a
+        Handler, a Formatter, a LoggerAdapter), none calls
+        `logging.config.dictConfig` or `fileConfig`, `setLoggerClass` or
+        `setLogRecordFactory`, and every `addFilter`, `addHandler`,
+        `setFormatter` or `logging.basicConfig` call passes only literals,
+        builtins and names imported from outside the project. Measured over
+        every `.py` file under the plugin root, once per graph."""
+        import ast
+        import builtins
+
+        from fixtures.identity_git import import_aliases, qualified_name
+
+        if hasattr(self, "_logging_verdict"):
+            return self._logging_verdict
+        verdict = True
+        replacing = {"logging.config.dictConfig", "logging.config.fileConfig",
+                     "logging.setLoggerClass", "logging.setLogRecordFactory"}
+        attaching = {"addFilter", "addHandler", "setFormatter"}
+        for path in sorted(PLUGIN_ROOT.rglob("*.py")):
+            if "tests" in path.relative_to(PLUGIN_ROOT).parts:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            aliases = import_aliases(tree)
+
+            def foreign(name):
+                imported = aliases.get(name)
+                if imported is None:
+                    return hasattr(builtins, name)
+                top = imported.split(".")[0]
+                return self._path(top) is None and self._path(imported) is None
+
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ClassDef) and any(
+                    (qualified_name(base, aliases) or "").startswith("logging.") for base in node.bases
+                ):
+                    verdict = False
+                elif isinstance(node, ast.Call):
+                    called = qualified_name(node.func, aliases) or ""
+                    method = node.func.attr if isinstance(node.func, ast.Attribute) else None
+                    if called in replacing:
+                        verdict = False
+                    elif method in attaching or called == "logging.basicConfig":
+                        arguments = list(node.args) + [keyword.value for keyword in node.keywords]
+                        if not all(
+                            foreign(inner.id)
+                            for argument in arguments for inner in ast.walk(argument)
+                            if isinstance(inner, ast.Name)
+                        ):
+                            verdict = False
+        self._logging_verdict = verdict
+        return verdict
+
     def _runs_no_project_code(self, owner: str, name: str) -> bool:
         """Building the class `name` of `owner` runs none of the project's
-        code: it defines no `__init__`, `__new__` or `__post_init__`, and no
-        base is a project name."""
+        code: it has no decorator (a `@dataclass` writes an `__init__` that
+        runs its field factories) and no keyword in its header (a
+        `metaclass=`), it defines no `__init__`, `__new__` or
+        `__post_init__`, and no base is a project name."""
         import ast
 
         node = self.classes.get(owner, {}).get(name)
-        if node is None:
+        if node is None or node.decorator_list or node.keywords:
             return False
         hooks = {"__init__", "__new__", "__post_init__"}
         if any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name in hooks
@@ -1701,7 +1785,286 @@ class _DetectionGraph:
                 return False
         return True
 
-    def unread_call(self, call, module: str) -> bool:
+    def _owner_class(self, module: str, function):
+        """The name of the class of `module` whose body defines `function`."""
+        for name, node in self.classes.get(module, {}).items():
+            if any(item is function for item in node.body):
+                return name
+        return None
+
+    def instance_method(self, call, module: str, function):
+        """How the census treats a method called on an object it cannot name
+        at the call: a LOCAL of `function` (`reader = Reader(); reader.read()`)
+        or an attribute of `self` (`self.reader.read()`).
+
+        Returns ("follow", (module, def)) when EVERY binding of the local in
+        `function`, or of `self.<attr>` across the methods of the class,
+        builds the same class of `module`, and that class defines the
+        method: the method is read like any other call. Returns ("report",
+        None) when the object is an attribute of `self` bound any other way,
+        or a local with at least one binding that a project name produces (a
+        project class or function's result) and the follow rule does not
+        hold. Returns ("skip", None) for a local bound only from outside the
+        project (`Path(x)`, a parameter)."""
+        import ast
+
+        func = call.func
+        if not isinstance(func, ast.Attribute) or function is None:
+            return "skip", None
+        method, owner = func.attr, func.value
+        arguments = function.args.posonlyargs + function.args.args
+        values = None
+        if isinstance(owner, ast.Name):
+            if owner.id in {arg.arg for arg in arguments + function.args.kwonlyargs}:
+                return "skip", None
+            values = [
+                sub.value for sub in ast.walk(function)
+                if isinstance(sub, ast.Assign) and any(
+                    isinstance(target, ast.Name) and target.id == owner.id for target in sub.targets
+                )
+            ]
+            values += [
+                None for sub in ast.walk(function)
+                if isinstance(sub, (ast.AugAssign, ast.For, ast.AsyncFor, ast.NamedExpr))
+                and isinstance(sub.target, ast.Name) and sub.target.id == owner.id
+            ]
+            anchored = [
+                value for value in values
+                if value is not None and self._produced_by_project(value, module)
+            ]
+            if not anchored or all(
+                isinstance(value, ast.Call) and self.target(value, module) is not None
+                and self.returns_foreign(self.target(value, module))
+                for value in anchored
+            ):
+                return "skip", None
+        elif (
+            isinstance(owner, ast.Attribute) and isinstance(owner.value, ast.Name)
+            and arguments and owner.value.id == arguments[0].arg
+        ):
+            cls = self._owner_class(module, function)
+            if cls is None:
+                return "skip", None
+            values = []
+            for item in self.classes[module][cls].body:
+                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    continue
+                own = (item.args.posonlyargs + item.args.args)[:1]
+                for sub in ast.walk(item):
+                    targets = sub.targets if isinstance(sub, ast.Assign) else (
+                        [sub.target] if isinstance(sub, (ast.AugAssign, ast.AnnAssign)) else []
+                    )
+                    for target in targets:
+                        if (
+                            isinstance(target, ast.Attribute) and target.attr == owner.attr
+                            and isinstance(target.value, ast.Name) and own and target.value.id == own[0].arg
+                        ):
+                            values.append(sub.value if isinstance(sub, ast.Assign) else None)
+        else:
+            return "skip", None
+        built = {
+            value.func.id for value in values
+            if isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id in self.classes.get(module, {})
+        }
+        if values and len(built) == 1 and all(
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in built
+            for value in values
+        ):
+            target = (module, f"{built.pop()}.{method}")
+            if target in self.defs:
+                return "follow", target
+        return "report", None
+
+    def _produced_by_project(self, value, module: str) -> bool:
+        """`value` is made by one of the project's own names: a call whose
+        callee, followed through attributes, subscripts and inner calls,
+        starts at a project name, or such a name itself. Not one: the result
+        of a method called directly on a proved data object (`_is_data`),
+        such as a compiled pattern's match, which is a standard-library
+        value."""
+        import ast
+
+        if (
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Attribute)
+            and isinstance(value.func.value, ast.Name)
+        ):
+            owned = self.project_name(value.func.value.id, module)
+            if owned is not None and owned[1] and self._is_data(*owned):
+                return False
+        head = value
+        while isinstance(head, (ast.Attribute, ast.Subscript, ast.Call)):
+            head = head.func if isinstance(head, ast.Call) else head.value
+        return isinstance(head, ast.Name) and self.project_name(head.id, module) is not None
+
+    _STDLIB_TYPES = frozenset({
+        "str", "bytes", "bool", "int", "float", "dict", "list", "tuple", "set", "frozenset",
+        "None", "Path", "PurePath", "Optional", "Union", "Dict", "List", "Tuple", "Set",
+        "FrozenSet", "Match", "re.Match", "Pattern", "re.Pattern",
+    })
+
+    def _stdlib_annotation(self, annotation) -> bool:
+        """`annotation` names only builtin and standard-library value types
+        (`str`, `Optional[Path]`, `dict`, `re.Match[str]`), as code or as a
+        string."""
+        import ast
+
+        if annotation is None:
+            return False
+        if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+            try:
+                annotation = ast.parse(annotation.value, mode="eval").body
+            except SyntaxError:
+                return False
+        for node in ast.walk(annotation):
+            if isinstance(node, ast.Name) and node.id not in self._STDLIB_TYPES:
+                return False
+            if isinstance(node, ast.Attribute) and ast.unparse(node) not in self._STDLIB_TYPES:
+                return False
+        return True
+
+    def returns_foreign(self, target, seen=frozenset()) -> bool:
+        """PROVED: every value the project function `target` returns is a
+        standard-library value, so methods called on its result run no
+        project code. Each `return` expression must be `_foreign_value`, a
+        function with no return value returns None, and a call into another
+        project function must satisfy this in turn (cycles fail)."""
+        import ast
+
+        if target in seen or target not in self.defs:
+            return False
+        node = self.defs[target]
+        returns, pending = [], list(node.body)
+        while pending:
+            item = pending.pop()
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            if isinstance(item, ast.Return):
+                returns.append(item.value)
+            pending.extend(ast.iter_child_nodes(item))
+        return all(
+            value is None or self._foreign_value(value, target[0], node, seen | {target})
+            for value in returns
+        )
+
+    def _foreign_value(self, value, module: str, function, seen, depth: int = 0) -> bool:
+        """`value`, evaluated in `function`, is a standard-library value:
+        a literal; an f-string, comparison or boolean test; a parameter
+        annotated with standard-library types; an operator, subscript,
+        attribute or conditional over such values; a local whose every
+        binding is one (a name declared `global` counts its module bindings
+        too); a builtin or a module imported from outside the project; a
+        module object that is data (`_is_data`); a call of a non-project
+        callable (`json.loads(text)`, `p.strip()`) whose receiver is one and
+        whose arguments name no project function, class or non-data object
+        (a project callable passed in could run); a method of a data object;
+        or a call into a project function that `returns_foreign`. Anything
+        else, a project class build or an unannotated parameter included, is
+        not proved."""
+        import ast
+
+        if depth > 12:
+            return False
+
+        def again(inner):
+            return self._foreign_value(inner, module, function, seen, depth + 1)
+
+        try:
+            ast.literal_eval(value)
+            return True
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            pass
+        if isinstance(value, (ast.JoinedStr, ast.Compare)):
+            return True
+        if isinstance(value, ast.BoolOp):
+            return all(again(item) for item in value.values)
+        if isinstance(value, ast.UnaryOp):
+            return again(value.operand)
+        if isinstance(value, ast.BinOp):
+            return again(value.left) and again(value.right)
+        if isinstance(value, ast.IfExp):
+            return again(value.body) and again(value.orelse)
+        if isinstance(value, (ast.Subscript, ast.Attribute, ast.Starred)):
+            return again(value.value)
+        if isinstance(value, (ast.Tuple, ast.List, ast.Set)):
+            return all(again(item) for item in value.elts)
+        if isinstance(value, ast.Dict):
+            return all(again(item) for item in [*value.keys, *value.values] if item is not None)
+        if isinstance(value, ast.Name):
+            arguments = function.args
+            for argument in arguments.posonlyargs + arguments.args + arguments.kwonlyargs:
+                if argument.arg == value.id:
+                    return self._stdlib_annotation(argument.annotation)
+            bound = [
+                sub.value for sub in ast.walk(function)
+                if isinstance(sub, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == value.id for t in sub.targets)
+            ]
+            other = [
+                sub for sub in ast.walk(function)
+                if isinstance(sub, (ast.AugAssign, ast.For, ast.AsyncFor, ast.NamedExpr, ast.With))
+                and any(isinstance(t, ast.Name) and t.id == value.id for t in ast.walk(sub)
+                        if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store))
+            ]
+            declared = {
+                name for sub in ast.walk(function) if isinstance(sub, ast.Global) for name in sub.names
+            }
+            if value.id in declared:
+                outside = self.bindings.get(module, {}).get(value.id, [])
+                bound = bound + outside
+                if any(item is None for item in bound):
+                    return False
+            if bound and not other:
+                return all(again(item) for item in bound)
+            owned = self.project_name(value.id, module)
+            if owned is not None and owned[1] and owned[0] == module:
+                return self._is_data(module, value.id)
+            if owned is None and not bound and not other:
+                import builtins
+                return hasattr(builtins, value.id) or value.id in self.aliases[module]
+            return False
+        if isinstance(value, ast.Call):
+            target = self.target(value, module)
+            if target is not None:
+                return self.returns_foreign(target, seen)
+            func = value.func
+            if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+                owned = self.project_name(func.value.id, module)
+                if owned is not None and owned[1] and self._is_data(*owned):
+                    return True
+            if self._produced_by_project(value, module) and not (
+                isinstance(func, ast.Attribute) and again(func.value)
+            ):
+                return False
+            receiver = func.value if isinstance(func, ast.Attribute) else None
+            passed = [*value.args, *(kw.value for kw in value.keywords)]
+            hands_project_code = any(
+                isinstance(inner, ast.Name) and self.project_name(inner.id, module) is not None
+                and not (self.project_name(inner.id, module)[1] and self._is_data(*self.project_name(inner.id, module)))
+                for argument in passed for inner in ast.walk(argument)
+            )
+            return (receiver is None or again(receiver)) and not hands_project_code
+        return False
+
+    def producer_of(self, call, module: str, function):
+        """For a method called on a LOCAL of `function`, the project callee
+        whose result some binding of the local holds, spelled as written
+        (`find_git_marker`, `PACTMemory._declared_dir_identity`), so an
+        unread method names what made its object; None otherwise."""
+        import ast
+
+        func = call.func
+        if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)) or function is None:
+            return None
+        producers = sorted({
+            _callee_text(sub.value.func) for sub in ast.walk(function)
+            if isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call)
+            and any(isinstance(t, ast.Name) and t.id == func.value.id for t in sub.targets)
+            and self._produced_by_project(sub.value, module)
+        })
+        return " or ".join(producers) if producers else None
+
+    def unread_call(self, call, module: str, function=None) -> bool:
         """A call the census cannot read: its callee is reached through one
         of the project's own names (`project_name`) and does not resolve to a
         project function. The callee is followed through attributes,
@@ -1709,13 +2072,17 @@ class _DetectionGraph:
         not reported: a call that resolves to a function; a method called
         directly on a project object that holds data (`_is_data`); and
         building a class of the calling module that runs no project code
-        (`_runs_no_project_code`). Everything else through a project name
+        (`_runs_no_project_code`). A method on a local or a `self` attribute
+        follows `instance_method`. Everything else through a project name
         (an instance's method, a function pulled from a table, a context
         variable, an imported class) is reported."""
         import ast
 
         if self.target(call, module) is not None:
             return False
+        verdict, _target = self.instance_method(call, module, function)
+        if verdict != "skip":
+            return verdict == "report"
         head, depth = call.func, 0
         while isinstance(head, (ast.Attribute, ast.Subscript, ast.Call)):
             head = head.func if isinstance(head, ast.Call) else head.value
@@ -1748,6 +2115,9 @@ class _DetectionGraph:
         for sub in ast.walk(node):
             if isinstance(sub, ast.Call):
                 found = self.target(sub, module)
+                if found is None:
+                    verdict, found = self.instance_method(sub, module, node)
+                    found = found if verdict == "follow" else None
                 if found is not None:
                     yield sub.func, found
             elif (
@@ -1766,8 +2136,9 @@ def _module_bindings(tree) -> dict:
     declares the name `global`. An assignment to a plain name in module code
     contributes its value; every other binding contributes None: a tuple,
     starred, subscript or attribute target (a store into the object), an
-    augmented assignment, a loop or `with` target, a walrus, an import, a
-    `def` or `class`, and any assignment under `global`."""
+    augmented assignment, a loop or `with` target, a walrus, an `except ...
+    as` name, a name a `match` pattern captures, an import, a `def` or
+    `class`, and any assignment under `global`."""
     import ast
 
     found: dict = {}
@@ -1798,6 +2169,19 @@ def _module_bindings(tree) -> dict:
                 found.setdefault((alias.asname or alias.name).split(".")[0], []).append(None)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and only is None:
             found.setdefault(node.name, []).append(None)
+        elif isinstance(node, ast.ExceptHandler) and node.name and (only is None or node.name in only):
+            found.setdefault(node.name, []).append(None)
+        elif isinstance(node, ast.Match):
+            for case in node.cases:
+                for pattern in ast.walk(case.pattern):
+                    if isinstance(pattern, (ast.MatchAs, ast.MatchStar)):
+                        captured = pattern.name
+                    elif isinstance(pattern, ast.MatchMapping):
+                        captured = pattern.rest
+                    else:
+                        captured = None
+                    if captured and (only is None or captured in only):
+                        found.setdefault(captured, []).append(None)
         for walrus in (sub for sub in ast.walk(node) if isinstance(sub, ast.NamedExpr)):
             take(walrus.target)
 
@@ -1816,7 +2200,9 @@ def _module_bindings(tree) -> dict:
             continue
         declared = {name for sub in ast.walk(function) if isinstance(sub, ast.Global) for name in sub.names}
         for sub in ast.walk(function) if declared else ():
-            if isinstance(sub, ast.stmt) and not isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            if isinstance(sub, (ast.stmt, ast.ExceptHandler)) and not isinstance(
+                sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+            ):
                 statement(sub, declared)
     return found
 
@@ -1999,6 +2385,24 @@ def route_inputs() -> dict:
     where it is named, so the function it reaches is read even when the call
     is elsewhere.
 
+    EXCEPTIONS, each admitted only on a positive check of the value it lets
+    through (each has a mutant that tries to pass project code through it):
+    - an environment alias binding, whose every use is itself an anchor;
+    - an `is` test on the environment, which reads no variable (the other
+      operand is followed as usual);
+    - a method called directly on a module object that is data
+      (`_DetectionGraph._is_data`: a literal by `ast.literal_eval`, a
+      `re.compile` of literals, or a logger while no plugin module can make
+      a logger run project code), every binding of the name counted;
+    - building a calling-module class that runs no project code
+      (`_DetectionGraph._runs_no_project_code`);
+    - a method on a local or a `self` attribute whose every binding builds
+      one same-module class defining it, which is followed, or on a local
+      bound from a project function that provably returns only
+      standard-library values (`_DetectionGraph.returns_foreign`); every
+      other method on such an object is reported
+      (`_DetectionGraph.instance_method`).
+
     The process and home directories are each ONE condition, `("cwd",)` and
     `("home",)`, whichever function reads them, so a new reader of either is
     absorbed by the condition already there: a new rung keyed on the process
@@ -2007,8 +2411,11 @@ def route_inputs() -> dict:
 
     NOT COVERED: a call through `getattr`, `exec` or `importlib`; modules
     outside the plugin (the standard library, third-party packages); an
-    environment read reached only through such a call; and a read through a
-    C extension (`ctypes`), which no source anchor can see.
+    environment read reached only through such a call; a read through a
+    C extension (`ctypes`), which no source anchor can see; and a method
+    called on a function's parameter, whose type the census cannot see
+    (21 such calls in 18 functions on the detection path, which are string
+    and path methods on the values the callers pass).
     """
     import ast
 
@@ -2045,9 +2452,12 @@ def route_inputs() -> dict:
             if isinstance(sub, ast.Name) and sub.id in graph.unresolved.get(module, ()):
                 add(("call", f"<unresolved relative import {module}: {sub.id}>"),
                     f"{site}:{sub.lineno}", key)
-            elif isinstance(sub, ast.Call) and graph.unread_call(sub, module):
-                add(("call", f"<call to no function {module}: {_callee_text(sub.func)}>"),
-                    f"{site}:{sub.lineno}", key)
+            elif isinstance(sub, ast.Call) and graph.unread_call(sub, module, node):
+                producer = graph.producer_of(sub, module, node)
+                shown = f"{module}: {_callee_text(sub.func)}" if producer is None else (
+                    f"{module}: a method of what {producer} returns"
+                )
+                add(("call", f"<call to no function {shown}>"), f"{site}:{sub.lineno}", key)
         for read, shown in _env_reads(node, module, key[1], graph):
             if isinstance(read, ast.Constant) and isinstance(read.value, str):
                 add(("env", read.value), f"{site}:{read.lineno}", key)
@@ -2209,6 +2619,26 @@ class TestEveryRouteEntryConditionIsARoute:
             "copies the identity record the rung returned with some fields changed; "
             "_replace on a NamedTuple runs no project code"
         ),
+        ("call", "<call to no function memory_api: a method of what PACTMemory._declared_dir_identity or PACTMemory._identity_at_root(...)._replace returns>"): (
+            "the local holds the _DetectedIdentity NamedTuple the rung returned, and the "
+            "method called on it is _replace, which builds another NamedTuple and runs no "
+            "project code"
+        ),
+        ("call", "<call to no function memory_api: a method of what _root_guard returns>"): (
+            "the local holds the _DetectedIdentity NamedTuple _root_guard returned, and the "
+            "method called on it is _replace, which builds another NamedTuple and runs no "
+            "project code"
+        ),
+        ("call", "<call to no function project_identity: a method of what find_git_marker returns>"): (
+            "find_git_marker returns None or `level / '.git'` for a level among its start's "
+            "parents, a pathlib Path; is_symlink, is_dir, resolve, is_file and read_text "
+            "are pathlib's (the start is unannotated, so the census cannot prove it)"
+        ),
+        ("call", "<call to no function shared.project_scope: a method of what _discover_context_record returns>"): (
+            "_discover_context_record returns a dict (the cached _session_record_on_disk "
+            "result, or {}); the method called on it is dict.get (the cache global is "
+            "rebound under `global`, so the census cannot prove it)"
+        ),
         ("call", "<call to no function config: _STORE_DB_PATH.set>"): (
             "get_user_memory_dir sets the store scope aside; the user-setting route "
             "replaces get_user_memory_dir whole"
@@ -2325,6 +2755,98 @@ class TestEveryRouteEntryConditionIsARoute:
         }
         # Thing(), helper.Thing() and reexported(): lines 11-13 of main.py.
         assert unread == {11, 12, 13}, unread
+
+    def test_each_exception_admits_only_a_value_proved_inert(self, tmp_path, monkeypatch):
+        """Control for the census's exceptions: each fixture form that tries
+        to pass project code through one (a table or pattern built from the
+        environment, a rebound or captured table, a dataclass whose factory
+        runs, a method on an object a project function made) is reported,
+        and each value proved inert (a literal table, a literal pattern, a
+        plain class, a same-module instance whose method is followed) is
+        read."""
+        import ast
+        import sys
+
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "m.py").write_text(
+            "import os\n"
+            "import re\n"
+            "from dataclasses import dataclass, field\n"
+            "TABLE = {'k': os.environ.get('X')}\n"
+            "PATTERN = re.compile(os.environ.get('X', 'x'))\n"
+            "CLEAN = {'k': 1}\n"
+            "CLEAN_RE = re.compile('x', re.I)\n"
+            "REBOUND = {'k': 1}\n"
+            "try:\n"
+            "    pass\n"
+            "except Exception as REBOUND:\n"
+            "    pass\n"
+            "CAPTURED = {'k': 1}\n"
+            "match 0:\n"
+            "    case CAPTURED if False:\n"
+            "        pass\n\n"
+            "@dataclass\n"
+            "class Box:\n"
+            "    value: str = field(default_factory=lambda: os.environ.get('X', ''))\n\n"
+            "class Plain:\n"
+            "    pass\n\n"
+            "class Reader:\n"
+            "    def read(self):\n"
+            "        return os.environ.get('X')\n\n"
+            "class Holder:\n"
+            "    def __init__(self):\n"
+            "        self.reader = Reader()\n\n"
+            "    def go(self):\n"
+            "        return self.reader.read()\n\n"
+            "def make():\n"
+            "    return Reader()\n\n"
+            "def entry():\n"
+            "    TABLE.get('k')\n"
+            "    PATTERN.match('x')\n"
+            "    CLEAN.get('k')\n"
+            "    CLEAN_RE.match('x')\n"
+            "    REBOUND.get('k')\n"
+            "    CAPTURED.get('k')\n"
+            "    Box()\n"
+            "    Plain()\n"
+            "    reader = Reader()\n"
+            "    reader.read()\n"
+            "    made = make()\n"
+            "    made.read()\n"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path,))
+        graph = _DetectionGraph()
+        assert graph.load("pkg.m")
+        entry = graph.defs[("pkg.m", "entry")]
+        unread = sorted(
+            ast.unparse(call.func) for call in ast.walk(entry)
+            if isinstance(call, ast.Call) and graph.unread_call(call, "pkg.m", entry)
+        )
+        assert unread == ["Box", "CAPTURED.get", "PATTERN.match", "REBOUND.get", "TABLE.get", "made.read"], unread
+        followed = {target for _node, target in graph.references(entry, "pkg.m")}
+        assert ("pkg.m", "Reader.read") in followed, followed
+        go = graph.defs[("pkg.m", "Holder.go")]
+        assert ("pkg.m", "Reader.read") in {target for _node, target in graph.references(go, "pkg.m")}
+
+    @pytest.mark.parametrize("source, untouched", [
+        ("import logging, sys\nlogging.basicConfig(level=logging.INFO, stream=sys.stderr)\n", True),
+        ("import logging\nclass F(logging.Filter):\n    pass\n", False),
+        ("import logging\ndef hook(record):\n    return True\nlogging.getLogger().addFilter(hook)\n", False),
+        ("import logging.config\nlogging.config.dictConfig({})\n", False),
+    ])
+    def test_a_logger_is_data_only_while_nothing_can_attach_project_code(
+        self, tmp_path, monkeypatch, source, untouched
+    ):
+        """Control for `_DetectionGraph._logging_untouched`: a basicConfig of
+        standard-library values leaves loggers data; a logging subclass, a
+        project callable attached to a logger, or a dictConfig does not."""
+        import sys
+
+        (tmp_path / "plugin_module.py").write_text(source)
+        monkeypatch.setattr(sys.modules[__name__], "PLUGIN_ROOT", tmp_path)
+        assert _DetectionGraph()._logging_untouched() is untouched
 
     def test_a_module_object_is_data_only_when_every_binding_is(self, tmp_path, monkeypatch):
         """Control for `_is_data`: a module-level name is a data object only
