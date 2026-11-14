@@ -21,6 +21,7 @@ from fixtures.identity_git import (
     reason_dict_sites,
     run_git,
     seed_session_evidence,
+    start_after_description,
     write_common_dir_override,
 )
 from scripts.memory_api import PACTMemory
@@ -2039,7 +2040,7 @@ class TestTheEvidenceCheckScansEachRootOnce:
 
         repo, store, slug_dir, ledger = self._rig(identity_env, monkeypatch)
         good = {"session_id": "sess-0", "project_dir": str(repo),
-                "started_at": datetime_now_iso()}
+                "started_at": start_after_description(repo)}
         ledger.write_text(json.dumps(good) + "\n", encoding="utf-8")
         (slug_dir / "sess-0").write_text("not a folder", encoding="utf-8")
         memory = PACTMemory(session_id="s", db_path=store)
@@ -2049,12 +2050,6 @@ class TestTheEvidenceCheckScansEachRootOnce:
         _fresh_scope_state()
         memory = PACTMemory(session_id="s", db_path=store)
         assert memory._read_project_scopes() == (CANONICAL, "proj")
-
-
-def datetime_now_iso() -> str:
-    from datetime import datetime, timezone
-
-    return datetime.now(timezone.utc).isoformat()
 
 
 class TestOneConstructionAsksGitEachQuestionOnce:

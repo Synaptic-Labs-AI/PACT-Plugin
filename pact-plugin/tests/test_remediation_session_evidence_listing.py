@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
-from fixtures.identity_git import make_repo, seed_session_evidence
+from fixtures.identity_git import make_repo, seed_session_evidence, start_after_description
 from scripts.database import db_connection, ensure_initialized
 from shared.pact_context import PRUNE_LEDGER_NAME, reconstruct_session_dir
 
@@ -52,7 +52,8 @@ def _rig(tmp_path: Path):
 def _ledger_line(slug_dir: Path, repo: Path) -> None:
     """A ledger line for SESSION that WOULD count as evidence."""
     slug_dir.mkdir(parents=True, exist_ok=True)
-    line = {"session_id": SESSION, "project_dir": str(repo), "started_at": _iso(0)}
+    line = {"session_id": SESSION, "project_dir": str(repo),
+            "started_at": start_after_description(repo)}
     (slug_dir / PRUNE_LEDGER_NAME).write_text(json.dumps(line) + "\n", encoding="utf-8")
 
 

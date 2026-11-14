@@ -115,6 +115,38 @@ def make_separate_git_dir_repo(path: Path, external_git_dir: Path) -> Path:
     run_git("commit", "-qm", "seed", cwd=path)
     return path
 
+
+def start_after_description(project_dir: Path) -> str:
+    """1 ms after `project_dir`'s description ctime, or now without one.
+
+    The evidence rule needs the description STRICTLY earlier than the start,
+    and the start is written to the microsecond, so the margin must clear
+    that rounding (a zero margin failed 17 tests). It must stay below the
+    time a re-clone takes to write a new description, or a seed followed by
+    a re-clone would date after the new one too: a 1 s margin made both
+    re-clone arms read evidence that is not there. The description is found
+    through the git common dir, so a linked worktree dates against the
+    shared one.
+    """
+    from datetime import datetime, timezone
+
+    result = subprocess.run(
+        ["git", "rev-parse", "--git-common-dir"],
+        cwd=str(project_dir), capture_output=True, text=True, timeout=30, check=False,
+    )
+    if result.returncode == 0:
+        common = Path(result.stdout.strip())
+        if not common.is_absolute():
+            common = Path(project_dir) / common
+        try:
+            ctime = (common / "description").stat().st_ctime
+        except OSError:
+            pass
+        else:
+            return datetime.fromtimestamp(ctime + 0.001, timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
+
+
 def seed_session_evidence(
     config_dir, project_dir: Path, session_id: str, started_at: Optional[str] = None
 ) -> Path:
@@ -122,16 +154,23 @@ def seed_session_evidence(
 
     Writes `pact-session-context.json` into the session directory
     `reconstruct_session_dir(project_dir, session_id)` names, with the
-    `project_dir` it records and a zone-aware `started_at` (now, unless
-    given). A legacy bucket whose rows carry `session_id` is then read by a
-    session whose identity root is `project_dir`, provided the repository's
-    `description` was created before that start.
+    `project_dir` it records and a zone-aware `started_at`. A legacy bucket
+    whose rows carry `session_id` is then read by a session whose identity
+    root is `project_dir`, provided the repository's `description` was
+    created before that start.
+
+    An omitted `started_at` is `start_after_description(project_dir)`, not
+    the wall clock: the evidence rule compares against the description's
+    ctime, and a wall-clock start passes only while the filesystem clock
+    does not lead the process clock by more than the git-init-to-seed gap
+    (3.7 ms to 264 ms in this suite; a 50 ms lead failed 14 seeding tests).
+    A test that needs a start EARLIER than the description, or one that
+    re-creates the repository after seeding, passes its own.
     `config_dir` is the isolated config root the file must land under (the
     suite sandboxes it at `tmp_path / "home" / ".claude"`); the helper
     refuses to write anywhere else, so a test can never seed a real session.
     """
     import json
-    from datetime import datetime, timezone
 
     from shared.pact_context import reconstruct_session_dir
 
@@ -145,7 +184,7 @@ def seed_session_evidence(
         json.dumps({
             "project_dir": str(project_dir),
             "session_id": session_id,
-            "started_at": started_at or datetime.now(timezone.utc).isoformat(),
+            "started_at": started_at or start_after_description(project_dir),
         }),
         encoding="utf-8",
     )
