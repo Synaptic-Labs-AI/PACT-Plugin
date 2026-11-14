@@ -1503,6 +1503,9 @@ class _DetectionGraph:
         # {class name: its ClassDef}}, and {module: top-level names bound to
         # the process environment} (`_ENV = os.environ`).
         self.values, self.classes, self.env_aliases = {}, {}, {}
+        # {module: {module-level name: every value bound to it, None for a
+        # binding that has no plain value}} (`_module_bindings`).
+        self.bindings = {}
 
     @staticmethod
     def _path(name: str):
@@ -1538,7 +1541,10 @@ class _DetectionGraph:
             for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
             if isinstance(target, ast.Name)
         }
-        self.globals[module] = set(self.values[module])
+        self.bindings[module] = _module_bindings(tree)
+        self.globals[module] = set(self.values[module]) | {
+            name for name, values in self.bindings[module].items() if any(v is not None for v in values)
+        }
         self.classes[module] = {
             node.name: node for node in tree.body if isinstance(node, ast.ClassDef)
         }
@@ -1563,8 +1569,10 @@ class _DetectionGraph:
         changed = True
         while changed:
             changed = False
-            for name, value in self.values[module].items():
-                if name not in bound and _evaluates_to_env(value, aliases, bound):
+            for name, values in self.bindings[module].items():
+                if name not in bound and any(
+                    value is not None and _evaluates_to_env(value, aliases, bound) for value in values
+                ):
                     bound.add(name)
                     changed = True
         self.env_aliases[module] = bound
@@ -1648,22 +1656,29 @@ class _DetectionGraph:
         return None
 
     def _is_data(self, owner: str, name: str) -> bool:
-        """`name` in `owner` is assigned a value that runs no project code
-        when its methods are called: a literal (a constant, or a dict, list,
-        set or tuple display of them), a compiled pattern (`re.compile`) or a
-        logger (`logging.getLogger`)."""
+        """EVERY module-level binding of `name` in `owner` (`_module_bindings`)
+        is a value that runs no project code when its methods are called: a
+        literal (a constant, or a dict, list, set or tuple display), a
+        compiled pattern (`re.compile`) or a logger (`logging.getLogger`). A
+        name bound in any other way as well (a call, an augmented assignment,
+        a loop target, an import, a `global` assignment in a function) is not
+        data, whichever binding comes last."""
         import ast
 
         from fixtures.identity_git import qualified_name
 
         if not self.load(owner):
             return False
-        value = self.values.get(owner, {}).get(name)
-        if isinstance(value, (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple)):
-            return True
-        return isinstance(value, ast.Call) and (
-            qualified_name(value.func, self.aliases[owner]) in ("re.compile", "logging.getLogger")
-        )
+        values = self.bindings.get(owner, {}).get(name, [])
+
+        def data(value):
+            if isinstance(value, (ast.Constant, ast.Dict, ast.List, ast.Set, ast.Tuple)):
+                return True
+            return isinstance(value, ast.Call) and (
+                qualified_name(value.func, self.aliases[owner]) in ("re.compile", "logging.getLogger")
+            )
+
+        return bool(values) and all(value is not None and data(value) for value in values)
 
     def _runs_no_project_code(self, owner: str, name: str) -> bool:
         """Building the class `name` of `owner` runs none of the project's
@@ -1742,6 +1757,68 @@ class _DetectionGraph:
                 found = self.refers_to(sub, module)
                 if found is not None:
                     yield sub, found
+
+
+def _module_bindings(tree) -> dict:
+    """{name: [value, ...]}: every binding of a module-level name, in the
+    module's own statements (descending into `if`, `try`, `with`, `match`
+    and loop bodies, not into a function or class) and in any function that
+    declares the name `global`. An assignment to a plain name in module code
+    contributes its value; every other binding contributes None: a tuple,
+    starred, subscript or attribute target (a store into the object), an
+    augmented assignment, a loop or `with` target, a walrus, an import, a
+    `def` or `class`, and any assignment under `global`."""
+    import ast
+
+    found: dict = {}
+
+    def statement(node, only=None):
+        def take(target, value=None):
+            names = [target] if isinstance(target, ast.Name) else [
+                inner for inner in ast.walk(target) if isinstance(inner, ast.Name)
+            ]
+            for name in names:
+                if only is None or name.id in only:
+                    plain = only is None and name is target
+                    found.setdefault(name.id, []).append(value if plain else None)
+
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                take(target, node.value)
+        elif isinstance(node, ast.AnnAssign) and (node.value is not None or only is not None):
+            take(node.target, node.value)
+        elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor)):
+            take(node.target)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if item.optional_vars is not None:
+                    take(item.optional_vars)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)) and only is None:
+            for alias in node.names:
+                found.setdefault((alias.asname or alias.name).split(".")[0], []).append(None)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and only is None:
+            found.setdefault(node.name, []).append(None)
+        for walrus in (sub for sub in ast.walk(node) if isinstance(sub, ast.NamedExpr)):
+            take(walrus.target)
+
+    pending = list(tree.body)
+    while pending:
+        node = pending.pop()
+        statement(node)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for field in ("body", "orelse", "finalbody", "handlers"):
+            pending.extend(getattr(node, field, None) or [])
+        for case in getattr(node, "cases", None) or []:
+            pending.extend(case.body)
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        declared = {name for sub in ast.walk(function) if isinstance(sub, ast.Global) for name in sub.names}
+        for sub in ast.walk(function) if declared else ():
+            if isinstance(sub, ast.stmt) and not isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                statement(sub, declared)
+    return found
 
 
 def _callee_text(func) -> str:
@@ -2248,6 +2325,47 @@ class TestEveryRouteEntryConditionIsARoute:
         }
         # Thing(), helper.Thing() and reexported(): lines 11-13 of main.py.
         assert unread == {11, 12, 13}, unread
+
+    def test_a_module_object_is_data_only_when_every_binding_is(self, tmp_path, monkeypatch):
+        """Control for `_is_data`: a module-level name is a data object only
+        when every binding of it (`_module_bindings`) is a recognised data
+        value, whichever binding comes last."""
+        import sys
+
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "binds.py").write_text(
+            "import re\n"
+            "ONE = {'k': 1}\n"
+            "PATTERN = re.compile('x')\n"
+            "TWICE = dict(a=1)\n"
+            "TWICE = {'k': 1}\n"
+            "AUG = {'k': 1}\n"
+            "AUG |= {'j': 2}\n"
+            "GLOBAL = {'k': 1}\n\n"
+            "def rebind():\n"
+            "    global GLOBAL\n"
+            "    GLOBAL = dict()\n\n"
+            "if ONE:\n"
+            "    NESTED = {'k': 1}\n"
+            "else:\n"
+            "    NESTED = dict()\n"
+            "STORED = {'k': 1}\n"
+            "STORED['j'] = len\n"
+            "LOOPED = {}\n"
+            "for LOOPED in ():\n"
+            "    pass\n"
+            "PAIR, OTHER = {}, {}\n"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path,))
+        graph = _DetectionGraph()
+        assert graph.load("pkg.binds")
+        names = ["ONE", "PATTERN", "TWICE", "AUG", "GLOBAL", "NESTED", "STORED", "LOOPED", "PAIR"]
+        assert {name: graph._is_data("pkg.binds", name) for name in names} == {
+            "ONE": True, "PATTERN": True, "TWICE": False, "AUG": False, "GLOBAL": False,
+            "NESTED": False, "STORED": False, "LOOPED": False, "PAIR": False,
+        }
 
     def test_every_environment_occurrence_is_read_or_reported(self, tmp_path, monkeypatch):
         """Control for `_env_reads`: each occurrence of the environment in
