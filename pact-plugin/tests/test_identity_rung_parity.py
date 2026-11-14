@@ -579,25 +579,44 @@ FLOOR_LAYOUTS = {
 # `return` is one layout outcome the identity code distinguishes, and each
 # operand of a returned `or` is one outcome of its own.
 #
-# NOT A FLOOR LAYOUT: the outcomes of these predicates, which only a hostile
-# `.git` produces, or which describe no layout at all. A layout that reaches
-# them declines, or never binds an id, so it has no documented count.
+# NOT A FLOOR LAYOUT: the outcomes of these predicates, which no own layout in
+# the unpinned table produces, or which describe no layout at all. Each reason
+# says how a layout reaching them ends: a decline, or, for the user's own
+# dot-git store, a bind through a pin, counted in the pinned table.
 NOT_A_FLOOR_LAYOUT = {
+    # Every truthy return of the three predicates below reaches one place:
+    # detect_id_for_root's `if _gitfile_points_at_foreign_gitdir(asked)`,
+    # which returns a `gitfile_redirect` decline (project_identity.py:1515-1529).
+    # Nothing else calls them. A usable pin is read before that check
+    # (project_identity.py:1489-1493), so a pinned checkout binds its pin.
     "_gitfile_points_at_foreign_gitdir": (
-        "true for a `.git` that points at a directory named `.git`: another "
-        "repository's git dir, which declines, or the user's own "
-        "`--separate-git-dir=<dir>/.git` store, which declines without a pin "
-        "and is measured pinned (TestTheGitCallFloorWithAPin), because a pin "
-        "answers before this predicate runs"
+        "its one truthy return is `_redirect_target_is_foreign` for the "
+        "marker's target (project_identity.py:1384), so it is true for "
+        "exactly the cases the next reason lists, and declines "
+        "`gitfile_redirect` at project_identity.py:1515-1529. The one own "
+        "layout it reaches is the user's `--separate-git-dir=<dir>/.git` "
+        "store: unpinned it declines there too, and pinned it binds through "
+        "the pin read first (TestTheGitCallFloorWithAPin)"
     ),
     "_redirect_target_is_foreign": (
-        "the redirect test behind the predicate above, true for the same "
-        "targets: a foreign git dir, or the user's own dot-git store"
+        "true at project_identity.py:1332 for a target named `.git` (the "
+        "foreign_gitdir, relative_foreign_gitdir and symlinked_git shapes "
+        "decline `gitfile_redirect`; the user's own dot-git store is the "
+        "pinned exception above), and at project_identity.py:1334 whenever "
+        "`_admin_dir_names_another_checkout` is true for a submodule admin "
+        "dir with no `commondir` file"
     ),
     "_admin_dir_names_another_checkout": (
-        "true for a submodule admin dir whose recorded core.worktree names "
-        "another checkout (a forgery) or is unset (the user's own submodule "
-        "after `git submodule deinit`, which is unprovable); both decline"
+        "true for a submodule admin dir whose recorded checkout cannot be "
+        "proven to be the asked one. Reached by a shape: the recorded "
+        "checkout is another one, a forgery (project_identity.py:1294; the "
+        "forged_submodule_admin and symlinked_submodule_admin shapes decline "
+        "`gitfile_redirect`). Reached by no fixture shape, and declining "
+        "through the same check at project_identity.py:1515-1529: git cannot "
+        "run (:1271), `git config core.worktree` exits non-zero or prints "
+        "nothing, i.e. it is unset as `git submodule deinit` leaves it, or "
+        "git failed (:1280), the recorded or the asked path cannot be "
+        "resolved (:1288), and the recorded path does not exist (:1298)"
     ),
     "_git_env_bool": "reads a git environment flag, not the `.git` layout",
 }
