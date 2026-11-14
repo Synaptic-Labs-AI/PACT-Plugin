@@ -333,21 +333,30 @@ def _git_calls(scope, scope_bindings: dict = None, aliases: dict = None):
             continue
         passes = any(
             kw.arg == "env" and (
-                _is_location_free_env_call(kw.value) or _is_key_filter_of_it(kw.value)
+                _is_location_free_env_call(kw.value, aliases)
+                or _is_key_filter_of_it(kw.value, aliases)
             )
             for kw in node.keywords
         )
         yield node, passes
 
 
-def _is_location_free_env_call(node) -> bool:
-    return (
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-        and node.func.id == "git_env_without_location"
-    )
+def _is_location_free_env_call(node, aliases: dict = None) -> bool:
+    """A call of `git_env_without_location`, by its own name or through the
+    module's imports (`from shared.project_scope import
+    git_env_without_location as env`, or `ps.git_env_without_location()`
+    after `import shared.project_scope as ps`). A name imported from
+    anywhere else, or bound to another function, is not it."""
+    if not isinstance(node, ast.Call):
+        return False
+    name = qualified_name(node.func, aliases or {})
+    if name == "git_env_without_location":
+        return True
+    module, _, function = (name or "").rpartition(".")
+    return function == "git_env_without_location" and module.rpartition(".")[2] == "project_scope"
 
 
-def _is_key_filter_of_it(node) -> bool:
+def _is_key_filter_of_it(node, aliases: dict = None) -> bool:
     """`{k: v for k, v in git_env_without_location().items() if k != "X"}`.
 
     Checked INLINE and by shape only: a pure key filter can drop variables
@@ -364,7 +373,7 @@ def _is_key_filter_of_it(node) -> bool:
         and all(isinstance(element, ast.Name) for element in target.elts)
         and isinstance(source, ast.Call) and not source.args
         and isinstance(source.func, ast.Attribute) and source.func.attr == "items"
-        and _is_location_free_env_call(source.func.value)
+        and _is_location_free_env_call(source.func.value, aliases)
     ):
         return False
     key, value = (element.id for element in target.elts)
@@ -770,6 +779,35 @@ def test_the_scan_accepts_only_an_inline_key_filter_of_the_location_free_env():
         "i": False,  # a dict display adding a variable
         "j": False,  # a second generator
     }
+
+
+def test_the_helper_is_recognised_under_its_import_alias():
+    """The location-free helper counts however the module imports it: under
+    an alias, or as an attribute of an aliased module. A name bound by
+    importing another function, and a call with no environment, still fail."""
+    source = textwrap.dedent("""
+        import subprocess
+        import shared.project_scope as scope
+
+        def aliased():
+            from shared.project_scope import git_env_without_location as location_free
+            subprocess.run(["git", "a"], env=location_free())
+
+        def module_attribute():
+            subprocess.run(["git", "b"], env=scope.git_env_without_location())
+
+        def another_function():
+            from shared.project_scope import unknown_root_reason as wrong
+            subprocess.run(["git", "c"], env=wrong())
+
+        def no_environment():
+            subprocess.run(["git", "d"])
+    """)
+    verdicts = {
+        call.args[0].elts[1].value: passes
+        for _name, call, passes in _module_git_calls(source)
+    }
+    assert verdicts == {"a": True, "b": True, "c": False, "d": False}, verdicts
 
 
 # THE SHARED SCOPE HELPER DECIDES WHAT EVERY SCANNER SEES. Its scope kinds are

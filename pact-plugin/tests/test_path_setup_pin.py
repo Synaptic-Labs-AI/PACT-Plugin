@@ -275,18 +275,38 @@ def _module_level_mutations(path):
     return lines
 
 
+def _docstrings(tree):
+    """The ids of every docstring node: the leading string of a module,
+    class or function body. A docstring documents a path mutation; it never
+    runs one, so it is not codegen."""
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            body = node.body
+            if (
+                body and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                found.add(id(body[0].value))
+    return found
+
+
 def _any_form_present(path):
     """True if the file contains a path mutation at any level OR embeds a
     mutation token in a string constant (codegen). Comments are
-    AST-invisible and never match."""
+    AST-invisible and never match, and docstrings are skipped: they
+    describe a mutation, they do not run one."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     names = _sys_names(tree)
+    docstrings = _docstrings(tree)
     for node in ast.walk(tree):
         if _is_path_mutation(node, names):
             return True
         if (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
+            and id(node) not in docstrings
             and any(tok in node.value for tok in _STR_TOKENS)
         ):
             return True
@@ -380,6 +400,26 @@ def test_a_name_holding_sys_path_is_followed(tmp_path):
         encoding="utf-8",
     )
     assert _module_level_mutations(module) == [3, 5]
+
+
+def test_a_docstring_naming_a_mutation_is_not_codegen(tmp_path):
+    """A docstring that names a path mutation describes it and never runs
+    it, so it is not a form; a string assigned for a child process to run
+    still is, and so is a real mutation."""
+    needle = "sys.path" + ".insert(0, 'x')"
+    documented = tmp_path / "documented.py"
+    documented.write_text(
+        f'"""Never {needle} here."""\n\n'
+        f'def helper():\n    """Do not {needle}."""\n    return None\n',
+        encoding="utf-8",
+    )
+    codegen = tmp_path / "codegen.py"
+    codegen.write_text(f'CHILD = "import sys; {needle}"\n', encoding="utf-8")
+    real = tmp_path / "real.py"
+    real.write_text(f"import sys\n{needle}\n", encoding="utf-8")
+    assert not _any_form_present(documented)
+    assert _any_form_present(codegen)
+    assert _any_form_present(real)
 
 
 def test_negative_fixture_flags_every_matcher_leg():
