@@ -624,21 +624,69 @@ NOT_A_FLOOR_LAYOUT = {
 }
 
 
+def _bool_shaped(value) -> bool:
+    """Whether a returned expression is a bool by its own form: a True/False
+    constant, a comparison, a `not`, or an `and`/`or` of such (an `or` of
+    other values returns one of them, not a bool)."""
+    if isinstance(value, ast.BoolOp):
+        return all(_bool_shaped(operand) for operand in value.values)
+    return (
+        (isinstance(value, ast.Constant) and isinstance(value.value, bool))
+        or isinstance(value, ast.Compare)
+        or (isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not))
+    )
+
+
+def _return_kind(function) -> tuple:
+    """("predicate" or "not a predicate", None), or (None, why the walk
+    cannot classify `function`). The walk reads two forms and no others:
+    - PREDICATE: the return annotation is the bare name `bool`;
+    - NOT A PREDICATE: an annotation that names neither `bool` nor `Any` nor
+      `object`, holds no constant other than None (so no string annotation
+      and no `Literal`), and a body with no bool-shaped return.
+    Anything else, a missing annotation included, is unreadable."""
+    returns = function.returns
+    if isinstance(returns, ast.Name) and returns.id == "bool":
+        return "predicate", None
+    if returns is None:
+        return None, "has no return annotation"
+    parts = list(ast.walk(returns))
+    names = {n.id for n in parts if isinstance(n, ast.Name)}
+    names |= {n.attr for n in parts if isinstance(n, ast.Attribute)}
+    constants = [n for n in parts if isinstance(n, ast.Constant) and n.value is not None]
+    if constants or names & {"bool", "Any", "object"}:
+        return None, f"has the return annotation {ast.unparse(returns)!r}, a form the walk does not read"
+    for node in ast.walk(function):
+        if isinstance(node, ast.Return) and node.value is not None and _bool_shaped(node.value):
+            return None, (
+                f"is annotated {ast.unparse(returns)!r} but returns "
+                f"{ast.unparse(node.value)!r} at line {node.lineno}"
+            )
+    return "not a predicate", None
+
+
 def _layout_predicate_forms() -> tuple:
-    """(predicates, unresolved): the `-> bool` functions reached from the
-    marker predicates through called names, and every form that walk cannot
-    read. FAIL CLOSED: a reached function with no return annotation (it could
-    be a predicate the `-> bool` filter drops) and a `project_identity`
-    function referenced other than as a called name (a call through a
-    variable or a wrapper the walk cannot follow) are unresolved."""
+    """(predicates, unresolved): the predicates among the functions reached
+    from the marker predicates through called names, and every form the walk
+    cannot read.
+
+    ANCHOR: every reached function, with its return annotation and its
+    return statements. FAIL CLOSED: each one is classified by
+    `_return_kind` as a predicate or as not a predicate, or it is
+    unresolved; none is dropped. A `project_identity` function referenced
+    other than as a called name (a call through a variable or a wrapper the
+    walk cannot follow) is unresolved too."""
     tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
     defined = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     reached, frontier = set(_marker_predicates()), list(_marker_predicates())
-    unresolved = []
+    unresolved, predicates = [], set()
     while frontier:
         function = defined[frontier.pop()]
-        if function.returns is None:
-            unresolved.append(f"{function.lineno}: {function.name} has no return annotation")
+        kind, why = _return_kind(function)
+        if kind == "predicate":
+            predicates.add(function.name)
+        elif kind is None:
+            unresolved.append(f"{function.lineno}: {function.name} {why}")
         called = {id(node.func) for node in ast.walk(function) if isinstance(node, ast.Call)}
         for node in ast.walk(function):
             if isinstance(node, ast.Name) and node.id in defined and id(node) not in called:
@@ -649,10 +697,6 @@ def _layout_predicate_forms() -> tuple:
             ):
                 reached.add(node.func.id)
                 frontier.append(node.func.id)
-    predicates = {
-        name for name in reached
-        if isinstance(defined[name].returns, ast.Name) and defined[name].returns.id == "bool"
-    }
     return predicates, unresolved
 
 
