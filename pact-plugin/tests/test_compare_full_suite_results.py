@@ -582,6 +582,36 @@ def test_a_census_line_only_in_captured_output_does_not_explain_the_exit(tmp_pat
          "error": "green test outcomes have an inconsistent overall conclusion"}]
 
 
+HOME_CENSUS_INFO = "HOME CENSUS: installed, 812 launches checked, 0 refused"
+
+
+@pytest.mark.parametrize("finish", [
+    (HOME_CENSUS_INFO,),
+    ("." * 40 + " [100%]" + HOME_CENSUS_INFO,),
+], ids=["own-line", "after-xdist-progress"])
+def test_a_green_run_carrying_the_home_census_information_line_is_clean(tmp_path, finish):
+    first = make_run(tmp_path, "one", finish_lines=finish)
+    second = make_run(tmp_path, "two", 101, finish_lines=finish)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["deltas"] == [] and comparison["evidence_errors"] == []
+    assert [run["validity"] for run in comparison["input_runs"]] == ["clean", "clean"]
+    assert [run["census_failures"] for run in read_runs(output)] == [[], []]
+
+
+def test_the_home_census_failure_header_still_fails_beside_a_run_with_the_information_line(
+        tmp_path):
+    first = make_run(tmp_path, "one", finish_lines=(HOME_CENSUS_INFO,))
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(HOME_CENSUS_HEADER, "  [gw0] test_z (call): child [x]"))
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["deltas"] == [
+        {"type": "census", "run": "two", "before": [], "after": ["home"]}]
+    assert read_runs(output)[1]["census_failures"] == [
+        {"census": "home", "problems": 1, "lines": ["[gw0] test_z (call): child [x]"]}]
+
+
 def test_a_census_line_beside_a_clean_exit_is_refused(tmp_path):
     """A census that fails a session raises its status to 1, so exit 0 contradicts it."""
     first = make_run(tmp_path, "one")
@@ -698,6 +728,25 @@ def test_each_census_header_written_by_finish_is_recognised(monkeypatch, module_
     assert session.exitstatus == 1
     assert comparator._census_failures(written) == [
         {"census": name, "problems": 1, "lines": ["a miss"]}]
+
+
+
+def test_the_information_line_the_real_home_census_writes_is_no_census_failure(monkeypatch):
+    import home_census as census
+    monkeypatch.setitem(census._state, "misses", [])
+    monkeypatch.setitem(census._state, "forwarded", [])
+    monkeypatch.setitem(census._state, "installed", True)
+    monkeypatch.setitem(census._state, "checked", 812)
+    monkeypatch.setitem(census._state, "forwarded_checked", 0)
+    written = []
+    reporter = types.SimpleNamespace(write_line=written.append)
+    session = types.SimpleNamespace(
+        exitstatus=0, config=types.SimpleNamespace(
+            pluginmanager=types.SimpleNamespace(get_plugin=lambda _name: reporter)))
+    census.finish(session)
+    assert session.exitstatus == 0
+    assert written == [HOME_CENSUS_INFO]
+    assert comparator._census_failures(written) == []
 
 
 RIG_CONFTEST = """\

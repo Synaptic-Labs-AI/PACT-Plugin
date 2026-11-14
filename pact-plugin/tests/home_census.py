@@ -3,8 +3,9 @@ Location: pact-plugin/tests/home_census.py
 Summary: Refuses a child process the suite starts without HOME in its environment.
 Used by: tests/conftest.py, whose pytest_configure installs it and registers its
          marker, whose pytest_runtest_protocol tells it which test is running,
-         whose pytest_testnodedown collects each xdist worker's refusals, and
-         whose pytest_sessionfinish reports; tests/test_home_census.py.
+         whose pytest_testnodedown collects each xdist worker's refusals and
+         launch count, and whose pytest_sessionfinish reports;
+         tests/test_home_census.py.
 
 A child started without HOME finds its home through the password database: the
 real one, outside the sandbox the suite runs in.
@@ -34,11 +35,20 @@ clean exit status (0) to 1. An environment the census cannot inspect (a key
 test that raises) is recorded as a fault line and fails the session; that
 launch is not aborted.
 
+A run with no refusal ends with one information line from the controller (or a
+session without xdist), `HOME CENSUS: installed, N launches checked, 0 refused`,
+where N counts the launch events the census judged, every worker's included.
+One launch can raise both events (a Popen that starts its child through
+posix_spawn), so N counts events, not children.
+
 THE ONE EXEMPTION: `@pytest.mark.child_env_without_home(reason="...")` on a
 test, its class or its module, with a non-empty string reason, exempts every
 launch made while that test runs: its setup, call and teardown, including a
 launch a shared fixture makes then. A marker without such a reason exempts
-nothing; the refusal line says the reason is missing.
+nothing; the refusal line says the reason is missing. The marker takes effect
+only for tests under pact-plugin/tests/, whose conftest tells the census which
+test is running; a launch from a test elsewhere (pact-plugin/skills/) is still
+judged, but no marker exempts it.
 
 NOT SEEN, AND OUTSIDE THE CENSUS:
 - os.spawn* and os.exec*, and os.fork() followed by an exec: on POSIX the exec
@@ -49,6 +59,9 @@ NOT SEEN, AND OUTSIDE THE CENSUS:
 - a grandchild that a child process starts, since the census is installed only
   in the suite's own processes.
 - a test that does not run: skipped, deselected or not collected.
+- the C-level process environment: the census judges an inherited launch by
+  os.environ, not by the C-level process environment, so changes made with
+  os.putenv/os.unsetenv, or a replaced os.environ, are not seen as such.
 """
 import os
 import sys
@@ -59,9 +72,10 @@ MARKER_HELP = (MARKER + "(reason): this test starts a child without HOME on purp
 REMEDY = ('pass HOME in the child env (the child_env fixture, or HOME from '
           'os.environ), or mark the test %s(reason=...)' % MARKER)
 WORKEROUTPUT_KEY = "home_census_refusals"
+WORKEROUTPUT_COUNT_KEY = "home_census_launches_checked"
 
 _state = {"installed": False, "misses": [], "forwarded": [], "exempt": None,
-          "unreasoned": False}
+          "unreasoned": False, "checked": 0, "forwarded_checked": 0}
 
 
 class HomeCensusError(RuntimeError):
@@ -111,6 +125,7 @@ def _audit(event, args):
         return
     if _state["exempt"] is not None:
         return
+    _state["checked"] += 1
     try:
         if env is None:
             lacking = "inherits an environment without HOME" if not _has_home(os.environ) \
@@ -156,19 +171,26 @@ def collect(node):
     name = getattr(getattr(node, "gateway", None), "id", "worker")
     for line in output.get(WORKEROUTPUT_KEY) or ():
         _state["forwarded"].append("[%s] %s" % (name, line))
+    _state["forwarded_checked"] += output.get(WORKEROUTPUT_COUNT_KEY, 0)
 
 
 def finish(session):
-    """Report every refusal and fail the session; a worker hands them on instead."""
+    """Report every refusal and fail the session, or, on a clean run of an
+    installed census, report how many launches it checked; a worker hands its
+    refusals and its count on instead."""
     workeroutput = getattr(session.config, "workeroutput", None)
     if workeroutput is not None:
         workeroutput[WORKEROUTPUT_KEY] = list(_state["misses"])
+        workeroutput[WORKEROUTPUT_COUNT_KEY] = _state["checked"]
         return
     problems = list(_state["misses"]) + list(_state["forwarded"])
-    if not problems:
-        return
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
     write = reporter.write_line if reporter is not None else (lambda line: print(line, file=sys.stderr))
+    if not problems:
+        if _state["installed"]:
+            write("HOME CENSUS: installed, %d launches checked, 0 refused"
+                  % (_state["checked"] + _state["forwarded_checked"]))
+        return
     write("HOME CENSUS: %d child(ren) started without HOME" % len(problems))
     for line in problems:
         write("  " + line)

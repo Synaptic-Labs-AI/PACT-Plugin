@@ -9,6 +9,7 @@ Used by: the suite; the census itself is tests/home_census.py, wired in
 """
 import asyncio
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -27,11 +28,13 @@ def census_state():
     """Restore the census's recorded lines, so a deliberate refusal here does
     not fail the session that runs this module."""
     saved = {key: list(census._state[key]) for key in ("misses", "forwarded")}
+    counts = {key: census._state[key] for key in ("checked", "forwarded_checked")}
     try:
         yield census._state
     finally:
         for key, value in saved.items():
             census._state[key][:] = value
+        census._state.update(counts)
 
 
 def _refused(launch, census_state):
@@ -283,15 +286,18 @@ def test_other_audit_events_are_ignored(census_state):
     assert census_state["misses"] == before
 
 
-def test_an_env_the_census_cannot_inspect_is_a_fault_that_fails_the_run(census_state):
+def test_an_env_whose_keys_cannot_be_read_is_a_fault_that_fails_the_run(census_state):
+    """The census reads an env's keys by iterating it; an env whose iteration
+    raises is recorded as a fault, and the fault names that error."""
     class Opaque:
-        def __contains__(self, key):
-            raise TypeError("opaque")
+        def __iter__(self):
+            raise LookupError("these keys cannot be read")
     before = len(census_state["misses"])
     census._audit("subprocess.Popen", (None, ["true"], None, Opaque()))
     added = census_state["misses"][before:]
     assert len(added) == 1 and "could not inspect the environment" in added[0], added
-    assert "test_an_env_the_census_cannot_inspect" in added[0], added
+    assert "LookupError('these keys cannot be read')" in added[0], added
+    assert "test_an_env_whose_keys_cannot_be_read" in added[0], added
 
 
 def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census_state):
@@ -356,23 +362,51 @@ def test_a_refusal_raises_only_a_clean_status(census_state, prior, after):
     assert session.exitstatus == after
 
 
-def test_finish_with_no_refusal_leaves_the_session_alone(census_state):
+def test_finish_with_no_refusal_reports_the_launches_checked(census_state):
     census_state["misses"][:] = []
     census_state["forwarded"][:] = []
+    census_state["checked"], census_state["forwarded_checked"] = 3, 4
+    reporter = _Reporter()
+    session = _Session(_Config(reporter))
+    census.finish(session)
+    assert session.exitstatus == 0
+    assert reporter.lines == ["HOME CENSUS: installed, 7 launches checked, 0 refused"]
+
+
+def test_a_census_never_installed_reports_nothing_on_a_clean_run(census_state, monkeypatch):
+    census_state["misses"][:] = []
+    census_state["forwarded"][:] = []
+    monkeypatch.setitem(census._state, "installed", False)
     reporter = _Reporter()
     session = _Session(_Config(reporter))
     census.finish(session)
     assert session.exitstatus == 0 and reporter.lines == []
 
 
+def test_each_judged_launch_is_counted_and_an_exempt_one_is_not(census_state):
+    before = census_state["checked"]
+    subprocess.run(["true"])
+    os.waitpid(os.posix_spawn("/bin/true", ["true"], dict(os.environ)), 0)
+    census._audit("os.system", ("true",))
+    assert census_state["checked"] - before == 2
+    census.enter(_item({"reason": "r"}))
+    try:
+        subprocess.run(["true"], env={"PATH": os.defpath})
+    finally:
+        census.leave()
+    assert census_state["checked"] - before == 2
+
+
 def test_a_worker_hands_its_refusals_to_the_controller(census_state):
     census_state["misses"][:] = [_LINE]
     census_state["forwarded"][:] = []
     workeroutput = {}
+    census_state["checked"] = 5
     worker = _Session(_Config(_Reporter(), workeroutput=workeroutput))
     census.finish(worker)
     assert worker.exitstatus == 0, "a worker's exit status is ignored by xdist"
     assert workeroutput[census.WORKEROUTPUT_KEY] == [_LINE]
+    assert workeroutput[census.WORKEROUTPUT_COUNT_KEY] == 5
 
     census_state["misses"][:] = []  # the controller process recorded nothing itself
     node = type("Node", (), {"workeroutput": workeroutput,
@@ -383,6 +417,20 @@ def test_a_worker_hands_its_refusals_to_the_controller(census_state):
     census.finish(controller)
     assert controller.exitstatus == 1
     assert reporter.lines[1] == "  [gw3] " + _LINE
+
+
+def test_the_controller_sums_every_workers_launch_count(census_state):
+    census_state["misses"][:] = []
+    census_state["forwarded"][:] = []
+    census_state["checked"], census_state["forwarded_checked"] = 0, 0
+    for name, count in (("gw0", 2), ("gw1", 9)):
+        census.collect(type("Node", (), {
+            "workeroutput": {census.WORKEROUTPUT_KEY: [], census.WORKEROUTPUT_COUNT_KEY: count},
+            "gateway": type("Gateway", (), {"id": name})()})())
+    census.collect(type("Node", (), {"workeroutput": {census.WORKEROUTPUT_KEY: []}})())
+    reporter = _Reporter()
+    census.finish(_Session(_Config(reporter)))
+    assert reporter.lines == ["HOME CENSUS: installed, 11 launches checked, 0 refused"]
 
 
 def test_a_repeated_refusal_is_recorded_once(census_state):
@@ -448,7 +496,11 @@ def test_under_xdist_a_child_with_home_passes_the_run(tmp_path):
     rc, output = _run_rig(tmp_path, '{"PATH": os.defpath, "HOME": os.environ["HOME"]}')
     assert "2 passed" in output, output
     assert rc == 0, output
-    assert "HOME CENSUS" not in output, output
+    assert "started without HOME" not in output, output
+    # The workers' launches (the test's own and any its session makes) reach
+    # the controller's information line.
+    assert re.search(r"HOME CENSUS: installed, [1-9][0-9]* launches checked, 0 refused",
+                     output), output
 
 
 def _git_rig(*args, cwd):
