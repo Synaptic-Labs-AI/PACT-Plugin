@@ -1795,6 +1795,102 @@ class _DetectionGraph:
                 return name
         return None
 
+    @staticmethod
+    def _bindings(scope, name=None, attribute=None) -> list:
+        """Every binding in `scope` (walked whole, nested functions included)
+        of the local `name`, or of `<receiver>.<attr>` for `attribute` =
+        (receiver, attr), as (kind, expression):
+        - "value": bound to the expression itself (`=`, an annotated `=`,
+          `:=`, or an element of a same-length tuple or list display);
+        - "from": bound to something derived from the expression (an
+          augmented `+=`, a loop or comprehension element, a `with ... as`
+          result, an unpacked part, an `except T as` exception of the type
+          `T`, a `match` capture of the subject);
+        - "param": a parameter of `scope` or of a function or lambda inside it;
+        - "import" and "global": an import, or a `global`/`nonlocal`
+          declaration;
+        - "unknown": any other binding (a nested `def` or `class`, an
+          `except` with no type)."""
+        import ast
+
+        found = []
+
+        def hit(target):
+            if name is not None:
+                return isinstance(target, ast.Name) and target.id == name
+            receiver, attr = attribute
+            return (
+                isinstance(target, ast.Attribute) and target.attr == attr
+                and isinstance(target.value, ast.Name) and target.value.id == receiver
+            )
+
+        def unpack(target, expression, kind):
+            if hit(target):
+                found.append((kind, expression))
+            elif isinstance(target, ast.Starred):
+                unpack(target.value, expression, "from")
+            elif isinstance(target, (ast.Tuple, ast.List)):
+                paired = (
+                    kind == "value" and isinstance(expression, (ast.Tuple, ast.List))
+                    and len(expression.elts) == len(target.elts)
+                    and not any(isinstance(e, ast.Starred) for e in [*target.elts, *expression.elts])
+                )
+                for index, element in enumerate(target.elts):
+                    if paired:
+                        unpack(element, expression.elts[index], "value")
+                    else:
+                        unpack(element, expression, "from")
+
+        for sub in ast.walk(scope):
+            if isinstance(sub, ast.Assign):
+                for target in sub.targets:
+                    unpack(target, sub.value, "value")
+            elif isinstance(sub, (ast.AnnAssign, ast.NamedExpr)):
+                if sub.value is not None:
+                    unpack(sub.target, sub.value, "value")
+            elif isinstance(sub, ast.AugAssign):
+                unpack(sub.target, sub.value, "from")
+            elif isinstance(sub, (ast.For, ast.AsyncFor, ast.comprehension)):
+                unpack(sub.target, sub.iter, "from")
+            elif isinstance(sub, (ast.With, ast.AsyncWith)):
+                for item in sub.items:
+                    if item.optional_vars is not None:
+                        unpack(item.optional_vars, item.context_expr, "from")
+            elif name is None:
+                continue
+            elif isinstance(sub, ast.ExceptHandler):
+                if sub.name == name:
+                    found.append(("from", sub.type) if sub.type is not None else ("unknown", None))
+            elif isinstance(sub, ast.Match):
+                for case in sub.cases:
+                    for pattern in ast.walk(case.pattern):
+                        if (
+                            isinstance(pattern, (ast.MatchAs, ast.MatchStar)) and pattern.name == name
+                        ) or (isinstance(pattern, ast.MatchMapping) and pattern.rest == name):
+                            found.append(("from", sub.subject))
+            elif isinstance(sub, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                if sub is not scope and getattr(sub, "name", None) == name:
+                    found.append(("unknown", None))
+                arguments = sub.args
+                every = [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+                         *(extra for extra in (arguments.vararg, arguments.kwarg) if extra)]
+                if any(argument.arg == name for argument in every):
+                    found.append(("param", None))
+            elif isinstance(sub, ast.ClassDef):
+                if sub.name == name:
+                    found.append(("unknown", None))
+            elif isinstance(sub, (ast.Import, ast.ImportFrom)):
+                for alias in sub.names:
+                    bound = alias.asname or (
+                        alias.name.split(".")[0] if isinstance(sub, ast.Import) else alias.name
+                    )
+                    if bound == name:
+                        found.append(("import", None))
+            elif isinstance(sub, (ast.Global, ast.Nonlocal)):
+                if name in sub.names:
+                    found.append(("global", None))
+        return found
+
     def instance_method(self, call, module: str, function):
         """How the census treats a method called on an object it cannot name
         at the call: a LOCAL of `function` (`reader = Reader(); reader.read()`)
@@ -1803,43 +1899,36 @@ class _DetectionGraph:
         Returns ("follow", (module, def)) when EVERY binding of the local in
         `function`, or of `self.<attr>` across the methods of the class,
         builds the same class of `module`, and that class defines the
-        method: the method is read like any other call. Returns ("report",
-        None) when the object is an attribute of `self` bound any other way,
-        or a local with at least one binding that a project name produces (a
-        project class or function's result) and the follow rule does not
-        hold. Returns ("skip", None) for a local bound only from outside the
-        project (`Path(x)`, a parameter)."""
+        method: the method is read like any other call. Every binding form
+        counts (`_bindings`). Returns ("skip", None) for a local that is a
+        parameter only (a method on a parameter is not covered), a name the
+        module rule reads (an import, a `global`, a module-level or builtin
+        name with no binding here), or a local whose every binding is a
+        parameter or a value proved to be a standard-library one
+        (`_foreign_value`, parameters admitted). Returns ("report", None) for
+        everything else: an attribute of `self` bound any other way, a local
+        with a binding that is not proved, and a name with no binding the
+        census can see."""
         import ast
+        import builtins
 
         func = call.func
         if not isinstance(func, ast.Attribute) or function is None:
             return "skip", None
         method, owner = func.attr, func.value
         arguments = function.args.posonlyargs + function.args.args
-        values = None
         if isinstance(owner, ast.Name):
-            if owner.id in {arg.arg for arg in arguments + function.args.kwonlyargs}:
+            found = self._bindings(function, name=owner.id)
+            kinds = {kind for kind, _expression in found}
+            if "global" in kinds or (found and kinds == {"import"}):
                 return "skip", None
-            values = [
-                sub.value for sub in ast.walk(function)
-                if isinstance(sub, ast.Assign) and any(
-                    isinstance(target, ast.Name) and target.id == owner.id for target in sub.targets
+            if not found:
+                known = (
+                    self.project_name(owner.id, module) is not None
+                    or owner.id in self.aliases[module] or hasattr(builtins, owner.id)
                 )
-            ]
-            values += [
-                None for sub in ast.walk(function)
-                if isinstance(sub, (ast.AugAssign, ast.For, ast.AsyncFor, ast.NamedExpr))
-                and isinstance(sub.target, ast.Name) and sub.target.id == owner.id
-            ]
-            anchored = [
-                value for value in values
-                if value is not None and self._produced_by_project(value, module)
-            ]
-            if not anchored or all(
-                isinstance(value, ast.Call) and self.target(value, module) is not None
-                and self.returns_foreign(self.target(value, module))
-                for value in anchored
-            ):
+                return ("skip", None) if known else ("report", None)
+            if kinds == {"param"}:
                 return "skip", None
         elif (
             isinstance(owner, ast.Attribute) and isinstance(owner.value, ast.Name)
@@ -1848,35 +1937,36 @@ class _DetectionGraph:
             cls = self._owner_class(module, function)
             if cls is None:
                 return "skip", None
-            values = []
+            found = []
             for item in self.classes[module][cls].body:
-                if not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                own = (item.args.posonlyargs + item.args.args)[:1]
-                for sub in ast.walk(item):
-                    targets = sub.targets if isinstance(sub, ast.Assign) else (
-                        [sub.target] if isinstance(sub, (ast.AugAssign, ast.AnnAssign)) else []
-                    )
-                    for target in targets:
-                        if (
-                            isinstance(target, ast.Attribute) and target.attr == owner.attr
-                            and isinstance(target.value, ast.Name) and own and target.value.id == own[0].arg
-                        ):
-                            values.append(sub.value if isinstance(sub, ast.Assign) else None)
+                own = (item.args.posonlyargs + item.args.args)[:1] if isinstance(
+                    item, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ) else []
+                if own:
+                    found += self._bindings(item, attribute=(own[0].arg, owner.attr))
         else:
             return "skip", None
+        values = [expression for kind, expression in found if kind == "value"]
         built = {
             value.func.id for value in values
             if isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
             and value.func.id in self.classes.get(module, {})
         }
-        if values and len(built) == 1 and all(
+        if found and len(values) == len(found) and len(built) == 1 and all(
             isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in built
             for value in values
         ):
             target = (module, f"{built.pop()}.{method}")
             if target in self.defs:
                 return "follow", target
+        if isinstance(owner, ast.Name) and all(
+            kind == "param" or (
+                kind in ("value", "from") and expression is not None
+                and self._foreign_value(expression, module, function, frozenset(), parameters=True)
+            )
+            for kind, expression in found
+        ):
+            return "skip", None
         return "report", None
 
     def _produced_by_project(self, value, module: str) -> bool:
@@ -1950,13 +2040,16 @@ class _DetectionGraph:
             for value in returns
         )
 
-    def _foreign_value(self, value, module: str, function, seen, depth: int = 0) -> bool:
+    def _foreign_value(
+        self, value, module: str, function, seen, depth: int = 0, parameters: bool = False
+    ) -> bool:
         """`value`, evaluated in `function`, is a standard-library value:
         a literal; an f-string, comparison or boolean test; a parameter
-        annotated with standard-library types; an operator, subscript,
-        attribute or conditional over such values; a local whose every
-        binding is one (a name declared `global` counts its module bindings
-        too); a builtin or a module imported from outside the project; a
+        annotated with standard-library types (any parameter, with
+        `parameters`); an operator, subscript, attribute or conditional over
+        such values; a local whose every binding (`_bindings`, in any form)
+        is or derives from one (a name declared `global` counts its module
+        bindings too); a builtin or a module imported from outside the project; a
         module object that is data (`_is_data`); a call of a non-project
         callable (`json.loads(text)`, `p.strip()`) whose receiver is one and
         whose arguments name no project function, class or non-data object
@@ -1970,7 +2063,7 @@ class _DetectionGraph:
             return False
 
         def again(inner):
-            return self._foreign_value(inner, module, function, seen, depth + 1)
+            return self._foreign_value(inner, module, function, seen, depth + 1, parameters)
 
         try:
             ast.literal_eval(value)
@@ -1993,36 +2086,44 @@ class _DetectionGraph:
             return all(again(item) for item in value.elts)
         if isinstance(value, ast.Dict):
             return all(again(item) for item in [*value.keys, *value.values] if item is not None)
+        if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            made = [value.key, value.value] if isinstance(value, ast.DictComp) else [value.elt]
+            return all(again(item) for item in made)
         if isinstance(value, ast.Name):
             arguments = function.args
             for argument in arguments.posonlyargs + arguments.args + arguments.kwonlyargs:
                 if argument.arg == value.id:
-                    return self._stdlib_annotation(argument.annotation)
-            bound = [
-                sub.value for sub in ast.walk(function)
-                if isinstance(sub, ast.Assign)
-                and any(isinstance(t, ast.Name) and t.id == value.id for t in sub.targets)
-            ]
-            other = [
-                sub for sub in ast.walk(function)
-                if isinstance(sub, (ast.AugAssign, ast.For, ast.AsyncFor, ast.NamedExpr, ast.With))
-                and any(isinstance(t, ast.Name) and t.id == value.id for t in ast.walk(sub)
-                        if isinstance(t, ast.Name) and isinstance(t.ctx, ast.Store))
-            ]
-            declared = {
-                name for sub in ast.walk(function) if isinstance(sub, ast.Global) for name in sub.names
-            }
-            if value.id in declared:
-                outside = self.bindings.get(module, {}).get(value.id, [])
-                bound = bound + outside
-                if any(item is None for item in bound):
-                    return False
-            if bound and not other:
-                return all(again(item) for item in bound)
+                    return parameters or self._stdlib_annotation(argument.annotation)
+            found = self._bindings(function, name=value.id)
+            if found:
+                # A binding that reads the name itself (`path = path.resolve()`)
+                # is proved on the assumption under test; every other binding
+                # must still be proved, so a project value cannot enter.
+                key = ("name", id(function), value.id)
+                if key in seen:
+                    return True
+                sources = []
+                for kind, expression in found:
+                    if kind == "global":
+                        outside = self.bindings.get(module, {}).get(value.id, [])
+                        if not outside or any(item is None for item in outside):
+                            return False
+                        sources += outside
+                    elif kind in ("value", "from") and expression is not None:
+                        sources.append(expression)
+                    elif kind == "import":
+                        if self.project_name(value.id, module) is not None:
+                            return False
+                    elif not (kind == "param" and parameters):
+                        return False
+                return all(
+                    self._foreign_value(item, module, function, seen | {key}, depth + 1, parameters)
+                    for item in sources
+                )
             owned = self.project_name(value.id, module)
             if owned is not None and owned[1] and owned[0] == module:
                 return self._is_data(module, value.id)
-            if owned is None and not bound and not other:
+            if owned is None:
                 import builtins
                 return hasattr(builtins, value.id) or value.id in self.aliases[module]
             return False
@@ -2031,6 +2132,10 @@ class _DetectionGraph:
             if target is not None:
                 return self.returns_foreign(target, seen)
             func = value.func
+            # A callee bound inside the function (a nested def or class, a
+            # local holding a callable) is proved like any other local.
+            if isinstance(func, ast.Name) and self._bindings(function, name=func.id) and not again(func):
+                return False
             if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
                 owned = self.project_name(func.value.id, module)
                 if owned is not None and owned[1] and self._is_data(*owned):
@@ -2041,8 +2146,17 @@ class _DetectionGraph:
                 return False
             receiver = func.value if isinstance(func, ast.Attribute) else None
             passed = [*value.args, *(kw.value for kw in value.keywords)]
+            # A project function CALLED inside an argument hands over its
+            # result, not itself: its callee name is not counted when it
+            # `returns_foreign`.
+            called = {
+                id(inner.func) for argument in passed for inner in ast.walk(argument)
+                if isinstance(inner, ast.Call) and self.target(inner, module) is not None
+                and self.returns_foreign(self.target(inner, module), seen)
+            }
             hands_project_code = any(
-                isinstance(inner, ast.Name) and self.project_name(inner.id, module) is not None
+                isinstance(inner, ast.Name) and id(inner) not in called
+                and self.project_name(inner.id, module) is not None
                 and not (self.project_name(inner.id, module)[1] and self._is_data(*self.project_name(inner.id, module)))
                 for argument in passed for inner in ast.walk(argument)
             )
@@ -2060,10 +2174,9 @@ class _DetectionGraph:
         if not (isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name)) or function is None:
             return None
         producers = sorted({
-            _callee_text(sub.value.func) for sub in ast.walk(function)
-            if isinstance(sub, ast.Assign) and isinstance(sub.value, ast.Call)
-            and any(isinstance(t, ast.Name) and t.id == func.value.id for t in sub.targets)
-            and self._produced_by_project(sub.value, module)
+            _callee_text(expression.func)
+            for _kind, expression in self._bindings(function, name=func.value.id)
+            if isinstance(expression, ast.Call) and self._produced_by_project(expression, module)
         })
         return " or ".join(producers) if producers else None
 
@@ -2399,12 +2512,14 @@ def route_inputs() -> dict:
       a logger run project code), every binding of the name counted;
     - building a calling-module class that runs no project code
       (`_DetectionGraph._runs_no_project_code`);
-    - a method on a local or a `self` attribute whose every binding builds
-      one same-module class defining it, which is followed, or on a local
-      bound from a project function that provably returns only
-      standard-library values (`_DetectionGraph.returns_foreign`); every
-      other method on such an object is reported
-      (`_DetectionGraph.instance_method`).
+    - a method on a local or a `self` attribute, every binding of it counted
+      in every form (`_DetectionGraph._bindings`): followed when every
+      binding builds one same-module class defining it, and read when every
+      binding of a local is a parameter or a value proved to be a
+      standard-library one (`_DetectionGraph._foreign_value`, which counts a
+      project function's result only when it `returns_foreign`); every other
+      method on such an object, and one on a name with no binding the
+      census can see, is reported (`_DetectionGraph.instance_method`).
 
     The process and home directories are each ONE condition, `("cwd",)` and
     `("home",)`, whichever function reads them, so a new reader of either is
@@ -2416,9 +2531,11 @@ def route_inputs() -> dict:
     outside the plugin (the standard library, third-party packages); an
     environment read reached only through such a call; a read through a
     C extension (`ctypes`), which no source anchor can see; and a method
-    called on a function's parameter, whose type the census cannot see
-    (21 such calls in 18 functions on the detection path, which are string
-    and path methods on the values the callers pass).
+    called on a function's parameter, or on a local proved a
+    standard-library value only by taking a parameter as one, whose type
+    the census cannot see (29 such calls in 20 functions on the detection
+    path, which are string, dict and path methods on the values the callers
+    pass).
     """
     import ast
 
@@ -2632,10 +2749,15 @@ class TestEveryRouteEntryConditionIsARoute:
             "method called on it is _replace, which builds another NamedTuple and runs no "
             "project code"
         ),
-        ("call", "<call to no function project_identity: a method of what find_git_marker returns>"): (
-            "find_git_marker returns None or `level / '.git'` for a level among its start's "
-            "parents, a pathlib Path; is_symlink, is_dir, resolve, is_file and read_text "
-            "are pathlib's (the start is unannotated, so the census cannot prove it)"
+        ("call", "<call to no function memory_api: a method of what main_repo_common_dir returns>"): (
+            "main_repo_common_dir returns None, `common.resolve()` (a pathlib Path), or "
+            "the memoised result of an earlier call of itself; the method called on it is "
+            "Path.resolve (the memo is a ContextVar's dict, so the census cannot prove it)"
+        ),
+        ("call", "<call to no function shared.project_scope: sessions_root.glob>"): (
+            "sessions_root is get_claude_config_dir() / 'pact-sessions', a pathlib Path; "
+            "glob is pathlib's (get_claude_config_dir builds its Path from unannotated "
+            "env and home parameters, so the census cannot prove it)"
         ),
         ("call", "<call to no function shared.project_scope: a method of what _discover_context_record returns>"): (
             "_discover_context_record returns a dict (the cached _session_record_on_disk "
@@ -2832,6 +2954,150 @@ class TestEveryRouteEntryConditionIsARoute:
         assert ("pkg.m", "Reader.read") in followed, followed
         go = graph.defs[("pkg.m", "Holder.go")]
         assert ("pkg.m", "Reader.read") in {target for _node, target in graph.references(go, "pkg.m")}
+
+    def test_a_local_method_is_read_only_when_every_binding_form_is(self, tmp_path, monkeypatch):
+        """Control for `_DetectionGraph._bindings` and `instance_method`: a
+        method on a local bound in any form (an annotated `=`, `:=`, `with
+        ... as`, a loop or comprehension element, an unpacked part, `+=`,
+        `except ... as`, a `match` capture, a nested `def`'s result) to what a
+        project function made is reported, as is one on a name with no
+        binding at all and on a `self` attribute bound by `with ... as` or by
+        unpacking; the same forms over standard-library values, a parameter,
+        an import and a same-module class build are not."""
+        import ast
+        import sys
+
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "forms.py").write_text(
+            "import os\n\n"
+            "class Reader:\n"
+            "    def read(self):\n"
+            "        return os.environ.get('X')\n\n"
+            "class ProjectError(Exception):\n"
+            "    def read(self):\n"
+            "        return os.environ.get('X')\n\n"
+            "def make():\n"
+            "    return Reader()\n\n"
+            "def makes():\n"
+            "    return [Reader()]\n\n"
+            "def annotated():\n"
+            "    reader: object = make()\n"
+            "    reader.read()\n\n"
+            "def walrus():\n"
+            "    if (reader := make()):\n"
+            "        reader.read()\n\n"
+            "def with_as():\n"
+            "    with make() as reader:\n"
+            "        reader.read()\n\n"
+            "def loop():\n"
+            "    for reader in makes():\n"
+            "        reader.read()\n\n"
+            "def comprehension():\n"
+            "    return [reader.read() for reader in makes()]\n\n"
+            "def unpacked():\n"
+            "    reader, _count = make(), 0\n"
+            "    reader.read()\n\n"
+            "def starred():\n"
+            "    reader, *_rest = makes()\n"
+            "    reader.read()\n\n"
+            "def augmented():\n"
+            "    reader = 0\n"
+            "    reader += make()\n"
+            "    reader.read()\n\n"
+            "def except_as():\n"
+            "    try:\n"
+            "        pass\n"
+            "    except ProjectError as reader:\n"
+            "        reader.read()\n\n"
+            "def match_capture():\n"
+            "    match make():\n"
+            "        case reader:\n"
+            "            reader.read()\n\n"
+            "def nested_def():\n"
+            "    def helper():\n"
+            "        return Reader()\n"
+            "    reader = helper()\n"
+            "    reader.read()\n\n"
+            "def unbound():\n"
+            "    nowhere.read()\n\n"
+            "class WithHolder:\n"
+            "    def __init__(self):\n"
+            "        self.reader = Reader()\n\n"
+            "    def reset(self):\n"
+            "        with make() as self.reader:\n"
+            "            pass\n\n"
+            "    def go(self):\n"
+            "        return self.reader.read()\n\n"
+            "class PairHolder:\n"
+            "    def __init__(self):\n"
+            "        self.reader = Reader()\n\n"
+            "    def reset(self):\n"
+            "        self.reader, self.count = make(), 0\n\n"
+            "    def go(self):\n"
+            "        return self.reader.read()\n\n"
+            "class AnnotatedHolder:\n"
+            "    def __init__(self):\n"
+            "        self.reader: Reader = Reader()\n\n"
+            "    def go(self):\n"
+            "        return self.reader.read()\n\n"
+            "def controls(text: str, path):\n"
+            "    name: str = text.strip()\n"
+            "    name.upper()\n"
+            "    if (size := len(text)):\n"
+            "        size.bit_length()\n"
+            "    with open(path) as handle:\n"
+            "        handle.read()\n"
+            "    for line in text.splitlines():\n"
+            "        line.strip()\n"
+            "    [part.strip() for part in text.split()]\n"
+            "    first, second = text, path\n"
+            "    first.lower()\n"
+            "    total = 0\n"
+            "    total += 1\n"
+            "    total.bit_length()\n"
+            "    try:\n"
+            "        pass\n"
+            "    except OSError as error:\n"
+            "        error.with_traceback(None)\n"
+            "    match text:\n"
+            "        case captured:\n"
+            "            captured.upper()\n"
+            "    import json\n"
+            "    json.dumps(1)\n"
+            "    path.exists()\n"
+            "    reader: Reader = Reader()\n"
+            "    reader.read()\n"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path,))
+        graph = _DetectionGraph()
+        assert graph.load("pkg.forms")
+        reported = {}
+        for (owner, qualified), node in graph.defs.items():
+            if owner != "pkg.forms":
+                continue
+            unread = sorted(
+                ast.unparse(call.func) for call in ast.walk(node)
+                if isinstance(call, ast.Call) and graph.unread_call(call, "pkg.forms", node)
+            )
+            if unread:
+                reported[qualified] = unread
+        forms = [
+            "annotated", "walrus", "with_as", "loop", "comprehension", "unpacked", "starred",
+            "augmented", "except_as", "match_capture", "nested_def",
+        ]
+        assert reported == {
+            **{name: ["reader.read"] for name in forms},
+            "unbound": ["nowhere.read"],
+            "WithHolder.go": ["self.reader.read"],
+            "PairHolder.go": ["self.reader.read"],
+        }, reported
+        followed = {
+            name: {target for _node, target in graph.references(graph.defs[("pkg.forms", name)], "pkg.forms")}
+            for name in ("controls", "AnnotatedHolder.go")
+        }
+        assert all(("pkg.forms", "Reader.read") in targets for targets in followed.values()), followed
 
     @pytest.mark.parametrize("source, untouched", [
         ("import logging, sys\nlogging.basicConfig(level=logging.INFO, stream=sys.stderr)\n", True),
