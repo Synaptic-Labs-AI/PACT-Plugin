@@ -1478,6 +1478,11 @@ class _DetectionGraph:
         # {module: names a relative import binds to a module that cannot be
         # found}; a use of one fails closed in `route_inputs`.
         self.unresolved = {}
+        # {module: names a relative import binds}, and {module: names its
+        # top-level statements assign}: a call through a relative name that
+        # reaches no function fails closed unless it is a method of such a
+        # module-level object.
+        self.relative, self.globals = {}, {}
 
     @staticmethod
     def _path(name: str):
@@ -1506,6 +1511,12 @@ class _DetectionGraph:
         # `shared.paths.f`), which `import_aliases` records without its dots.
         package = module.split(".")[:-1] if path.name != "__init__.py" else module.split(".")
         self.unresolved[module] = set()
+        self.relative[module] = set()
+        self.globals[module] = {
+            target.id for node in tree.body if isinstance(node, (ast.Assign, ast.AnnAssign))
+            for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+            if isinstance(target, ast.Name)
+        }
         for node in ast.walk(tree):
             if not (isinstance(node, ast.ImportFrom) and node.level):
                 continue
@@ -1520,6 +1531,8 @@ class _DetectionGraph:
                 aliases[bound] = target
                 if self._path(owner or alias.name) is None and self._path(target) is None:
                     self.unresolved[module].add(bound)
+                else:
+                    self.relative[module].add(bound)
         self.aliases[module] = aliases
         constants = {}
         for node in tree.body:
@@ -1580,6 +1593,27 @@ class _DetectionGraph:
             dotted = qualified_name(func, self.aliases[module])
             return self.follow(dotted) if dotted else None
         return None
+
+    def unread_relative_call(self, call, module: str) -> bool:
+        """A call through a relatively imported name that reaches no project
+        function (a class, a package re-export, a name the graph cannot
+        follow), which the census therefore cannot read. A method of a
+        module-level object of the imported module (a compiled pattern's
+        `.sub`) is not one: the object holds data, not a route input."""
+        import ast
+
+        func, chain = call.func, []
+        while isinstance(func, ast.Attribute):
+            chain.append(func.attr)
+            func = func.value
+        if not (isinstance(func, ast.Name) and func.id in self.relative.get(module, ())):
+            return False
+        if self.target(call, module) is not None:
+            return False
+        if not chain:
+            return True
+        owner, _, name = self.aliases[module][func.id].rpartition(".")
+        return not (owner and self.load(owner) and name in self.globals.get(owner, ()))
 
     def references(self, node, module: str):
         """Yield (expression, (module, def)) for each call into a project
@@ -1718,6 +1752,9 @@ def route_inputs() -> tuple:
         for sub in ast.walk(node):
             if isinstance(sub, ast.Name) and sub.id in graph.unresolved.get(module, ()):
                 add(("call", f"<unresolved relative import {module}: {sub.id}>"),
+                    f"{site}:{sub.lineno}", key)
+            elif isinstance(sub, ast.Call) and graph.unread_relative_call(sub, module):
+                add(("call", f"<relative call to no function {module}: {ast.unparse(sub.func)}>"),
                     f"{site}:{sub.lineno}", key)
         for read, shown in _env_reads(node, module, key[1], graph):
             if isinstance(read, ast.Constant) and isinstance(read.value, str):
@@ -1919,18 +1956,24 @@ class TestEveryRouteEntryConditionIsARoute:
         """Control for `_DetectionGraph.load`: a relative import resolves
         against the importing module's package, and one that names a missing
         module or climbs above the package is recorded as unresolved, which
-        `route_inputs` turns into a condition no exclusion names."""
+        `route_inputs` turns into a condition no exclusion names. A call
+        through a relative name that reaches no function (a class, a package
+        re-export the graph cannot follow) is unread too; a method of a
+        module-level object is not."""
+        import ast
         import sys
 
         package = tmp_path / "pkg"
         package.mkdir()
-        (package / "__init__.py").write_text("")
+        (package / "__init__.py").write_text("from os.path import join as reexported\n")
         (package / "helper.py").write_text(
-            "import os\n\ndef read():\n    return os.environ.get('X')\n"
+            "import os\nimport re\n\nPATTERN = re.compile('x')\n\n"
+            "class Thing:\n    pass\n\n"
+            "def read():\n    return os.environ.get('X')\n"
         )
         (package / "main.py").write_text(
-            "from .helper import read\n"
-            "from . import helper\n"
+            "from .helper import read, Thing, PATTERN\n"
+            "from . import helper, reexported\n"
             "from .missing import gone\n"
             "from ...outside import far\n\n"
             "def entry():\n"
@@ -1938,6 +1981,10 @@ class TestEveryRouteEntryConditionIsARoute:
             "    helper.read()\n"
             "    gone()\n"
             "    far()\n"
+            "    Thing()\n"
+            "    helper.Thing()\n"
+            "    reexported('a', 'b')\n"
+            "    PATTERN.sub('', 'y')\n"
         )
         monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path,))
         graph = _DetectionGraph()
@@ -1945,5 +1992,12 @@ class TestEveryRouteEntryConditionIsARoute:
         assert graph.aliases["pkg.main"]["read"] == "pkg.helper.read"
         assert graph.aliases["pkg.main"]["helper"] == "pkg.helper"
         assert graph.unresolved["pkg.main"] == {"gone", "far"}
-        targets = {target for _node, target in graph.references(graph.defs[("pkg.main", "entry")], "pkg.main")}
+        entry = graph.defs[("pkg.main", "entry")]
+        targets = {target for _node, target in graph.references(entry, "pkg.main")}
         assert targets == {("pkg.helper", "read")}
+        unread = {
+            call.lineno for call in ast.walk(entry)
+            if isinstance(call, ast.Call) and graph.unread_relative_call(call, "pkg.main")
+        }
+        # Thing(), helper.Thing() and reexported(): lines 11-13 of main.py.
+        assert unread == {11, 12, 13}, unread
