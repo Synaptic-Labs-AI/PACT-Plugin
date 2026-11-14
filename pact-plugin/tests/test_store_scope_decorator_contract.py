@@ -152,6 +152,19 @@ class TestTheInstrumentIsLive:
                 "the exemption for {0} carries no reason".format(name)
             )
 
+    def test_every_public_callable_is_a_definition_the_scan_reads(self):
+        """The population is the class body's `def` statements, so a public
+        method bound any other way (an alias of a private function, a
+        `partialmethod`, an attribute set after the class) would be outside
+        it and carry no decorator unseen. Every public callable or
+        descriptor the class defines must be one of those definitions."""
+        bound = {
+            name for name, value in vars(PACTMemory).items()
+            if not name.startswith("_") and (callable(value) or hasattr(value, "__get__"))
+        }
+        assert bound - set(_public_methods()) == set(), sorted(bound - set(_public_methods()))
+        assert "save" in bound, "the runtime read found no public method"
+
 
 class TestEachPublicEntryPointCarriesTheScope:
     """FAIL-CLOSED over the public surface.

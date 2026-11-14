@@ -21,8 +21,8 @@ Matched mutation forms: sys.path.insert/append/extend calls, slice-assignment
 insert were added after review findings that they dodged every arm while
 being plausible honest-mistake forms, not adversarial constructions. `sys`
 means any name the file binds to the sys module (`import sys as X`), and
-`sys.path` also any name bound by `from sys import path [as P]`, in any
-scope of the file.
+`sys.path` also any name bound by `from sys import path [as P]` or assigned
+sys.path (`entries = sys.path`), in any scope of the file.
 ACCEPTED UNDER-BLOCK (adversarial-only, documented boundary): wholesale
 rebinding (`sys.path = [...]`), `getattr(sys.path, ...)` with a verb string, and
 slice-assign/augmented forms with exotic spacing inside codegen strings —
@@ -189,6 +189,20 @@ def _sys_names(tree):
                 not node.level):
             paths.update(a.asname or a.name for a in node.names
                          if a.name == "path")
+    # A name assigned sys.path (`entries = sys.path`) holds the same list,
+    # so a mutation through it is a path mutation; followed to a fixed point.
+    changed = True
+    while changed:
+        changed = False
+        names = (frozenset(modules), frozenset(paths))
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None \
+                    and _is_sys_path(node.value, names):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name) and target.id not in paths:
+                        paths.add(target.id)
+                        changed = True
     return frozenset(modules), frozenset(paths)
 
 
@@ -348,6 +362,24 @@ def test_the_data_only_check_sees_a_function_level_insert():
     tree = ast.parse("import sys\ndef f():\n    sys.path" + ".insert(0, 'x')\n")
     assert [node.lineno for node in ast.walk(tree)
             if _is_path_mutation(node)] == [3]
+
+
+def test_a_name_holding_sys_path_is_followed(tmp_path):
+    """Control for the alias leg of `_sys_names`: a mutation through a name
+    assigned sys.path (directly or through another such name) is a path
+    mutation; a mutation of a copy of the list is not."""
+    module = tmp_path / "aliased.py"
+    module.write_text(
+        "import sys\n"
+        "entries = sys.path\n"
+        "entries.insert(0, 'x')\n"
+        "again = entries\n"
+        "again += ['y']\n"
+        "snapshot = list(sys.path)\n"
+        "snapshot.insert(0, 'x')\n",
+        encoding="utf-8",
+    )
+    assert _module_level_mutations(module) == [3, 5]
 
 
 def test_negative_fixture_flags_every_matcher_leg():

@@ -150,6 +150,7 @@ KNOWN_NAME_SITES = Counter({
     ("hooks/session_init.py", "_saved_context"): 1,              # read
     ("hooks/session_init.py", "_lead_context_persisted"): 1,     # existence read
     ("hooks/shared/pact_context.py", "build_context_cache"): 1,  # the writers' path
+    ("hooks/shared/pact_context.py", "persist_context"): 1,  # the writer's own temp-file prefix
     ("hooks/shared/pact_context.py", "init"): 1,                 # read path
     ("hooks/shared/pact_context.py", "_clear_carryover_team"): 1,  # read (earlier sessions' contexts)
     ("hooks/shared/pact_context.py", "_project_session_records"): 1,  # read (this project's session contexts)
@@ -223,6 +224,19 @@ def _derives_a_session_path(function):
         elif isinstance(node, ast.Constant) and isinstance(node.value, str) and "pact-sessions" in node.value:
             return True
     return any(marker in name for name in names for marker in _SESSION_PATH_NAMES)
+
+
+def _names_the_file(text):
+    """A string piece that names the context file, or the piece of a name
+    assembled from several (`"pact-session-" + "context.json"`, an f-string
+    field after `pact-session-`, a temp name built on `pact-session-context`),
+    so an assembled name counts as a name site rather than escaping the
+    census."""
+    return (
+        FILENAME in text
+        or "session-context" in text
+        or text.endswith(("pact-session-", "pact-session"))
+    )
 
 
 def _write_call(call):
@@ -342,7 +356,7 @@ class _Census(ast.NodeVisitor):
     def visit_Constant(self, node):
         if (
             isinstance(node.value, str)
-            and FILENAME in node.value
+            and _names_the_file(node.value)
             and id(node) not in self.docstrings
         ):
             self.name_sites[(self.rel, self._where())] += 1
@@ -643,6 +657,28 @@ class TestCensus:
             (_CONTEXT_MODULE, "init"): 1,
             (_CONTEXT_MODULE, "via_bare_name"): 1,
             (_CONTEXT_MODULE, "via_alias"): 1,
+        })
+
+    def test_an_assembled_file_name_is_a_name_site(self, tmp_path):
+        """Positive control for `_names_the_file`: a name assembled from
+        pieces is counted where it is built; another session file's name is
+        not."""
+        hooks = tmp_path / "hooks"
+        hooks.mkdir()
+        (hooks / "seeded.py").write_text(
+            "def split(base):\n"
+            "    return base / ('pact-session-' + 'context.json')\n\n"
+            "def formatted(base, kind):\n"
+            "    return base / f'pact-session-{kind}.json'\n\n"
+            "def temp_name():\n"
+            "    return '.pact-session-context-'\n\n"
+            "def unrelated():\n"
+            "    return ('pact-sessions', 'session-journal.jsonl')\n"
+        )
+        assert _python_census(tmp_path)["name_sites"] == Counter({
+            ("hooks/seeded.py", "split"): 1,
+            ("hooks/seeded.py", "formatted"): 1,
+            ("hooks/seeded.py", "temp_name"): 1,
         })
 
     def test_a_str_replace_is_not_a_relocation(self, tmp_path):
