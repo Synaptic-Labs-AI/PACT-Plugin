@@ -712,6 +712,26 @@ class TestCensus:
             ("hooks/seeded.py", "temp_name"): 1,
         })
 
+    def test_a_name_the_census_cannot_read_is_reported_unreadable(self, tmp_path):
+        """Positive control for the census's fail-closed branch: a name built
+        from a `%` template lands in the unreadable list, while a complete
+        name beside it is a name site and another session file's name is
+        neither."""
+        hooks = tmp_path / "hooks"
+        hooks.mkdir()
+        (hooks / "seeded.py").write_text(
+            "def templated(base, kind):\n"
+            "    return base / ('pact-session-%s.json' % kind)\n\n"
+            "def named(base):\n"
+            "    return base / 'pact-session-context.json'\n\n"
+            "def other(base):\n"
+            "    return base / 'pact-session-journal.json'\n"
+        )
+        found = _python_census(tmp_path)
+        assert found["unreadable_names"] == ["hooks/seeded.py:2: 'pact-session-%s.json'"], (
+            found["unreadable_names"])
+        assert found["name_sites"] == Counter({("hooks/seeded.py", "named"): 1})
+
     def test_a_str_replace_is_not_a_relocation(self, tmp_path):
         """Path.replace takes one argument; str.replace takes two."""
         hooks = tmp_path / "hooks"
