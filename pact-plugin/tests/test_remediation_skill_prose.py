@@ -1370,7 +1370,10 @@ class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
             "when the checkout's .git names a linked worktree's admin directory "
             "that does not link back to it"
         ),
-        "home_root": "when the project root is the user's home directory",
+        "home_root": (
+            "when the checkout the session is in is the user's home directory "
+            "(a linked worktree included)"
+        ),
     }
     NO_GIT_DIR = (
         "or when no git directory is found (a broken .git marker or a "

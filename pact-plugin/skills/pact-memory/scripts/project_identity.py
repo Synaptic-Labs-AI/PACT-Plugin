@@ -1009,9 +1009,9 @@ def read_user_setting(config_path: Path) -> Optional[str]:
 
     The user-scope fallback for a session with no repository at all. Applied
     by the caller only when no repository is found, so a repo-scoped override
-    wins wherever one is read. In a home directory that is itself a
-    repository no override is read, and the cwd-marker route applies this
-    setting there. Never raises.
+    wins wherever one is read. When the checkout the session is in is the
+    home directory, a linked worktree included, no override is read, and the
+    cwd-marker route applies this setting there. Never raises.
     """
     try:
         payload = json.loads(Path(config_path).read_text(encoding="utf-8"))

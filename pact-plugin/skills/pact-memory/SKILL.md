@@ -400,11 +400,13 @@ Two operator surfaces answer, and they are deliberately ordered:
   unusable file is reported as `override_ignored` and resolution continues
   without it. The file is never read, so nothing is reported, when the
   repository has no working tree, when the checkout's `.git` names a linked
-  worktree's admin directory that does not link back to it, when the project
-  root is the user's home directory, or when no git directory is found (a broken `.git` marker or a declaration that cannot be
-  resolved). When git cannot see a home directory that is itself a
-  repository from the working directory, the user-scope `project_id` below
-  binds there if it is set.
+  worktree's admin directory that does not link back to it, when the checkout
+  the session is in is the user's home directory (a linked worktree
+  included), or when no git directory is found (a broken `.git` marker or a declaration that cannot be
+  resolved). When git cannot see that home checkout from the working
+  directory, the user-scope `project_id` below binds there if it is set. A
+  session in a checkout outside the home directory reads its pin even when
+  the repository's main checkout is the home directory.
 - `config.json` → `"project_id"` in the user memory directory, the directory
   that holds the default `memory.db` named under Storage — a USER-scoped
   setting, read there whatever store a command names: `--db-path` does not
@@ -412,8 +414,8 @@ Two operator surfaces answer, and they are deliberately ordered:
   answers ONLY when no declaration was present and no repository was found,
   from the working directory or by walking up to its project marker (a home
   directory the walk reaches is not asked, as above), so a repository pin
-  outranks it wherever one is read: in a home directory that is itself a
-  repository no pin is read, and when git cannot see that home from the
+  outranks it wherever one is read: when the session's checkout is the home
+  directory no pin is read, and when git cannot see that home from the
   working directory this setting binds there. Use it for a non-repository working
   directory that should share one identity. Only the user sets it: it changes
   the identity of every session it answers for, so an agent asks the user

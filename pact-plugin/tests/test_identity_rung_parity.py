@@ -70,6 +70,7 @@ from fixtures.identity_routes import (
     _answer,
     _clear,
     _override,
+    home_for,
     plant_unusable_pin,
 )
 
@@ -209,6 +210,13 @@ def _marker_predicates() -> set:
     return _marker_predicate_forms()[0]
 
 
+def _set_home(monkeypatch, shape: str, target: Path) -> None:
+    """Point HOME at the directory a `home_` shape names."""
+    home = home_for(shape, target)
+    if home is not None:
+        monkeypatch.setenv("HOME", str(home))
+
+
 @pytest.fixture(scope="module")
 def matrix(tmp_path_factory):
     """{(shape, route): (answer, answering rung, override report)}, the call
@@ -250,6 +258,7 @@ def matrix(tmp_path_factory):
             elsewhere.mkdir()
             with pytest.MonkeyPatch.context() as cell_patch:
                 _clear(cell_patch)
+                _set_home(cell_patch, shape, target)
                 previous = sys.getprofile()
                 sys.setprofile(tracer)
                 try:
@@ -269,14 +278,26 @@ def matrix(tmp_path_factory):
 ACCEPTED_BINDS = {"foreign_external_store"}
 
 
+def _setting_at_home(shape: str, route: str) -> bool:
+    """Whether the cell is the user-setting route at a shape whose target IS
+    HOME. The cwd-marker rung's home landing never asks git, so the user
+    setting binds there by design while every other route lands on the
+    folder name; read from the fixture, not typed: the route is the one
+    whose sources include "user setting", the shape one whose HOME is its
+    target."""
+    home = getattr(SHAPES[shape], "home", None)
+    return "user setting" in ROUTES[route][1] and home is not None and home(Path("t")) == Path("t")
+
+
 def _reached(cells) -> dict:
     """{shape: {route: (answer, override report)}} for the cells whose own
-    rung answered. The override report is (reason, path withheld) or None, so
-    a route that starts or stops reading the file, or starts printing its
-    path, disagrees."""
+    rung answered, except the user setting at a home target (see
+    `_setting_at_home`, whose cells are checked on their own). The override
+    report is (reason, path withheld) or None, so a route that starts or
+    stops reading the file, or starts printing its path, disagrees."""
     by_shape = collections.defaultdict(dict)
     for (shape, route), (answer, rung, override) in cells.items():
-        if rung in ROUTES[route][1]:
+        if rung in ROUTES[route][1] and not _setting_at_home(shape, route):
             by_shape[shape][route] = (answer, override)
     return by_shape
 
@@ -293,6 +314,20 @@ class TestEveryRungGivesAShapeTheSameAnswer:
                     grouped[answer].append(route)
                 disagreements[shape] = {answer: sorted(routes) for answer, routes in grouped.items()}
         assert disagreements == {}, f"routes that answer a shape differently: {disagreements}"
+
+    def test_the_user_setting_binds_only_at_a_home_target(self, matrix):
+        """The cells `_reached` leaves out must answer exactly the user
+        setting, with no override read; and there must be some."""
+        from fixtures.identity_routes import USER_SETTING_ID
+
+        cells, _sites, _fired, _executed = matrix
+        excluded = {cell: cells[cell] for cell in cells if _setting_at_home(*cell)}
+        assert excluded, "no home-target cell was measured"
+        wrong = {
+            cell: answer for cell, answer in excluded.items()
+            if answer != (f"bound:{USER_SETTING_ID}", "user setting", None)
+        }
+        assert wrong == {}, f"a home-target cell left out of the agreement arm answered: {wrong}"
 
     def test_every_unreached_cell_is_a_recorded_exception(self, matrix):
         cells, _sites, _fired, _executed = matrix
@@ -500,6 +535,7 @@ def identity_callers(matrix, tmp_path_factory):
             elsewhere.mkdir()
             with pytest.MonkeyPatch.context() as cell_patch:
                 _clear(cell_patch)
+                _set_home(cell_patch, shape, target)
                 previous = sys.getprofile()
                 sys.setprofile(tracer)
                 try:
@@ -975,6 +1011,7 @@ def git_calls(tmp_path_factory):
 
             with pytest.MonkeyPatch.context() as cell_patch:
                 _clear(cell_patch)
+                _set_home(cell_patch, shape, target)
                 run(cell_patch, target, elsewhere)  # puts the process on this route
                 _fresh_scope_state()
                 cell_patch.setattr(subprocess, "run", counting)

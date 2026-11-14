@@ -8,7 +8,8 @@ skill names as never reading the override file). Neither test imports the
 other; both import this module.
 
 SHAPES maps a name to `builder(base) -> target`. Every target has a `sub/`
-directory. Hostile shapes redirect the target's `.git` at a git directory
+directory. A `home_` shape carries `home`, and its cells run with HOME set to
+`home_for(shape, target)`. Hostile shapes redirect the target's `.git` at a git directory
 that is not its own; the `control_` shapes are genuine checkouts. Each
 `control_own_` builder carries `layout`, its row name in PACTMemory.__init__'s
 git-call table.
@@ -202,6 +203,26 @@ def _own_superproject_worktree_submodule(base: Path) -> Path:
 # `control_own_` builder carries one; the git-call floor reads its layouts
 # from these, so a new own layout must state its row there.
 _own_checkout.layout = "checkout"
+def _home_linked_worktree(base: Path) -> Path:
+    """HOME is a linked worktree of a repository stored elsewhere."""
+    main = make_repo(base / "store" / "main", remote=OWN)
+    run_git("worktree", "add", "-q", str(base / "home"), "-b", "wt", cwd=main)
+    return base / "home"
+
+
+def _home_main_checkout(base: Path) -> Path:
+    """HOME is a main checkout; the session is in its linked worktree
+    outside HOME."""
+    main = make_repo(base / "home", remote=OWN)
+    run_git("worktree", "add", "-q", str(base / "outside"), "-b", "wt", cwd=main)
+    return base / "outside"
+
+
+# A shape whose `home` is set runs with HOME pointed at that directory.
+_home_linked_worktree.home = lambda target: target
+_home_main_checkout.home = lambda target: target.parent / "home"
+
+
 _own_linked_worktree.layout = "linked worktree"
 _own_submodule.layout = "submodule"
 _own_separate_git_dir.layout = "separate-git-dir checkout"
@@ -227,6 +248,8 @@ _BUILDERS = {
     "control_own_separate_git_dir": _own_separate_git_dir,
     "control_own_submodule_worktree": _own_submodule_worktree,
     "control_own_superproject_worktree_submodule": _own_superproject_worktree_submodule,
+    "home_linked_worktree": _home_linked_worktree,
+    "home_main_checkout_session_outside": _home_main_checkout,
 }
 
 
@@ -237,9 +260,16 @@ def _with_sub(build):
         return target
 
     builder.__name__ = build.__name__
-    if hasattr(build, "layout"):
-        builder.layout = build.layout
+    for attribute in ("layout", "home"):
+        if hasattr(build, attribute):
+            setattr(builder, attribute, getattr(build, attribute))
     return builder
+
+
+def home_for(shape: str, target: Path) -> Optional[Path]:
+    """The HOME a shape's cells run with, or None to leave HOME alone."""
+    home = getattr(SHAPES[shape], "home", None)
+    return home(target) if home is not None else None
 
 
 SHAPES = {name: _with_sub(build) for name, build in _BUILDERS.items()}

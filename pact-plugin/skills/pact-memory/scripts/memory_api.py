@@ -152,7 +152,8 @@ class _DetectedIdentity(NamedTuple):
     rung declines before the identity read (a repository with no working
     tree, a `.git` naming a linked worktree's admin dir that does not link
     back, a broken `.git` marker, a declaration that cannot be resolved) and
-    when the root is the user's home directory. `path` is None (the reason is
+    when the checkout the session is in is the user's home directory.
+    `path` is None (the reason is
     kept) when
     the checkout's `.git` is a redirect, or points at a git directory outside
     the checkout that is neither a linked worktree's nor a submodule's admin
@@ -2508,20 +2509,33 @@ class PACTMemory:
         discloses `override file` instead); `decline_label` is the disclosed
         source when the root declines (defaults to `label`).
 
-        A ROOT THAT IS THE USER'S HOME IS A HOME LANDING on every rung that
-        reaches it, declared or discovered, repository or not: it warns and
-        keeps the folder name, and is never canonicalised. A dotfiles home
+        A CHECKOUT THAT IS THE USER'S HOME IS A HOME LANDING on every rung
+        that reaches it, declared or discovered, repository or not: it warns
+        and keeps the folder name, and is never canonicalised. A dotfiles home
         would otherwise give every directory under it that repository's id.
+        The checkout tested is the one the session is in, the directory
+        holding the nearest `.git` marker above `asked_root` (the walk git
+        itself makes, with no subprocess), not the identity root: a home that
+        is a linked worktree of a repository stored elsewhere is a landing,
+        and a main checkout at home is not one for a session in its worktree
+        outside home.
         """
         legacy_name = PACTMemory._legacy_project_name(common_dir, root)
-        if _is_home(root):
-            _warn_home_landing(root)
+        checkout = root
+        marker = find_git_marker(asked_root) if asked_root is not None else None
+        if marker is not None:
+            try:
+                checkout = marker.parent.resolve()
+            except (OSError, RuntimeError):
+                checkout = root
+        if _is_home(checkout):
+            _warn_home_landing(checkout)
             return _DetectedIdentity(
-                project_id=root.name,
+                project_id=checkout.name,
                 source=label,
                 legacy_basename=legacy_name,
                 override_ignored=None,
-                identity_root=root,
+                identity_root=checkout,
             )
         identity = detect_id_for_root(root, common_dir, asked_root=asked_root)
         PACTMemory._warn_override_ignored(identity)
@@ -2562,10 +2576,12 @@ class PACTMemory:
         silently absorbed by a user setting. The setting answers only when no
         declaration was present at all and no repository was found, so a
         repository pin outranks it wherever one is read. No rung reads a pin
-        in a HOME directory that is itself a repository: the git-root and
-        declared rungs land there on its folder name, and the cwd-marker
-        rung, whose HOME landing never asks git, binds the user setting there
-        when one exists.
+        when the checkout the session is in is the HOME directory, a linked
+        worktree included: the git-root, declared and recorded rungs land
+        there on its folder name, and the cwd-marker rung, whose HOME landing
+        never asks git, binds the user setting there when one exists. A
+        session in a worktree outside HOME reads its repository's pin even
+        when the main checkout is HOME.
         """
         # A DECLARATION THAT WAS PRESENT BUT NAMED NO PROJECT. Local only: no
         # instance, module or thread state.
@@ -2727,10 +2743,10 @@ class PACTMemory:
                 # any route has decided by now, so a repo-scoped override and
                 # this setting never disagree within one resolution — that is
                 # why there is no disagreement warning to emit. The one
-                # repository it outranks is a HOME directory that is itself a
-                # repository, on this route only: the walk's HOME landing never
-                # asks git (the git-root rung reaches such a home and lands
-                # there instead).
+                # repository it outranks is a checkout that is the HOME
+                # directory (a linked worktree included), on this route only:
+                # the walk's HOME landing never asks git (the git-root rung
+                # reaches such a home and lands there instead).
                 user_setting = read_user_setting(get_user_memory_dir() / "config.json")
                 if user_setting is not None:
                     # THE PRE-CHANGE VALUE IS STILL COMPUTABLE, so it must be
