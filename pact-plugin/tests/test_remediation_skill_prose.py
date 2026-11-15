@@ -1555,6 +1555,9 @@ class _DetectionGraph:
         # {module: {module-level name: every value bound to it, None for a
         # binding that has no plain value}} (`_module_bindings`).
         self.bindings = {}
+        # {module: the code the module runs when imported, as a function}
+        # (`_import_time_code`).
+        self.import_time = {}
 
     @staticmethod
     def _path(name: str):
@@ -1591,6 +1594,7 @@ class _DetectionGraph:
             if isinstance(target, ast.Name)
         }
         self.bindings[module] = _module_bindings(tree)
+        self.import_time[module] = _import_time_code(tree)
         self.globals[module] = set(self.values[module]) | {
             name for name, values in self.bindings[module].items() if any(v is not None for v in values)
         }
@@ -1706,26 +1710,19 @@ class _DetectionGraph:
 
     def _is_data(self, owner: str, name: str) -> bool:
         """EVERY module-level binding of `name` in `owner` (`_module_bindings`)
-        is a value PROVED to run no project code when its methods are called:
-        - a LITERAL: `ast.literal_eval` accepts it, so it holds constants only
-          (a display holding a call or a name, which runs at import, is not);
-        - a COMPILED PATTERN: `re.compile` whose arguments are literals or
-          `re` flags;
-        - a LOGGER: `logging.getLogger` of a literal or `__name__`, and only
-          while `_logging_untouched()` holds (no project code can make a
-          logger call reach project code).
-        A name bound in any other way as well (a call, an augmented assignment,
-        a loop target, an import, an `except ... as` or `match` capture, a
-        `global` assignment in a function) is not data, whichever binding
-        comes last."""
+        is a LITERAL that `ast.literal_eval` accepts, so it holds constants
+        only (a display holding a call or a name, which runs at import, is
+        not). A name bound in any other way as well (a call, an augmented
+        assignment, a loop target, an import, an `except ... as` or `match`
+        capture, a `global` assignment in a function) is not data, whichever
+        binding comes last. A built object (a compiled pattern, a logger, a
+        context variable, a class instance) is never data: a method called on
+        one is reported."""
         import ast
-
-        from fixtures.identity_git import qualified_name
 
         if not self.load(owner):
             return False
         values = self.bindings.get(owner, {}).get(name, [])
-        aliases = self.aliases[owner]
 
         def literal(value):
             try:
@@ -1734,105 +1731,7 @@ class _DetectionGraph:
                 return False
             return True
 
-        def flag(value):
-            if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
-                return flag(value.left) and flag(value.right)
-            return (qualified_name(value, aliases) or "").startswith("re.")
-
-        def data(value):
-            if literal(value):
-                return True
-            if not isinstance(value, ast.Call):
-                return False
-            arguments = list(value.args) + [keyword.value for keyword in value.keywords]
-            called = qualified_name(value.func, aliases)
-            if called == "re.compile":
-                return all(literal(argument) or flag(argument) for argument in arguments)
-            if called == "logging.getLogger":
-                return all(
-                    literal(argument) or (isinstance(argument, ast.Name) and argument.id == "__name__")
-                    for argument in arguments
-                ) and self._logging_untouched()
-            return False
-
-        return bool(values) and all(value is not None and data(value) for value in values)
-
-    def _logging_untouched(self) -> bool:
-        """No module of the plugin (outside its tests) can make a logger call
-        run project code: none subclasses a `logging` class (a Filter, a
-        Handler, a Formatter, a LoggerAdapter), none calls
-        `logging.config.dictConfig` or `fileConfig`, `setLoggerClass` or
-        `setLogRecordFactory`, and every `addFilter`, `addHandler`,
-        `setFormatter` or `logging.basicConfig` call passes only literals,
-        builtins and names imported from outside the project. Measured over
-        every `.py` file under the plugin root, once per graph."""
-        import ast
-        import builtins
-
-        from fixtures.identity_git import import_aliases, qualified_name
-
-        if hasattr(self, "_logging_verdict"):
-            return self._logging_verdict
-        verdict = True
-        replacing = {"logging.config.dictConfig", "logging.config.fileConfig",
-                     "logging.setLoggerClass", "logging.setLogRecordFactory"}
-        attaching = {"addFilter", "addHandler", "setFormatter"}
-        for path in sorted(PLUGIN_ROOT.rglob("*.py")):
-            if "tests" in path.relative_to(PLUGIN_ROOT).parts:
-                continue
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            aliases = import_aliases(tree)
-
-            def foreign(name):
-                imported = aliases.get(name)
-                if imported is None:
-                    return hasattr(builtins, name)
-                top = imported.split(".")[0]
-                return self._path(top) is None and self._path(imported) is None
-
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ClassDef) and any(
-                    (qualified_name(base, aliases) or "").startswith("logging.") for base in node.bases
-                ):
-                    verdict = False
-                elif isinstance(node, ast.Call):
-                    called = qualified_name(node.func, aliases) or ""
-                    method = node.func.attr if isinstance(node.func, ast.Attribute) else None
-                    if called in replacing:
-                        verdict = False
-                    elif method in attaching or called == "logging.basicConfig":
-                        arguments = list(node.args) + [keyword.value for keyword in node.keywords]
-                        if not all(
-                            foreign(inner.id)
-                            for argument in arguments for inner in ast.walk(argument)
-                            if isinstance(inner, ast.Name)
-                        ):
-                            verdict = False
-        self._logging_verdict = verdict
-        return verdict
-
-    def _runs_no_project_code(self, owner: str, name: str) -> bool:
-        """Building the class `name` of `owner` runs none of the project's
-        code: it has no decorator (a `@dataclass` writes an `__init__` that
-        runs its field factories) and no keyword in its header (a
-        `metaclass=`), it defines no `__init__`, `__new__` or
-        `__post_init__`, and no base is a project name."""
-        import ast
-
-        node = self.classes.get(owner, {}).get(name)
-        if node is None or node.decorator_list or node.keywords:
-            return False
-        hooks = {"__init__", "__new__", "__post_init__"}
-        if any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name in hooks
-               for item in node.body):
-            return False
-        for base in node.bases:
-            head = base
-            while isinstance(head, (ast.Attribute, ast.Subscript)):
-                head = head.value
-            if isinstance(head, ast.Name) and self.project_name(head.id, owner):
-                return False
-        return True
+        return bool(values) and all(value is not None and literal(value) for value in values)
 
     def _owner_class(self, module: str, function):
         """The name of the class of `module` whose body defines `function`."""
@@ -1937,91 +1836,63 @@ class _DetectionGraph:
                     found.append(("global", None))
         return found
 
-    def instance_method(self, call, module: str, function):
+    def instance_method(self, call, module: str, function) -> str:
         """How the census treats a method called on an object it cannot name
-        at the call: a LOCAL of `function` (`reader = Reader(); reader.read()`)
-        or an attribute of `self` (`self.reader.read()`).
+        at the call: a LOCAL of `function` (`reader = make(); reader.read()`)
+        or an attribute of `self` (`self.reader.read()`). No such method is
+        followed into a class.
 
-        Returns ("follow", (module, def)) when EVERY binding of the local in
-        `function`, or of `self.<attr>` across the methods of the class,
-        builds the same class of `module`, and that class defines the
-        method: the method is read like any other call. Every binding form
-        counts (`_bindings`). Returns ("skip", None) for a local that is a
-        parameter only (a method on a parameter is not covered), a name the
-        module rule reads (an import, a `global`, a module-level or builtin
-        name with no binding here), or a local whose every binding is a
-        parameter or a value proved to be a standard-library one
-        (`_foreign_value`, parameters admitted). Returns ("report", None) for
-        everything else: an attribute of `self` bound any other way, a local
-        with a binding that is not proved, and a name with no binding the
-        census can see."""
+        "skip" (not this rule's to report): a local that is a parameter only
+        (a method on a parameter is not covered), a name the module rule
+        reads (an import, a `global`, a module-level or builtin name with no
+        binding here), or a local whose every binding (`_bindings`, every
+        form) is a parameter or a value proved to be a standard-library one
+        (`_foreign_value`). "report" for everything else: any method on an
+        attribute of `self`, a local with any binding that is not proved (a
+        project class build included), and a name with no binding the census
+        can see."""
         import ast
         import builtins
 
         func = call.func
         if not isinstance(func, ast.Attribute) or function is None:
-            return "skip", None
-        method, owner = func.attr, func.value
+            return "skip"
+        owner = func.value
         arguments = function.args.posonlyargs + function.args.args
-        if isinstance(owner, ast.Name):
-            found = self._bindings(function, name=owner.id)
-            kinds = {kind for kind, _expression in found}
-            if "global" in kinds or (found and kinds == {"import"}):
-                return "skip", None
-            if not found:
-                known = (
-                    self.project_name(owner.id, module) is not None
-                    or owner.id in self.aliases[module] or hasattr(builtins, owner.id)
-                )
-                return ("skip", None) if known else ("report", None)
-            if kinds == {"param"}:
-                return "skip", None
-        elif (
+        if (
             isinstance(owner, ast.Attribute) and isinstance(owner.value, ast.Name)
             and arguments and owner.value.id == arguments[0].arg
+            and self._owner_class(module, function) is not None
         ):
-            cls = self._owner_class(module, function)
-            if cls is None:
-                return "skip", None
-            found = []
-            for item in self.classes[module][cls].body:
-                own = (item.args.posonlyargs + item.args.args)[:1] if isinstance(
-                    item, (ast.FunctionDef, ast.AsyncFunctionDef)
-                ) else []
-                if own:
-                    found += self._bindings(item, attribute=(own[0].arg, owner.attr))
-        else:
-            return "skip", None
-        values = [expression for kind, expression in found if kind == "value"]
-        built = {
-            value.func.id for value in values
-            if isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
-            and value.func.id in self.classes.get(module, {})
-        }
-        if found and len(values) == len(found) and len(built) == 1 and all(
-            isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in built
-            for value in values
-        ):
-            target = (module, f"{built.pop()}.{method}")
-            if target in self.defs:
-                return "follow", target
-        if isinstance(owner, ast.Name) and all(
+            return "report"
+        if not isinstance(owner, ast.Name):
+            return "skip"
+        found = self._bindings(function, name=owner.id)
+        kinds = {kind for kind, _expression in found}
+        if "global" in kinds or (found and kinds == {"import"}):
+            return "skip"
+        if not found:
+            known = (
+                self.project_name(owner.id, module) is not None
+                or owner.id in self.aliases[module] or hasattr(builtins, owner.id)
+            )
+            return "skip" if known else "report"
+        if all(
             kind == "param" or (
                 kind in ("value", "from") and expression is not None
                 and self._foreign_value(expression, module, function, frozenset(), parameters=True)
             )
             for kind, expression in found
         ):
-            return "skip", None
-        return "report", None
+            return "skip"
+        return "report"
 
     def _produced_by_project(self, value, module: str) -> bool:
         """`value` is made by one of the project's own names: a call whose
         callee, followed through attributes, subscripts and inner calls,
         starts at a project name, or such a name itself. Not one: the result
-        of a method called directly on a proved data object (`_is_data`),
-        such as a compiled pattern's match, which is a standard-library
-        value."""
+        of a method called directly on a module-level literal table
+        (`_is_data`), which is a standard-library value."""
         import ast
 
         if (
@@ -2231,18 +2102,18 @@ class _DetectionGraph:
         of the project's own names (`project_name`) and does not resolve to a
         project function. The callee is followed through attributes,
         subscripts and inner calls to the name it starts from. Read, and so
-        not reported: a call that resolves to a function; a method called
-        directly on a project object that holds data (`_is_data`); and
-        building a class of the calling module that runs no project code
-        (`_runs_no_project_code`). A method on a local or a `self` attribute
-        follows `instance_method`. Everything else through a project name
-        (an instance's method, a function pulled from a table, a context
-        variable, an imported class) is reported."""
+        not reported: a call that resolves to a function, and a method
+        called directly on a module-level literal (`_is_data`). A method on a
+        local or a `self` attribute follows `instance_method`. Everything
+        else through a project name is reported: every build of a project
+        class (same module or imported, whatever the class defines), a
+        method of a compiled pattern, a logger or a context variable, an
+        instance's method, and a function pulled from a table."""
         import ast
 
         if self.target(call, module) is not None:
             return False
-        verdict, _target = self.instance_method(call, module, function)
+        verdict = self.instance_method(call, module, function)
         if verdict != "skip":
             return verdict == "report"
         head, depth = call.func, 0
@@ -2256,8 +2127,6 @@ class _DetectionGraph:
             return False
         owner, name = owned
         if depth == 1 and isinstance(call.func, ast.Attribute) and name and self._is_data(owner, name):
-            return False
-        if depth == 0 and owner == module and self._runs_no_project_code(owner, name):
             return False
         return True
 
@@ -2277,9 +2146,6 @@ class _DetectionGraph:
         for sub in ast.walk(node):
             if isinstance(sub, ast.Call):
                 found = self.target(sub, module)
-                if found is None:
-                    verdict, found = self.instance_method(sub, module, node)
-                    found = found if verdict == "follow" else None
                 if found is not None:
                     yield sub.func, found
             elif (
@@ -2289,6 +2155,30 @@ class _DetectionGraph:
                 found = self.refers_to(sub, module)
                 if found is not None:
                     yield sub, found
+
+
+def _import_time_code(tree):
+    """The code `tree` runs when it is imported, as one function the census
+    reads like any other: every module-level statement, class bodies
+    included, with each function's and lambda's body removed (its
+    decorators and defaults run at import and are kept)."""
+    import ast
+    import copy
+
+    body = copy.deepcopy(tree).body
+    for statement in body:
+        for node in ast.walk(statement):
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                node.body = [ast.Pass()]
+            elif isinstance(node, ast.Lambda):
+                node.body = ast.Constant(value=None)
+    code = ast.FunctionDef(
+        name="<import>",
+        args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[],
+                           kw_defaults=[], kwarg=None, defaults=[]),
+        body=body or [ast.Pass()], decorator_list=[], returns=None,
+    )
+    return ast.fix_missing_locations(code)
 
 
 def _module_bindings(tree) -> dict:
@@ -2530,7 +2420,9 @@ def route_inputs() -> dict:
     """{condition: sorted sites} for every input the detection path reads, from
     `_detect_project_identity_with_legacy` through every function it calls in
     the project's own modules (the memory scripts and `hooks/`), helpers and
-    re-exports included.
+    re-exports included, and the code each of those modules runs when it is
+    imported (`_import_time_code`: module statements and class bodies, with
+    decorators and defaults).
 
     A condition is `("env", KEY)` for an environment read whose variable is a
     constant, a module constant, or a parameter resolved from the constant
@@ -2547,25 +2439,25 @@ def route_inputs() -> dict:
     where it is named, so the function it reaches is read even when the call
     is elsewhere.
 
-    EXCEPTIONS, each admitted only on a positive check of the value it lets
-    through (each has a mutant that tries to pass project code through it):
-    - an environment alias binding, whose every use is itself an anchor;
-    - an `is` test on the environment, which reads no variable (the other
-      operand is followed as usual);
-    - a method called directly on a module object that is data
-      (`_DetectionGraph._is_data`: a literal by `ast.literal_eval`, a
-      `re.compile` of literals, or a logger while no plugin module can make
-      a logger run project code), every binding of the name counted;
-    - building a calling-module class that runs no project code
-      (`_DetectionGraph._runs_no_project_code`);
-    - a method on a local or a `self` attribute, every binding of it counted
-      in every form (`_DetectionGraph._bindings`): followed when every
-      binding builds one same-module class defining it, and read when every
-      binding of a local is a parameter or a value proved to be a
-      standard-library one (`_DetectionGraph._foreign_value`, which counts a
-      project function's result only when it `returns_foreign`); every other
-      method on such an object, and one on a name with no binding the
-      census can see, is reported (`_DetectionGraph.instance_method`).
+    READ, and so not reported:
+    - an environment read with a constant key, and an environment alias
+      binding, whose every use is itself an anchor; an `is` test on the
+      environment, which reads no variable (the other operand is followed);
+    - a direct call to a project function or method that resolves to its
+      `def`, which is then read in turn;
+    - a method called directly on a module-level literal table
+      (`_DetectionGraph._is_data`: every binding of the name is accepted by
+      `ast.literal_eval`);
+    - a method on a local whose every binding, in every form
+      (`_DetectionGraph._bindings`), is a parameter or a value proved to be
+      a standard-library one (`_DetectionGraph._foreign_value`, which counts
+      a project function's result only when it `returns_foreign`).
+    REPORTED, as a condition NOT_A_ROUTE must name with its reason: every
+    other call through a project name. That is every build of a project
+    class, in a function or at import, whatever the class defines; a method
+    of any other project object (a compiled pattern, a logger, a context
+    variable, an instance); a method on any `self` attribute; and a method
+    on a local holding anything else. No method is followed into a class.
 
     The process and home directories are each ONE condition, `("cwd",)` and
     `("home",)`, whichever function reads them, so a new reader of either is
@@ -2576,12 +2468,15 @@ def route_inputs() -> dict:
     NOT COVERED: a call through `getattr`, `exec` or `importlib`; modules
     outside the plugin (the standard library, third-party packages); an
     environment read reached only through such a call; a read through a
-    C extension (`ctypes`), which no source anchor can see; and a method
-    called on a function's parameter, or on a local proved a
-    standard-library value only by taking a parameter as one, whose type
-    the census cannot see (29 such calls in 20 functions on the detection
-    path, which are string, dict and path methods on the values the callers
-    pass).
+    C extension (`ctypes`), which no source anchor can see; a method called
+    on a function's parameter, or on a local proved a standard-library
+    value only by taking a parameter as one, whose type the census cannot
+    see; and a plain attribute read, `with`, `for` or formatting of an
+    object a project function returned, which runs no code the census sees.
+    Each such object is built somewhere, and every project class build is
+    reported, so its origin is a named condition. A condition names a
+    callee, not a site: a further call of an already named callee is
+    absorbed by that name.
     """
     import ast
 
@@ -2591,12 +2486,24 @@ def route_inputs() -> dict:
     for module in DETECTION_MODULES:
         graph.load(module)
     reached, pending, outward = set(), [DETECTION_ENTRY], {}
+    imported = set()
+
+    def scopes(key):
+        """The function `key`, and its module's import-time code the first
+        time the module is reached."""
+        yield graph.defs[key]
+        if key[0] not in imported:
+            imported.add(key[0])
+            yield graph.import_time[key[0]]
+
     while pending:
         key = pending.pop()
         if key in reached:
             continue
         reached.add(key)
-        for expression, target in graph.references(graph.defs[key], key[0]):
+        for expression, target in (
+            pair for scope in scopes(key) for pair in graph.references(scope, key[0])
+        ):
             if key[0] in DETECTION_MODULES and target[0] not in DETECTION_MODULES:
                 spelled = (qualified_name(expression, graph.aliases[key[0]]) or "").rpartition(".")[2]
                 outward.setdefault(("call", spelled), set()).add(f"{key[0]}.py:{expression.lineno}")
@@ -2610,8 +2517,11 @@ def route_inputs() -> dict:
     def add(condition, site, key):
         found.setdefault(condition, set()).add(site)
 
-    for key in sorted(reached):
-        module, node = key[0], graph.defs[key]
+    scanned = [(key, graph.defs[key]) for key in sorted(reached)] + [
+        ((module, "<import>"), graph.import_time[module]) for module in sorted(imported)
+    ]
+    for key, node in scanned:
+        module = key[0]
         names = graph.aliases[module]
         site = f"{module}.py"
         for sub in ast.walk(node):
@@ -2641,8 +2551,8 @@ def route_inputs() -> dict:
                 add(("cwd",), f"{site}:{sub.lineno}", key)
             elif called in ("pathlib.Path.home", "Path.home", "os.path.expanduser"):
                 add(("home",), f"{site}:{sub.lineno}", key)
-    for key in sorted(reached):
-        for node in ast.walk(graph.defs[key]):
+    for key, scope in scanned:
+        for node in ast.walk(scope):
             if not isinstance(node, ast.Call):
                 continue
             target = graph.target(node, key[0])
@@ -2841,6 +2751,93 @@ class TestEveryRouteEntryConditionIsARoute:
             "the per-pass git-dir memo: the constructor sets it empty before the "
             "detection and resets it after, so it holds only answers this pass asked"
         ),
+        # Builds of the project's own record classes. Each is a NamedTuple
+        # whose body holds only annotated fields (no method, decorator or
+        # class keyword), so building one runs no project code.
+        ("call", "<call to no function memory_api: _DetectedIdentity>"): (
+            "builds the _DetectedIdentity NamedTuple a rung returns (fields only)"
+        ),
+        ("call", "<call to no function project_identity: OriginRead>"): (
+            "builds the OriginRead NamedTuple read_origin returns (fields only)"
+        ),
+        ("call", "<call to no function project_identity: OverrideRead>"): (
+            "builds the OverrideRead NamedTuple read_override returns (fields only)"
+        ),
+        ("call", "<call to no function project_identity: RootIdentity>"): (
+            "builds the RootIdentity NamedTuple detect_id_for_root and _refuse_submodule_basename return (fields only)"
+        ),
+        # The module logger, `logging.getLogger(__name__)`. Every argument at
+        # these sites is a string constant, a str, a Path, or a field of the
+        # identity or override record, so formatting runs no project code; no
+        # plugin module outside the tests attaches a filter, handler or
+        # formatter (the one `basicConfig`, in telegram/server.py, passes a
+        # level, a format string and sys.stderr).
+        ("call", "<call to no function memory_api: logger.debug>"): (
+            "the detection path's debug lines; arguments are constants, the source "
+            "label and the detected project id"
+        ),
+        ("call", "<call to no function memory_api: logger.warning>"): (
+            "the decline, override-ignored, home and unresolved warnings; arguments "
+            "are constants, the cause text, the override path and reason, and the "
+            "root Path and its name"
+        ),
+        # Compiled patterns, each a `re.compile` of literal strings, and the
+        # re.Match objects and str groups their methods return.
+        ("call", "<call to no function database: CANONICAL_ID_RE.fullmatch>"): (
+            "is_canonical_id matches the id against a literal pattern"
+        ),
+        ("call", "<call to no function database: a method of what CANONICAL_ID_RE.fullmatch returns>"): (
+            "reads the port group of that re.Match"
+        ),
+        ("call", "<call to no function project_identity: _SCHEME_PREFIX_RE.match>"): (
+            "matches a remote url's scheme prefix against a literal pattern"
+        ),
+        ("call", "<call to no function project_identity: a method of what _SCHEME_PREFIX_RE.match returns>"): (
+            "reads the scheme group and the match end of that re.Match"
+        ),
+        ("call", "<call to no function project_identity: _SCP_FORM_RE.match>"): (
+            "_scp_match matches git's scp form against a literal pattern"
+        ),
+        ("call", "<call to no function project_identity: a method of what _SCP_FORM_RE.match returns>"): (
+            "reads the host and user groups of that re.Match"
+        ),
+        ("call", "<call to no function project_identity: a method of what _scp_match returns>"): (
+            "_scp_match returns that re.Match or None; reads its host and path groups"
+        ),
+        ("call", "<call to no function project_identity: host.isascii>"): (
+            "host is the str host group of the scp match"
+        ),
+        ("call", "<call to no function project_identity: host.isalpha>"): (
+            "host is the str host group of the scp match"
+        ),
+        ("call", "<call to no function project_identity: host.lower>"): (
+            "host is a str partitioned from the url's authority after the scheme match"
+        ),
+        ("call", "<call to no function project_identity: scp_path.startswith>"): (
+            "scp_path is the str path group of the scp match"
+        ),
+        ("call", "<call to no function project_identity: scp_path.replace>"): (
+            "scp_path is the str path group of the scp match"
+        ),
+        ("call", "<call to no function shared.project_scope: _GIT_INT_RE.fullmatch>"): (
+            "parses a git integer value against a literal pattern"
+        ),
+        ("call", "<call to no function shared.project_scope: a method of what _GIT_INT_RE.fullmatch returns>"): (
+            "reads the hex and dec groups of that re.Match"
+        ),
+        ("call", "<call to no function shared.project_scope: digits.strip>"): (
+            "digits is a str group of that match"
+        ),
+        ("call", "<call to no function shared.project_scope: _UNSAFE_SLUG_CHARS_RE.sub>"): (
+            "replaces unsafe characters in the session id with a literal pattern and "
+            "a literal replacement"
+        ),
+        ("call", "store_scope"): (
+            "the _with_store_scope decorator, applied to PACTMemory's methods when the "
+            "class is defined, runs each call inside store_scope(self._db_path), which "
+            "binds the store file; get_user_memory_dir sets that binding aside before "
+            "the user-setting route reads, so it selects no route"
+        ),
         ("call", "is_canonical_id"): "validates an id value",
         ("call", "validate_identifier_for_write"): "validates an id value",
     }
@@ -2883,8 +2880,8 @@ class TestEveryRouteEntryConditionIsARoute:
         module or climbs above the package is recorded as unresolved, which
         `route_inputs` turns into a condition no exclusion names. A call
         through a relative name that reaches no function (a class, a package
-        re-export the graph cannot follow) is unread too; a method of a
-        module-level object is not."""
+        re-export the graph cannot follow) is unread too, and so is a method
+        of a module-level compiled pattern."""
         import ast
         import sys
 
@@ -2924,17 +2921,18 @@ class TestEveryRouteEntryConditionIsARoute:
             call.lineno for call in ast.walk(entry)
             if isinstance(call, ast.Call) and graph.unread_call(call, "pkg.main")
         }
-        # Thing(), helper.Thing() and reexported(): lines 11-13 of main.py.
-        assert unread == {11, 12, 13}, unread
+        # Thing(), helper.Thing(), reexported() and PATTERN.sub(): lines 11-14.
+        assert unread == {11, 12, 13, 14}, unread
 
-    def test_each_exception_admits_only_a_value_proved_inert(self, tmp_path, monkeypatch):
-        """Control for the census's exceptions: each fixture form that tries
-        to pass project code through one (a table or pattern built from the
-        environment, a rebound or captured table, a dataclass whose factory
-        runs, a method on an object a project function made) is reported,
-        and each value proved inert (a literal table, a literal pattern, a
-        plain class, a same-module instance whose method is followed) is
-        read."""
+    def test_only_a_literal_table_and_a_direct_call_are_read(self, tmp_path, monkeypatch):
+        """Control for what the census admits: a method on a module-level
+        literal table, and a direct call to a project function. Every other
+        use of a project object is reported: a table built from the
+        environment or rebound or captured, a compiled pattern (a literal one
+        included), any project class build (a dataclass, a plain class, a
+        class with a method), a method on a local or a `self` attribute that
+        holds a project object, and a method on what a project function
+        made. No method is followed into a class."""
         import ast
         import sys
 
@@ -2995,11 +2993,16 @@ class TestEveryRouteEntryConditionIsARoute:
             ast.unparse(call.func) for call in ast.walk(entry)
             if isinstance(call, ast.Call) and graph.unread_call(call, "pkg.m", entry)
         )
-        assert unread == ["Box", "CAPTURED.get", "PATTERN.match", "REBOUND.get", "TABLE.get", "made.read"], unread
+        assert unread == [
+            "Box", "CAPTURED.get", "CLEAN_RE.match", "PATTERN.match", "Plain", "REBOUND.get",
+            "Reader", "TABLE.get", "made.read", "reader.read",
+        ], unread
         followed = {target for _node, target in graph.references(entry, "pkg.m")}
-        assert ("pkg.m", "Reader.read") in followed, followed
+        assert followed == {("pkg.m", "make")}, followed
         go = graph.defs[("pkg.m", "Holder.go")]
-        assert ("pkg.m", "Reader.read") in {target for _node, target in graph.references(go, "pkg.m")}
+        assert [ast.unparse(call.func) for call in ast.walk(go)
+                if isinstance(call, ast.Call) and graph.unread_call(call, "pkg.m", go)] == ["self.reader.read"]
+        assert {target for _node, target in graph.references(go, "pkg.m")} == set()
 
     def test_a_local_method_is_read_only_when_every_binding_form_is(self, tmp_path, monkeypatch):
         """Control for `_DetectionGraph._bindings` and `instance_method`: a
@@ -3007,9 +3010,9 @@ class TestEveryRouteEntryConditionIsARoute:
         ... as`, a loop or comprehension element, an unpacked part, `+=`,
         `except ... as`, a `match` capture, a nested `def`'s result) to what a
         project function made is reported, as is one on a name with no
-        binding at all and on a `self` attribute bound by `with ... as` or by
-        unpacking; the same forms over standard-library values, a parameter,
-        an import and a same-module class build are not."""
+        binding at all, one on any `self` attribute, and every build of a
+        project class; the same forms over standard-library values, a
+        parameter and an import are not."""
         import ast
         import sys
 
@@ -3133,40 +3136,25 @@ class TestEveryRouteEntryConditionIsARoute:
             "annotated", "walrus", "with_as", "loop", "comprehension", "unpacked", "starred",
             "augmented", "except_as", "match_capture", "nested_def",
         ]
+        builds = ["make", "makes", "WithHolder.__init__", "PairHolder.__init__", "AnnotatedHolder.__init__"]
         assert reported == {
-            **{name: ["reader.read"] for name in forms},
+            **{name: ["reader.read"] for name in forms if name != "nested_def"},
+            "nested_def": ["Reader", "reader.read"],
+            **{name: ["Reader"] for name in builds},
             "unbound": ["nowhere.read"],
-            "WithHolder.go": ["self.reader.read"],
-            "PairHolder.go": ["self.reader.read"],
+            **{f"{holder}.go": ["self.reader.read"] for holder in ("WithHolder", "PairHolder", "AnnotatedHolder")},
+            "controls": ["Reader", "reader.read"],
         }, reported
         followed = {
-            name: {target for _node, target in graph.references(graph.defs[("pkg.forms", name)], "pkg.forms")}
-            for name in ("controls", "AnnotatedHolder.go")
+            target for (owner, _qualified), node in graph.defs.items() if owner == "pkg.forms"
+            for _node, target in graph.references(node, "pkg.forms")
         }
-        assert all(("pkg.forms", "Reader.read") in targets for targets in followed.values()), followed
-
-    @pytest.mark.parametrize("source, untouched", [
-        ("import logging, sys\nlogging.basicConfig(level=logging.INFO, stream=sys.stderr)\n", True),
-        ("import logging\nclass F(logging.Filter):\n    pass\n", False),
-        ("import logging\ndef hook(record):\n    return True\nlogging.getLogger().addFilter(hook)\n", False),
-        ("import logging.config\nlogging.config.dictConfig({})\n", False),
-    ])
-    def test_a_logger_is_data_only_while_nothing_can_attach_project_code(
-        self, tmp_path, monkeypatch, source, untouched
-    ):
-        """Control for `_DetectionGraph._logging_untouched`: a basicConfig of
-        standard-library values leaves loggers data; a logging subclass, a
-        project callable attached to a logger, or a dictConfig does not."""
-        import sys
-
-        (tmp_path / "plugin_module.py").write_text(source)
-        monkeypatch.setattr(sys.modules[__name__], "PLUGIN_ROOT", tmp_path)
-        assert _DetectionGraph()._logging_untouched() is untouched
+        assert ("pkg.forms", "Reader.read") not in followed, followed
 
     def test_a_module_object_is_data_only_when_every_binding_is(self, tmp_path, monkeypatch):
         """Control for `_is_data`: a module-level name is a data object only
-        when every binding of it (`_module_bindings`) is a recognised data
-        value, whichever binding comes last."""
+        when every binding of it (`_module_bindings`) is a literal, whichever
+        binding comes last; a compiled pattern is not one."""
         import sys
 
         package = tmp_path / "pkg"
@@ -3200,7 +3188,7 @@ class TestEveryRouteEntryConditionIsARoute:
         assert graph.load("pkg.binds")
         names = ["ONE", "PATTERN", "TWICE", "AUG", "GLOBAL", "NESTED", "STORED", "LOOPED", "PAIR"]
         assert {name: graph._is_data("pkg.binds", name) for name in names} == {
-            "ONE": True, "PATTERN": True, "TWICE": False, "AUG": False, "GLOBAL": False,
+            "ONE": True, "PATTERN": False, "TWICE": False, "AUG": False, "GLOBAL": False,
             "NESTED": False, "STORED": False, "LOOPED": False, "PAIR": False,
         }
 
