@@ -322,6 +322,8 @@ ONCE_RULES = (
     ("even when the list is empty", "the no-skip rule"),
     ("first decide whether the round needs a first-round review", "the re-review's first-round trigger"),
     ("when unsure, the round needs one", "the trigger's unsure default"),
+    ("taken from the most recent such line", "the use of corrected placeholders in the re-review's first-round dispatch"),
+    ("a hunk in such a fix that changes anything its finding does not name", "the over-reaching fix hunk"),
     ("or another reason, stated", "the REPORT reason set"),
     ("for any reason, or none, other than", "the blocker trigger's reason test"),
     ("routes it to a tracked GitHub issue there", "the tracked-issue decline"),
@@ -1175,10 +1177,10 @@ class TestLeadFacingRules:
          "the bar on any other message")),
         ("Re-check", "It needs one when the record holds no valid first-round cold report; when the record holds a lead line of corrected placeholder values appended after the most recent valid cold report; or when git diff from the {head} recorded with the most recent valid cold report to the current {head} carries any hunk that is not a fix you dispatched for a cold finding in the record with no disposition", (
          "the first-round trigger, all three causes")),
-        ("Re-check", "A hunk you cannot attribute to one of those fixes counts, including a commit merged in from the base and a fix to a warm finding, and so does a recorded {head} that git cannot resolve; when unsure, the round needs one", (
-         "the trigger's attribution rule and its unsure default")),
-        ("Re-check", "When the round needs one, dispatch the cold prompt as a first-round review", (
-         "the first-round dispatch the trigger selects")),
+        ("Re-check", "A hunk you cannot attribute to one of those fixes counts, including a commit merged in from the base and a fix to a warm finding; so does a hunk in such a fix that changes anything its finding does not name, and so does a recorded {head} that git cannot resolve; when unsure, the round needs one", (
+         "the trigger's attribution rule, the over-reaching fix hunk, and the unsure default")),
+        ("Re-check", "When the round needs one, dispatch the cold prompt as a first-round review, with any placeholder value that a lead line of corrections in the record changed taken from the most recent such line, except {base} and {head}, which follow their definitions", (
+         "the first-round dispatch the trigger selects, filled from the latest corrections, with base and head always fresh")),
         ("Re-check", "when that review is valid and the record holds earlier findings with no disposition, resume its subagent once in the same round with the re-check message listing them, and that re-check's report is the round's end state", (
          "the same-round re-check of earlier findings after the fallback")),
         ("Re-check", "if that re-check is not valid or not possible, the valid first-round report is the round's end state instead, with no fresh dispatch, and the earlier findings keep no disposition until the next round's re-check", (
@@ -1315,7 +1317,7 @@ class TestOutsideSectionRules:
         ("pr", "takes the place of a teachback", "what stands in for the cold lane's teachback"),
         ("pr", "When a warm reviewer's findings need fixing", (
          "the warm scoping of reviewer-to-fixer reuse")),
-        ("pr", "Reuse the warm reviewer who found the issues; the cold reviewer re-checks its own findings", (
+        ("pr", "Reuse the warm reviewer who found the issues; the cold reviewer re-checks every cold finding with no disposition", (
          "the Verify-Only re-review routing")),
         ("pr", "and per open question in each first-round or re-check cold report,", (
          "the synthesis row for each cold open question")),
