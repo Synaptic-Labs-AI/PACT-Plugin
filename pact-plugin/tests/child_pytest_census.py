@@ -76,7 +76,8 @@ them that does not block pytest-randomly is refused:
   (`uv run -v python3 ...`) or a program not named like an interpreter
   (`uv run -v echo python ...`) is never stepped past.
 - [wrapper] Any family above behind NAME=VALUE words, the shell's reserved words
-  or the listed wrappers and tool runners (below).
+  or the listed wrappers and tool runners (below), each named bare or by a path
+  (`/usr/local/bin/uv run pytest`).
 - [shell] Any family above inside the command text of a shell run with `-c`
   (below).
 `-m py.test` and `-m _pytest` start no pytest session and are no family.
@@ -92,22 +93,36 @@ their options, option values and numeric arguments: `timeout`, `nice`, `nohup`,
 `uv run`, `uv tool run`, `uvx`, `poetry run`, `pipx run`, `pdm run`, `hatch run`
 (and its `ENV:` prefix, as in `hatch run test:pytest`), `conda run`,
 `micromamba run`, `pipenv run`, `rye run` and `pixi run` (and hatch's `+`/`-`
-matrix selectors). Each wrapper's options that take a separate value are in
-_WRAPPERS, read from the tool's own `--help` (coreutils, GNU time, xvfb-run,
-uv 0.13.6, pipx, pdm, hatch, pipenv, poetry), bash's `help exec` for the
-`exec` builtin, sudo's manual page, micromamba's source (`micromamba run` and
-its prefix options), and the current online documentation of `conda run`,
+matrix selectors). A wrapper's first word matches by its basename, so a path to
+it counts as the bare name. Each wrapper's options that take a separate value
+are in _WRAPPERS, read from the tool's own `--help` (coreutils, GNU time,
+xvfb-run, uv 0.13.6, pipx, pdm, hatch, pipenv, poetry), bash's `help exec` for
+the `exec` builtin, sudo's manual page, micromamba's source (`micromamba run`
+and its prefix options), and the current online documentation of `conda run`,
 `rye run` and `pixi run`.
 
 A shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) run with `-c` (alone, or bundled as
 in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
 has its command text opened, and so does one behind a wrapper or an assignment.
-The text is read as a shell reads its words: quotes and escapes are resolved, a
-backslash-newline continues the line, and each command between `;`, `&`, `&&`,
-`||`, `|`, `|&`, a newline, `(` and `)` is judged on its own, written with or
-without spaces. A redirection (`>`, `>>`, `<`, `2>&1`, `&>`) and its target do
-not end a command. A shell command inside a shell command is opened the same
-way, up to four levels deep.
+The text is read as bash reads it:
+- Quotes and escapes are resolved, and a backslash-newline joins the lines.
+- A `#` that starts a word begins a comment to the end of the line; a `#` inside
+  a word or inside quotes is text (`--base-url=http://x/#frag`).
+- Each command between `;`, `&`, `&&`, `||`, `|`, `|&`, a newline, `(` and `)`
+  is judged on its own, written with or without spaces, and so is a function
+  body, where it is defined, whether or not the function is called.
+- A redirection (`>`, `>>`, `<`, `2>&1`, `&>`, the here-string `<<<`) and its
+  target do not end a command.
+- A heredoc's body (`<<WORD` or `<<-WORD`) is data, not commands: it runs from
+  the next newline to the line that is the delimiter (its leading tabs stripped
+  for `<<-`), and several heredocs on one line take their bodies in turn. In a
+  heredoc whose delimiter is unquoted, the body's command substitutions are
+  judged.
+- The command text of a command substitution (`$( )` or backticks, also inside
+  double quotes) and of a process substitution (`<( )` or `>( )`) is judged as
+  its own shell text. Arithmetic (`$(( ))` and `(( ))`) runs no command.
+- A shell command inside a shell command is opened the same way. Shells and
+  substitutions together are opened up to four levels deep.
 
 On a pytest child that is not deterministic the census records a line naming
 PYTEST_CURRENT_TEST, the argv and the cwd, then raises ChildPytestCensusError,
@@ -145,9 +160,11 @@ Blind spots, examples of launches outside the census:
    hides a bare `pytest` program, `coverage run` or a shell after it, and hides
    an interpreter running pytest's script unless the hidden value is itself
    named like an interpreter. [module] and [mention] are still caught there.
-9. Shell text the census does not expand or track: `$( )` and backtick
-   substitutions, variables (`$PYTEST`), `export`, aliases, functions, `eval`,
-   `env -S`, and a script fed to a shell's stdin (`bash <<EOF`, `bash -s`). An
+9. Shell text the census does not expand or track: variables (`$PYTEST`) and
+   what a substitution's output becomes (`$(echo pytest) -q`), `export`,
+   aliases, `eval`, `env -S`, a script fed to a shell's stdin (`bash <<EOF`,
+   `bash -s`), a command substitution inside arithmetic (`$(( $(pytest) ))`), and
+   a `case` pattern's `)` inside a `$( )` (it ends the substitution early). An
    operator written alone inside quotes (`";"`) is read as an operator.
 10. pytest run from a file the census cannot name: a renamed or wrapper copy of
     the console script, a zipapp (`python pytest.pyz`), or a module other than
@@ -379,13 +396,15 @@ def _names_pytest(argv):
 
 def _miss(argv, cwd, env):
     """Return the refusal line for a non-deterministic pytest child, else None."""
-    if isinstance(argv, (str, bytes)):
-        words, shell_text = _lex(os.fsdecode(argv)), True
-    else:
-        words, shell_text = [os.fsdecode(a) for a in (argv or [])], False
     environment = (dict(os.environ) if env is None
                    else {os.fsdecode(k): os.fsdecode(v) for k, v in env.items()})
-    for part, program, part_env in _commands(words, environment, shell_text, 0):
+    if isinstance(argv, (str, bytes)):
+        words = _lex(os.fsdecode(argv))
+        commands = _shell_commands(os.fsdecode(argv), environment, 0)
+    else:
+        words = [os.fsdecode(a) for a in (argv or [])]
+        commands = _commands(words, environment, False, 0)
+    for part, program, part_env in commands:
         start = _pytest_args(part, program)
         if start is not None and not _deterministic(part[start:], part_env):
             where = os.fsdecode(cwd) if cwd is not None else os.getcwd()
@@ -395,15 +414,204 @@ def _miss(argv, cwd, env):
 
 
 def _lex(text):
-    """The words of shell text, with each run of operator characters its own word."""
+    """The words of shell text, with each run of operator characters its own word.
+    `#` is text here: _scan has already removed the comments a shell would."""
     text = text.replace("\\\n", " ")
     lexer = shlex.shlex(text, posix=True, punctuation_chars=_OPERATOR_CHARS)
+    lexer.commenters = ""
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     try:
         return list(lexer)
     except ValueError:  # an unclosed quote: fall back to a plain split
         return re.findall(r"[();<>|&\n]+|[^\s();<>|&]+", text)
+
+
+def _closing(text, i, close):
+    """Index after the `close` that ends a construct whose body starts at `i`,
+    skipping quotes, escapes and nested parentheses; len(text) when unclosed."""
+    depth = 1
+    while i < len(text):
+        char = text[i]
+        if char == "\\":
+            i += 2
+            continue
+        if char in "'\"" and close == ")":
+            end = text.find(char, i + 1) if char == "'" else _double_end(text, i + 1)
+            i = len(text) if end < 0 else end + 1
+            continue
+        if close == ")" and char == "(":
+            depth += 1
+        elif char == close[0] and text.startswith(close, i):
+            depth -= 1
+            if depth == 0:
+                return i + len(close)
+        i += 1
+    return len(text)
+
+
+def _double_end(text, i):
+    """Index of the `"` that closes a double-quoted string whose body starts at
+    `i`, or -1."""
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+        elif text[i] == '"':
+            return i
+        elif text.startswith("$(", i) or text[i] == "`":
+            i = _closing(text, i + 2, ")") if text[i] == "$" else _closing(text, i + 1, "`")
+        else:
+            i += 1
+    return -1
+
+
+def _substitution(text, i, bodies):
+    """When a command or process substitution, or arithmetic, starts at `i`,
+    record its command text in `bodies` and return (the word that stands for
+    it, the index after it); else None."""
+    if text.startswith("$((", i):
+        return "0", _closing(text, i + 3, "))")  # arithmetic runs no command
+    for opener, stands_for in (("$(", "_"), ("<(", "/dev/fd/63"), (">(", "/dev/fd/63")):
+        if text.startswith(opener, i):
+            end = _closing(text, i + 2, ")")
+            bodies.append(text[i + 2:end - 1])
+            return stands_for, end
+    if text[i] == "`":
+        end = _closing(text, i + 1, "`")
+        bodies.append(re.sub(r"\\([`$\\])", r"\1", text[i + 1:end - 1]))
+        return "_", end
+    return None
+
+
+def _scan(text):
+    """Shell text as a shell reads it, before its words are split: (the text with
+    comments, heredoc bodies and line continuations removed and each
+    substitution replaced by a word, the command texts of its substitutions)."""
+    out, bodies, heredocs = [], [], []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        at_word_start = not out or out[-1][-1:] in " \t\r" + _OPERATOR_CHARS
+        if text.startswith("\\\n", i):
+            i += 2
+        elif char == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+        elif char == "'":
+            end = text.find("'", i + 1)
+            end = len(text) if end < 0 else end + 1
+            out.append(text[i:end])
+            i = end
+        elif char == '"':
+            i = _scan_double(text, i, out, bodies)
+        elif text.startswith("((", i) and at_word_start:
+            end = _closing(text, i + 2, "))")  # an arithmetic command
+            out.append("true")
+            i = end
+        elif (found := _substitution(text, i, bodies)) is not None:
+            out.append(found[0])
+            i = found[1]
+        elif char == "#" and at_word_start:
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+        elif text.startswith("<<<", i):
+            out.append("<<<")
+            i += 3
+        elif text.startswith("<<", i):
+            i = _heredoc_operator(text, i + 2, heredocs)
+            out.append("<< _")
+        elif char == "\n" and heredocs:
+            out.append("\n")
+            i = _heredoc_bodies(text, i + 1, heredocs, bodies)
+            heredocs.clear()
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out), bodies
+
+
+def _scan_double(text, i, out, bodies):
+    """Copy the double-quoted string at `i` to `out`, replacing its substitutions;
+    return the index after it."""
+    out.append('"')
+    i += 1
+    while i < len(text) and text[i] != '"':
+        if text.startswith("\\\n", i):
+            i += 2
+        elif text[i] == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+        elif text[i] in "$`" and (found := _substitution(text, i, bodies)) is not None:
+            out.append(found[0])
+            i = found[1]
+        else:
+            out.append(text[i])
+            i += 1
+    out.append('"')
+    return i + 1
+
+
+def _heredoc_operator(text, i, heredocs):
+    """Read a heredoc's `-` and delimiter word from `i`, queue the heredoc and
+    return the index after the word."""
+    strip_tabs = text.startswith("-", i)
+    i += strip_tabs
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    start = i
+    while i < len(text) and text[i] not in " \t\r" + _OPERATOR_CHARS:
+        if text[i] in "'\"":
+            end = text.find(text[i], i + 1)
+            i = len(text) if end < 0 else end + 1
+        else:
+            i += 2 if text[i] == "\\" else 1
+    word = text[start:i]
+    quoted = any(char in word for char in "'\"\\")
+    heredocs.append((re.sub(r"""\\(.)|['"]""", r"\1", word), strip_tabs, quoted))
+    return i
+
+
+def _heredoc_bodies(text, i, heredocs, bodies):
+    """Skip the body of each queued heredoc, which starts at `i`, recording the
+    substitutions of an unquoted one; return the index after the last."""
+    for delimiter, strip_tabs, quoted in heredocs:
+        lines = []
+        while i < len(text):
+            end = text.find("\n", i)
+            end = len(text) if end < 0 else end
+            line, i = text[i:end], end + 1
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                break
+            lines.append(line)
+        if not quoted:
+            _heredoc_substitutions("\n".join(lines), bodies)
+    return min(i, len(text))
+
+
+def _heredoc_substitutions(body, bodies):
+    """Record the command texts of the substitutions an unquoted heredoc body
+    expands: quotes are text there, and a backslash escapes `$`, a backtick or
+    itself."""
+    i = 0
+    while i < len(body):
+        if body[i] == "\\":
+            i += 2
+        elif body.startswith(("<(", ">("), i):
+            i += 1
+        elif (found := _substitution(body, i, bodies)) is not None:
+            i = found[1]
+        else:
+            i += 1
+
+
+def _shell_commands(text, env, depth):
+    """Yield (command words, program index, environment) for every command in
+    shell text and in each of its substitutions."""
+    main, bodies = _scan(text)
+    yield from _commands(_lex(main), env, True, depth)
+    if depth < _MAX_DEPTH:
+        for body in bodies:
+            yield from _shell_commands(body, env, depth + 1)
 
 
 def _is_operator(word):
@@ -438,7 +646,7 @@ def _commands(words, env, shell_text, depth):
         program, part_env = _program(part, env)
         text = _shell_command(part, program)
         if text is not None and depth < _MAX_DEPTH:
-            yield from _commands(_lex(text), part_env, True, depth + 1)
+            yield from _shell_commands(text, part_env, depth + 1)
         else:
             yield part, program, part_env
 
@@ -469,7 +677,7 @@ def _program(part, env):
             i += 1
             continue
         words = next((words for words in _MULTI_WORD_WRAPPERS
-                      if tuple(part[i:i + len(words)]) == words), None)
+                      if (os.path.basename(word), *part[i + 1:i + len(words)]) == words), None)
         if words is not None:
             name, i = " ".join(words), i + len(words)
         elif os.path.basename(word) in _WRAPPERS:

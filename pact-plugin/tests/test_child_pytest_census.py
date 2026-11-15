@@ -360,6 +360,111 @@ def test_a_blocked_pytest_child_inside_a_shell_command_is_accepted(argv):
     assert census._miss(argv, None, {}) is None, argv
 
 
+# A wrapper named by a path is the wrapper: its first word matches by basename.
+@pytest.mark.parametrize("argv", [
+    ["/usr/local/bin/uv", "run", "pytest", "-q"],
+    ["/usr/bin/poetry", "run", "pytest"],
+    ["/home/u/.local/bin/uv", "tool", "run", "pytest"],
+    ["/opt/conda/bin/conda", "run", "-n", "x", "pytest"],
+    ["/home/u/.local/bin/uv", "run", "python", "/venv/bin/pytest"],
+    ["/home/u/.local/bin/uv", "run", "coverage", "run", "-m", "pytest"],
+])
+def test_a_wrapper_named_by_a_path_is_stepped_over(argv):
+    assert census._miss(argv, None, {}) is not None, argv
+    assert census._miss(argv + _BLOCK, None, {}) is None, argv
+
+
+# Shell text as bash runs it. Each row was checked against bash 5.2 with a stub
+# pytest on PATH: the refused rows start an unblocked pytest, the accepted rows
+# do not.
+@pytest.mark.parametrize("text", [
+    # Process substitution runs its command.
+    "cat <(pytest -q)",
+    "tee >(pytest -q) < /dev/null",
+    "diff <(python -m pytest --co -q) expected.txt",
+    "cat < <(pytest -q)",
+    # Command substitution runs its command, also inside double quotes.
+    "echo `pytest -q`",
+    'echo "$(pytest -q)"',
+    'echo "`pytest -q`"',
+    "echo $(echo $(pytest -q))",
+    "echo `echo \\`pytest -q\\``",
+    "x=$(pytest -q)",
+    "echo ${X:-$(pytest -q)}",
+    'cat <<< "$(pytest -q)"',
+    # A backslash-newline joins the two lines' words.
+    "py\\\ntest -q",
+    # A here-string is not a heredoc: the next line is a command.
+    "cat <<<x\npytest -q",
+    # A # inside a word, after a backslash or inside quotes is text.
+    "echo a#b; pytest -q",
+    "echo \\#x; pytest -q",
+    'echo "a # b"; pytest -q',
+    "echo hi #c\npytest -q",
+    # A heredoc's body starts at the next newline and ends at its delimiter.
+    "cat <<EOF; pytest -q\nbody\nEOF",
+    "cat<<EOF\nbody\nEOF\npytest -q",
+    "cat <<-EOF\n\tbody\n\tEOF\npytest -q",
+    "cat <<A <<B\na\nA\nb\nB\npytest -q",
+    # An unquoted heredoc runs its body's substitutions.
+    "cat <<EOF\n$(pytest -q)\nEOF",
+    "cat <<EOF\n`pytest -q`\nEOF",
+    # Arithmetic is not a heredoc.
+    "((x=1<<2))\npytest -q",
+    # A called function runs its body.
+    "f() { pytest -q; }; f",
+])
+def test_shell_text_that_runs_an_unblocked_pytest_is_refused(text):
+    assert census._miss(["bash", "-c", text], None, {}) is not None, text
+
+
+def test_a_function_body_is_judged_where_it_is_defined():
+    # bash runs no pytest here, since f is never called; the census judges the
+    # body anyway, as its docstring says.
+    assert census._miss(["bash", "-c", "f() { pytest -q; }"], None, {}) is not None
+
+
+@pytest.mark.parametrize("text", [
+    "pytest --base-url=http://x/#frag -p no:randomly",
+    "echo hi #; pytest -q",
+    "cat <(pytest -q -p no:randomly)",
+    "echo $(pytest -q -p no:randomly)",
+    # Single quotes and an escape keep a substitution as text.
+    "echo '$(pytest -q)'",
+    "echo '`pytest -q`'",
+    "echo \\`pytest -q\\`",
+    'echo "<(pytest -q)"',
+    "cat <<< 'pytest -q'",
+    # A heredoc's body is data.
+    "cat > run.sh <<'EOF2'\npython -m pytest\nEOF2",
+    "cat <<EOF | cat\npytest body\nEOF",
+    "cat <<EOF\n\tpytest\n\tEOF\nEOF\npytest -p no:randomly",
+    "cat <<-EOF\n\tpytest\n\tEOF\npytest -p no:randomly",
+    "cat <<A <<B\npytest a\nA\npytest b\nB\npytest -p no:randomly",
+    # A quoted delimiter, however quoted, leaves the body unexpanded.
+    "cat <<'EOF'\n$(pytest -q)\nEOF",
+    'cat <<"EOF"\n$(pytest -q)\nEOF',
+    "cat <<\\EOF\n$(pytest -q)\nEOF",
+    'cat <<E"O"F\n$(pytest -q)\nEOF',
+    # In an unquoted body a backslash escapes `$`, and `<(` is text.
+    "cat <<EOF\n\\$(pytest -q)\nEOF",
+    "cat <<EOF\n<(pytest -q)\nEOF",
+])
+def test_shell_text_that_runs_no_unblocked_pytest_is_accepted(text):
+    assert census._miss(["bash", "-c", text], None, {}) is None, text
+
+
+# Blind spot 9, pinned as listed: bash runs pytest in each, and the census does
+# not see it.
+@pytest.mark.parametrize("text", [
+    "$(echo pytest) -q",
+    "echo $(( $(pytest -q) ))",
+    "echo $(case x in x) pytest -q;; esac)",
+])
+def test_a_listed_shell_blind_spot_is_accepted(text):
+    assert census._miss(["bash", "-c", text], None, {}) is None, text
+
+
 @pytest.mark.parametrize("argv", [
     ["git", "grep", "pytest"],
     ["pip", "install", "pytest"],
