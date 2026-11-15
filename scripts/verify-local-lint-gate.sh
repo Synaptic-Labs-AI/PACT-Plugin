@@ -75,13 +75,14 @@ fi
 
 if ! command -v ruff >/dev/null 2>&1; then
     printf 'GATE REFUSED: ruff is not available, so the lint legs cannot run.\n' >&2
-    printf '  A missing linter must not read as a pass. From the repo root, these three commands refuse\n' >&2
-    printf '  an interpreter below the floor and otherwise create the repository venv (.venv), install the\n' >&2
-    printf '  CI lock into it (every locked package, ruff at the version CI pins among them) and put it first on\n' >&2
-    printf '  PATH, as .cursor/install.sh does. This is the local install, not the CI one: it accepts source\n' >&2
-    printf '  builds, whose build dependencies are not hash-checked.\n' >&2
+    printf '  A missing linter must not read as a pass. From the repo root, these commands refuse an\n' >&2
+    printf '  interpreter below the floor and otherwise create the repository venv (.venv), install ruff alone\n' >&2
+    printf '  into it, at the version and hashes constraints-ci.txt pins for CI and from a wheel only, and put\n' >&2
+    printf '  it first on PATH. ruff publishes wheels for Linux, macOS and Windows, so nothing is compiled.\n' >&2
+    printf '  The full test environment, which compiles a package on some platforms, is .cursor/install.sh.\n' >&2
     printf '    python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else sys.version)" && python3 -m venv .venv\n' >&2
-    printf '    .venv/bin/python -m pip install --require-hashes -r constraints-ci.txt\n' >&2
+    printf '    sed -n "/^ruff==/,/[0-9a-f]$/p" constraints-ci.txt > .venv/ruff-lock.txt\n' >&2
+    printf '    .venv/bin/python -m pip install --only-binary=:all: --require-hashes --no-deps -r .venv/ruff-lock.txt\n' >&2
     printf '    . .venv/bin/activate\n' >&2
     printf '  To lint without this gate, run the CI legs directly from the repo root:\n' >&2
     printf '    ruff check --select F401,F821 --target-version py312 pact-plugin/ scripts/\n' >&2

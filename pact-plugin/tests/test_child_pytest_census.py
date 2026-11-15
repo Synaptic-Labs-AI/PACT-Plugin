@@ -459,6 +459,14 @@ def test_a_listed_shell_blind_spot_is_accepted(text):
     ["echo", "python3", "-mpytest.__main__"],
     ["git", "grep", "python", "-m", "pytest"],
     ["timeout", "5", "echo", "python", "-m", "pytest"],
+    ["sudo", "-u", "bob", "echo", "python", "-m", "pytest"],
+    ["git", "-C", "repo", "grep", "python", "-m", "pytest"],
+    # A file command touches its words and runs none of them.
+    ["chmod", "755", "/venv/bin/pytest"],
+    ["touch", "pytest"],
+    ["mkdir", "-p", "pytest"],
+    ["rm", "-rf", "pytest"],
+    ["cp", "-r", "/x", "pytest"],
     ["bash", "-c", "printf '%s\\n' python -m pytest"],
     # A program that reads or lists its words runs none of them.
     ["grep", "-rn", "pytest", "."],
@@ -714,6 +722,7 @@ _FAMILY_ROWS = {
     "module": [[PY, "-m", "pytest"], ["py", "-3", "-m", "pytest.__main__"],
                ["ipython", "-m", "pytest"], [PY, "-m", "coverage", "run", "-m", "pytest"]],
     "mention": [["make", "check", "python", "-m", "pytest"],
+                ["make", "test", "python", "-m", "pytest"],
                 ["tox", "devenv", "python3", "-mpytest.__main__"]],
     "script": [[PY, "/venv/bin/pytest"], [PY, "-I", "/x/pytest/__main__.py"]],
     "wrapper": [["timeout", "60", "pytest"], ["uvx", "pytest@8.3.0"], ["sudo", "pytest", *_BLOCK]],

@@ -460,23 +460,30 @@ class TestHashCheckedInstall:
             "unchecked, and in CI dropping --only-binary=:all: lets a source "
             "build install its build dependencies unchecked.")
 
-    def test_the_lint_gate_remedy_is_the_local_install(self):
-        """The remedy runs on a developer's machine, so it prints the local
-        install as .cursor/install.sh runs it: refuse a python3 below the
-        interpreter floor, create .venv, install the lock into it, activate it.
-        It says what it installs, where, and that it is not CI's install."""
+    _REMEDY_LOCK = ".venv/ruff-lock.txt"
+    _REMEDY_INSTALL = (".venv/bin/python -m pip install --only-binary=:all: --require-hashes "
+                       "--no-deps -r .venv/ruff-lock.txt")
+
+    def test_the_lint_gate_remedy_installs_ruff_alone(self):
+        """The remedy runs on a developer's machine and the gate needs ruff only,
+        so it refuses a python3 below the interpreter floor, creates .venv, copies
+        ruff's own entry out of the lock, installs that entry from a wheel with
+        its hashes and nothing else, and activates the venv. The full
+        environment, which compiles a package on some platforms, stays
+        .cursor/install.sh's."""
         root = ci_contract.require_root("the lint gate remedy")
         printed = _lint_gate_remedy_lines(root)
-        commands = [line for line in printed if line.startswith(("python3 ", ".venv/", ". "))]
+        commands = [line for line in printed
+                    if line.startswith(("python3 ", ".venv/", ". ", "sed "))]
         check, _, venv = commands[0].partition(" && ")
-        assert [venv, *commands[1:]] == [
-            "python3 -m venv .venv",
-            ".venv/bin/python " + _LOCAL_LOCK_INSTALL.split(" ", 1)[1],
+        extract, _, target = commands[1].partition(" > ")
+        assert [venv, target, *commands[2:]] == [
+            "python3 -m venv .venv", self._REMEDY_LOCK, self._REMEDY_INSTALL,
             ". .venv/bin/activate",
         ], commands
         cursor = [line.strip() for line in
                   (root / ".cursor" / "install.sh").read_text(encoding="utf-8").splitlines()]
-        assert venv in cursor and commands[2] in cursor, (
+        assert venv in cursor and commands[3] in cursor, (
             "the remedy's venv and activate lines are not .cursor/install.sh's")
         # The floor check is a third copy of the floor; it must equal the other two.
         assert _remedy_floor_minor(check) == _install_floor_minor(root) \
@@ -485,16 +492,32 @@ class TestHashCheckedInstall:
         assert "assert" not in check and "sys.exit(" in check, check
         prose = " ".join(line for line in printed
                          if line not in commands and not line.startswith("ruff "))
-        for phrase in ("repository venv (.venv)", "not the CI one"):
+        for phrase in ("repository venv (.venv)", "install ruff alone",
+                       "from a wheel only", ".cursor/install.sh"):
             assert phrase in prose, phrase
-        # A count of the lock's packages here would go stale on every lock
-        # refresh that adds or drops one, so the remedy's prose names no number
-        # at all. The printed commands are outside this check: the floor in the
-        # first one is pinned to its other copies above.
-        assert "every locked package" in prose, prose
+        # A version or count here would go stale on a lock refresh; the printed
+        # commands carry none either, since the version comes from the lock.
         assert not _STANDALONE_NUMBER.search(prose), prose
         script = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
         assert "-c constraints-ci.txt" not in script
+
+    def test_the_remedy_extracts_exactly_the_locks_ruff_entry(self):
+        """The printed extraction, run as printed against the real lock, yields
+        ruff's entry with every hash the lock lists for it and no other
+        requirement, so the remedy installs CI's ruff and cannot drift from it."""
+        root = ci_contract.require_root("the lint gate remedy")
+        extract = next(line for line in _lint_gate_remedy_lines(root)
+                       if line.startswith("sed ")).partition(" > ")[0]
+        proc = subprocess.run(shlex.split(extract), cwd=root, capture_output=True,
+                              text=True, timeout=30)
+        assert proc.returncode == 0, proc
+        lines = (root / "constraints-ci.txt").read_text(encoding="utf-8").splitlines()
+        first = next(i for i, line in enumerate(lines) if line.startswith("ruff=="))
+        last = next(i for i in range(first, len(lines)) if not lines[i].endswith("\\"))
+        assert proc.stdout.splitlines() == lines[first:last + 1], proc.stdout
+        requirements = [line for line in proc.stdout.splitlines() if not line.startswith(" ")]
+        assert len(requirements) == 1 and requirements[0].startswith("ruff=="), requirements
+        assert proc.stdout.count("--hash=sha256:") == last - first, proc.stdout
 
     @pytest.mark.parametrize("prose, has_number", [
         ("every locked package, 40 of them", True),

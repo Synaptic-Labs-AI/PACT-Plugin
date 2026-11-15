@@ -55,13 +55,16 @@ refused whether or not it does:
   sys.executable. Its short and long options before `-m` are stepped over,
   including the values of `-W`, `-X` and `--check-hash-based-pycs`, and the
   launcher's `-3`, `-3.12` and `-V:3.12`.
-- [mention] Every word naming an interpreter in a command, up to the first word
-  naming a program that runs none of its words (listed under [wrapper]), is
-  read as the [module] family, not only the first. So
-  `make check python -m pytest` is refused, while `echo python -m pytest`,
-  `printf '%s\\n' python -m pytest` and `git grep python -m pytest` are
-  mentions. The stop holds for one command only: `printf x; python -m pytest`
-  is still judged.
+- [mention] Every word naming an interpreter in a command is read as the
+  [module] family, not only the first, up to the word in program position when
+  that word names a program that runs none of its words (listed under
+  [wrapper]). The word in program position is the program itself, or the
+  command a listed wrapper runs (followed along a chain), or the subcommand of
+  git, whose subcommand is the program it runs. So `echo python -m pytest`,
+  `printf '%s\\n' python -m pytest`, `timeout 5 echo python -m pytest` and
+  `git grep python -m pytest` are mentions, while `make test python -m pytest`
+  is refused: `test` there is make's argument, not a program. The stop holds
+  for one command only: `printf x; python -m pytest` is still judged.
 - [script] The program is an interpreter that runs pytest's program or
   `__main__.py` as its script (`python /venv/bin/pytest`). Only the program
   position counts here: in `pip install python-dateutil pytest` or
@@ -74,8 +77,9 @@ refused whether or not it does:
   print, look up, read, list or ignore their words and run none of them:
   `echo`, `printf`, `which`, `true`, `false`, `:`, `grep`, `egrep`, `fgrep`,
   `rg`, `ag`, `ls`, `cat`, `head`, `tail`, `wc`, `sed`, `awk`, `cut`, `sort`,
-  `uniq`, `diff`, `file`, `stat`, `test` and `[`. So `grep -c pytest log` and
-  `ls -la pytest` are mentions, not launches.
+  `uniq`, `diff`, `file`, `stat`, `test`, `[`, `chmod`, `chown`, `touch`,
+  `mkdir`, `rm`, `cp`, `mv` and `ln`. So `grep -c pytest log`,
+  `ls -la pytest` and `chmod 755 /venv/bin/pytest` are mentions, not launches.
   Its command is the first word after it that is not an option (a word starting
   with `-`), a NAME=VALUE word, a number or duration (`60`, `1.5m`, `inf`,
   `0x5`), a hatch matrix selector (`+py=3.12`, `-py=3.11`) or the verb `run`
@@ -99,6 +103,13 @@ refused whether or not it does:
 EVERY OTHER LAUNCH FORM IS OUTSIDE THE CENSUS, whether or not it starts pytest:
 the census does not claim to see it, refuse it, or list it. The blind spots at
 the end are examples of that rule, not a complete list.
+
+A HARMLESS COMMAND THE CENSUS STILL REFUSES IS AN ACCEPTED, DOCUMENTED LIMIT,
+not a defect to fix. A program the census does not read is refused when a word
+that may be its command starts pytest (`make check python -m pytest`,
+`python-config -m pytest`), because telling a mention from a launch there would
+need that program's own argument grammar. The refusal fails loudly, naming the
+program and the remedy.
 
 The program is the first word past NAME=VALUE words, the shell's own
 `{ } ! if then elif else fi do done while until`, `function NAME`, `coproc`
@@ -248,7 +259,8 @@ _RESERVED = frozenset({"{", "}", "!", "if", "then", "elif", "else", "fi",
 _RUNS_NOTHING = frozenset({
     "echo", "printf", "which", "true", "false", ":", "grep", "egrep", "fgrep", "rg",
     "ag", "ls", "cat", "head", "tail", "wc", "sed", "awk", "cut", "sort", "uniq",
-    "diff", "file", "stat", "test", "[",
+    "diff", "file", "stat", "test", "[", "chmod", "chown", "touch", "mkdir", "rm", "cp",
+    "mv", "ln",
 })
 # find's actions that run the command after them.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
@@ -258,6 +270,9 @@ _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 _CHAINED = frozenset({"env", "nice", "nohup", "sudo", "timeout", "time", "stdbuf",
                       "xvfb-run", "exec", "uv", "uvx", "pipx", "poetry", "pdm", "pipenv",
                       "hatch", "rye", "pixi", "conda", "micromamba", "find"})
+# Dispatchers whose first plain word is the program they run (`git grep` runs
+# git-grep), so that word is in program position for the [mention] stop.
+_DISPATCHERS = frozenset({"git"})
 # Subcommand verbs a program names before the command it runs (`uv run`,
 # `uv tool run`, `poetry run`, `hatch -e test run`).
 _RUN_VERBS = frozenset({"run", "tool"})
@@ -807,9 +822,10 @@ def _pytest_args(part, program):
     if start is not None:
         return start
     # [mention]: every word naming an interpreter is read for its -m forms, up to
-    # a program that runs none of its words, whose words after it are its own.
+    # a program in program position that runs none of its words.
+    stop = _command_position(part, program)
     for at, word in enumerate(part):
-        if _command_name(word) in _RUNS_NOTHING:
+        if at == stop and _command_name(word) in _RUNS_NOTHING:
             break
         if not _is_interpreter(word):
             continue
@@ -821,6 +837,16 @@ def _pytest_args(part, program):
             if found is not None:
                 return found
     return None
+
+
+def _command_position(part, program):
+    """Index of the word in program position: the command a listed wrapper or
+    dispatcher runs, followed along a chain, else the program word itself."""
+    if program < len(part) and _command_name(part[program]) in _CHAINED | _DISPATCHERS:
+        found = _command_search(part, program, 0)
+        if found is not None:
+            return found
+    return program
 
 
 def _modelled(word):
@@ -840,15 +866,22 @@ def _wrapper(part, program, depth):
 
 def _command_starts_pytest(part, program, depth):
     """True when a word that may be the command of the program at `program`
-    starts pytest. That word is the first past options, NAME=VALUE words,
-    numbers and the verbs in _RUN_VERBS; while it follows an option it may be
-    that option's value, so the next one is tried too. A word in _CHAINED is
-    searched again as a program of its own. find's commands are the words after
-    its _FIND_EXEC actions."""
+    starts pytest."""
+    return _command_search(part, program, depth) is True
+
+
+def _command_search(part, program, depth):
+    """True when a word that may be the command of the program at `program`
+    starts pytest, else the index of the word the search took for the command,
+    or None when it found none. That word is the first past options,
+    NAME=VALUE words, numbers and the verbs in _RUN_VERBS; while it follows an
+    option it may be that option's value, so the next one is tried too. A word
+    in _CHAINED is searched again as a program of its own. find's commands are
+    the words after its _FIND_EXEC actions."""
     if _command_name(part[program]) == "find":
-        return depth < _MAX_DEPTH and any(
-            _command_starts_pytest(part, at, depth + 1)
-            for at in range(program + 1, len(part)) if part[at] in _FIND_EXEC)
+        return (depth < _MAX_DEPTH and any(
+            _command_search(part, at, depth + 1) is True
+            for at in range(program + 1, len(part)) if part[at] in _FIND_EXEC)) or None
     after_option = False
     for at in range(program + 1, len(part)):
         word = part[at]
@@ -859,12 +892,12 @@ def _command_starts_pytest(part, program, depth):
         elif _starts_pytest(part, at, depth):
             return True
         elif _command_name(word) in _CHAINED and depth < _MAX_DEPTH:
-            return _command_starts_pytest(part, at, depth + 1)
+            return _command_search(part, at, depth + 1)
         elif after_option or word in _RUN_VERBS:
             after_option = False
         else:
-            return False
-    return False
+            return at
+    return None
 
 
 def _starts_pytest(part, at, depth):
