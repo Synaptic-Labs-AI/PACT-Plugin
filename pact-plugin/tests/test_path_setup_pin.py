@@ -275,54 +275,19 @@ def _module_level_mutations(path):
     return lines
 
 
-def _reads_a_docstring(tree):
-    """Whether `tree` can read a docstring as data: a `__doc__` name or
-    attribute, a `"__doc__"` string (`getattr`, `vars`), or `getdoc`. A
-    docstring is exempt only where nothing reads one, since a read turns it
-    into a value the code can use."""
-    return any(
-        (isinstance(node, ast.Name) and node.id in ("__doc__", "getdoc"))
-        or (isinstance(node, ast.Attribute) and node.attr in ("__doc__", "getdoc"))
-        or (isinstance(node, ast.Constant) and node.value == "__doc__")
-        for node in ast.walk(tree)
-    )
-
-
-def _docstrings(tree):
-    """The ids of every docstring node: the leading string of a module,
-    class or function body, or none in a module that reads a docstring
-    (`_reads_a_docstring`). A docstring documents a path mutation; it never
-    runs one, so it is not codegen."""
-    found = set()
-    if _reads_a_docstring(tree):
-        return found
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
-            body = node.body
-            if (
-                body and isinstance(body[0], ast.Expr)
-                and isinstance(body[0].value, ast.Constant)
-                and isinstance(body[0].value.value, str)
-            ):
-                found.add(id(body[0].value))
-    return found
-
-
 def _any_form_present(path):
     """True if the file contains a path mutation at any level OR embeds a
     mutation token in a string constant (codegen). Comments are
-    AST-invisible and never match, and docstrings are skipped: they
-    describe a mutation, they do not run one."""
+    AST-invisible and never match; a docstring is a string constant like
+    any other, so a token in one is a form."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
     names = _sys_names(tree)
-    docstrings = _docstrings(tree)
     for node in ast.walk(tree):
         if _is_path_mutation(node, names):
             return True
         if (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
-            and id(node) not in docstrings
             and any(tok in node.value for tok in _STR_TOKENS)
         ):
             return True
@@ -418,31 +383,27 @@ def test_a_name_holding_sys_path_is_followed(tmp_path):
     assert _module_level_mutations(module) == [3, 5]
 
 
-def test_a_docstring_naming_a_mutation_is_not_codegen(tmp_path):
-    """A docstring that names a path mutation describes it and never runs
-    it, so it is not a form; a docstring its module reads as data is, and so
-    are a string assigned for a child process to run and a real mutation."""
+def test_a_docstring_naming_a_mutation_is_a_form(tmp_path):
+    """A docstring is scanned like any other string: one that quotes a path
+    mutation is a form, as are a string assigned for a child process to run
+    and a real mutation; a docstring that describes one in words is not."""
     needle = "sys.path" + ".insert(0, 'x')"
     documented = tmp_path / "documented.py"
     documented.write_text(
-        f'"""Never {needle} here."""\n\n'
         f'def helper():\n    """Do not {needle}."""\n    return None\n',
+        encoding="utf-8",
+    )
+    worded = tmp_path / "worded.py"
+    worded.write_text(
+        'def helper():\n    """Never insert into sys.path here."""\n    return None\n',
         encoding="utf-8",
     )
     codegen = tmp_path / "codegen.py"
     codegen.write_text(f'CHILD = "import sys; {needle}"\n', encoding="utf-8")
     real = tmp_path / "real.py"
     real.write_text(f"import sys\n{needle}\n", encoding="utf-8")
-    read_doc = tmp_path / "read_doc.py"
-    read_doc.write_text(
-        f'def helper():\n    """import sys; {needle}"""\n\n\nCHILD = helper.__doc__\n',
-        encoding="utf-8",
-    )
-    assert not _any_form_present(documented)
-    assert _any_form_present(read_doc)
-    for read in ("f.__doc__", "getattr(f, '__doc__')", "inspect.getdoc(f)", "vars(f)['__doc__']", "__doc__"):
-        assert _reads_a_docstring(ast.parse(read)), read
-    assert not _reads_a_docstring(ast.parse("f.__name__"))
+    assert _any_form_present(documented)
+    assert not _any_form_present(worded)
     assert _any_form_present(codegen)
     assert _any_form_present(real)
 

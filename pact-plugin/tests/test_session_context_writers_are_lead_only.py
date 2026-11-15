@@ -141,26 +141,35 @@ KNOWN_MODULE_PATH_USES = Counter({
     ("hooks/shared/pact_context.py", "set_harness_stamp"): 3,
 })
 
-# (file, enclosing function): count of code strings naming the file. Each one
-# builds the path for a READ, builds the path persist_context writes
-# (build_context_cache), or is message text.
+# (file, enclosing function): count of strings naming the file, docstrings
+# included. Each code string builds the path for a READ, builds the path
+# persist_context writes (build_context_cache), or is message text; each
+# docstring is the function's or module's own description of the file.
 KNOWN_NAME_SITES = Counter({
     ("hooks/dispatch_gate.py", "<module>"): 2,                   # message text
     ("hooks/dispatch_gate.py", "evaluate_dispatch"): 3,          # message text
+    ("hooks/bootstrap_gate.py", "is_marker_set"): 1,             # docstring
     ("hooks/session_init.py", "_saved_context"): 1,              # read
-    ("hooks/session_init.py", "_lead_context_persisted"): 1,     # existence read
-    ("hooks/shared/pact_context.py", "build_context_cache"): 1,  # the writers' path
-    ("hooks/shared/pact_context.py", "persist_context"): 1,  # the writer's own temp-file prefix
-    ("hooks/shared/pact_context.py", "init"): 1,                 # read path
+    ("hooks/session_init.py", "_lead_context_persisted"): 2,     # existence read; docstring
+    ("hooks/shared/marker_schema.py", "<module>"): 1,            # module docstring
+    ("hooks/shared/pact_context.py", "build_context_cache"): 2,  # the writers' path; docstring
+    ("hooks/shared/pact_context.py", "persist_context"): 2,  # the writer's own temp-file prefix; docstring
+    ("hooks/shared/pact_context.py", "init"): 2,                 # read path; docstring
     ("hooks/shared/pact_context.py", "_clear_carryover_team"): 1,  # read (earlier sessions' contexts)
     ("hooks/shared/pact_context.py", "_project_session_records"): 1,  # read (this project's session contexts)
-    ("hooks/shared/pact_harvest.py", "main"): 2,                 # CLI help text
-    ("hooks/shared/session_registry.py", "_lead_context_exists_for"): 1,  # existence read
+    ("hooks/shared/pact_context.py", "heal_context_if_missing"): 1,  # docstring
+    ("hooks/shared/pact_context.py", "reconstruct_session_dir"): 1,  # docstring
+    ("hooks/shared/pact_context.py", "reset_for_tests"): 1,      # docstring
+    ("hooks/shared/pact_context.py", "set_harness_stamp"): 1,    # docstring
+    ("hooks/shared/pact_context.py", "write_context"): 1,        # docstring
+    ("hooks/shared/pact_harvest.py", "main"): 3,                 # CLI help text; docstring
+    ("hooks/shared/session_registry.py", "_lead_context_exists_for"): 2,  # existence read; docstring
     ("hooks/shared/session_resume.py", "_saved_team_of"): 1,         # read
-    ("skills/pact-memory/scripts/pact_session.py", "_context_file_path"): 1,       # read
+    ("hooks/shared/session_resume.py", "format_session_substitutions"): 1,  # docstring
+    ("skills/pact-memory/scripts/pact_session.py", "_context_file_path"): 2,       # read; docstring
     ("skills/pact-memory/scripts/pact_session.py", "_context_record_on_disk"): 1,  # read
     ("skills/pact-memory/scripts/memory_api.py", "_legacy_session_evidence"): 1,  # read (legacy-admission evidence)
-    ("hooks/session_end.py", "_pruned_session_line"): 1,  # read (prune-ledger evidence before a reap)
+    ("hooks/session_end.py", "_pruned_session_line"): 2,  # read (prune-ledger evidence before a reap); docstring
     ("hooks/shared/project_scope.py", "<module>"): 1,  # read (the record rung's _CONTEXT_FILE)
 })
 
@@ -227,8 +236,7 @@ def _derives_a_session_path(function):
 
 
 # ANCHOR of the name census: the context file's name or a piece of it, in
-# any string constant or f-string piece outside a docstring (a docstring
-# counts too in a module that reads one, `_reads_a_docstring`). `pact-sessions`
+# any string constant or f-string piece, docstrings included. `pact-sessions`
 # (the sessions root) is another word, and `context.json` counts only as the
 # file's own tail (`context.json`, `-context.json`, `session-context.json`),
 # not inside another name such as `planted-context.json`.
@@ -238,19 +246,6 @@ _NAME_ANCHOR = re.compile(
 # A complete literal file name in the sessions folder other than the context
 # file: `pact-session-<word>.<ext>`, no placeholder.
 _OTHER_SESSION_FILE = re.compile(r"pact-session-(?!context\b)[a-z0-9_]+\.[a-z]+\b")
-
-
-def _reads_a_docstring(tree):
-    """Whether `tree` can read a docstring as data: a `__doc__` name or
-    attribute, a `"__doc__"` string (`getattr`, `vars`), or `getdoc`. A
-    docstring is exempt only where nothing reads one, since a read turns it
-    into a value the code can use."""
-    return any(
-        (isinstance(node, ast.Name) and node.id in ("__doc__", "getdoc"))
-        or (isinstance(node, ast.Attribute) and node.attr in ("__doc__", "getdoc"))
-        or (isinstance(node, ast.Constant) and node.value == "__doc__")
-        for node in ast.walk(tree)
-    )
 
 
 def _unreadable_name(text):
@@ -309,8 +304,6 @@ class _Census(ast.NodeVisitor):
     def __init__(self, rel, tree):
         self.rel = rel
         self.stack = []
-        self.docstrings = set()
-        self.reads_docstrings = _reads_a_docstring(tree)
         self.api_refs = Counter()
         self.name_sites = Counter()
         self.unreadable_names = []
@@ -340,13 +333,6 @@ class _Census(ast.NodeVisitor):
     def _where(self):
         return ".".join(self.stack) or "<module>"
 
-    def _note_docstring(self, node):
-        body = getattr(node, "body", [])
-        if self.reads_docstrings:
-            return
-        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-            self.docstrings.add(id(body[0].value))
-
     def _note_writes(self, scope):
         for inner in _own_nodes(scope):
             kind = isinstance(inner, ast.Call) and _write_call(inner)
@@ -354,7 +340,6 @@ class _Census(ast.NodeVisitor):
                 self.writes[(self.rel, self._where(), kind)] += 1
 
     def visit_Module(self, node):
-        self._note_docstring(node)
         self._note_writes(node)
         self.generic_visit(node)
 
@@ -377,7 +362,6 @@ class _Census(ast.NodeVisitor):
         return None
 
     def _visit_scope(self, node):
-        self._note_docstring(node)
         self.stack.append(node.name)
         if not isinstance(node, ast.ClassDef):
             self._note_writes(node)
@@ -401,7 +385,7 @@ class _Census(ast.NodeVisitor):
             self.module_path_uses[(self.rel, self._where())] += 1
 
     def visit_Constant(self, node):
-        if not isinstance(node.value, str) or id(node) in self.docstrings:
+        if not isinstance(node.value, str):
             return
         if _names_the_file(node.value):
             self.name_sites[(self.rel, self._where())] += 1
@@ -733,8 +717,8 @@ class TestCensus:
         """Positive control for the census's fail-closed branch: a name built
         from a `%` template lands in the unreadable list, while a complete
         name beside it is a name site and another session file's name is
-        neither. A docstring holding the template is exempt, unless its
-        module reads a docstring as data."""
+        neither. A docstring is scanned like any other string, so one holding
+        the template is reported too, whether or not anything reads it."""
         hooks = tmp_path / "hooks"
         hooks.mkdir()
         (hooks / "seeded.py").write_text(
@@ -749,20 +733,18 @@ class TestCensus:
             "def f():\n"
             "    \"\"\"pact-session-%s.json\"\"\"\n"
         )
-        (hooks / "read_doc.py").write_text(
-            "def f(base):\n"
-            "    \"\"\"pact-session-%s.json\"\"\"\n"
-            "    return base / (f.__doc__ % 'context')\n"
+        (hooks / "named_doc.py").write_text(
+            "def g():\n"
+            "    \"\"\"Reads pact-session-context.json.\"\"\"\n"
         )
         found = _python_census(tmp_path)
         assert sorted(found["unreadable_names"]) == [
-            "hooks/read_doc.py:2: 'pact-session-%s.json'",
+            "hooks/documented.py:2: 'pact-session-%s.json'",
             "hooks/seeded.py:2: 'pact-session-%s.json'",
         ], found["unreadable_names"]
-        assert found["name_sites"] == Counter({("hooks/seeded.py", "named"): 1})
-        for read in ("f.__doc__", "getattr(f, '__doc__')", "inspect.getdoc(f)", "vars(f)['__doc__']", "__doc__"):
-            assert _reads_a_docstring(ast.parse(read)), read
-        assert not _reads_a_docstring(ast.parse("f.__name__"))
+        assert found["name_sites"] == Counter({
+            ("hooks/seeded.py", "named"): 1, ("hooks/named_doc.py", "g"): 1,
+        })
 
     def test_a_str_replace_is_not_a_relocation(self, tmp_path):
         """Path.replace takes one argument; str.replace takes two."""

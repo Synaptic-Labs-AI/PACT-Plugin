@@ -765,7 +765,7 @@ def _run_rotation(start_marker: str, marker_above_gap: bool = False) -> dict:
     The save count is derived INSIDE the subprocess from the writer's own
     constant, so this file never imports `working_memory` and never touches
     the interpreter's `sys.path`. That is not tidiness: a module-scoped
-    `sys.path.insert(0, ...)` of the memory-scripts directory is a GLOBAL
+    insert of the memory-scripts directory into `sys.path` is a GLOBAL
     mutation that outlives this file and re-orders imports for every test
     that runs afterwards. It broke two unrelated counter-tests in the full
     suite while passing in isolation and when paired directly -- the failure
