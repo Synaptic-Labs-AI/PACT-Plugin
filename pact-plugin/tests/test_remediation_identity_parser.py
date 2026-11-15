@@ -34,7 +34,7 @@ DECLINE = pi.OUTCOME_DECLINE
 
 def _origin_id(repo: Path):
     """The (outcome, id) the classifier gives for what `read_origin` returns."""
-    origin = pi.read_origin(repo)
+    origin = pi.read_origin(repo / ".git")
     assert origin.state == pi.ORIGIN_PRESENT, origin
     return pi.classify_remote_origin(origin.value)
 
@@ -87,7 +87,7 @@ class TestTheOriginIsTheUrlGitFetches:
         for url in urls:
             _add_url(repo, url)
 
-        assert pi.read_origin(repo) == pi.OriginRead(pi.ORIGIN_EMPTY_ENTRY, None)
+        assert pi.read_origin(repo / ".git") == pi.OriginRead(pi.ORIGIN_EMPTY_ENTRY, None)
         identity = pi.detect_id_for_root(repo, common_dir(repo))
         assert identity.project_id is None
         assert identity.decline_reason == pi.decline_record(
@@ -115,7 +115,7 @@ class TestTheOriginIsTheUrlGitFetches:
                 '\turl = "git@a.example:o/a.git\\ngit@evil.example:x/y"\n'
             )
 
-        origin = pi.read_origin(repo)
+        origin = pi.read_origin(repo / ".git")
 
         assert origin == pi.OriginRead(
             pi.ORIGIN_PRESENT, "git@a.example:o/a.git\ngit@evil.example:x/y"
@@ -139,7 +139,7 @@ class TestMachineLocalConfigIsNotAnIdentityInput:
         )
         monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
 
-        assert pi.read_origin(repo).state == pi.ORIGIN_ABSENT
+        assert pi.read_origin(repo / ".git").state == pi.ORIGIN_ABSENT
 
     def test_environment_config_does_not_set_the_identity(self, tmp_path, monkeypatch):
         repo = self._origin_less_repo(tmp_path)
@@ -150,7 +150,7 @@ class TestMachineLocalConfigIsNotAnIdentityInput:
             "GIT_CONFIG_PARAMETERS", "'remote.origin.url'='git@param.example:o/p.git'"
         )
 
-        assert pi.read_origin(repo).state == pi.ORIGIN_ABSENT
+        assert pi.read_origin(repo / ".git").state == pi.ORIGIN_ABSENT
 
     def test_an_exported_git_config_file_neither_sets_nor_breaks_the_identity(
         self, tmp_path, monkeypatch
@@ -175,7 +175,7 @@ class TestMachineLocalConfigIsNotAnIdentityInput:
         run_git("config", "--worktree", "remote.origin.url",
                 "git@worktree.example:o/w.git", cwd=repo)
 
-        assert pi.read_origin(repo).state == pi.ORIGIN_ABSENT
+        assert pi.read_origin(repo / ".git").state == pi.ORIGIN_ABSENT
 
 
 class TestAUserLessScpRemoteFollowsGitsRule:

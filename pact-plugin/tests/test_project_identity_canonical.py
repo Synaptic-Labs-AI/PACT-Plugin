@@ -358,7 +358,7 @@ class TestReadOrigin:
         """Catches the collapse that makes a no-remote repo decline."""
         assert_outside_repository(tmp_path)
         repo = make_repo(tmp_path / "repo")
-        origin = pi.read_origin(repo)
+        origin = pi.read_origin(repo / ".git")
         assert origin.state == pi.ORIGIN_ABSENT
         assert origin.value is None
 
@@ -371,7 +371,7 @@ class TestReadOrigin:
         assert_outside_repository(tmp_path)
         raw = "  https://GitHub.com/o/r.git \t"
         repo = make_repo(tmp_path / "repo", remote=raw)
-        origin = pi.read_origin(repo)
+        origin = pi.read_origin(repo / ".git")
         assert origin.state == pi.ORIGIN_PRESENT
         assert origin.value == raw
 
@@ -381,7 +381,7 @@ class TestReadOrigin:
         monkeypatch.setattr(
             pi.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError())
         )
-        assert pi.read_origin(repo).state == pi.ORIGIN_UNAVAILABLE
+        assert pi.read_origin(repo / ".git").state == pi.ORIGIN_UNAVAILABLE
 
     def test_a_git_error_is_unavailable(self, tmp_path, monkeypatch):
         """A non-1 exit is 'cannot answer', never 'no origin'."""
@@ -391,7 +391,7 @@ class TestReadOrigin:
             "run",
             lambda *a, **k: SimpleNamespace(returncode=128, stdout=b""),
         )
-        assert pi.read_origin(repo).state == pi.ORIGIN_UNAVAILABLE
+        assert pi.read_origin(repo / ".git").state == pi.ORIGIN_UNAVAILABLE
 
     def test_exit_one_with_no_value_is_absent(self, tmp_path, monkeypatch):
         """`git config --get-all` exits 1 when the key is unset; that is ABSENT."""
@@ -401,7 +401,7 @@ class TestReadOrigin:
             "run",
             lambda *a, **k: SimpleNamespace(returncode=1, stdout=b""),
         )
-        assert pi.read_origin(repo).state == pi.ORIGIN_ABSENT
+        assert pi.read_origin(repo / ".git").state == pi.ORIGIN_ABSENT
 
     def test_a_non_utf8_origin_does_not_crash_and_declines(self, tmp_path, monkeypatch):
         """Catches locale decoding escaping the reader (UnicodeDecodeError)."""
@@ -413,7 +413,7 @@ class TestReadOrigin:
                 returncode=0, stdout=b"https://host/owner/re\xffpo\x00"
             ),
         )
-        origin = pi.read_origin(repo)
+        origin = pi.read_origin(repo / ".git")
         assert origin.state == pi.ORIGIN_PRESENT
         assert pi.classify_remote_origin(origin.value) == (DECLINE, None)
 

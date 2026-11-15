@@ -65,7 +65,8 @@ def _save(mem, repo_root, payload=None):
     """Run the REAL save() with the cwd repo pinned, and return the disclosure."""
     with patch.object(memory_api, "_ensure_ready", lambda: None), \
          patch.object(PACTMemory, "_store_embedding", return_value=None), \
-         patch.object(memory_api, "main_repo_root", return_value=repo_root):
+         patch.object(memory_api, "main_repo_root", return_value=repo_root), \
+         patch.object(memory_api, "main_repo_common_dir", return_value=None):
         mem._cwd_repo_root = False  # clear the per-instance cache
         mem.save(payload or {"context": "scope disclosure probe"},
                  sync_to_claude=False)
@@ -410,6 +411,7 @@ def test_a_save_that_fails_AT_THE_STORE_WRITE_discloses_nothing(mem, caplog):
              patch.object(
                  memory_api, "main_repo_root",
                  return_value=Path("/Users/mj/Sites/scratchpad/viable")), \
+             patch.object(memory_api, "main_repo_common_dir", return_value=None), \
              patch.object(
                  memory_api, "create_memory",
                  side_effect=RuntimeError("store write exploded")):
@@ -444,7 +446,8 @@ def _quick_save(repo_root, **kwargs):
 
     with patch.object(memory_api, "_ensure_ready", lambda: None), \
          patch.object(PACTMemory, "_store_embedding", return_value=None), \
-         patch.object(memory_api, "main_repo_root", return_value=repo_root):
+         patch.object(memory_api, "main_repo_root", return_value=repo_root), \
+         patch.object(memory_api, "main_repo_common_dir", return_value=None):
         return quick_save(**kwargs)
 
 

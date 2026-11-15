@@ -183,6 +183,14 @@ class _DetectedIdentity(NamedTuple):
     # WHAT THE PRE-CHANGE RESOLVER PRODUCED for this exact input, or None
     # where it refused. The backlog file name reads only this.
     pre_change_name: Optional[str] = None
+    # THE COMMON DIR THE IDENTITY WAS READ FROM, when a rung bound one. Every
+    # later git question about the identity (the read gate's worktree
+    # listing and submodule exemption, the suppression disclosure) is asked
+    # of this repository. Asking git again at `identity_root` would not do:
+    # that root is git's work-tree top level, and a `core.worktree` that
+    # places it inside ANOTHER repository makes git, asked there, answer
+    # for that repository.
+    identity_common_dir: Optional[Path] = None
 
 
 # `_read_project_scopes` result cache: (store, mtime_ns, size, canonical,
@@ -976,6 +984,7 @@ def _pre_change_declared_name(
 
 def _legacy_suppression(
     identity_root: Optional[Path],
+    common_dir: Optional[Path] = None,
 ) -> "tuple[Optional[dict], Optional[str]]":
     """The structured disclosure for a SUPPRESSED legacy candidate.
 
@@ -987,7 +996,11 @@ def _legacy_suppression(
     """
     if identity_root is None:
         return None, None
-    common_dir = main_repo_common_dir(str(identity_root))
+    if common_dir is None:
+        # No rung recorded the identity's common dir (a home landing, a
+        # basename): git is asked at the root, which is then the folder
+        # that holds the repository it names.
+        common_dir = main_repo_common_dir(str(identity_root))
     if common_dir is None or not _submodule_admin_dir(common_dir):
         return None, None
     try:
@@ -1686,7 +1699,7 @@ def _verified_worktree_roots(repo_root: Path, common_dir: Optional[Path]) -> Lis
 
     try:
         result = subprocess.run(
-            ["git", "-C", str(repo_root), "worktree", "list", "--porcelain", "-z"],
+            ["git", "--git-dir", str(common_dir), "worktree", "list", "--porcelain", "-z"],
             capture_output=True,
             text=False,
             timeout=5,
@@ -2055,25 +2068,24 @@ class PACTMemory:
                         routes (each takes about 1 ms):
                           checkout: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
                           linked worktree: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
-                          submodule: git root 5-6, CLAUDE_PROJECT_DIR 5-6, cwd marker 6;
+                          submodule: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
                           separate-git-dir checkout: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
-                          linked worktree of a submodule: git root 5-6, CLAUDE_PROJECT_DIR 5-6, cwd marker 6;
-                          submodule of a superproject worktree: git root 5-6, CLAUDE_PROJECT_DIR 5-6, cwd marker 6.
-                        A submodule asked about from a subdirectory costs the
-                        one more. The cwd marker is reached through a
+                          linked worktree of a submodule: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
+                          submodule of a superproject worktree: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6.
+                        The cwd marker is reached through a
                         GIT_CEILING_DIRECTORIES entry above the cwd. The first
-                        legacy-scope read adds up to 2 more (the worktree
-                        list, plus the common dir when detection asked about
-                        another directory). No call is repeated with the same
+                        legacy-scope read adds up to 1 more (the worktree
+                        list, asked of the common dir the identity was read
+                        from). No call is repeated with the same
                         argument. These counts assume no override pin. With
                         a canonical override pin, which answers before the
                         origin is read, the counts are:
                           checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
                           linked worktree: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
-                          submodule: git root 3-4, CLAUDE_PROJECT_DIR 3-4, cwd marker 4;
+                          submodule: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
                           separate-git-dir checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
-                          linked worktree of a submodule: git root 4-5, CLAUDE_PROJECT_DIR 4-5, cwd marker 5;
-                          submodule of a superproject worktree: git root 3-4, CLAUDE_PROJECT_DIR 3-4, cwd marker 4;
+                          linked worktree of a submodule: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
+                          submodule of a superproject worktree: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
                           dot-git store checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4.
                         A dot-git store checkout, made with `git init
                         --separate-git-dir=<dir>/.git`, declines without a
@@ -2128,6 +2140,7 @@ class PACTMemory:
             # A SUPPLIED id does not widen: there is no legacy candidate and
             # therefore no gate root to carry. PINNED, not coded around.
             self._project_identity_root = None
+            self._project_common_dir = None
             self._git_rung_root = None
             self._decline_reason = None
             self._decline_detail = None
@@ -2143,7 +2156,7 @@ class PACTMemory:
                 # common-dir question is the one detection just answered for
                 # the identity root.
                 suppression = (
-                    _legacy_suppression(detected.identity_root)
+                    _legacy_suppression(detected.identity_root, detected.identity_common_dir)
                     if detected.legacy_basename is None
                     else (None, None)
                 )
@@ -2164,6 +2177,7 @@ class PACTMemory:
             # in a declared-repo session those differ, and gating on the cwd
             # would exclude the declared repo's own legacy bucket.
             self._project_identity_root = detected.identity_root
+            self._project_common_dir = detected.identity_common_dir
             # THE GIT RUNG RESOLVED FROM THE PROCESS'S OWN LOCATION, so its
             # identity root IS the working directory's repository root: the
             # divergence check reuses it instead of asking git again.
@@ -2613,6 +2627,7 @@ class PACTMemory:
                 legacy_basename=legacy_name,
                 override_ignored=identity.override_ignored,
                 identity_root=root,
+                identity_common_dir=common_dir,
             )
         return _decline_detected(
             identity,
@@ -3206,13 +3221,18 @@ class PACTMemory:
                 gate_common = None
                 if repo_root is not None:
                     try:
-                        # THE DETECTION PASS ASKED THIS ALREADY. Its answer for
-                        # the same directory is taken ONCE, by the first read;
-                        # every later read asks git afresh.
+                        # THE COMMON DIR THE IDENTITY WAS READ FROM, when a
+                        # rung recorded one, so the listing and the exemption
+                        # describe the repository the id came from. Otherwise
+                        # the detection pass's answer for the same directory
+                        # is taken ONCE, by the first read, and every later
+                        # read asks git afresh.
                         passed = getattr(self, "_detection_common_dirs", None) or {}
                         key = os.path.realpath(str(repo_root))
                         gate_common = (
-                            passed.pop(key) if key in passed
+                            self._project_common_dir
+                            if getattr(self, "_project_common_dir", None) is not None
+                            else passed.pop(key) if key in passed
                             else main_repo_common_dir(str(repo_root))
                         )
                     except Exception:
@@ -3592,11 +3612,14 @@ class PACTMemory:
             # again would answer the same question twice.
             self._cwd_repo_id = self._project_id
             return self._cwd_repo_id
-        # ASK FOR THIS ROOT'S common dir, not the process cwd's: `main_repo_root`
-        # may have been resolved for a different start, and pairing a root with
-        # another repository's common dir reads the wrong config. A path that
-        # is not a repository answers None, which is the designed basename arm.
-        common_dir = main_repo_common_dir(str(root))
+        # ASK FROM THE SAME START `main_repo_root` WAS ASKED FROM (the process
+        # cwd), never from the root: the root is git's work-tree top level,
+        # and a `core.worktree` that places it inside ANOTHER repository makes
+        # git, asked there, answer with that repository's common dir. The
+        # cached root is dropped when the cwd moves (`_refresh_cwd_cache`), so
+        # both answers describe one start. A start that is not a repository
+        # answers None, which is the designed basename arm.
+        common_dir = main_repo_common_dir()
         identity = detect_id_for_root(root, common_dir, asked_root=_cwd_or_none())
         # NO FOLDER PSEUDO-ID ON A DECLINE. `identity.project_id or root.name`
         # invented an id the resolver had just refused, and the warning then

@@ -846,8 +846,16 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
     return OUTCOME_NO_PORTABLE_ORIGIN, None
 
 
-def read_origin(root: Path) -> OriginRead:
-    """Read this repository's `origin` URL.
+def read_origin(git_dir: Path) -> OriginRead:
+    """Read the `origin` URL of the repository whose git directory is
+    `git_dir`.
+
+    THE CONFIG IS READ FROM THE GIT DIRECTORY ITSELF (`git --git-dir`), never
+    by running git in a work tree: with `-C <work tree>`, git discovers the
+    repository again from that directory, and a `core.worktree` that places
+    the work tree inside ANOTHER repository makes git answer with that
+    repository's config. The override is read from this repository's common
+    dir, so the origin must come from the same repository.
 
     THE IDENTITY RULE: the origin is the FIRST `remote.origin.url` in the
     repository's own config (`.git/config` plus the files it includes),
@@ -885,17 +893,18 @@ def read_origin(root: Path) -> OriginRead:
     other non-zero status is "git could not answer" = UNAVAILABLE. A missing
     git, a timeout and an unreadable configuration are all UNAVAILABLE.
 
-    CONTRACT: call this only for a root ALREADY ESTABLISHED as a repository
-    (its common dir resolved). Outside one, `--local` exits 128, which reads
-    as UNAVAILABLE. `detect_id_for_root` therefore gates on `common_dir`
-    rather than using this call to discover repo-ness.
+    CONTRACT: call this only with a git directory git has ALREADY answered
+    for (a common dir from `rev-parse --git-common-dir`). A directory that
+    is not one makes `--local` exit 128, which reads as UNAVAILABLE.
+    `detect_id_for_root` therefore gates on `common_dir` rather than using
+    this call to discover repo-ness.
     """
     from shared.project_scope import git_env_without_location
 
     try:
         result = subprocess.run(
             [
-                "git", "-C", str(root), "config", "--local", "--includes",
+                "git", "--git-dir", str(git_dir), "config", "--local", "--includes",
                 "-z", "--get-all", "remote.origin.url",
             ],
             capture_output=True,
@@ -1554,7 +1563,7 @@ def detect_id_for_root(
     # and keep basenaming by ruling.
     submodule_controlled = _submodule_checkout(root, common_dir, asked_root)
 
-    origin = read_origin(root)
+    origin = read_origin(common_dir)
     if origin.state == ORIGIN_UNAVAILABLE:
         return RootIdentity(
             None,

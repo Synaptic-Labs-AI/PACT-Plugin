@@ -1050,7 +1050,9 @@ class TestProjectIdStability:
         def _git_run(command, **_kwargs):
             result = MagicMock()
             for option, stdout in answers.items():
-                if option in command:
+                # Only a `rev-parse` asks these; the origin read also passes
+                # `--git-dir`, as the directory it reads.
+                if "rev-parse" in command and option in command:
                     result.returncode = 0
                     result.stdout = stdout
                     return result

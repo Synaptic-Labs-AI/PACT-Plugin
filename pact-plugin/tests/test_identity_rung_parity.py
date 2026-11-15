@@ -57,6 +57,7 @@ from fixtures.identity_git import (
     assert_outside_repository,
     bindings,
     import_aliases,
+    make_repo,
     qualified_name,
     run_git,
 )
@@ -1500,3 +1501,83 @@ class TestAnUnresolvableMarkerIsNotTheIdentityRoot:
         monkeypatch.setattr(memory_api, "find_git_marker", lambda start: marker)
         elsewhere = tmp_path / "elsewhere"
         assert memory_api._home_checkout(elsewhere, home / "sub", None) == home
+
+
+# --- every git question about the identity asks its own repository ----------
+
+
+class TestTheIdentityIsAskedOfItsOwnRepository:
+    """A repository whose `core.worktree` names a directory inside another
+    repository: git's top level is that directory, so a git question asked
+    THERE answers for the other repository. Every question about the
+    identity is asked of the common dir it was read from."""
+
+    def _layout(self, base: Path):
+        from fixtures.identity_routes import VICTIM
+
+        victim = make_repo(base / "victim", remote=VICTIM)
+        run_git("worktree", "add", "-q", str(base / "victim-linked"), cwd=victim)
+        project = make_repo(base / "project", remote=OWN)
+        run_git("worktree", "add", "-q", str(base / "project-linked"), cwd=project)
+        (victim / "wt").mkdir()
+        run_git("config", "core.worktree", str(victim / "wt"), cwd=project)
+        return victim, project
+
+    def test_the_read_gate_lists_the_identitys_own_worktrees(self, tmp_path, monkeypatch):
+        """The read gate's worktree listing and submodule exemption use the
+        common dir the identity came from: this repository's own linked
+        worktree is in its gate, and the other repository's never is."""
+        victim, project = self._layout(tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        store = elsewhere / "m.db"
+        _seed_bucket(store, project.name)
+        from scripts import database
+
+        listed, anchors = [], []
+        real_roots = memory_api._verified_worktree_roots
+        real_plausibility = database.legacy_candidate_plausibility
+
+        def roots(repo_root, common_dir):
+            found = real_roots(repo_root, common_dir)
+            listed.append((common_dir, found))
+            return found
+
+        def plausibility(*args, **kwargs):
+            anchors.append(kwargs.get("root_common"))
+            return real_plausibility(*args, **kwargs)
+
+        _clear(monkeypatch)
+        _fresh_scope_state()
+        monkeypatch.chdir(project)
+        monkeypatch.setattr(memory_api, "_verified_worktree_roots", roots)
+        monkeypatch.setattr(database, "legacy_candidate_plausibility", plausibility)
+        memory = PACTMemory(session_id="s", db_path=store)
+        assert memory._project_id == "github.com/own/project", memory._project_id
+        memory._read_project_scopes()
+        own = (project / ".git").resolve()
+        assert listed and anchors, "the read gate was not reached"
+        assert [Path(common).resolve() for common, _found in listed] == [own]
+        assert [Path(anchor).resolve() for anchor in anchors] == [own]
+        foreign = (tmp_path / "victim-linked").resolve()
+        assert all(foreign not in found for _common, found in listed), listed
+        assert all((tmp_path / "project-linked").resolve() in found for _common, found in listed), listed
+
+    def test_the_suppression_disclosure_reads_the_given_common_dir(self, tmp_path):
+        """`_legacy_suppression` tests the common dir the identity came from;
+        git is asked at the root only when no common dir was recorded."""
+        victim, project = self._layout(tmp_path)
+        assert memory_api._legacy_suppression(victim / "wt", project / ".git") == (None, None)
+        asked = []
+        real = memory_api.main_repo_common_dir
+
+        def spy(start=None):
+            asked.append(start)
+            return real(start)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(memory_api, "main_repo_common_dir", spy)
+            memory_api._legacy_suppression(victim / "wt", project / ".git")
+            assert asked == []
+            memory_api._legacy_suppression(victim / "wt")
+            assert asked == [str(victim / "wt")]

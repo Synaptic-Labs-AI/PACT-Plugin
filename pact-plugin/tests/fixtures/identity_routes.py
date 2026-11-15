@@ -270,9 +270,38 @@ def _stray_dotgit_without_repository(base: Path) -> Path:
     return target
 
 
+def _repository_with_worktree_at(project: Path, worktree: Path) -> Path:
+    """A repository whose `core.worktree` names `worktree`: git, asked in the
+    repository, answers `worktree` as its top level."""
+    target = make_repo(project, remote=OWN)
+    worktree.mkdir(parents=True, exist_ok=True)
+    run_git("config", "core.worktree", str(worktree), cwd=target)
+    return target
+
+
+def _worktree_inside_home_repository(base: Path) -> Path:
+    """`core.worktree` names a directory inside a pinned home repository
+    whose origin is the victim's."""
+    home = make_repo(base / "home", remote=VICTIM)
+    (home / ".git" / "pact-project-id").write_text("github.com/victim/home\n", encoding="utf-8")
+    return _repository_with_worktree_at(home / "projects" / "project", home / "area" / "wt")
+
+
+def _worktree_inside_another_repository(base: Path) -> Path:
+    """`core.worktree` names a directory inside the victim's repository."""
+    victim = _victim(base)
+    return _repository_with_worktree_at(base / "project", victim / "wt")
+
+
+def _worktree_outside_any_repository(base: Path) -> Path:
+    """`core.worktree` names a directory in no repository."""
+    return _repository_with_worktree_at(base / "project", base / "free" / "wt")
+
+
 # A shape whose `home` is set runs with HOME pointed at that directory.
 _home_linked_worktree.home = lambda target: target
 _home_main_checkout.home = lambda target: target.parent / "home"
+_worktree_inside_home_repository.home = lambda target: target.parent.parent
 for _stray in (
     _stray_empty_dotgit, _stray_hooks_only_dotgit, _stray_objectless_dotgit, _stray_dangling_dotgit,
 ):
@@ -311,6 +340,9 @@ _BUILDERS = {
     "home_stray_objectless_dotgit": _stray_objectless_dotgit,
     "home_stray_dangling_dotgit": _stray_dangling_dotgit,
     "stray_dotgit_without_repository": _stray_dotgit_without_repository,
+    "home_worktree_inside_home_repository": _worktree_inside_home_repository,
+    "worktree_inside_another_repository": _worktree_inside_another_repository,
+    "worktree_outside_any_repository": _worktree_outside_any_repository,
 }
 
 
