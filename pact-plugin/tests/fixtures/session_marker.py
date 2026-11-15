@@ -16,8 +16,10 @@ import contextlib
 import uuid
 from pathlib import Path
 
-# The directory memory_init composes the marker in. The ids built by callers use
-# only [0-9a-z-], which its slug sanitiser keeps, and stay under its 64-char cap.
+# The directory memory_init composes the marker in; tests/test_session_marker.py
+# pins that embedding_marker() equals memory_init's path. The ids built by
+# callers use only [0-9a-z-], which its slug sanitiser keeps, and stay under its
+# 64-char cap.
 _MARKER_DIR = Path("/tmp")
 
 # Every id importer_session_id has handed out in this process.

@@ -17,15 +17,14 @@ hooks: its entry point `randomly`, its module `pytest_randomly`, and that module
 imported again as `pytest_randomly.__init__`. The census reads the words pytest
 reads, in pytest's order: the value of the last `-o addopts=...` (or
 `--override-ini addopts=...`) before any bare `--`, then PYTEST_ADDOPTS, then
-the argv. Each `-p
-VALUE` (or `-pVALUE`, the value stripped of spaces) applies in turn, and a bare
-`--` does not end them: pytest reads every `-p` before it parses options.
-`-p no:NAME` blocks NAME, and `pytest_NAME` unless NAME starts with `pytest_`,
-and unloads either if it was loaded; `-p NAME` loads NAME when it is one of the
-three, whatever came before. So `-p no:randomly` blocks the entry
-point and the module but not `pytest_randomly.__init__`, and `-p
-no:pytest_randomly` leaves the entry point to load. Next the entry point loads
-unless it is blocked, PYTEST_DISABLE_PLUGIN_AUTOLOAD is non-empty, or
+the argv. Each `-p VALUE` (or `-pVALUE`, the value stripped of spaces) applies
+in turn, and a bare `--` does not end them: pytest reads every `-p` before it
+parses options. `-p no:NAME` blocks NAME, and `pytest_NAME` unless NAME starts
+with `pytest_`, and unloads either if it was loaded; `-p NAME` loads NAME when
+it is one of the three, whatever came before. So `-p no:randomly` blocks the
+entry point and the module but not `pytest_randomly.__init__`, and
+`-p no:pytest_randomly` leaves the entry point to load. Next the entry point
+loads unless it is blocked, PYTEST_DISABLE_PLUGIN_AUTOLOAD is non-empty, or
 `--disable-plugin-autoload` comes before any bare `--`. Last, each
 comma-separated name in PYTEST_PLUGINS loads when it is one of the three and
 not blocked, with autoload disabled or not. Other PYTEST_PLUGINS names are not
@@ -39,11 +38,11 @@ and so do the `env` wrapper's own options: `-i`, `--ignore-environment` and a
 bare `-` empty it, `-u NAME`, `-uNAME` and `--unset=NAME` remove a name, and its
 NAME=VALUE words set one. `sudo` starts from an empty environment unless it is
 given `-E` or `--preserve-env`, or `--preserve-env=NAMES` for those names.
-`pdm run --env NAME=VALUE` and micromamba's `-e NAME=VALUE` and `--env
-NAME=VALUE` (either tool also as `--env=NAME=VALUE`) set one. The shell builtin
-`exec -c` (alone or bundled, as in `-cl`) empties it. `micromamba run
---clean-env` and `pixi run --clean-env` empty it, except that micromamba keeps
-each name a bare `-e NAME` or `--env NAME` gives.
+`pdm run --env NAME=VALUE` and micromamba's `-e NAME=VALUE` and
+`--env NAME=VALUE` (either tool also as `--env=NAME=VALUE`) set one. The shell
+builtin `exec -c` (alone or bundled, as in `-cl`) empties it.
+`micromamba run --clean-env` and `pixi run --clean-env` empty it, except that
+micromamba keeps each name a bare `-e NAME` or `--env NAME` gives.
 
 THE CENSUS REFUSES THESE LAUNCH FAMILIES, AND ONLY THESE. A launch in one of
 them that does not block pytest-randomly is refused:
@@ -96,10 +95,11 @@ their options, option values and numeric arguments: `timeout`, `nice`, `nohup`,
 `uv run`, `uv tool run`, `uvx`, `poetry run`, `pipx run`, `pdm run`, `hatch run`
 (and its `ENV:` prefix, as in `hatch run test:pytest`), `conda run`,
 `micromamba run`, `pipenv run`, `rye run` and `pixi run` (and hatch's `+`/`-`
-matrix selectors). timeout follows its argv grammar, `timeout [OPTION]...
-DURATION COMMAND`: the one word after its options is the duration, however it is
-spelled (`.5`, `inf`, `1e1`, `0x5`), and the command after it is judged even
-when timeout would reject that word and run nothing (`timeout bogus pytest`).
+matrix selectors). timeout follows its argv grammar,
+`timeout [OPTION]... DURATION COMMAND`: the one word after its options is the
+duration, however it is spelled (`.5`, `inf`, `1e1`, `0x5`), and the command
+after it is judged even when timeout would reject that word and run nothing
+(`timeout bogus pytest`).
 A wrapper's first word matches by its basename, so a path to it counts as the
 bare name. Each wrapper's options that take a separate value are in _WRAPPERS,
 read from the tool's own `--help` (coreutils, GNU time, xvfb-run, uv 0.13.6,
@@ -188,13 +188,13 @@ Blind spots, examples of launches outside the census:
     the console script, a zipapp (`python pytest.pyz`), or a module other than
     `pytest` and `pytest.__main__` that starts a session (`python -m runpy`, a
     plugin's own entry point). The census judges a launch by its words, not by
-    what the named file does, nor by what an environment file sets (`uv run
-    --env-file`, `pdm run --env-file`).
+    what the named file does, nor by what an environment file sets
+    (`uv run --env-file`, `pdm run --env-file`).
 11. An interpreter not named above: `jython` (which cannot run current
     pytest), a custom-named or embedded interpreter, or one renamed on disk.
 12. Plugin loading the census does not read: a config file's `addopts` (the
-    child's own pytest.ini, pyproject.toml, tox.ini or setup.cfg; only an `-o
-    addopts=` override is read), an `-o addopts=` inside that value,
+    child's own pytest.ini, pyproject.toml, tox.ini or setup.cfg; only an
+    `-o addopts=` override is read), an `-o addopts=` inside that value,
     `pytest_plugins` in a conftest.py or test module, a plugin that imports
     pytest_randomly itself, and a pytest whose loading order differs from 9.2.
 """

@@ -126,7 +126,12 @@
 #                          constraints file low-risk rather than an audit.
 #     - pytest-randomly  : shuffled-order DIAGNOSTIC runs only. Installed with
 #                          the rest of the set, so ordered and shuffled runs
-#                          share one environment, and BLOCKED by
+#                          share one environment. That is the point: an
+#                          ordered and a seeded run then differ only in test
+#                          order, so the comparator attributes any delta
+#                          between them to order, never to a different
+#                          installed set, and verify_ci_environment.py holds
+#                          both runs to the same lock. It is BLOCKED by
 #                          `addopts = "-p no:randomly"` in the root
 #                          pyproject.toml. Only a workflow_dispatch with a
 #                          `shuffle_seed` loads it (`-p randomly` on the run
@@ -597,6 +602,12 @@ jobs:
       # from N when each process starts its session, and again when a process
       # shuffles the tests it collected (each xdist worker; the controller
       # collects none), so a seeded run's random draws also depend on N.
+      # The flag is there so the seed varies the order and not the reseeding:
+      # without it the plugin would also reseed before every test's setup,
+      # call and teardown, which an ordered run (plugin blocked) never does,
+      # so a shuffled-versus-ordered difference could come from that
+      # reseeding instead of from the order. Carried-over random state is a
+      # side effect, not the aim.
       - name: Run test suite
         working-directory: pact-plugin
         run: python -m pytest -ra -n 4 --dist "$DIST" ${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed} --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"

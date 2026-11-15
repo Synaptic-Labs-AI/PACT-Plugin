@@ -344,7 +344,6 @@ class TestFastWorkflowHygiene:
             "verify_ci_environment.py requires the pins' closure"
         )
 
-
     def test_checkout_uses_full_history(self):
         root = ci_contract.require_root("the fast checkout depth")
         steps = ci_contract.steps_of(

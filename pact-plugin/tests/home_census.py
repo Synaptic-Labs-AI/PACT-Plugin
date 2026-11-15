@@ -49,16 +49,17 @@ setup and teardown. A launch made while a wider-scoped (class, module, package
 or session) fixture sets up or tears down is never exempt, whichever test
 triggered it, so a shared fixture's verdict does not depend on test order. A
 marker without such a reason exempts nothing; the refusal line says the reason
-is missing. The census is installed,
-and told which test is running, by pact-plugin/tests/conftest.py, whose
-pytest_runtest_protocol pytest runs for every test of a session that loads it:
-there a marked test under pact-plugin/skills/ is exempt like any other. That
-conftest also registers a plugin that tells the census when a wider-scoped
-fixture sets up or tears down; as a plugin rather than a conftest hook it sees
-every fixture of the session, a session fixture and a skills/ module's fixture
-included. A session that does not load that conftest, such as a run of
-pact-plugin/skills/ tests alone, has no census installed: it judges no launch
-and prints no census line.
+is missing.
+
+The census is installed, and told which test is running, by
+pact-plugin/tests/conftest.py, whose pytest_runtest_protocol pytest runs for
+every test of a session that loads it: there a marked test under
+pact-plugin/skills/ is exempt like any other. That conftest also registers a
+plugin that tells the census when a wider-scoped fixture sets up or tears down;
+as a plugin rather than a conftest hook it sees every fixture of the session, a
+session fixture and a skills/ module's fixture included. A session that does not
+load that conftest, such as a run of pact-plugin/skills/ tests alone, has no
+census installed: it judges no launch and prints no census line.
 
 NOT SEEN, AND OUTSIDE THE CENSUS:
 - os.spawn* and os.exec*, and os.fork() followed by an exec: on POSIX the exec

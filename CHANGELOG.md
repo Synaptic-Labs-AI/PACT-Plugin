@@ -36,6 +36,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
 - The full-suite workflow takes an optional `shuffle_seed` dispatch input. A guard accepts only an empty value or a decimal seed of up to 9 digits with no leading zero, and refuses anything else before setup. A seeded run shuffles the suite and passes `--randomly-dont-reset-seed`, so pytest-randomly does not reseed the random generators before each test; it still seeds them when each process starts its session and again when it shuffles. The evidence artifact name ends in `ordered` or `seed-N`. Merge-queue and push runs pass no seed, so their pytest command is unchanged. On Linux the guard's test also checks non-ASCII digits under a locale it builds, and fails in CI if it cannot build it.
 - `scripts/compare_full_suite_results.py` reads each run's seed from the full-suite step's own pytest-randomly header and records it beside the run identity, outside the compared environment, so a shuffled run compared with an ordered one reports a real test difference as a delta. A seed or census line printed in a test's captured output is ignored. It refuses as evidence a log with two seed lines, a seed line beside the older unseeded run line, a seed that is not 1 to 10 ASCII digits, a log with no session banner after the run command, and the earlier seeded run line without `--randomly-dont-reset-seed`.
 - It reports a green run that a census failed as a census outcome naming the census, and a red run still records any census that failed it. It refuses a census failure beside exit status 0 or beside a status a census cannot produce, and a census block whose problem lines do not match its header's count. `comparison.json` and every `runs.jsonl` record move to schema_version 2.
+- The CI workflow's header now says why ordered and shuffled runs share one environment: they then differ only in test order, so the comparator attributes any difference between them to order, and the environment check holds both to the same lock.
 
 ### CI package lock
 
@@ -67,6 +68,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
 - The mint-matrix corpus and the Cat-2 name count read only git-tracked files, so an untracked file in a worktree cannot add rows or hide a dropped name. The fast suite still re-selects the mint matrix when a test module changes.
 - Tests whose memory saves reach the session embedding marker use a fresh session id each and remove that marker afterwards, so no fixed-id `/tmp` marker makes later runs or other workers skip the embedding catch-up. The session id other modules import is unique to each process, and the suite fails any test that leaves a marker under it; the session-init export test fails if it leaves its own.
 - The idle-preamble test rig requires a tmp path, so it never patches HOME to the shared `/tmp`. Two claim-gate tests that started their hook without HOME now pass the sandbox HOME, and two cache-binding helpers carry HOME from their caller.
+- A test pins that the suite's session-marker fixture names the same embedding-marker path memory_init writes.
 
 ### Fast-suite test selection
 
