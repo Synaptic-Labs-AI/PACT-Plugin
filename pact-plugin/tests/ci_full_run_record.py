@@ -73,10 +73,16 @@ WRITTEN EVEN WHEN THE SESSION FAILED. A record that exists only on success
 cannot evidence a failure. The write is atomic (temp + ``os.replace``) so the
 verifier never reads a partial JSON document.
 
-THE EXIT STATUS IS THE ONE THE PROCESS RETURNS. Other sessionfinish hooks (the
-child-pytest and clock-shift censuses, the CI environment binding) raise the
-session's status after pytest has passed the old one as the hook's argument,
-so the recorder's hook runs trylast and reads ``session.exitstatus``.
+THE EXIT STATUS IS THE ONE THE PROCESS RETURNS. pytest passes every
+sessionfinish hook the status as it stood before any of them ran, and other
+hooks raise the session's status inside their own sessionfinish: today the
+child-pytest and clock-shift censuses (through tests/conftest.py's hook), the
+HOME census (its Plugin, registered by pact-plugin/conftest.py) and the CI
+environment binding. So the recorder's hook runs trylast, after every other
+sessionfinish hook the suite registers, and reads ``session.exitstatus``.
+tests/test_ci_full_run_record.py checks that order, on the controller and on
+an xdist worker, for whatever sessionfinish hooks the suite registers, so a
+hook added later is checked without this list changing.
 """
 
 import datetime

@@ -1042,3 +1042,91 @@ def test_the_gitignore_lists_the_record_file():
     assert RECORD_NAME in lines, (
         f".gitignore has no line {RECORD_NAME!r}; a renamed record would be "
         f"committable")
+
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _plugin_file(plugin):
+    """The file a hook's plugin was loaded from: a module's own, or the module
+    that defines a plugin object's class."""
+    name = getattr(plugin, "__file__", None) or getattr(
+        sys.modules.get(type(plugin).__module__), "__file__", None)
+    return Path(name).resolve() if name else None
+
+
+def _sessionfinish_order_problems(config):
+    """Why the recorder would not read the final exit status in this process:
+    a sessionfinish hook of the suite's own (any plugin loaded from under
+    pact-plugin/) that pytest calls after the recorder, or a missing member of
+    the hooks known to raise the status today."""
+    manager = config.pluginmanager
+    recorder = manager.get_plugin("full-run-record")
+    if recorder is None:
+        return ["the full-run-record plugin is not registered"]
+    # pluggy calls a hook's implementations last-listed first; wrappers wrap
+    # the calls rather than taking a turn among them.
+    calls = [impl for impl in reversed(config.hook.pytest_sessionfinish.get_hookimpls())
+             if not (impl.hookwrapper or getattr(impl, "wrapper", False))]
+    last = [impl.plugin for impl in calls].index(recorder)
+    suite = {}
+    for position, impl in enumerate(calls):
+        where = _plugin_file(impl.plugin)
+        if impl.plugin is recorder or where is None or _PLUGIN_ROOT not in where.parents:
+            continue
+        suite[where.relative_to(_PLUGIN_ROOT).as_posix()] = position
+    problems = ["%s's sessionfinish runs after the recorder's" % name
+                for name, position in sorted(suite.items()) if position > last]
+    for member in ("tests/conftest.py", "tests/home_census.py",
+                   "tests/ci_environment_binding.py"):
+        if member not in suite:
+            problems.append("%s registers no sessionfinish hook in this process" % member)
+    return problems
+
+
+def test_the_recorder_reads_the_status_after_every_suite_sessionfinish_hook(request):
+    """In this process (an xdist worker under the suite's own -n runs, else the
+    only process), every sessionfinish hook loaded from under pact-plugin/ runs
+    before the recorder's, so the status the tests/conftest.py censuses, the
+    HOME census and the CI binding raise is the one it records."""
+    assert _sessionfinish_order_problems(request.config) == []
+
+
+_ORDER_PROBE = '''
+import json
+import os
+
+import pytest
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionstart(session):
+    import test_ci_full_run_record as pins
+    where = getattr(session.config, "workerinput", {}).get("workerid", "controller")
+    path = os.path.join(os.environ["PACT_ORDER_PROBE_DIR"], where + ".json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(pins._sessionfinish_order_problems(session.config), handle)
+'''
+
+
+def test_the_recorder_reads_the_status_last_on_the_controller_and_a_worker(tmp_path):
+    """A real `-n 1` session rooted at the plugin: on the controller and on its
+    worker, every suite sessionfinish hook runs before the recorder's."""
+    pytest.importorskip("xdist")
+    (tmp_path / "pact_order_probe.py").write_text(_ORDER_PROBE, encoding="utf-8")
+    results = tmp_path / "results"
+    results.mkdir()
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith(("PYTEST_XDIST_", "GITHUB_"))
+           and key not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    env["PACT_ORDER_PROBE_DIR"] = str(results)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
+         "-n", "1", "-p", "pact_order_probe", "tests/test_session_home_sandbox.py"],
+        cwd=_PLUGIN_ROOT, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    found = {path.stem: json.loads(path.read_text(encoding="utf-8"))
+             for path in results.glob("*.json")}
+    assert found == {"controller": [], "gw0": []}, (found, output)
