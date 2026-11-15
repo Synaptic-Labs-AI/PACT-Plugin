@@ -821,8 +821,8 @@ class TestWorktreeSetupVenvLinkReportPins:
 class TestRunReceiptAttribution:
     """The pact-agent-teams Step 0 run receipt separates three cases.
 
-    A moved HEAD is unattributable. A status change that an isolated copy of
-    the same commit reproduces was written by the run itself, so it is a
+    A moved HEAD is unattributable. A status change that an isolated copy holding
+    the staged change reproduces was written by the run itself, so it is a
     failure of the teammate's own change and must be fixed, never re-run away.
     A status change the copy does not reproduce is unattributable. Each arm
     is bound to the Step 0 receipt bullet, so the phrase cannot be satisfied
@@ -837,8 +837,10 @@ class TestRunReceiptAttribution:
     REQUIRED_PHRASES = (
         ("If `HEAD` differs, the worktree moved during the run: re-run it, or report that result as unattributable in `uncertainty`, never as a pass or a failure of your change.",
          "the moved-HEAD branch"),
-        ("If only the status differs, re-run the same command in an isolated copy of the same commit, such as a `git archive` export or a clone with its remote removed, and compare its files before and after.",
-         "the isolated-copy re-run"),
+        ("If only the status differs, re-run the same command with the same interpreter, by absolute path (for example the worktree's venv `python`), in an isolated copy that holds your staged change:",
+         "the isolated-copy re-run, with the same interpreter by absolute path"),
+        ("a clone of the repository with its remote removed, checked out at your `HEAD`, with your staged change applied by piping `git diff --cached --binary` from the worktree into `git apply --index` in the clone. Compare its status before and after.",
+         "the recipe that carries the staged change into the copy"),
         ("If the same paths appear there, the run itself wrote them: treat it as a failure of your change, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
          "the run-made change treated as a failure of the change"),
         ("Otherwise the worktree moved during the run: re-run it, or report that result as unattributable in `uncertainty`.",
@@ -859,4 +861,13 @@ class TestRunReceiptAttribution:
     def test_receipt_branch_present(self, phrase, lost):
         assert phrase in self._bullet(), (
             f"the {self.REL_PATH} Step 0 run-receipt bullet lost {lost} ({phrase!r})"
+        )
+
+    def test_receipt_names_no_archive_export(self):
+        # An archive export holds neither the staged change nor .git, so the
+        # run-made path may not reappear there; only a clone is named.
+        assert "git archive" not in self._bullet(), (
+            f"the {self.REL_PATH} Step 0 run-receipt bullet names a git archive "
+            "export again; the isolated copy must be a remote-less clone with "
+            "the staged change applied"
         )

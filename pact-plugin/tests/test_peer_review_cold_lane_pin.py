@@ -422,6 +422,9 @@ RETIRED_LANE_STEMS = (
     "release notes",
     "even when the list is empty",
     "a resume other than a same-round re-check",
+    # An archive export has no .git, so tests that need a checkout skip there
+    # and a run-made path may not reappear; the receipt names only a clone.
+    "git archive",
 )
 # Each validity list ends at its consequence clause.
 VALIDITY_ENDS = ("; otherwise",)
@@ -750,8 +753,8 @@ class TestOperationalFactsClause:
         ("untracked docs/", "the path-convention fact (untracked docs/ is normal)"),
         ("If HEAD differs, report that result as unattributable because the worktree moved, not as a finding about the diff", (
          "the moved-HEAD branch of the run receipt")),
-        ("If only the status differs, re-run the same command in an isolated copy of {head} under {scratch_dir}, such as a git archive export or a clone with its remote removed, and compare its files before and after", (
-         "the isolated-copy re-run that separates a run-made change from an outside one")),
+        ("If only the status differs, re-run the same command with the same interpreter, by absolute path, in an isolated copy under {scratch_dir}: a clone of the repository with its remote removed, checked out at {head}. Compare its status before and after", (
+         "the isolated-copy re-run: same interpreter by absolute path, a remote-less clone at {head}")),
         ("if the same paths appear there, the run itself wrote them, and they are a finding about the diff; otherwise report the result as unattributable because the worktree moved", (
          "the run-made change reported as a finding, and only an unreproduced change as unattributable")),
     ])
@@ -1319,6 +1322,8 @@ class TestOutsideSectionRules:
         ("pr", "takes the place of a teachback", "what stands in for the cold lane's teachback"),
         ("pr", "When a warm reviewer's findings need fixing", (
          "the warm scoping of reviewer-to-fixer reuse")),
+        ("pr", "Warm: faster than the initial review; cold: a full first-round review each round, plus a re-check when **Re-check** calls for one", (
+         "the Verify-Only duration row: the cold lane's full first round each round")),
         ("pr", "Warm: confirm each finding was addressed; cold: a first-round review, then one re-check by resume when that review is valid and earlier cold findings with no disposition remain, per **Re-check**", (
          "the Verify-Only depth row: a cold first round every round, then the conditional re-check")),
         ("pr", "Reuse the warm reviewer who found the issues; for the cold lane, dispatch a fresh cold subagent for the first-round review and resume that subagent for any re-check, per **Re-check**", (

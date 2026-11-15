@@ -62,7 +62,9 @@ FORMAT_ROW = (
     "plus the two warm report lines below | Full review with severity ratings |"
 )
 TABLE_END_ROW = (
-    "| **Duration** | Significantly faster than initial review | Full review cycle |"
+    "| **Duration** | Warm: faster than the initial review; cold: a full "
+    "first-round review each round, plus a re-check when **Re-check** calls "
+    "for one | Full review cycle |"
 )
 NEW_ISSUE_NOTE = "> **New issue verification**"
 
