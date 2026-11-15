@@ -6,6 +6,7 @@ Summary: Pins the child-pytest census: which launches it refuses and accepts,
 Used by: the suite; the census itself is tests/child_pytest_census.py, wired in
          tests/conftest.py.
 """
+import importlib.util
 import os
 import re
 import subprocess
@@ -251,6 +252,12 @@ def test_an_unusual_interpreter_launch_is_refused(argv):
     ["bash", "-c", "{ pytest; }"],
     ["bash", "-c", "if true; then pytest; fi"],
     ["bash", "-c", "for i in 1 2; do pytest; done"],
+    # A program that runs nothing stops the [mention] read for its own command only.
+    ["bash", "-c", "printf x; python -m pytest"],
+    ["bash", "-c", "cat f | python -m pytest"],
+    ["bash", "-c", "test -x f && python -m pytest"],
+    ["bash", "-c", "printf x; make check python -m pytest"],
+    ["bash", "-c", "cat f | make check python -m pytest"],
     # A redirection target is not a separator; the `;` after it is.
     ["bash", "-c", "echo start >log;pytest"],
     # A shell inside a shell.
@@ -445,6 +452,14 @@ def test_a_listed_shell_blind_spot_is_accepted(text):
     ["timeout", "bogus", "pytest", "-q"],
     # pytest's own arguments are no command, even one naming pytest.
     ["pytest", "-p", "no:randomly", "tests/pytest"],
+    # A program that prints, reads or lists its words runs none of them, nor
+    # an interpreter named among them.
+    ["printf", "%s\\n", "python", "-m", "pytest"],
+    ["echo", "python", "-m", "pytest"],
+    ["echo", "python3", "-mpytest.__main__"],
+    ["git", "grep", "python", "-m", "pytest"],
+    ["timeout", "5", "echo", "python", "-m", "pytest"],
+    ["bash", "-c", "printf '%s\\n' python -m pytest"],
     # A program that reads or lists its words runs none of them.
     ["grep", "-rn", "pytest", "."],
     ["rg", "-n", "pytest", "tests"],
@@ -509,7 +524,7 @@ _LAUNCHER_FORMS = [
     ["graalpy", "-m", "pytest"],
     ["pyston3", "-m", "pytest"],
     # Any word naming an interpreter is read for -m pytest, not only the first.
-    ["echo", "python3", "python", "-m", "pytest"],
+    ["make", "check", "python3", "python", "-m", "pytest"],
 ]
 
 
@@ -610,6 +625,8 @@ _WRAPPED = [
     ["hatch", "run", "-py=3.11", "+py=3.12", "python", "-m", "pytest"],
     ["conda", "-v", "run", "pytest"],
     ["pipx", "run", "pytest"],
+    # A package script may start pytest.
+    ["npm", "run", "pytest"],
     ["uvx", "pytest"],
     ["/home/u/.local/bin/uv", "run", "coverage", "run", "-m", "pytest"],
     ["timeout", "60", "python3", "-m", "coverage", "run", "--parallel-mode", "-m", "pytest"],
@@ -696,7 +713,8 @@ _FAMILY_ROWS = {
     "coverage": [["coverage", "run", "-m", "pytest"], ["coverage", "run", "/venv/bin/pytest"]],
     "module": [[PY, "-m", "pytest"], ["py", "-3", "-m", "pytest.__main__"],
                ["ipython", "-m", "pytest"], [PY, "-m", "coverage", "run", "-m", "pytest"]],
-    "mention": [["echo", "python", "-m", "pytest"], ["echo", "python3", "-mpytest.__main__"]],
+    "mention": [["make", "check", "python", "-m", "pytest"],
+                ["tox", "devenv", "python3", "-mpytest.__main__"]],
     "script": [[PY, "/venv/bin/pytest"], [PY, "-I", "/x/pytest/__main__.py"]],
     "wrapper": [["timeout", "60", "pytest"], ["uvx", "pytest@8.3.0"], ["sudo", "pytest", *_BLOCK]],
     "shell": [["bash", "-c", "cd x && pytest"], ["sh", "-ec", "python3 -m pytest"]],
@@ -722,6 +740,23 @@ def test_every_documented_family_has_a_refused_row_and_no_other_family_exists():
     (family, argv) for family, rows in sorted(_FAMILY_ROWS.items()) for argv in rows])
 def test_each_documented_family_is_refused(family, argv):
     assert census._miss(argv, None, {}) is not None, (family, argv)
+
+
+def test_the_lock_pins_the_versions_the_census_replays():
+    """The lock, not this interpreter, is the reference: CI installs it, and the
+    CI environment binding fails a CI run whose installed versions differ."""
+    root = Path(__file__).resolve().parents[2]
+    spec = importlib.util.spec_from_file_location(
+        "_census_verify_ci_environment", root / "scripts" / "verify_ci_environment.py")
+    verify = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(verify)
+    pins = verify.read_pins(root / "constraints-ci.txt")
+    pinned = {name: ".".join(pins[name].split(".")[:2]) for name in census.REPLAYED_VERSIONS}
+    assert pinned == census.REPLAYED_VERSIONS, (
+        f"constraints-ci.txt pins {pinned}, but the census replays the plugin loading of "
+        f"{census.REPLAYED_VERSIONS}. Re-run the rows of "
+        "test_each_route_pytest_loads_or_blocks_the_plugin_by against the pinned versions, "
+        "re-check _RANDOMLY_NAMES and the census docstring, then update REPLAYED_VERSIONS.")
 
 
 def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census_state):

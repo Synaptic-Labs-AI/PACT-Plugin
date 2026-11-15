@@ -55,9 +55,13 @@ refused whether or not it does:
   sys.executable. Its short and long options before `-m` are stepped over,
   including the values of `-W`, `-X` and `--check-hash-based-pycs`, and the
   launcher's `-3`, `-3.12` and `-V:3.12`.
-- [mention] Every word naming an interpreter anywhere in a command is read as
-  the [module] family, not only the first, so `echo python -m pytest` is
-  refused.
+- [mention] Every word naming an interpreter in a command, up to the first word
+  naming a program that runs none of its words (listed under [wrapper]), is
+  read as the [module] family, not only the first. So
+  `make check python -m pytest` is refused, while `echo python -m pytest`,
+  `printf '%s\\n' python -m pytest` and `git grep python -m pytest` are
+  mentions. The stop holds for one command only: `printf x; python -m pytest`
+  is still judged.
 - [script] The program is an interpreter that runs pytest's program or
   `__main__.py` as its script (`python /venv/bin/pytest`). Only the program
   position counts here: in `pip install python-dateutil pytest` or
@@ -75,9 +79,10 @@ refused whether or not it does:
   Its command is the first word after it that is not an option (a word starting
   with `-`), a NAME=VALUE word, a number or duration (`60`, `1.5m`, `inf`,
   `0x5`), a hatch matrix selector (`+py=3.12`, `-py=3.11`) or the verb `run`
-  or `tool` (`uv tool run pytest`,
-  `hatch -e test run pytest`). A word right after an option may be that
-  option's value, so the word after it is tried too (`sudo -u bob pytest`).
+  or `tool` (`uv tool run pytest`, `hatch -e test run pytest`, and
+  `npm run pytest`, whose package script may start pytest). A word right
+  after an option may be that option's value, so the word after it is tried
+  too (`sudo -u bob pytest`).
   The command is also tried as a shell whose -c text runs a family above, or
   runs such a program (`sudo bash -c 'timeout 5 pytest'`). When the command is
   one of the process wrappers and tool runners `env`, `nice`, `nohup`, `sudo`,
@@ -187,6 +192,10 @@ Blind spots, examples of launches outside the census:
     `-o addopts=` override is read), an `-o addopts=` inside that value,
     `pytest_plugins` in a conftest.py or test module, a plugin that imports
     pytest_randomly itself, and a pytest whose loading order differs from 9.2.
+    A lock that pins another pytest or pytest-randomly than REPLAYED_VERSIONS
+    fails test_the_lock_pins_the_versions_the_census_replays, and the CI
+    environment binding fails a CI run whose installed versions differ from
+    the lock, so this drift is left only to a local run on another pytest.
 13. A command a program runs from text the census reads as a plain word: sed's
     `e` command and awk's `system()` inside their script, a git alias
     (`git -c alias.t='!pytest' t`), and an option of a read or list program
@@ -198,6 +207,8 @@ import shlex
 import sys
 
 REMEDY = 'add "-p", "no:randomly" to the child argv'
+# The major.minor versions whose plugin loading the census replays.
+REPLAYED_VERSIONS = {"pytest": "9.2", "pytest-randomly": "5.1"}
 WRAPPER_REMEDY = ("launch pytest directly, as in sys.executable -m pytest -p no:randomly, "
                   "or teach the census this program")
 WORKEROUTPUT_KEY = "child_pytest_census_misses"
@@ -795,8 +806,11 @@ def _pytest_args(part, program):
     start = _launch(part, program)
     if start is not None:
         return start
-    # [mention]: every word naming an interpreter is read for its -m forms.
+    # [mention]: every word naming an interpreter is read for its -m forms, up to
+    # a program that runs none of its words, whose words after it are its own.
     for at, word in enumerate(part):
+        if _command_name(word) in _RUNS_NOTHING:
+            break
         if not _is_interpreter(word):
             continue
         module, after = _module(part, at + 1)
