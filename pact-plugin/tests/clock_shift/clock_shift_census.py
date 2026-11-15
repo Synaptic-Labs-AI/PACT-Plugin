@@ -37,7 +37,12 @@ A worker that crashes before its finish() hands over no misses and no child
 count. Its pid is still excluded from check 2, taken for every node, crashed or
 restarted, from the subprocess its execnet popen gateway holds (xdist's
 workerinfo carries no pid). A gateway that exposes no such subprocess gives no
-pid, and then that worker's own ledger lines would count as a child's.
+pid, and then that worker's own ledger lines would count as a child's. That path
+is execnet's private gateway._io.popen.pid, so
+tests/test_clock_shift_instrument.py's
+test_under_xdist_a_crashed_workers_ledger_line_is_not_a_childs pins it: a real
+xdist worker crashes under the locked xdist and execnet, and the arm fails if
+the path gives that worker no pid or a pid other than its own.
 
 Each problem line names its test from PYTEST_CURRENT_TEST at launch time. A test
 that deletes that variable, to reach a refusal it gates, prints as "<outside a

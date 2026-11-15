@@ -53,6 +53,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
 - Under xdist, each census worker hands its refusals to the controller, which fails the run, so a test that swallows a census error still fails it. The clock-shift census now works under xdist too: the controller judges "children loaded the shim" once for the whole run, ignoring the workers' own ledger lines and those of crashed or restarted workers.
 - The full-run record carries the exit status the process actually returns, so a run that a census or the environment check failed is recorded as failed. The censuses raise only a clean status to 1, so an interrupted, internal-error or usage-error run keeps its own status.
 - The HOME census's live test no longer depends on how long the interpreter's path is: it checks the refusal line against the census's own rendering of the launch, and a case runs the interpreter from a path over 200 characters long.
+- The clock-shift census docstring now names the crash arm that pins the private execnet path it reads a crashed worker's pid from (`gateway._io.popen.pid`): that arm runs a real crashed xdist worker and fails if the path gives no pid or another process's.
 
 ### Root conftest import charter
 
