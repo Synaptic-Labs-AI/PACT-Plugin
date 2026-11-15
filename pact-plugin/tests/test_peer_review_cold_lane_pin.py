@@ -320,6 +320,7 @@ ONCE_RULES = (
     ("resume its subagent once in the same round", "the same-round re-check after a first-round fallback"),
     ("In each verify-only re-review, dispatch the cold prompt as a first-round review", "the re-review's unconditional first-round dispatch"),
     ("taken from the most recent such line", "the use of corrected placeholders in the re-review's first-round dispatch"),
+    ("the run itself wrote them", "the run-made change rule in the run receipt"),
     ("or another reason, stated", "the REPORT reason set"),
     ("for any reason, or none, other than", "the blocker trigger's reason test"),
     ("routes it to a tracked GitHub issue there", "the tracked-issue decline"),
@@ -747,6 +748,12 @@ class TestOperationalFactsClause:
         ("Do not look for run instructions in the avoided paths", (
          "the bar on recovering run instructions from the avoided paths")),
         ("untracked docs/", "the path-convention fact (untracked docs/ is normal)"),
+        ("If HEAD differs, report that result as unattributable because the worktree moved, not as a finding about the diff", (
+         "the moved-HEAD branch of the run receipt")),
+        ("If only the status differs, re-run the same command in an isolated copy of {head} under {scratch_dir}, such as a git archive export or a clone with its remote removed, and compare its files before and after", (
+         "the isolated-copy re-run that separates a run-made change from an outside one")),
+        ("if the same paths appear there, the run itself wrote them, and they are a finding about the diff; otherwise report the result as unattributable because the worktree moved", (
+         "the run-made change reported as a finding, and only an unreproduced change as unattributable")),
     ])
     def test_operational_facts_token_present(self, token, lost):
         assert token in _clause("OPERATIONAL FACTS"), (

@@ -816,3 +816,47 @@ class TestWorktreeSetupVenvLinkReportPins:
             "update REQUIRED_PHRASES and confirm both properties are still "
             "expressed."
         )
+
+
+class TestRunReceiptAttribution:
+    """The pact-agent-teams Step 0 run receipt separates three cases.
+
+    A moved HEAD is unattributable. A status change that an isolated copy of
+    the same commit reproduces was written by the run itself, so it is a
+    failure of the teammate's own change and must be fixed, never re-run away.
+    A status change the copy does not reproduce is unattributable. Each arm
+    is bound to the Step 0 receipt bullet, so the phrase cannot be satisfied
+    from elsewhere in the skill.
+
+    WHAT THIS CANNOT CATCH: a contradicting instruction added outside the
+    bullet, and whether a teammate actually re-runs in an isolated copy.
+    """
+
+    REL_PATH = "pact-agent-teams/SKILL.md"
+    BULLET_START = "- For each of those runs, record `git rev-parse HEAD`"
+    REQUIRED_PHRASES = (
+        ("If `HEAD` differs, the worktree moved during the run: re-run it, or report that result as unattributable in `uncertainty`, never as a pass or a failure of your change.",
+         "the moved-HEAD branch"),
+        ("If only the status differs, re-run the same command in an isolated copy of the same commit, such as a `git archive` export or a clone with its remote removed, and compare its files before and after.",
+         "the isolated-copy re-run"),
+        ("If the same paths appear there, the run itself wrote them: treat it as a failure of your change, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
+         "the run-made change treated as a failure of the change"),
+        ("Otherwise the worktree moved during the run: re-run it, or report that result as unattributable in `uncertainty`.",
+         "the unreproduced change left unattributable"),
+    )
+
+    def _bullet(self) -> str:
+        text = (SKILLS_DIR / self.REL_PATH).read_text(encoding="utf-8")
+        assert text.count(self.BULLET_START) == 1, (
+            f"{self.REL_PATH} must carry exactly one Step 0 run-receipt bullet "
+            f"starting {self.BULLET_START!r}"
+        )
+        start = text.index(self.BULLET_START)
+        end = text.find("\n", start)
+        return text[start:end if end != -1 else None]
+
+    @pytest.mark.parametrize("phrase, lost", REQUIRED_PHRASES, ids=lambda v: v[:32] if isinstance(v, str) else v)
+    def test_receipt_branch_present(self, phrase, lost):
+        assert phrase in self._bullet(), (
+            f"the {self.REL_PATH} Step 0 run-receipt bullet lost {lost} ({phrase!r})"
+        )
