@@ -858,19 +858,22 @@ def _return_kind(function, defined: "dict | None" = None, seen: frozenset = froz
 
 
 # Every form the layout walk does not read, on the tree as it is, with how
-# many times it occurs and why it is not a predicate reached another way.
-# Measured by `_layout_predicate_forms`; a new or changed form fails the
-# census arm.
+# many times it occurs and what the code at the site is: the project_identity
+# function it calls (or the module-level name it reaches), with its return
+# annotation, and the annotation of the function the site is in.
+# `test_each_named_layout_reason_states_the_code_at_its_site` derives those
+# from the source and requires each reason to carry them; a new or changed
+# form fails the census arm.
 NAMED_LAYOUT_FORMS = {
-    ('_gitfile_points_at_foreign_gitdir', 'binds', 'target = _marker_target(root)'): (1, "the marker's resolved target and its directory; read as a tuple, not returned"),
-    ('_marker_names_external_git_dir', 'binds', 'target = _marker_target(root)'): (1, "the marker's resolved target and its directory; read as a tuple, not returned"),
-    ('_marker_names_external_git_dir', 'returns', 'not _submodule_admin_dir(git_dir)'): (1, "returns the negation of a predicate's result; the negated predicate is walked and classified"),
-    ('_marker_target', 'binds', 'marker = find_git_marker(root)'): (1, 'the marker path the walk read; tested with is_symlink/is_dir/is_file, not returned'),
-    ('_resolved_git_dir', 'binds', 'raw = git_dir_answer(asked_root)'): (1, "git's --git-dir answer as a string; resolved to a path before it is returned"),
-    ('_submodule_checkout', 'binds', 'git_dir = _resolved_git_dir(asked)'): (1, 'the resolved git dir; compared with the common dir, not returned as is'),
-    ('find_git_marker', 'binds', 'ceilings = _git_ceiling_directories()'): (1, 'the ceiling set; tested for membership, not returned'),
-    ('find_git_marker', 'binds', "cross_filesystem = _git_env_bool('GIT_DISCOVERY_ACROSS_FILESYSTEM')"): (1, 'a bool flag that decides whether the walk crosses a device; read once, not returned'),
-    ('git_dir_answer', 'calls', 'DETECTION_GIT_DIRS.get'): (1, "a method on this module's detection memo, a module-level ContextVar; it returns the memoised answers or None"),
+    ('_gitfile_points_at_foreign_gitdir', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_gitfile_points_at_foreign_gitdir` (-> bool)"),
+    ('_marker_names_external_git_dir', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_marker_names_external_git_dir` (-> bool)"),
+    ('_marker_names_external_git_dir', 'returns', 'not _submodule_admin_dir(git_dir)'): (1, "returns `not` applied to a call to `_submodule_admin_dir` (-> bool) in `_marker_names_external_git_dir` (-> bool)"),
+    ('_marker_target', 'binds', 'marker = find_git_marker(root)'): (1, "assigns a call to `find_git_marker` (-> Optional[Path]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
+    ('_resolved_git_dir', 'binds', 'raw = git_dir_answer(asked_root)'): (1, "assigns a call to `git_dir_answer` (-> Optional[str]) to a local in `_resolved_git_dir` (-> Optional[Path])"),
+    ('_submodule_checkout', 'binds', 'git_dir = _resolved_git_dir(asked)'): (1, "assigns a call to `_resolved_git_dir` (-> Optional[Path]) to a local in `_submodule_checkout` (-> bool)"),
+    ('find_git_marker', 'binds', 'ceilings = _git_ceiling_directories()'): (1, "assigns a call to `_git_ceiling_directories` (-> set) to a local in `find_git_marker` (-> Optional[Path])"),
+    ('find_git_marker', 'binds', "cross_filesystem = _git_env_bool('GIT_DISCOVERY_ACROSS_FILESYSTEM')"): (1, "assigns a call to `_git_env_bool` (-> bool) to a local in `find_git_marker` (-> Optional[Path])"),
+    ('git_dir_answer', 'calls', 'DETECTION_GIT_DIRS.get'): (1, "calls a method on `DETECTION_GIT_DIRS`, a module-level assignment of a `contextvars.ContextVar(...)` call, in `git_dir_answer` (-> Optional[str])"),
 }
 
 
@@ -890,7 +893,8 @@ def _layout_predicate_forms() -> tuple:
     called value that is not a name or a method (a subscript, a call's
     result), which the walk cannot resolve; every local binding of a
     project_identity call's result in any form (assignment, annotated or
-    augmented assignment, walrus, a `for` or `with` target), which also
+    augmented assignment, walrus, a `for` or `with` target, a `match`
+    capture), which also
     covers the methods later called on it; a return that carries such a result inside another
     expression (`or`, `not`, a ternary); a project_identity function used as
     a value; and an annotation `_return_kind` cannot classify. The census arm
@@ -942,7 +946,10 @@ def _layout_predicate_forms() -> tuple:
         local_names = {
             node.id for node in ast.walk(function)
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
-        } | {argument.arg for argument in ast.walk(function) if isinstance(argument, ast.arg)}
+        } | {argument.arg for argument in ast.walk(function) if isinstance(argument, ast.arg)} | {
+            node.name for node in ast.walk(function)
+            if isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name
+        } | {node.rest for node in ast.walk(function) if isinstance(node, ast.MatchMapping) and node.rest}
         for node in ast.walk(function):
             if isinstance(node, ast.Name) and node.id in defined and id(node) not in called:
                 unresolved[(name, "uses as a value", node.id)] += 1
@@ -974,6 +981,15 @@ def _layout_predicate_forms() -> tuple:
                 for item in node.items:
                     if project_call(item.context_expr):
                         unresolved[(name, "binds", ast.unparse(item))] += 1
+            if isinstance(node, ast.Match) and project_call(node.subject):
+                for case in node.cases:
+                    if any(
+                        (isinstance(part, (ast.MatchAs, ast.MatchStar)) and part.name)
+                        or (isinstance(part, ast.MatchMapping) and part.rest)
+                        for part in ast.walk(case.pattern)
+                    ):
+                        form = f"match {ast.unparse(node.subject)}: case {ast.unparse(case.pattern)}"
+                        unresolved[(name, "binds", form)] += 1
             if (
                 isinstance(node, ast.Return) and node.value is not None
                 and project_call(node.value)
@@ -1226,6 +1242,42 @@ class TestTheDocumentedGitCallFloor:
             if key[0] not in NOT_A_FLOOR_LAYOUT and not reached.get(key)
         )
         assert unreached == [], f"a layout outcome no own layout reaches: {unreached}"
+
+    def test_each_named_layout_reason_states_the_code_at_its_site(self):
+        """Each NAMED_LAYOUT_FORMS reason carries, derived from the source:
+        the function the site is in with its return annotation, and either
+        every project_identity function its form calls with that function's
+        return annotation, or, for a call through a module-level name, that
+        name and the call its module-level assignment makes."""
+        import re
+
+        tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
+        defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+        assigned = {}
+        for node in tree.body:
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target] if isinstance(node, ast.AnnAssign) else []
+            for target in targets:
+                if isinstance(target, ast.Name) and isinstance(getattr(node, "value", None), ast.Call):
+                    assigned[target.id] = ast.unparse(node.value.func)
+
+        def annotated(name):
+            returns = defs[name].returns
+            return f"`{name}` (-> {ast.unparse(returns) if returns else None})"
+
+        missing = {}
+        for (function, kind, form), (_count, reason) in NAMED_LAYOUT_FORMS.items():
+            expected = [annotated(function)]
+            called = [name for name in re.findall(r"\b(\w+)\(", form) if name in defs]
+            if called:
+                expected += [annotated(name) for name in called]
+            else:
+                root = form.split(".")[0]
+                assert root in assigned, (function, kind, form)
+                expected.append(f"`{root}`, a module-level assignment of a `{assigned[root]}(...)` call")
+            absent = [fragment for fragment in expected if fragment not in reason]
+            if absent:
+                missing[(function, kind, form)] = absent
+        assert missing == {}, f"a named reason that does not state the code at its site: {missing}"
 
 
 # --- the git-call floor with an override pin --------------------------------
