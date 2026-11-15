@@ -853,3 +853,70 @@ def test_a_change_to_the_census_or_conftest_selects_this_module_in_the_fast_suit
         sys.modules.pop(spec.name, None)
     assert (status, changed_paths) == ("ok", [changed])
     assert "tests/test_home_census.py" in selection.included, selection
+
+
+_GATED_RIG_TESTS = '''
+import os
+import subprocess
+import sys
+
+import pytest
+
+
+@pytest.mark.skipif(os.environ.get("HOME_CENSUS_RIG_GATE") != "run",
+                    reason="rig: runs only where its gate is open")
+def test_gated_launch_without_home():
+    subprocess.run([sys.executable, "-c",
+                    "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()",
+                    os.environ["HOME_CENSUS_RIG_MARKER"]],
+                   env={"PATH": os.defpath})
+
+
+def test_plain():
+    pass
+'''
+
+
+@pytest.mark.parametrize("gate", ["closed", "run"])
+def test_a_gated_test_is_judged_where_it_runs_and_stopped_before_its_child(tmp_path, gate):
+    """A test that does not run in one session is judged in a session where it
+    does run, by the census that session's tests/conftest.py installs, and its
+    refused launch never starts the child. Closed gate: skipped, no refusal.
+    Open gate: refused, the run fails, and the child's marker is never made."""
+    (tmp_path / "conftest.py").write_text(
+        _RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
+    (tmp_path / "test_gated.py").write_text(_GATED_RIG_TESTS, encoding="utf-8")
+    marker = tmp_path / "child-started"
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env.update(HOME_CENSUS_RIG_GATE=gate, HOME_CENSUS_RIG_MARKER=str(marker))
+    proc = subprocess.run(
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly", "test_gated.py"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    assert not marker.exists(), "the child started: " + output
+    if gate == "closed":
+        assert "1 passed, 1 skipped" in output, output
+        assert proc.returncode == 0, output
+        assert "started without HOME" not in output, output
+    else:
+        assert proc.returncode == 1, output
+        assert "HOME CENSUS: 1 child(ren) started without HOME" in output, output
+        assert "test_gated_launch_without_home" in output, output
+
+
+def _not_seen_item(start):
+    """The NOT SEEN bullet of the census docstring that begins with `start`,
+    with its wrapped lines joined."""
+    section = census.__doc__.split("NOT SEEN, AND OUTSIDE THE CENSUS:", 1)[1]
+    items = [" ".join(item.split()) for item in section.split("\n- ")]
+    return next(item for item in items if item.startswith(start))
+
+
+def test_the_docstring_says_a_test_that_does_not_run_is_judged_where_it_runs():
+    item = _not_seen_item("a test that does not run")
+    assert ("Such a test is judged on the machine where it does run, in any session "
+            "that loads pact-plugin/tests/conftest.py") in item, item
+    assert ("a launch it makes there that the census refuses is stopped before the "
+            "child starts.") in item, item
+    assert " not judged" not in item and " never " not in item, item

@@ -68,7 +68,10 @@ NOT SEEN, AND OUTSIDE THE CENSUS:
   or a C extension.
 - a grandchild that a child process starts, since the census is installed only
   in the suite's own processes.
-- a test that does not run: skipped, deselected or not collected.
+- a test that does not run: skipped, deselected or not collected. Such a test
+  is judged on the machine where it does run, in any session that loads
+  pact-plugin/tests/conftest.py, and a launch it makes there that the census
+  refuses is stopped before the child starts.
 - the C-level process environment: the census judges an inherited launch by
   os.environ, not by the C-level process environment, so changes made with
   os.putenv/os.unsetenv, or a replaced os.environ, are not seen as such.
