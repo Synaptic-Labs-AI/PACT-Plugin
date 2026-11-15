@@ -56,7 +56,8 @@ refused whether or not it does:
   the Windows launcher `py` or `pyw`, any of these with `.exe`, or
   sys.executable. Its short and long options before `-m` are stepped over,
   including the values of `-W`, `-X` and `--check-hash-based-pycs`, and the
-  launcher's `-3`, `-3.12` and `-V:3.12`.
+  launcher's `-3`, `-3.12`, `-3.12-arm64` and `-V:<tag>` (`-V:3.12`,
+  `-V:Anaconda3/3.12`), each read as one option whose letters are not options.
 - [mention] Every word naming an interpreter in a command is read as the
   [module] family, not only the first, up to the word in program position when
   that word names a program that runs none of its words (listed under
@@ -270,6 +271,9 @@ _PYTEST_MODULES = frozenset({"pytest", "pytest.__main__"})
 # The Windows launcher's names; any basename starting with python or pypy is an
 # interpreter too.
 _LAUNCHERS = frozenset({"py", "pyw"})
+# The Windows launcher's version option, with an optional architecture
+# (`-3`, `-3.12`, `-3.12-64`, `-3.12-arm64`); no CPython option starts with a digit.
+_LAUNCHER_VERSION = re.compile(r"-[0-9][0-9.]*(?:-[A-Za-z0-9]+)?\Z")
 # An interpreter's name, after _command_name: one of these, optionally with a
 # version and one letter (python3, python3.12t, pythonw, pypy3.10, graalpy-24.1).
 _INTERPRETER = re.compile(r"(?:python|pypy|ipython|graalpy|pyston)(?:-?[0-9]+(?:\.[0-9]+)*)?[a-z]?\Z")
@@ -831,6 +835,9 @@ def _module(words, i):
             continue
         if not word.startswith("-") or word in ("-", "--"):
             return None, i  # a script, stdin, or the end of options
+        if word.startswith("-V:") or _LAUNCHER_VERSION.match(word):
+            i += 1  # the launcher's `-V:<tag>` or `-3.12-arm64`, whose letters are no options
+            continue
         letters = word[1:]
         for at, letter in enumerate(letters):
             if letter == "c":
