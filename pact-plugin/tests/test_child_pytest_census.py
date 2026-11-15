@@ -433,6 +433,15 @@ def test_a_wrapper_named_by_a_path_is_stepped_over(argv):
     "builtin command pytest -q",
     "coproc pytest -q",
     "coproc P { pytest -q; }",
+    # exec -a takes the next word only when the first `a` ends the option.
+    "exec -aa pytest -q",
+    "exec -a name pytest -q",
+    "exec -aname pytest -q",
+    # `((` and `$((` whose inner paren closes on anything but `)` are subshells.
+    "((pytest -q) )",
+    "((pytest -q); )",
+    "((pytest -q)|cat)",
+    "echo $((pytest -q) )",
 ])
 def test_shell_text_that_runs_an_unblocked_pytest_is_refused(text):
     assert census._miss(["bash", "-c", text], None, {}) is not None, text
@@ -442,6 +451,7 @@ def test_shell_text_that_is_a_syntax_error_is_still_judged():
     # bash rejects this text and starts nothing; the census refuses it, as its
     # docstring says.
     assert census._miss(["bash", "-c", "echo \\$(pytest -q)"], None, {}) is not None
+    assert census._miss(["bash", "-c", "((pytest -q)\n)"], None, {}) is not None
 
 
 def test_another_shells_text_is_read_by_bash_rules():
@@ -490,6 +500,12 @@ def test_a_function_body_is_judged_where_it_is_defined():
     "command -v pytest",
     "command -V pytest",
     "command -pv pytest",
+    "exec -ca name pytest -p no:randomly",
+    # Arithmetic whose inner parens close early is still arithmetic.
+    "((pytest = 1))",
+    "(( (pytest) + (1) ))",
+    "echo $(( (pytest) + (1) ))",
+    "echo $((1+(pytest*3)))",
 ])
 def test_shell_text_that_runs_no_unblocked_pytest_is_accepted(text):
     assert census._miss(["bash", "-c", text], None, {}) is None, text
@@ -501,7 +517,6 @@ def test_shell_text_that_runs_no_unblocked_pytest_is_accepted(text):
     "$(echo pytest) -q",
     "echo $(( $(pytest -q) ))",
     "echo $(case x in x) pytest -q;; esac)",
-    "echo $((pytest -q) )",
 ])
 def test_a_listed_shell_blind_spot_is_accepted(text):
     assert census._miss(["bash", "-c", text], None, {}) is None, text
@@ -735,8 +750,8 @@ def test_an_option_value_named_like_an_interpreter_makes_no_launch_pytest(argv):
      ["uv", "run", "-v", "python", "/venv/bin/pytest"]),
     (["uv", "run", "--frozen", "ls", "-l", "python", "/venv/bin/pytest"],
      ["uv", "run", "--frozen", "python", "/venv/bin/pytest"]),
-    (["timeout", "-v", "echo", "python", "/venv/bin/pytest"],
-     ["timeout", "-v", "python", "/venv/bin/pytest"]),
+    (["timeout", "-v", "60", "echo", "python", "/venv/bin/pytest"],
+     ["timeout", "-v", "60", "python", "/venv/bin/pytest"]),
     (["uv", "run", "-v", "python3", "python", "/venv/bin/pytest"],
      ["uv", "run", "--made-up-option", "python3", "python", "/venv/bin/pytest"]),
     (["uv", "run", "--made-up-option", "echo", "python", "/venv/bin/pytest"],
@@ -935,7 +950,10 @@ _KNOWN_FLAG_WRAPPERS = {
 @pytest.mark.parametrize("wrapper, flag", [
     (wrapper, flag) for wrapper, flags in _KNOWN_FLAG_WRAPPERS.items() for flag in flags])
 def test_a_known_flag_takes_no_value(wrapper, flag):
-    accepted = [*wrapper.split(), flag, "python3", "python", "/venv/bin/pytest"]
+    # timeout's DURATION follows its options, so a flag that wrongly took a value
+    # would take the duration and make python3 the duration instead.
+    duration = ["60"] if wrapper == "timeout" else []
+    accepted = [*wrapper.split(), flag, *duration, "python3", "python", "/venv/bin/pytest"]
     assert census._miss(accepted, None, {}) is None, accepted
     refused_twin = [*wrapper.split(), "--made-up-option", "python3", "python", "/venv/bin/pytest"]
     assert census._miss(refused_twin, None, {}) is not None, refused_twin
@@ -1175,3 +1193,22 @@ def test_under_xdist_a_blocked_child_passes_the_run(tmp_path):
     assert "2 passed" in output, output
     assert rc == 0, output
     assert "CHILD PYTEST CENSUS" not in output, output
+
+
+# timeout's one DURATION word, in every spelling coreutils 9.4 runs its command
+# after, is stepped over.
+@pytest.mark.parametrize("duration", [
+    "60", ".5", "5.", "inf", "INF", "infinity", "1e1", "1E1", "0x5", "0X5", "0x1p3", "0x.8",
+    "2s", "1m", "0.01h", "1e-2d", "+5",
+])
+def test_each_timeout_duration_is_stepped_over(duration):
+    assert census._miss(["timeout", duration, "pytest", "-q"], None, {}) is not None
+    assert census._miss(["timeout", duration, "pytest", "-p", "no:randomly"], None, {}) is None
+
+
+def test_timeout_judges_the_command_after_any_duration_word():
+    # timeout rejects `bogus` and runs nothing, but the census judges the command
+    # after it anyway, as its docstring says.
+    assert census._miss(["timeout", "bogus", "pytest", "-q"], None, {}) is not None
+    # With no duration given, `pytest` is the duration and nothing runs.
+    assert census._miss(["timeout", "pytest", "-q"], None, {}) is None

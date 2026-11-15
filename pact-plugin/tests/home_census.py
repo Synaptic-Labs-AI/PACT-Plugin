@@ -43,10 +43,13 @@ One launch can raise both events (a Popen that starts its child through
 posix_spawn), so N counts events, not children.
 
 THE ONE EXEMPTION: `@pytest.mark.child_env_without_home(reason="...")` on a
-test, its class or its module, with a non-empty string reason, exempts every
-launch made while that test runs: its setup, call and teardown, including a
-launch a shared fixture makes then. A marker without such a reason exempts
-nothing; the refusal line says the reason is missing. The census is installed,
+test, its class or its module, with a non-empty string reason, exempts the
+launches made by that test's own call and by its function-scoped fixtures'
+setup and teardown. A launch made while a wider-scoped (class, module, package
+or session) fixture sets up or tears down is never exempt, whichever test
+triggered it, so a shared fixture's verdict does not depend on test order. A
+marker without such a reason exempts nothing; the refusal line says the reason
+is missing. The census is installed,
 and told which test is running, by pact-plugin/tests/conftest.py, whose
 pytest_runtest_protocol pytest runs for every test of a session that loads it:
 there a marked test under pact-plugin/skills/ is exempt like any other. A session
@@ -78,7 +81,7 @@ WORKEROUTPUT_KEY = "home_census_refusals"
 WORKEROUTPUT_COUNT_KEY = "home_census_launches_checked"
 
 _state = {"installed": False, "misses": [], "forwarded": [], "exempt": None,
-          "unreasoned": False, "checked": 0, "forwarded_checked": 0}
+          "unreasoned": False, "checked": 0, "forwarded_checked": 0, "shared": 0}
 
 
 class HomeCensusError(RuntimeError):
@@ -113,6 +116,16 @@ def leave():
     _state["unreasoned"] = False
 
 
+def shared_fixture_begins():
+    """A wider-scoped fixture starts setting up or tearing down."""
+    _state["shared"] += 1
+
+
+def shared_fixture_ends():
+    """That fixture's setup or teardown is over."""
+    _state["shared"] = max(0, _state["shared"] - 1)
+
+
 def _has_home(env):
     # The keys, as the launch reads them: a dict may hold bytes keys, and
     # os.environ refuses a bytes key test.
@@ -126,7 +139,7 @@ def _audit(event, args):
         argv, env = args[1], args[2]
     else:
         return
-    if _state["exempt"] is not None:
+    if _state["exempt"] is not None and not _state["shared"]:
         return
     _state["checked"] += 1
     try:
@@ -142,7 +155,9 @@ def _audit(event, args):
     if lacking is None:
         return
     unreasoned = (" (its %s marker has no reason, so it exempts nothing)" % MARKER
-                  if _state["unreasoned"] else "")
+                  if _state["unreasoned"] else
+                  " (in a wider-scoped fixture, which its %s marker does not cover)" % MARKER
+                  if _state["exempt"] is not None else "")
     line = "%s: child [%s] %s%s; %s" % (_current_test(), _shown(argv), lacking, unreasoned,
                                          REMEDY)
     _record(line)

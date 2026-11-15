@@ -467,6 +467,7 @@ _suite = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_suite)
 pytest_configure = _suite.pytest_configure
 pytest_runtest_protocol = _suite.pytest_runtest_protocol
+pytest_fixture_setup = _suite.pytest_fixture_setup
 pytest_testnodedown = _suite.pytest_testnodedown
 pytest_sessionfinish = _suite.pytest_sessionfinish
 '''
@@ -567,6 +568,81 @@ def test_the_marker_exempts_a_skills_test_in_a_session_that_loads_the_conftest(t
     assert proc.returncode == 1, output
     assert "HOME CENSUS: 1 child(ren) started without HOME" in output, output
     assert "test_unmarked_in_skills" in output and "test_marked_in_skills" not in output, output
+
+
+_SCOPE_RIG_TESTS = '''
+import os
+import subprocess
+
+import pytest
+
+
+def _launch(where):
+    try:
+        subprocess.run(["true"], env={"PATH": os.defpath})
+        outcome = "ran"
+    except Exception:
+        outcome = "refused"
+    with open(os.environ["HOME_CENSUS_SCOPE_LOG"], "a", encoding="utf-8") as log:
+        log.write("%s: %s\\n" % (where, outcome))
+
+
+@pytest.fixture(scope="module")
+def shared():
+    _launch("module setup")
+    yield
+    _launch("module teardown")
+
+
+@pytest.fixture
+def per_test():
+    _launch("function setup")
+    yield
+    _launch("function teardown")
+
+
+@pytest.mark.child_env_without_home(reason="rig: a marked test that triggers a module fixture")
+def test_marked(shared, per_test):
+    _launch("call")
+'''
+
+
+_SCOPE_RIG_AFTER = '''
+from test_scope import _launch
+
+import pytest
+
+
+@pytest.mark.child_env_without_home(reason="rig: a marked test after the module fixture")
+def test_marked_after():
+    _launch("later call")
+'''
+
+
+def test_the_marker_never_covers_a_wider_scoped_fixture(tmp_path):
+    """A module-scoped fixture first triggered by a marked test is refused in its
+    setup and in its teardown, while the marked test's call and its
+    function-scoped fixture stay exempt, and a marked test in the next module is
+    exempt again once that fixture is torn down."""
+    (tmp_path / "conftest.py").write_text(
+        _RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
+    (tmp_path / "test_scope.py").write_text(_SCOPE_RIG_TESTS, encoding="utf-8")
+    (tmp_path / "test_scope_after.py").write_text(_SCOPE_RIG_AFTER, encoding="utf-8")
+    log = tmp_path / "launches.log"
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env["HOME_CENSUS_SCOPE_LOG"] = str(log)
+    proc = subprocess.run(
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
+         "test_scope.py", "test_scope_after.py"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "module setup: refused", "function setup: ran", "call: ran",
+        "function teardown: ran", "module teardown: refused", "later call: ran"], output
+    assert "HOME CENSUS: 2 child(ren) started without HOME" in output, output
+    assert "in a wider-scoped fixture" in output, output
+    assert proc.returncode == 1, output
 
 
 def _real_session(*paths, plugin_dir=None, marker=None):

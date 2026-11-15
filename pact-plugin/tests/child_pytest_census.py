@@ -5,8 +5,9 @@ Used by: tests/conftest.py, whose pytest_configure installs it, whose
          pytest_testnodedown collects each xdist worker's misses, and whose
          pytest_sessionfinish reports; tests/test_child_pytest_census.py.
 
-pytest-randomly is installed in every environment and blocked by the root
-pyproject.toml addopts. A child session rooted outside the repo does not read
+pytest-randomly is installed in CI, where constraints-ci.txt pins it, and may be
+installed anywhere else (the shared local .venv lacks it); the root
+pyproject.toml addopts blocks it. A child session rooted outside the repo does not read
 that config, so it would shuffle. Every pytest child must therefore block the
 plugin itself; none may load it. The repo config is not consulted.
 
@@ -95,13 +96,17 @@ their options, option values and numeric arguments: `timeout`, `nice`, `nohup`,
 `uv run`, `uv tool run`, `uvx`, `poetry run`, `pipx run`, `pdm run`, `hatch run`
 (and its `ENV:` prefix, as in `hatch run test:pytest`), `conda run`,
 `micromamba run`, `pipenv run`, `rye run` and `pixi run` (and hatch's `+`/`-`
-matrix selectors). A wrapper's first word matches by its basename, so a path to
-it counts as the bare name. Each wrapper's options that take a separate value
-are in _WRAPPERS, read from the tool's own `--help` (coreutils, GNU time,
-xvfb-run, uv 0.13.6, pipx, pdm, hatch, pipenv, poetry), bash's `help exec` for
-the `exec` builtin, sudo's manual page, micromamba's source (`micromamba run`
-and its prefix options), and the current online documentation of `conda run`,
-`rye run` and `pixi run`.
+matrix selectors). timeout follows its argv grammar, `timeout [OPTION]...
+DURATION COMMAND`: the one word after its options is the duration, however it is
+spelled (`.5`, `inf`, `1e1`, `0x5`), and the command after it is judged even
+when timeout would reject that word and run nothing (`timeout bogus pytest`).
+A wrapper's first word matches by its basename, so a path to it counts as the
+bare name. Each wrapper's options that take a separate value are in _WRAPPERS,
+read from the tool's own `--help` (coreutils, GNU time, xvfb-run, uv 0.13.6,
+pipx, pdm, hatch, pipenv, poetry), bash's `help exec` for the `exec` builtin,
+sudo's manual page, micromamba's source (`micromamba run` and its prefix
+options), and the current online documentation of `conda run`, `rye run` and
+`pixi run`.
 
 A shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) run with `-c` (alone, or bundled as
 in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
@@ -124,7 +129,10 @@ The text is read as bash reads it:
   judged.
 - The command text of a command substitution (`$( )` or backticks, also inside
   double quotes) and of a process substitution (`<( )` or `>( )`) is judged as
-  its own shell text. Arithmetic (`$(( ))` and `(( ))`) runs no command.
+  its own shell text. Arithmetic (`$(( ))` and `(( ))`) runs no command. As in
+  bash, `((` and `$((` open arithmetic only when the paren they open closes on
+  `))`; `((cmd) )` is two subshells and `$((cmd) )` a command substitution of a
+  subshell, both judged.
 - A shell command inside a shell command is opened the same way. Shells and
   substitutions together are opened up to four levels deep.
 - Every shell's `-c` text (`sh`, `dash`, `zsh`, `ksh`) is read by these bash
@@ -174,9 +182,7 @@ Blind spots, examples of launches outside the census:
    what a substitution's output becomes (`$(echo pytest) -q`), `export`,
    aliases, `eval`, `env -S`, a script fed to a shell's stdin (`bash <<EOF`,
    `bash -s`), a command substitution inside arithmetic (`$(( $(pytest) ))`), and
-   a `case` pattern's `)` inside a `$( )` (it ends the substitution early), and a
-   command substitution whose text starts with a subshell (`$((pytest -q) )`),
-   which is read as arithmetic. An
+   a `case` pattern's `)` inside a `$( )` (it ends the substitution early). An
    operator written alone inside quotes (`";"`) is read as an operator.
 10. pytest run from a file the census cannot name: a renamed or wrapper copy of
     the console script, a zipapp (`python pytest.pyz`), or a module other than
@@ -466,6 +472,30 @@ def _closing(text, i, close):
     return len(text)
 
 
+def _arithmetic_end(text, i):
+    """Index after the `))` that ends arithmetic opened by a `((` just before
+    `i`, or None when the inner paren closes on anything but `)`, as in
+    `((cmd) )`, which bash runs as two subshells. len(text) when unclosed."""
+    depth = 2
+    while i < len(text):
+        char = text[i]
+        if char == "\\":
+            i += 2
+            continue
+        if char in "'\"":
+            end = text.find(char, i + 1) if char == "'" else _double_end(text, i + 1)
+            i = len(text) if end < 0 else end + 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 1:
+                return i + 2 if text.startswith("))", i) else None
+        i += 1
+    return len(text)
+
+
 def _double_end(text, i):
     """Index of the `"` that closes a double-quoted string whose body starts at
     `i`, or -1."""
@@ -485,8 +515,8 @@ def _substitution(text, i, bodies):
     """When a command or process substitution, or arithmetic, starts at `i`,
     record its command text in `bodies` and return (the word that stands for
     it, the index after it); else None."""
-    if text.startswith("$((", i):
-        return "0", _closing(text, i + 3, "))")  # arithmetic runs no command
+    if text.startswith("$((", i) and (end := _arithmetic_end(text, i + 3)) is not None:
+        return "0", end  # arithmetic runs no command
     for opener, stands_for in (("$(", "_"), ("<(", "/dev/fd/63"), (">(", "/dev/fd/63")):
         if text.startswith(opener, i):
             end = _closing(text, i + 2, ")")
@@ -523,9 +553,13 @@ def _scan(text):
         elif char == '"':
             i = _scan_double(text, i, out, bodies)
         elif text.startswith("((", i) and at_word_start:
-            end = _closing(text, i + 2, "))")  # an arithmetic command
-            out.append("true")
-            i = end
+            end = _arithmetic_end(text, i + 2)
+            if end is None:  # `((cmd) )`: two subshells, not arithmetic
+                out.append("(")
+                i += 1
+            else:  # an arithmetic command
+                out.append("true")
+                i = end
         elif (found := _substitution(text, i, bodies)) is not None:
             out.append(found[0])
             i = found[1]
@@ -745,12 +779,13 @@ def _wrapper_options(part, i, name, env):
             env.clear()
             i += 1
         elif name == "exec" and _EXEC_BUNDLE.fullmatch(arg):
-            # bash's `exec [-cl] [-a name]`: -c empties the environment, and an
-            # `a` takes the rest of the word, or the next word, as its value.
+            # bash's `exec [-cl] [-a name]`: -c empties the environment, and the
+            # first `a` takes the rest of the word as its value, or the next
+            # word when it ends the word (`-aa` names `a`).
             letters = arg[1:]
             if "c" in letters.partition("a")[0]:
                 env.clear()
-            i += 2 if letters.endswith("a") else 1
+            i += 2 if letters.find("a") == len(letters) - 1 else 1
         elif name == "env" and arg in ("-u", "--unset") and i + 1 < len(part):
             env.pop(part[i + 1], None)
             i += 2
@@ -767,6 +802,9 @@ def _wrapper_options(part, i, name, env):
             i += 1
         elif arg in takes_value:
             i += 2
+        elif name == "timeout" and not arg.startswith("-"):
+            i += 1  # timeout's one DURATION word, however spelled
+            break
         elif _is_assignment(arg):
             _assign(env, arg)
             i += 1

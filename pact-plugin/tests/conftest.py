@@ -245,6 +245,24 @@ def pytest_runtest_protocol(item, nextitem):
         home_census.leave()
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_fixture_setup(fixturedef, request):
+    """Tell the HOME census when a wider-scoped fixture sets up or tears down,
+    which the opt-out marker never covers. Finalizers run last-in, first-out:
+    the first added here runs after the fixture's own teardown, and the one
+    added after the fixture body runs before it."""
+    if fixturedef.scope == "function":
+        yield
+        return
+    home_census.shared_fixture_begins()
+    fixturedef.addfinalizer(home_census.shared_fixture_ends)
+    try:
+        yield
+    finally:
+        home_census.shared_fixture_ends()
+        fixturedef.addfinalizer(home_census.shared_fixture_begins)
+
+
 def pytest_runtest_setup(item):
     """Skip a `requires_non_root` test when the suite runs as root."""
     if item.get_closest_marker(_NON_ROOT_MARKER) is None:

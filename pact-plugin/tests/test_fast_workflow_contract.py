@@ -864,7 +864,8 @@ def _seed_guard_run(root):
 
 # Which locale legs the seed-guard rows run under, decided by PLATFORM, never
 # by tool availability: on Linux (glibc, where CI runs) the range-widening leg
-# always runs and a missing localedef fails loudly; on other platforms glibc's
+# is generated, and a missing localedef or en_US source fails it in CI
+# (GITHUB_ACTIONS=true) and skips it elsewhere; on other platforms glibc's
 # locales do not exist, so only the ASCII leg applies.
 _GLIBC_LOCALES = sys.platform.startswith("linux")
 _LOCALE_LEGS = ("ascii", "range-widening") if _GLIBC_LOCALES else ("ascii",)
