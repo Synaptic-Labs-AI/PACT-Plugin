@@ -1251,10 +1251,15 @@ def override_read_matrix(tmp_path_factory):
             back = os.path.join(git_dir, "gitdir")
             linked = open(back, encoding="utf-8").read().strip() if os.path.isfile(back) else ""
             unlinked_admin = os.path.realpath(linked) != os.path.realpath(os.path.join(target, ".git"))
+        toplevel = git_out(target, "rev-parse", "--show-toplevel")
+        # The session's checkout is HOME when the target is, or when git's
+        # worktree toplevel for it is (a stray `.git` git skips).
         return {
             "bare": git_out(target, "rev-parse", "--is-bare-repository") == "true",
             "unlinked_admin": unlinked_admin,
-            "home_root": os.path.realpath(target) == os.path.realpath(home),
+            "home_root": os.path.realpath(target) == os.path.realpath(home) or (
+                toplevel is not None and os.path.realpath(toplevel) == os.path.realpath(home)
+            ),
         }
 
     cells = {}
@@ -1279,6 +1284,7 @@ def override_read_matrix(tmp_path_factory):
                 home = os.environ["HOME"]
             _answer, rung = routes._answer(detected)
             documented = routes.home_for(shape, target) if shape in routes.SHAPES else None
+            toplevel = git_out(target, "rev-parse", "--show-toplevel")
             cells[(shape, route)] = {
                 "error": None,
                 "reached": rung in sources,
@@ -1286,6 +1292,7 @@ def override_read_matrix(tmp_path_factory):
                 "home": os.path.realpath(home),
                 "home_expected": os.path.realpath(documented) if documented else None,
                 "target": os.path.realpath(target),
+                "toplevel": os.path.realpath(toplevel) if toplevel else None,
                 "read": routes._override(detected) is not None,
                 **properties(target, home),
             }
@@ -1459,7 +1466,7 @@ class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
         assert not_at_home == {}, f"a home shape ran away from its documented HOME: {not_at_home}"
         wrong = {}
         for key, cell in cells.items():
-            at_home = cell["target"] == cell["home_expected"]
+            at_home = cell["target"] == cell["home_expected"] or cell["toplevel"] == cell["home_expected"]
             expected = (True, False) if at_home else (False, True)
             if (cell["home_root"], cell["read"]) != expected or not cell["reached"]:
                 wrong[key] = {"home_root": cell["home_root"], "read": cell["read"], "reached": cell["reached"]}

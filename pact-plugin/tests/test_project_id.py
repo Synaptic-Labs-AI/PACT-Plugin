@@ -387,7 +387,7 @@ class TestSourceEquivalence:
         # rather than spawning its own subprocess. The subprocess markers this
         # assertion used to carry moved with it and are pinned on the helper by
         # test_main_repo_root_carries_the_git_derivation.
-        assert "repo_root = main_repo_root(common=cwd_common_dir)" in real_source
+        assert "repo_root = main_repo_root(common=cwd_common_dir" in real_source
         # Strategy 3 walks up to the nearest project marker. THE CALL TOKEN,
         # NOT ITS ARGUMENT: the cwd is resolved once, guardedly, and passed in
         # (`cwd_start`, or `setting_start` for the user-setting rung), so
@@ -399,7 +399,7 @@ class TestSourceEquivalence:
         # Use code-specific markers that won't appear in the docstring.
         pos_env = real_source.index('os.environ.get("CLAUDE_PROJECT_DIR")')
         pos_record = real_source.index("get_project_dir_from_session_record()")
-        pos_git = real_source.index("repo_root = main_repo_root(common=cwd_common_dir)")
+        pos_git = real_source.index("repo_root = main_repo_root(common=cwd_common_dir")
         pos_cwd = real_source.index("_find_project_root(")
 
 

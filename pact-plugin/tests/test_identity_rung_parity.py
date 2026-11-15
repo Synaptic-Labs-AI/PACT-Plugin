@@ -210,6 +210,30 @@ def _marker_predicates() -> set:
     return _marker_predicate_forms()[0]
 
 
+# {home shape: (whether the cwd marker walk from the target lands on HOME,
+# the answer every route gives when the session's checkout is HOME, or None
+# when it is not)}, measured with the filesystem and git by the matrix fixture.
+HOME_FACTS: dict = {}
+
+
+def _home_facts(shape: str, target: Path) -> None:
+    """Record, once per home shape, where the cwd marker walk lands and
+    whether git's toplevel for the target, or the target itself, is HOME."""
+    import subprocess
+
+    home = home_for(shape, target)
+    if home is None or shape in HOME_FACTS:
+        return
+    home = home.resolve()
+    walk = PACTMemory._find_project_root(target / "sub").resolve()
+    toplevel = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True, timeout=30, check=False,
+    ).stdout.strip()
+    at_home = target.resolve() == home or (toplevel and Path(toplevel).resolve() == home)
+    HOME_FACTS[shape] = (walk == home, f"bound:{home.name}" if at_home else None)
+
+
 def _set_home(monkeypatch, shape: str, target: Path) -> None:
     """Point HOME at the directory a `home_` shape names."""
     home = home_for(shape, target)
@@ -256,6 +280,7 @@ def matrix(tmp_path_factory):
             plant_unusable_pin(target)
             elsewhere = base / "elsewhere"
             elsewhere.mkdir()
+            _home_facts(shape, target)
             with pytest.MonkeyPatch.context() as cell_patch:
                 _clear(cell_patch)
                 _set_home(cell_patch, shape, target)
@@ -279,14 +304,13 @@ ACCEPTED_BINDS = {"foreign_external_store"}
 
 
 def _setting_at_home(shape: str, route: str) -> bool:
-    """Whether the cell is the user-setting route at a shape whose target IS
-    HOME. The cwd-marker rung's home landing never asks git, so the user
-    setting binds there by design while every other route lands on the
-    folder name; read from the fixture, not typed: the route is the one
-    whose sources include "user setting", the shape one whose HOME is its
-    target."""
-    home = getattr(SHAPES[shape], "home", None)
-    return "user setting" in ROUTES[route][1] and home is not None and home(Path("t")) == Path("t")
+    """Whether the cell is the user-setting route at a home shape whose cwd
+    marker walk lands on HOME. That walk's HOME landing never asks git, so
+    the user setting binds there by design while every other route lands on
+    the folder name; measured, not typed: the route is the one whose sources
+    include "user setting", the shape one whose walk HOME_FACTS records as
+    landing on HOME."""
+    return "user setting" in ROUTES[route][1] and HOME_FACTS.get(shape, (False, None))[0]
 
 
 def _reached(cells) -> dict:
@@ -314,6 +338,23 @@ class TestEveryRungGivesAShapeTheSameAnswer:
                     grouped[answer].append(route)
                 disagreements[shape] = {answer: sorted(routes) for answer, routes in grouped.items()}
         assert disagreements == {}, f"routes that answer a shape differently: {disagreements}"
+
+    def test_a_checkout_at_home_lands_on_the_home_folder(self, matrix):
+        """Every home shape whose checkout git or the target names as HOME
+        lands on the home folder, with no override read, on every route that
+        reaches it (the user-setting cells at a walk that lands on HOME are
+        checked below). A stray `.git` git skips must not move the landing
+        off a home repository."""
+        cells, _sites, _fired, _executed = matrix
+        landing = {shape: answer for shape, (_walk, answer) in HOME_FACTS.items() if answer}
+        assert landing, "no home shape has its checkout at HOME"
+        wrong = {
+            (shape, route): (answer, override)
+            for (shape, route), (answer, rung, override) in cells.items()
+            if shape in landing and rung in ROUTES[route][1] and not _setting_at_home(shape, route)
+            and (answer, override) != (landing[shape], None)
+        }
+        assert wrong == {}, f"a checkout at HOME did not land on the home folder: {wrong}"
 
     def test_the_user_setting_binds_only_at_a_home_target(self, matrix):
         """The cells `_reached` leaves out must answer exactly the user
@@ -1351,3 +1392,28 @@ class TestARepositoryPinOutranksTheUserSetting:
     def test_the_user_setting_route_is_measured(self, pinned_answers):
         """Control: the route that sets a user setting is one of the cells."""
         assert any("user setting" in route for _layout, route in pinned_answers)
+
+
+# --- the home check when the marker's directory will not resolve ------------
+
+
+class TestAnUnresolvableMarkerIsNotTheIdentityRoot:
+    """When the `.git` marker's directory cannot be resolved, the home check
+    tests that directory as spelled, never the identity root, so a marker in
+    the home directory still lands home."""
+
+    def test_the_spelled_marker_directory_is_tested(self, tmp_path, monkeypatch):
+        import types
+
+        home = tmp_path / "home"
+        home.mkdir()
+
+        class Unresolvable(type(Path())):
+            def resolve(self, strict=False):
+                raise OSError("will not resolve")
+
+        marker = types.SimpleNamespace(parent=Unresolvable(home))
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(memory_api, "find_git_marker", lambda start: marker)
+        elsewhere = tmp_path / "elsewhere"
+        assert memory_api._home_checkout(elsewhere, home / "sub", None) == home

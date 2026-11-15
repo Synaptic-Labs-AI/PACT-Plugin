@@ -218,9 +218,54 @@ def _home_main_checkout(base: Path) -> Path:
     return base / "outside"
 
 
+def _home_repository_folder(base: Path) -> Path:
+    """HOME is a repository; the target is a plain folder inside it."""
+    make_repo(base / "home", remote=OWN)
+    (base / "home" / "folder").mkdir()
+    return base / "home" / "folder"
+
+
+def _stray_empty_dotgit(base: Path) -> Path:
+    """An empty `.git` directory, which git skips, in a folder under a home
+    repository."""
+    target = _home_repository_folder(base)
+    (target / ".git").mkdir()
+    return target
+
+
+def _stray_hooks_only_dotgit(base: Path) -> Path:
+    """A `.git` directory holding only a hook, which git skips."""
+    target = _home_repository_folder(base)
+    (target / ".git" / "hooks").mkdir(parents=True)
+    (target / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\n", encoding="utf-8")
+    return target
+
+
+def _stray_objectless_dotgit(base: Path) -> Path:
+    """A `.git` repository with its objects directory removed, which git
+    skips."""
+    import shutil
+
+    target = _home_repository_folder(base)
+    run_git("init", "-q", str(target), cwd=base)
+    shutil.rmtree(target / ".git" / "objects")
+    return target
+
+
+def _stray_dangling_dotgit(base: Path) -> Path:
+    """A `.git` symlink to nowhere, which git and the marker walk skip."""
+    target = _home_repository_folder(base)
+    (target / ".git").symlink_to(base / "nowhere")
+    return target
+
+
 # A shape whose `home` is set runs with HOME pointed at that directory.
 _home_linked_worktree.home = lambda target: target
 _home_main_checkout.home = lambda target: target.parent / "home"
+for _stray in (
+    _stray_empty_dotgit, _stray_hooks_only_dotgit, _stray_objectless_dotgit, _stray_dangling_dotgit,
+):
+    _stray.home = lambda target: target.parent
 
 
 _own_linked_worktree.layout = "linked worktree"
@@ -250,6 +295,10 @@ _BUILDERS = {
     "control_own_superproject_worktree_submodule": _own_superproject_worktree_submodule,
     "home_linked_worktree": _home_linked_worktree,
     "home_main_checkout_session_outside": _home_main_checkout,
+    "home_stray_empty_dotgit": _stray_empty_dotgit,
+    "home_stray_hooks_only_dotgit": _stray_hooks_only_dotgit,
+    "home_stray_objectless_dotgit": _stray_objectless_dotgit,
+    "home_stray_dangling_dotgit": _stray_dangling_dotgit,
 }
 
 

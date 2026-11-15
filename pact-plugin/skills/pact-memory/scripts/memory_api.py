@@ -152,7 +152,9 @@ class _DetectedIdentity(NamedTuple):
     rung declines before the identity read (a repository with no working
     tree, a `.git` naming a linked worktree's admin dir that does not link
     back, a broken `.git` marker, a declaration that cannot be resolved) and
-    when the checkout the session is in is the user's home directory.
+    when the checkout the session is in is the user's home directory (a
+    stray `.git` that git skips, such as an empty directory or a dangling
+    symlink, does not make its folder a checkout).
     `path` is None (the reason is
     kept) when
     the checkout's `.git` is a redirect, or points at a git directory outside
@@ -884,6 +886,28 @@ def _is_home(root: Path) -> bool:
     except (OSError, RuntimeError):
         return False
     return os.path.normcase(str(root)) == os.path.normcase(str(home))
+
+
+def _home_checkout(
+    root: Path, asked_root: Optional[Path], toplevel: Optional[str]
+) -> Optional[Path]:
+    """HOME, when the checkout the session is in is HOME, else None: the
+    directory of the nearest `.git` marker above `asked_root`, or git's
+    worktree toplevel for it, or, with neither, the identity root. A marker
+    whose directory will not resolve is tested as it is spelled."""
+    candidates = []
+    marker = find_git_marker(asked_root) if asked_root is not None else None
+    if marker is not None:
+        try:
+            candidates.append(marker.parent.resolve())
+        except (OSError, RuntimeError):
+            candidates.append(Path(os.path.abspath(marker.parent)))
+    if toplevel:
+        candidates.append(Path(toplevel))
+    for candidate in candidates or [root]:
+        if _is_home(candidate):
+            return candidate
+    return None
 
 
 def _warn_home_landing(root: Path) -> None:
@@ -1837,7 +1861,9 @@ def _ask_rev_parse(start: Optional[str], args: tuple) -> Optional[str]:
 
 
 def main_repo_root(
-    start: Optional[str] = None, common: Optional[Path] = None
+    start: Optional[str] = None,
+    common: Optional[Path] = None,
+    toplevel: Any = _TOPLEVEL_UNASKED,
 ) -> Optional[Path]:
     """The repository's identity ROOT — the working tree, or the main checkout.
 
@@ -1868,6 +1894,8 @@ def main_repo_root(
             runs in the current working directory.
         common: The already-resolved common dir, when the caller has it. Saves
             a duplicate `rev-parse`; `None` resolves it here.
+        toplevel: The caller's `--show-toplevel` answer for `start` (None: git
+            gave none), when it holds one; left out, it is asked here.
 
     Returns:
         The identity root, or None when git is absent, times out, exits
@@ -1878,7 +1906,8 @@ def main_repo_root(
         common = main_repo_common_dir(start)
     if common is None:
         return None
-    toplevel = _git_rev_parse(start, "--show-toplevel")
+    if toplevel is _TOPLEVEL_UNASKED:
+        toplevel = _git_rev_parse(start, "--show-toplevel")
     if toplevel is None:
         # No working tree: a bare repository, or a repository git cannot
         # describe. There is no root to name.
@@ -2381,7 +2410,16 @@ class PACTMemory:
             # resolver.
             declared_root = None
         declared_common_dir = main_repo_common_dir(declared_dir)
-        declared_main_root = main_repo_root(declared_dir, declared_common_dir)
+        # The toplevel is asked once and handed to the root lookup and to the
+        # home check, which both need it.
+        declared_toplevel = (
+            _git_rev_parse(declared_dir, "--show-toplevel")
+            if declared_common_dir is not None
+            else None
+        )
+        declared_main_root = main_repo_root(
+            declared_dir, declared_common_dir, toplevel=declared_toplevel
+        )
         # WHAT THE PRE-CHANGE RESOLVER NAMED THIS DECLARATION, carried on every
         # result below that the pre-change resolver would also have named.
         pre_change = _pre_change_declared_name(
@@ -2405,6 +2443,7 @@ class PACTMemory:
                 asked_root=declared_root or Path(declared_dir),
                 source=source,
                 label=source,
+                toplevel=declared_toplevel,
             ))
         # A FORGED WORKTREE-ADMIN POINTER DECLINES HERE. `main_repo_root`
         # correctly refuses the redirect and returns None, but the fall-through
@@ -2469,10 +2508,15 @@ class PACTMemory:
             # recorded checkout itself.
             pre_change = recorded_root.name
             recorded_common_dir = main_repo_common_dir(str(recorded_root))
+            recorded_toplevel = (
+                _git_rev_parse(str(recorded_root), "--show-toplevel")
+                if recorded_common_dir is not None
+                else None
+            )
             # The same guards as every other rung, on the recorded checkout.
             guarded = _root_guard(
                 recorded_root, recorded_common_dir, recorded_label,
-                label=recorded_label, root=recorded_root,
+                label=recorded_label, root=recorded_root, toplevel=recorded_toplevel,
             )
             if guarded is not None:
                 return done(guarded)
@@ -2487,10 +2531,11 @@ class PACTMemory:
                 asked_root=recorded_root,
                 source=source,
                 label=recorded_label,
+                toplevel=recorded_toplevel,
             ))
         return done(PACTMemory._identity_at_root(
             live_root, declared_common_dir, asked_root=Path(declared_dir),
-            source=source, label=source,
+            source=source, label=source, toplevel=declared_toplevel,
         ))
 
     @staticmethod
@@ -2502,6 +2547,7 @@ class PACTMemory:
         source: str,
         label: str,
         decline_label: Optional[str] = None,
+        toplevel: Optional[str] = None,
     ) -> "_DetectedIdentity":
         """Detect the identity of one established root and wrap it as a record.
 
@@ -2513,29 +2559,28 @@ class PACTMemory:
         that reaches it, declared or discovered, repository or not: it warns
         and keeps the folder name, and is never canonicalised. A dotfiles home
         would otherwise give every directory under it that repository's id.
-        The checkout tested is the one the session is in, the directory
-        holding the nearest `.git` marker above `asked_root` (the walk git
-        itself makes, with no subprocess), not the identity root: a home that
-        is a linked worktree of a repository stored elsewhere is a landing,
-        and a main checkout at home is not one for a session in its worktree
-        outside home.
+        The checkout tested is the one the session is in, not the identity
+        root, and it is a landing when EITHER of the two answers naming it is
+        HOME: the directory holding the nearest `.git` marker above
+        `asked_root`, and git's worktree toplevel for `asked_root`
+        (`toplevel`, the answer the rung already holds). They differ where
+        git skips a `.git` that is not a git directory (an empty or partial
+        directory, a dangling symlink): the marker names the folder holding
+        it, git the repository around it. So a home that is a linked worktree
+        of a repository stored elsewhere is a landing, a main checkout at home
+        is not one for a session in its worktree outside home, and a stray
+        `.git` under a home repository does not move the landing off it.
         """
         legacy_name = PACTMemory._legacy_project_name(common_dir, root)
-        checkout = root
-        marker = find_git_marker(asked_root) if asked_root is not None else None
-        if marker is not None:
-            try:
-                checkout = marker.parent.resolve()
-            except (OSError, RuntimeError):
-                checkout = root
-        if _is_home(checkout):
-            _warn_home_landing(checkout)
+        landing = _home_checkout(root, asked_root, toplevel)
+        if landing is not None:
+            _warn_home_landing(landing)
             return _DetectedIdentity(
-                project_id=checkout.name,
+                project_id=landing.name,
                 source=label,
                 legacy_basename=legacy_name,
                 override_ignored=None,
-                identity_root=checkout,
+                identity_root=landing,
             )
         identity = detect_id_for_root(root, common_dir, asked_root=asked_root)
         PACTMemory._warn_override_ignored(identity)
@@ -2577,7 +2622,8 @@ class PACTMemory:
         declaration was present at all and no repository was found, so a
         repository pin outranks it wherever one is read. No rung reads a pin
         when the checkout the session is in is the HOME directory, a linked
-        worktree included: the git-root, declared and recorded rungs land
+        worktree included (a stray `.git` that git skips does not make its
+        folder a checkout): the git-root, declared and recorded rungs land
         there on its folder name, and the cwd-marker rung, whose HOME landing
         never asks git, binds the user setting there when one exists. A
         session in a worktree outside HOME reads its repository's pin even
@@ -2630,7 +2676,8 @@ class PACTMemory:
             # The pre-change resolver named every repository it reached here,
             # bare and redirected included, by its common dir's parent.
             git_pre_change = cwd_common_dir.parent.name or None
-            repo_root = main_repo_root(common=cwd_common_dir)
+            cwd_toplevel = _git_rev_parse(None, "--show-toplevel")
+            repo_root = main_repo_root(common=cwd_common_dir, toplevel=cwd_toplevel)
             if repo_root is None:
                 # NO ROOT: a forged worktree pointer, or a bare repository.
                 # The guard tells them apart, so a redirect is reported as a
@@ -2653,6 +2700,7 @@ class PACTMemory:
                 source="git root",
                 label="git root",
                 decline_label="unresolved",
+                toplevel=cwd_toplevel,
             )._replace(pre_change_name=git_pre_change)
             if detected.project_id is not None:
                 # THE DISCLOSURE DECISION LIVES IN ONE PLACE: a canonical id
@@ -2719,8 +2767,11 @@ class PACTMemory:
                 PACTMemory._find_project_root(cwd_start) if cwd_start is not None else None
             )
             cwd_common_dir = None
+            marker_toplevel = None
             if cwd_root is not None and cwd_root.name and not _is_home(cwd_root):
                 cwd_common_dir = main_repo_common_dir(str(cwd_root))
+                if cwd_common_dir is not None:
+                    marker_toplevel = _git_rev_parse(str(cwd_root), "--show-toplevel")
                 # A REPOSITORY THE WALK FINDS DECIDES BEFORE THE USER SETTING,
                 # exactly as on the git-root rung: it binds its pin or its
                 # origin, or declines, and the setting is never read. The same
@@ -2733,7 +2784,9 @@ class PACTMemory:
                 # and from `find_git_marker`, but `_find_project_root` does not
                 # stop at a ceiling, and `git -C <root>` examines the root
                 # itself.
-                guarded = _root_guard(cwd_root, cwd_common_dir, "cwd", root=cwd_root)
+                guarded = _root_guard(
+                    cwd_root, cwd_common_dir, "cwd", root=cwd_root, toplevel=marker_toplevel,
+                )
                 if guarded is not None:
                     return guarded._replace(pre_change_name=cwd_root.name)
             if cwd_common_dir is None:
@@ -2786,6 +2839,7 @@ class PACTMemory:
                 source="cwd",
                 label="cwd",
                 decline_label="unresolved",
+                toplevel=marker_toplevel,
             )._replace(pre_change_name=cwd_root.name)
         except OSError:
             logger.debug("Failed to detect project_id from cwd")
