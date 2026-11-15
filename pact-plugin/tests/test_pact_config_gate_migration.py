@@ -90,6 +90,16 @@ def _restore_gate_modules():
         yield
 
 
+@pytest.fixture(autouse=True)
+def _reload_gates_after_each_test():
+    """After each test, restore both mode variables to their values before it
+    and reload both gates, so the next test never sees a test-chosen mode."""
+    with restored_env_and_reloaded(
+        (INLINE, VARIETY), ("dispatch_gate", "handoff_ordering_gate")
+    ):
+        yield
+
+
 @pytest.fixture
 def clean(monkeypatch):
     """Reset both env vars for a test. Does NOT touch sys.modules (see

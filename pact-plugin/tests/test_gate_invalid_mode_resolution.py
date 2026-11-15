@@ -26,11 +26,13 @@ Mechanism the tests pin:
   mode is active emits valid, uncorrupted JSON. (TestInvalidModeStdoutStaysClean)
 
 Reload discipline: both gate modules resolve their mode constant at IMPORT, so we
-reload under the invalid env and, at teardown, restore the mode variables to
-their values from before this module ran and reload again (without evicting
-from sys.modules -- sibling test files import + reload them and would break if
-they vanished). Mirrors test_pact_config_gate_migration.
-(TestTeardownRestoresAmbientModes pins the restore.)
+reload under the invalid env and, after EVERY test, restore the mode variables to
+their values from before that test and reload again, so no test hands a
+test-chosen mode to the next; the module teardown does the same for the values
+from before this module ran. Neither evicts from sys.modules -- sibling test
+files import + reload them and would break if they vanished. Mirrors
+test_pact_config_gate_migration. (TestTeardownRestoresAmbientModes pins the
+restore.)
 """
 import ast
 import contextlib
@@ -75,6 +77,14 @@ def _restore_gate_modules():
     """After this file, restore both mode variables to the values they had
     before it ran (set or absent), then reload both gates, so later tests see
     the constants they saw before this module. Do NOT evict from sys.modules."""
+    with restored_env_and_reloaded((INLINE_ENV, VARIETY_ENV), _GATE_MODULES):
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _reload_gates_after_each_test():
+    """After each test, restore both mode variables to their values before it
+    and reload both gates, so the next test never sees a test-chosen mode."""
     with restored_env_and_reloaded((INLINE_ENV, VARIETY_ENV), _GATE_MODULES):
         yield
 
@@ -204,6 +214,19 @@ def _restore_fixture(tree):
                 and node.name == "_restore_gate_modules")
 
 
+def _yields_inside_helper(fixture):
+    """True when ``fixture`` yields inside a ``with restored_env_and_reloaded(...)``."""
+    return any(
+        isinstance(node, ast.With)
+        and any(isinstance(item.context_expr, ast.Call)
+                and isinstance(item.context_expr.func, ast.Name)
+                and item.context_expr.func.id == "restored_env_and_reloaded"
+                for item in node.items)
+        and any(isinstance(inner, ast.Yield)
+                for statement in node.body for inner in ast.walk(statement))
+        for node in ast.walk(fixture))
+
+
 def _environ_writes(tree, fixture):
     """Line numbers where ``fixture`` writes os.environ, under any name the
     module binds it to: ``import os as o``, ``from os import environ [as e]``,
@@ -248,6 +271,16 @@ class TestTeardownRestoresAmbientModes:
     absent, then reload so the constant matches.
     """
 
+    def test_an_absent_value_set_inside_is_removed(self, monkeypatch):
+        monkeypatch.delenv(INLINE_ENV, raising=False)
+        with contextlib.redirect_stderr(io.StringIO()):
+            with restored_env_and_reloaded((INLINE_ENV,), ("dispatch_gate",)):
+                os.environ[INLINE_ENV] = "deny"
+        assert INLINE_ENV not in os.environ
+        assert importlib.import_module("dispatch_gate").INLINE_MISSION_MODE == "warn"
+
+    # Kept the last test in this file that reloads a gate, so the leftover
+    # check at the end of the file reads what it leaves behind.
     def test_an_ambient_value_removed_inside_comes_back(self, monkeypatch):
         monkeypatch.setenv(INLINE_ENV, "deny")
         with contextlib.redirect_stderr(io.StringIO()):
@@ -266,20 +299,32 @@ class TestTeardownRestoresAmbientModes:
         variables fails here even though no test observes a module teardown."""
         tree = ast.parse((Path(__file__).parent / module_file).read_text(encoding="utf-8"))
         fixture = _restore_fixture(tree)
-
-        yields_inside_helper = any(
-            isinstance(node, ast.With)
-            and any(isinstance(item.context_expr, ast.Call)
-                    and isinstance(item.context_expr.func, ast.Name)
-                    and item.context_expr.func.id == "restored_env_and_reloaded"
-                    for item in node.items)
-            and any(isinstance(inner, ast.Yield)
-                    for statement in node.body for inner in ast.walk(statement))
-            for node in ast.walk(fixture))
-        assert yields_inside_helper, f"{module_file}: the fixture must yield inside restored_env_and_reloaded"
-
+        assert _yields_inside_helper(fixture), (
+            f"{module_file}: the fixture must yield inside restored_env_and_reloaded")
         writes = _environ_writes(tree, fixture)
         assert not writes, f"{module_file}: the fixture writes os.environ at lines {writes}"
+
+    @pytest.mark.parametrize("module_file", [
+        "test_gate_invalid_mode_resolution.py",
+        "test_pact_config_gate_migration.py",
+    ])
+    def test_each_gate_module_reloads_the_gates_after_every_test(self, module_file):
+        """Both modules restore the mode variables and reload the gates after
+        EVERY test, through a function-scoped autouse fixture, so no test hands
+        a test-chosen mode to the next. Holds in any test order, unlike the
+        leftover check at the end of this file."""
+        tree = ast.parse((Path(__file__).parent / module_file).read_text(encoding="utf-8"))
+        fixture = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
+                        and node.name == "_reload_gates_after_each_test"), None)
+        assert fixture is not None, f"{module_file}: no _reload_gates_after_each_test fixture"
+        decorators = [d for d in fixture.decorator_list if isinstance(d, ast.Call)
+                      and ast.unparse(d.func) == "pytest.fixture"]
+        keywords = {k.arg: ast.literal_eval(k.value) for d in decorators for k in d.keywords}
+        assert keywords.get("autouse") is True and keywords.get("scope", "function") == "function", (
+            f"{module_file}: the fixture must be autouse and function-scoped: {keywords}")
+        assert _yields_inside_helper(fixture), (
+            f"{module_file}: the fixture must yield inside restored_env_and_reloaded")
+        assert not _environ_writes(tree, fixture), f"{module_file}: the fixture writes os.environ"
 
     @pytest.mark.parametrize("source", [
         "from os import environ\n"
@@ -303,10 +348,23 @@ class TestTeardownRestoresAmbientModes:
         tree = ast.parse(source)
         assert _environ_writes(tree, _restore_fixture(tree)) == []
 
-    def test_an_absent_value_set_inside_is_removed(self, monkeypatch):
-        monkeypatch.delenv(INLINE_ENV, raising=False)
+
+class TestNoTestLeavesAGateReloaded:
+    """Each gate's mode constant matches what a fresh reload under the current
+    environment gives, so no earlier test left it reloaded at a test-chosen
+    mode. In file order this runs after every test above that reloads a gate.
+    Under a shuffled order it can run first and then checks nothing; the
+    every-test fixture check above holds in any order."""
+
+    @pytest.mark.parametrize("module_name,const_name", [
+        ("dispatch_gate", "INLINE_MISSION_MODE"),
+        ("handoff_ordering_gate", "DISPATCH_VARIETY_MODE"),
+    ])
+    def test_the_gate_constant_matches_the_current_environment(self, module_name, const_name):
+        module = importlib.import_module(module_name)
+        left = getattr(module, const_name)
         with contextlib.redirect_stderr(io.StringIO()):
-            with restored_env_and_reloaded((INLINE_ENV,), ("dispatch_gate",)):
-                os.environ[INLINE_ENV] = "deny"
-        assert INLINE_ENV not in os.environ
-        assert importlib.import_module("dispatch_gate").INLINE_MISSION_MODE == "warn"
+            importlib.reload(module)
+        assert getattr(module, const_name) == left, (
+            f"{module_name}.{const_name} was {left!r}, but the current environment "
+            f"resolves to {getattr(module, const_name)!r}: an earlier test left it reloaded")

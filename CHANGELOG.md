@@ -75,6 +75,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
 - The idle-preamble test rig requires a tmp path, so it never patches HOME to the shared `/tmp`. Two claim-gate tests that started their hook without HOME now pass the sandbox HOME, and two cache-binding helpers carry HOME from their caller.
 - A test pins that the suite's session-marker fixture names the same embedding-marker path memory_init writes.
 - A test no longer reseeds the global random generator: the canonical-join collision test draws from a local `random.Random(1136)`, and a new pin refuses any test code that calls or names `random.seed`, `random.setstate`, `numpy.random.seed` or `numpy.random.set_state`, resolved through the file's own imports; its docstring names what it cannot see, among them getattr, a module bound by assignment, and a reseed inside an imported non-test module or a library. The pin reads only files git tracks, so an untracked scratch file beside the suite cannot fail it.
+- The gate-mode tests now restore the mode variables and reload the dispatch and handoff-ordering gates after every test, and two tests that reloaded against an emptied variable now put an ambient value back first, so no test leaves a gate reloaded at a test-chosen mode; a check pins the per-test reload in both modules that change the modes.
 
 ### Fast-suite test selection
 
