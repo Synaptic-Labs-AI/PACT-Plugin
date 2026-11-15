@@ -317,7 +317,7 @@ ONCE_RULES = (
     ('"Run one more verify-only re-review round", described as', "the question's re-review option"),
     ("with every placeholder value it was dispatched with", "the full placeholder record at spawn"),
     ("in the changed code at `{head}`", "the evidence location for verified invalid"),
-    ("resume its subagent once in the same round", "the same-round re-check after a first-round fallback"),
+    ("resume its subagent once in the same round", "the one same-round re-check after the round's first-round review"),
     ("In each verify-only re-review, dispatch the cold prompt as a first-round review", "the re-review's unconditional first-round dispatch"),
     ("taken from the most recent such line", "the use of corrected placeholders in the re-review's first-round dispatch"),
     ("the run itself wrote them", "the run-made change rule in the run receipt"),
