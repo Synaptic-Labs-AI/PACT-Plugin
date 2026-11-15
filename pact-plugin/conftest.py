@@ -2,10 +2,11 @@
 
 Location: pact-plugin/conftest.py
 
-Summary: Owns skills-adjacent coverage ONLY. Pin test files living beside
-skill artifacts (skills/<skill>/test_*.py) sit outside tests/conftest.py's
-subtree, so this conftest guarantees every skills/*/scripts dir is importable
-for them. tests/conftest.py owns the full path block for tests/; the
+Summary: Makes every skills/*/scripts dir importable for the pin test files
+beside skill artifacts (skills/<skill>/test_*.py), which sit outside
+tests/conftest.py's subtree, and runs what every session needs: the
+import-identity harness, the pytest-randomly seed gate and the CI in-band
+plugins. tests/conftest.py owns the full path block for tests/; the
 membership guard keeps the overlap a no-op when both conftests load in one
 run.
 
@@ -14,9 +15,13 @@ The plugin root itself is inserted explicitly below (lead-ruled: deliberate
 source, not reliance on pytest's conftest-basedir mechanics); the telegram
 test family's `from telegram.X import ...` imports resolve through it.
 
-NO-IMPORT CHARTER: this file path-INSERTS only. Never import from a scripts
-dir at conftest scope — a missing optional dependency there becomes a total
-suite collection failure.
+IMPORT CHARTER: at any scope, guarded or not, this file imports only the
+standard library, pytest, and tests/ modules whose own imports, followed
+through every tests/ module they import, are only those. Never import a
+skills/*/scripts module, a plugin-root module or any other package here. A
+session-wide plugin that needs another package is registered from
+tests/conftest.py instead. tests/test_root_conftest_import_charter.py enforces
+this charter.
 """
 
 import sys
@@ -34,8 +39,8 @@ if _plugin_root not in sys.path:
 
 # Import-identity harness registration (layer 4 guard). tests/ is inserted so
 # the harness module resolves at conftest load; the insert is a guarded no-op
-# once tests/conftest.py has run. The harness is stdlib-only, so this import
-# cannot trip the no-import charter's optional-dependency failure mode.
+# once tests/conftest.py has run. The harness imports only the standard
+# library, as the import charter requires.
 # Name-based hook discovery picks up the re-exported callables session-wide
 # (this conftest's tree spans both tests/ and the skills-adjacent files).
 _tests_dir = str(Path(__file__).parent / "tests")
@@ -55,8 +60,9 @@ def pytest_configure(config):
 
     The seed gate runs here, not in tests/conftest.py, so a session that
     collects only skills-adjacent tests is gated too. Plugin objects, because
-    this module already re-exports a pytest_sessionstart. Both are
-    stdlib-only and gated on GITHUB_ACTIONS, so outside CI they do nothing.
+    this module already re-exports a pytest_sessionstart. Both import only
+    the standard library and pytest, and both are gated on GITHUB_ACTIONS, so
+    outside CI they do nothing.
     The full-run recorder is registered here rather than through
     PYTEST_PLUGINS: PYTEST_PLUGINS would inject it into every nested pytest
     subprocess the suite spawns.
