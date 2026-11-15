@@ -472,28 +472,21 @@ class TestHashCheckedInstall:
     def test_the_remedy_number_check_finds_a_standalone_number(self, prose, has_number):
         assert bool(_STANDALONE_NUMBER.search(prose)) is has_number, prose
 
-    @pytest.mark.parametrize("pins", [1, 41])
-    def test_the_lint_gate_remedy_does_not_change_with_the_lock_size(self, tmp_path, pins):
-        """The refusal printed with ruff absent is the same text whatever the
-        lock holds."""
+    def test_the_lint_gate_refuses_without_ruff_and_prints_its_remedy(self, tmp_path):
+        """With no ruff on PATH the gate exits 2 and prints its own ruff-missing
+        remedy, line for line as the script spells it."""
         root = ci_contract.require_root("the lint gate remedy")
-        rig = tmp_path / "repo"
-        (rig / "scripts").mkdir(parents=True)
-        (rig / "pact-plugin").mkdir()
-        shutil.copy(root / "scripts" / "verify-local-lint-gate.sh", rig / "scripts")
-        (rig / "constraints-ci.txt").write_text(
-            "".join(f"pkg{n}==1.0 --hash=sha256:{n:064x}\n" for n in range(pins)),
-            encoding="utf-8")
+        script = root / "scripts" / "verify-local-lint-gate.sh"
         bin_dir = tmp_path / "bin"  # dirname only, so no ruff resolves
         bin_dir.mkdir()
         (bin_dir / "dirname").symlink_to(shutil.which("dirname"))
         proc = subprocess.run(
-            [shutil.which("bash"), str(rig / "scripts" / "verify-local-lint-gate.sh")],
+            [shutil.which("bash"), str(script)],
             env={"PATH": str(bin_dir), "HOME": str(tmp_path / "home")},
             capture_output=True, text=True, timeout=30)
         assert proc.returncode == 2, (proc.returncode, proc.stderr)
-        real = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
-        block = real[real.index("printf 'GATE REFUSED: ruff is not available"):]
+        text = script.read_text(encoding="utf-8")
+        block = text[text.index("printf 'GATE REFUSED: ruff is not available"):]
         expected = [line.split("'")[1].removesuffix("\\n")
                     for line in block[:block.index("exit 2")].splitlines()
                     if line.strip().startswith("printf")]

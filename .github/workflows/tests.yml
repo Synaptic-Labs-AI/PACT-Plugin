@@ -593,8 +593,10 @@ jobs:
       # with no further splitting, globbing or command substitution. The seed
       # guard is what keeps that word a decimal integer. With
       # --randomly-dont-reset-seed the plugin does not reseed the random
-      # generators before each test; it still seeds them once from N at
-      # session start, so a seeded run's random draws also depend on N.
+      # generators before each test. pytest-randomly 5.1.0 still seeds them
+      # from N when each process starts its session, and again when a process
+      # shuffles the tests it collected (each xdist worker; the controller
+      # collects none), so a seeded run's random draws also depend on N.
       - name: Run test suite
         working-directory: pact-plugin
         run: python -m pytest -ra -n 4 --dist "$DIST" ${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed} --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"
