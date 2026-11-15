@@ -938,6 +938,14 @@ def test_a_malformed_launch_that_names_no_pytest_is_left_to_its_launcher(census_
     ([PY, "-I", "-m", "pytest.__main__", 1], None),
     (["coverage", "run", "--module", "pytest", 1], None),
     (["bash", "-c", b"cd x && pytest -q", 1], None),
+    # Operators written against pytest's name, as the shell reader splits them.
+    (["bash", "-c", "cd x&&pytest -q", 1], None),
+    (["bash", "-c", "pytest;echo", 1], None),
+    (["bash", "-c", "pytest|tee log", 1], None),
+    (["bash", "-c", "(pytest)", 1], None),
+    (["bash", "-c", "echo `pytest -q`", 1], None),
+    (["bash", "-c", "echo $(pytest -q)", 1], None),
+    (["bash", "-c", "cd x;pytest -q 'unclosed", 1], None),
     (["py.test", "-q"], {"A": 1}),
     ([PY, "/venv/lib/python3.12/site-packages/pytest/__main__.py"], {"A": 1}),
 ])

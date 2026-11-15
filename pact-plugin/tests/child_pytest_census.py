@@ -419,9 +419,13 @@ def _names_pytest(argv):
     """True when a launch the census could not judge names pytest as a program or
     module: a word that is pytest's program or `pytest/__main__.py`, or pytest's
     module after `-m` (bundled or not) or `--module`. Each item is split into
-    words, so shell text counts too; a word that only contains `pytest` (a
-    tmp_path under /tmp/pytest-of-<user>/) does not."""
-    words = [word for item in _items(argv) for word in _split(_text(item))]
+    words as the shell reader splits them (_lex, which makes each run of
+    operator characters its own word and falls back to a plain split on an
+    unclosed quote), and each word again at backticks, so shell text counts
+    too; a word that only contains `pytest` (a tmp_path under
+    /tmp/pytest-of-<user>/) does not."""
+    words = [piece for item in _items(argv) for word in _lex(_text(item))
+             for piece in word.split("`") if piece]
     return any(
         _is_pytest_script(word) or bool(_BUNDLED_MODULE.match(word))
         or (word in _PYTEST_MODULES and at > 0
