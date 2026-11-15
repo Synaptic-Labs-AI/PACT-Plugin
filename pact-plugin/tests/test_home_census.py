@@ -467,7 +467,6 @@ _suite = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_suite)
 pytest_configure = _suite.pytest_configure
 pytest_runtest_protocol = _suite.pytest_runtest_protocol
-pytest_fixture_setup = _suite.pytest_fixture_setup
 pytest_testnodedown = _suite.pytest_testnodedown
 pytest_sessionfinish = _suite.pytest_sessionfinish
 '''
@@ -643,6 +642,93 @@ def test_the_marker_never_covers_a_wider_scoped_fixture(tmp_path):
     assert "HOME CENSUS: 2 child(ren) started without HOME" in output, output
     assert "in a wider-scoped fixture" in output, output
     assert proc.returncode == 1, output
+
+
+_LAYOUT_LAUNCH = '''
+import os
+import subprocess
+
+import pytest
+
+
+def _launch(where):
+    try:
+        subprocess.run(["true"], env={"PATH": os.defpath})
+        outcome = "ran"
+    except Exception:
+        outcome = "refused"
+    with open(os.environ["HOME_CENSUS_SCOPE_LOG"], "a", encoding="utf-8") as log:
+        log.write("%s: %s\\n" % (where, outcome))
+'''
+
+_LAYOUT_TESTS = _LAYOUT_LAUNCH + '''
+
+@pytest.fixture(scope="session")
+def shared():
+    _launch("session setup")
+    yield
+    _launch("session teardown")
+
+
+@pytest.mark.child_env_without_home(reason="rig: a marked test that triggers a session fixture")
+def test_marked(shared, request):
+    plugins = [p for p in request.config.pluginmanager.get_plugins()
+               if type(p).__name__ == "_SharedFixtureBracket"]
+    assert len(plugins) == 1, plugins
+    _launch("tests call")
+'''
+
+_LAYOUT_SKILL = _LAYOUT_LAUNCH + '''
+
+@pytest.fixture(scope="module")
+def mod():
+    _launch("skills module setup")
+    yield
+    _launch("skills module teardown")
+
+
+@pytest.mark.child_env_without_home(reason="rig: a marked skills test")
+def test_marked_skill(mod):
+    _launch("skills call")
+'''
+
+
+def test_the_marker_never_covers_a_session_or_skills_fixture(tmp_path):
+    """The plugin's layout: the rootdir above tests/conftest.py. A session
+    fixture's node is the rootdir and a skills/ module is outside tests/, so a
+    conftest hook would not see either; the registered plugin does. Both
+    fixtures are refused in setup and teardown under a marked test, whose own
+    calls stay exempt, and exactly one bracket plugin is registered."""
+    root = tmp_path / "repo"
+    (root / "tests").mkdir(parents=True)
+    (root / "skills" / "rig-skill").mkdir(parents=True)
+    (root / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (root / "tests" / "conftest.py").write_text(
+        _RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
+    (root / "tests" / "test_layout.py").write_text(_LAYOUT_TESTS, encoding="utf-8")
+    (root / "skills" / "rig-skill" / "test_rig_skill.py").write_text(_LAYOUT_SKILL,
+                                                                     encoding="utf-8")
+    log = tmp_path / "launches.log"
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env["HOME_CENSUS_SCOPE_LOG"] = str(log)
+    proc = subprocess.run(
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
+         "tests", "skills"],
+        cwd=root, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    assert "2 passed" in output, output
+    assert sorted(log.read_text(encoding="utf-8").splitlines()) == sorted([
+        "session setup: refused", "tests call: ran", "skills module setup: refused",
+        "skills call: ran", "skills module teardown: refused",
+        "session teardown: refused"]), output
+    assert proc.returncode == 1, output
+
+
+def test_this_session_registers_one_bracket_plugin(request):
+    plugins = [p for p in request.config.pluginmanager.get_plugins()
+               if type(p).__name__ == "_SharedFixtureBracket"]
+    assert len(plugins) == 1, plugins
 
 
 def _real_session(*paths, plugin_dir=None, marker=None):

@@ -233,6 +233,12 @@ def pytest_configure(config):
     # HOME CENSUS. Always on: refuses a child process started without HOME.
     config.addinivalue_line("markers", home_census.MARKER_HELP)
     home_census.install()
+    # A plugin object, not a hook in this conftest: pytest calls
+    # pytest_fixture_setup through the fixture node's hook proxy, which drops
+    # conftests off the node's path (a session fixture's node is the rootdir,
+    # a skills/ module is outside tests/), and keeps every registered plugin.
+    if not config.pluginmanager.has_plugin(_SHARED_FIXTURE_PLUGIN):
+        config.pluginmanager.register(_SharedFixtureBracket(), _SHARED_FIXTURE_PLUGIN)
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -245,22 +251,28 @@ def pytest_runtest_protocol(item, nextitem):
         home_census.leave()
 
 
-@pytest.hookimpl(hookwrapper=True)
-def pytest_fixture_setup(fixturedef, request):
-    """Tell the HOME census when a wider-scoped fixture sets up or tears down,
-    which the opt-out marker never covers. Finalizers run last-in, first-out:
-    the first added here runs after the fixture's own teardown, and the one
-    added after the fixture body runs before it."""
-    if fixturedef.scope == "function":
-        yield
-        return
-    home_census.shared_fixture_begins()
-    fixturedef.addfinalizer(home_census.shared_fixture_ends)
-    try:
-        yield
-    finally:
-        home_census.shared_fixture_ends()
-        fixturedef.addfinalizer(home_census.shared_fixture_begins)
+_SHARED_FIXTURE_PLUGIN = "home-census-shared-fixtures"
+
+
+class _SharedFixtureBracket:
+    """Tells the HOME census when a wider-scoped fixture sets up or tears
+    down, which the opt-out marker never covers."""
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_fixture_setup(self, fixturedef, request):
+        """Finalizers run last-in, first-out: the first added here runs after
+        the fixture's own teardown, and the one added after the fixture body
+        runs before it."""
+        if fixturedef.scope == "function":
+            yield
+            return
+        home_census.shared_fixture_begins()
+        fixturedef.addfinalizer(home_census.shared_fixture_ends)
+        try:
+            yield
+        finally:
+            home_census.shared_fixture_ends()
+            fixturedef.addfinalizer(home_census.shared_fixture_begins)
 
 
 def pytest_runtest_setup(item):
