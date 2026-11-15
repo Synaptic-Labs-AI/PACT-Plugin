@@ -25,8 +25,8 @@ means any name the file binds to the sys module (`import sys as X`), and
 sys.path (`entries = sys.path`), in any scope of the file.
 ACCEPTED UNDER-BLOCK (adversarial-only, documented boundary): wholesale
 rebinding (`sys.path = [...]`), `getattr(sys.path, ...)` with a verb string, and
-slice-assign/augmented forms with exotic spacing inside codegen strings —
-this pin is an honest-mistake guard, not an adversary-proof one. OUT OF PARTITION (different failure mode): removal
+slice-assign inside codegen strings — this pin is an honest-mistake guard,
+not an adversary-proof one. OUT OF PARTITION (different failure mode): removal
 mutations (remove/pop/clear/del) sabotage conftest setup rather than
 re-introduce per-file path setup; zero occurrences at introduction, and the
 failure would be loud (imports break), unlike a silent added root.
@@ -42,14 +42,13 @@ Population: tests/**/*.py plus skills-adjacent test files
 (skills/*/test_*.py). conftest.py files are the mechanism and are exempt.
 
 Keep-set provenance (enumerated from the tree, not inherited from plan
-text): 5 module-level carriers, 2 function-level (spawn-worker) carriers,
-15 codegen-string carriers. Plan-level expectations counted pre-deletion
-category memberships (16 spawn/subprocess + 8 top-level-scripts importers);
-the 8 top-level-scripts importers retain no inserts at all once scripts/ is
-conftest-owned, so they do not appear here.
+text): module-level carriers, function-level (spawn-worker) carriers, and
+codegen-string carriers. Files that imported the top-level scripts retain no
+inserts at all once scripts/ is conftest-owned, so they do not appear here.
 """
 
 import ast
+import re
 import subprocess
 from pathlib import Path
 
@@ -58,15 +57,31 @@ from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 
-# Built as concatenations so THIS file's own source never contains a needle
-# as a contiguous literal — the any-form arm scans string constants and must
-# not flag the pin itself. Call-form tokens plus augmented assignment in its
-# two common spacings; slice-assignment inside a codegen string is accepted
+# What may sit between two tokens of a call form in a codegen string:
+# whitespace, a line break, a backslash continuation, or a `#` comment, any
+# number of them.
+_BETWEEN = r"(?:\s|\\\n|#[^\n]*(?:\n|$))*"
+# A path mutation in a codegen string, read as name and operator tokens:
+# `sys . path . insert|append|extend (` or `sys . path +=`, with `_BETWEEN`
+# between any two of them. Built in pieces so THIS file's own source never
+# holds a needle — the any-form arm scans string constants and must not flag
+# the pin itself. Slice-assignment inside a codegen string is accepted
 # under-block (see module docstring).
-_STR_TOKENS = tuple(
-    "sys.path" + t for t in (".insert(", ".append(", ".extend(", " += ", "+=")
+_PATH_MUTATION = re.compile(
+    r"\bsys" + _BETWEEN + r"\." + _BETWEEN + r"path\b" + _BETWEEN
+    + r"(?:\." + _BETWEEN + r"(?:insert|append|extend)\b" + _BETWEEN + r"\(|\+=)"
 )
 _STR_VERBS = (".insert", ".append", ".extend", "+=")
+
+
+def _mutates_path(text):
+    """Whether `text` holds a path mutation, read as a stream of name and
+    operator tokens (`_PATH_MUTATION`): whitespace, line breaks, backslash
+    continuations and `#` comments between tokens are skipped. It reads any
+    text, prose included, and never fails. It does not honour string-literal
+    boundaries, so a call quoted inside a codegen string's own inner quotes
+    is flagged too."""
+    return _PATH_MUTATION.search(text) is not None
 
 _MODULE_ALLOWLIST = {
     "tests/merge_guard_baseline_loader.py",
@@ -288,7 +303,7 @@ def _any_form_present(path):
         if (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
-            and any(tok in node.value for tok in _STR_TOKENS)
+            and _mutates_path(node.value)
         ):
             return True
         if isinstance(node, ast.JoinedStr):
@@ -297,7 +312,7 @@ def _any_form_present(path):
                 for c in node.values
                 if isinstance(c, ast.Constant) and isinstance(c.value, str)
             )
-            if "sys.path" in text and any(v in text for v in _STR_VERBS):
+            if _mutates_path(text) or ("sys.path" in text and any(v in text for v in _STR_VERBS)):
                 return True
     return False
 
@@ -359,7 +374,7 @@ def test_data_only_carriers_mutate_nothing():
 def test_the_data_only_check_sees_a_function_level_insert():
     """Pins the arm above: its matcher flags a real function-level insert
     the module-level arm cannot see."""
-    # Concatenated, like _STR_TOKENS, so this file carries no needle itself.
+    # Concatenated, like _PATH_MUTATION, so this file carries no needle itself.
     tree = ast.parse("import sys\ndef f():\n    sys.path" + ".insert(0, 'x')\n")
     assert [node.lineno for node in ast.walk(tree)
             if _is_path_mutation(node)] == [3]
@@ -406,6 +421,33 @@ def test_a_docstring_naming_a_mutation_is_a_form(tmp_path):
     assert not _any_form_present(worded)
     assert _any_form_present(codegen)
     assert _any_form_present(real)
+
+
+def test_a_codegen_call_form_is_read_as_tokens(tmp_path):
+    """A codegen string's call form is read as name and operator tokens:
+    a space, a line break, a backslash continuation or a comment between
+    them does not hide it, while prose that names `sys.path` without a call
+    is not a form. The reader takes text Python's tokenizer rejects (an
+    apostrophe, an unbalanced bracket, a dedent, an unterminated quote) and
+    returns an answer for each."""
+    name = "sys" + ".path"
+    forms = [
+        f"import sys; {name}.insert (0, 'x')",
+        f"import sys; {name}.insert\n    (0, 'x')",
+        f"import sys; {name} .insert(0, 'x')",
+        f"import sys; {name}.insert  # first\n(0, 'x')",
+        f"import sys; {name}.append \\\n('x')",
+        f"import sys; {name}   +=   ['x']",
+    ]
+    for text in forms:
+        assert _mutates_path(text), text
+        carrier = tmp_path / "carrier.py"
+        carrier.write_text(f"CHILD = {text!r}\n", encoding="utf-8")
+        assert _any_form_present(carrier), text
+    for text in [f"Never insert into {name} here.", f"the {name} entries", f"{name}[0]"]:
+        assert not _mutates_path(text), text
+    rejected = ["don't touch it", "f(", "    a\n  b", '"unterminated', f"don't {name}.insert (0, 'x')"]
+    assert [_mutates_path(text) for text in rejected] == [False, False, False, False, True]
 
 
 def test_negative_fixture_flags_every_matcher_leg():
