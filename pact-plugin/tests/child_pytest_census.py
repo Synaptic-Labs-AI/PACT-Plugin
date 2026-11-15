@@ -61,12 +61,16 @@ refused whether or not it does:
   [module] family, not only the first, up to the word in program position when
   that word names a program that runs none of its words (listed under
   [wrapper]). The word in program position is the program itself, or the
-  command a listed wrapper runs (followed along a chain), or the subcommand of
-  git, whose subcommand is the program it runs. So `echo python -m pytest`,
-  `printf '%s\\n' python -m pytest`, `timeout 5 echo python -m pytest` and
-  `git grep python -m pytest` are mentions, while `make test python -m pytest`
-  is refused: `test` there is make's argument, not a program. The stop holds
-  for one command only: `printf x; python -m pytest` is still judged.
+  command a listed wrapper runs, or the subcommand of git, whose subcommand is
+  the program it runs, or the command of find's first `-exec`-family action,
+  each followed along a chain. A find with no such action runs nothing. So
+  `echo python -m pytest`, `printf '%s\\n' python -m pytest`,
+  `timeout 5 echo python -m pytest`, `git grep python -m pytest`,
+  `timeout 5 git grep python -m pytest`,
+  `find . -exec echo python -m pytest ;` and `find . -name x python -m pytest`
+  are mentions, while `make test python -m pytest` is refused: `test` there is
+  make's argument, not a program. The stop holds for one command only:
+  `printf x; python -m pytest` is still judged.
 - [script] The program is an interpreter that runs pytest's program or
   `__main__.py` as its script (`python /venv/bin/pytest`). Only the program
   position counts here: in `pip install python-dateutil pytest` or
@@ -97,7 +101,10 @@ refused whether or not it does:
   command is searched for the same way, so a chain of them is followed to the
   program it starts (`timeout 60 nice -n 5 pytest`, `sudo env uv run pytest`).
   find is in that list, and its commands are the words after `-exec`,
-  `-execdir`, `-ok` and `-okdir` (`find . -name x -exec pytest {} ;`).
+  `-execdir`, `-ok` and `-okdir` (`find . -name x -exec pytest {} ;`). So are
+  the shell builtins `command` and `builtin`, whose command is the word after
+  them (`command -v` and `command -V` run nothing), and git's subcommand is
+  searched the same way.
 - [shell] Any family above inside the command text of a shell run with `-c`
   (below).
 `-m py.test` and `-m _pytest` start no pytest session and are no family.
@@ -268,12 +275,14 @@ _RUNS_NOTHING = frozenset({
 })
 # find's actions that run the command after them.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
-# Process wrappers and tool runners whose command may itself be one of them: the
-# command search runs again from each, so a chain of them is followed to the
-# program it starts. Names only; a missing name shortens a chain.
+# Process wrappers, tool runners and the shell builtins that run the word after
+# them, whose command may itself be one of them: the command search runs again
+# from each, so a chain of them is followed to the program it starts. Names
+# only; a missing name shortens a chain.
 _CHAINED = frozenset({"env", "nice", "nohup", "sudo", "timeout", "time", "stdbuf",
                       "xvfb-run", "exec", "uv", "uvx", "pipx", "poetry", "pdm", "pipenv",
-                      "hatch", "rye", "pixi", "conda", "micromamba", "find"})
+                      "hatch", "rye", "pixi", "conda", "micromamba", "find",
+                      "command", "builtin"})
 # Dispatchers whose first plain word is the program they run (`git grep` runs
 # git-grep), so that word is in program position for the [mention] stop.
 _DISPATCHERS = frozenset({"git"})
@@ -852,7 +861,7 @@ def _pytest_args(part, program):
     # a program in program position that runs none of its words.
     stop = _command_position(part, program)
     for at, word in enumerate(part):
-        if at == stop and _command_name(word) in _RUNS_NOTHING:
+        if at == stop and _runs_nothing(part, at):
             break
         if not _is_interpreter(word):
             continue
@@ -871,9 +880,17 @@ def _command_position(part, program):
     dispatcher runs, followed along a chain, else the program word itself."""
     if program < len(part) and _command_name(part[program]) in _CHAINED | _DISPATCHERS:
         found = _command_search(part, program, 0)
-        if found is not None:
+        if found is not None and found is not True:
             return found
     return program
+
+
+def _runs_nothing(part, at):
+    """True for a program at `at` that runs none of its words: a listed one, or
+    a find with no action that runs a command."""
+    name = _command_name(part[at])
+    return name in _RUNS_NOTHING or (
+        name == "find" and not any(word in _FIND_EXEC for word in part[at + 1:]))
 
 
 def _modelled(word):
@@ -903,12 +920,25 @@ def _command_search(part, program, depth):
     or None when it found none. That word is the first past options,
     NAME=VALUE words, numbers and the verbs in _RUN_VERBS; while it follows an
     option it may be that option's value, so the next one is tried too. A word
-    in _CHAINED is searched again as a program of its own. find's commands are
-    the words after its _FIND_EXEC actions."""
-    if _command_name(part[program]) == "find":
-        return (depth < _MAX_DEPTH and any(
-            _command_search(part, at, depth + 1) is True
-            for at in range(program + 1, len(part)) if part[at] in _FIND_EXEC)) or None
+    in _CHAINED, or a dispatcher's subcommand, is searched again as a program of
+    its own. find's commands are the words after its _FIND_EXEC actions."""
+    name = _command_name(part[program])
+    if name == "find":
+        if depth >= _MAX_DEPTH:
+            return None
+        first = None
+        for at in range(program + 1, len(part)):
+            if part[at] in _FIND_EXEC:
+                found = _command_search(part, at, depth + 1)
+                if found is True:
+                    return True
+                # The first action's command is the one in program position; a
+                # later action that starts pytest returns True above instead.
+                first = found if first is None else first
+        return first
+    if name == "command" and any(
+            "v" in word or "V" in word for word in _leading_options(part, program)):
+        return None  # `command -v` and `-V` describe, never run
     after_option = False
     for at in range(program + 1, len(part)):
         word = part[at]
@@ -919,12 +949,26 @@ def _command_search(part, program, depth):
         elif _starts_pytest(part, at, depth):
             return True
         elif _command_name(word) in _CHAINED and depth < _MAX_DEPTH:
-            return _command_search(part, at, depth + 1)
+            found = _command_search(part, at, depth + 1)
+            return at if found is None else found
         elif after_option or word in _RUN_VERBS:
             after_option = False
+        elif _command_name(word) in _DISPATCHERS and depth < _MAX_DEPTH:
+            found = _command_search(part, at, depth + 1)
+            return at if found is None else found
         else:
             return at
     return None
+
+
+def _leading_options(part, program):
+    """The option words right after the program word."""
+    options = []
+    for word in part[program + 1:]:
+        if not word.startswith("-") or word == "-":
+            break
+        options.append(word)
+    return options
 
 
 def _starts_pytest(part, at, depth):

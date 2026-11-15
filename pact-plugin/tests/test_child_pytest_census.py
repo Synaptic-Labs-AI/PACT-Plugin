@@ -528,6 +528,19 @@ def test_a_listed_shell_blind_spot_is_accepted(text):
     ["timeout", "5", "echo", "python", "-m", "pytest"],
     ["sudo", "-u", "bob", "echo", "python", "-m", "pytest"],
     ["git", "-C", "repo", "grep", "python", "-m", "pytest"],
+    # The same, reached through a wrapper chain: git's subcommand, find's first
+    # -exec command and the command builtin's command are in program position.
+    ["timeout", "5", "git", "grep", "python", "-m", "pytest"],
+    ["sudo", "git", "grep", "python", "-m", "pytest"],
+    ["timeout", "5", "git", "-C", "repo", "grep", "python", "-m", "pytest"],
+    ["find", ".", "-exec", "echo", "python", "-m", "pytest", ";"],
+    ["timeout", "5", "find", ".", "-exec", "grep", "python", "-m", "pytest", ";"],
+    ["command", "echo", "python", "-m", "pytest"],
+    ["timeout", "5", "command", "echo", "python", "-m", "pytest"],
+    ["timeout", "5", "command", "-v", "pytest"],
+    # A find with no -exec-family action runs nothing.
+    ["find", ".", "-name", "x", "python", "-m", "pytest"],
+    ["timeout", "5", "find", ".", "-name", "x", "python", "-m", "pytest"],
     # A file command touches its words and runs none of them.
     ["chmod", "755", "/venv/bin/pytest"],
     ["touch", "pytest"],
@@ -717,6 +730,12 @@ _WRAPPED = [
     ["sudo", "graalpy", "-m", "pytest"],
     ["timeout", "5", "pyston3", "-m", "pytest"],
     ["bash", "-c", "timeout 5 nice -n 1 pytest -q"],
+    # A dispatcher's subcommand, the command builtin's command and a later find
+    # action are judged through a chain as without one.
+    ["timeout", "5", "git", "pytest"],
+    ["timeout", "5", "command", "pytest"],
+    ["timeout", "5", "find", ".", "-exec", "pytest", "{}", ";"],
+    ["find", ".", "-exec", "echo", "x", ";", "-exec", "python", "-m", "pytest", "{}", ";"],
     # Programs that run their arguments stay refused.
     ["xargs", "-n1", "pytest"],
     ["xargs", "-I", "{}", "python3", "-m", "pytest", "{}"],
