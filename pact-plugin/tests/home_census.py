@@ -261,6 +261,10 @@ def finish(session):
         return
     problems = list(_state["misses"]) + list(_state["forwarded"])
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    # xdist's progress can leave the terminal mid-line ("....[100%]"), which
+    # write_line does not break, so the report would join it. Start a new line.
+    if reporter is not None and getattr(getattr(reporter, "_tw", None), "width_of_current_line", 0):
+        reporter.write("\n")
     write = reporter.write_line if reporter is not None else (lambda line: print(line, file=sys.stderr))
     if not problems:
         if _state["installed"]:

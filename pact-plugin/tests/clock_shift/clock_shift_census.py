@@ -218,6 +218,10 @@ def finish(session):
     if not problems:
         return
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    # xdist's progress can leave the terminal mid-line ("....[100%]"), which
+    # write_line does not break, so the report would join it. Start a new line.
+    if reporter is not None and getattr(getattr(reporter, "_tw", None), "width_of_current_line", 0):
+        reporter.write("\n")
     write = reporter.write_line if reporter is not None else (lambda line: print(line, file=sys.stderr))
     write("clock-shift census: %d problem(s); this run did not shift every clock" % len(problems))
     for line in problems:

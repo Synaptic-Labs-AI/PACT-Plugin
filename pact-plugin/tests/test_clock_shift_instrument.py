@@ -12,6 +12,7 @@ day a sweep puts on this process's own clock.
 """
 import ast
 import os
+import re
 import subprocess
 import sys
 import time
@@ -516,6 +517,9 @@ def test_under_xdist_a_worker_child_that_drops_the_shift_fails_the_run(tmp_path)
     line = "] %s (call): " % NODE
     assert ("2 passed" in out, rc, line in out, "its env drops PACT_TEST_CLOCK_SHIFT_SECONDS" in out) == (
         True, 1, True, True), out
+    # The report starts its own line, not glued onto xdist's progress line.
+    assert re.search(r"^clock-shift census: [0-9]+ problem\(s\); this run did not shift every "
+                     r"clock$", out, re.M), out
 
 
 def test_under_xdist_a_worker_child_that_keeps_the_shift_passes_the_run(tmp_path):

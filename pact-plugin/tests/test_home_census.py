@@ -538,6 +538,8 @@ def test_under_xdist_a_swallowed_refusal_still_fails_the_run(tmp_path):
     assert "2 passed" in output, output
     assert rc == 1, output
     assert "HOME CENSUS: 1 " in output, output
+    # The report starts its own line, not glued onto xdist's progress line.
+    assert re.search(r"^HOME CENSUS: 1 child\(ren\) started without HOME$", output, re.M), output
     assert "test_swallows_the_census_error" in output and census.REMEDY in output, output
 
 
@@ -548,8 +550,8 @@ def test_under_xdist_a_child_with_home_passes_the_run(tmp_path):
     assert "started without HOME" not in output, output
     # The workers' launches (the test's own and any its session makes) reach
     # the controller's information line.
-    assert re.search(r"HOME CENSUS: installed, [1-9][0-9]* launch(es)? checked, 0 refused",
-                     output), output
+    assert re.search(r"^HOME CENSUS: installed, [1-9][0-9]* launch(es)? checked, 0 refused$",
+                     output, re.M), output
 
 
 _SKILLS_RIG_TESTS = '''
@@ -953,3 +955,24 @@ def test_the_docstring_says_a_test_that_does_not_run_is_judged_where_it_runs():
     assert ("a launch it makes there that the census refuses is stopped before the "
             "child starts.") in item, item
     assert " not judged" not in item and " never " not in item, item
+
+
+def test_the_terminal_writer_attribute_the_censuses_read_counts_the_open_line(request):
+    """The HOME, child-pytest and clock-shift censuses start their report on a
+    new line when the terminal reporter's writer is mid-line, read through
+    pytest's private TerminalWriter.width_of_current_line. Under the locked
+    pytest that attribute exists on this session's reporter and counts the
+    characters of an unfinished line, so a pytest that drops it fails here
+    rather than quietly gluing the reports back onto the progress line."""
+    import io
+
+    from _pytest._io import TerminalWriter
+
+    reporter = request.config.pluginmanager.get_plugin("terminalreporter")
+    assert isinstance(reporter._tw, TerminalWriter), type(reporter._tw)
+    assert isinstance(reporter._tw.width_of_current_line, int)
+    writer = TerminalWriter(file=io.StringIO())
+    writer.write("....[100%]")
+    assert writer.width_of_current_line == len("....[100%]")
+    writer.write("\n")
+    assert writer.width_of_current_line == 0

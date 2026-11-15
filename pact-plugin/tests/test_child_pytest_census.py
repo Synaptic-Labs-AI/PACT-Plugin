@@ -1082,6 +1082,9 @@ def test_under_xdist_a_swallowed_miss_still_fails_the_run(tmp_path):
     assert "2 passed" in output, output
     assert rc == 1, output
     assert "CHILD PYTEST CENSUS: 1 " in output, output
+    # The report starts its own line, not glued onto xdist's progress line.
+    assert re.search(r"^CHILD PYTEST CENSUS: 1 pytest child\(ren\) started without blocking "
+                     r"pytest-randomly$", output, re.M), output
     assert "test_swallows_the_census_error" in output and census.REMEDY in output, output
 
 
