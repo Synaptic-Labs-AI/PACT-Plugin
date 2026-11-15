@@ -1312,10 +1312,10 @@ class TestOutsideSectionRules:
         ("pr", "takes the place of a teachback", "what stands in for the cold lane's teachback"),
         ("pr", "When a warm reviewer's findings need fixing", (
          "the warm scoping of reviewer-to-fixer reuse")),
-        ("pr", "Warm: confirm each finding was addressed; cold: a first-round review, then a re-check of every cold finding with no disposition", (
-         "the Verify-Only depth row: a cold first round, then the re-check")),
-        ("pr", "Reuse the warm reviewer who found the issues; the cold reviewer re-checks every cold finding with no disposition", (
-         "the Verify-Only re-review routing")),
+        ("pr", "Warm: confirm each finding was addressed; cold: a first-round review, then one re-check by resume when that review is valid and earlier cold findings with no disposition remain, per **Re-check**", (
+         "the Verify-Only depth row: a cold first round every round, then the conditional re-check")),
+        ("pr", "Reuse the warm reviewer who found the issues; for the cold lane, dispatch a fresh cold subagent for the first-round review and resume that subagent for any re-check, per **Re-check**", (
+         "the Verify-Only re-review routing: a fresh cold subagent each round, resumed for any re-check")),
         ("pr", "and per open question in each first-round or re-check cold report,", (
          "the synthesis row for each cold open question")),
         ("pr", "every cold open question carries a disposition", (

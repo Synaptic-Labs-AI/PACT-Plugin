@@ -86,8 +86,8 @@ After remediation fixes are applied, re-review is **verify-only** — not a fres
 | Aspect | Verify-Only | Full Review |
 |--------|-------------|-------------|
 | **Scope** | Warm: only files changed during remediation; cold: the whole PR, per the Cold Reviewer Lane | Full PR diff |
-| **Depth** | Warm: confirm each finding was addressed; cold: a first-round review, then a re-check of every cold finding with no disposition | Fresh architectural analysis |
-| **Agent** | Reuse the warm reviewer who found the issues; the cold reviewer re-checks every cold finding with no disposition per the Cold Reviewer Lane | Multiple reviewers in parallel, each freshly spawned under a distinct `name=` |
+| **Depth** | Warm: confirm each finding was addressed; cold: a first-round review, then one re-check by resume when that review is valid and earlier cold findings with no disposition remain, per **Re-check** | Fresh architectural analysis |
+| **Agent** | Reuse the warm reviewer who found the issues; for the cold lane, dispatch a fresh cold subagent for the first-round review and resume that subagent for any re-check, per **Re-check** | Multiple reviewers in parallel, each freshly spawned under a distinct `name=` |
 | **Format** | Checklist: finding → resolved / not resolved / new issue, plus the two warm report lines below | Full review with severity ratings |
 | **Duration** | Significantly faster than initial review | Full review cycle |
 

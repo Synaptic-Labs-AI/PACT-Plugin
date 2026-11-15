@@ -27,7 +27,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
 ### For plugin users
 
 - Teammates (the pact-agent-teams HANDOFF checklist) and the cold reviewer record `git rev-parse HEAD` and `git status --porcelain --untracked-files=all` immediately before and after each test run they report. If either changed during the run, the result is re-run or reported as unattributable, not as a pass or a failure of the change.
-- Every verify-only re-review now gives the cold reviewer a fresh first-round review of the whole PR, filled with the latest corrected placeholder values (base and head are always fresh), then resumes it once to check the open cold findings. The re-check message goes only by resume. The per-hunk test that decided when a re-check alone was enough, with its exceptions, is removed.
+- Every verify-only re-review now gives the cold reviewer a fresh first-round review of the whole PR, filled with the latest corrected placeholder values (base and head are always fresh). When that review is valid and earlier cold findings with no disposition remain, it resumes the reviewer once to check them; otherwise the valid first-round report ends the round, as it also does when that re-check is not valid. The re-check message goes only by resume. The per-hunk test that decided when a re-check alone was enough, with its exceptions, is removed.
 
 ### Shuffled-order diagnostic runs
 
@@ -57,7 +57,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
 
 - `pact-plugin/conftest.py` states its import charter: at any scope it imports only the standard library, pytest, and tests/ modules whose own imports, followed through every tests/ module they reach, are only those. It makes no dynamic import except two named, gated ones: the CI environment check's script load, which imports `packaging`, only when GITHUB_ACTIONS=true, and the import-identity map's find_spec, only when PACT_IDENTITY_MAP_OUT is set. It forbids any helper that imports a module by name.
 - A pin enforces the charter at every scope of every module the walk reaches, checks that each deviation runs only behind its gate, and reads the script the CI check loads. It refuses standard-library helpers that import a module named by a string, such as `pkgutil.resolve_name`, `pydoc.locate` and `logging.config.dictConfig`, matching each by the callable it resolves to through the file's imports, so `timeit.default_timer` or a local named `locate` is not refused.
-- The charter and the pin's docstring state what the pin cannot see: a callable reached through getattr or a computed name; a helper matched by its dotted path whose module is bound other than by an import (a parameter, an assignment, a star import), or may not be under an import name reused for another module; and string routes too common to refuse, such as mock.patch targets and pickle loads. A dynamic import callable or an instance-method helper is matched by name wherever the walked file names it. Tests pin the binding statement in both directions, and each listed blind spot has a row.
+- The charter and the pin's docstring state what the pin cannot see: a callable reached through getattr or a computed name; a helper matched by its dotted path whose module is bound other than by an import (a parameter, an assignment, a star import), or may not be under an import name reused for another module; and string routes too common to refuse, such as mock.patch targets and pickle loads. A dynamic import callable is matched by name wherever the walked file names it, and an instance-method helper by attribute name wherever the file reaches it as an attribute. Tests pin the binding statement in both directions, and each listed blind spot has a row.
 
 ### Test isolation
 
@@ -75,7 +75,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
 
 - The resolver no longer reads a bare `"__init__.py"` string as a script that a test runs, which had pulled unrelated modules into the closure. A path that carries its directory still resolves.
 - The resolver follows a read of an anchored directory joined to file literals (`ROOT / "hooks" / "x.py"`, `joinpath`, `os.path.join`), resolving names per scope as Python does, and through parameters that a default value or an in-module call gives an anchored path. A module whose reads reach the resolver's limits is treated as unproven, so every exclusion that loads it comes back on any change. This finds dependencies the import closure missed, among them two hooks that load a shared module by file path.
-- Neither resolver change moves the fast-suite selection for any single changed path.
+- In a check over every tracked path when this was released, neither resolver change moved the fast-suite selection for any single changed path.
 
 ### Why
 
