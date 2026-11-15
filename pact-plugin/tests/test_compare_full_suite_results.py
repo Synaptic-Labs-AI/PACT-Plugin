@@ -544,6 +544,7 @@ CHILD_CENSUS_HEADER = ("CHILD PYTEST CENSUS: 1 pytest child(ren) started without
                        "blocking pytest-randomly")
 CLOCK_CENSUS_HEADER = "clock-shift census: 1 problem(s); this run did not shift every clock"
 HOME_CENSUS_HEADER = "HOME CENSUS: 1 child(ren) started without HOME"
+CENSUS_PROBLEM = "  [gw0] test_x (call): child"
 
 
 @pytest.mark.parametrize("finish, name", [
@@ -569,6 +570,26 @@ def test_a_census_failed_green_run_names_the_census(tmp_path, finish, name):
         "clean", "census_outcome"]
     assert read_runs(output)[1]["census_failures"] == [
         {"census": name, "problems": 1, "lines": [finish[1].strip()]}]
+
+
+@pytest.mark.parametrize("finish, found", [
+    (("HOME CENSUS: 2 child(ren) started without HOME", "  [gw0] test_z (call): child"),
+     1),
+    ((HOME_CENSUS_HEADER, "  [gw0] test_z (call): child", "  [gw1] test_y (call): child"),
+     2),
+    (("HOME CENSUS: 2 child(ren) started without HOME", "  [gw0] test_z (call): child",
+      "[gw3] PASSED tests/test_other.py::test_ok", "  [gw1] test_y (call): child"), 1),
+], ids=["truncated", "extra-line", "interleaved"])
+def test_a_census_block_whose_lines_disagree_with_its_header_is_refused(
+        tmp_path, finish, found):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=finish)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    counted = int(finish[0].split(": ")[1].split(" ")[0])
+    assert comparison["evidence_errors"] == [
+        {"run": "two", "error": f"the home census header counts {counted} "
+         f"problem(s) but {found} problem line(s) follow it"}]
 
 
 def test_a_census_line_only_in_captured_output_does_not_explain_the_exit(tmp_path):
@@ -618,7 +639,8 @@ def test_the_home_census_failure_header_still_fails_beside_a_run_with_the_inform
 def test_a_census_line_beside_a_clean_exit_is_refused(tmp_path):
     """A census that fails a session raises its status to 1, so exit 0 contradicts it."""
     first = make_run(tmp_path, "one")
-    second = make_run(tmp_path, "two", 101, finish_lines=(CHILD_CENSUS_HEADER,))
+    second = make_run(tmp_path, "two", 101,
+                      finish_lines=(CHILD_CENSUS_HEADER, CENSUS_PROBLEM))
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, comparison
     assert comparison["deltas"] == []
@@ -634,7 +656,7 @@ def test_a_census_line_beside_an_exit_status_a_census_cannot_set_is_refused(
         tmp_path, exitstatus):
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101, census_failed=True,
-                      finish_lines=(CLOCK_CENSUS_HEADER,),
+                      finish_lines=(CLOCK_CENSUS_HEADER, CENSUS_PROBLEM),
                       record_updates={"exitstatus": exitstatus})
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, comparison
@@ -652,7 +674,7 @@ def test_a_red_run_with_a_census_line_keeps_its_test_outcome(tmp_path, exitstatu
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101,
                       cases=[case(ALPHA), case(BETA, "failure", "boom")],
-                      finish_lines=(CHILD_CENSUS_HEADER,),
+                      finish_lines=(CHILD_CENSUS_HEADER, CENSUS_PROBLEM),
                       record_updates={"exitstatus": exitstatus})
     completed, comparison, output = invoke(tmp_path, first, second)
     assert completed.returncode == 1, comparison
@@ -693,9 +715,11 @@ def test_a_red_run_records_its_census_and_ignores_a_captured_one(tmp_path):
 
 def test_the_census_comparison_is_by_name_not_by_count(tmp_path):
     first = make_run(tmp_path, "one", census_failed=True,
-                     finish_lines=(CHILD_CENSUS_HEADER.replace(": 1 ", ": 2 "),))
+                     finish_lines=(CHILD_CENSUS_HEADER.replace(": 1 ", ": 2 "),
+                                   *(CENSUS_PROBLEM,) * 2))
     second = make_run(tmp_path, "two", 101, census_failed=True,
-                      finish_lines=(CHILD_CENSUS_HEADER.replace(": 1 ", ": 3 "),))
+                      finish_lines=(CHILD_CENSUS_HEADER.replace(": 1 ", ": 3 "),
+                                    *(CENSUS_PROBLEM,) * 3))
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 0, comparison
     assert comparison["deltas"] == []

@@ -283,7 +283,10 @@ def _census_failures(finish_span: list[str]) -> list[dict]:
     """Every census that failed the session, with its problem lines.
 
     Read from the session-finish span only, so a census-shaped line in a test's
-    captured output is never counted.
+    captured output is never counted. A census writes one indented line per
+    problem straight after its header, so a block with fewer or more lines than
+    its header counts (a log cut short, or another line written in between) is
+    refused.
     """
     failures = []
     for index, line in enumerate(finish_span):
@@ -296,6 +299,10 @@ def _census_failures(finish_span: list[str]) -> list[dict]:
                 if not detail.startswith("  "):
                     break
                 problems.append(detail.strip())
+            if len(problems) != int(match.group(1)):
+                raise EvidenceError(
+                    f"the {name} census header counts {int(match.group(1))} "
+                    f"problem(s) but {len(problems)} problem line(s) follow it")
             failures.append({"census": name, "problems": int(match.group(1)),
                              "lines": problems})
     return sorted(failures, key=lambda failure: failure["census"])

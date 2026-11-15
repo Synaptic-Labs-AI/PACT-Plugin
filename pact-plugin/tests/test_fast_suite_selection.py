@@ -1208,11 +1208,13 @@ class TestImportClosure:
         assert "hooks/shared/__init__.py" not in closure, sorted(closure)
 
     # Names resolve per scope, as Python resolves them. Each row reads
-    # hooks/shared/__init__.py through a name that, in the scope of the read,
-    # is not bound to an anchored path, though the same name is anchored in
-    # another scope or by another binding.
+    # hooks/shared/__init__.py through `base`, which in the scope of the read
+    # is bound only in a way that names no anchored path, though `base` is
+    # anchored outside that scope.
     _HOOKS = ('from pathlib import Path\n'
               'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n')
+    _BASE = _HOOKS + 'base = HOOKS / "shared"\n'
+    _READ = '    return (base / "__init__.py").read_text()\n'
 
     @pytest.mark.parametrize("source", [
         _HOOKS
@@ -1221,73 +1223,45 @@ class TestImportClosure:
           '    return base\n'
           'def b(tmp_path):\n'
           '    base = tmp_path\n'
-          '    return (base / "__init__.py").read_text()\n',
-        _HOOKS
-        + 'base = HOOKS / "shared"\n'
-          'def b(tmp_path):\n'
-          '    base = tmp_path\n'
-          '    return (base / "__init__.py").read_text()\n',
-        _HOOKS
-        + 'def b():\n'
-          '    base = HOOKS / "shared"\n'
-          '    base = HOOKS\n'
-          '    return (base / "__init__.py").read_text()\n',
-        _HOOKS
-        + 'def b():\n'
-          '    base = HOOKS / "shared"\n'
-          '    base /= "x"\n'
-          '    return (base / "__init__.py").read_text()\n',
-        _HOOKS
-        + 'base = HOOKS / "shared"\n'
-          'def b(paths):\n'
-          '    for base in paths:\n'
-          '        return (base / "__init__.py").read_text()\n',
-        _HOOKS
-        + 'base = HOOKS / "shared"\n'
-          'def b():\n'
-          '    base: Path\n'
-          '    return (base / "__init__.py").read_text()\n',
-        _HOOKS
-        + 'base = HOOKS / "shared"\n'
-          'READ = lambda base: (base / "__init__.py").read_text()\n',
-        _HOOKS
-        + 'base = HOOKS / "shared"\n'
-          'def b(paths):\n'
-          '    return [(base / "__init__.py").read_text() for base in paths]\n',
+        + _READ,
+        _BASE + 'def b(tmp_path):\n    base = tmp_path\n' + _READ,
+        _BASE + 'def b(cm):\n    with cm as base:\n        pass\n' + _READ,
+        _BASE + 'def b():\n    try:\n        pass\n    except OSError as base:\n'
+                '        pass\n' + _READ,
+        _BASE + 'def b():\n    import base\n' + _READ,
+        _BASE + 'def b():\n    del base\n' + _READ,
+        _BASE + 'def b(tmp_path):\n    if (base := tmp_path):\n        pass\n' + _READ,
+        _BASE + 'def b(value):\n    match value:\n        case base:\n            pass\n'
+        + _READ,
+        _BASE + 'def b(value):\n    match value:\n        case [*base]:\n            pass\n'
+        + _READ,
+        _BASE + 'def b(value):\n    match value:\n        case {**base}:\n'
+                '            pass\n' + _READ,
+        _BASE + 'def b():\n    def base():\n        pass\n' + _READ,
+        _BASE + 'def b():\n    class base:\n        pass\n' + _READ,
+        _BASE + 'def b():\n    type base = int\n' + _READ,
+        _BASE + 'def b(pair):\n    base, _ = pair\n' + _READ,
+        _BASE + 'def b(paths):\n    for base in paths:\n        pass\n' + _READ,
+        _BASE + 'def b():\n    base: Path\n' + _READ,
+        _BASE + 'def b():\n    base += "x"\n' + _READ,
+        _BASE + 'READ = lambda base: (base / "__init__.py").read_text()\n',
+        _BASE + 'def b(paths):\n'
+                '    return [(base / "__init__.py").read_text() for base in paths]\n',
         _HOOKS
         + 'class Rig:\n'
           '    base = HOOKS / "shared"\n'
           '    def read(self):\n'
           '        return (base / "__init__.py").read_text()\n',
         _HOOKS
-        + 'BASE = HOOKS / "shared"\n'
-          'def reset(tmp_path):\n'
-          '    global BASE\n'
-          '    BASE = tmp_path\n'
-          'TEXT = (BASE / "__init__.py").read_text()\n',
-        _HOOKS
-        + 'def outer(tmp_path):\n'
+        + 'class Rig:\n'
           '    base = HOOKS / "shared"\n'
-          '    def inner():\n'
-          '        nonlocal base\n'
-          '        base = tmp_path\n'
-          '    inner()\n'
-          '    return (base / "__init__.py").read_text()\n',
-        _HOOKS
-        + 'def guarded(hooks_root, tmp_path):\n'
-          '    hooks_root = tmp_path\n'
-          '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
-          'def test_real():\n'
-          '    guarded(HOOKS, None)\n',
-        _HOOKS
-        + 'def guarded(conftest, hooks_root):\n'
-          '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
-          'def test_real():\n'
-          '    guarded(*[None], HOOKS)\n',
-    ], ids=["other-functions-local", "local-hides-module-name", "two-anchors",
-            "augmented", "loop-target", "bare-annotation", "lambda-parameter",
-            "comprehension-target", "class-name-in-method", "global-rebind",
-            "nonlocal-rebind", "rebound-parameter", "starred-argument"])
+          '    FILES = [(base / "__init__.py") for _ in (1,)]\n',
+    ], ids=["other-functions-local", "unanchored-assignment", "with", "except",
+            "import", "del", "walrus", "match-capture", "match-star", "match-rest",
+            "nested-def", "nested-class", "type-alias", "unpacking", "loop-target",
+            "bare-annotation", "other-augmented-operator", "lambda-parameter",
+            "comprehension-target", "class-name-in-method",
+            "class-name-in-comprehension"])
     def test_a_name_not_anchored_in_the_scope_of_its_read_names_nothing(
             self, core, tmp_path, source):
         plugin = self._rig(tmp_path)
@@ -1295,6 +1269,8 @@ class TestImportClosure:
         closure = core.import_closure(plugin, ["tests/test_h.py"])
         assert "hooks/shared/__init__.py" not in closure, sorted(closure)
 
+    # A name names every anchored path any of its bindings names, and a
+    # parameter every path a call or default gives it, however many hops.
     @pytest.mark.parametrize("source", [
         _HOOKS
         + 'def outer():\n'
@@ -1315,12 +1291,95 @@ class TestImportClosure:
           '    base = HOOKS / "shared"\n'
           '    TEXT = (base / "__init__.py").read_text()\n',
         _HOOKS
+        + 'class Rig:\n'
+          '    base = HOOKS / "shared"\n'
+          '    FILES = [path for path in [base / "__init__.py"]]\n',
+        _HOOKS
         + 'def b():\n'
+          '    base = HOOKS / "other"\n'
           '    base = HOOKS / "shared"\n'
+        + _READ,
+        _HOOKS
+        + 'def b(tmp_path):\n'
           '    base = HOOKS / "shared"\n'
-          '    return (base / "__init__.py").read_text()\n',
+          '    base = tmp_path\n'
+        + _READ,
+        _HOOKS
+        + 'def b():\n'
+          '    base = HOOKS\n'
+          '    base /= "shared"\n'
+        + _READ,
+        _HOOKS
+        + 'def b():\n'
+          '    base = HOOKS\n'
+          '    base = base / "shared"\n'
+        + _READ,
+        _HOOKS
+        + 'def b():\n'
+          '    if (base := HOOKS / "shared"):\n'
+          '        pass\n'
+        + _READ,
+        _HOOKS
+        + 'def b():\n'
+          '    [(base := HOOKS / "shared") for _ in (1,)]\n'
+        + _READ,
+        _HOOKS
+        + 'BASE = None\n'
+          'def setup():\n'
+          '    global BASE\n'
+          '    BASE = HOOKS / "shared"\n'
+          'TEXT = (BASE / "__init__.py").read_text()\n',
+        _HOOKS
+        + 'def outer():\n'
+          '    base = None\n'
+          '    def inner():\n'
+          '        nonlocal base\n'
+          '        base = HOOKS / "shared"\n'
+          '    inner()\n'
+        + _READ,
+        _BASE + 'def b():\n    base.name = None\n' + _READ,
+        _HOOKS
+        + 'def guarded(hooks_root, tmp_path):\n'
+          '    hooks_root = tmp_path\n'
+          '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+          'def test_real():\n'
+          '    guarded(HOOKS, None)\n',
+        _HOOKS
+        + 'def guarded(hooks_root, conftest=None):\n'
+          '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+          'def test_real():\n'
+          '    guarded(*(), HOOKS)\n',
+        _HOOKS
+        + 'def helper(base):\n'
+          '    return (base / "shared" / "__init__.py").read_text()\n'
+          'def read(root):\n'
+          '    return helper(root)\n'
+          'def test_real():\n'
+          '    read(HOOKS)\n',
+        _HOOKS
+        + 'def read(root):\n'
+          '    return (root / "shared" / "__init__.py").read_text()\n'
+          'def read(root):\n'
+          '    return None\n'
+          'def test_real():\n'
+          '    read(HOOKS)\n',
+        _HOOKS
+        + 'def read(root=HOOKS):\n'
+          '    return (root / "shared" / "__init__.py").read_text()\n',
+        _HOOKS
+        + 'def read(*, root=HOOKS):\n'
+          '    return (root / "shared" / "__init__.py").read_text()\n',
+        _HOOKS
+        + 'READ = lambda root: (root / "shared" / "__init__.py").read_text()\n'
+          'READ(HOOKS)\n',
     ], ids=["enclosing-functions-local", "global-read", "class-body-read",
-            "agreeing-rebind"])
+            "class-comprehension-first-iterable", "conflicting-anchors",
+            "anchored-then-unanchored", "augmented-join", "self-reference",
+            "walrus", "comprehension-walrus", "global-assignment",
+            "nonlocal-assignment", "attribute-target-binds-nothing",
+            "rebound-parameter", "starred-argument", "two-hop-parameter",
+            "redefined-function", "default-value", "keyword-default",
+            "lambda-call"])
     def test_a_name_anchored_in_the_scope_of_its_read_names_the_file(
             self, core, tmp_path, source):
         plugin = self._rig(tmp_path)
@@ -1337,19 +1396,6 @@ class TestImportClosure:
                  'B = (HOOKS / "data.json").read_text()\n')
         closure = core.import_closure(plugin, ["tests/test_j.py"])
         assert closure == {"tests/test_j.py"}, sorted(closure)
-
-    def test_a_call_to_a_redefined_function_binds_no_parameter(self, core, tmp_path):
-        plugin = self._rig(tmp_path)
-        _write(plugin / "tests" / "test_k.py",
-               self._HOOKS
-               + 'def read(root):\n'
-                 '    return (root / "shared" / "direct.py").read_text()\n'
-                 'def read(root):\n'
-                 '    return None\n'
-                 'def test_real():\n'
-                 '    read(HOOKS)\n')
-        closure = core.import_closure(plugin, ["tests/test_k.py"])
-        assert "hooks/shared/direct.py" not in closure, sorted(closure)
 
     @pytest.mark.parametrize("module, read", [
         ("tests/test_conftest_import_guard.py", "hooks/shared/__init__.py"),
@@ -1373,6 +1419,80 @@ class TestImportClosure:
         closure = core.import_closure(plugin, ["tests/test_g.py"])
         assert "tests/helper.py" not in closure and "conftest.py" not in closure
         assert "hooks/shared/unrelated.py" not in closure
+
+
+def _over_the_join_limits(core, kind, over=True):
+    """A module that reaches one of the join resolver's limits (or, with
+    over=False, stops one short of it), and the unproven site it records."""
+    head = ('from pathlib import Path\n'
+            'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n')
+    if kind == "readings":
+        calls = core._JOIN_READINGS + (1 if over else 0)
+        return (head + 'def read(root):\n    return root / "x.py"\n'
+                + "".join(f'read(HOOKS / "d{n}")\n' for n in range(calls)),
+                "join readings over")
+    if kind == "passes":
+        # Each hop takes one pass; the last pass must see no change.
+        hops = core._JOIN_PASSES - (1 if over else 2)
+        body = "".join(f"def f{n}(p):\n    return f{n + 1}(p)\n" for n in range(hops))
+        return (head + body + f'def f{hops}(p):\n    return p / "x.py"\n'
+                'f0(HOOKS)\n', "join parameters not settled")
+    tail = '    c = a / "x"\n' if over else '    c = HOOKS\n'
+    return (head + 'def b():\n    a = HOOKS\n' + tail + '    a = c\n'
+            '    return a / "y.py"\n', "join bindings not settled")
+
+
+class TestJoinLimits:
+    """A module whose joined-path reads reach the resolver's limits is
+    unproven, so every exclusion that loads it comes back on any change."""
+
+    @pytest.mark.parametrize("kind", ["readings", "passes", "bindings"])
+    def test_a_module_at_a_limit_records_an_unproven_site(self, core, tmp_path, kind):
+        source, why = _over_the_join_limits(core, kind)
+        sites = _classify(core, tmp_path, source)
+        assert any(why in site for site in sites), sites
+
+    @pytest.mark.parametrize("kind", ["readings", "passes", "bindings"])
+    def test_a_module_short_of_a_limit_records_none(self, core, tmp_path, kind):
+        source, why = _over_the_join_limits(core, kind, over=False)
+        sites = _classify(core, tmp_path, source)
+        assert not any(why in site for site in sites), sites
+
+    def test_the_last_hop_short_of_the_pass_limit_still_names_its_file(
+            self, core, tmp_path):
+        source, _ = _over_the_join_limits(core, "passes", over=False)
+        sites = _classify(core, tmp_path, source,
+                          extra={"hooks/x.py": "VALUE = 1\n"})
+        closure = core.import_closure(tmp_path / "repo" / "pact-plugin",
+                                      ["tests/test_probe.py"])
+        assert "hooks/x.py" in closure and not sites, (sorted(closure), sites)
+
+    def _select(self, core, tmp_path, source):
+        repo, plugin, _ = _git_rig(tmp_path)
+        _write(plugin / "hooks" / "unrelated.py", "VALUE = 1\n")
+        (plugin / "tests" / "test_slow.py").write_text(source, encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "rig")
+        base = _git(repo, "rev-parse", "HEAD")
+        (plugin / "hooks" / "unrelated.py").write_text("VALUE = 2\n", encoding="utf-8")
+        _git(repo, "commit", "-q", "-am", "change")
+        manifest = _facts_manifest(core)
+        changed = ["pact-plugin/hooks/unrelated.py"]
+        facts = core.gather_facts(repo, manifest, changed, base)
+        return core.select(core.discover(repo), manifest, changed, "ok", facts)
+
+    @pytest.mark.parametrize("kind", ["readings", "passes", "bindings"])
+    def test_an_exclusion_at_a_limit_comes_back_on_an_unrelated_change(
+            self, core, tmp_path, kind):
+        source, _ = _over_the_join_limits(core, kind)
+        result = self._select(core, tmp_path, source)
+        assert _reasons(result) == [("tests/test_slow.py", "unproven_reach")]
+
+    @pytest.mark.parametrize("kind", ["readings", "passes", "bindings"])
+    def test_an_exclusion_short_of_a_limit_stays_out(self, core, tmp_path, kind):
+        source, _ = _over_the_join_limits(core, kind, over=False)
+        result = self._select(core, tmp_path, source)
+        assert result.added_back == (), _reasons(result)
 
 
 class TestScanIndex:

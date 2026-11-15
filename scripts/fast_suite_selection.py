@@ -38,6 +38,7 @@ import fnmatch
 import functools
 import hashlib
 import importlib
+import itertools
 import json
 import re
 import subprocess
@@ -728,7 +729,8 @@ class FileScan:
     scanner_roots: frozenset[str] | None
     # 'line:why' evidence that a production module climbs out of the plugin.
     repo_reach: tuple[str, ...]
-    # 'line:why' for every site that keeps a TEST-SIDE module unproven.
+    # 'line:why' for every site that keeps a TEST-SIDE module unproven, and
+    # for any module whose joined-path reads the resolver could not finish.
     unproven: tuple[str, ...]
     dynamic_imports: tuple[str, ...]
     dynamic_fixtures: tuple[str, ...]
@@ -1146,70 +1148,93 @@ def _module_anchors(tree: ast.Module, rel: str,
 
 
 _Anchor = tuple[int, tuple[str, ...]]
-_Scope = ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
-_SCOPE_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+_Env = dict[str, frozenset[_Anchor]]
+_FUNCTION_NODES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
 _COMPREHENSION_NODES = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
-_JOIN_READINGS = 16
+_SCOPE_NODES = (*_FUNCTION_NODES, ast.ClassDef, *_COMPREHENSION_NODES)
+_Scope = (ast.Module | ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda | ast.ClassDef
+          | ast.ListComp | ast.SetComp | ast.DictComp | ast.GeneratorExp)
+# The most combinations of its names' anchored paths one expression is read
+# under, and the most passes that carry anchored paths into parameters and
+# across scopes. A module that reaches either is unproven, not cut short.
+_JOIN_READINGS = 64
+_JOIN_PASSES = 8
 
 
 def _outer_parts(node: _Scope) -> list[ast.AST]:
-    """What a def, lambda or class evaluates in the scope around it: its
-    decorators, default values, and a class's bases and keywords."""
+    """What a nested scope evaluates in the scope around it: a def's or
+    lambda's decorators and default values, a class's decorators, bases and
+    keywords, a comprehension's first iterable."""
+    if isinstance(node, _COMPREHENSION_NODES):
+        return [node.generators[0].iter]
+    if isinstance(node, ast.Module):
+        return []
     parts: list[ast.AST] = list(getattr(node, "decorator_list", []))
     if isinstance(node, ast.ClassDef):
         return parts + node.bases + [keyword.value for keyword in node.keywords]
-    if isinstance(node, ast.Module):
-        return parts
     arguments = node.args
     return parts + arguments.defaults + [d for d in arguments.kw_defaults if d is not None]
 
 
-def _scope_nodes(scope: _Scope) -> list[tuple[ast.AST, frozenset[str]]]:
-    """(node, comprehension-bound names around it) for every node a scope
-    evaluates in its own namespace. The bodies of the functions, lambdas and
-    classes it defines are left out (each is a scope of its own); their outer
-    parts are kept. Inside a comprehension, its loop targets are its own names."""
-    roots: list[ast.AST] = [scope.body] if isinstance(scope, ast.Lambda) else list(scope.body)
-    out: list[tuple[ast.AST, frozenset[str]]] = []
-    stack: list[tuple[ast.AST, frozenset[str]]] = [
-        (node, frozenset()) for node in reversed(roots)]
+def _scope_roots(scope: _Scope) -> list[ast.AST]:
+    """The nodes a scope evaluates in its own namespace, before descending."""
+    if isinstance(scope, ast.Lambda):
+        return [scope.body]
+    if isinstance(scope, _COMPREHENSION_NODES):
+        roots: list[ast.AST] = ([scope.key, scope.value] if isinstance(scope, ast.DictComp)
+                                else [scope.elt])
+        for position, generator in enumerate(scope.generators):
+            roots += [generator.target, *generator.ifs]
+            if position:
+                roots.append(generator.iter)
+        return roots
+    return list(scope.body)
+
+
+def _scope_nodes(scope: _Scope) -> list[ast.AST]:
+    """Every node a scope evaluates in its own namespace. The bodies of the
+    functions, lambdas, classes and comprehensions it contains are left out
+    (each is a scope of its own); their outer parts are kept."""
+    out: list[ast.AST] = []
+    stack = list(reversed(_scope_roots(scope)))
     while stack:
-        node, shadowed = stack.pop()
-        out.append((node, shadowed))
+        node = stack.pop()
+        out.append(node)
         if isinstance(node, _SCOPE_NODES):
-            stack.extend((part, shadowed) for part in _outer_parts(node))
+            stack.extend(_outer_parts(node))
             continue
-        if isinstance(node, _COMPREHENSION_NODES):
-            shadowed = shadowed | {name.id for generator in node.generators
-                                   for name in ast.walk(generator.target)
-                                   if isinstance(name, ast.Name)}
-        stack.extend((child, shadowed) for child in ast.iter_child_nodes(node))
+        stack.extend(ast.iter_child_nodes(node))
     return out
 
 
-def _scope_bindings(scope: _Scope, nodes) -> tuple[dict[str, list], dict[str, list],
-                                                   dict[str, list]]:
-    """The names a scope binds, each with its bindings; and the bindings of its
-    `global` and of its `nonlocal` names, which belong to the module and to the
-    enclosing function. A binding is the assigned value for a plain
-    `name = value` (or `name: T = value`); None for any other form: a
-    parameter, an augmented, unpacked, loop, with, except, import, del, walrus
-    or match binding, an annotation without a value, or a nested def or class
-    name."""
-    bindings: dict[str, list] = {}
+def _scope_bindings(scope: _Scope, nodes: list[ast.AST]):
+    """(bindings, global names, exports) of one scope.
+
+    bindings maps each name the scope binds to its (position, value) pairs: the
+    value is the expression a plain, annotated or walrus assignment to the bare
+    name binds, a synthesized `name / x` for an augmented `name /= x`, and
+    None for every other form (a parameter, a loop, unpacking, with, except,
+    import, del, match capture, a type alias, a nested def or class name,
+    `x: T` with no value, any other augmented operator). exports are the
+    (kind, name, value) assignments the scope makes to a name another scope
+    owns: `global`, `nonlocal`, and a walrus inside a comprehension."""
+    bindings: dict[str, list[tuple[tuple[int, int], ast.AST | None]]] = {}
     declared_global: set[str] = set()
     declared_nonlocal: set[str] = set()
+    walrus: list[tuple[str, ast.AST]] = []
 
-    def bind(name: str, value) -> None:
-        bindings.setdefault(name, []).append(value)
+    def bind(name: str, node: ast.AST, value: ast.AST | None) -> None:
+        position = (getattr(node, "lineno", 0), getattr(node, "col_offset", 0))
+        bindings.setdefault(name, []).append((position, value))
 
-    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+    if isinstance(scope, _FUNCTION_NODES):
         arguments = scope.args
         for arg in (*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
                     arguments.vararg, arguments.kwarg):
             if arg is not None:
-                bind(arg.arg, None)
-    for node, shadowed in nodes:
+                bindings.setdefault(arg.arg, []).append(((0, -1), None))
+    targets_done: set[int] = set()
+    for node in nodes:
         if isinstance(node, ast.Global):
             declared_global.update(node.names)
         elif isinstance(node, ast.Nonlocal):
@@ -1217,215 +1242,283 @@ def _scope_bindings(scope: _Scope, nodes) -> tuple[dict[str, list], dict[str, li
         elif isinstance(node, ast.Assign):
             for target in node.targets:
                 if isinstance(target, ast.Name):
-                    bind(target.id, node.value)
-                else:
-                    for name in ast.walk(target):
-                        if isinstance(name, ast.Name):
-                            bind(name.id, None)
+                    targets_done.add(id(target))
+                    bind(target.id, target, node.value)
         elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            bind(node.target.id, node.value)  # None without a value
-        elif isinstance(node, (ast.AugAssign, ast.For, ast.AsyncFor)):
-            for name in ast.walk(node.target):
-                if isinstance(name, ast.Name):
-                    bind(name.id, None)
-        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
-            for name in ast.walk(node.optional_vars):
-                if isinstance(name, ast.Name):
-                    bind(name.id, None)
+            targets_done.add(id(node.target))
+            bind(node.target.id, node.target, node.value)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            targets_done.add(id(node.target))
+            value = None
+            if isinstance(node.op, ast.Div):
+                value = ast.copy_location(ast.BinOp(
+                    left=ast.Name(id=node.target.id, ctx=ast.Load()), op=ast.Div(),
+                    right=node.value), node)
+            bind(node.target.id, node.target, value)
+        elif isinstance(node, ast.NamedExpr):
+            targets_done.add(id(node.target))
+            if isinstance(scope, _COMPREHENSION_NODES):
+                walrus.append((node.target.id, node.value))
+            else:
+                bind(node.target.id, node.target, node.value)
         elif isinstance(node, ast.ExceptHandler) and node.name:
-            bind(node.name, None)
+            bind(node.name, node, None)
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             for alias in node.names:
-                bind((alias.asname or alias.name).split(".")[0], None)
-        elif isinstance(node, ast.Delete):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    bind(target.id, None)
-        elif isinstance(node, ast.NamedExpr):
-            bind(node.target.id, None)  # binds in this scope, even in a comprehension
+                bind((alias.asname or alias.name).split(".")[0], node, None)
         elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
-            bind(node.name, None)
+            bind(node.name, node, None)
         elif isinstance(node, ast.MatchMapping) and node.rest:
-            bind(node.rest, None)
+            bind(node.rest, node, None)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bind(node.name, None)
-    global_bindings = {name: bindings.pop(name) for name in declared_global
-                       if name in bindings}
-    nonlocal_bindings = {name: bindings.pop(name) for name in declared_nonlocal
-                         if name in bindings}
-    for name in declared_global:
-        global_bindings.setdefault(name, [])
-    return bindings, global_bindings, nonlocal_bindings
+            bind(node.name, node, None)
+        elif (isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del))
+              and id(node) not in targets_done):
+            # A loop, with, unpacking, del, type alias or comprehension target.
+            bind(node.id, node, None)
+    exports: list[tuple[str, str, ast.AST | None]] = []
+    for kind, names in (("global", declared_global), ("nonlocal", declared_nonlocal)):
+        for name in sorted(names):
+            exports += [(kind, name, value) for _, value in bindings.pop(name, [])]
+            if kind == "global":
+                exports.append((kind, name, None))  # the module owns it even unassigned
+    exports += [("walrus", name, value) for name, value in walrus]
+    return bindings, declared_global, exports
 
 
-def _resolve_scope(bindings: dict[str, list], outer: dict[str, _Anchor],
-                   module_env: dict[str, _Anchor], declared_global,
-                   parameters: dict[str, _Anchor]) -> dict[str, _Anchor]:
-    """The anchors visible in one scope. A name the scope binds is its own: it
-    resolves only when every binding is a plain assignment and all resolve to
-    the same anchor, or when it is a parameter bound only by its signature and
-    an in-module call gives it an anchor. A `global` name reads the module's;
-    any other free name, a `nonlocal` one included, reads the scope around it.
-    """
-    env = {name: anchor for name, anchor in outer.items() if name not in bindings}
+def _anchors_of(node: ast.AST, env: _Env, notes: list[str]) -> frozenset[_Anchor]:
+    """Every anchored path an expression names: one reading per combination
+    of the anchored paths its names carry. Over _JOIN_READINGS combinations
+    the module is unproven and the expression names nothing."""
+    names = sorted({inner.id for inner in ast.walk(node)
+                    if isinstance(inner, ast.Name) and inner.id in env}
+                   | {f"{inner.value.id}.__file__" for inner in ast.walk(node)
+                      if isinstance(inner, ast.Attribute) and inner.attr == "__file__"
+                      and isinstance(inner.value, ast.Name)
+                      and f"{inner.value.id}.__file__" in env})
+    count = 1
+    for name in names:
+        count *= len(env[name])
+    if count > _JOIN_READINGS:
+        notes.append(f"{getattr(node, 'lineno', 1)}:join readings over {_JOIN_READINGS}")
+        return frozenset()
+    found = set()
+    for combination in itertools.product(*(sorted(env[name]) for name in names)):
+        anchor = _anchor_of(node, dict(zip(names, combination)))
+        if anchor is not None:
+            found.add(anchor)
+    return frozenset(found)
+
+
+def _resolve_scope(bindings, outer: _Env, module_env: _Env, declared_global: set[str],
+                   injected: dict[str, frozenset[_Anchor]], notes: list[str]) -> _Env:
+    """The anchored paths each name in one scope carries. A name the scope
+    binds is its own and hides the same name outside; it carries every path
+    any of its bindings names, the paths other scopes give it (calls, default
+    values, `global`, `nonlocal`, a comprehension's walrus) included, and
+    nothing when none does. Bindings are read in source order, so a binding
+    that reads its own name sees the paths of the bindings before it. A
+    `global` name reads the module's; any other free name reads the scope
+    around it."""
+    env = {name: paths for name, paths in outer.items() if name not in bindings}
     for name in declared_global:
         if name in module_env:
             env[name] = module_env[name]
         else:
             env.pop(name, None)
-    for name, anchor in parameters.items():
-        if bindings.get(name) == [None]:
-            env[name] = anchor
-    pending = {name: values for name, values in bindings.items()
-               if values and all(value is not None for value in values)}
-    while pending:
-        settled = {}
-        for name, values in pending.items():
-            found = {_anchor_of(value, env) for value in values}
-            if len(found) == 1 and None not in found:
-                settled[name] = found.pop()
-        if not settled:
-            break
-        env.update(settled)
-        for name in settled:
-            del pending[name]
+    for _ in range(len(bindings) + 1):  # an acyclic chain settles in this many
+        settled = dict(env)
+        for name, entries in bindings.items():
+            found = set(injected.get(name, ()))
+            for _, value in sorted(entries, key=lambda entry: entry[0]):
+                if value is None:
+                    continue
+                view = {**settled, name: frozenset(found)} if found else {
+                    key: paths for key, paths in settled.items() if key != name}
+                found |= _anchors_of(value, view, notes)
+            if found:  # a name only gains paths, so one never found stays absent
+                settled[name] = frozenset(found)
+        if settled == env:
+            return env
+        env = settled
+    notes.append(f"1:join bindings not settled in {len(bindings) + 1} passes")
     return env
 
 
 def _anchored_join_files(tree: ast.Module, rel: str,
                          module_files: dict[str, str],
-                         plugin_root: Path) -> list[Path]:
-    """Production .py files a module names by joining an anchored directory to
-    file literals (`ROOT / "hooks" / "x.py"`, `HERE.joinpath("x.py")`,
-    `os.path.join(BASE, "x.py")`). A test that reads such a file depends on it.
+                         plugin_root: Path) -> tuple[list[Path], list[str]]:
+    """(production .py files, unproven sites) for a module that joins an
+    anchored directory to file literals (`ROOT / "hooks" / "x.py"`,
+    `HERE.joinpath("x.py")`, `os.path.join(BASE, "x.py")`). A test that reads
+    such a file depends on it.
 
     Names are resolved per scope, as Python resolves them: the module body,
-    each def, async def and lambda, and each class body. A name a scope binds
-    is local to it and hides the same name outside, unless declared `global` or
-    `nonlocal`; a free name reads the enclosing function and then the module (a
-    class body's names are not seen by its methods). A comprehension's loop
-    targets are its own; a walrus binds in the scope around it. A local is
-    followed only when every one of its bindings in the scope is a plain
-    assignment and all resolve to one anchored path; a parameter, only when
-    nothing else in the function binds it and a direct call to a function of
-    that name, defined once in the module, passes an anchored path in its
-    exact positional or keyword slot (a starred argument ends the matching).
-    Everything else names nothing: an unanchored base (a tmp_path, a literal
-    absolute path), a name bound any other way (a loop, unpacking, with,
-    except, import, an augmented or conflicting assignment, an assignment
-    through `global` or `nonlocal` from another scope), a lambda's
-    parameters, and a call through an alias, an attribute or another module.
+    each def, async def and lambda, each class body, and each comprehension.
+    A name a scope binds is local to it and hides the same name outside,
+    unless declared `global` or `nonlocal`; a free name reads the scopes
+    around it, out to the module. A class body's names are seen neither by
+    its methods nor by its comprehensions, except a comprehension's first
+    iterable. A comprehension's loop targets are its own; its walrus binds in
+    the function or module around it.
+
+    A name carries every anchored path any of its bindings names: a plain,
+    annotated or walrus assignment, and `/=` joined onto the paths before it;
+    bindings are read in source order, so one that reads its own name sees
+    the bindings before it. A binding of any other form names nothing: a
+    loop, unpacking, with, except, import, del, match capture, a type alias,
+    a nested def or class, `x: T` with no value, another augmented operator,
+    or a value that is not an anchored path. A parameter also carries every
+    anchored path its default value names, and every one a direct call
+    passes in a slot it can land in (by position, or by keyword; after a
+    starred argument, in its own slot or any later one), to any def of that
+    name in the module or lambda a plain assignment gives that name. An
+    assignment through `global` or `nonlocal`, and a comprehension's walrus,
+    carries its value's paths to the scope that owns the name. A call through
+    an attribute, any other name or another module binds nothing.
+
+    Over-approximates, and never cuts a reading short: carrying paths into
+    parameters and across scopes repeats until nothing changes, at most
+    _JOIN_PASSES times; a scope's own names settle within one more pass than
+    it binds names (only a cycle that keeps growing takes longer); and an
+    expression is read under at most _JOIN_READINGS combinations of its
+    names' paths. A module that reaches any of these limits is unproven.
+
     The joined path must name an existing file ending in .py; as for a whole
     literal, test-tree files and conftests are not edges.
     """
+    notes: list[str] = []
     _, _, module_resolved = _module_anchors(tree, rel, module_files)
-    file_anchors = {name: anchor for name, anchor in module_resolved.items()
-                    if name.endswith(".__file__")}
-    functions: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            functions.setdefault(node.name, []).append(node)
+    file_anchors: _Env = {name: frozenset({anchor}) for name, anchor in module_resolved.items()
+                          if name.endswith(".__file__")}
     module_parts = Path(rel).parts
 
-    # Each scope, parents before children: its nodes and bindings, the scope its
-    # free names read ("around": a class body is skipped, as Python skips it),
-    # and the nearest enclosing function ("function_around", for nonlocal).
+    # Each scope, parents before children: its nodes and bindings, the scope
+    # its free names read ("around": a class body is skipped, as Python skips
+    # it), the nearest enclosing def or lambda ("function_around", for
+    # nonlocal), and the assignments it makes to names other scopes own.
     scopes: list[dict] = []
+    scope_of: dict[int, int] = {}
 
-    def collect(scope: _Scope, around: int | None, function_around: int | None) -> None:
+    def collect(scope: _Scope, around: int | None, function_around: int | None,
+                owner: int | None) -> None:
         nodes = _scope_nodes(scope)
-        bindings, global_bindings, nonlocal_bindings = _scope_bindings(scope, nodes)
+        bindings, declared_global, exports = _scope_bindings(scope, nodes)
         index = len(scopes)
+        scope_of[id(scope)] = index
         scopes.append({"node": scope, "nodes": nodes, "bindings": bindings,
-                       "global": set(global_bindings), "around": around,
-                       "function_around": function_around})
-        # A global or nonlocal assignment rebinds the module's name, or the
-        # nearest enclosing function's that binds it. It is evaluated in this
-        # scope, so it counts there as a binding that names nothing.
-        if index:
-            for name, values in global_bindings.items():
-                scopes[0]["bindings"].setdefault(name, []).extend([None] * len(values))
-        for name, values in nonlocal_bindings.items():
-            owner = function_around
-            while owner is not None and name not in scopes[owner]["bindings"]:
-                owner = scopes[owner]["function_around"]
-            if owner is not None:
-                scopes[owner]["bindings"][name].extend([None] * len(values))
+                       "global": declared_global, "around": around,
+                       "function_around": function_around, "exports": []})
+        for kind, name, value in exports:
+            target: int | None = index if kind == "walrus" and owner is None else owner
+            if kind == "global":
+                target = 0
+            elif kind == "nonlocal":
+                target = function_around
+                while target is not None and name not in scopes[target]["bindings"]:
+                    target = scopes[target]["function_around"]
+            if target is None:
+                continue
+            scopes[target]["bindings"].setdefault(name, [])
+            if value is not None:
+                scopes[index]["exports"].append((target, name, value))
         is_class = isinstance(scope, ast.ClassDef)
-        is_function = isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
-        for node, _ in nodes:
+        is_function = isinstance(scope, _FUNCTION_NODES)
+        is_comprehension = isinstance(scope, _COMPREHENSION_NODES)
+        for node in nodes:
             if isinstance(node, _SCOPE_NODES):
                 collect(node, around if is_class else index,
-                        index if is_function else function_around)
+                        index if is_function else function_around,
+                        owner if is_comprehension else index)
 
-    collect(tree, None, None)
+    collect(tree, None, None, None)
+    # Callables by name: every def, and every lambda a plain assignment names.
+    defs: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda]] = {}
+    for scope in scopes:
+        if isinstance(scope["node"], (ast.FunctionDef, ast.AsyncFunctionDef)):
+            defs.setdefault(scope["node"].name, []).append(scope["node"])
+        for node in scope["nodes"]:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Lambda):
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        defs.setdefault(target.id, []).append(node.value)
 
-    def environments(parameters: dict[int, dict[str, set[_Anchor]]]) -> list[list[dict]]:
-        """Every scope's readings: one environment per combination of its own
-        and its enclosing scopes' parameter anchors, at most _JOIN_READINGS."""
-        envs: list[list[dict]] = [[] for _ in scopes]
+    def environments(injected: dict[int, dict[str, frozenset[_Anchor]]]) -> list[_Env]:
+        envs: list[_Env] = []
         for index, scope in enumerate(scopes):
-            if index == 0:
-                outers = [dict(file_anchors)]
-            else:
-                outers = envs[scope["around"]] or [{}]
-            module_env = envs[0][0] if envs[0] else {}
-            bound = parameters.get(id(scope["node"]), {})
-            readings: list[dict[str, _Anchor]] = [{}]
-            for name, anchors in sorted(bound.items()):
-                readings = [{**reading, name: anchor} for reading in readings
-                            for anchor in sorted(anchors)][:_JOIN_READINGS]
-            for outer in outers:
-                for reading in readings:
-                    envs[index].append(_resolve_scope(
-                        scope["bindings"], outer, module_env, scope["global"], reading))
-            envs[index] = envs[index][:_JOIN_READINGS]
+            outer = file_anchors if index == 0 else envs[scope["around"]]
+            envs.append(_resolve_scope(scope["bindings"], outer, envs[0] if envs else {},
+                                       scope["global"], injected.get(index, {}), notes))
         return envs
 
-    def call_anchors(envs: list[list[dict]]) -> dict[int, dict[str, set[_Anchor]]]:
-        bound: dict[int, dict[str, set[_Anchor]]] = {}
-        for index, scope in enumerate(scopes):
-            for call, shadowed in scope["nodes"]:
-                if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
-                    continue
-                targets = functions.get(call.func.id, ())
-                if len(targets) != 1:
-                    continue  # unknown or redefined: which body the call reaches is open
-                function = targets[0]
-                positional = [arg.arg for arg in (*function.args.posonlyargs,
-                                                  *function.args.args)]
-                slots: list[tuple[str, ast.AST]] = []
-                for parameter, argument in zip(positional, call.args):
-                    if isinstance(argument, ast.Starred):
-                        break  # *args shifts every later slot
-                    slots.append((parameter, argument))
-                slots += [(keyword.arg, keyword.value) for keyword in call.keywords
-                          if keyword.arg is not None]
-                for env in envs[index]:
-                    visible = {name: anchor for name, anchor in env.items()
-                               if name not in shadowed}
-                    for parameter, argument in slots:
-                        found = _anchor_of(argument, visible)
-                        if found is not None:
-                            bound.setdefault(id(function), {}).setdefault(
-                                parameter, set()).add(found)
-        return bound
+    def contributions(envs: list[_Env]) -> dict[int, dict[str, set[_Anchor]]]:
+        given: dict[int, dict[str, set[_Anchor]]] = {}
 
-    envs = environments({})
-    envs = environments(call_anchors(envs))
+        def give(node: ast.AST, name: str, value: ast.AST, env: _Env) -> None:
+            paths = _anchors_of(value, env, notes)
+            if paths:
+                given.setdefault(scope_of[id(node)], {}).setdefault(name, set()).update(paths)
+
+        for index, scope in enumerate(scopes):
+            env = envs[index]
+            for target, name, value in scope["exports"]:
+                paths = _anchors_of(value, env, notes)
+                if paths:
+                    given.setdefault(target, {}).setdefault(name, set()).update(paths)
+            for node in scope["nodes"]:
+                if isinstance(node, _FUNCTION_NODES):
+                    arguments = node.args
+                    positional = [*arguments.posonlyargs, *arguments.args]
+                    for arg, default in zip(positional[len(positional)
+                                                       - len(arguments.defaults):],
+                                            arguments.defaults):
+                        give(node, arg.arg, default, env)
+                    for arg, default in zip(arguments.kwonlyargs, arguments.kw_defaults):
+                        if default is not None:
+                            give(node, arg.arg, default, env)
+                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)):
+                    continue
+                for function in defs.get(node.func.id, ()):
+                    names = [arg.arg for arg in (*function.args.posonlyargs,
+                                                 *function.args.args)]
+                    starred = 0
+                    for position, argument in enumerate(node.args):
+                        if isinstance(argument, ast.Starred):
+                            starred += 1
+                            continue
+                        slots = (names[position - starred:position - starred + 1]
+                                 if not starred else names[position - starred:])
+                        for slot in slots:
+                            give(function, slot, argument, env)
+                    for keyword in node.keywords:
+                        if keyword.arg is not None:
+                            give(function, keyword.arg, keyword.value, env)
+        return given
+
+    injected: dict[int, dict[str, frozenset[_Anchor]]] = {}
+    for _ in range(_JOIN_PASSES):
+        envs = environments(injected)
+        merged = {index: dict(names) for index, names in injected.items()}
+        for index, names in contributions(envs).items():
+            for name, paths in names.items():
+                merged.setdefault(index, {})[name] = (
+                    merged.get(index, {}).get(name, frozenset()) | frozenset(paths))
+        if merged == injected:
+            break
+        injected = merged
+    else:
+        notes.append(f"1:join parameters not settled in {_JOIN_PASSES} passes")
+        envs = environments(injected)
+
     found: list[Path] = []
     for index, scope in enumerate(scopes):
-        for env in envs[index]:
-            for node, shadowed in scope["nodes"]:
-                joined = (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)) or (
-                    isinstance(node, ast.Call)
-                    and _call_name(node) in ("joinpath", "join"))
-                if not joined:
-                    continue
-                visible = {name: anchor for name, anchor in env.items()
-                           if name not in shadowed}
-                anchor = _anchor_of(node, visible)
-                if anchor is None or not anchor[1] or not anchor[1][-1].endswith(".py"):
+        for node in scope["nodes"]:
+            joined = (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)) or (
+                isinstance(node, ast.Call) and _call_name(node) in ("joinpath", "join"))
+            if not joined:
+                continue
+            for anchor in _anchors_of(node, envs[index], notes):
+                if not anchor[1] or not anchor[1][-1].endswith(".py"):
                     continue
                 directory = _anchor_directory(anchor, module_parts)
                 if directory is None:
@@ -1435,7 +1528,7 @@ def _anchored_join_files(tree: ast.Module, rel: str,
                         or not candidate.is_file()):
                     continue
                 found.append(candidate)
-    return found
+    return found, list(dict.fromkeys(notes))
 
 
 def _repo_reach(tree: ast.Module, rel: str, plugin_root: Path,
@@ -3120,7 +3213,8 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
                         root).as_posix()
                 except ValueError:
                     pass
-    edges.extend(_anchored_join_files(tree, module_rel, module_files, root))
+    joined, join_sites = _anchored_join_files(tree, module_rel, module_files, root)
+    edges.extend(joined)
     test_side = module_rel.startswith("tests/") or _is_test_file(module_rel)
     return FileScan(
         edges=tuple(dict.fromkeys(to_rel(edges))),
@@ -3132,9 +3226,9 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
                                      module_files, scan_wrappers),
         repo_reach=(() if test_side else _repo_reach(
             tree, module_rel, root, module_files, docstrings)),
-        unproven=(_test_side_reasons(tree, module_rel, roots, root,
-                                     docstrings, module_files)
-                  if test_side else ()),
+        unproven=(*(_test_side_reasons(tree, module_rel, roots, root,
+                                       docstrings, module_files)
+                    if test_side else ()), *join_sites),
         dynamic_imports=tuple(dynamic_imports),
         dynamic_fixtures=tuple(dynamic_fixtures),
         scans=scans,
