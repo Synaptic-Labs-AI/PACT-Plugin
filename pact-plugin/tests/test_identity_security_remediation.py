@@ -1373,8 +1373,9 @@ def _pact_memory_census(tree: ast.AST, verbs: set) -> tuple:
     the check on that text that makes it safe:
     - whitespace, then a CLI verb: an OFFENCE (an invocation of an executable
       that does not exist). This is checked before every other form;
-    - a `/` or `\\` directly after the name: a folder inside a path, because
-      the path continues in the same text;
+    - a `/` directly after the name: a folder inside a path, because the
+      path continues in the same text (a backslash is not one: a shell reads
+      a backslash before a newline as a line continuation);
     - whitespace, then a word that starts with a letter (an opening quote or
       parenthesis may precede it) and is not a verb: prose, because the token
       after the name is visible and is not a verb;
@@ -1412,7 +1413,7 @@ def _pact_memory_census(tree: ast.AST, verbs: set) -> tuple:
             site = f"{node.lineno}: {text[max(0, match.start() - 20):match.end() + 20]!r}"
             if verb.match(after):
                 offences.append(site)
-            elif after.startswith(("/", "\\")) or word.match(after) or punctuation.match(after):
+            elif after.startswith("/") or word.match(after) or punctuation.match(after):
                 continue
             else:
                 parent = parents.get(node)
@@ -1491,6 +1492,9 @@ def test_the_executable_census_reads_or_reports_every_form():
         '"pact-memory --db-path=x rekey"': "unreadable",
         '"pact-memory.exe rekey"': "unreadable",
         '"pact-memory 2 rekey"': "unreadable",
+        '"pact-memory\\\\\\n    project-id rekey"': "unreadable",
+        'r"pact-memory\\ rekey"': "unreadable",
+        'f"pact-memory\\\\{sep}rekey"': "unreadable",
         # The named entry, and commands placed where it sits.
         'def get_memory_dir():\n    return Path.home() / ".claude" / "pact-memory"': "named",
         'def get_memory_dir():\n    return f"{\'pact-memory\'} rekey"': "unreadable",
