@@ -5,10 +5,11 @@ Summary: Pins the default block of pytest-randomly and the seed gate that backs 
 The merge gate runs in file order because the repository-root pyproject.toml
 addopts carries `-p no:randomly`. Two edits would undo that silently in CI,
 where the plugin is installed: deleting the line, or adding a nearer pytest
-config file that pytest picks instead of the root one. The shared venv lacks the
-plugin, so neither edit changes a local run. The static arms below red on both
-edits without the plugin; the seed-gate arms pin the runtime refusal that fires
-in CI.
+config file that pytest picks instead of the root one. pytest-randomly may or
+may not be installed locally. Where it is absent, neither edit changes a local
+run; where it is installed, the seed gate refuses the session, as in CI. The
+static arms below red on both edits whether or not the plugin is installed; the
+seed-gate arms pin the runtime refusal wherever the plugin is loaded.
 """
 
 import os
@@ -217,7 +218,8 @@ class TestSeedGate:
         """A session that collects only a skills/ test never loads
         tests/conftest.py, so the gate must run from the plugin-root conftest.
         A stand-in plugin whose module name is pytest-randomly's makes the gate
-        see the plugin loaded without the real one installed."""
+        see the plugin loaded whether or not the real one is installed; the real
+        one, where present, stays blocked by `-p no:randomly`."""
         (tmp_path / "zz_fake_randomly.py").write_text(
             '__name__ = "pytest_randomly.stand_in"\n', encoding="utf-8")
         skills_test = sorted(_PLUGIN_ROOT.glob("skills/*/test_*.py"))[0]

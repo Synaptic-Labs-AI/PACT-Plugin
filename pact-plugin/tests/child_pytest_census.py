@@ -5,11 +5,12 @@ Used by: tests/conftest.py, whose pytest_configure installs it, whose
          pytest_testnodedown collects each xdist worker's misses, and whose
          pytest_sessionfinish reports; tests/test_child_pytest_census.py.
 
-pytest-randomly is installed in CI, where constraints-ci.txt pins it, and may be
-installed anywhere else (the shared local .venv lacks it); the root
-pyproject.toml addopts blocks it. A child session rooted outside the repo does not read
-that config, so it would shuffle. Every pytest child must therefore block the
-plugin itself; none may load it. The repo config is not consulted.
+pytest-randomly is installed in CI, where constraints-ci.txt pins it, and may or
+may not be installed locally; the root pyproject.toml addopts blocks it, and
+`-p no:randomly` is a no-op where it is absent. A child session rooted outside
+the repo does not read that config, so where the plugin is installed it would
+shuffle. Every pytest child must therefore block the plugin itself; none may
+load it. The repo config is not consulted.
 
 A pytest child is deterministic when pytest, loading plugins as pytest 9.2
 does, registers pytest-randomly under none of the three names that run its
