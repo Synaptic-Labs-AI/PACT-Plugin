@@ -445,6 +445,18 @@ def test_a_listed_shell_blind_spot_is_accepted(text):
     ["timeout", "bogus", "pytest", "-q"],
     # pytest's own arguments are no command, even one naming pytest.
     ["pytest", "-p", "no:randomly", "tests/pytest"],
+    # A program that reads or lists its words runs none of them.
+    ["grep", "-rn", "pytest", "."],
+    ["rg", "-n", "pytest", "tests"],
+    ["grep", "-c", "pytest", "file.txt"],
+    ["ls", "-la", "pytest"],
+    ["bash", "-c", "grep -q pytest log && echo ok"],
+    ["sed", "-n", "/pytest/p", "log"],
+    ["test", "-x", "/venv/bin/pytest"],
+    ["timeout", "5", "cat", "-n", "pytest"],
+    # find runs only the words after its -exec actions.
+    ["find", ".", "-name", "pytest"],
+    ["find", ".", "-name", "*.py", "-exec", "grep", "-l", "pytest", "{}", ";"],
 ])
 def test_a_mention_of_pytest_that_launches_no_pytest_is_ignored(argv):
     assert census._miss(argv, None, {}) is None
@@ -527,6 +539,7 @@ def test_each_launcher_form_is_accepted_with_the_flag(argv):
     ["uvx", "ruff", "check"],
     ["pipx", "run", "black", "."],
     ["hatch", "run", "lint:ruff"],
+    ["hatch", "run", "+py=3.12", "lint:ruff"],
     ["conda", "run", "-n", "dev", "python", "script.py"],
     ["coverage", "run", "/venv/bin/pip"],
     ["pytest-cov-report"],
@@ -590,6 +603,11 @@ _WRAPPED = [
     ["poetry", "run", "python", "-m", "pytest"],
     ["hatch", "run", "test:pytest"],
     ["hatch", "-e", "test", "run", "pytest"],
+    # A matrix selector or exclusion before the command, and the env:script prefix.
+    ["hatch", "run", "+py=3.12", "test:pytest"],
+    ["hatch", "run", "+py=3.12", "+feature=x", "pytest"],
+    ["hatch", "run", "-py=3.11", "test:pytest"],
+    ["hatch", "run", "-py=3.11", "+py=3.12", "python", "-m", "pytest"],
     ["conda", "-v", "run", "pytest"],
     ["pipx", "run", "pytest"],
     ["uvx", "pytest"],
@@ -602,7 +620,17 @@ _WRAPPED = [
     ["timeout", "60", "sudo", "-E", "env", "A=1", "pytest"],
     ["nohup", "timeout", "5", "uv", "run", "python", "-m", "pytest"],
     ["sudo", "-u", "bob", "nice", "pytest"],
+    # An interpreter named only by the [module] family's list, behind a wrapper.
+    ["sudo", "py", "-3", "-m", "pytest"],
+    ["sudo", "graalpy", "-m", "pytest"],
+    ["timeout", "5", "pyston3", "-m", "pytest"],
     ["bash", "-c", "timeout 5 nice -n 1 pytest -q"],
+    # Programs that run their arguments stay refused.
+    ["xargs", "-n1", "pytest"],
+    ["xargs", "-I", "{}", "python3", "-m", "pytest", "{}"],
+    ["find", ".", "-name", "x", "-exec", "pytest", "{}", ";"],
+    ["timeout", "5", "find", "tests", "-execdir", "python3", "-m", "pytest", "{}", "+"],
+    ["bash", "-c", "find . -ok timeout 5 pytest {} \\;"],
     # A shell's -c text behind such a program, and such a program inside one.
     ["timeout", "60", "bash", "-c", "cd x && pytest"],
     ["nohup", "sh", "-c", "cd x && python3 -m pytest"],

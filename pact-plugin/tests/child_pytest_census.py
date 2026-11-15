@@ -66,11 +66,16 @@ refused whether or not it does:
   read (`timeout 60 pytest`, `sudo python -m pytest`, `uv run pytest`), refused
   whether or not it blocks pytest-randomly, since the census cannot tell what
   environment and argv that program passes on. The program is any program
-  except an interpreter, `coverage`, pytest's program, and `echo`, `printf`,
-  `which`, `true`, `false` and `:`, which run none of their words.
+  except an interpreter, `coverage`, pytest's program, and the programs that
+  print, look up, read, list or ignore their words and run none of them:
+  `echo`, `printf`, `which`, `true`, `false`, `:`, `grep`, `egrep`, `fgrep`,
+  `rg`, `ag`, `ls`, `cat`, `head`, `tail`, `wc`, `sed`, `awk`, `cut`, `sort`,
+  `uniq`, `diff`, `file`, `stat`, `test` and `[`. So `grep -c pytest log` and
+  `ls -la pytest` are mentions, not launches.
   Its command is the first word after it that is not an option (a word starting
   with `-`), a NAME=VALUE word, a number or duration (`60`, `1.5m`, `inf`,
-  `0x5`) or the verb `run` or `tool` (`uv tool run pytest`,
+  `0x5`), a hatch matrix selector (`+py=3.12`, `-py=3.11`) or the verb `run`
+  or `tool` (`uv tool run pytest`,
   `hatch -e test run pytest`). A word right after an option may be that
   option's value, so the word after it is tried too (`sudo -u bob pytest`).
   The command is also tried as a shell whose -c text runs a family above, or
@@ -80,6 +85,8 @@ refused whether or not it does:
   `pdm`, `pipenv`, `hatch`, `rye`, `pixi`, `conda` or `micromamba`, its own
   command is searched for the same way, so a chain of them is followed to the
   program it starts (`timeout 60 nice -n 5 pytest`, `sudo env uv run pytest`).
+  find is in that list, and its commands are the words after `-exec`,
+  `-execdir`, `-ok` and `-okdir` (`find . -name x -exec pytest {} ;`).
 - [shell] Any family above inside the command text of a shell run with `-c`
   (below).
 `-m py.test` and `-m _pytest` start no pytest session and are no family.
@@ -180,6 +187,10 @@ Blind spots, examples of launches outside the census:
     `-o addopts=` override is read), an `-o addopts=` inside that value,
     `pytest_plugins` in a conftest.py or test module, a plugin that imports
     pytest_randomly itself, and a pytest whose loading order differs from 9.2.
+13. A command a program runs from text the census reads as a plain word: sed's
+    `e` command and awk's `system()` inside their script, a git alias
+    (`git -c alias.t='!pytest' t`), and an option of a read or list program
+    that runs one (`sort --compress-program`, `rg --pre`).
 """
 import os
 import re
@@ -221,21 +232,30 @@ _OPERATOR_PIECE = re.compile(r"&>>?|[<>]&|>>|>\||<<<|<<|<>|[<>]|\|&|&&|\|\||[;&|
 # Words a shell reads before a command without running them.
 _RESERVED = frozenset({"{", "}", "!", "if", "then", "elif", "else", "fi",
                        "do", "done", "while", "until"})
-# Programs that run none of the words after them: they print, look up or ignore
-# them.
-_RUNS_NOTHING = frozenset({"echo", "printf", "which", "true", "false", ":"})
+# Programs that run none of the words after them: they print, look up, read,
+# list or ignore them. Names only; a missing name refuses a mention loudly.
+_RUNS_NOTHING = frozenset({
+    "echo", "printf", "which", "true", "false", ":", "grep", "egrep", "fgrep", "rg",
+    "ag", "ls", "cat", "head", "tail", "wc", "sed", "awk", "cut", "sort", "uniq",
+    "diff", "file", "stat", "test", "[",
+})
+# find's actions that run the command after them.
+_FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 # Process wrappers and tool runners whose command may itself be one of them: the
 # command search runs again from each, so a chain of them is followed to the
 # program it starts. Names only; a missing name shortens a chain.
 _CHAINED = frozenset({"env", "nice", "nohup", "sudo", "timeout", "time", "stdbuf",
                       "xvfb-run", "exec", "uv", "uvx", "pipx", "poetry", "pdm", "pipenv",
-                      "hatch", "rye", "pixi", "conda", "micromamba"})
+                      "hatch", "rye", "pixi", "conda", "micromamba", "find"})
 # Subcommand verbs a program names before the command it runs (`uv run`,
 # `uv tool run`, `poetry run`, `hatch -e test run`).
 _RUN_VERBS = frozenset({"run", "tool"})
 # A number or duration a program takes before its command (`timeout 1.5m`,
 # `nice -n +5`, `timeout inf`, `timeout 0x5`).
 _NUMBER = re.compile(r"[+-]?(?:\.?[0-9][0-9a-z.+-]*|inf(?:inity)?)\Z", re.IGNORECASE)
+# A hatch matrix selector before its command: `hatch run +py=3.12 test:pytest`,
+# or an exclusion, `-py=3.11`.
+_SELECTOR = re.compile(r"[+-][A-Za-z_][A-Za-z0-9_.-]*=")
 # hatch names an environment before its command: `hatch run test:pytest`.
 _ENVIRONMENT_PREFIX = re.compile(r"[A-Za-z0-9_.-]+:")
 # Shell options that take a separate value, and the long ones that take a file.
@@ -809,11 +829,16 @@ def _command_starts_pytest(part, program, depth):
     starts pytest. That word is the first past options, NAME=VALUE words,
     numbers and the verbs in _RUN_VERBS; while it follows an option it may be
     that option's value, so the next one is tried too. A word in _CHAINED is
-    searched again as a program of its own."""
+    searched again as a program of its own. find's commands are the words after
+    its _FIND_EXEC actions."""
+    if _command_name(part[program]) == "find":
+        return depth < _MAX_DEPTH and any(
+            _command_starts_pytest(part, at, depth + 1)
+            for at in range(program + 1, len(part)) if part[at] in _FIND_EXEC)
     after_option = False
     for at in range(program + 1, len(part)):
         word = part[at]
-        if _is_assignment(word) or _NUMBER.match(word):
+        if _is_assignment(word) or _NUMBER.match(word) or _SELECTOR.match(word):
             after_option = False
         elif word.startswith("-"):
             after_option = True
