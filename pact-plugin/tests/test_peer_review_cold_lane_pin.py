@@ -392,7 +392,11 @@ RECHECK_VALIDITY = "A re-check report is valid only with"
 RETIRED_LANE_STEMS = (
     "supersed",
     "restart",
-    "merge-base",
+    # A re-check base that moved off {base}. The run receipt's control clone
+    # legitimately names `git merge-base {base} {head}`, so the bare command
+    # name is not retired; the moving-base wording is.
+    "merge-base of",
+    "re-check base",
     "ancestor",
     "latest round",
     "previous cold",
@@ -418,8 +422,8 @@ RETIRED_LANE_STEMS = (
     # The per-hunk trigger that chose between a first round and a re-check
     # alone; every verify-only round now runs a first-round review.
     "needs a first-round review",
-    "attribute",
-    "release notes",
+    "a hunk you cannot attribute to one of those fixes",
+    "only records that fix in the release notes",
     "even when the list is empty",
     "a resume other than a same-round re-check",
     # An archive export has no .git, so tests that need a checkout skip there
@@ -755,8 +759,14 @@ class TestOperationalFactsClause:
          "the moved-HEAD branch of the run receipt")),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path, in an isolated copy under {scratch_dir}: a clone of the repository with its remote removed, checked out at {head}. Compare its status before and after", (
          "the isolated-copy re-run: same interpreter by absolute path, a remote-less clone at {head}")),
-        ("if the same paths appear there, the run itself wrote them, and they are a finding about the diff; otherwise report the result as unattributable because the worktree moved", (
-         "the run-made change reported as a finding, and only an unreproduced change as unattributable")),
+        ("If the same paths appear there, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
+         "the base-control run at the merge base")),
+        ("If those paths appear there too, they are a pre-existing defect: name them as pre-existing under the open questions, with the paths and the command that wrote them, not as a finding about the diff", (
+         "a base-reproduced write reported as pre-existing, not as a finding")),
+        ("If they appear only in the {head} clone, the run itself wrote them, and they are a finding about the diff", (
+         "the change-only write reported as a finding about the diff")),
+        ("If they do not appear in the {head} clone, report the result as unattributable because the worktree moved", (
+         "only an unreproduced change left unattributable")),
     ])
     def test_operational_facts_token_present(self, token, lost):
         assert token in _clause("OPERATIONAL FACTS"), (

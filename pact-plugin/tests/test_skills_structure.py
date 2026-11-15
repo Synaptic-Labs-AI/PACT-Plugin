@@ -835,16 +835,22 @@ class TestRunReceiptAttribution:
     REL_PATH = "pact-agent-teams/SKILL.md"
     BULLET_START = "- For each of those runs, record `git rev-parse HEAD`"
     REQUIRED_PHRASES = (
-        ("If `HEAD` differs, the worktree moved during the run: re-run it, or report that result as unattributable in `uncertainty`, never as a pass or a failure of your change.",
-         "the moved-HEAD branch"),
+        ("If `HEAD` differs, the worktree moved during the run: re-run it before you write the HANDOFF, and never report the moved run as a pass or a failure of your change.",
+         "the moved-HEAD branch: re-run before the HANDOFF"),
+        ("Only when a re-run is impossible, report that result as unattributable in `uncertainty` and state there that the exit-code precondition above is not met.",
+         "the unattributable exception, bound to an impossible re-run and an unmet precondition"),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path (for example the worktree's venv `python`), in an isolated copy that holds your staged change:",
          "the isolated-copy re-run, with the same interpreter by absolute path"),
         ("a clone of the repository with its remote removed, checked out at your `HEAD`, with your staged change applied by piping `git diff --cached --binary` from the worktree into `git apply --index` in the clone. Compare its status before and after.",
          "the recipe that carries the staged change into the copy"),
-        ("If the same paths appear there, the run itself wrote them: treat it as a failure of your change, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
-         "the run-made change treated as a failure of the change"),
-        ("Otherwise the worktree moved during the run: re-run it, or report that result as unattributable in `uncertainty`.",
-         "the unreproduced change left unattributable"),
+        ("If the same paths appear there, run the same command the same way in a second clone with its remote removed, checked out at the merge base of your `HEAD` with the branch your work will merge into (`git merge-base HEAD <that branch>`, computed in the worktree), with no change applied.",
+         "the base-control run at the merge base"),
+        ("If those paths appear in the merge-base clone too, they are a pre-existing defect: report them in your HANDOFF, with the paths and the command that wrote them, and do not treat them as a failure of your change.",
+         "a base-reproduced write reported as pre-existing"),
+        ("If they appear only in the copy that holds your change, the run itself wrote them: treat it as a failure of your change, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
+         "the change-only write treated as a failure of the change"),
+        ("If they do not appear in the copy that holds your change, the worktree moved during the run: handle it as a moved `HEAD`.",
+         "the unreproduced change handled as a moved HEAD"),
     )
 
     def _bullet(self) -> str:
