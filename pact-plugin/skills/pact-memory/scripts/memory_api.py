@@ -897,20 +897,19 @@ def _is_home(root: Path) -> bool:
     return os.path.normcase(str(root)) == os.path.normcase(str(home))
 
 
-def _git_skips_marker(root: Path, common: Optional[Path], toplevel: Optional[str]) -> bool:
-    """Whether git skipped the `.git` directory at `root` for a checkout
-    elsewhere: git's answers asked at `root` name a common dir that is not
-    `root/.git` and a top level that is not `root`. A `.git` file is never
-    skipped (git refuses a bad gitfile rather than looking past it), and no
-    answer is no evidence: git's errors (an unreadable or untrusted `.git`)
-    answer None too."""
+def _git_skips_marker(root: Path, common: Optional[Path], git_dir: Optional[str]) -> bool:
+    """Whether git looked past the `.git` directory at `root`: git, asked at
+    `root`, answered with a git dir that is not `root/.git`. A git dir that
+    IS `root/.git` means git used it, whatever its common dir and work tree
+    name. A `.git` file is never looked past (git refuses a bad gitfile).
+    Inside a repository, git looks past a `.git` it cannot use, an
+    unreadable one included, and answers for the repository above, a bare
+    one included. With no repository above, git gives no answer, and no
+    answer is no evidence: the `.git` stays a marker git cannot answer for."""
     dot_git = root / ".git"
-    if common is None or not toplevel or not dot_git.is_dir():
+    if common is None or not git_dir or not dot_git.is_dir():
         return False
-    return (
-        os.path.realpath(toplevel) != os.path.realpath(root)
-        and os.path.realpath(common) != os.path.realpath(dot_git)
-    )
+    return os.path.realpath(git_dir) != os.path.realpath(dot_git)
 
 
 def _home_checkout(
@@ -1868,6 +1867,44 @@ def _git_rev_parse(start: Optional[str], *args: str) -> Optional[str]:
     )
 
 
+def _git_dir_and_toplevel(start: Optional[str]) -> "tuple[Optional[str], Optional[str]]":
+    """(absolute git dir, top level) from ONE `git rev-parse
+    --absolute-git-dir --show-toplevel`, either None when git gave no
+    answer. A bare repository answers its git dir and then exits non-zero
+    on the top level, so the git dir is kept and the top level is None."""
+    return _detection_answer(
+        ("rev-parse", _where(start), ("--absolute-git-dir", "--show-toplevel")),
+        lambda: _ask_git_dir_and_toplevel(start),
+    )
+
+
+def _ask_git_dir_and_toplevel(start: Optional[str]) -> "tuple[Optional[str], Optional[str]]":
+    command = ["git"]
+    if start is not None:
+        command += ["-C", str(start)]
+    command += ["rev-parse", "--absolute-git-dir", "--show-toplevel"]
+    from shared.project_scope import git_env_without_location
+
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=False,
+            timeout=5,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None, None
+    lines = os.fsdecode(result.stdout).splitlines()
+    git_dir = lines[0].strip() if lines and lines[0].strip() else None
+    toplevel = (
+        lines[1].strip()
+        if result.returncode == 0 and len(lines) > 1 and lines[1].strip()
+        else None
+    )
+    return git_dir, toplevel
+
+
 def _ask_rev_parse(start: Optional[str], args: tuple) -> Optional[str]:
     command = ["git"]
     if start is not None:
@@ -2801,7 +2838,8 @@ class PACTMemory:
             cwd_common_dir = None
             marker_toplevel = None
             # A `.git` GIT LOOKED PAST IS NO MARKER: when git, asked at the
-            # walk's root, names a checkout elsewhere (`_git_skips_marker`),
+            # walk's root, answers with a git dir other than that root's
+            # `.git` (`_git_skips_marker`),
             # the walk runs again without that `.git`, so the root is where
             # the same folder with no `.git` would land. The answers asked at
             # a root are kept, so no root is asked twice.
@@ -2809,18 +2847,17 @@ class PACTMemory:
             asked: dict = {}
             while cwd_start is not None:
                 cwd_root = PACTMemory._find_project_root(cwd_start, frozenset(skipped))
-                cwd_common_dir = marker_toplevel = None
+                cwd_common_dir = marker_git_dir = marker_toplevel = None
                 if not cwd_root.name or _is_home(cwd_root):
                     break
                 key = Path(os.path.realpath(cwd_root))
                 if key not in asked:
                     common = main_repo_common_dir(str(cwd_root))
-                    asked[key] = (
-                        common,
-                        _git_rev_parse(str(cwd_root), "--show-toplevel") if common is not None else None,
-                    )
-                cwd_common_dir, marker_toplevel = asked[key]
-                if key in skipped or not _git_skips_marker(cwd_root, cwd_common_dir, marker_toplevel):
+                    asked[key] = (common, *(
+                        _git_dir_and_toplevel(str(cwd_root)) if common is not None else (None, None)
+                    ))
+                cwd_common_dir, marker_git_dir, marker_toplevel = asked[key]
+                if key in skipped or not _git_skips_marker(cwd_root, cwd_common_dir, marker_git_dir):
                     break
                 skipped.add(key)
             if cwd_root is not None and cwd_root.name and not _is_home(cwd_root):

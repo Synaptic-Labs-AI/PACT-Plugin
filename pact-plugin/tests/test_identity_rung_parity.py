@@ -331,6 +331,19 @@ def _setting_at_home(shape: str, route: str) -> bool:
     return "user setting" in ROUTES[route][1] and HOME_FACTS.get(shape, (False, None))[0]
 
 
+# Shapes whose routes see different repositories by design: a folder inside a
+# bare repository, where git asked from the folder finds the bare repository
+# (no working tree, so those routes decline) while the cwd-marker routes,
+# whose ceiling hides it, find no repository and bind the folder. They are
+# left out of the agreement arm; each must still disagree there, and each
+# stray `.git` shape must answer on every route exactly as its no-`.git`
+# twin (`test_a_stray_git_answers_as_the_same_folder_with_none`).
+SPLIT_BY_VISIBILITY = {
+    "stray_dotgit_under_bare_repository": "no_dotgit_under_bare_repository",
+    "no_dotgit_under_bare_repository": None,
+}
+
+
 def _reached(cells) -> dict:
     """{shape: {route: (answer, override report)}} for the cells whose own
     rung answered, except the user setting at a home target (see
@@ -339,7 +352,10 @@ def _reached(cells) -> dict:
     stops reading the file, or starts printing its path, disagrees."""
     by_shape = collections.defaultdict(dict)
     for (shape, route), (answer, rung, override) in cells.items():
-        if rung in ROUTES[route][1] and not _setting_at_home(shape, route):
+        if (
+            rung in ROUTES[route][1] and not _setting_at_home(shape, route)
+            and shape not in SPLIT_BY_VISIBILITY
+        ):
             by_shape[shape][route] = (answer, override)
     return by_shape
 
@@ -387,6 +403,25 @@ class TestEveryRungGivesAShapeTheSameAnswer:
             if answer != (f"bound:{USER_SETTING_ID}", "user setting", None)
         }
         assert wrong == {}, f"a home-target cell left out of the agreement arm answered: {wrong}"
+
+    def test_a_stray_git_answers_as_the_same_folder_with_none(self, matrix):
+        """A `.git` git looks past for a bare repository above answers on
+        every route exactly as the same folder with no `.git`, and the pair
+        does split by route (the reason it is left out of the agreement
+        arm)."""
+        cells, _sites, _fired, _executed = matrix
+        for stray, twin in SPLIT_BY_VISIBILITY.items():
+            if twin is None:
+                continue
+            differ = {
+                route: (cells[(stray, route)][0], cells[(twin, route)][0])
+                for route in ROUTES
+                if cells[(stray, route)][0::2] != cells[(twin, route)][0::2]
+            }
+            assert differ == {}, f"{stray} differs from {twin}: {differ}"
+        for shape in SPLIT_BY_VISIBILITY:
+            answers = {cells[(shape, route)][0] for route in ROUTES}
+            assert len(answers) > 1, (shape, answers)
 
     def test_a_stray_git_with_no_repository_above_declines_on_every_route(self, matrix):
         """A `.git` directory with no repository above gets no answer from
@@ -1581,3 +1616,46 @@ class TestTheIdentityIsAskedOfItsOwnRepository:
             assert asked == []
             memory_api._legacy_suppression(victim / "wt")
             assert asked == [str(victim / "wt")]
+
+
+class TestAGitTheBareRepositoryAboveLooksPast:
+    @pytest.mark.requires_non_root
+    def test_an_unreadable_git_answers_as_the_same_folder_with_none(self, tmp_path_factory):
+        """A `.git` directory git cannot read, in a folder inside a bare
+        repository: git answers the bare repository's git dir for it, so it
+        is looked past, and every route answers as for the same folder with
+        no `.git`."""
+        import os
+
+        from fixtures.identity_routes import (
+            _no_dotgit_under_bare_repository,
+            _stray_dotgit_under_bare_repository,
+        )
+
+        answers = {}
+        for name, build in (
+            ("unreadable", _stray_dotgit_under_bare_repository),
+            ("none", _no_dotgit_under_bare_repository),
+        ):
+            base = tmp_path_factory.mktemp(f"bare_{name}")
+            assert_outside_repository(base)
+            target = build(base)
+            (target / "sub").mkdir()
+            if name == "unreadable":
+                os.chmod(target / ".git", 0)
+            try:
+                for index, (route, (run, _sources)) in enumerate(ROUTES.items()):
+                    elsewhere = base / f"elsewhere-{index}"
+                    elsewhere.mkdir()
+                    with pytest.MonkeyPatch.context() as cell_patch:
+                        _clear(cell_patch)
+                        answers[(name, route)] = _answer(run(cell_patch, target, elsewhere))[0]
+            finally:
+                if name == "unreadable":
+                    os.chmod(target / ".git", 0o755)
+        differ = {
+            route: (answers[("unreadable", route)], answers[("none", route)])
+            for route in ROUTES
+            if answers[("unreadable", route)] != answers[("none", route)]
+        }
+        assert differ == {}, f"an unreadable .git under a bare repository answered differently: {differ}"

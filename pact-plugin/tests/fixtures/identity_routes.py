@@ -261,12 +261,49 @@ def _stray_dangling_dotgit(base: Path) -> Path:
 
 def _stray_dotgit_without_repository(base: Path) -> Path:
     """An empty `.git` directory in a folder with no repository above it.
-    Git finds no repository here, so it gives no answer, and git's errors
-    on a `.git` it cannot read or does not trust give that same None.
-    Reading a None as a `.git` git looked past would send those to another
-    root, so this `.git` stays a marker that git cannot answer for."""
+    Git gives no answer here, for an empty `.git` and an unreadable one
+    alike, and no answer is no evidence that git looked past the `.git`, so
+    it stays a marker git cannot answer for. Under a repository, git
+    answers for that repository instead, and the `.git` is looked past."""
     target = base / "folder"
     (target / ".git").mkdir(parents=True)
+    return target
+
+
+def _stray_dotgit_under_bare_repository(base: Path) -> Path:
+    """An empty `.git` directory in a folder inside a bare repository, which
+    git skips for the bare repository above."""
+    above = base / "above.git"
+    above.mkdir()
+    run_git("init", "-q", "--bare", str(above), cwd=base)
+    run_git("--git-dir", str(above), "remote", "add", "origin", VICTIM, cwd=base)
+    target = above / "folder"
+    (target / ".git").mkdir(parents=True)
+    return target
+
+
+def _no_dotgit_under_bare_repository(base: Path) -> Path:
+    """The same folder inside a bare repository with no `.git` at all."""
+    target = _stray_dotgit_under_bare_repository(base)
+    (target / ".git").rmdir()
+    return target
+
+
+def _forged_worktree_config_dotgit(base: Path) -> Path:
+    """A `.git` DIRECTORY whose `commondir` names the victim's git dir and
+    whose `config.worktree` puts the work tree elsewhere: git uses it as this
+    folder's git dir, with the victim's repository behind it."""
+    victim = _victim(base)
+    run_git("config", "extensions.worktreeConfig", "true", cwd=victim)
+    elsewhere = base / "elsewhere-worktree"
+    elsewhere.mkdir()
+    target = base / "target"
+    (target / ".git").mkdir(parents=True)
+    (target / ".git" / "HEAD").write_text("ref: refs/heads/master\n", encoding="utf-8")
+    (target / ".git" / "commondir").write_text(str(victim / ".git") + "\n", encoding="utf-8")
+    (target / ".git" / "config.worktree").write_text(
+        f"[core]\n\tworktree = {elsewhere}\n", encoding="utf-8"
+    )
     return target
 
 
@@ -341,6 +378,9 @@ _BUILDERS = {
     "home_stray_dangling_dotgit": _stray_dangling_dotgit,
     "stray_dotgit_without_repository": _stray_dotgit_without_repository,
     "home_worktree_inside_home_repository": _worktree_inside_home_repository,
+    "stray_dotgit_under_bare_repository": _stray_dotgit_under_bare_repository,
+    "no_dotgit_under_bare_repository": _no_dotgit_under_bare_repository,
+    "forged_worktree_config_dotgit": _forged_worktree_config_dotgit,
     "worktree_inside_another_repository": _worktree_inside_another_repository,
     "worktree_outside_any_repository": _worktree_outside_any_repository,
 }
