@@ -1895,14 +1895,52 @@ def _ask_git_dir_and_toplevel(start: Optional[str]) -> "tuple[Optional[str], Opt
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return None, None
-    lines = os.fsdecode(result.stdout).splitlines()
-    git_dir = lines[0].strip() if lines and lines[0].strip() else None
-    toplevel = (
-        lines[1].strip()
-        if result.returncode == 0 and len(lines) > 1 and lines[1].strip()
-        else None
-    )
-    return git_dir, toplevel
+    return _parse_git_dir_and_toplevel(result.stdout, result.returncode, start)
+
+
+def _parse_git_dir_and_toplevel(
+    out: bytes, returncode: int, start: Optional[str]
+) -> "tuple[Optional[str], Optional[str]]":
+    """(git dir, top level) from the bytes of `rev-parse --absolute-git-dir
+    --show-toplevel` asked at `start`. Git ends each answer with `\\n`, and
+    either path can hold a `\\n` or any other line separator, so the answer
+    is never split at a line separator. In order:
+
+    - no answer ending in `\\n`: (None, None);
+    - a non-zero exit (a bare repository): git printed only the git dir, so
+      the git dir is the answer minus its final `\\n`, and the top level is
+      None;
+    - the answer starts with `<realpath start>/.git` and `\\n`: that is the
+      git dir, and the top level is the rest minus its final `\\n`;
+    - the answer holds exactly one other `\\n`: neither path holds one, so
+      the git dir and the top level are the text either side of it;
+    - otherwise the top level is the longest of `realpath start` and its
+      ancestors that the answer ends with, after a `\\n`, and the git dir is
+      the text before that `\\n`;
+    - otherwise the git dir is the whole answer, which is not the `.git` at
+      `start`, and the top level is None.
+    """
+    if not out.endswith(b"\n"):
+        return None, None
+    body = out[:-1]
+    if returncode != 0:
+        return os.fsdecode(body) or None, None
+    root = os.path.realpath(start if start is not None else os.curdir)
+    own = os.fsencode(os.path.join(root, ".git")) + b"\n"
+    if out.startswith(own):
+        return os.fsdecode(own[:-1]), os.fsdecode(out[len(own):-1]) or None
+    if body.count(b"\n") == 1:
+        git_dir, toplevel = body.split(b"\n")
+        return os.fsdecode(git_dir) or None, os.fsdecode(toplevel) or None
+    candidate = root
+    while True:
+        ending = b"\n" + os.fsencode(candidate)
+        if body.endswith(ending) and len(body) > len(ending):
+            return os.fsdecode(body[: -len(ending)]), candidate
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            return os.fsdecode(body) or None, None
+        candidate = parent
 
 
 def _ask_rev_parse(start: Optional[str], args: tuple) -> Optional[str]:

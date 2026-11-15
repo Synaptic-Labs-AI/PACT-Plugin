@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import ast
 import collections
+import os
 import sys
 from pathlib import Path
 
@@ -436,6 +437,19 @@ class TestEveryRungGivesAShapeTheSameAnswer:
         }
         assert set(answers) == set(ROUTES), sorted(answers)
         assert set(answers.values()) == {("broken_git_marker", None)}, answers
+
+    def test_a_line_separator_in_a_path_binds_its_own_origin(self, matrix):
+        """A repository whose folder, or whose parent folder, is named with
+        every character `str.splitlines()` splits at binds its own origin on
+        every route, the cwd-marker routes included: git's answers about it
+        hold those characters, and none of them may cut an answer short."""
+        cells, _sites, _fired, _executed = matrix
+        own = f"bound:{pi.normalize_remote_url(OWN)}"
+        shapes = [shape for shape in SHAPES if shape.startswith("control_line_separator_")]
+        assert len(shapes) == 2, shapes
+        answers = {(shape, route): cells[(shape, route)][0] for shape in shapes for route in ROUTES}
+        wrong = {cell: answer for cell, answer in answers.items() if answer != own}
+        assert wrong == {}, f"a line separator in a path changed the answer: {wrong}"
 
     def test_every_unreached_cell_is_a_recorded_exception(self, matrix):
         cells, _sites, _fired, _executed = matrix
@@ -1681,3 +1695,76 @@ class TestAGitTheBareRepositoryAboveLooksPast:
             if answers[("unreadable", route)] != answers[("none", route)]
         }
         assert differ == {}, f"an unreadable .git under a bare repository answered differently: {differ}"
+
+
+def _worktree_named_elsewhere(main: Path, worktree: Path, elsewhere: Path) -> None:
+    """A linked worktree of `main` whose `core.worktree` names `elsewhere`."""
+    run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+    run_git("config", "extensions.worktreeConfig", "true", cwd=main)
+    elsewhere.mkdir(parents=True)
+    run_git("config", "--worktree", "core.worktree", str(elsewhere), cwd=worktree)
+
+
+class TestTheGitDirAnswerIsNeverSplitAtALineSeparator:
+    """`_ask_git_dir_and_toplevel` reads git's two answers without splitting
+    at a line separator, one arm per branch its docstring lists, each asking
+    real git. LINE_SEPARATOR_NAME holds every character `str.splitlines()`
+    splits at."""
+
+    def test_the_own_git_dir_is_read_by_its_known_start(self, tmp_path):
+        from fixtures.identity_routes import LINE_SEPARATOR_NAME
+
+        assert_outside_repository(tmp_path)
+        root = make_repo(tmp_path / LINE_SEPARATOR_NAME / "target")
+        elsewhere = tmp_path / "free" / LINE_SEPARATOR_NAME
+        elsewhere.mkdir(parents=True)
+        run_git("config", "core.worktree", str(elsewhere), cwd=root)
+        real = os.path.realpath(root)
+        assert memory_api._ask_git_dir_and_toplevel(str(root)) == (
+            os.path.join(real, ".git"), os.path.realpath(elsewhere),
+        )
+
+    def test_a_bare_repository_answers_its_whole_git_dir(self, tmp_path):
+        from fixtures.identity_routes import LINE_SEPARATOR_NAME
+
+        assert_outside_repository(tmp_path)
+        bare = tmp_path / LINE_SEPARATOR_NAME / "store.git"
+        bare.mkdir(parents=True)
+        run_git("init", "-q", "--bare", str(bare), cwd=tmp_path)
+        assert memory_api._ask_git_dir_and_toplevel(str(bare)) == (os.path.realpath(bare), None)
+
+    def test_another_git_dir_with_plain_paths_is_split_at_its_one_newline(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        main = make_repo(tmp_path / "main")
+        worktree, elsewhere = tmp_path / "wt", tmp_path / "free" / "wt"
+        _worktree_named_elsewhere(main, worktree, elsewhere)
+        assert memory_api._ask_git_dir_and_toplevel(str(worktree)) == (
+            os.path.join(os.path.realpath(main), ".git", "worktrees", "wt"),
+            os.path.realpath(elsewhere),
+        )
+
+    def test_another_git_dir_ends_at_the_start_it_was_asked_from(self, tmp_path):
+        from fixtures.identity_routes import LINE_SEPARATOR_NAME
+
+        assert_outside_repository(tmp_path)
+        main = make_repo(tmp_path / "main")
+        worktree = tmp_path / LINE_SEPARATOR_NAME
+        run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+        git_dir, toplevel = memory_api._ask_git_dir_and_toplevel(str(worktree))
+        assert toplevel == os.path.realpath(worktree)
+        assert os.path.dirname(git_dir) == os.path.join(os.path.realpath(main), ".git", "worktrees")
+
+    def test_an_answer_ending_at_no_ancestor_keeps_its_git_dir(self, tmp_path):
+        """A linked worktree whose `core.worktree` names a folder outside
+        its ancestors, with a newline in that folder's name: the git dir is
+        the whole answer and the top level is unknown."""
+        from fixtures.identity_routes import LINE_SEPARATOR_NAME
+
+        assert_outside_repository(tmp_path)
+        main = make_repo(tmp_path / "main")
+        worktree, elsewhere = tmp_path / "wt", tmp_path / "free" / LINE_SEPARATOR_NAME
+        _worktree_named_elsewhere(main, worktree, elsewhere)
+        git_dir = os.path.join(os.path.realpath(main), ".git", "worktrees", "wt")
+        assert memory_api._ask_git_dir_and_toplevel(str(worktree)) == (
+            f"{git_dir}\n{os.path.realpath(elsewhere)}", None,
+        )

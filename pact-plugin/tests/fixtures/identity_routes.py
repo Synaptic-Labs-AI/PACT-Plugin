@@ -25,6 +25,7 @@ given, so pass one that is undone after each cell.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 from typing import Optional
@@ -335,6 +336,21 @@ def _worktree_outside_any_repository(base: Path) -> Path:
     return _repository_with_worktree_at(base / "project", base / "free" / "wt")
 
 
+# A folder name holding every character `str.splitlines()` splits at, and a
+# trailing space, so git's answers about a repository there hold them too.
+LINE_SEPARATOR_NAME = "a\nb\rc\x0bd\x0ce\x1cf\x1dg\x1eh\x85i\u2028j\u2029k "
+
+
+def _line_separator_folder(base: Path) -> Path:
+    """The repository's own folder is named LINE_SEPARATOR_NAME."""
+    return make_repo(base / LINE_SEPARATOR_NAME, remote=OWN)
+
+
+def _line_separator_parent(base: Path) -> Path:
+    """The repository's parent folder is named LINE_SEPARATOR_NAME."""
+    return make_repo(base / LINE_SEPARATOR_NAME / "target", remote=OWN)
+
+
 # A shape whose `home` is set runs with HOME pointed at that directory.
 _home_linked_worktree.home = lambda target: target
 _home_main_checkout.home = lambda target: target.parent / "home"
@@ -383,6 +399,8 @@ _BUILDERS = {
     "forged_worktree_config_dotgit": _forged_worktree_config_dotgit,
     "worktree_inside_another_repository": _worktree_inside_another_repository,
     "worktree_outside_any_repository": _worktree_outside_any_repository,
+    "control_line_separator_folder": _line_separator_folder,
+    "control_line_separator_parent": _line_separator_parent,
 }
 
 
@@ -414,11 +432,13 @@ def plant_unusable_pin(target: Path, text: str = UNUSABLE_PIN) -> Optional[Path]
     git reports no common dir."""
     result = subprocess.run(
         ["git", "-C", str(target), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-        capture_output=True, text=True, timeout=30, check=False,
+        capture_output=True, timeout=30, check=False,
     )
-    if result.returncode != 0 or not result.stdout.strip():
+    # Bytes, with only git's one final newline dropped: the path may hold
+    # line separators and trailing spaces.
+    if result.returncode != 0 or not result.stdout.endswith(b"\n") or result.stdout == b"\n":
         return None
-    pin = Path(result.stdout.strip()) / "pact-project-id"
+    pin = Path(os.fsdecode(result.stdout[:-1])) / "pact-project-id"
     pin.write_text(text, encoding="utf-8")
     return pin
 
