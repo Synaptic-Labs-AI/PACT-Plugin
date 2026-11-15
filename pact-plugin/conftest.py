@@ -26,8 +26,10 @@ No dynamic import call (importlib.import_module, __import__, importlib.reload,
 find_spec, an importlib.util spec or loader call, runpy, exec or eval, or a
 standard-library helper that imports a module it is given by name, such as
 pkgutil.resolve_name, pydoc.locate or logging.config.dictConfig) appears in
-this file or in any tests/ module it follows, at any scope. Exactly two
-functions deviate, and only they may import outside this charter:
+this file or in any tests/ module it follows, at any scope. Any other helper
+that imports a module by name is forbidden here too, whether or not the pin
+sees it. Exactly two functions deviate, and only they may import outside this
+charter:
 - tests/ci_environment_binding.py, `_load_verify_script`, runs only when
   GITHUB_ACTIONS=true. It loads the repo-root scripts/verify_ci_environment.py,
   which imports `packaging` (or pip's vendored copy), so a CI session imports
@@ -39,11 +41,12 @@ functions deviate, and only they may import outside this charter:
 Add no other deviation. tests/test_root_conftest_import_charter.py enforces
 this charter. It cannot see a callable reached through getattr or a computed
 name, nor a module named by a string to a standard-library helper whose name is
-too common to refuse: unittest.mock.patch's target, pickle.load and
+too common to refuse, among them unittest.mock.patch's target, pickle.load and
 pickle.loads, importlib.resources.files, pkgutil.get_data, an importlib.metadata
-entry point's load(), the run of cProfile, profile or pdb, and a warning
-category named in a filter string (pytest's filterwarnings). Never reach an
-import any of these ways here.
+entry point's load(), the run of cProfile, profile or pdb, a warning category
+named in a filter string (pytest's filterwarnings), and a multiprocessing spawn,
+whose child imports the parent's main module. Never reach an import any of these
+ways here.
 """
 
 import sys

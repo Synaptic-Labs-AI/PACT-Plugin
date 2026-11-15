@@ -42,7 +42,7 @@ DYNAMIC_IMPORTS = frozenset({
     "resolve_name", "walk_packages", "get_loader", "find_loader", "locate",
     "loadTestsFromName", "loadTestsFromNames", "DocTestSuite", "dictConfig", "fileConfig",
     "make_parser", "addsitedir", "runsource", "runctx", "timeit", "import_fresh_module",
-    "_setoption",
+    "_setoption", "getDOMImplementation",
 })
 # (file, enclosing function) -> the dynamic callables it may name, and how often.
 DEVIATIONS = {
@@ -217,6 +217,9 @@ def test_the_conftest_states_the_charter_and_names_this_pin():
                    "tests/test_root_conftest_import_charter.py enforces",
                    "reached through getattr or a computed name",
                    "Exactly two functions deviate",
+                   "Any other helper that imports a module by name is forbidden here too",
+                   "too common to refuse, among them",
+                   "a multiprocessing spawn, whose child imports the parent's main module",
                    "a standard-library helper that imports a module it is given by name",
                    "unittest.mock.patch's target", "pickle.load and pickle.loads",
                    "importlib.resources.files", "pkgutil.get_data",
@@ -372,6 +375,7 @@ def test_a_loaded_script_inside_the_charter_passes(tmp_path):
     # test.support is outside sys.stdlib_module_names, so reach it as an attribute.
     "def f(import_helper):\n    import_helper.import_fresh_module('yaml')\n",
     "import warnings\nwarnings._setoption('ignore::yaml.YAMLError')\n",
+    "import xml.dom\nxml.dom.getDOMImplementation('minidom')\n",
 ])
 def test_a_helper_that_imports_by_name_is_refused(tmp_path, conftest):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest))
@@ -390,6 +394,7 @@ def test_a_helper_that_imports_by_name_is_refused(tmp_path, conftest):
     "def pytest_configure(config):\n"
     "    config.addinivalue_line('filterwarnings', 'ignore::yaml.YAMLError')\n",
     "import importlib\ngetattr(importlib, 'import_module')('yaml')\n",
+    "import multiprocessing\nmultiprocessing.get_context('spawn').Process(target=print).start()\n",
 ])
 def test_a_listed_blind_spot_is_not_seen(tmp_path, conftest):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest))
