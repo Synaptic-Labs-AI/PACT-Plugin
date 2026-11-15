@@ -538,6 +538,15 @@ def test_a_listed_shell_blind_spot_is_accepted(text):
     ["command", "echo", "python", "-m", "pytest"],
     ["timeout", "5", "command", "echo", "python", "-m", "pytest"],
     ["timeout", "5", "command", "-v", "pytest"],
+    # A git subcommand that runs a command runs this one, which is no launch.
+    ["git", "bisect", "run", "make", "test"],
+    ["git", "bisect", "run", "echo", "python", "-m", "pytest"],
+    ["git", "submodule", "foreach", "git", "status"],
+    ["git", "rebase", "--exec", "make check", "main"],
+    # A shell keyword or builtin that tests or looks up its words runs none.
+    ["bash", "-c", "[[ -x /venv/bin/pytest ]] && echo ok"],
+    ["type", "pytest"],
+    ["hash", "pytest"],
     # A find with no -exec-family action runs nothing.
     ["find", ".", "-name", "x", "python", "-m", "pytest"],
     ["timeout", "5", "find", ".", "-name", "x", "python", "-m", "pytest"],
@@ -736,6 +745,17 @@ _WRAPPED = [
     ["timeout", "5", "command", "pytest"],
     ["timeout", "5", "find", ".", "-exec", "pytest", "{}", ";"],
     ["find", ".", "-exec", "echo", "x", ";", "-exec", "python", "-m", "pytest", "{}", ";"],
+    # A git subcommand that runs a command, bare, chained and in shell text.
+    ["git", "bisect", "run", "pytest"],
+    ["git", "bisect", "run", "timeout", "5", "python", "-m", "pytest"],
+    ["timeout", "5", "git", "bisect", "run", "pytest"],
+    ["bash", "-c", "git bisect run pytest -q"],
+    ["git", "submodule", "foreach", "pytest -q"],
+    ["git", "submodule", "--quiet", "foreach", "--recursive", "python", "-m", "pytest"],
+    ["git", "rebase", "--exec", "pytest -q", "main"],
+    ["git", "rebase", "-x", "python -m pytest", "main"],
+    ["git", "rebase", "--exec=pytest", "main"],
+    ["git", "rebase", "-xpytest", "main"],
     # Programs that run their arguments stay refused.
     ["xargs", "-n1", "pytest"],
     ["xargs", "-I", "{}", "python3", "-m", "pytest", "{}"],

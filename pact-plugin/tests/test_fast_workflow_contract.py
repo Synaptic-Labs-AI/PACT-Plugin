@@ -172,13 +172,19 @@ def _full_doc(root):
     return ci_contract.load_workflow(root, ci_contract.FULL_WORKFLOW)
 
 
+def _printed(line):
+    """The text a `printf '...\\n'` line prints: its format without the newline,
+    with each printf `\\\\` printed as one backslash."""
+    return line.split("'")[1].removesuffix("\\n").replace("\\\\", "\\")
+
+
 def _lint_gate_remedy_lines(root):
     """The lines the lint gate prints when ruff is missing, as its printf calls
     spell them."""
     text = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
     block = text[text.index("GATE REFUSED: ruff is not available"):]
     block = block[:block.index("exit 2")]
-    return [line.split("'")[1].removesuffix("\\n").strip()
+    return [_printed(line).strip()
             for line in block.splitlines() if line.strip().startswith("printf")]
 
 
@@ -493,7 +499,8 @@ class TestHashCheckedInstall:
         prose = " ".join(line for line in printed
                          if line not in commands and not line.startswith("ruff "))
         for phrase in ("repository venv (.venv)", "install ruff alone",
-                       "from a wheel only", ".cursor/install.sh"):
+                       "from a wheel only", ".cursor/install.sh", "for a POSIX shell",
+                       "On Windows", ".venv\\Scripts\\python"):
             assert phrase in prose, phrase
         # A version or count here would go stale on a lock refresh; the printed
         # commands carry none either, since the version comes from the lock.
@@ -567,7 +574,7 @@ class TestHashCheckedInstall:
         assert proc.returncode == 2, (proc.returncode, proc.stderr)
         text = script.read_text(encoding="utf-8")
         block = text[text.index("printf 'GATE REFUSED: ruff is not available"):]
-        expected = [line.split("'")[1].removesuffix("\\n")
+        expected = [_printed(line)
                     for line in block[:block.index("exit 2")].splitlines()
                     if line.strip().startswith("printf")]
         assert proc.stderr.splitlines() == expected, proc.stderr
@@ -669,7 +676,7 @@ def _assert_full_workflow_contract(root):
         "and load is the only diagnostic alternative"
     )
     # The seed is free text, so it is only ever admitted through the job-level
-    # SEED key and the seed guard below; empty, the default, is file order.
+    # PACT_SHUFFLE_SEED key and the seed guard below; empty, the default, is file order.
     seed = inputs["shuffle_seed"]
     assert seed.get("type") == "string", seed
     assert seed.get("required") is False, seed
@@ -701,8 +708,9 @@ def _assert_full_workflow_contract(root):
     )
     # Empty outside a dispatch, so the merge gate's run line expands the seed
     # to no words and the root config keeps pytest-randomly blocked.
-    assert (job.get("env") or {}).get("SEED") == "${{ inputs.shuffle_seed || '' }}", (
-        f"the job-level SEED env is {(job.get('env') or {}).get('SEED')!r}; it "
+    assert "SEED" not in (job.get("env") or {}), "the seed's earlier, generic name is back"
+    assert (job.get("env") or {}).get("PACT_SHUFFLE_SEED") == "${{ inputs.shuffle_seed || '' }}", (
+        f"the job-level PACT_SHUFFLE_SEED env is {(job.get('env') or {}).get('PACT_SHUFFLE_SEED')!r}; it "
         "must evaluate from inputs.shuffle_seed and be empty outside a dispatch"
     )
 
@@ -776,10 +784,10 @@ def _assert_full_workflow_contract(root):
     for key in ("if", "continue-on-error", "env", "shell"):
         assert key not in seed_guard, (
             f"the SEED guard carries `{key}:` ({seed_guard[key]!r}); it must "
-            "run unconditionally in the default shell with the job-level SEED"
+            "run unconditionally in the default shell with the job-level PACT_SHUFFLE_SEED"
         )
     seed_run = seed_guard["run"]
-    assert "$SEED" in seed_run, seed_run
+    assert "$PACT_SHUFFLE_SEED" in seed_run, seed_run
     assert "^(0|[123456789][0123456789]{0,8})$" in seed_run, seed_run
     assert ">> \"$GITHUB_OUTPUT\"" in seed_run, seed_run
     assert not re.search(r"\bpytest\b", seed_run), (
@@ -1030,7 +1038,7 @@ class TestSeedGuardBehaviour:
             [bash, "-e", str(script)],
             env={"PATH": "/usr/bin:/bin", "HOME": str(home),
                  "LC_ALL": locale["LC_ALL"], "LOCPATH": locale["LOCPATH"],
-                 "SEED": seed, "GITHUB_OUTPUT": str(output)},
+                 "PACT_SHUFFLE_SEED": seed, "GITHUB_OUTPUT": str(output)},
             capture_output=True, text=True, timeout=30)
         return proc, output.read_text(encoding="utf-8")
 

@@ -83,9 +83,10 @@ refused whether or not it does:
   print, look up, read, list or ignore their words and run none of them:
   `echo`, `printf`, `which`, `true`, `false`, `:`, `grep`, `egrep`, `fgrep`,
   `rg`, `ag`, `ls`, `cat`, `head`, `tail`, `wc`, `sed`, `awk`, `cut`, `sort`,
-  `uniq`, `diff`, `file`, `stat`, `test`, `[`, `chmod`, `chown`, `touch`,
-  `mkdir`, `rm`, `cp`, `mv` and `ln`. So `grep -c pytest log`,
-  `ls -la pytest` and `chmod 755 /venv/bin/pytest` are mentions, not launches.
+  `uniq`, `diff`, `file`, `stat`, `test`, `[`, `[[`, `type`, `hash`, `chmod`,
+  `chown`, `touch`, `mkdir`, `rm`, `cp`, `mv` and `ln`. So `grep -c pytest log`,
+  `ls -la pytest`, `[[ -x /venv/bin/pytest ]]` and `chmod 755 /venv/bin/pytest`
+  are mentions, not launches.
   Its command is the first word after it that is not an option (a word starting
   with `-`), a NAME=VALUE word, a number or duration (`60`, `1.5m`, `inf`,
   `0x5`), a hatch matrix selector (`+py=3.12`, `-py=3.11`) or the verb `run`
@@ -104,7 +105,11 @@ refused whether or not it does:
   `-execdir`, `-ok` and `-okdir` (`find . -name x -exec pytest {} ;`). So are
   the shell builtins `command` and `builtin`, whose command is the word after
   them (`command -v` and `command -V` run nothing), and git's subcommand is
-  searched the same way.
+  searched the same way. Three git subcommands run a command, which is judged
+  too: `git bisect run` the argv after `run`, `git submodule foreach` its
+  remaining words and `git rebase --exec` (or `-x`) each value, both as shell
+  text, so `git bisect run pytest` is refused and `git bisect run make test`
+  is not.
 - [shell] Any family above inside the command text of a shell run with `-c`
   (below).
 `-m py.test` and `-m _pytest` start no pytest session and are no family.
@@ -193,7 +198,13 @@ Blind spots, examples of launches outside the census:
    (`timeout 60 chrt -f 1 pytest`, `sudo taskset 1 pytest`): the census takes
    that program for the command and judges no further. The list holds names
    only, so a name missing from it can shorten a chain but cannot hide an
-   option's value.
+   option's value. Of git's subcommands, only `bisect run`, `submodule
+   foreach` and `rebase --exec`/`-x` are searched for the command they run.
+   git's other ways of running a command are not: `difftool --extcmd`/`-x`,
+   `filter-branch`'s `--*-filter` options, the `--upload-pack`, `-u`,
+   `--receive-pack` and `--exec` transport options of `fetch`, `clone`,
+   `pull`, `ls-remote`, `push` and `archive`, and `send-email`'s `--*-cmd`
+   options, nor commands git runs from its configuration (blind spot 13).
 9. Shell text the census does not expand or track: variables (`$PYTEST`) and
    what a substitution's output becomes (`$(echo pytest) -q`), `export`,
    aliases, `eval`, `env -S`, a script fed to a shell's stdin (`bash <<EOF`,
@@ -270,8 +281,8 @@ _RESERVED = frozenset({"{", "}", "!", "if", "then", "elif", "else", "fi",
 _RUNS_NOTHING = frozenset({
     "echo", "printf", "which", "true", "false", ":", "grep", "egrep", "fgrep", "rg",
     "ag", "ls", "cat", "head", "tail", "wc", "sed", "awk", "cut", "sort", "uniq",
-    "diff", "file", "stat", "test", "[", "chmod", "chown", "touch", "mkdir", "rm", "cp",
-    "mv", "ln",
+    "diff", "file", "stat", "test", "[", "[[", "type", "hash", "chmod", "chown", "touch",
+    "mkdir", "rm", "cp", "mv", "ln",
 })
 # find's actions that run the command after them.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
@@ -956,9 +967,46 @@ def _command_search(part, program, depth):
         elif _command_name(word) in _DISPATCHERS and depth < _MAX_DEPTH:
             found = _command_search(part, at, depth + 1)
             return at if found is None else found
+        elif name in _DISPATCHERS and depth < _MAX_DEPTH:
+            return _git_subcommand(part, at, depth)
         else:
             return at
     return None
+
+
+def _git_subcommand(part, at, depth):
+    """True when git's subcommand at `at` runs a command that starts pytest, else
+    the index of the word in program position: `bisect run`'s command, or the
+    subcommand itself. `bisect run` runs the argv after it; `submodule foreach`
+    runs its remaining words, and `rebase --exec`/`-x` each value, as shell
+    text."""
+    subcommand = part[at]
+    if subcommand == "bisect" and part[at + 1:at + 2] == ["run"]:
+        found = _command_search(part, at + 1, depth + 1)
+        return True if found is True else (at if found is None else found)
+    if subcommand == "submodule":
+        i = at + 1
+        while i < len(part) and part[i] in ("-q", "--quiet"):
+            i += 1
+        if part[i:i + 1] == ["foreach"]:
+            i += 1
+            while i < len(part) and part[i] in ("--recursive", "-q", "--quiet"):
+                i += 1
+            return True if _text_starts_pytest(" ".join(part[i:]), depth) else at
+    if subcommand == "rebase":
+        for i in range(at + 1, len(part)):
+            word = part[i]
+            if word in ("--exec", "-x"):
+                text = part[i + 1] if i + 1 < len(part) else ""
+            elif word.startswith("--exec="):
+                text = word.split("=", 1)[1]
+            elif word.startswith("-x"):
+                text = word[2:]
+            else:
+                continue
+            if _text_starts_pytest(text, depth):
+                return True
+    return at
 
 
 def _leading_options(part, program):
@@ -978,7 +1026,13 @@ def _starts_pytest(part, at, depth):
     if _launch(part, at) is not None:
         return True
     text = _shell_command(part, at)
-    return text is not None and depth < _MAX_DEPTH and any(
+    return text is not None and _text_starts_pytest(text, depth)
+
+
+def _text_starts_pytest(text, depth):
+    """True when shell text runs a command that starts pytest by a family above,
+    or through a program the census does not read."""
+    return depth < _MAX_DEPTH and any(
         _launch(inner, start) is not None or _wrapper(inner, start, depth + 1) is not None
         for inner, start, _ in _shell_commands(text, {}, depth + 1))
 

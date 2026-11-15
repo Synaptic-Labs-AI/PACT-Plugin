@@ -80,6 +80,8 @@ if ! command -v ruff >/dev/null 2>&1; then
     printf '  into it, at the version and hashes constraints-ci.txt pins for CI and from a wheel only, and put\n' >&2
     printf '  it first on PATH. ruff publishes wheels for Linux, macOS and Windows, so nothing is compiled.\n' >&2
     printf '  The full test environment, which compiles a package on some platforms, is .cursor/install.sh.\n' >&2
+    printf '  The commands below are for a POSIX shell. On Windows the same steps use .venv\\Scripts\\python\n' >&2
+    printf '  in place of .venv/bin/python, and .venv\\Scripts\\activate to put the venv first on PATH.\n' >&2
     printf '    python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else sys.version)" && python3 -m venv .venv\n' >&2
     printf '    sed -n "/^ruff==/,/[0-9a-f]$/p" constraints-ci.txt > .venv/ruff-lock.txt\n' >&2
     printf '    .venv/bin/python -m pip install --only-binary=:all: --require-hashes --no-deps -r .venv/ruff-lock.txt\n' >&2

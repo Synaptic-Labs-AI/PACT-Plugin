@@ -393,10 +393,12 @@ def test_dynamic_command_mutations_remain_invalid(tmp_path, mutation):
 ORDERED_COMMAND = ('python -m pytest -ra -n 4 --dist "$DIST" '
                    '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
 SEEDED_COMMAND = ('python -m pytest -ra -n 4 --dist "$DIST" '
-                  '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed} '
+                  '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed} '
                   '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
-SEED_TOKENS = ["${SEED:+-p", "randomly", "--randomly-seed=$SEED",
+SEED_TOKENS = ["${PACT_SHUFFLE_SEED:+-p", "randomly", "--randomly-seed=$PACT_SHUFFLE_SEED",
                "--randomly-dont-reset-seed}"]
+# The seeded line as logs from before the variable's rename carry it.
+EARLIER_SEEDED_COMMAND = SEEDED_COMMAND.replace("PACT_SHUFFLE_SEED", "SEED")
 
 
 def read_runs(output):
@@ -406,6 +408,17 @@ def read_runs(output):
 def test_the_shipped_run_line_is_the_seeded_shape():
     assert shlex.split(ci_contract.WORKFLOW_TEST_CMD) == shlex.split(SEEDED_COMMAND)
     assert comparator._command_argv([ci_contract.WORKFLOW_TEST_CMD])[8:12] == SEED_TOKENS
+
+
+def test_a_log_from_before_the_seed_rename_compares_with_one_after(tmp_path):
+    first = make_run(tmp_path, "one", command=EARLIER_SEEDED_COMMAND, seeds=(7,))
+    second = make_run(tmp_path, "two", 101, command=SEEDED_COMMAND, seeds=(7,))
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical"
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [7, 7]
+    assert [run["argv"][8] for run in read_runs(output)] == [
+        "${SEED:+-p", "${PACT_SHUFFLE_SEED:+-p"]
 
 
 def test_seeded_run_line_is_accepted_and_its_seed_is_recorded(tmp_path):
@@ -847,20 +860,26 @@ def test_two_seed_lines_are_refused(tmp_path):
 
 @pytest.mark.parametrize("mutation", [
     "literal_seed", "no_wrapper", "extra_token", "seed_after_junit", "wrong_junit",
-    "previous_seeded_line", "dont_reset_outside_expansion"])
+    "previous_seeded_line", "dont_reset_outside_expansion", "other_variable",
+    "names_mixed"])
 def test_seeded_shape_is_exact(tmp_path, mutation):
     """The second shape admits exactly four tokens in exactly one place."""
-    seed_text = '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}'
+    seed_text = '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}'
     if mutation == "previous_seeded_line":
         changed = SEEDED_COMMAND.replace(" --randomly-dont-reset-seed}", "}")
     elif mutation == "dont_reset_outside_expansion":
         changed = SEEDED_COMMAND.replace(" --randomly-dont-reset-seed}",
                                          "} --randomly-dont-reset-seed")
     elif mutation == "literal_seed":
-        changed = SEEDED_COMMAND.replace('--randomly-seed="$SEED"', "--randomly-seed=7")
+        changed = SEEDED_COMMAND.replace('--randomly-seed="$PACT_SHUFFLE_SEED"', "--randomly-seed=7")
     elif mutation == "no_wrapper":
         changed = SEEDED_COMMAND.replace(
-            seed_text, '-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed')
+            seed_text, '-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed')
+    elif mutation == "other_variable":
+        changed = SEEDED_COMMAND.replace("PACT_SHUFFLE_SEED", "OTHER_SEED")
+    elif mutation == "names_mixed":
+        changed = SEEDED_COMMAND.replace('--randomly-seed="$PACT_SHUFFLE_SEED"',
+                                         '--randomly-seed="$SEED"')
     elif mutation == "extra_token":
         changed = SEEDED_COMMAND.replace("--junitxml=", "-x --junitxml=")
     elif mutation == "seed_after_junit":

@@ -30,7 +30,7 @@ VERIFY_CMD = "python scripts/verify_ci_environment.py"
 TEST_CMD = "python -m pytest -ra -n 4 --dist loadfile"
 WORKFLOW_TEST_CMD = (
     "python -m pytest -ra -n 4 --dist \"$DIST\" "
-    "${SEED:+-p randomly --randomly-seed=\"$SEED\" --randomly-dont-reset-seed} "
+    "${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed=\"$PACT_SHUFFLE_SEED\" --randomly-dont-reset-seed} "
     "--junitxml=\"$GITHUB_WORKSPACE/.full-suite-results.xml\""
 )
 UPLOAD_ARTIFACT_ACTION = (
@@ -48,10 +48,10 @@ UPLOAD_ARTIFACT_NAME = (
 _DIST_VARIABLE = "$DIST"
 _JUNIT_ARGUMENT = "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"
 # shlex's view of the unquoted
-# `${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}`.
-# With SEED empty the shell expands it to no words, so the static default
+# `${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}`.
+# With PACT_SHUFFLE_SEED empty the shell expands it to no words, so the static default
 # argv drops these four tokens.
-_SEED_EXPANSION = ("${SEED:+-p", "randomly", "--randomly-seed=$SEED",
+_SEED_EXPANSION = ("${PACT_SHUFFLE_SEED:+-p", "randomly", "--randomly-seed=$PACT_SHUFFLE_SEED",
                    "--randomly-dont-reset-seed}")
 
 
@@ -59,9 +59,9 @@ def normalized_workflow_test_argv(command=WORKFLOW_TEST_CMD):
     """Resolve the exact diagnostic command to its static default argv.
 
     The workflow passes the dispatch values through the job-level `DIST` and
-    `SEED` environment keys and never embeds an expression in the `run:`
+    `PACT_SHUFFLE_SEED` environment keys and never embeds an expression in the `run:`
     text, so shlex sees shell variables, not a space-bearing expression. The
-    seed expansion adds no words when SEED is empty, which is the merge
+    seed expansion adds no words when PACT_SHUFFLE_SEED is empty, which is the merge
     gate's case, so the normalized argv drops it. Any spelling
     or argument drift is a parse failure: a normalizer that accepted more than
     the reviewed command could hide a scope regression, and an expression

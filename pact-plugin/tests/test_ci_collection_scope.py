@@ -359,8 +359,8 @@ class TestCiInvocationCollectsTheWholeCorpus:
         normalized = ci_contract.normalized_workflow_test_argv()
         assert normalized == ci_contract.TEST_CMD.split()
         # The seeded run line still normalizes to the static default: with
-        # SEED empty the expansion adds no words.
-        assert '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}' in (
+        # PACT_SHUFFLE_SEED empty the expansion adds no words.
+        assert '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}' in (
             ci_contract.WORKFLOW_TEST_CMD)
         assert _pytest_args(ci_contract.WORKFLOW_TEST_CMD) == [
             "-ra", "-n", "4", "--dist", "loadfile"
@@ -377,22 +377,22 @@ class TestCiInvocationCollectsTheWholeCorpus:
             ci_contract.WORKFLOW_TEST_CMD + " tests",
             ci_contract.WORKFLOW_TEST_CMD.replace(" " + junit, "", 1),
             ci_contract.WORKFLOW_TEST_CMD + " --deselect tests/test_smoke.py",
-            # The seed must reach pytest only through the guarded SEED key,
-            # inside the `${SEED:+...}` wrapper that expands to nothing when
+            # The seed must reach pytest only through the guarded PACT_SHUFFLE_SEED key,
+            # inside the `${PACT_SHUFFLE_SEED:+...}` wrapper that expands to nothing when
             # it is empty: a bare seed flag, an inline expression, a quoted
             # wrapper (one word) or a dropped expansion is drift.
             ci_contract.WORKFLOW_TEST_CMD.replace(
-                '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}',
-                '-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed', 1),
+                '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}',
+                '-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed', 1),
             ci_contract.WORKFLOW_TEST_CMD.replace(
-                '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}',
+                '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}',
                 '-p randomly --randomly-seed=${{ inputs.shuffle_seed }} '
                 '--randomly-dont-reset-seed', 1),
             ci_contract.WORKFLOW_TEST_CMD.replace(
-                '${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}',
-                '"${SEED:+-p randomly --randomly-seed=$SEED --randomly-dont-reset-seed}"', 1),
+                '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}',
+                '"${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed=$PACT_SHUFFLE_SEED --randomly-dont-reset-seed}"', 1),
             ci_contract.WORKFLOW_TEST_CMD.replace(
-                ' ${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}', '', 1),
+                ' ${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}', '', 1),
             # A seeded run must not reseed before each test.
             ci_contract.WORKFLOW_TEST_CMD.replace(
                 ' --randomly-dont-reset-seed}', '}', 1),

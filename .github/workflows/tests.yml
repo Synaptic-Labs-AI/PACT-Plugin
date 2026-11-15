@@ -280,11 +280,15 @@ jobs:
     # THE SHUFFLE SEED TAKES THE SAME ROUTE. The dispatch input is free text,
     # so it reaches the run line only through this key, and the seed guard
     # step refuses anything but decimal digits before setup. A merge-group or
-    # push run has no inputs, so SEED is empty there and the suite runs in
-    # file order: the root pyproject.toml blocks pytest-randomly by default.
+    # push run has no inputs, so PACT_SHUFFLE_SEED is empty there and the
+    # suite runs in file order: the root pyproject.toml blocks pytest-randomly
+    # by default. It is job-level for the same reason as DIST: the pytest step
+    # reads it on its run line and may not carry `env:`, so a narrower scope
+    # would need a second copy under another name. The PACT_ prefix keeps it
+    # apart from any SEED a test or tool reads.
     env:
       DIST: ${{ inputs.dist || 'loadfile' }}
-      SEED: ${{ inputs.shuffle_seed || '' }}
+      PACT_SHUFFLE_SEED: ${{ inputs.shuffle_seed || '' }}
     # THE TESTED SET. IT IS NOT THE SUPPORTED FLOOR, AND THE TWO ARE
     # DIFFERENT QUESTIONS THAT LIVE IN DIFFERENT FILES.
     #   THE TESTED SET is the interpreter this job runs: 3.12, set below.
@@ -363,26 +367,29 @@ jobs:
               ;;
           esac
 
-      # THE SEED GUARD. Empty means file order. Otherwise SEED must be a
+      # THE SEED GUARD. Empty means file order. Otherwise PACT_SHUFFLE_SEED
+      # must be a
       # decimal integer without leading zeros, at most 9 digits (below 2^32;
       # scripts/compare_full_suite_results.py's SEED_LINE reads 1 to 10 digits,
       # a superset, so every seed this guard admits is read there);
       # anything else refuses before setup, and the value is never echoed. The
       # digit classes are spelled out rather than written as ranges, so the
       # locale cannot widen them. This guard protects two sinks: the
-      # `order=...` line it appends to GITHUB_OUTPUT, where a newline in SEED
+      # `order=...` line it appends to GITHUB_OUTPUT, where a newline in
+      # PACT_SHUFFLE_SEED
       # would add an output of its own, and the artifact name, which reads
       # only the `order` output (`ordered` or `seed-N`), never the raw input.
-      # The run line does not depend on it: there SEED stays one argv word
+      # The run line does not depend on it: there PACT_SHUFFLE_SEED stays one
+      # argv word
       # (see the comment on that step). Same shape as the DIST guard: no
       # `if:`, `env:`, `shell:` or `continue-on-error:`, and no pytest token.
       - name: Guard the diagnostic shuffle seed
         id: order
         run: |
-          if [ -z "$SEED" ]; then
+          if [ -z "$PACT_SHUFFLE_SEED" ]; then
             order=ordered
-          elif [[ "$SEED" =~ ^(0|[123456789][0123456789]{0,8})$ ]]; then
-            order="seed-$SEED"
+          elif [[ "$PACT_SHUFFLE_SEED" =~ ^(0|[123456789][0123456789]{0,8})$ ]]; then
+            order="seed-$PACT_SHUFFLE_SEED"
           else
             printf '%s\n' "SEED GUARD: shuffle_seed must be empty or a decimal integer without leading zeros, at most 9 digits; refusing before setup." >&2
             exit 1
@@ -593,11 +600,14 @@ jobs:
       - name: Verify the CI environment (before tests)
         run: python scripts/verify_ci_environment.py
 
-      # `${SEED:+…}` IS UNQUOTED ON PURPOSE: with SEED set it splits into the
+      # `${PACT_SHUFFLE_SEED:+…}` IS UNQUOTED ON PURPOSE: with PACT_SHUFFLE_SEED
+      # set it splits into the
       # four words `-p randomly --randomly-seed=N --randomly-dont-reset-seed`,
-      # and with SEED empty it adds no words, so the merge gate's argv is
+      # and with PACT_SHUFFLE_SEED empty it adds no words, so the merge gate's
+      # argv is
       # unchanged. The split happens only between those literal words: the
-      # inner "$SEED" is quoted, so whatever SEED holds stays one argv word,
+      # inner "$PACT_SHUFFLE_SEED" is quoted, so whatever PACT_SHUFFLE_SEED
+      # holds stays one argv word,
       # with no further splitting, globbing or command substitution. The seed
       # guard is what keeps that word a decimal integer. With
       # --randomly-dont-reset-seed the plugin does not reseed the random
@@ -613,7 +623,7 @@ jobs:
       # side effect, not the aim.
       - name: Run test suite
         working-directory: pact-plugin
-        run: python -m pytest -ra -n 4 --dist "$DIST" ${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed} --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"
+        run: python -m pytest -ra -n 4 --dist "$DIST" ${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed} --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"
 
       # THE CERTIFYING RUN'S OWN EVIDENCE. verify_full_collection.py above
       # inspects a separate --collect-only run; this reads the in-band record
