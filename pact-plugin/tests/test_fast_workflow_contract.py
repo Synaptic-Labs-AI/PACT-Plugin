@@ -12,6 +12,7 @@ not a guard.
 """
 
 import ast
+import os
 import re
 import shlex
 import shutil
@@ -168,6 +169,11 @@ def _fast_doc(root):
 
 def _full_doc(root):
     return ci_contract.load_workflow(root, ci_contract.FULL_WORKFLOW)
+
+
+# A number standing alone in prose (`40`, `1.2.3`), not one inside a word
+# (`py312`, `F401`, `python3`).
+_STANDALONE_NUMBER = re.compile(r"(?<![\w.-])\d+(?:\.\d+)*(?![\w.-])")
 
 
 class TestFastWorkflowShape:
@@ -448,10 +454,23 @@ class TestHashCheckedInstall:
         for phrase in ("repository venv (.venv)", "not the CI one"):
             assert phrase in prose, phrase
         # A count of the lock's packages here would go stale on every lock
-        # refresh that adds or drops one, so the remedy names none.
+        # refresh that adds or drops one, so the remedy names no number at all.
         assert "every locked package" in prose, prose
-        assert not re.search(r"\d+ locked package", prose), prose
+        assert not _STANDALONE_NUMBER.search(prose), prose
         assert "-c constraints-ci.txt" not in text
+
+    @pytest.mark.parametrize("prose, has_number", [
+        ("every locked package, 40 of them", True),
+        ("all 40 locked packages", True),
+        ("every locked package (40)", True),
+        ("pinned at 1.2.3 in the lock", True),
+        ("40", True),
+        ("ruff check --select F401,F821 --target-version py312", False),
+        ("python3 -m venv .venv", False),
+        ("pact-plugin/ scripts/ constraints-ci.txt", False),
+    ])
+    def test_the_remedy_number_check_finds_a_standalone_number(self, prose, has_number):
+        assert bool(_STANDALONE_NUMBER.search(prose)) is has_number, prose
 
     @pytest.mark.parametrize("pins", [1, 41])
     def test_the_lint_gate_remedy_does_not_change_with_the_lock_size(self, tmp_path, pins):
@@ -851,25 +870,71 @@ _GLIBC_LOCALES = sys.platform.startswith("linux")
 _LOCALE_LEGS = ("ascii", "range-widening") if _GLIBC_LOCALES else ("ascii",)
 
 
-@pytest.fixture(scope="module")
-def range_widening_locale(tmp_path_factory):
-    """An en_US.UTF-8 locale built into a tmp LOCPATH, independent of which
-    locales the runner generated. Under it, bash's `[0-9]` matches non-ASCII
-    digits such as U+0663; under C.UTF-8 it does not. Building it needs only
-    localedef and glibc's en_US source, which the `locales` package ships."""
-    localedef = shutil.which("localedef")
-    assert localedef, (
-        "localedef is not on PATH, so the range-widening locale cannot be "
-        "built and the seed guard's digit classes go unproven")
+def _range_widening_locale(tmp_path_factory, localedef):
+    """An en_US.UTF-8 locale built into a tmp LOCPATH by `localedef`. In CI
+    (GITHUB_ACTIONS=true) a missing localedef or a failed build fails, because
+    the runner ships glibc's en_US source and the seed guard's digit classes must
+    be proven there. Elsewhere either skips, since a host without the `locales`
+    package cannot build it; the static no-range arm still runs."""
+    def unavailable(reason):
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail(f"{reason}, so the seed guard's digit classes go unproven")
+        pytest.skip(f"{reason}; outside CI the static no-range arm still runs")
+
+    if not localedef:
+        unavailable("localedef is not on PATH, so the range-widening locale cannot be built")
     locpath = tmp_path_factory.mktemp("locpath")
     home = tmp_path_factory.mktemp("localedef-home")
     proc = subprocess.run(
         [localedef, "-i", "en_US", "-f", "UTF-8", str(locpath / "en_US.UTF-8")],
         env={"PATH": "/usr/bin:/bin", "HOME": str(home)},
         capture_output=True, text=True, timeout=120)
-    assert (locpath / "en_US.UTF-8" / "LC_COLLATE").is_file(), (
-        f"localedef did not build en_US.UTF-8 (rc {proc.returncode}): {proc.stderr}")
+    if not (locpath / "en_US.UTF-8" / "LC_COLLATE").is_file():
+        unavailable(f"localedef did not build en_US.UTF-8 (rc {proc.returncode}): "
+                    f"{proc.stderr.strip()}")
     return {"LC_ALL": "en_US.UTF-8", "LOCPATH": str(locpath)}
+
+
+@pytest.fixture(scope="module")
+def range_widening_locale(tmp_path_factory):
+    """An en_US.UTF-8 locale built into a tmp LOCPATH, independent of which
+    locales the runner generated. Under it, bash's `[0-9]` matches non-ASCII
+    digits such as U+0663; under C.UTF-8 it does not. Building it needs only
+    localedef and glibc's en_US source, which the `locales` package ships."""
+    return _range_widening_locale(tmp_path_factory, shutil.which("localedef"))
+
+
+class TestRangeWideningLocaleUnavailable:
+    """Without localedef or glibc's en_US source the locale fails in CI and
+    skips elsewhere."""
+
+    @staticmethod
+    def _failing_localedef(tmp_path):
+        script = tmp_path / "localedef"
+        script.write_text("#!/bin/sh\necho 'cannot open locale definition file' >&2\nexit 4\n",
+                          encoding="utf-8")
+        script.chmod(0o755)
+        return str(script)
+
+    def _outcome(self, tmp_path, tmp_path_factory, missing):
+        """The exception the helper ends with. A skip or a fail escapes
+        pytest.raises for the other kind, so catch both and compare."""
+        localedef = None if missing == "binary" else self._failing_localedef(tmp_path)
+        try:
+            _range_widening_locale(tmp_path_factory, localedef)
+        except (pytest.fail.Exception, pytest.skip.Exception) as exc:
+            return type(exc)
+        return None
+
+    @pytest.mark.parametrize("missing", ["binary", "source"])
+    def test_it_fails_in_ci(self, monkeypatch, tmp_path, tmp_path_factory, missing):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        assert self._outcome(tmp_path, tmp_path_factory, missing) is pytest.fail.Exception
+
+    @pytest.mark.parametrize("missing", ["binary", "source"])
+    def test_it_skips_outside_ci(self, monkeypatch, tmp_path, tmp_path_factory, missing):
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        assert self._outcome(tmp_path, tmp_path_factory, missing) is pytest.skip.Exception
 
 
 class TestSeedGuardBehaviour:
@@ -905,10 +970,11 @@ class TestSeedGuardBehaviour:
     def test_the_locale_legs_match_the_platform(self, tmp_path, request):
         """CONTROL. On Linux the non-ASCII digit rows run under a built
         en_US.UTF-8 and can only catch a `[0-9]` guard if `[0-9]` matches
-        U+0663 there, so prove it does; a missing localedef fails here and in
-        every widening row, never skips. Elsewhere glibc's locales do not exist,
-        the widening leg is not generated, and the static no-range arm is the
-        only check of the digit classes."""
+        U+0663 there, so prove it does. A missing localedef or en_US source
+        fails here and in every widening row in CI, and skips them elsewhere.
+        Off Linux glibc's locales do not exist, the widening leg is not
+        generated, and the static no-range arm is the only check of the digit
+        classes."""
         if not sys.platform.startswith("linux"):
             assert _LOCALE_LEGS == ("ascii",), _LOCALE_LEGS
             return

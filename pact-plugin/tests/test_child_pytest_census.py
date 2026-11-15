@@ -411,8 +411,28 @@ def test_a_wrapper_named_by_a_path_is_stepped_over(argv):
     "cat <<EOF\n`pytest -q`\nEOF",
     # Arithmetic is not a heredoc.
     "((x=1<<2))\npytest -q",
-    # A called function runs its body.
+    # A called function runs its body, in either form.
     "f() { pytest -q; }; f",
+    "function f { pytest -q; }; f",
+    # An fd number or {name} against a redirection is part of it, not a program.
+    "2>/dev/null pytest -q",
+    "2>&1 pytest -q",
+    "10>log pytest -q",
+    "2>>log pytest -q",
+    "{fd}>log pytest -q",
+    # Only at a word start: here `1` is part of the plugin name.
+    "pytest -p no:randomly1>x",
+    # An operator written against a redirection still separates.
+    "true;>log pytest -q",
+    "true;2>log pytest -q",
+    "true|>log pytest -q",
+    "true&&>log pytest -q",
+    # command, builtin and coproc run the command after them.
+    "command pytest -q",
+    "command -- pytest -q",
+    "builtin command pytest -q",
+    "coproc pytest -q",
+    "coproc P { pytest -q; }",
 ])
 def test_shell_text_that_runs_an_unblocked_pytest_is_refused(text):
     assert census._miss(["bash", "-c", text], None, {}) is not None, text
@@ -434,6 +454,7 @@ def test_a_function_body_is_judged_where_it_is_defined():
     # bash runs no pytest here, since f is never called; the census judges the
     # body anyway, as its docstring says.
     assert census._miss(["bash", "-c", "f() { pytest -q; }"], None, {}) is not None
+    assert census._miss(["bash", "-c", "function f { pytest -q; }"], None, {}) is not None
 
 
 @pytest.mark.parametrize("text", [
@@ -461,6 +482,14 @@ def test_a_function_body_is_judged_where_it_is_defined():
     # In an unquoted body a backslash escapes `$`, and `<(` is text.
     "cat <<EOF\n\\$(pytest -q)\nEOF",
     "cat <<EOF\n<(pytest -q)\nEOF",
+    # An fd number is not an argument.
+    "pytest -p no:randomly 1>x",
+    # `&>` redirects both streams; it is not `&` then `>`.
+    "true&>log pytest -q",
+    # command -v and -V describe a command and run nothing.
+    "command -v pytest",
+    "command -V pytest",
+    "command -pv pytest",
 ])
 def test_shell_text_that_runs_no_unblocked_pytest_is_accepted(text):
     assert census._miss(["bash", "-c", text], None, {}) is None, text
@@ -472,6 +501,7 @@ def test_shell_text_that_runs_no_unblocked_pytest_is_accepted(text):
     "$(echo pytest) -q",
     "echo $(( $(pytest -q) ))",
     "echo $(case x in x) pytest -q;; esac)",
+    "echo $((pytest -q) )",
 ])
 def test_a_listed_shell_blind_spot_is_accepted(text):
     assert census._miss(["bash", "-c", text], None, {}) is None, text

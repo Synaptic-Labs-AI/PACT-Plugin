@@ -87,7 +87,9 @@ the census does not claim to see it, refuse it, or list it. The blind spots at
 the end are examples of that rule, not a complete list.
 
 The program is the first word past NAME=VALUE words, the shell's own
-`{ } ! if then elif else fi do done while until`, and the listed wrappers with
+`{ } ! if then elif else fi do done while until`, `function NAME`, `coproc`
+(and the NAME it takes before a compound command), `builtin` and `command` (and
+its `-p`; `command -v` and `command -V` run nothing), and the listed wrappers with
 their options, option values and numeric arguments: `timeout`, `nice`, `nohup`,
 `stdbuf`, `sudo`, `env`, `exec`, `time`, `xvfb-run`, and the tool runners
 `uv run`, `uv tool run`, `uvx`, `poetry run`, `pipx run`, `pdm run`, `hatch run`
@@ -112,7 +114,9 @@ The text is read as bash reads it:
   is judged on its own, written with or without spaces, and so is a function
   body, where it is defined, whether or not the function is called.
 - A redirection (`>`, `>>`, `<`, `2>&1`, `&>`, the here-string `<<<`) and its
-  target do not end a command.
+  target do not end a command, and neither does a file descriptor number or
+  `{name}` written against it (`2>/dev/null pytest`). An operator written
+  against another (`true;>log pytest`) is still read as each of them.
 - A heredoc's body (`<<WORD` or `<<-WORD`) is data, not commands: it runs from
   the next newline to the line that is the delimiter (its leading tabs stripped
   for `<<-`), and several heredocs on one line take their bodies in turn. In a
@@ -170,7 +174,9 @@ Blind spots, examples of launches outside the census:
    what a substitution's output becomes (`$(echo pytest) -q`), `export`,
    aliases, `eval`, `env -S`, a script fed to a shell's stdin (`bash <<EOF`,
    `bash -s`), a command substitution inside arithmetic (`$(( $(pytest) ))`), and
-   a `case` pattern's `)` inside a `$( )` (it ends the substitution early). An
+   a `case` pattern's `)` inside a `$( )` (it ends the substitution early), and a
+   command substitution whose text starts with a subshell (`$((pytest -q) )`),
+   which is read as arithmetic. An
    operator written alone inside quotes (`";"`) is read as an operator.
 10. pytest run from a file the census cannot name: a renamed or wrapper copy of
     the console script, a zipapp (`python pytest.pyz`), or a module other than
@@ -219,6 +225,10 @@ _COVERAGE_PROGRAM = re.compile(r"coverage(-?\d+(\.\d+)*)?\Z")
 _RANDOMLY_NAMES = frozenset({"randomly", "pytest_randomly", "pytest_randomly.__init__"})
 # Characters a shell reads as operators; a run of them is one lexer token.
 _OPERATOR_CHARS = "();<>|&\n"
+# A file descriptor number or `{name}` written against a redirection.
+_FD_PREFIX = re.compile(r"(?:\d+|\{[A-Za-z_][A-Za-z0-9_]*\})(?=[<>])")
+# The operators a run of operator characters is made of, longest first.
+_OPERATOR_PIECE = re.compile(r"&>>?|[<>]&|>>|>\||<<<|<<|<>|[<>]|\|&|&&|\|\||[;&|()\n]")
 # Words a shell reads before a command without running them.
 _RESERVED = frozenset({"{", "}", "!", "if", "then", "elif", "else", "fi",
                        "do", "done", "while", "until"})
@@ -500,6 +510,8 @@ def _scan(text):
         at_word_start = not out or out[-1][-1:] in " \t\r" + _OPERATOR_CHARS
         if text.startswith("\\\n", i):
             i += 2
+        elif at_word_start and (fd := _FD_PREFIX.match(text, i)):
+            i = fd.end()  # `2>x`, `{fd}>x`: the number or name belongs to the redirection
         elif char == "\\":
             out.append(text[i:i + 2])
             i += 2
@@ -633,11 +645,12 @@ def _split_commands(words):
             skip = False
             continue
         if _is_operator(word):
-            if "<" in word or ">" in word:
-                skip = True
-                continue
-            yield part
-            part = []
+            for piece in _OPERATOR_PIECE.findall(word):
+                if "<" in piece or ">" in piece:
+                    skip = True
+                else:
+                    yield part
+                    part = []
             continue
         part.append(word)
     yield part
@@ -679,8 +692,22 @@ def _program(part, env):
             _assign(env, word)
             i += 1
             continue
-        if word in _RESERVED:
+        if word in _RESERVED or word == "builtin":
             i += 1
+            continue
+        if word == "function":
+            i += 2  # `function NAME`, then its body
+            continue
+        if word == "coproc":
+            # A NAME is allowed only before a compound command.
+            i += 2 if i + 2 < len(part) and part[i + 2] in _RESERVED else 1
+            continue
+        if word == "command":
+            i += 1
+            while i < len(part) and part[i].startswith("-") and part[i] != "-":
+                if "v" in part[i] or "V" in part[i]:
+                    return len(part), env  # `command -v` and `-V` describe, never run
+                i += 1
             continue
         words = next((words for words in _MULTI_WORD_WRAPPERS
                       if (os.path.basename(word), *part[i + 1:i + len(words)]) == words), None)

@@ -70,7 +70,8 @@ SHA = re.compile(r"[0-9a-fA-F]{40}")
 # The run line's unexpanded
 # `${SEED:+-p randomly --randomly-seed="$SEED" --randomly-dont-reset-seed}`, as
 # shlex splits it, and pytest-randomly's own report-header line. SEED_LINE is
-# the only accepted spelling: 1 to 10 ASCII digits holds every 32-bit seed.
+# the only accepted spelling: 1 to 10 ASCII digits holds every 32-bit seed, and
+# every seed the seed guard in .github/workflows/tests.yml admits (at most 9).
 # SEED_LIKE_LINE is the same line with any run of Unicode digits; a header line
 # that matches it but not SEED_LINE is refused rather than read.
 _SEED_ARGV = ["${SEED:+-p", "randomly", "--randomly-seed=$SEED",

@@ -356,7 +356,9 @@ jobs:
           esac
 
       # THE SEED GUARD. Empty means file order. Otherwise SEED must be a
-      # decimal integer without leading zeros, at most 9 digits (below 2^32);
+      # decimal integer without leading zeros, at most 9 digits (below 2^32;
+      # scripts/compare_full_suite_results.py's SEED_LINE reads 1 to 10 digits,
+      # a superset, so every seed this guard admits is read there);
       # anything else refuses before setup, and the value is never echoed. The
       # digit classes are spelled out rather than written as ranges, so the
       # locale cannot widen them. This guard protects two sinks: the
