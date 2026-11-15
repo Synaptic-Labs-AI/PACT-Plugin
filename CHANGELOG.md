@@ -42,6 +42,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
 
 - `constraints-ci.txt` is now a hash-checked lock generated from the hand-edited `constraints-ci.in`: every distribution, pip included, is pinned with a sha256 hash for each file. CI installs it with `pip install --only-binary=:all: --require-hashes -r constraints-ci.txt`, so a missing pin, a changed file or a source build refuses the install. `.cursor/install.sh` installs the same lock but still accepts source builds (pysqlite3 has no aarch64 Linux or x86_64 macOS wheel) and says so. The environment check parses the lock and version-checks pip like any other pin.
 - The lint gate's ruff-missing remedy prints the three commands that create the repository's `.venv`, install the CI lock (ruff among it) into it and activate it, as `.cursor/install.sh` does, instead of installing into whatever `python3` is first on PATH. It says it installs every locked package rather than a fixed count, and a pin refuses any number in that text. A test runs the real gate with no ruff on PATH and requires exit 2 and the script's own remedy text.
+- The local lint gate's ruff-missing remedy now refuses a `python3` below the interpreter floor before it creates the venv, with an explicit exit that `PYTHONOPTIMIZE` cannot skip, and a test holds its floor equal to `.cursor/install.sh`'s and the declared `requires-python`.
 
 ### Test-suite censuses
 

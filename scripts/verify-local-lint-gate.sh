@@ -75,11 +75,12 @@ fi
 
 if ! command -v ruff >/dev/null 2>&1; then
     printf 'GATE REFUSED: ruff is not available, so the lint legs cannot run.\n' >&2
-    printf '  A missing linter must not read as a pass. From the repo root, these three commands create the\n' >&2
-    printf '  repository venv (.venv), install the CI lock into it (every locked package, ruff at the version\n' >&2
-    printf '  CI pins among them) and put it first on PATH, as .cursor/install.sh does. This is the local\n' >&2
-    printf '  install, not the CI one: it accepts source builds, whose build dependencies are not hash-checked.\n' >&2
-    printf '    python3 -m venv .venv\n' >&2
+    printf '  A missing linter must not read as a pass. From the repo root, these three commands refuse\n' >&2
+    printf '  an interpreter below the floor and otherwise create the repository venv (.venv), install the\n' >&2
+    printf '  CI lock into it (every locked package, ruff at the version CI pins among them) and put it first on\n' >&2
+    printf '  PATH, as .cursor/install.sh does. This is the local install, not the CI one: it accepts source\n' >&2
+    printf '  builds, whose build dependencies are not hash-checked.\n' >&2
+    printf '    python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else sys.version)" && python3 -m venv .venv\n' >&2
     printf '    .venv/bin/python -m pip install --require-hashes -r constraints-ci.txt\n' >&2
     printf '    . .venv/bin/activate\n' >&2
     printf '  To lint without this gate, run the CI legs directly from the repo root:\n' >&2

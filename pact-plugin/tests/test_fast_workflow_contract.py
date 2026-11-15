@@ -18,6 +18,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -169,6 +170,37 @@ def _fast_doc(root):
 
 def _full_doc(root):
     return ci_contract.load_workflow(root, ci_contract.FULL_WORKFLOW)
+
+
+def _lint_gate_remedy_lines(root):
+    """The lines the lint gate prints when ruff is missing, as its printf calls
+    spell them."""
+    text = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
+    block = text[text.index("GATE REFUSED: ruff is not available"):]
+    block = block[:block.index("exit 2")]
+    return [line.split("'")[1].removesuffix("\\n").strip()
+            for line in block.splitlines() if line.strip().startswith("printf")]
+
+
+def _remedy_floor_minor(check):
+    """The minor version of the floor the remedy's printed check enforces."""
+    found = re.findall(r"sys\.version_info >= \(3, (\d+)\)", check)
+    assert len(found) == 1, check
+    return int(found[0])
+
+
+def _install_floor_minor(root):
+    text = (root / ".cursor" / "install.sh").read_text(encoding="utf-8")
+    found = re.findall(r"(?m)^PYTHON_FLOOR_MINOR=(\d+)$", text)
+    assert len(found) == 1, found
+    return int(found[0])
+
+
+def _declared_floor_minor(root):
+    declared = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    found = re.fullmatch(r">=3\.(\d+)", declared["project"]["requires-python"])
+    assert found, declared["project"]["requires-python"]
+    return int(found.group(1))
 
 
 # A number standing alone in prose (`40`, `1.2.3`), not one inside a word
@@ -430,33 +462,39 @@ class TestHashCheckedInstall:
 
     def test_the_lint_gate_remedy_is_the_local_install(self):
         """The remedy runs on a developer's machine, so it prints the local
-        install exactly as .cursor/install.sh runs it: create .venv, install the
-        lock into it, activate it. It says what it installs, where, and that it
-        is not CI's install."""
+        install as .cursor/install.sh runs it: refuse a python3 below the
+        interpreter floor, create .venv, install the lock into it, activate it.
+        It says what it installs, where, and that it is not CI's install."""
         root = ci_contract.require_root("the lint gate remedy")
-        text = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
-        block = text[text.index("GATE REFUSED: ruff is not available"):]
-        block = block[:block.index("exit 2")]
-        printed = [line.split("'")[1].removesuffix("\\n").strip()
-                   for line in block.splitlines() if line.strip().startswith("printf")]
+        printed = _lint_gate_remedy_lines(root)
         commands = [line for line in printed if line.startswith(("python3 ", ".venv/", ". "))]
-        assert commands == [
+        check, _, venv = commands[0].partition(" && ")
+        assert [venv, *commands[1:]] == [
             "python3 -m venv .venv",
             ".venv/bin/python " + _LOCAL_LOCK_INSTALL.split(" ", 1)[1],
             ". .venv/bin/activate",
         ], commands
         cursor = [line.strip() for line in
                   (root / ".cursor" / "install.sh").read_text(encoding="utf-8").splitlines()]
-        assert commands[0] in cursor and commands[2] in cursor, (
+        assert venv in cursor and commands[2] in cursor, (
             "the remedy's venv and activate lines are not .cursor/install.sh's")
-        prose = " ".join(printed)
+        # The floor check is a third copy of the floor; it must equal the other two.
+        assert _remedy_floor_minor(check) == _install_floor_minor(root) \
+            == _declared_floor_minor(root), check
+        # Python drops an assert under -O or PYTHONOPTIMIZE, so the check exits instead.
+        assert "assert" not in check and "sys.exit(" in check, check
+        prose = " ".join(line for line in printed
+                         if line not in commands and not line.startswith("ruff "))
         for phrase in ("repository venv (.venv)", "not the CI one"):
             assert phrase in prose, phrase
         # A count of the lock's packages here would go stale on every lock
-        # refresh that adds or drops one, so the remedy names no number at all.
+        # refresh that adds or drops one, so the remedy's prose names no number
+        # at all. The printed commands are outside this check: the floor in the
+        # first one is pinned to its other copies above.
         assert "every locked package" in prose, prose
         assert not _STANDALONE_NUMBER.search(prose), prose
-        assert "-c constraints-ci.txt" not in text
+        script = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
+        assert "-c constraints-ci.txt" not in script
 
     @pytest.mark.parametrize("prose, has_number", [
         ("every locked package, 40 of them", True),
@@ -470,6 +508,26 @@ class TestHashCheckedInstall:
     ])
     def test_the_remedy_number_check_finds_a_standalone_number(self, prose, has_number):
         assert bool(_STANDALONE_NUMBER.search(prose)) is has_number, prose
+
+    @pytest.mark.parametrize("below_floor", [False, True], ids=["at-floor", "below-floor"])
+    def test_the_remedy_floor_check_refuses_under_pythonoptimize(self, below_floor):
+        """The printed floor check, run as printed under PYTHONOPTIMIZE=1, passes
+        this interpreter and refuses one below the floor, naming its version. A
+        floor above every real interpreter stands in for a below-floor python3."""
+        root = ci_contract.require_root("the lint gate remedy")
+        check = next(line for line in _lint_gate_remedy_lines(root)
+                     if line.startswith("python3 -c ")).partition(" && ")[0]
+        code = shlex.split(check)[2]
+        if below_floor:
+            code = re.sub(r"\(3, \d+\)", "(99, 0)", code)
+            assert "(99, 0)" in code, code
+        proc = subprocess.run([sys.executable, "-c", code],
+                              env=dict(os.environ, PYTHONOPTIMIZE="1"),
+                              capture_output=True, text=True, timeout=30)
+        if below_floor:
+            assert proc.returncode == 1 and proc.stderr.strip() == sys.version, proc
+        else:
+            assert proc.returncode == 0 and proc.stderr == "", proc
 
     def test_the_lint_gate_refuses_without_ruff_and_prints_its_remedy(self, tmp_path):
         """With no ruff on PATH the gate exits 2 and prints its own ruff-missing
