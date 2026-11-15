@@ -408,9 +408,26 @@ class TestEveryRungGivesAShapeTheSameAnswer:
     def test_a_stray_git_answers_as_the_same_folder_with_none(self, matrix):
         """A `.git` git looks past for a bare repository above answers on
         every route exactly as the same folder with no `.git`, and the pair
-        does split by route (the reason it is left out of the agreement
-        arm)."""
+        splits by route as SPLIT_BY_VISIBILITY states: a route that asks git
+        (one whose sources hold no "cwd") declines no_working_tree; a
+        cwd-marker route binds a folder name; and the user setting over the
+        cwd marker binds the setting."""
+        from fixtures.identity_routes import USER_SETTING_ID
+
         cells, _sites, _fired, _executed = matrix
+        wrong = {}
+        for shape in SPLIT_BY_VISIBILITY:
+            for route, (_run, sources) in ROUTES.items():
+                answer, rung, override = cells[(shape, route)]
+                if "user setting" in sources:
+                    right = (answer, rung) == (f"bound:{USER_SETTING_ID}", "user setting")
+                elif "cwd" in sources:
+                    right = rung == "cwd" and answer.startswith("bound:") and "/" not in answer
+                else:
+                    right = answer == "no_working_tree" and rung in sources
+                if not right or override is not None:
+                    wrong[(shape, route)] = (answer, rung, override)
+        assert wrong == {}, f"a route of the bare-repository pair answered outside its class: {wrong}"
         for stray, twin in SPLIT_BY_VISIBILITY.items():
             if twin is None:
                 continue
@@ -980,9 +997,9 @@ def _return_kind(function, defined: "dict | None" = None, seen: frozenset = froz
 # many times it occurs and what the code at the site is: the project_identity
 # function it calls (or the module-level name it reaches), with its return
 # annotation, and the annotation of the function the site is in.
-# `test_each_named_layout_reason_states_the_code_at_its_site` derives those
-# from the source and requires each reason to carry them; a new or changed
-# form fails the census arm.
+# `test_each_named_layout_reason_states_the_code_at_its_site` derives each
+# reason's text from the source and requires the reason to equal it; a new or
+# changed form fails the census arm.
 NAMED_LAYOUT_FORMS = {
     ('_admin_dir_names_another_checkout', 'binds', 'value = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `_admin_dir_names_another_checkout` (-> bool)"),
     ('_marker_target', 'binds', 'target = gitfile_target(text)'): (1, "assigns a call to `gitfile_target` (-> Optional[str]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
@@ -1017,11 +1034,20 @@ def _layout_predicate_forms() -> tuple:
     project_identity call's result in any form (assignment, annotated or
     augmented assignment, walrus, a `for` or `with` target, a `match`
     capture), which also
-    covers the methods later called on it; a return that carries such a result inside another
-    expression (`or`, `not`, a ternary); a project_identity function used as
-    a value; and an annotation `_return_kind` cannot classify. The census arm
+    covers the methods later called on it; a project_identity call passed
+    as an argument, positional, keyword or starred, to any callee other than
+    a module-level def of project_identity (a container method such as
+    `append`, `setdefault` or `extend` included); a return that carries such
+    a result inside another expression (`or`, `not`, a ternary); a
+    project_identity function used as a value; and an annotation
+    `_return_kind` cannot classify. The census arm
     compares the Counter with NAMED_LAYOUT_FORMS exactly, so a new form fails
-    it."""
+    it.
+
+    NOT COVERED: a project_identity call inside a tuple that is subscripted
+    in a branch test (`if (_pred(d),)[0]:`), and a project_identity call in
+    an f-string that is a statement of its own, whose value is discarded
+    (`f"{_pred(d)}"`). The walk reports neither."""
     import builtins
 
     tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
@@ -1076,6 +1102,11 @@ def _layout_predicate_forms() -> tuple:
             if isinstance(node, ast.Name) and node.id in defined and id(node) not in called:
                 unresolved[(name, "uses as a value", node.id)] += 1
             if isinstance(node, ast.Call):
+                if not (isinstance(node.func, ast.Name) and node.func.id in defined) and any(
+                    project_call(argument)
+                    for argument in [*node.args, *(keyword.value for keyword in node.keywords)]
+                ):
+                    unresolved[(name, "passes", ast.unparse(node))] += 1
                 if isinstance(node.func, ast.Name) and node.func.id in defined:
                     if node.func.id not in reached:
                         reached.add(node.func.id)
@@ -1370,10 +1401,10 @@ class TestTheDocumentedGitCallFloor:
         AST, compared by equality, so a reason that adds a claim (a flow
         fact, a purpose) fails as surely as one that drops a fragment. A
         bind names the project_identity function it calls and the function
-        it is in, each with its return annotation; a return of `not` and a
-        call do the same; a call through a module-level name names that
-        name and the call its assignment makes. A form of another shape has
-        no derived text and fails."""
+        it is in, each with its return annotation; a return of `not` applied
+        to a direct call names the same two; a method called on a
+        module-level name names that name and the call its assignment makes.
+        A form of another shape has no derived text and fails."""
         tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
         defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         assigned = {}
