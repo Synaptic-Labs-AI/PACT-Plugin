@@ -2650,197 +2650,241 @@ class TestEveryRouteEntryConditionIsARoute:
     # the matrices do not need one to.
     NOT_A_ROUTE = {
         ("env", "GIT_DISCOVERY_ACROSS_FILESYSTEM"): (
-            "selects the cwd-marker rung exactly as the driven GIT_CEILING_DIRECTORIES "
-            "does, so the cwd-marker routes measure that rung: both marker walks "
-            "(find_git_marker and project_scope._git_metadata_at_or_above) stop at a "
-            "parent on another filesystem as they stop at a ceiling entry there, and "
-            "with the variable true they walk on as with no ceiling (measured by "
-            "faking a device boundary at each cwd-marker route's ceiling for every "
-            "fixture shape); a real filesystem boundary cannot be built in a test"
+            "read beside the driven GIT_CEILING_DIRECTORIES by both marker walks "
+            "(find_git_marker and project_scope._git_metadata_at_or_above), to stop at a "
+            "filesystem boundary; a real filesystem boundary cannot be built in a test"
         ),
         ("env", "CLAUDE_CODE_SESSION_ID"): (
             "names the session whose record the session-record readers open; the "
-            "session-record and worktree identity record routes replace those "
-            "readers whole, because a test process cannot reach a real record"
+            "session-record and worktree identity record routes replace those readers"
         ),
-        ("env", "PYTEST_CURRENT_TEST"): (
-            "the guard that makes the session record inert in a test process; it "
-            "selects no route outside tests"
-        ),
+        ("env", "PYTEST_CURRENT_TEST"): "the session-record readers' test-process guard",
         ("env", "PACT_TEST_MEMORY_DIR"): (
-            "where get_user_memory_dir finds the user-scope setting; read inside "
-            "get_user_memory_dir, which the user-setting route replaces"
+            "read inside get_user_memory_dir, which the user-setting route replaces"
         ),
         ("env", "CLAUDE_CONFIG_DIR"): (
-            "the config root under which _session_record_on_disk opens a session "
-            "record; reached only through the two session-record readers, which return "
-            "nothing in a test process before they read it, and whose records the "
-            "session-record and worktree identity record routes replace whole"
+            "the config root under which _session_record_on_disk opens a session record, "
+            "read through the session-record readers, which the session-record and "
+            "worktree identity record routes replace"
         ),
         ("env", "<shared.project_scope.git_env_without_location: os.environ.items>"): (
-            "copies the environment for git subprocesses with the location "
-            "variables removed; it selects nothing"
+            "the copy of the environment git_env_without_location builds for git "
+            "subprocesses"
         ),
         ("home",): "a landing property, measured as the home_root shape",
         ("call", "get_worktree_identity_from_session_record"): (
-            "its record is consumed only by recorded_main_root, which the worktree "
-            "identity record route drives"
+            "its record is read by recorded_main_root, which the worktree identity record "
+            "route replaces"
         ),
-        ("call", "git_env_without_location"): "strips location variables from every git call",
+        ("call", "git_env_without_location"): "builds the environment of every git call",
         ("call", "<call to no function project_identity: git_env_without_location().items>"): (
-            "iterates the location-free copy of the environment to build a git "
-            "subprocess's environment; it selects nothing"
+            "iterates the environment copy git_env_without_location builds for a git "
+            "subprocess"
         ),
         ("call", "<call to no function memory_api: PACTMemory._identity_at_root(...)._replace>"): (
-            "copies the identity record the rung returned with some fields changed; "
-            "_replace on a NamedTuple runs no project code"
+            "_replace on the result of _identity_at_root"
         ),
         ("call", "<call to no function memory_api: a method of what PACTMemory._declared_dir_identity or PACTMemory._identity_at_root(...)._replace returns>"): (
-            "the local holds the _DetectedIdentity NamedTuple the rung returned, and the "
-            "method called on it is _replace, which builds another NamedTuple and runs no "
-            "project code"
+            "a method of what _declared_dir_identity or _identity_at_root returned"
         ),
         ("call", "<call to no function memory_api: a method of what _root_guard returns>"): (
-            "the local holds the _DetectedIdentity NamedTuple _root_guard returned, and the "
-            "method called on it is _replace, which builds another NamedTuple and runs no "
-            "project code"
+            "a method of what _root_guard returned"
         ),
         ("call", "<call to no function memory_api: a method of what main_repo_common_dir returns>"): (
-            "main_repo_common_dir returns None, `common.resolve()` (a pathlib Path), or "
-            "the memoised result of an earlier call of itself; the method called on it is "
-            "Path.resolve (the memo is a ContextVar's dict, so the census cannot prove it)"
+            "a method of main_repo_common_dir's result, which the census cannot type"
         ),
         ("call", "<call to no function shared.project_scope: sessions_root.glob>"): (
-            "sessions_root is get_claude_config_dir() / 'pact-sessions', a pathlib Path; "
-            "glob is pathlib's (get_claude_config_dir builds its Path from unannotated "
-            "env and home parameters, so the census cannot prove it)"
+            "a method of sessions_root, built from get_claude_config_dir(), which the "
+            "census cannot type"
         ),
         ("call", "<call to no function shared.project_scope: a method of what _discover_context_record returns>"): (
-            "_discover_context_record returns a dict (the cached _session_record_on_disk "
-            "result, or {}); the method called on it is dict.get (the cache global is "
-            "rebound under `global`, so the census cannot prove it)"
+            "a method of _discover_context_record's result, which the census cannot type"
         ),
         ("call", "<call to no function config: _STORE_DB_PATH.set>"): (
             "get_user_memory_dir sets the store scope aside; the user-setting route "
-            "replaces get_user_memory_dir whole"
+            "replaces get_user_memory_dir"
         ),
         ("call", "<call to no function config: _STORE_DB_PATH.get>"): (
-            "get_memory_dir reads the store scope, reached only through "
-            "get_user_memory_dir, which the user-setting route replaces whole"
+            "get_memory_dir reads the store scope, reached through get_user_memory_dir, "
+            "which the user-setting route replaces"
         ),
         ("call", "<call to no function config: _STORE_DB_PATH.reset>"): (
             "get_user_memory_dir restores the store scope; the user-setting route "
-            "replaces get_user_memory_dir whole"
+            "replaces get_user_memory_dir"
         ),
         ("call", "<call to no function memory_api: _DETECTION_ANSWERS.get>"): (
-            "the per-pass answer memo: the constructor sets it empty before the "
-            "detection and resets it after, so it holds only answers this pass asked"
+            "the constructor's per-pass answer memo"
         ),
         ("call", "<call to no function memory_api: _DETECTION_COMMON_DIRS.get>"): (
-            "the per-pass common-dir memo: the constructor sets it empty before the "
-            "detection and resets it after, so it holds only answers this pass asked"
+            "the constructor's per-pass common-dir memo"
         ),
         ("call", "<call to no function memory_api: _DETECTION_COMMON_DIRS.set>"): (
-            "main_repo_common_dir sets the per-pass memo aside while it asks git, so "
-            "the inner call runs git"
+            "main_repo_common_dir sets the per-pass memo aside while it asks git"
         ),
         ("call", "<call to no function memory_api: _DETECTION_COMMON_DIRS.reset>"): (
             "main_repo_common_dir restores the per-pass memo after asking git"
         ),
         ("call", "<call to no function project_identity: DETECTION_GIT_DIRS.get>"): (
-            "the per-pass git-dir memo: the constructor sets it empty before the "
-            "detection and resets it after, so it holds only answers this pass asked"
+            "the constructor's per-pass git-dir memo"
         ),
-        # Builds of the project's own record classes. Each is a NamedTuple
-        # whose body holds only annotated fields (no method, decorator or
-        # class keyword), so building one runs no project code.
         ("call", "<call to no function memory_api: _DetectedIdentity>"): (
-            "builds the _DetectedIdentity NamedTuple a rung returns (fields only)"
+            "builds a record class (fields only)"
         ),
-        ("call", "<call to no function project_identity: OriginRead>"): (
-            "builds the OriginRead NamedTuple read_origin returns (fields only)"
-        ),
+        ("call", "<call to no function project_identity: OriginRead>"): "builds a record class (fields only)",
         ("call", "<call to no function project_identity: OverrideRead>"): (
-            "builds the OverrideRead NamedTuple read_override returns (fields only)"
+            "builds a record class (fields only)"
         ),
         ("call", "<call to no function project_identity: RootIdentity>"): (
-            "builds the RootIdentity NamedTuple detect_id_for_root and _refuse_submodule_basename return (fields only)"
+            "builds a record class (fields only)"
         ),
-        # The module logger, `logging.getLogger(__name__)`. Every argument at
-        # these sites is a string constant, a str, a Path, or a field of the
-        # identity or override record, so formatting runs no project code; no
-        # plugin module outside the tests attaches a filter, handler or
-        # formatter (the one `basicConfig`, in telegram/server.py, passes a
-        # level, a format string and sys.stderr).
         ("call", "<call to no function memory_api: logger.debug>"): (
-            "the detection path's debug lines; arguments are constants, the source "
-            "label and the detected project id"
+            "a logger method; every project object built on the path is a named build"
         ),
         ("call", "<call to no function memory_api: logger.warning>"): (
-            "the decline, override-ignored, home and unresolved warnings; arguments "
-            "are constants, the cause text, the override path and reason, and the "
-            "root Path and its name"
+            "a logger method; every project object built on the path is a named build"
         ),
-        # Compiled patterns, each a `re.compile` of literal strings, and the
-        # re.Match objects and str groups their methods return.
         ("call", "<call to no function database: CANONICAL_ID_RE.fullmatch>"): (
-            "is_canonical_id matches the id against a literal pattern"
+            "a method of a compiled literal pattern"
         ),
         ("call", "<call to no function database: a method of what CANONICAL_ID_RE.fullmatch returns>"): (
-            "reads the port group of that re.Match"
+            "a method of that pattern's match"
         ),
         ("call", "<call to no function project_identity: _SCHEME_PREFIX_RE.match>"): (
-            "matches a remote url's scheme prefix against a literal pattern"
+            "a method of a compiled literal pattern"
         ),
         ("call", "<call to no function project_identity: a method of what _SCHEME_PREFIX_RE.match returns>"): (
-            "reads the scheme group and the match end of that re.Match"
+            "a method of that pattern's match"
         ),
         ("call", "<call to no function project_identity: _SCP_FORM_RE.match>"): (
-            "_scp_match matches git's scp form against a literal pattern"
+            "a method of a compiled literal pattern"
         ),
         ("call", "<call to no function project_identity: a method of what _SCP_FORM_RE.match returns>"): (
-            "reads the host and user groups of that re.Match"
+            "a method of that pattern's match"
         ),
         ("call", "<call to no function project_identity: a method of what _scp_match returns>"): (
-            "_scp_match returns that re.Match or None; reads its host and path groups"
+            "a method of _scp_match's result"
         ),
         ("call", "<call to no function project_identity: host.isascii>"): (
-            "host is the str host group of the scp match"
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
         ),
         ("call", "<call to no function project_identity: host.isalpha>"): (
-            "host is the str host group of the scp match"
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
         ),
         ("call", "<call to no function project_identity: host.lower>"): (
-            "host is a str partitioned from the url's authority after the scheme match"
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
         ),
         ("call", "<call to no function project_identity: scp_path.startswith>"): (
-            "scp_path is the str path group of the scp match"
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
         ),
         ("call", "<call to no function project_identity: scp_path.replace>"): (
-            "scp_path is the str path group of the scp match"
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
         ),
         ("call", "<call to no function shared.project_scope: _GIT_INT_RE.fullmatch>"): (
-            "parses a git integer value against a literal pattern"
+            "a method of a compiled literal pattern"
         ),
         ("call", "<call to no function shared.project_scope: a method of what _GIT_INT_RE.fullmatch returns>"): (
-            "reads the hex and dec groups of that re.Match"
+            "a method of that pattern's match"
         ),
         ("call", "<call to no function shared.project_scope: digits.strip>"): (
-            "digits is a str group of that match"
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
         ),
         ("call", "<call to no function shared.project_scope: _UNSAFE_SLUG_CHARS_RE.sub>"): (
-            "replaces unsafe characters in the session id with a literal pattern and "
-            "a literal replacement"
+            "a method of a compiled literal pattern"
         ),
         ("call", "store_scope"): (
-            "the _with_store_scope decorator, applied to PACTMemory's methods when the "
-            "class is defined, runs each call inside store_scope(self._db_path), which "
-            "binds the store file; get_user_memory_dir sets that binding aside before "
-            "the user-setting route reads, so it selects no route"
+            "the _with_store_scope decorator runs each PACTMemory method inside "
+            "store_scope(self._db_path), which binds the store file; get_user_memory_dir, "
+            "which the user-setting route replaces, sets that binding aside"
         ),
         ("call", "is_canonical_id"): "validates an id value",
         ("call", "validate_identifier_for_write"): "validates an id value",
     }
+
+    def test_each_named_build_and_pattern_is_what_its_reason_says(self):
+        """Computes the two properties NOT_A_ROUTE's reasons state: an entry
+        whose reason says "builds a record class (fields only)" builds a
+        class that is a NamedTuple whose body holds only annotated fields and
+        a docstring (no method, decorator or class keyword), and one that says
+        "a method of a compiled literal pattern" calls a method on a module
+        name (followed through imports) whose every binding is `re.compile`
+        of literals or `re` flags. Every entry of either shape carries that
+        reason, and no other entry does."""
+        import ast
+        import re as regex
+
+        from fixtures.identity_git import qualified_name
+
+        graph = _DetectionGraph()
+        shape = regex.compile(r"<call to no function ([\w.]+): (\w+)(?:\.(\w+))?>")
+
+        def literal(value):
+            try:
+                ast.literal_eval(value)
+            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+                return False
+            return True
+
+        def fields_only(node):
+            return (
+                [ast.unparse(base) for base in node.bases] in (["NamedTuple"], ["typing.NamedTuple"])
+                and not node.decorator_list and not node.keywords
+                and all(
+                    (isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+                     and (item.value is None or literal(item.value)))
+                    or (isinstance(item, ast.Expr) and isinstance(item.value, ast.Constant))
+                    for item in node.body
+                )
+            )
+
+        def compiled_literal(owner, name):
+            aliases = graph.aliases[owner]
+            values = graph.bindings[owner].get(name, [])
+
+            def flag(value):
+                if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+                    return flag(value.left) and flag(value.right)
+                return (qualified_name(value, aliases) or "").startswith("re.")
+
+            return bool(values) and all(
+                isinstance(value, ast.Call) and qualified_name(value.func, aliases) == "re.compile"
+                and all(literal(argument) or flag(argument)
+                        for argument in [*value.args, *(kw.value for kw in value.keywords)])
+                for value in values
+            )
+
+        builds, patterns, wrong = set(), set(), {}
+        for condition, reason in self.NOT_A_ROUTE.items():
+            found = shape.fullmatch(condition[1]) if condition[0] == "call" else None
+            kind = None
+            if found:
+                module, name, method = found.groups()
+                assert graph.load(module), module
+                owned = graph.project_name(name, module)
+                if owned is not None and owned[1]:
+                    owner, leaf = owned
+                    graph.load(owner)
+                    node = graph.classes.get(owner, {}).get(leaf)
+                    if method is None and node is not None:
+                        kind = "build"
+                        (builds if fields_only(node) else wrong.setdefault("not fields only", set())).add(condition)
+                    elif method is not None and compiled_literal(owner, leaf):
+                        kind = "pattern"
+                        patterns.add(condition)
+            says = (
+                "build" if reason == "builds a record class (fields only)"
+                else "pattern" if reason == "a method of a compiled literal pattern"
+                else None
+            )
+            if says != kind:
+                wrong.setdefault(f"reason says {says}, the code is {kind}", set()).add(condition)
+        assert wrong == {}, wrong
+        assert len(builds) >= 1 and len(patterns) >= 1, (builds, patterns)  # control
 
     def test_every_entry_condition_is_driven_or_excluded(self, route_driven_conditions):
         conditions = route_entry_conditions()
