@@ -20,7 +20,21 @@ standard library, pytest, and tests/ modules whose own imports, followed
 through every tests/ module they import, are only those. Never import a
 skills/*/scripts module, a plugin-root module or any other package here. A
 session-wide plugin that needs another package is registered from
-tests/conftest.py instead. tests/test_root_conftest_import_charter.py enforces
+tests/conftest.py instead.
+
+No dynamic import call (importlib.import_module, __import__, importlib.reload,
+find_spec, an importlib.util spec or loader call, runpy, exec or eval) appears
+in this file or in any tests/ module it follows, at any scope. Exactly two
+calls deviate, and only they may import outside this charter:
+- tests/ci_environment_binding.py, `_load_verify_script`, runs only when
+  GITHUB_ACTIONS=true. It loads the repo-root scripts/verify_ci_environment.py,
+  which imports `packaging` (or pip's vendored copy), so a CI session imports
+  that package.
+- tests/import_identity_map.py, `resolve_origins`, runs only when
+  PACT_IDENTITY_MAP_OUT is set, at session finish. Its find_spec imports the
+  parent packages of the names the collected tests import, skills/*/scripts
+  and plugin-root packages included.
+Add no other deviation. tests/test_root_conftest_import_charter.py enforces
 this charter.
 """
 
@@ -40,7 +54,7 @@ if _plugin_root not in sys.path:
 # Import-identity harness registration (layer 4 guard). tests/ is inserted so
 # the harness module resolves at conftest load; the insert is a guarded no-op
 # once tests/conftest.py has run. The harness imports only the standard
-# library, as the import charter requires.
+# library; its one dynamic import is a deviation the import charter names.
 # Name-based hook discovery picks up the re-exported callables session-wide
 # (this conftest's tree spans both tests/ and the skills-adjacent files).
 _tests_dir = str(Path(__file__).parent / "tests")
@@ -61,7 +75,8 @@ def pytest_configure(config):
     The seed gate runs here, not in tests/conftest.py, so a session that
     collects only skills-adjacent tests is gated too. Plugin objects, because
     this module already re-exports a pytest_sessionstart. Both import only
-    the standard library and pytest, and both are gated on GITHUB_ACTIONS, so
+    the standard library and pytest, except the CI binding's script load,
+    which the import charter names. Both are gated on GITHUB_ACTIONS, so
     outside CI they do nothing.
     The full-run recorder is registered here rather than through
     PYTEST_PLUGINS: PYTEST_PLUGINS would inject it into every nested pytest
