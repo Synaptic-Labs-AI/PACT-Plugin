@@ -123,6 +123,12 @@ The text is read as bash reads it:
   its own shell text. Arithmetic (`$(( ))` and `(( ))`) runs no command.
 - A shell command inside a shell command is opened the same way. Shells and
   substitutions together are opened up to four levels deep.
+- Every shell's `-c` text (`sh`, `dash`, `zsh`, `ksh`) is read by these bash
+  rules, so a construct another shell lacks or reads differently is judged as
+  bash reads it: dash rejects `<( )` and `<<<` as syntax errors, so
+  `dash -c 'cat <(pytest -q)'` is refused although dash runs nothing.
+- Text that bash rejects as a syntax error is still judged by these rules and
+  refused on purpose, although it starts no child: `echo \\$(pytest -q)`.
 
 On a pytest child that is not deterministic the census records a line naming
 PYTEST_CURRENT_TEST, the argv and the cwd, then raises ChildPytestCensusError,

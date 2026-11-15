@@ -418,6 +418,18 @@ def test_shell_text_that_runs_an_unblocked_pytest_is_refused(text):
     assert census._miss(["bash", "-c", text], None, {}) is not None, text
 
 
+def test_shell_text_that_is_a_syntax_error_is_still_judged():
+    # bash rejects this text and starts nothing; the census refuses it, as its
+    # docstring says.
+    assert census._miss(["bash", "-c", "echo \\$(pytest -q)"], None, {}) is not None
+
+
+def test_another_shells_text_is_read_by_bash_rules():
+    # dash 0.5.12 rejects `<(` as a syntax error and starts nothing; the census
+    # reads every shell's text as bash does and refuses it, as its docstring says.
+    assert census._miss(["dash", "-c", "cat <(pytest -q)"], None, {}) is not None
+
+
 def test_a_function_body_is_judged_where_it_is_defined():
     # bash runs no pytest here, since f is never called; the census judges the
     # body anyway, as its docstring says.
