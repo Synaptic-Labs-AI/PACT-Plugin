@@ -34,19 +34,12 @@ there is a module pytest cannot import, which stops pytest with a usage error
 before any test runs.
 
 A child's environment starts as the explicit `env` passed to the launch, or this
-process's when none is passed. NAME=VALUE words before the program apply to it,
-and so do the `env` wrapper's own options: `-i`, `--ignore-environment` and a
-bare `-` empty it, `-u NAME`, `-uNAME` and `--unset=NAME` remove a name, and its
-NAME=VALUE words set one. `sudo` starts from an empty environment unless it is
-given `-E` or `--preserve-env`, or `--preserve-env=NAMES` for those names.
-`pdm run --env NAME=VALUE` and micromamba's `-e NAME=VALUE` and
-`--env NAME=VALUE` (either tool also as `--env=NAME=VALUE`) set one. The shell
-builtin `exec -c` (alone or bundled, as in `-cl`) empties it.
-`micromamba run --clean-env` and `pixi run --clean-env` empty it, except that
-micromamba keeps each name a bare `-e NAME` or `--env NAME` gives.
+process's when none is passed, and the NAME=VALUE words before the program apply
+to it.
 
 THE CENSUS REFUSES THESE LAUNCH FAMILIES, AND ONLY THESE. A launch in one of
-them that does not block pytest-randomly is refused:
+them that does not block pytest-randomly is refused, and a [wrapper] launch is
+refused whether or not it does:
 - [program] The program is pytest's own: `pytest` or `py.test`, by path or not,
   with a distro version suffix (`pytest-3`, `pytest3`, `py.test-3`), `.exe`, or a
   tool runner's `@version` pin (`pytest@8.3.0`); or the package's
@@ -64,21 +57,29 @@ them that does not block pytest-randomly is refused:
   launcher's `-3`, `-3.12` and `-V:3.12`.
 - [mention] Every word naming an interpreter anywhere in a command is read as
   the [module] family, not only the first, so `echo python -m pytest` is
-  refused, and a wrapper option's value named like an interpreter
-  (`uv run -p python3 python -m pytest`) does not hide the interpreter after it.
+  refused.
 - [script] The program is an interpreter that runs pytest's program or
   `__main__.py` as its script (`python /venv/bin/pytest`). Only the program
   position counts here: in `pip install python-dateutil pytest` or
-  `echo python /venv/bin/pytest` no interpreter runs a script. When the program
-  word is named like an interpreter and follows an option the wrapper tables
-  below do not know (neither a value option nor a flag), it may be that option's
-  value, so the next word that would then be the program is tried too
-  (`uv run --made-up-option python3 python /venv/bin/pytest`). A known flag
-  (`uv run -v python3 ...`) or a program not named like an interpreter
-  (`uv run -v echo python ...`) is never stepped past.
-- [wrapper] Any family above behind NAME=VALUE words, the shell's reserved words
-  or the listed wrappers and tool runners (below), each named bare or by a path
-  (`/usr/local/bin/uv run pytest`).
+  `echo python /venv/bin/pytest` no interpreter runs a script.
+- [wrapper] Any family above as the command of a program the census does not
+  read (`timeout 60 pytest`, `sudo python -m pytest`, `uv run pytest`), refused
+  whether or not it blocks pytest-randomly, since the census cannot tell what
+  environment and argv that program passes on. The program is any program
+  except an interpreter, `coverage`, pytest's program, and `echo`, `printf`,
+  `which`, `true`, `false` and `:`, which run none of their words.
+  Its command is the first word after it that is not an option (a word starting
+  with `-`), a NAME=VALUE word, a number or duration (`60`, `1.5m`, `inf`,
+  `0x5`) or the verb `run` or `tool` (`uv tool run pytest`,
+  `hatch -e test run pytest`). A word right after an option may be that
+  option's value, so the word after it is tried too (`sudo -u bob pytest`).
+  The command is also tried as a shell whose -c text runs a family above, or
+  runs such a program (`sudo bash -c 'timeout 5 pytest'`). When the command is
+  one of the process wrappers and tool runners `env`, `nice`, `nohup`, `sudo`,
+  `timeout`, `time`, `stdbuf`, `xvfb-run`, `exec`, `uv`, `uvx`, `pipx`, `poetry`,
+  `pdm`, `pipenv`, `hatch`, `rye`, `pixi`, `conda` or `micromamba`, its own
+  command is searched for the same way, so a chain of them is followed to the
+  program it starts (`timeout 60 nice -n 5 pytest`, `sudo env uv run pytest`).
 - [shell] Any family above inside the command text of a shell run with `-c`
   (below).
 `-m py.test` and `-m _pytest` start no pytest session and are no family.
@@ -90,28 +91,12 @@ the end are examples of that rule, not a complete list.
 The program is the first word past NAME=VALUE words, the shell's own
 `{ } ! if then elif else fi do done while until`, `function NAME`, `coproc`
 (and the NAME it takes before a compound command), `builtin` and `command` (and
-its `-p`; `command -v` and `command -V` run nothing), and the listed wrappers with
-their options, option values and numeric arguments: `timeout`, `nice`, `nohup`,
-`stdbuf`, `sudo`, `env`, `exec`, `time`, `xvfb-run`, and the tool runners
-`uv run`, `uv tool run`, `uvx`, `poetry run`, `pipx run`, `pdm run`, `hatch run`
-(and its `ENV:` prefix, as in `hatch run test:pytest`), `conda run`,
-`micromamba run`, `pipenv run`, `rye run` and `pixi run` (and hatch's `+`/`-`
-matrix selectors). timeout follows its argv grammar,
-`timeout [OPTION]... DURATION COMMAND`: the one word after its options is the
-duration, however it is spelled (`.5`, `inf`, `1e1`, `0x5`), and the command
-after it is judged even when timeout would reject that word and run nothing
-(`timeout bogus pytest`).
-A wrapper's first word matches by its basename, so a path to it counts as the
-bare name. Each wrapper's options that take a separate value are in _WRAPPERS,
-read from the tool's own `--help` (coreutils, GNU time, xvfb-run, uv 0.13.6,
-pipx, pdm, hatch, pipenv, poetry), bash's `help exec` for the `exec` builtin,
-sudo's manual page, micromamba's source (`micromamba run` and its prefix
-options), and the current online documentation of `conda run`, `rye run` and
-`pixi run`.
+its `-p`; `command -v` and `command -V` run nothing). `exec` and `time` are
+programs like any other, so a pytest after them is refused as [wrapper].
 
 A shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) run with `-c` (alone, or bundled as
 in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
-has its command text opened, and so does one behind a wrapper or an assignment.
+has its command text opened, and so does one behind an assignment.
 The text is read as bash reads it:
 - Quotes and escapes are resolved, and a backslash-newline joins the lines.
 - A `#` that starts a word begins a comment to the end of the line; a `#` inside
@@ -143,8 +128,9 @@ The text is read as bash reads it:
 - Text that bash rejects as a syntax error is still judged by these rules and
   refused on purpose, although it starts no child: `echo \\$(pytest -q)`.
 
-On a pytest child that is not deterministic the census records a line naming
-PYTEST_CURRENT_TEST, the argv and the cwd, then raises ChildPytestCensusError,
+On a pytest child that is not deterministic, or that starts through a program
+the census does not read, the census records a line naming PYTEST_CURRENT_TEST,
+the argv, the cwd and the remedy, then raises ChildPytestCensusError,
 which aborts the launch before the child starts. finish() fails the session for
 every recorded line, so a test that swallows the error still fails the run.
 Under xdist a worker cannot fail the run itself (the controller ignores a
@@ -171,14 +157,11 @@ Blind spots, examples of launches outside the census:
    load this census.
 7. A worker that crashes before its finish() runs sends no lines; xdist reports
    the crash itself.
-8. A bare `pytest` program behind a wrapper not in the list: a test runner or
-   task runner (`tox`, `nox`, `make`, `just`), a tool runner whose options come
-   before its run verb (`hatch -e test run pytest`, `conda -v run pytest`), and
-   process wrappers such as `chrt`, `taskset`, `ionice` or `setsid`; or behind a
-   listed wrapper's option whose separate value _WRAPPERS does not name, which
-   hides a bare `pytest` program, `coverage run` or a shell after it, and hides
-   an interpreter running pytest's script unless the hidden value is itself
-   named like an interpreter. [module] and [mention] are still caught there.
+8. A chain through a program the [wrapper] family does not name as a wrapper
+   (`timeout 60 chrt -f 1 pytest`, `sudo taskset 1 pytest`): the census takes
+   that program for the command and judges no further. The list holds names
+   only, so a name missing from it can shorten a chain but cannot hide an
+   option's value.
 9. Shell text the census does not expand or track: variables (`$PYTEST`) and
    what a substitution's output becomes (`$(echo pytest) -q`), `export`,
    aliases, `eval`, `env -S`, a script fed to a shell's stdin (`bash <<EOF`,
@@ -189,8 +172,7 @@ Blind spots, examples of launches outside the census:
     the console script, a zipapp (`python pytest.pyz`), or a module other than
     `pytest` and `pytest.__main__` that starts a session (`python -m runpy`, a
     plugin's own entry point). The census judges a launch by its words, not by
-    what the named file does, nor by what an environment file sets
-    (`uv run --env-file`, `pdm run --env-file`).
+    what the named file does, nor by what an environment file sets.
 11. An interpreter not named above: `jython` (which cannot run current
     pytest), a custom-named or embedded interpreter, or one renamed on disk.
 12. Plugin loading the census does not read: a config file's `addopts` (the
@@ -205,6 +187,8 @@ import shlex
 import sys
 
 REMEDY = 'add "-p", "no:randomly" to the child argv'
+WRAPPER_REMEDY = ("launch pytest directly, as in sys.executable -m pytest -p no:randomly, "
+                  "or teach the census this program")
 WORKEROUTPUT_KEY = "child_pytest_census_misses"
 AUTOLOAD_ENV = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
 ADDOPTS_ENV = "PYTEST_ADDOPTS"
@@ -223,8 +207,6 @@ _LAUNCHERS = frozenset({"py", "pyw"})
 # version and one letter (python3, python3.12t, pythonw, pypy3.10, graalpy-24.1).
 _INTERPRETER = re.compile(r"(?:python|pypy|ipython|graalpy|pyston)(?:-?[0-9]+(?:\.[0-9]+)*)?[a-z]?\Z")
 _PYTEST_MENTION = re.compile(r"py\.?test")
-# bash's exec options, alone or bundled: -c, -l and -a NAME.
-_EXEC_BUNDLE = re.compile(r"-(?:[cl]+(?:a.*)?|a.*)")
 _COVERAGE_PROGRAM = re.compile(r"coverage(-?\d+(\.\d+)*)?\Z")
 # The names under which pytest registers pytest-randomly's hooks: its entry
 # point, its module, and the module imported again as `pytest_randomly.__init__`
@@ -239,108 +221,23 @@ _OPERATOR_PIECE = re.compile(r"&>>?|[<>]&|>>|>\||<<<|<<|<>|[<>]|\|&|&&|\|\||[;&|
 # Words a shell reads before a command without running them.
 _RESERVED = frozenset({"{", "}", "!", "if", "then", "elif", "else", "fi",
                        "do", "done", "while", "until"})
-# Programs that run the command after them, each with its options that take a
-# separate value.
-# The option tables come from each wrapper's own `--help`: coreutils timeout,
-# nice, stdbuf and env, GNU time, xvfb-run, uv 0.13.6 (`uv run`, `uv tool run`),
-# pipx, pdm, hatch, pipenv and poetry. The shell builtin exec comes from bash's
-# `help exec`, sudo from its manual page, micromamba from its source, and conda,
-# rye and pixi from their documentation.
-_UV_COMMON_VALUE_OPTIONS = frozenset({
-    "-w", "--with", "--with-editable", "--with-requirements", "--env-file",
-    "--python-platform", "--index", "--default-index", "-i", "--index-url",
-    "--extra-index-url", "-f", "--find-links", "--index-strategy", "--keyring-provider",
-    "-P", "--upgrade-package", "--upgrade-group", "--resolution", "--prerelease",
-    "--prerelease-package", "--fork-strategy", "--exclude-newer", "--exclude-newer-package",
-    "--no-sources-package", "--reinstall-package", "--link-mode", "-C", "--config-setting",
-    "--config-settings-package", "--no-build-isolation-package", "--no-build-package",
-    "--no-binary-package", "--cache-dir", "--refresh-package", "-p", "--python", "--color",
-    "--allow-insecure-host", "--directory", "--project", "--config-file",
-})
-_UV_TOOL_RUN_VALUE_OPTIONS = _UV_COMMON_VALUE_OPTIONS | {
-    "--from", "-c", "--constraints", "-b", "--build-constraints", "--overrides",
-    "--torch-backend",
-}
-_WRAPPERS = {
-    "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
-    "nice": frozenset({"-n", "--adjustment"}),
-    "nohup": frozenset(),
-    "exec": frozenset(),
-    "time": frozenset({"-f", "--format", "-o", "--output"}),
-    "stdbuf": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
-    "sudo": frozenset({"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
-                       "-D", "--chdir", "-R", "--chroot", "-r", "--role",
-                       "-t", "--type", "-U", "--other-user", "-T", "--command-timeout"}),
-    "env": frozenset({"-C", "--chdir"}),
-    "xvfb-run": frozenset({"-s", "-f", "-e", "-p", "--server-args",
-                           "--auth-file", "--error-file", "--xauth-protocol"}),
-    "uv run": _UV_COMMON_VALUE_OPTIONS | {
-        "--extra", "--no-extra", "--group", "--no-group", "--only-group",
-        "--no-editable-package", "--package",
-    },
-    "poetry run": frozenset({"-C", "--directory", "-P", "--project"}),
-    "uv tool run": _UV_TOOL_RUN_VALUE_OPTIONS,
-    "uvx": _UV_TOOL_RUN_VALUE_OPTIONS,
-    "pipx run": frozenset({"--spec", "--python", "--with", "-i", "--index-url", "--backend",
-                           "--fetch-python"}),
-    "pdm run": frozenset({"-p", "--project", "-k", "--skip", "--venv", "--env-file",
-                          "--working-dir"}),
-    "hatch run": frozenset(),
-    "conda run": frozenset({"-n", "--name", "-p", "--prefix", "--cwd"}),
-    "micromamba run": frozenset({"-n", "--name", "-p", "--prefix", "-r", "--root-prefix",
-                                 "--relocate-prefix", "--cwd", "-a", "--attach", "--label"}),
-    "pipenv run": frozenset(),
-    "rye run": frozenset({"--pyproject"}),
-    "pixi run": frozenset({"-e", "--environment", "-p", "--platform", "-m", "--manifest-path",
-                           "-w", "--workspace", "-s", "--script", "--config-file",
-                           "--auth-file", "--pinning-strategy", "--pypi-keyring-provider",
-                           "--tls-root-certs", "--color"}),
-}
-# micromamba's options that set one environment variable for the command
-# (`-e NAME=VALUE`), or keep one through `--clean-env` (`-e NAME`). pdm's
-# `--env NAME=VALUE` needs no entry: its value is a NAME=VALUE word.
-_ENV_OPTIONS = {
-    "micromamba run": frozenset({"-e", "--env"}),
-}
-# The listed wrappers' options that take no value, from the same sources. The
-# script-route candidates never step past a word after one of these; an
-# option that takes a value under another wrapper is known from that table.
-_KNOWN_FLAGS = frozenset({
-    # uv run / uv tool run / uvx (uv 0.13.6 --help)
-    "--active", "--all-extras", "--all-groups", "--all-packages", "--compile-bytecode", "--exact",
-    "--frozen", "--gui-script", "--help", "--isolated", "--locked", "--managed-python", "--module",
-    "--no-binary", "--no-build", "--no-build-isolation", "--no-cache", "--no-config",
-    "--no-default-groups", "--no-dev", "--no-editable", "--no-env-file", "--no-index",
-    "--no-managed-python", "--no-progress", "--no-project", "--no-python-downloads",
-    "--no-require-build-hashes", "--no-sources", "--no-sync", "--offline", "--only-dev", "--quiet",
-    "--refresh", "--reinstall", "--require-build-hashes", "--system-certs", "--upgrade",
-    "--verbose", "--lfs", "-q", "-v",
-    # timeout, env, xvfb-run, time, exec, sudo
-    "--preserve-status", "--foreground", "--ignore-environment", "-0", "--null", "--debug",
-    "--list-signal-handling", "--block-signal", "--default-signal", "--ignore-signal",
-    "--auto-servernum", "-l", "--listen-tcp", "--append", "--portability",
-    "-A", "-B", "-E", "-H", "-K", "-N", "-S", "-V", "--bell", "--no-update",
-    "--askpass", "--background", "--preserve-env", "--edit", "--set-home", "--login",
-    "--remove-timestamp", "--reset-timestamp", "--list", "--non-interactive",
-    "--preserve-groups", "--stdin", "--shell", "--version", "--validate",
-    # pipx run, pdm run, poetry run, pipenv run
-    "--skip-maintenance", "--global", "--no-path-check", "--path", "--pypackages",
-    "--fetch-missing-python", "--system-site-packages", "--editable", "-j", "--json",
-    "--site-packages", "--recreate", "--ansi", "--no-ansi", "--no-interaction", "--no-plugins",
-    "-vv", "-vvv", "--system",
-    # conda run, micromamba run, rye run, pixi run
-    "--dev", "--debug-wrapper-scripts", "--no-capture-output", "--live-stream", "-vvvv", "-d",
-    "--detach", "--clean-env", "--force-activate", "--revalidate", "--skip-deps", "--dry-run",
-    "-x", "--executable", "--experimental", "--templated", "--run-post-link-scripts",
-    "--no-symbolic-links", "--no-hard-links", "--no-ref-links", "--tls-no-verify",
-    "--use-environment-activation-cache", "--no-completions", "--no-install", "--as-is",
-})
-# Wrappers named by more than one word, longest first.
-_MULTI_WORD_WRAPPERS = tuple(sorted(
-    (tuple(name.split()) for name in _WRAPPERS if " " in name), key=len, reverse=True))
+# Programs that run none of the words after them: they print, look up or ignore
+# them.
+_RUNS_NOTHING = frozenset({"echo", "printf", "which", "true", "false", ":"})
+# Process wrappers and tool runners whose command may itself be one of them: the
+# command search runs again from each, so a chain of them is followed to the
+# program it starts. Names only; a missing name shortens a chain.
+_CHAINED = frozenset({"env", "nice", "nohup", "sudo", "timeout", "time", "stdbuf",
+                      "xvfb-run", "exec", "uv", "uvx", "pipx", "poetry", "pdm", "pipenv",
+                      "hatch", "rye", "pixi", "conda", "micromamba"})
+# Subcommand verbs a program names before the command it runs (`uv run`,
+# `uv tool run`, `poetry run`, `hatch -e test run`).
+_RUN_VERBS = frozenset({"run", "tool"})
+# A number or duration a program takes before its command (`timeout 1.5m`,
+# `nice -n +5`, `timeout inf`, `timeout 0x5`).
+_NUMBER = re.compile(r"[+-]?(?:\.?[0-9][0-9a-z.+-]*|inf(?:inity)?)\Z", re.IGNORECASE)
 # hatch names an environment before its command: `hatch run test:pytest`.
 _ENVIRONMENT_PREFIX = re.compile(r"[A-Za-z0-9_.-]+:")
-_DURATION = re.compile(r"\d+(\.\d+)?[smhd]?\Z")
 # Shell options that take a separate value, and the long ones that take a file.
 _SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
 # coverage run's options that take a separate value.
@@ -428,12 +325,20 @@ def _miss(argv, cwd, env):
         words = [os.fsdecode(a) for a in (argv or [])]
         commands = _commands(words, environment, False, 0)
     for part, program, part_env in commands:
+        wrapper = _wrapper(part, program, 0)
+        if wrapper is not None:
+            return ("%s: pytest child [%s] (cwd %s) starts through %s, which the census "
+                    "does not read; %s" % (_current_test(), _shown(words), _where(cwd),
+                                           wrapper, WRAPPER_REMEDY))
         start = _pytest_args(part, program)
         if start is not None and not _deterministic(part[start:], part_env):
-            where = os.fsdecode(cwd) if cwd is not None else os.getcwd()
             return "%s: pytest child [%s] (cwd %s) does not block pytest-randomly; %s" % (
-                _current_test(), _shown(words), where, REMEDY)
+                _current_test(), _shown(words), _where(cwd), REMEDY)
     return None
+
+
+def _where(cwd):
+    return os.fsdecode(cwd) if cwd is not None else os.getcwd()
 
 
 def _lex(text):
@@ -717,8 +622,8 @@ def _assign(env, word):
 
 def _program(part, env):
     """Index of the program word, past NAME=VALUE words, reserved words and the
-    listed wrappers with their options, option values and numeric arguments, and
-    the environment the program runs with."""
+    builtins that run the command after them, and the environment the program
+    runs with."""
     env = dict(env)
     i = 0
     while i < len(part):
@@ -744,85 +649,8 @@ def _program(part, env):
                     return len(part), env  # `command -v` and `-V` describe, never run
                 i += 1
             continue
-        words = next((words for words in _MULTI_WORD_WRAPPERS
-                      if (os.path.basename(word), *part[i + 1:i + len(words)]) == words), None)
-        if words is not None:
-            name, i = " ".join(words), i + len(words)
-        elif os.path.basename(word) in _WRAPPERS:
-            name, i = os.path.basename(word), i + 1
-        else:
-            return i, env
-        i = _wrapper_options(part, i, name, env)
+        return i, env
     return i, env
-
-
-def _wrapper_options(part, i, name, env):
-    """Step over a wrapper's options, applying the ones that change the
-    environment, and return the index after them."""
-    takes_value = _WRAPPERS[name]
-    inherited = dict(env)
-    if name == "sudo":
-        env.clear()
-    clean = False
-    env_args = []  # pdm's and micromamba's --env values, applied after the loop
-    while i < len(part):
-        arg = part[i]
-        if arg in _ENV_OPTIONS.get(name, ()) and i + 1 < len(part):
-            env_args.append(part[i + 1])
-            i += 2
-        elif name in ("pdm run", "micromamba run") and arg.startswith("--env="):
-            env_args.append(arg.split("=", 1)[1])
-            i += 1
-        elif arg == "--clean-env" and name in ("micromamba run", "pixi run"):
-            clean = True
-            i += 1
-        elif name == "env" and arg in ("-i", "--ignore-environment", "-"):
-            env.clear()
-            i += 1
-        elif name == "exec" and _EXEC_BUNDLE.fullmatch(arg):
-            # bash's `exec [-cl] [-a name]`: -c empties the environment, and the
-            # first `a` takes the rest of the word as its value, or the next
-            # word when it ends the word (`-aa` names `a`).
-            letters = arg[1:]
-            if "c" in letters.partition("a")[0]:
-                env.clear()
-            i += 2 if letters.find("a") == len(letters) - 1 else 1
-        elif name == "env" and arg in ("-u", "--unset") and i + 1 < len(part):
-            env.pop(part[i + 1], None)
-            i += 2
-        elif name == "env" and arg.startswith(("--unset=", "-u")):
-            env.pop(arg.split("=", 1)[1] if arg.startswith("--") else arg[2:], None)
-            i += 1
-        elif name == "sudo" and arg in ("-E", "--preserve-env"):
-            env.update(inherited)
-            i += 1
-        elif name == "sudo" and arg.startswith("--preserve-env="):
-            for kept in arg.split("=", 1)[1].split(","):
-                if kept in inherited:
-                    env[kept] = inherited[kept]
-            i += 1
-        elif arg in takes_value:
-            i += 2
-        elif name == "timeout" and not arg.startswith("-"):
-            i += 1  # timeout's one DURATION word, however spelled
-            break
-        elif _is_assignment(arg):
-            _assign(env, arg)
-            i += 1
-        elif (arg.startswith("-") and arg != "-") or _DURATION.match(arg):
-            i += 1
-        elif name == "hatch run" and arg.startswith("+"):
-            i += 1  # a matrix selector, as in `hatch run +py=3.12 test:pytest`
-        else:
-            break
-    if clean:
-        env.clear()
-    for value in env_args:
-        if _is_assignment(value):
-            _assign(env, value)
-        elif clean and value in inherited:
-            env[value] = inherited[value]  # micromamba's `-e NAME` keeps NAME
-    return i
 
 
 def _shell_command(part, program):
@@ -920,17 +748,34 @@ def _coverage_run(words, i):
     return None
 
 
+def _launch(part, at):
+    """Index of the first pytest argument when the command starting at `at` runs
+    pytest by the [program], [coverage], [module] or [script] family, else None."""
+    if at >= len(part):
+        return None
+    word = part[at]
+    if _is_pytest_script(word):
+        return at + 1
+    if _COVERAGE_PROGRAM.match(_command_name(word)):
+        return _coverage_run(part, at + 1)
+    if not _is_interpreter(word):
+        return None
+    module, after = _module(part, at + 1)
+    if module in _PYTEST_MODULES:
+        return after
+    if module == "coverage":
+        return _coverage_run(part, after)
+    if module is None and after < len(part) and _is_pytest_script(part[after]):
+        return after + 1  # the interpreter runs pytest's script file
+    return None
+
+
 def _pytest_args(part, program):
     """Index of the first pytest argument when `part` runs pytest, else None."""
-    if program < len(part):
-        name = _command_name(part[program])
-        if _is_pytest_script(part[program]):
-            return program + 1
-        if _COVERAGE_PROGRAM.match(name):
-            return _coverage_run(part, program + 1)
-    # [module] and [mention]: every word naming an interpreter is read for its -m
-    # forms, so a wrapper option's value named like one (`uv run -p python3`)
-    # cannot hide the interpreter after it.
+    start = _launch(part, program)
+    if start is not None:
+        return start
+    # [mention]: every word naming an interpreter is read for its -m forms.
     for at, word in enumerate(part):
         if not _is_interpreter(word):
             continue
@@ -941,44 +786,58 @@ def _pytest_args(part, program):
             found = _coverage_run(part, after)
             if found is not None:
                 return found
-    # [script]: only an interpreter in the program position runs a script; a
-    # word after an interpreter mentioned elsewhere (`pip install python-x
-    # pytest`) is no script of it.
-    for at in _program_candidates(part, program):
-        if _is_interpreter(part[at]):
-            module, after = _module(part, at + 1)
-            if module is None and after < len(part) and _is_pytest_script(part[after]):
-                return after + 1  # the interpreter runs pytest's script file
     return None
 
 
-def _program_candidates(part, program):
-    """The program index, then each later word that is the program if the word
-    before it was the value of an option the wrapper tables do not list
-    (`uv run --made-up-option python3 python ...`). A step is taken only past an
-    interpreter-named word that follows an option the tables do not know: a
-    known flag (`-v`) takes no value, and any other word (`echo`, `ls`) is the
-    program itself. A part with no program word (only assignments or a bare
-    wrapper) has none."""
-    if program >= len(part):
-        return []
-    candidates = [program]
-    i = program
-    while 0 < i < len(part) and _is_interpreter(part[i]) and _unknown_option(part[i - 1]):
-        i += 1
-        while i < len(part) and part[i].startswith("-") and part[i] not in ("-", "--"):
-            i += 1
-        if i >= len(part):
-            break
-        candidates.append(i)
-    return candidates
+def _modelled(word):
+    """True for a program the families read themselves."""
+    name = _command_name(word)
+    return (_is_pytest_script(word) or _is_interpreter(word) or name in _RUNS_NOTHING
+            or bool(_COVERAGE_PROGRAM.match(name)))
 
 
-def _unknown_option(word):
-    """True for an option word that may take the next word as its value: an
-    option no wrapper table knows, written without `=`."""
-    return word.startswith("-") and "=" not in word and word not in ("-", "--") \
-        and word not in _KNOWN_FLAGS and not any(word in values for values in _WRAPPERS.values())
+def _wrapper(part, program, depth):
+    """The program word when the program is none the census reads and a word
+    that may be the command it runs starts pytest, else None."""
+    if program >= len(part) or _modelled(part[program]):
+        return None
+    return part[program] if _command_starts_pytest(part, program, depth) else None
+
+
+def _command_starts_pytest(part, program, depth):
+    """True when a word that may be the command of the program at `program`
+    starts pytest. That word is the first past options, NAME=VALUE words,
+    numbers and the verbs in _RUN_VERBS; while it follows an option it may be
+    that option's value, so the next one is tried too. A word in _CHAINED is
+    searched again as a program of its own."""
+    after_option = False
+    for at in range(program + 1, len(part)):
+        word = part[at]
+        if _is_assignment(word) or _NUMBER.match(word):
+            after_option = False
+        elif word.startswith("-"):
+            after_option = True
+        elif _starts_pytest(part, at, depth):
+            return True
+        elif _command_name(word) in _CHAINED and depth < _MAX_DEPTH:
+            return _command_starts_pytest(part, at, depth + 1)
+        elif after_option or word in _RUN_VERBS:
+            after_option = False
+        else:
+            return False
+    return False
+
+
+def _starts_pytest(part, at, depth):
+    """True when the command starting at `at` runs pytest by a family above, or
+    is a shell whose -c text runs pytest by one or through a program the census
+    does not read."""
+    if _launch(part, at) is not None:
+        return True
+    text = _shell_command(part, at)
+    return text is not None and depth < _MAX_DEPTH and any(
+        _launch(inner, start) is not None or _wrapper(inner, start, depth + 1) is not None
+        for inner, start, _ in _shell_commands(text, {}, depth + 1))
 
 
 def _split(text):
