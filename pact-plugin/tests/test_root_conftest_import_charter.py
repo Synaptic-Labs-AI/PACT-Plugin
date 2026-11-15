@@ -24,7 +24,9 @@ by what it is, not by its spelling:
   locate as find`), so `timeit.default_timer` or a local named `locate` is not
   one. The alias map is file-wide, so a local that rebinds an imported module's
   name (`def f(pydoc): pydoc.locate`) is still read as the module: an
-  over-refusal.
+  over-refusal. Only an import binds a module here, so a helper reached through
+  a parameter, an assignment, a star import or an alias name reused in another
+  scope is not seen.
 - TIMEIT_RUNNERS (`timeit.timeit`, `timeit.repeat`, `timeit.Timer`) only when a
   statement or setup it is given is not a lambda, since a statement string is
   compiled and run; with none given it times `pass`.
@@ -288,7 +290,9 @@ def test_the_conftest_states_the_charter_and_names_this_pin():
                    "tests/import_identity_map.py, `resolve_origins`",
                    "PACT_IDENTITY_MAP_OUT is set",
                    "tests/test_root_conftest_import_charter.py enforces",
-                   "reached through getattr or a computed name",
+                   "reached through getattr, a computed name, or any binding other than "
+                   "an import of its module (a parameter, an assignment, a star import, "
+                   "or an import name reused for another module elsewhere in the file)",
                    "Exactly two functions deviate",
                    "Any other helper that imports a module by name is forbidden here too",
                    "too common to refuse, among them",
@@ -300,6 +304,13 @@ def test_the_conftest_states_the_charter_and_names_this_pin():
                    "the run of cProfile, profile or pdb",
                    "a warning category named in a filter string"):
         assert phrase in docstring, (phrase, docstring)
+
+
+def test_this_pin_states_its_import_binding_blind_spot():
+    docstring = " ".join(__doc__.split())
+    assert ("Only an import binds a module here, so a helper reached through a parameter, "
+            "an assignment, a star import or an alias name reused in another scope is not "
+            "seen.") in docstring, docstring
 
 
 def _rig(tmp_path, conftest, modules=None, scripts=None):

@@ -39,14 +39,16 @@ charter:
   parent packages of the names the collected tests import, skills/*/scripts
   and plugin-root packages included.
 Add no other deviation. tests/test_root_conftest_import_charter.py enforces
-this charter. It cannot see a callable reached through getattr or a computed
-name, nor a module named by a string to a standard-library helper whose name is
-too common to refuse, among them unittest.mock.patch's target, pickle.load and
-pickle.loads, importlib.resources.files, pkgutil.get_data, an importlib.metadata
-entry point's load(), the run of cProfile, profile or pdb, a warning category
-named in a filter string (pytest's filterwarnings), and a multiprocessing spawn,
-whose child imports the parent's main module. Never reach an import any of these
-ways here.
+this charter. It cannot see a callable reached through getattr, a computed
+name, or any binding other than an import of its module (a parameter, an
+assignment, a star import, or an import name reused for another module
+elsewhere in the file), nor a module named by a string to a standard-library
+helper whose name is too common to refuse, among them unittest.mock.patch's
+target, pickle.load and pickle.loads, importlib.resources.files,
+pkgutil.get_data, an importlib.metadata entry point's load(), the run of
+cProfile, profile or pdb, a warning category named in a filter string (pytest's
+filterwarnings), and a multiprocessing spawn, whose child imports the parent's
+main module. Never reach an import any of these ways here.
 """
 
 import sys
