@@ -2171,8 +2171,10 @@ class _DetectionGraph:
     def class_statement_name(self, expression, module: str) -> bool:
         """Whether a base, keyword value or decorator of a class statement
         (`_class_statement_names`) is reached through one of the project's
-        own names (`project_name`, a class of the same module included) and
-        does not resolve to a project function. Defining the class runs that
+        own names (`project_name`, a class of the same module included),
+        followed through attribute, subscript, call and starred expressions
+        to the name it starts from, and does not resolve to a project
+        function. Defining the class runs that
         object's code (a base's `__init_subclass__`, a metaclass, a class
         decorator) with no call node, so the name is reported. A project
         function there is followed by `references` like any other use."""
@@ -2184,9 +2186,22 @@ class _DetectionGraph:
         if found is not None:
             return False
         head = expression
-        while isinstance(head, (ast.Attribute, ast.Subscript, ast.Call)):
+        while isinstance(head, (ast.Attribute, ast.Subscript, ast.Call, ast.Starred)):
             head = head.func if isinstance(head, ast.Call) else head.value
         return isinstance(head, ast.Name) and self.project_name(head.id, module) is not None
+
+    def own_class_value(self, node, module: str):
+        """The class name when `node` loads a top-level class of `module`
+        itself, the same-module counterpart of `imported_name`: a class
+        object handed to other code (`type(...)`, `types.new_class(...)`, an
+        `isinstance` test, a raise, an annotation) can run its hooks with no
+        class statement. None for anything else."""
+        import ast
+
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and (
+                node.id in self.classes.get(module, {})):
+            return node.id
+        return None
 
     def references(self, node, module: str):
         """Yield (expression, (module, def)) for each call into a project
@@ -2527,13 +2542,19 @@ def route_inputs() -> dict:
     project module ...>")`, marked when the use is an annotation. Every
     class statement, in a function or at import, whose base, keyword value
     (`metaclass=` included) or decorator is reached through a project name
-    (a class of the same module included) and does not resolve to a project
+    (a class of the same module included), through a starred, subscripted,
+    attribute or call expression too, and does not resolve to a project
     function (`_DetectionGraph.class_statement_name`) is `("call", "<class
     statement on a project name ...>")`, since defining the class runs that
     object's code (a base's `__init_subclass__` or `__class_getitem__`, a
-    metaclass, a class decorator) with no call node. Nothing classifies any
-    of these unless NOT_A_ROUTE names it, so the census fails closed. A
-    project
+    metaclass, a class decorator) with no call node. Every use of a
+    top-level class of the same module other than as the callee of a call
+    (`_DetectionGraph.own_class_value`: handed to `type` or
+    `types.new_class`, tested with `isinstance`, an attribute read from it)
+    is `("call", "<class of its own module used as a value ...>")`, marked
+    when the use is an annotation, as another module's classes are.
+    Nothing classifies any of these unless NOT_A_ROUTE names it, so the
+    census fails closed. A project
     function used as a value (passed, stored, returned) counts as a call
     where it is named, so the function it reaches is read even when the call
     is elsewhere.
@@ -2556,8 +2577,9 @@ def route_inputs() -> dict:
     class, in a function or at import, whatever the class defines; a method
     of any other project object (a compiled pattern, a logger, a context
     variable, an instance); a method on any `self` attribute; and a method
-    on a local holding anything else; and every class statement on a
-    project name. No method is followed into a class.
+    on a local holding anything else; every class statement on a project
+    name; and every use of a class of the same module as a value. No method
+    is followed into a class.
 
     The process and home directories are each ONE condition, `("cwd",)` and
     `("home",)`, whichever function reads them, so a new reader of either is
@@ -2664,8 +2686,17 @@ def route_inputs() -> dict:
             if isinstance(getattr(sub, field, None), ast.AST)
             for inner in ast.walk(getattr(sub, field))
         }
+        heads = {
+            id(inner) for sub in ast.walk(node) if isinstance(sub, ast.ClassDef)
+            for _role, expression in _class_statement_names(sub) for inner in ast.walk(expression)
+        }
         for sub in ast.walk(node):
             imported_name = graph.imported_name(sub, module) if id(sub) not in callees else None
+            own = graph.own_class_value(sub, module) if id(sub) not in callees | heads else None
+            if own is not None:
+                place = " in an annotation" if id(sub) in annotations else ""
+                add(("call", f"<class of its own module used as a value {module}: {own}{place}>"),
+                    f"{site}:{sub.lineno}", key)
             if imported_name is not None:
                 place = " in an annotation" if id(sub) in annotations else ""
                 add(("call", f"<name imported from a project module {module}: {imported_name}{place}>"),
@@ -3032,6 +3063,90 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<name imported from a project module graph: _connection_sqlite3>"): (
             "the sqlite3 module database imports, read for its IntegrityError class in a module-level tuple"
         ),
+        ('call', '<class of its own module used as a value embeddings: EmbeddingService in an annotation>'): (
+            "embeddings' class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value memory_api: PACTMemory in an annotation>'): (
+            "memory_api's class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value memory_api: PACTMemory>'): (
+            "memory_api's class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ('call', '<class of its own module used as a value models: Decision in an annotation>'): (
+            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value models: Decision>'): (
+            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ('call', '<class of its own module used as a value models: Entity in an annotation>'): (
+            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value models: Entity>'): (
+            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ('call', '<class of its own module used as a value models: MemoryObject in an annotation>'): (
+            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value models: TaskItem in an annotation>'): (
+            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value models: TaskItem>'): (
+            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ('call', '<class of its own module used as a value pin_caps: CapViolation in an annotation>'): (
+            "pin_caps' NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value pin_caps: Pin in an annotation>'): (
+            "pin_caps' NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value project_identity: OriginRead in an annotation>'): (
+            "project_identity's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value project_identity: OverrideRead in an annotation>'): (
+            "project_identity's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value project_identity: RootIdentity in an annotation>'): (
+            "project_identity's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.claude_md_manager: GateTarget in an annotation>'): (
+            "claude_md_manager's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.claude_md_manager: ManagedDocument in an annotation>'): (
+            "claude_md_manager's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.claude_md_markers: Cause in an annotation>'): (
+            "claude_md_markers' Enum class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.claude_md_markers: Cause>'): (
+            "claude_md_markers' Enum class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ('call', '<class of its own module used as a value shared.claude_md_markers: Document in an annotation>'): (
+            "claude_md_markers' class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.claude_md_markers: Kind in an annotation>'): (
+            "claude_md_markers' Enum class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.claude_md_markers: Line in an annotation>'): (
+            "claude_md_markers' NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.claude_md_markers: Located in an annotation>'): (
+            "claude_md_markers' NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.claude_md_markers: State in an annotation>'): (
+            "claude_md_markers' Enum class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.merge_guard_common: _PyScope in an annotation>'): (
+            "merge_guard_common's class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.pact_context: TeamAlignment in an annotation>'): (
+            "pact_context's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value shared.project_scope: SessionRoot in an annotation>'): (
+            "project_scope's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
+        ('call', '<class of its own module used as a value working_memory: SyncResult in an annotation>'): (
+            "working_memory's class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
+        ),
         ("call", "is_canonical_id"): "validates an id value",
         ("call", "validate_identifier_for_write"): "validates an id value",
     }
@@ -3119,18 +3234,21 @@ class TestEveryRouteEntryConditionIsARoute:
     def test_each_class_reason_states_the_class_it_names(self):
         """Each NOT_A_ROUTE reason for a class is the text computed from the
         class: for a name used in an annotation, its module, whether it is a
-        NamedTuple, a @dataclass or a plain class, and whether its body
-        defines a method; for a class statement on a project base, that the
-        base and every project class it derives from define no
-        `__init_subclass__` or `__class_getitem__` and name no metaclass. Any
-        other form computes no reason, so it fails here until the arm reads
-        it."""
+        NamedTuple, a @dataclass, an Enum or a plain class, and whether its
+        body defines a method; for a class statement on a project base, that
+        the base and every project class it derives from define no
+        `__init_subclass__` or `__class_getitem__` and name no metaclass; for
+        a class of its own module used as a value, its form as for an
+        annotation, that same hook-free chain, and whether the use is an
+        annotation. Any other form computes no reason, so it fails here until
+        the arm reads it."""
         import ast
         import re as regex
 
         graph = _DetectionGraph()
         annotated = regex.compile(r"<name imported from a project module ([\w.]+): (\w+) in an annotation>")
         statement = regex.compile(r"<class statement on a project name ([\w.]+): \w+ (base|keyword \w+|decorator) (\w+)>")
+        own = regex.compile(r"<class of its own module used as a value ([\w.]+): (\w+)( in an annotation)?>")
         inert = "a base whose project classes define no __init_subclass__ or __class_getitem__ and name no metaclass"
 
         def class_node(name, module):
@@ -3140,11 +3258,14 @@ class TestEveryRouteEntryConditionIsARoute:
                 return None, None
             return owned[0], graph.classes.get(owned[0], {}).get(owned[1])
 
-        def annotation_reason(owner, node):
+        def described(owner, node):
+            """`<module>'s <form> class[ with methods]`, or None for a form
+            the arm does not read."""
             bases = [ast.unparse(base) for base in node.bases]
             decorators = [ast.unparse(decorator) for decorator in node.decorator_list]
             form = (
                 "NamedTuple " if bases in (["NamedTuple"], ["typing.NamedTuple"]) and not decorators
+                else "Enum " if bases in (["Enum"], ["enum.Enum"]) and not decorators
                 else "@dataclass " if decorators in (["dataclass"], ["dataclasses.dataclass"]) and not bases
                 else "" if not bases and not decorators
                 else None
@@ -3154,7 +3275,11 @@ class TestEveryRouteEntryConditionIsARoute:
             short = owner.rpartition(".")[2]
             methods = any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) for item in node.body)
             return (f"{short}{chr(39) if short.endswith('s') else chr(39) + 's'} {form}class"
-                    f"{' with methods' if methods else ''}, named in an annotation")
+                    f"{' with methods' if methods else ''}")
+
+        def annotation_reason(owner, node):
+            text = described(owner, node)
+            return None if text is None else f"{text}, named in an annotation"
 
         def no_hooks(owner, node, depth=0):
             if depth > 8 or any(keyword.arg == "metaclass" for keyword in node.keywords) or any(
@@ -3178,7 +3303,7 @@ class TestEveryRouteEntryConditionIsARoute:
         computed, wrong = 0, {}
         for condition, reason in self.NOT_A_ROUTE.items():
             text = condition[1] if condition[0] == "call" else ""
-            if not (annotated.fullmatch(text) or text.startswith("<class statement")):
+            if not (annotated.fullmatch(text) or text.startswith(("<class statement", "<class of its own module"))):
                 continue
             expected = None
             found = annotated.fullmatch(text)
@@ -3190,6 +3315,16 @@ class TestEveryRouteEntryConditionIsARoute:
                 module, role, name = found.groups()
                 owner, node = class_node(name, module)
                 expected = inert if role == "base" and node is not None and no_hooks(owner, node) else None
+            found = own.fullmatch(text)
+            if found:
+                module, name, in_annotation = found.groups()
+                assert graph.load(module), module
+                node = graph.classes.get(module, {}).get(name)
+                text = described(module, node) if node is not None and no_hooks(module, node) else None
+                expected = None if text is None else (
+                    f"{text}, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
+                    + ("named in an annotation" if in_annotation else "used as a value")
+                )
             computed += 1
             if reason != expected:
                 wrong[condition] = (reason, expected)
@@ -3220,6 +3355,36 @@ class TestEveryRouteEntryConditionIsARoute:
         assert reported("class X(ProjectScopeDisagreementError): pass") == [True]
         assert reported("@dataclass\nclass X(RuntimeError, metaclass=type): pass") == [False, False, False]
         assert reported(f"@{function}\nclass X: pass") == [False]
+        global_name = next(name for name in sorted(graph.globals["memory_api"]) if name not in graph.classes["memory_api"])
+        assert reported(f"class X(*{global_name}): pass") == [True]
+        assert reported("class X(*(RuntimeError,)): pass") == [False]
+
+    def test_a_class_of_its_own_module_used_as_a_value_is_reported(self):
+        """A load of a top-level class of the same module is reported
+        wherever it is not the callee of a call: handed to `type` or
+        `types.new_class`, tested with `isinstance`, named in an annotation.
+        A standard-library class and a local are not."""
+        import ast
+
+        graph = _DetectionGraph()
+        assert graph.load("memory_api")
+
+        def loads(source):
+            tree = ast.parse(source)
+            callees = {id(sub.func) for sub in ast.walk(tree) if isinstance(sub, ast.Call)}
+            return sorted(
+                graph.own_class_value(sub, "memory_api") or "-"
+                for sub in ast.walk(tree)
+                if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load) and id(sub) not in callees
+            )
+
+        assert "PACTMemory" in graph.classes["memory_api"]  # control: a same-module class
+        assert loads("X = type('X', (PACTMemory,), {})") == ["PACTMemory"]
+        assert loads("X = types.new_class('X', (PACTMemory,))") == ["-", "PACTMemory"]
+        assert loads("ok = isinstance(value, PACTMemory)") == ["-", "PACTMemory"]
+        assert loads("def f(memory: PACTMemory): pass") == ["PACTMemory"]
+        assert loads("X = type('X', (RuntimeError,), {})") == ["-"]
+        assert loads("memory = PACTMemory()") == []
 
     def test_every_entry_condition_is_driven_or_excluded(self, route_driven_conditions):
         conditions = route_entry_conditions()
