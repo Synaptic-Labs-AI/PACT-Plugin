@@ -274,7 +274,7 @@ def test_finish_without_a_terminal_reporter_writes_to_stderr(census_state, capsy
     census.finish(session)
     assert session.exitstatus == 1
     assert capsys.readouterr().err.splitlines() == [
-        "HOME CENSUS: 1 child(ren) started without HOME", "  " + _LINE]
+        "HOME CENSUS: 1 distinct child(ren) started without HOME", "  " + _LINE]
 
 
 def test_other_audit_events_are_ignored(census_state):
@@ -363,7 +363,18 @@ def test_finish_fails_the_session_and_reports_each_refusal(census_state):
     session = _Session(_Config(reporter))
     census.finish(session)
     assert session.exitstatus == 1
-    assert reporter.lines == ["HOME CENSUS: 1 child(ren) started without HOME", "  " + _LINE]
+    assert reporter.lines == ["HOME CENSUS: 1 distinct child(ren) started without HOME", "  " + _LINE]
+
+
+def test_an_identical_refusal_is_counted_once(census_state):
+    """The header counts distinct refusal lines, as it says."""
+    census_state["misses"][:] = []
+    census_state["forwarded"][:] = []
+    census._record(_LINE)
+    census._record(_LINE)
+    reporter = _Reporter()
+    census.finish(_Session(_Config(reporter)))
+    assert reporter.lines == ["HOME CENSUS: 1 distinct child(ren) started without HOME", "  " + _LINE]
 
 
 @pytest.mark.parametrize("prior, after", [(0, 1), (1, 1), (2, 2), (3, 3), (4, 4)])
@@ -539,7 +550,7 @@ def test_under_xdist_a_swallowed_refusal_still_fails_the_run(tmp_path):
     assert rc == 1, output
     assert "HOME CENSUS: 1 " in output, output
     # The report starts its own line, not glued onto xdist's progress line.
-    assert re.search(r"^HOME CENSUS: 1 child\(ren\) started without HOME$", output, re.M), output
+    assert re.search(r"^HOME CENSUS: 1 distinct child\(ren\) started without HOME$", output, re.M), output
     assert "test_swallows_the_census_error" in output and census.REMEDY in output, output
 
 
@@ -599,7 +610,7 @@ def test_the_marker_exempts_a_skills_test_in_a_session_that_loads_the_conftest(t
     output = proc.stdout + proc.stderr
     assert "3 passed" in output, output
     assert proc.returncode == 1, output
-    assert "HOME CENSUS: 1 child(ren) started without HOME" in output, output
+    assert "HOME CENSUS: 1 distinct child(ren) started without HOME" in output, output
     assert "test_unmarked_in_skills" in output and "test_marked_in_skills" not in output, output
 
 
@@ -673,7 +684,7 @@ def test_the_marker_never_covers_a_wider_scoped_fixture(tmp_path):
     assert log.read_text(encoding="utf-8").splitlines() == [
         "module setup: refused", "function setup: ran", "call: ran",
         "function teardown: ran", "module teardown: refused", "later call: ran"], output
-    assert "HOME CENSUS: 2 child(ren) started without HOME" in output, output
+    assert "HOME CENSUS: 2 distinct child(ren) started without HOME" in output, output
     assert "in a wider-scoped fixture" in output, output
     assert proc.returncode == 1, output
 
@@ -828,7 +839,7 @@ def test_a_session_with_or_without_the_tests_conftest_has_one_census(tmp_path, p
     marker = tmp_path / "outcome"
     rc, output = _real_session(*paths, plugin_dir=tmp_path, marker=marker)
     assert marker.read_text(encoding="utf-8").startswith("refused: HomeCensusError"), output
-    assert "HOME CENSUS: 1 child(ren) started without HOME" in output, output
+    assert "HOME CENSUS: 1 distinct child(ren) started without HOME" in output, output
     assert output.count("HOME CENSUS") == 1, output
     assert rc == 1, output
 
@@ -936,7 +947,7 @@ def test_a_gated_test_is_judged_where_it_runs_and_stopped_before_its_child(tmp_p
         assert "started without HOME" not in output, output
     else:
         assert proc.returncode == 1, output
-        assert "HOME CENSUS: 1 child(ren) started without HOME" in output, output
+        assert "HOME CENSUS: 1 distinct child(ren) started without HOME" in output, output
         assert "test_gated_launch_without_home" in output, output
 
 

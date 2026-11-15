@@ -27,7 +27,8 @@ TWO RULES REFUSE A LAUNCH:
 A refusal records a line naming PYTEST_CURRENT_TEST and the launch, then raises
 HomeCensusError, which aborts the launch before the child starts. finish() fails
 the session for every recorded line, so a test that swallows the error still
-fails the run. Under xdist a worker cannot fail the run itself (the controller
+fails the run. An identical line is recorded once, so finish()'s header counts
+distinct refusal lines, not launches. Under xdist a worker cannot fail the run itself (the controller
 ignores a worker's exit status), so a worker's finish() hands its lines to the
 controller through workeroutput, collect() gathers them as each worker goes
 down, and the controller's finish() reports and fails. finish() raises only a
@@ -272,7 +273,7 @@ def finish(session):
             write("HOME CENSUS: installed, %d %s checked, 0 refused"
                   % (checked, "launch" if checked == 1 else "launches"))
         return
-    write("HOME CENSUS: %d child(ren) started without HOME" % len(problems))
+    write("HOME CENSUS: %d distinct child(ren) started without HOME" % len(problems))
     for line in problems:
         write("  " + line)
     # Raise a clean status only: an interrupted, internal-error or usage-error

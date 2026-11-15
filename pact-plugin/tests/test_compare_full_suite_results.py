@@ -540,10 +540,10 @@ def test_a_missing_session_banner_is_refused_not_read_as_ordered(tmp_path):
          "full-suite run command; the run's seed header cannot be located"}]
 
 
-CHILD_CENSUS_HEADER = ("CHILD PYTEST CENSUS: 1 pytest child(ren) started without "
+CHILD_CENSUS_HEADER = ("CHILD PYTEST CENSUS: 1 distinct pytest child(ren) started without "
                        "blocking pytest-randomly")
 CLOCK_CENSUS_HEADER = "clock-shift census: 1 problem(s); this run did not shift every clock"
-HOME_CENSUS_HEADER = "HOME CENSUS: 1 child(ren) started without HOME"
+HOME_CENSUS_HEADER = "HOME CENSUS: 1 distinct child(ren) started without HOME"
 CENSUS_PROBLEM = "  [gw0] test_x (call): child"
 
 
@@ -573,11 +573,11 @@ def test_a_census_failed_green_run_names_the_census(tmp_path, finish, name):
 
 
 @pytest.mark.parametrize("finish, found", [
-    (("HOME CENSUS: 2 child(ren) started without HOME", "  [gw0] test_z (call): child"),
+    (("HOME CENSUS: 2 distinct child(ren) started without HOME", "  [gw0] test_z (call): child"),
      1),
     ((HOME_CENSUS_HEADER, "  [gw0] test_z (call): child", "  [gw1] test_y (call): child"),
      2),
-    (("HOME CENSUS: 2 child(ren) started without HOME", "  [gw0] test_z (call): child",
+    (("HOME CENSUS: 2 distinct child(ren) started without HOME", "  [gw0] test_z (call): child",
       "[gw3] PASSED tests/test_other.py::test_ok", "  [gw1] test_y (call): child"), 1),
 ], ids=["truncated", "extra-line", "interleaved"])
 def test_a_census_block_whose_lines_disagree_with_its_header_is_refused(
@@ -831,6 +831,55 @@ def test_real_census_output_lands_in_the_session_finish_span(tmp_path, parallel)
     failures = comparator._census_failures(finish_span)
     assert [(failure["census"], failure["problems"]) for failure in failures] == [
         ("child_pytest", 1)], completed.stdout
+
+
+SEEDED_RIG_CONFTEST = """\
+import os
+
+import randomly_seed_gate
+
+
+def pytest_configure(config):
+    with open(os.environ["SEEDED_RIG_LOADED"], "w") as handle:
+        handle.write(str(randomly_seed_gate.randomly_loaded(config.pluginmanager)))
+"""
+
+
+@pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
+def test_a_real_seeded_session_is_read_by_the_comparator_and_the_seed_gate(tmp_path, parallel):
+    """A real pytest-randomly session started with a seed, serial and under
+    xdist: the comparator's own header parsers must read that seed from its
+    real terminal output, and the seed gate must find the plugin loaded. The
+    child starts as `python -c "...pytest.main(...)"`, which the child-pytest
+    census leaves unjudged (its blind spot 3), rooted outside the repository, so
+    neither the census nor the seed gate loads in it. CI installs the lock, so
+    a CI run without pytest-randomly fails here instead of skipping."""
+    if importlib.util.find_spec("pytest_randomly") is None:
+        reason = "pytest-randomly is not importable, so no real seeded session can run"
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail(f"{reason}; CI installs the lock, so this arm must run there")
+        pytest.skip(f"{reason}; CI installs the lock and runs this arm")
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+    (rig / "conftest.py").write_text(SEEDED_RIG_CONFTEST, encoding="utf-8")
+    (rig / "test_two.py").write_text(
+        "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
+    loaded = tmp_path / "loaded.txt"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(Path(__file__).parent), env.get("PYTHONPATH")) if part)
+    env["SEEDED_RIG_LOADED"] = str(loaded)
+    completed = subprocess.run(
+        [sys.executable, "-c", "import sys, pytest; sys.exit(pytest.main(sys.argv[1:]))",
+         "-ra", "-p", "no:cacheprovider", "-p", "randomly", "--randomly-seed=4242",
+         "--randomly-dont-reset-seed", *parallel],
+        cwd=rig, env=env, capture_output=True, text=True, timeout=300, check=False)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
+    header, _finish = comparator._session_spans(lines)
+    assert comparator._shuffle_seed(header) == 4242, completed.stdout
+    assert loaded.read_text(encoding="utf-8") == "True", completed.stdout
 
 
 def test_two_seed_lines_are_refused(tmp_path):

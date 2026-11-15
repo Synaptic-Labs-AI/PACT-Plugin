@@ -49,6 +49,17 @@ os.environ["HOME"] = _SESSION_HOME_DIR
 os.environ.pop("CLAUDE_CONFIG_DIR", None)
 # The sandbox HOME drops the operator's global git config; this drops the
 # machine's system file, the remaining git config a test or child could read.
+# The suite's own git calls on the real checkout (tracked-file listings) then
+# rely on git's ownership check passing without a system safe.directory, which
+# holds wherever the checkout belongs to the user running the suite. Every
+# supported environment is that case: CI runs on the runner host, not in a
+# container (.github/workflows/tests.yml `runs-on: ubuntu-latest`, no
+# `container:`), and actions/checkout clones as the runner user and records
+# its own safe.directory in the global config, which the sandbox HOME already
+# drops; the Cursor cloud agent runs .cursor/install.sh in its workspace as
+# its own user (the script calls sudo for apt) and sets no safe.directory; a
+# developer runs the suite in their own clone. A checkout owned by another
+# uid, trusted only through /etc/gitconfig, is not a supported environment.
 os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
 
 # NO HYPOTHESIS EXAMPLE DATABASE, AND NO HYPOTHESIS STORAGE IN THE TREE.

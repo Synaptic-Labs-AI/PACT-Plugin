@@ -176,6 +176,9 @@ the census does not read, the census records a line naming PYTEST_CURRENT_TEST,
 the argv, the cwd and the remedy, then raises ChildPytestCensusError,
 which aborts the launch before the child starts. finish() fails the session for
 every recorded line, so a test that swallows the error still fails the run.
+An identical line is recorded once, so finish()'s header counts distinct
+refusal lines, not launches: one launch can raise both a subprocess.Popen and
+an os.posix_spawn audit event.
 Under xdist a worker cannot fail the run itself (the controller ignores a
 worker's exit status), so a worker's finish() hands its lines to the controller
 through workeroutput, collect() gathers them as each worker goes down, and the
@@ -1173,7 +1176,7 @@ def finish(session):
     if reporter is not None and getattr(getattr(reporter, "_tw", None), "width_of_current_line", 0):
         reporter.write("\n")
     write = reporter.write_line if reporter is not None else (lambda line: print(line, file=sys.stderr))
-    write("CHILD PYTEST CENSUS: %d pytest child(ren) started without blocking pytest-randomly"
+    write("CHILD PYTEST CENSUS: %d distinct pytest child(ren) started without blocking pytest-randomly"
           % len(problems))
     for line in problems:
         write("  " + line)
