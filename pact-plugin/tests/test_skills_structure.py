@@ -821,9 +821,12 @@ class TestWorktreeSetupVenvLinkReportPins:
 class TestRunReceiptAttribution:
     """The pact-agent-teams Step 0 run receipt, branch by branch.
 
-    - A moved HEAD is re-run before the HANDOFF; it is reported as
-      unattributable only when a re-run is impossible, and then the unmet
-      exit-code precondition is stated.
+    - A moved HEAD is re-run once before the HANDOFF. If that re-run also
+      moves, or its status change is again unreproduced, or a re-run is
+      impossible, it is reported as unattributable, naming what moved and
+      stating the unmet exit-code precondition, and is not re-run again.
+      That exit never takes paths the change copy reproduces: on any run,
+      those follow the pre-existing and failure branches.
     - A status-only change is re-run with the same interpreter, by absolute
       path, in a remote-less clone at HEAD with the staged change applied.
     - Paths that copy reproduces are re-run in a second remote-less clone at
@@ -832,7 +835,7 @@ class TestRunReceiptAttribution:
       HANDOFF. Reproduced only in the change copy, they are a failure of the
       teammate's own change, to fix, never re-run away.
     - A status change the change copy does not reproduce is handled as a
-      moved HEAD.
+      moved HEAD, under the same one-re-run bound.
     - No git archive export is named as the copy.
 
     Each arm is bound to the Step 0 receipt bullet, so the phrase cannot be
@@ -846,10 +849,12 @@ class TestRunReceiptAttribution:
     REL_PATH = "pact-agent-teams/SKILL.md"
     BULLET_START = "- For each of those runs, record `git rev-parse HEAD`"
     REQUIRED_PHRASES = (
-        ("If `HEAD` differs, the worktree moved during the run: re-run it before you write the HANDOFF, and never report the moved run as a pass or a failure of your change.",
-         "the moved-HEAD branch: re-run before the HANDOFF"),
-        ("Only when a re-run is impossible, report that result as unattributable in `uncertainty` and state there that the exit-code precondition above is not met.",
-         "the unattributable exception, bound to an impossible re-run and an unmet precondition"),
+        ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, and never report the moved run as a pass or a failure of your change.",
+         "the moved-HEAD branch: one re-run before the HANDOFF"),
+        ("If that re-run also moves, or its status change is again not reproduced in the copy that holds your change, or a re-run is impossible, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
+         "the bound: after one re-run, unattributable, naming what moved, with the unmet precondition stated"),
+        ("This exit never applies to paths the copy that holds your change reproduces; on any run, those follow the pre-existing and failure branches below.",
+         "a reproduced write never reaches the unattributable exit"),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path (for example the worktree's venv `python`), in an isolated copy that holds your staged change:",
          "the isolated-copy re-run, with the same interpreter by absolute path"),
         ("a clone of the repository with its remote removed, checked out at your `HEAD`, with your staged change applied by piping `git diff --cached --binary` from the worktree into `git apply --index` in the clone. Compare its status before and after.",
