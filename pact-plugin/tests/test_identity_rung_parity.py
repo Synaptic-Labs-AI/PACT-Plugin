@@ -739,8 +739,9 @@ def _not_a_bool_type(node) -> "str | None":
 
 def _predicate_results(function, defined: dict, seen: frozenset) -> dict:
     """{id(returned node): predicate name} for each value `function` returns
-    that is a project_identity function's result not proven to be a non-bool:
-    a direct call, or a name assigned from such a call in the body."""
+    that is a direct call to a project_identity function not proven to be a
+    non-bool. A result reaching a return any other way (a local name, an
+    `or`, a ternary) is not read here; `_layout_predicate_forms` reports it."""
     def predicate_call(node):
         if (
             isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
@@ -751,20 +752,10 @@ def _predicate_results(function, defined: dict, seen: frozenset) -> dict:
                 return name
         return None
 
-    assigned = {}
-    for node in ast.walk(function):
-        if isinstance(node, ast.Assign):
-            name = predicate_call(node.value)
-            if name:
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        assigned[target.id] = name
     found = {}
     for node in ast.walk(function):
         if isinstance(node, ast.Return) and node.value is not None:
             name = predicate_call(node.value)
-            if name is None and isinstance(node.value, ast.Name):
-                name = assigned.get(node.value.id)
             if name:
                 found[id(node.value)] = name
     return found
@@ -825,38 +816,132 @@ def _return_kind(function, defined: "dict | None" = None, seen: frozenset = froz
     return "not a predicate", None
 
 
+# Every form the layout walk does not read, on the tree as it is, with how
+# many times it occurs and why it is not a predicate reached another way.
+# Measured by `_layout_predicate_forms`; a new or changed form fails the
+# census arm.
+NAMED_LAYOUT_FORMS = {
+    ('_gitfile_points_at_foreign_gitdir', 'binds', 'target = _marker_target(root)'): (1, "the marker's resolved target and its directory; read as a tuple, not returned"),
+    ('_marker_names_external_git_dir', 'binds', 'target = _marker_target(root)'): (1, "the marker's resolved target and its directory; read as a tuple, not returned"),
+    ('_marker_names_external_git_dir', 'returns', 'not _submodule_admin_dir(git_dir)'): (1, "returns the negation of a predicate's result; the negated predicate is walked and classified"),
+    ('_marker_target', 'binds', 'marker = find_git_marker(root)'): (1, 'the marker path the walk read; tested with is_symlink/is_dir/is_file, not returned'),
+    ('_resolved_git_dir', 'binds', 'raw = git_dir_answer(asked_root)'): (1, "git's --git-dir answer as a string; resolved to a path before it is returned"),
+    ('_submodule_checkout', 'binds', 'git_dir = _resolved_git_dir(asked)'): (1, 'the resolved git dir; compared with the common dir, not returned as is'),
+    ('find_git_marker', 'binds', 'ceilings = _git_ceiling_directories()'): (1, 'the ceiling set; tested for membership, not returned'),
+    ('find_git_marker', 'binds', "cross_filesystem = _git_env_bool('GIT_DISCOVERY_ACROSS_FILESYSTEM')"): (1, 'a bool flag that decides whether the walk crosses a device; read once, not returned'),
+    ('git_dir_answer', 'calls', 'DETECTION_GIT_DIRS.get'): (1, "a method on this module's detection memo, a module-level ContextVar; it returns the memoised answers or None"),
+}
+
+
 def _layout_predicate_forms() -> tuple:
     """(predicates, unresolved): the predicates among the functions reached
-    from the marker predicates through called names, and every form the walk
-    cannot read.
+    from the marker predicates through called names, and a Counter of every
+    form the walk does not read, keyed (function, kind, form).
 
-    ANCHOR: every reached function, with its return annotation and its
-    return statements. FAIL CLOSED: each one is classified by
-    `_return_kind` as a predicate or as not a predicate, or it is
-    unresolved; none is dropped. A `project_identity` function referenced
-    other than as a called name (a call through a variable or a wrapper the
-    walk cannot follow) is unresolved too."""
+    ANCHOR: every reached function: its return annotation, every call in its
+    body and every value its calls produce. The walk reads outright a direct
+    call to a module-level def of project_identity (followed), a direct
+    `return` of one (classified by `_return_kind`), and a callee that is an
+    import or a builtin, or a method on one of them or on a local or
+    parameter. FAIL CLOSED, with no exception, it reports: a callee bound in
+    project_identity other than as a def (an alias, a lambda, a module-level
+    assignment), or a method on one; a called local or parameter, and a
+    called value that is not a name or a method (a subscript, a call's
+    result), which the walk cannot resolve; every local binding of a
+    project_identity call's result in any form (assignment, annotated or
+    augmented assignment, walrus, a `for` or `with` target), which also
+    covers the methods later called on it; a return that carries such a result inside another
+    expression (`or`, `not`, a ternary); a project_identity function used as
+    a value; and an annotation `_return_kind` cannot classify. The census arm
+    compares the Counter with NAMED_LAYOUT_FORMS exactly, so a new form fails
+    it."""
+    import builtins
+
     tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
     defined = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    module_imports = {
+        (alias.asname or alias.name).split(".")[0]
+        for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
     reached, frontier = set(_marker_predicates()), list(_marker_predicates())
-    unresolved, predicates = [], set()
+    unresolved, predicates = collections.Counter(), set()
+
+    def callee_root(func):
+        """The Name a callee hangs from, "" for a method on a literal, or
+        None for another form."""
+        while isinstance(func, (ast.Attribute, ast.Call, ast.Subscript, ast.BinOp)):
+            func = func.left if isinstance(func, ast.BinOp) else (
+                func.func if isinstance(func, ast.Call) else func.value
+            )
+        if isinstance(func, ast.Constant) and isinstance(func.value, (str, bytes)):
+            return ""
+        return func.id if isinstance(func, ast.Name) else None
+
+    def project_call(value) -> bool:
+        return any(
+            isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in defined
+            for node in ast.walk(value)
+        )
+
     while frontier:
         function = defined[frontier.pop()]
+        name = function.name
         kind, why = _return_kind(function, defined)
         if kind == "predicate":
-            predicates.add(function.name)
+            predicates.add(name)
         elif kind is None:
-            unresolved.append(f"{function.lineno}: {function.name} {why}")
+            unresolved[(name, "annotation", why)] += 1
         called = {id(node.func) for node in ast.walk(function) if isinstance(node, ast.Call)}
+        local_imports = {
+            (alias.asname or alias.name).split(".")[0]
+            for node in ast.walk(function) if isinstance(node, (ast.Import, ast.ImportFrom))
+            for alias in node.names
+        }
+        local_names = {
+            node.id for node in ast.walk(function)
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store)
+        } | {argument.arg for argument in ast.walk(function) if isinstance(argument, ast.arg)}
         for node in ast.walk(function):
             if isinstance(node, ast.Name) and node.id in defined and id(node) not in called:
-                unresolved.append(f"{node.lineno}: {function.name} uses {node.id} as a value")
+                unresolved[(name, "uses as a value", node.id)] += 1
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id in defined:
+                    if node.func.id not in reached:
+                        reached.add(node.func.id)
+                        frontier.append(node.func.id)
+                    continue
+                root = callee_root(node.func) if isinstance(node.func, (ast.Name, ast.Attribute)) else None
+                if root is None:
+                    unresolved[(name, "calls", ast.unparse(node.func))] += 1
+                    continue
+                if root == "":
+                    continue
+                if root in local_imports or (root not in local_names and root in module_imports):
+                    continue
+                if root not in local_names and hasattr(builtins, root) and root not in vars(pi):
+                    continue
+                if isinstance(node.func, ast.Attribute) and root in local_names:
+                    continue
+                unresolved[(name, "calls", ast.unparse(node.func))] += 1
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)):
+                if node.value is not None and project_call(node.value):
+                    unresolved[(name, "binds", ast.unparse(node))] += 1
+            if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) and project_call(node.iter):
+                unresolved[(name, "iterates", ast.unparse(node.iter))] += 1
+            if isinstance(node, (ast.With, ast.AsyncWith)):
+                for item in node.items:
+                    if project_call(item.context_expr):
+                        unresolved[(name, "binds", ast.unparse(item))] += 1
             if (
-                isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-                and node.func.id in defined and node.func.id not in reached
+                isinstance(node, ast.Return) and node.value is not None
+                and project_call(node.value)
+                and not (
+                    isinstance(node.value, ast.Call) and isinstance(node.value.func, ast.Name)
+                    and node.value.func.id in defined
+                )
             ):
-                reached.add(node.func.id)
-                frontier.append(node.func.id)
+                unresolved[(name, "returns", ast.unparse(node.value))] += 1
     return predicates, unresolved
 
 
@@ -1085,7 +1170,13 @@ class TestTheDocumentedGitCallFloor:
         whose outcomes no own layout can reach, and each must still be one."""
         _measured, reached = git_calls
         predicates, unresolved = _layout_predicate_forms()
-        assert unresolved == [], f"a layout-predicate form the walk cannot read: {unresolved}"
+        named = {key: count for key, (count, _reason) in NAMED_LAYOUT_FORMS.items()}
+        assert all(reason for _count, reason in NAMED_LAYOUT_FORMS.values())
+        new = {key: count for key, count in unresolved.items() if named.get(key) != count}
+        gone = {key: count for key, count in named.items() if unresolved.get(key) != count}
+        assert new == {} and gone == {}, (
+            f"layout-walk forms not named, or named and gone: new={new} gone={gone}"
+        )
         assert {"_marker_names_external_git_dir", "_submodule_checkout"} <= predicates  # control
         assert set(NOT_A_FLOOR_LAYOUT) <= predicates, set(NOT_A_FLOOR_LAYOUT) - predicates
         outcomes = _layout_outcomes(predicates)
