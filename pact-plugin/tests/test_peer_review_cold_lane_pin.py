@@ -18,7 +18,7 @@ COVERED, and this list is the scope:
   clause labels, no backticks inside it, and every placeholder it uses
   defined in the placeholder list (and every defined placeholder used);
   the {base} and {head} definitions (one base for every round);
-  the bound on what a re-check appends;
+  the bar on adding to the prompt, with the re-check by resume only;
 - each prompt clause's content, bound to its own label line: ARTIFACT's
   diff instruction and its bar on PR and commit-message surfaces; AVOID's
   named paths and stores; CHANNELS' messaging, task-tool and pact-memory
@@ -320,7 +320,8 @@ ONCE_RULES = (
     ("in the changed code at `{head}`", "the evidence location for verified invalid"),
     ("resume its subagent once in the same round", "the same-round re-check after a first-round fallback"),
     ("even when the list is empty", "the no-skip rule"),
-    ("send it instead as a fresh cold dispatch", "the fresh re-check after imPACT corrections"),
+    ("first decide whether the round needs a first-round review", "the re-review's first-round trigger"),
+    ("when unsure, the round needs one", "the trigger's unsure default"),
     ("or another reason, stated", "the REPORT reason set"),
     ("for any reason, or none, other than", "the blocker trigger's reason test"),
     ("routes it to a tracked GitHub issue there", "the tracked-issue decline"),
@@ -412,6 +413,11 @@ RETIRED_LANE_STEMS = (
     "once it has handled that reviewer",
     # The release end that left a replaced reviewer holding forever.
     "calls for no replacement",
+    # A fresh subagent sent the re-check message never read the PR, so it
+    # reads only the listed hunks; a re-check goes only by resume.
+    "followed by the re-check message",
+    "for a re-check, the re-check message",
+    "appends the re-check message",
 )
 # Each validity list ends at its consequence clause.
 VALIDITY_ENDS = ("; otherwise",)
@@ -574,9 +580,9 @@ class TestPromptShape:
 
     def test_re_check_append_is_bounded(self):
         before = _split_section()[0]
-        assert "a re-check also appends the re-check message (see **Re-check**), and nothing else" in before, (
-            "the cold lane no longer bounds what a re-check dispatch adds to "
-            "the verbatim prompt"
+        assert "Change only the placeholders, and nothing else; the re-check message goes only by resume (see **Re-check**)" in before, (
+            "the cold lane no longer bars adding anything to the verbatim "
+            "prompt, or no longer routes the re-check message by resume only"
         )
 
     def test_prompt_has_no_backticks(self):
@@ -903,7 +909,8 @@ class TestLifecycleOrder:
             f"the cold lane again uses {term!r} — machinery the lane dropped "
             f"(restart, supersession, a moving re-check base, round "
             f"bookkeeping, the re-check skip, the old append-at-return "
-            f"timing, and the stop valve that released on any imPACT outcome); "
+            f"timing, the stop valve that released on any imPACT outcome, and "
+            f"a fresh dispatch carrying the re-check message); "
             f"every round now reviews the whole PR with one retry, and a cold "
             f"report is held until every warm reviewer of its round is accepted "
             f"or stopped with TaskStop"
@@ -1099,8 +1106,8 @@ class TestLeadFacingRules:
          "the re-dispatch trigger, all three causes")),
         ("No report or an invalid one", "after any HALT and any /PACT:imPACT are resolved", (
          "the re-dispatch timing")),
-        ("No report or an invalid one", "with the placeholders as /PACT:imPACT corrected them and, for a re-check, the re-check message", (
-         "the re-dispatch's placeholders and message")),
+        ("No report or an invalid one", "as a first-round review with the placeholders as /PACT:imPACT corrected them; in a verify-only re-review it is the round's first-round review under **Re-check**, with that rule's one same-round re-check", (
+         "the re-dispatch's shape — a first-round review, never a fresh re-check")),
         ("No report or an invalid one", "Each round gets that one fresh dispatch at most", (
          "the per-round bound — no retry loop")),
         ("No report or an invalid one", "If it also returns no valid report, or /PACT:imPACT does not resolve the blocker, the cold lane did not run for this round", (
@@ -1148,7 +1155,7 @@ class TestLeadFacingRules:
          "the decline option's description")),
         ("Synthesis", '"Run one more verify-only re-review round", described as "Run one verify-only re-review round in which the cold re-check checks it."', (
          "the re-review option's description")),
-        ("Synthesis", "However many findings choose it, run one such round; it runs the cold re-check only, which lists every finding still without a disposition", (
+        ("Synthesis", "However many findings choose it, run one such round; it runs the cold lane only, per **Re-check**, whose re-check lists every finding still without a disposition", (
          "the one-round bound on re-review answers and its scope")),
         ("Synthesis", 'with the literal options "Decline it"', "the question's decline option"),
         ("Synthesis", '"Run one more verify-only re-review round"', "the question's re-review option"),
@@ -1166,8 +1173,12 @@ class TestLeadFacingRules:
         ("Remediation", "route its findings to warm fixers", "where its findings go"),
         ("Remediation", "Send it no message other than a HALT or the re-check message", (
          "the bar on any other message")),
-        ("Re-check", "when the record holds no valid first-round cold report, dispatch the cold prompt as a first-round review", (
-         "the first-round fallback in a re-review")),
+        ("Re-check", "It needs one when the record holds no valid first-round cold report; when the record holds a lead line of corrected placeholder values appended after the most recent valid cold report; or when git diff from the {head} recorded with the most recent valid cold report to the current {head} carries any hunk that is not a fix you dispatched for a cold finding in the record with no disposition", (
+         "the first-round trigger, all three causes")),
+        ("Re-check", "A hunk you cannot attribute to one of those fixes counts, including a commit merged in from the base and a fix to a warm finding, and so does a recorded {head} that git cannot resolve; when unsure, the round needs one", (
+         "the trigger's attribution rule and its unsure default")),
+        ("Re-check", "When the round needs one, dispatch the cold prompt as a first-round review", (
+         "the first-round dispatch the trigger selects")),
         ("Re-check", "when that review is valid and the record holds earlier findings with no disposition, resume its subagent once in the same round with the re-check message listing them, and that re-check's report is the round's end state", (
          "the same-round re-check of earlier findings after the fallback")),
         ("Re-check", "if that re-check is not valid or not possible, the valid first-round report is the round's end state instead, with no fresh dispatch, and the earlier findings keep no disposition until the next round's re-check", (
@@ -1189,8 +1200,6 @@ class TestLeadFacingRules:
         ("SendMessage to the agentId of the cold subagent that returned the most recent valid report", (
          "the resume target")),
         ("with the re-check message as the whole message", "the bar on adding anything to the resume"),
-        ("When the record holds a lead line of corrected placeholder values appended after that report, send it instead as a fresh cold dispatch: the cold prompt with the corrected placeholders, followed by the re-check message", (
-         "the fresh re-check after imPACT corrections")),
     ])
     def test_resume_paragraph_present(self, token, lost):
         region = _strip_ticks(_paragraph("Send the re-check message by resume"))
