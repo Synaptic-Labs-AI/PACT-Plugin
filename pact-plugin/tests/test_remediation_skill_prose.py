@@ -14,6 +14,7 @@ whitespace is collapsed on both sides, so a re-wrap or a backtick change does
 not red an arm, while a deleted or inverted clause does.
 """
 
+import functools
 import re
 from pathlib import Path
 
@@ -2137,6 +2138,36 @@ class _DetectionGraph:
             return False
         return True
 
+    def imported_name(self, node, module: str):
+        """The dotted name, as written, when `node` loads a module-level name
+        of another project module that is not a function: a name bound by
+        `from <project module> import NAME`, or `<project module>.NAME` on a
+        module imported by name. None for anything else (a function, which
+        `references` follows, a submodule, a standard-library name)."""
+        import ast
+
+        if not isinstance(getattr(node, "ctx", None), ast.Load):
+            return None
+        if isinstance(node, ast.Name):
+            target = self.aliases[module].get(node.id)
+            shown = node.id
+        elif isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            base = self.aliases[module].get(node.value.id)
+            if not base or self._path(base) is None:
+                return None
+            target = f"{base}.{node.attr}"
+            shown = f"{node.value.id}.{node.attr}"
+        else:
+            return None
+        if not target or self._path(target) is not None:
+            return None
+        owner, _, leaf = target.rpartition(".")
+        if not owner or self._path(owner) is None or not self.load(owner):
+            return None
+        if self.follow(target) is not None or (owner, leaf) in self.defs:
+            return None
+        return shown
+
     def references(self, node, module: str):
         """Yield (expression, (module, def)) for each call into a project
         function inside `node`, and for each project function used as a
@@ -2168,11 +2199,26 @@ def _import_time_code(tree):
     """The code `tree` runs when it is imported, as one function the census
     reads like any other: every module-level statement, class bodies
     included, with each function's and lambda's body removed (its
-    decorators and defaults run at import and are kept)."""
+    decorators and defaults run at import and are kept). Left out: a
+    module-level `if` whose test is exactly `__name__ == "__main__"` and
+    which has no `else` branch, since on import `__name__` is the module's
+    name. Any other test that mentions `__name__` (reversed operands, an
+    `and` or `or`, a variable) and any `else` branch is read."""
     import ast
     import copy
 
-    body = copy.deepcopy(tree).body
+    def main_guard(statement):
+        test = getattr(statement, "test", None)
+        return (
+            isinstance(statement, ast.If) and not statement.orelse
+            and isinstance(test, ast.Compare) and len(test.ops) == 1
+            and isinstance(test.ops[0], ast.Eq)
+            and isinstance(test.left, ast.Name) and test.left.id == "__name__"
+            and isinstance(test.comparators[0], ast.Constant)
+            and test.comparators[0].value == "__main__"
+        )
+
+    body = [statement for statement in copy.deepcopy(tree).body if not main_guard(statement)]
     for statement in body:
         for node in ast.walk(statement):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -2427,9 +2473,14 @@ def route_inputs() -> dict:
     """{condition: sorted sites} for every input the detection path reads, from
     `_detect_project_identity_with_legacy` through every function it calls in
     the project's own modules (the memory scripts and `hooks/`), helpers and
-    re-exports included, and the code each of those modules runs when it is
-    imported (`_import_time_code`: module statements and class bodies, with
-    decorators and defaults).
+    re-exports included, and the code that runs when the modules it reaches
+    are imported (`_import_time_code`: module statements and class bodies,
+    with decorators and defaults). The modules read at import are every
+    module holding a reached function, every project module one of them
+    imports (at module level, or inside a reached function), transitively,
+    and the package of each dotted prefix of every such module's name; a
+    project call in import-time code is followed like any other, to a fixed
+    point.
 
     A condition is `("env", KEY)` for an environment read whose variable is a
     constant, a module constant, or a parameter resolved from the constant
@@ -2440,8 +2491,12 @@ def route_inputs() -> dict:
     (`_env_reads`): one the census cannot read is `("env", "<...>")` naming
     the function and the expression. Every call through one of the project's
     own names that does not resolve to a function (`_DetectionGraph.unread_call`)
-    is `("call", "<call to no function ...>")`. Nothing classifies either
-    unless NOT_A_ROUTE names it, so the census fails closed. A project
+    is `("call", "<call to no function ...>")`, and every use of a
+    module-level name of another project module that is not a function (a
+    constant, a class, an object) is `("call", "<name imported from a
+    project module ...>")`, marked when the use is an annotation. Nothing
+    classifies any of these unless NOT_A_ROUTE names it, so the census fails
+    closed. A project
     function used as a value (passed, stored, returned) counts as a call
     where it is named, so the function it reaches is read even when the call
     is elsewhere.
@@ -2493,28 +2548,60 @@ def route_inputs() -> dict:
     for module in DETECTION_MODULES:
         graph.load(module)
     reached, pending, outward = set(), [DETECTION_ENTRY], {}
-    imported = set()
+    imported, importing = set(), []
 
-    def scopes(key):
-        """The function `key`, and its module's import-time code the first
-        time the module is reached."""
-        yield graph.defs[key]
-        if key[0] not in imported:
-            imported.add(key[0])
-            yield graph.import_time[key[0]]
+    def read_module(module):
+        """Queue `module`, and the package of each dotted prefix of its name,
+        for its import-time code: importing `a.b.c` runs `a`, `a.b` and
+        `a.b.c`."""
+        parts = module.split(".")
+        for end in range(1, len(parts) + 1):
+            name = ".".join(parts[:end])
+            if name not in imported and graph.load(name):
+                imported.add(name)
+                importing.append(name)
 
-    while pending:
+    def imports_in(module, scope):
+        """The project modules an import statement in `scope` names: the
+        module itself, and a submodule a `from` import names."""
+        path = graph._files[module]
+        package = module.split(".")[:-1] if path.name != "__init__.py" else module.split(".")
+        named = set()
+        for node in ast.walk(scope):
+            if isinstance(node, ast.Import):
+                named.update(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                if node.level:
+                    if node.level - 1 > len(package):
+                        continue
+                    base = package[: len(package) - (node.level - 1)]
+                    owner = ".".join([*base, *([node.module] if node.module else [])])
+                else:
+                    owner = node.module or ""
+                named.add(owner)
+                named.update(f"{owner}.{alias.name}" if owner else alias.name for alias in node.names)
+        return {name for name in named if name and graph._path(name) is not None}
+
+    def follow(module, scope):
+        for expression, target in graph.references(scope, module):
+            if module in DETECTION_MODULES and target[0] not in DETECTION_MODULES:
+                spelled = (qualified_name(expression, graph.aliases[module]) or "").rpartition(".")[2]
+                outward.setdefault(("call", spelled), set()).add(f"{module}.py:{expression.lineno}")
+            pending.append(target)
+        for name in imports_in(module, scope):
+            read_module(name)
+
+    while pending or importing:
+        if importing:
+            module = importing.pop()
+            follow(module, graph.import_time[module])
+            continue
         key = pending.pop()
         if key in reached:
             continue
         reached.add(key)
-        for expression, target in (
-            pair for scope in scopes(key) for pair in graph.references(scope, key[0])
-        ):
-            if key[0] in DETECTION_MODULES and target[0] not in DETECTION_MODULES:
-                spelled = (qualified_name(expression, graph.aliases[key[0]]) or "").rpartition(".")[2]
-                outward.setdefault(("call", spelled), set()).add(f"{key[0]}.py:{expression.lineno}")
-            pending.append(target)
+        read_module(key[0])
+        follow(key[0], graph.defs[key])
 
     def params(node):
         return [arg.arg for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs]
@@ -2531,7 +2618,18 @@ def route_inputs() -> dict:
         module = key[0]
         names = graph.aliases[module]
         site = f"{module}.py"
+        callees = {id(sub.func) for sub in ast.walk(node) if isinstance(sub, ast.Call)}
+        annotations = {
+            id(inner) for sub in ast.walk(node) for field in ("annotation", "returns")
+            if isinstance(getattr(sub, field, None), ast.AST)
+            for inner in ast.walk(getattr(sub, field))
+        }
         for sub in ast.walk(node):
+            imported_name = graph.imported_name(sub, module) if id(sub) not in callees else None
+            if imported_name is not None:
+                place = " in an annotation" if id(sub) in annotations else ""
+                add(("call", f"<name imported from a project module {module}: {imported_name}{place}>"),
+                    f"{site}:{sub.lineno}", key)
             if isinstance(sub, ast.Name) and sub.id in graph.unresolved.get(module, ()):
                 add(("call", f"<unresolved relative import {module}: {sub.id}>"),
                     f"{site}:{sub.lineno}", key)
@@ -2580,9 +2678,29 @@ def route_inputs() -> dict:
     return {condition: sorted(sites) for condition, sites in found.items()}
 
 
-def route_entry_conditions() -> dict:
-    """{condition: sorted sites}: `route_inputs`."""
+def _source_fingerprint() -> tuple:
+    """The roots `route_inputs` reads, with every `.py` file under them and
+    its content digest, so a changed, added or removed file, or another
+    root, gives another fingerprint."""
+    import hashlib
+
+    return tuple(_PROJECT_ROOTS) + tuple(
+        (str(path), hashlib.sha256(path.read_bytes()).hexdigest())
+        for root in _PROJECT_ROOTS for path in sorted(Path(root).rglob("*.py"))
+    )
+
+
+@functools.lru_cache(maxsize=4)
+def _route_inputs_for(fingerprint: tuple) -> dict:
+    """`route_inputs` for the tree `fingerprint` names."""
     return route_inputs()
+
+
+def route_entry_conditions() -> dict:
+    """{condition: sorted sites}: `route_inputs`, computed once per source
+    tree (the import closure it reads makes it slow); a changed tree
+    computes afresh."""
+    return _route_inputs_for(_source_fingerprint())
 
 
 class _RecordingMonkeyPatch(pytest.MonkeyPatch):
@@ -2809,6 +2927,60 @@ class TestEveryRouteEntryConditionIsARoute:
             "store_scope(self._db_path), which binds the store file; get_user_memory_dir, "
             "which the user-setting route replaces, sets that binding aside"
         ),
+        ("call", "<call to no function shared.merge_guard_common: _ReadVerbSpec>"): (
+            "builds a record class (fields only)"
+        ),
+        ("call", "<call to no function shared.merge_guard_common: _WrapperGrammar>"): (
+            "builds a record class (fields only)"
+        ),
+        ("call", "<call to no function shared.pact_context: TeamAlignment>"): (
+            "builds a record class (fields only)"
+        ),
+        ("call", "<call to no function shared.session_state: SAFE_PATH_COMPONENT_RE.fullmatch>"): (
+            "a method of a compiled literal pattern"
+        ),
+        ("call", "<name imported from a project module memory_api: MemoryObject in an annotation>"): (
+            "the models record class, named in an annotation"
+        ),
+        ("call", "<name imported from a project module memory_api: ProjectScopeDisagreementError>"): (
+            "pact_session's error class, the base of a class memory_api defines"
+        ),
+        ("call", "<name imported from a project module project_identity: CANONICAL_ID_MAX_LENGTH>"): (
+            "database's id length constant, which the importing function returns"
+        ),
+        ("call", "<name imported from a project module search: MemoryObject in an annotation>"): (
+            "the models record class, named in an annotation"
+        ),
+        ("call", "<name imported from a project module shared.claude_md_manager: Document in an annotation>"): (
+            "claude_md_markers' document class, named in an annotation"
+        ),
+        ("call", "<name imported from a project module shared.claude_md_manager: Located in an annotation>"): (
+            "claude_md_markers' record class, named in an annotation"
+        ),
+        ("call", "<name imported from a project module shared.claude_md_manager: SessionRoot in an annotation>"): (
+            "project_scope's record class, named in an annotation"
+        ),
+        ("call", "<name imported from a project module shared.project_scope: _UNSAFE_SLUG_CHARS_RE>"): (
+            "pact_context's compiled pattern, whose sub replaces unsafe characters in the session id"
+        ),
+        ("call", "<name imported from a project module shared.session_resume: Document in an annotation>"): (
+            "claude_md_markers' document class, named in an annotation"
+        ),
+        ("call", "<name imported from a project module shared.session_resume: ManagedDocument in an annotation>"): (
+            "claude_md_manager's record class, named in an annotation"
+        ),
+        ("call", "<name imported from a project module shared.session_resume: SessionRoot in an annotation>"): (
+            "project_scope's record class, named in an annotation"
+        ),
+        ("call", "<name imported from a project module working_memory: Document in an annotation>"): (
+            "claude_md_markers' document class, named in an annotation"
+        ),
+        ("call", "<name imported from a project module working_memory: Located in an annotation>"): (
+            "claude_md_markers' record class, named in an annotation"
+        ),
+        ("call", "<name imported from a project module graph: _connection_sqlite3>"): (
+            "the sqlite3 module database imports, read for its IntegrityError class in a module-level tuple"
+        ),
         ("call", "is_canonical_id"): "validates an id value",
         ("call", "validate_identifier_for_write"): "validates an id value",
     }
@@ -2924,6 +3096,27 @@ class TestEveryRouteEntryConditionIsARoute:
         conditions = route_entry_conditions()
         for known in (("env", "CLAUDE_PROJECT_DIR"), ("call", "get_project_dir_from_session_record")):
             assert known in conditions and known in route_driven_conditions, known
+
+    def test_only_the_exact_main_guard_is_left_out_of_import_time_code(self):
+        """Control for `_import_time_code`: a read inside a module-level `if
+        __name__ == "__main__":` with no else branch is not import-time
+        code; the same read under any other test that mentions `__name__`,
+        or in the guard's else branch, is."""
+        import ast
+
+        def reads(source):
+            code = _import_time_code(ast.parse(source))
+            return any(
+                isinstance(node, ast.Call) and ast.unparse(node.func) == "os.environ.get"
+                for node in ast.walk(code)
+            )
+
+        read = 'os.environ.get("X")'
+        assert not reads(f'import os\nif __name__ == "__main__":\n    {read}\n')
+        assert reads(f'import os\nif __name__ == "__main__" or X:\n    {read}\n')
+        assert reads(f'import os\nif "__main__" == __name__:\n    {read}\n')
+        assert reads(f'import os\nif __name__ == "__main__":\n    pass\nelse:\n    {read}\n')
+        assert reads(f'import os\nif __name__ == "__main__":\n    pass\n{read}\n')
 
     def test_the_graph_resolves_relative_imports_and_fails_closed(self, tmp_path, monkeypatch):
         """Control for `_DetectionGraph.load`: a relative import resolves
