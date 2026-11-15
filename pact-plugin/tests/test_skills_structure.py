@@ -821,9 +821,10 @@ class TestWorktreeSetupVenvLinkReportPins:
 class TestRunReceiptAttribution:
     """The pact-agent-teams Step 0 run receipt, branch by branch.
 
+    - Before each run, HEAD and the status are recorded and the staged change
+      is saved to a file outside the worktree.
     - A moved HEAD is re-run once before the HANDOFF, in the isolated copy
-      that holds the change, checked out at the HEAD recorded before the run,
-      never in the worktree. That copy's run is the result, and any paths it
+      that holds the change, never in the worktree. That copy's run is the result, and any paths it
       writes go through the merge-base check below.
     - If that copy cannot be built or the command cannot be run in it, the
       result is reported as unattributable, naming what moved and stating
@@ -831,9 +832,11 @@ class TestRunReceiptAttribution:
       never takes paths the change copy reproduces: on any run, those follow
       the pre-existing and failure branches.
     - A status-only change is re-run with the same interpreter, by absolute
-      path, in a remote-less clone at HEAD with the staged change applied.
+      path, in the same copy: a remote-less clone at the pre-run HEAD with
+      the saved staged change applied, never the live index.
     - Paths that copy reproduces are re-run in a second remote-less clone at
-      the merge base with the branch the work merges into, with no change
+      the merge base of the pre-run HEAD with the branch the work merges into,
+      with no change
       applied. Reproduced there too, they are pre-existing and reported in
       the HANDOFF; when every reproduced path is pre-existing, the run's own
       exit code decides (0 is a pass, nonzero is still a failure of the
@@ -854,8 +857,10 @@ class TestRunReceiptAttribution:
     REL_PATH = "pact-agent-teams/SKILL.md"
     BULLET_START = "- For each of those runs, record `git rev-parse HEAD`"
     REQUIRED_PHRASES = (
-        ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, in the isolated copy that holds your change described below, checked out at the `HEAD` you recorded before the run, not in the worktree, and never report the moved run as a pass or a failure of your change.",
-         "the moved-HEAD branch: one re-run, in the change copy at the pre-run HEAD, never the worktree"),
+        ("and immediately before it also save your staged change with `git diff --cached --binary` to a file outside the worktree, such as one in your session scratch directory.",
+         "the record step: the staged change saved before the run, outside the worktree"),
+        ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, in the isolated copy that holds your change described below, not in the worktree, and never report the moved run as a pass or a failure of your change.",
+         "the moved-HEAD branch: one re-run, in the change copy, never the worktree"),
         ("That copy's run is your result; any paths its status shows after the run follow the merge-base check below as reproduced paths.",
          "the moved-HEAD copy run as the result, its writes routed to the merge-base check"),
         ("If that copy cannot be built or the command cannot be run in it, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
@@ -864,9 +869,9 @@ class TestRunReceiptAttribution:
          "a reproduced write never reaches the unattributable exit"),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path (for example the worktree's venv `python`), in an isolated copy that holds your staged change:",
          "the isolated-copy re-run, with the same interpreter by absolute path"),
-        ("a clone of the repository with its remote removed, checked out at your `HEAD`, with your staged change applied by piping `git diff --cached --binary` from the worktree into `git apply --index` in the clone. Compare its status before and after.",
-         "the recipe that carries the staged change into the copy"),
-        ("If the same paths appear there, run the same command the same way in a second clone with its remote removed, checked out at the merge base of your `HEAD` with the branch your work will merge into (`git merge-base HEAD <that branch>`, computed in the worktree), with no change applied.",
+        ("a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone. Compare its status before and after.",
+         "the recipe: the pre-run HEAD plus the staged change saved before the run"),
+        ("If the same paths appear there, run the same command the same way in a second clone with its remote removed, checked out at the merge base of the `HEAD` you recorded before the run with the branch your work will merge into (`git merge-base <recorded HEAD> <that branch>`, computed in the worktree), with no change applied.",
          "the base-control run at the merge base"),
         ("If those paths appear in the merge-base clone too, they are a pre-existing defect: report them in your HANDOFF, with the paths and the command that wrote them, and do not treat them as a failure of your change.",
          "a base-reproduced write reported as pre-existing"),
