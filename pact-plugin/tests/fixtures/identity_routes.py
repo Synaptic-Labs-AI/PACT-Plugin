@@ -351,6 +351,29 @@ def _line_separator_parent(base: Path) -> Path:
     return make_repo(base / LINE_SEPARATOR_NAME / "target", remote=OWN)
 
 
+def _separate_git_dir_ending_in_a_space(base: Path) -> Path:
+    """A `--separate-git-dir` checkout whose git dir's name ends in a space."""
+    run_git("init", "-q", f"--separate-git-dir={base / 'store '}", str(base / "target"), cwd=base)
+    run_git("remote", "add", "origin", OWN, cwd=base / "target")
+    return base / "target"
+
+
+def _linked_worktree_named(base: Path, name: str) -> Path:
+    main = make_repo(base / "main", remote=OWN)
+    run_git("worktree", "add", "-q", str(base / name), "-b", "wt", cwd=main)
+    return base / name
+
+
+def _worktree_ending_in_a_space(base: Path) -> Path:
+    """A linked worktree whose folder name ends in a space."""
+    return _linked_worktree_named(base, "target ")
+
+
+def _worktree_holding_a_newline(base: Path) -> Path:
+    """A linked worktree whose folder name holds a newline."""
+    return _linked_worktree_named(base, "tar\nget")
+
+
 # A shape whose `home` is set runs with HOME pointed at that directory.
 _home_linked_worktree.home = lambda target: target
 _home_main_checkout.home = lambda target: target.parent / "home"
@@ -401,6 +424,9 @@ _BUILDERS = {
     "worktree_outside_any_repository": _worktree_outside_any_repository,
     "control_line_separator_folder": _line_separator_folder,
     "control_line_separator_parent": _line_separator_parent,
+    "control_path_separate_git_dir_ending_in_a_space": _separate_git_dir_ending_in_a_space,
+    "control_path_worktree_ending_in_a_space": _worktree_ending_in_a_space,
+    "control_path_worktree_holding_a_newline": _worktree_holding_a_newline,
 }
 
 

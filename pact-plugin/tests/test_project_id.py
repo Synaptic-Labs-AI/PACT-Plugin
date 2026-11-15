@@ -74,10 +74,11 @@ def _rev_parse_mock(*, common, toplevel=None, git_dir=None, default_rc=1):
             # `--git-dir`, as the directory it reads, and answers the default.
             if "rev-parse" in command and option in command and stdout is not None:
                 result.returncode = 0
-                result.stdout = stdout
+                # Bytes, as `text=False` returns them.
+                result.stdout = stdout.encode()
                 return result
         result.returncode = default_rc
-        result.stdout = ""
+        result.stdout = b""
         return result
 
     return _run
@@ -665,15 +666,16 @@ class TestDetectProjectId:
             result = PACTMemory._detect_project_id()
         assert result == "awesome-repo"
 
-    def test_git_strips_whitespace_from_output(self, clean_env_no_claude_project_dir):
-        """Should strip trailing whitespace/newline from git output."""
+    def test_git_output_keeps_a_trailing_space(self, clean_env_no_claude_project_dir):
+        """Only git's final newline is dropped: a folder name that ends in a
+        space keeps it."""
         with patch("subprocess.run", side_effect=_rev_parse_mock(
-            common="  /path/to/repo/.git  \n",
-            toplevel="  /path/to/repo  \n",
-            git_dir="  /path/to/repo/.git  \n",
+            common="/path/to/repo /.git\n",
+            toplevel="/path/to/repo \n",
+            git_dir="/path/to/repo /.git\n",
         )):
             result = PACTMemory._detect_project_id()
-        assert result == "repo"
+        assert result == "repo "
 
     def test_git_nonzero_returncode_falls_through(self, clean_env_no_claude_project_dir):
         """Should fall back to cwd when git returns non-zero (not a repo)."""
@@ -690,7 +692,7 @@ class TestDetectProjectId:
         """Should fall back to cwd when git returns empty output."""
         mock_result = MagicMock()
         mock_result.returncode = 0
-        mock_result.stdout = ""
+        mock_result.stdout = b""
 
         with patch("subprocess.run", return_value=mock_result), \
              patch("pathlib.Path.cwd", return_value=Path("/fallback/from-cwd")):

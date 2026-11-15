@@ -1530,6 +1530,17 @@ _DETECTION_ANSWERS: "contextvars.ContextVar[Optional[dict]]" = contextvars.Conte
 )
 
 
+# THE PASS'S RAW WORKTREE LISTINGS, keyed by the `--git-dir` argument
+# exactly as git was given it, each the (returncode, stdout) git answered.
+# Set beside `_DETECTION_ANSWERS` as a fresh dict for each construction's
+# detection pass and handed to that instance's FIRST legacy read, whose gate
+# runs the same `worktree list --porcelain -z` command for the same common
+# dir; every later read asks git afresh.
+_DETECTION_LISTINGS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "_DETECTION_LISTINGS", default=None
+)
+
+
 def _detection_answer(question: tuple, ask):
     """`ask()`'s answer, asked once per detection pass for each question.
     Outside a pass every call asks."""
@@ -1602,12 +1613,13 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
             timeout=5,
             env=git_env_without_location(),
         )
-        if result.returncode != 0 or not result.stdout.strip():
+        # os.fsdecode (in `one_git_answer`), never subprocess's locale
+        # decoding: a path may contain bytes invalid in the locale, and
+        # UnicodeDecodeError would escape this reader.
+        answer = project_identity.one_git_answer(result)
+        if answer is None:
             return None
-        # os.fsdecode, never subprocess's locale decoding: a path may contain
-        # bytes invalid in the locale, and UnicodeDecodeError would escape this
-        # reader.
-        common = Path(os.fsdecode(result.stdout).strip())
+        common = Path(answer)
         if not common.is_absolute():
             # git returns this path RELATIVE TO THE DIRECTORY IT RAN IN, at any
             # depth — measured in the main checkout: ".git" at the root,
@@ -1656,7 +1668,7 @@ def _ask_worktree_toplevels(start, git_dir: Optional[Path]) -> Optional[set]:
         command += ["--git-dir", str(git_dir)]
     elif start is not None:
         command += ["-C", str(start)]
-    command += ["worktree", "list", "--porcelain"]
+    command += ["worktree", "list", "--porcelain", "-z"]
     from shared.project_scope import git_env_without_location
 
     try:
@@ -1666,10 +1678,14 @@ def _ask_worktree_toplevels(start, git_dir: Optional[Path]) -> Optional[set]:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return None
+    listings = _DETECTION_LISTINGS.get()
+    if listings is not None and git_dir is not None:
+        listings[str(git_dir)] = (result.returncode, result.stdout)
     if result.returncode != 0:
         return None
     toplevels = set()
-    for line in os.fsdecode(result.stdout).splitlines():
+    # `-z` ends every field with NUL, so a path holding a newline stays whole.
+    for line in os.fsdecode(result.stdout).split("\0"):
         if not line.startswith("worktree "):
             continue
         try:
@@ -1679,7 +1695,9 @@ def _ask_worktree_toplevels(start, git_dir: Optional[Path]) -> Optional[set]:
     return toplevels
 
 
-def _verified_worktree_roots(repo_root: Path, common_dir: Optional[Path]) -> List[Path]:
+def _verified_worktree_roots(
+    repo_root: Path, common_dir: Optional[Path], listing: Optional[tuple] = None
+) -> List[Path]:
     """The gate roots: the identity root plus every TWO-WAY-LINKED worktree.
 
     `git worktree list` reports whatever `<common>/worktrees/*/gitdir` names,
@@ -1690,23 +1708,29 @@ def _verified_worktree_roots(repo_root: Path, common_dir: Optional[Path]) -> Lis
     whose `gitdir:` is `<common>/worktrees/<name>`, and (c) that admin dir's
     `gitdir` names `W/.git` back. Anything else is dropped, which can only
     narrow the gate; a listing failure narrows it to the identity root.
+
+    `listing`, the (returncode, stdout) the detection pass got from this same
+    command for this same `common_dir`, is used instead of asking git again.
     """
     roots = [Path(repo_root).resolve()]
     if common_dir is None:
         return roots
     from shared.project_scope import git_env_without_location
 
-    try:
-        result = subprocess.run(
-            ["git", "--git-dir", str(common_dir), "worktree", "list", "--porcelain", "-z"],
-            capture_output=True,
-            text=False,
-            timeout=5,
-            env=git_env_without_location(),
-        )
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
-        return roots
-    if result.returncode != 0:
+    if listing is None:
+        try:
+            result = subprocess.run(
+                ["git", "--git-dir", str(common_dir), "worktree", "list", "--porcelain", "-z"],
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+            return roots
+        listing = (result.returncode, result.stdout)
+    returncode, stdout = listing
+    if returncode != 0:
         return roots
     try:
         admin_parent = (Path(common_dir) / "worktrees").resolve()
@@ -1714,7 +1738,7 @@ def _verified_worktree_roots(repo_root: Path, common_dir: Optional[Path]) -> Lis
         return roots
     # `-z`: every field ends in NUL and an empty field ends a record.
     records, current = [], []
-    for field in os.fsdecode(result.stdout).split("\0"):
+    for field in os.fsdecode(stdout).split("\0"):
         if field:
             current.append(field)
         elif current:
@@ -1734,16 +1758,10 @@ def _verified_worktree_roots(repo_root: Path, common_dir: Optional[Path]) -> Lis
             marker = Path(worktree) / ".git"
             if not marker.is_file():
                 continue
-            line = next(
-                (
-                    entry for entry in marker.read_text(encoding="utf-8").splitlines()
-                    if entry.startswith("gitdir:")
-                ),
-                None,
-            )
-            if line is None:
+            target = project_identity.gitfile_target(marker.read_text(encoding="utf-8"))
+            if target is None:
                 continue
-            admin = Path(line.split(":", 1)[1].strip())
+            admin = Path(target)
             if not admin.is_absolute():
                 admin = Path(worktree) / admin
             admin = admin.resolve()
@@ -1960,9 +1978,7 @@ def _ask_rev_parse(start: Optional[str], args: tuple) -> Optional[str]:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return None
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    return os.fsdecode(result.stdout).strip()
+    return project_identity.one_git_answer(result)
 
 
 def main_repo_root(
@@ -2151,7 +2167,8 @@ class PACTMemory:
                         GIT_CEILING_DIRECTORIES entry above the cwd. The first
                         legacy-scope read adds up to 1 more (the worktree
                         list, asked of the common dir the identity was read
-                        from). No call is repeated with the same
+                        from; none when the detection pass already listed
+                        that common dir). No call is repeated with the same
                         argument. These counts assume no override pin. With
                         a canonical override pin, which answers before the
                         origin is read, the counts are:
@@ -2225,6 +2242,7 @@ class PACTMemory:
             detection_pass = _DETECTION_COMMON_DIRS.set({})
             git_dir_pass = project_identity.DETECTION_GIT_DIRS.set({})
             answers_pass = _DETECTION_ANSWERS.set({})
+            listings_pass = _DETECTION_LISTINGS.set({})
             try:
                 detected = self._detect_project_identity_with_legacy()
                 # THE SUPPRESSION DISCLOSURE ASKS INSIDE THE SAME PASS: its
@@ -2240,6 +2258,8 @@ class PACTMemory:
                 _DETECTION_COMMON_DIRS.reset(detection_pass)
                 project_identity.DETECTION_GIT_DIRS.reset(git_dir_pass)
                 _DETECTION_ANSWERS.reset(answers_pass)
+                self._detection_listings = _DETECTION_LISTINGS.get()
+                _DETECTION_LISTINGS.reset(listings_pass)
             self._project_id = detected.project_id
             self._project_id_source = detected.source
             # The name the PRE-change resolver produced for this location.
@@ -3315,11 +3335,19 @@ class PACTMemory:
                     # ONLY TWO-WAY-LINKED worktrees widen the gate: a listed
                     # entry is what the repository's own `.git` CLAIMS, and a
                     # delivered `.git` can claim another project's checkout.
+                    # The detection pass's listing of the same common dir,
+                    # spelled as git was given it, is taken ONCE, by the first
+                    # read; every later read lists afresh.
                     try:
+                        listings = getattr(self, "_detection_listings", None) or {}
                         gate_roots.extend(
                             str(root)
                             for root in _verified_worktree_roots(
-                                Path(repo_root), gate_common
+                                Path(repo_root),
+                                gate_common,
+                                listings.pop(str(gate_common), None)
+                                if gate_common is not None
+                                else None,
                             )
                         )
                     except Exception:

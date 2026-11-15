@@ -1088,8 +1088,29 @@ DETECTION_GIT_DIRS: "contextvars.ContextVar[Optional[dict]]" = contextvars.Conte
 )
 
 
+def one_git_answer(result) -> Optional[str]:
+    """The one path a git command printed, with only git's final newline
+    dropped, or None when git failed or printed nothing. Never stripped: a
+    path can end in a space or hold a line separator."""
+    if result.returncode != 0:
+        return None
+    out = result.stdout[:-1] if result.stdout.endswith(b"\n") else result.stdout
+    return os.fsdecode(out) or None
+
+
+def gitfile_target(text: str) -> Optional[str]:
+    """The git dir a `.git` file names, read as git reads it: the trailing
+    newlines and carriage returns are dropped, and the rest after `gitdir:`
+    is the path, its leading spaces dropped. None when the file does not
+    start with `gitdir:` or names no path."""
+    text = text.rstrip("\r\n")
+    if not text.startswith("gitdir:"):
+        return None
+    return text[len("gitdir:"):].lstrip(" ") or None
+
+
 def git_dir_answer(start) -> Optional[str]:
-    """`git [-C start] rev-parse --git-dir`, decoded and stripped, or None;
+    """`git [-C start] rev-parse --git-dir` (`one_git_answer`), or None;
     answered once per resolved start inside a detection pass."""
     memo = DETECTION_GIT_DIRS.get()
     key = None
@@ -1117,11 +1138,7 @@ def git_dir_answer(start) -> Optional[str]:
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         answer = None
     else:
-        answer = (
-            os.fsdecode(result.stdout).strip()
-            if result.returncode == 0 and result.stdout.strip()
-            else None
-        )
+        answer = one_git_answer(result)
     if key is not None:
         memo[key] = answer
     return answer
@@ -1282,7 +1299,8 @@ def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool
         # is genuine. A live submodule always records `core.worktree`, so
         # nothing legitimate is refused by answering True here.
         return True
-    if result.returncode != 0 or not result.stdout.strip():
+    value = one_git_answer(result)
+    if value is None:
         # AN UNSET `core.worktree` IS UNPROVABLE, NOT PROVEN-INNOCENT, and the
         # difference was a blocking defect: `git submodule deinit` UNSETS
         # `core.worktree` while the submodule's origin SURVIVES, so a forged
@@ -1291,7 +1309,7 @@ def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool
         # it (measured: `../../../../checks/ForeignProj`), so failing closed
         # here refuses only the deinit-ed state that cannot be checked.
         return True
-    recorded = Path(os.fsdecode(result.stdout).strip())
+    recorded = Path(value)
     if not recorded.is_absolute():
         recorded = admin_dir / recorded
     try:
@@ -1418,20 +1436,16 @@ def _marker_target(root: Path) -> Optional[Tuple[Path, Path]]:
         text = marker.read_text(encoding="utf-8", errors="replace")
     except (OSError, RuntimeError):
         return None
-    for line in text.splitlines():
-        if not line.startswith("gitdir:"):
-            continue
-        target = line.split(":", 1)[1].strip()
-        if not target:
-            return None
-        resolved = Path(target)
-        if not resolved.is_absolute():
-            resolved = marker_root / resolved
-        try:
-            return resolved.resolve(), marker_root
-        except (OSError, RuntimeError):
-            return None
-    return None
+    target = gitfile_target(text)
+    if target is None:
+        return None
+    resolved = Path(target)
+    if not resolved.is_absolute():
+        resolved = marker_root / resolved
+    try:
+        return resolved.resolve(), marker_root
+    except (OSError, RuntimeError):
+        return None
 
 
 def _without_path(override_ignored: Optional[dict]) -> Optional[dict]:

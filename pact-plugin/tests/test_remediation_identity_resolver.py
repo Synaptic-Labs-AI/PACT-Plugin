@@ -2144,6 +2144,45 @@ class TestOneConstructionAsksGitEachQuestionOnce:
         common = [call for call in calls if "--git-common-dir" in call[0]]
         assert len(common) == 1, common
 
+    def test_the_first_read_reuses_the_detection_worktree_listing(
+        self, identity_env, monkeypatch
+    ):
+        """A linked worktree declared by CLAUDE_PROJECT_DIR: detection lists
+        the main checkout's worktrees to check the pointer, and the first
+        legacy read's gate takes that listing instead of running the same
+        `worktree list` again. A later read of the same instance lists afresh."""
+        import collections
+        import subprocess
+
+        _fresh_scope_state()
+        main = make_repo(identity_env / "proj", remote=REMOTE)
+        worktree = make_worktree(main, identity_env / "wt")
+        monkeypatch.chdir(identity_env)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        store = identity_env / "store.db"
+        _seed(store, "proj")
+        calls = []
+        real = subprocess.run
+
+        def counting(argv, *args, **kwargs):
+            if argv and Path(str(argv[0])).name == "git":
+                calls.append((tuple(map(str, argv)), str(kwargs.get("cwd") or Path.cwd())))
+            return real(argv, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", counting)
+        memory = PACTMemory(session_id="s", db_path=store)
+        detection = list(calls)
+        memory._read_project_scopes()
+        listings = [call for call in calls if "worktree" in call[0]]
+        assert len(listings) == 1 and listings == [c for c in detection if "worktree" in c[0]], calls
+        assert memory._legacy_scope_state is not None  # control: the gate ran
+        repeats = {call: n for call, n in collections.Counter(calls).items() if n > 1}
+        assert not repeats, repeats
+        _fresh_scope_state()
+        calls.clear()
+        memory._read_project_scopes()
+        assert [call for call in calls if "worktree" in call[0]] == listings, calls
+
     def test_a_later_construction_asks_again(self, identity_env, monkeypatch):
         """The detection pass's answers belong to one construction."""
         assert memory_api._DETECTION_COMMON_DIRS.get() is None

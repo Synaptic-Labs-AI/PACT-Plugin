@@ -451,6 +451,21 @@ class TestEveryRungGivesAShapeTheSameAnswer:
         wrong = {cell: answer for cell, answer in answers.items() if answer != own}
         assert wrong == {}, f"a line separator in a path changed the answer: {wrong}"
 
+    def test_a_path_ending_in_a_space_or_holding_a_newline_binds_its_own_origin(self, matrix):
+        """A `--separate-git-dir` checkout whose git dir ends in a space, and a
+        linked worktree whose folder ends in a space or holds a newline, bind
+        their own origin on every route: no answer about them is stripped or
+        split at a line separator."""
+        cells, _sites, _fired, _executed = matrix
+        own = f"bound:{pi.normalize_remote_url(OWN)}"
+        shapes = [shape for shape in SHAPES if shape.startswith("control_path_")]
+        assert len(shapes) == 3, shapes
+        wrong = {
+            (shape, route): cells[(shape, route)][0]
+            for shape in shapes for route in ROUTES if cells[(shape, route)][0] != own
+        }
+        assert wrong == {}, f"a path ending in a space or holding a newline changed the answer: {wrong}"
+
     def test_every_unreached_cell_is_a_recorded_exception(self, matrix):
         cells, _sites, _fired, _executed = matrix
         unreached = {
@@ -946,6 +961,9 @@ def _return_kind(function, defined: "dict | None" = None, seen: frozenset = froz
 # from the source and requires each reason to carry them; a new or changed
 # form fails the census arm.
 NAMED_LAYOUT_FORMS = {
+    ('_admin_dir_names_another_checkout', 'binds', 'value = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `_admin_dir_names_another_checkout` (-> bool)"),
+    ('_marker_target', 'binds', 'target = gitfile_target(text)'): (1, "assigns a call to `gitfile_target` (-> Optional[str]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
+    ('git_dir_answer', 'binds', 'answer = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `git_dir_answer` (-> Optional[str])"),
     ('_gitfile_points_at_foreign_gitdir', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_gitfile_points_at_foreign_gitdir` (-> bool)"),
     ('_marker_names_external_git_dir', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_marker_names_external_git_dir` (-> bool)"),
     ('_marker_names_external_git_dir', 'returns', 'not _submodule_admin_dir(git_dir)'): (1, "returns `not` applied to a call to `_submodule_admin_dir` (-> bool) in `_marker_names_external_git_dir` (-> bool)"),
@@ -1609,8 +1627,8 @@ class TestTheIdentityIsAskedOfItsOwnRepository:
         real_roots = memory_api._verified_worktree_roots
         real_plausibility = database.legacy_candidate_plausibility
 
-        def roots(repo_root, common_dir):
-            found = real_roots(repo_root, common_dir)
+        def roots(repo_root, common_dir, listing=None):
+            found = real_roots(repo_root, common_dir, listing)
             listed.append((common_dir, found))
             return found
 
@@ -1768,3 +1786,64 @@ class TestTheGitDirAnswerIsNeverSplitAtALineSeparator:
         assert memory_api._ask_git_dir_and_toplevel(str(worktree)) == (
             f"{git_dir}\n{os.path.realpath(elsewhere)}", None,
         )
+
+
+class TestAGitPathAnswerIsNeverStripped:
+    """Each reader of one path from git, or from a `.git` file, keeps a path
+    that ends in a space or holds a newline whole. One arm per reader, each
+    against real git."""
+
+    def test_the_common_dir_keeps_a_trailing_space(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        store = tmp_path / "store "
+        run_git("init", "-q", f"--separate-git-dir={store}", str(tmp_path / "target"), cwd=tmp_path)
+        assert memory_api.main_repo_common_dir(str(tmp_path / "target")) == store.resolve()
+
+    def test_the_git_dir_answer_keeps_a_trailing_space(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        store = tmp_path / "store "
+        run_git("init", "-q", f"--separate-git-dir={store}", str(tmp_path / "target"), cwd=tmp_path)
+        answer = pi.git_dir_answer(str(tmp_path / "target"))
+        assert answer is not None and os.path.realpath(answer) == os.path.realpath(store)
+
+    def test_the_marker_target_keeps_a_trailing_space(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        store = tmp_path / "store "
+        run_git("init", "-q", f"--separate-git-dir={store}", str(tmp_path / "target"), cwd=tmp_path)
+        assert pi._marker_target(tmp_path / "target") == (store.resolve(), tmp_path / "target")
+
+    def test_the_top_level_keeps_a_trailing_space(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        main = make_repo(tmp_path / "main")
+        worktree = tmp_path / "wt "
+        run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+        assert memory_api._ask_rev_parse(str(worktree), ("--show-toplevel",)) == os.path.realpath(worktree)
+
+    def test_the_worktree_listing_keeps_a_newline(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        main = make_repo(tmp_path / "main")
+        worktree = tmp_path / "w\nt"
+        run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+        listed = memory_api._ask_worktree_toplevels(None, main / ".git")
+        assert listed == {main.resolve(), worktree.resolve()}
+
+    def test_the_verified_worktrees_keep_a_newline_in_the_admin_path(self, tmp_path):
+        """The worktree's `.git` file names an admin dir under a main
+        checkout whose folder holds a newline."""
+        assert_outside_repository(tmp_path)
+        main = make_repo(tmp_path / "ma\nin")
+        worktree = tmp_path / "wt"
+        run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+        roots = memory_api._verified_worktree_roots(main, (main / ".git").resolve())
+        assert roots == [main.resolve(), worktree.resolve()]
+
+    def test_a_recorded_worktree_keeps_a_trailing_space(self, tmp_path):
+        """A submodule admin dir whose `core.worktree` names the checkout
+        asked about, a folder ending in a space, records that checkout."""
+        assert_outside_repository(tmp_path)
+        admin = tmp_path / "admin"
+        run_git("init", "-q", "--bare", str(admin), cwd=tmp_path)
+        checkout = tmp_path / "checkout "
+        checkout.mkdir()
+        run_git("--git-dir", str(admin), "config", "core.worktree", str(checkout), cwd=tmp_path)
+        assert pi._admin_dir_names_another_checkout(admin, checkout) is False

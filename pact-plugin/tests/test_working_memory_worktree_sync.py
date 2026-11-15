@@ -1054,10 +1054,11 @@ class TestProjectIdStability:
                 # `--git-dir`, as the directory it reads.
                 if "rev-parse" in command and option in command:
                     result.returncode = 0
-                    result.stdout = stdout
+                    # Bytes, as `text=False` returns them.
+                    result.stdout = stdout.encode()
                     return result
             result.returncode = 1
-            result.stdout = ""
+            result.stdout = b""
             return result
 
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/home/user/mainproj/src/module")

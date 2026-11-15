@@ -2917,6 +2917,9 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function memory_api: _DETECTION_ANSWERS.get>"): (
             "the constructor's per-pass answer memo"
         ),
+        ("call", "<call to no function memory_api: _DETECTION_LISTINGS.get>"): (
+            "the constructor's per-pass worktree-listing memo"
+        ),
         ("call", "<call to no function memory_api: _DETECTION_COMMON_DIRS.get>"): (
             "the constructor's per-pass common-dir memo"
         ),
