@@ -763,6 +763,8 @@ class TestOperationalFactsClause:
          "the base-control run at the merge base")),
         ("If those paths appear there too, they are a pre-existing defect: name them as pre-existing under the open questions, with the paths and the command that wrote them, not as a finding about the diff", (
          "a base-reproduced write reported as pre-existing, not as a finding")),
+        ("When every reproduced path is pre-existing, the run's own result stands for the diff: a pass is a pass, and a failure is a finding about the diff", (
+         "the run's own result when every reproduced path is pre-existing")),
         ("If they appear only in the {head} clone, the run itself wrote them, and they are a finding about the diff", (
          "the change-only write reported as a finding about the diff")),
         ("If they do not appear in the {head} clone, report the result as unattributable because the worktree moved", (

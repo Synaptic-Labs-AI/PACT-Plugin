@@ -821,23 +821,26 @@ class TestWorktreeSetupVenvLinkReportPins:
 class TestRunReceiptAttribution:
     """The pact-agent-teams Step 0 run receipt, branch by branch.
 
-    - A moved HEAD is re-run once before the HANDOFF. If the re-run moves
-      HEAD again, or changes the status in a way the change copy does not
-      reproduce, or a re-run is impossible, it is reported as unattributable,
-      naming what moved and stating the unmet exit-code precondition, and is
-      not re-run again. The stop reads the same after either trigger.
-      That exit never takes paths the change copy reproduces: on any run,
-      those follow the pre-existing and failure branches.
+    - A moved HEAD is re-run once before the HANDOFF, in the isolated copy
+      that holds the change, checked out at the HEAD recorded before the run,
+      never in the worktree. That copy's run is the result, and any paths it
+      writes go through the merge-base check below.
+    - If that copy cannot be built or the command cannot be run in it, the
+      result is reported as unattributable, naming what moved and stating
+      the unmet exit-code precondition, and is not re-run again. That exit
+      never takes paths the change copy reproduces: on any run, those follow
+      the pre-existing and failure branches.
     - A status-only change is re-run with the same interpreter, by absolute
       path, in a remote-less clone at HEAD with the staged change applied.
     - Paths that copy reproduces are re-run in a second remote-less clone at
       the merge base with the branch the work merges into, with no change
-      applied. Reproduced there too, they are pre-existing and reported in the
-      HANDOFF; when every reproduced path is pre-existing, the run's own exit
-      code decides (0 is a pass, nonzero is still a failure of the change). Reproduced only in the change copy, they are a failure of the
+      applied. Reproduced there too, they are pre-existing and reported in
+      the HANDOFF; when every reproduced path is pre-existing, the run's own
+      exit code decides (0 is a pass, nonzero is still a failure of the
+      change). Reproduced only in the change copy, they are a failure of the
       teammate's own change, to fix, never re-run away.
-    - A status change the change copy does not reproduce is handled as a
-      moved HEAD, under the same one-re-run bound.
+    - A status change the change copy does not reproduce came from outside
+      the run, and the copy's run is the result.
     - No git archive export is named as the copy.
 
     Each arm is bound to the Step 0 receipt bullet, so the phrase cannot be
@@ -851,10 +854,12 @@ class TestRunReceiptAttribution:
     REL_PATH = "pact-agent-teams/SKILL.md"
     BULLET_START = "- For each of those runs, record `git rev-parse HEAD`"
     REQUIRED_PHRASES = (
-        ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, and never report the moved run as a pass or a failure of your change.",
-         "the moved-HEAD branch: one re-run before the HANDOFF"),
-        ("If the re-run moves `HEAD` again, or changes the status in a way the copy that holds your change does not reproduce, or a re-run is impossible, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
-         "the bound: after one re-run, unattributable, naming what moved, with the unmet precondition stated"),
+        ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, in the isolated copy that holds your change described below, checked out at the `HEAD` you recorded before the run, not in the worktree, and never report the moved run as a pass or a failure of your change.",
+         "the moved-HEAD branch: one re-run, in the change copy at the pre-run HEAD, never the worktree"),
+        ("That copy's run is your result; any paths its status shows after the run follow the merge-base check below as reproduced paths.",
+         "the moved-HEAD copy run as the result, its writes routed to the merge-base check"),
+        ("If that copy cannot be built or the command cannot be run in it, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
+         "the stop: unattributable only when the copy cannot be built or run, naming what moved, with the unmet precondition stated"),
         ("This exit never applies to paths the copy that holds your change reproduces; on any run, those follow the pre-existing and failure branches below.",
          "a reproduced write never reaches the unattributable exit"),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path (for example the worktree's venv `python`), in an isolated copy that holds your staged change:",
@@ -869,8 +874,8 @@ class TestRunReceiptAttribution:
          "the exit code's verdict when every reproduced path is pre-existing"),
         ("If they appear only in the copy that holds your change, the run itself wrote them: treat it as a failure of your change, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
          "the change-only write treated as a failure of the change"),
-        ("If they do not appear in the copy that holds your change, the worktree moved during the run: handle it as a moved `HEAD`.",
-         "the unreproduced change handled as a moved HEAD"),
+        ("If they do not appear in the copy that holds your change, the worktree change came from outside the run: that copy's run is your result.",
+         "the unreproduced change: the copy's run is the result"),
     )
 
     def _bullet(self) -> str:
