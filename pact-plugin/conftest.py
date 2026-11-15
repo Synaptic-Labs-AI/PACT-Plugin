@@ -35,7 +35,8 @@ calls deviate, and only they may import outside this charter:
   parent packages of the names the collected tests import, skills/*/scripts
   and plugin-root packages included.
 Add no other deviation. tests/test_root_conftest_import_charter.py enforces
-this charter.
+this charter. It cannot see a callable reached through getattr or a computed
+name, so never reach an import callable that way here.
 """
 
 import sys

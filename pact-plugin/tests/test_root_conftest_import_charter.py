@@ -16,6 +16,11 @@ called or not, imported by name or reached as an attribute, except where
 DEVIATIONS allows it: one (file, enclosing function) site, with an exact count
 for each callable. A deviation the real tree no longer uses is reported too, so
 the charter cannot keep naming a deviation that is gone.
+
+The script the CI deviation loads, scripts/verify_ci_environment.py, is read
+statically too: at every scope it imports only the standard library and
+`packaging` (or pip's vendored copy), it does import `packaging`, as the
+charter says, and it makes no dynamic import.
 """
 import ast
 import sys
@@ -25,6 +30,8 @@ from pathlib import Path
 import pytest
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+VERIFY_SCRIPT = PLUGIN_ROOT.parent / "scripts" / "verify_ci_environment.py"
+VERIFY_SCRIPT_PACKAGES = ("packaging", "pip._vendor.packaging")
 PYTEST_MODULES = frozenset({"pytest", "_pytest"})
 DYNAMIC_IMPORTS = frozenset({
     "__import__", "import_module", "reload", "find_spec", "spec_from_file_location",
@@ -148,6 +155,32 @@ def charter_violations(plugin_root):
     return violations, sorted(set(followed)), unused
 
 
+def verify_script_violations(script, plugin_root):
+    """Violations for `script`, the file the CI deviation loads. It runs on this
+    conftest's sys.path, so a name that tests/, the plugin root or a
+    skills/*/scripts directory holds shadows the module it means."""
+    tree = ast.parse(script.read_text(encoding="utf-8"), str(script))
+    shadowing = [plugin_root / "tests", plugin_root,
+                 *sorted(plugin_root.glob("skills/*/scripts"))]
+    violations = [f"{script.name}:{line}: dynamic import `{name}`"
+                  for _, name, line in _dynamic_references(tree)]
+    imports_packaging = False
+    for dotted, _, line in _imports(tree):
+        if dotted is None:
+            violations.append(f"{script.name}:{line}: a relative import")
+        elif any(_in_dir(directory, dotted) for directory in shadowing):
+            violations.append(f"{script.name}:{line}: `{dotted}` resolves to a plugin module")
+        elif any(dotted == package or dotted.startswith(package + ".")
+                 for package in VERIFY_SCRIPT_PACKAGES):
+            imports_packaging = True
+        elif dotted.split(".")[0] not in sys.stdlib_module_names:
+            violations.append(
+                f"{script.name}:{line}: `{dotted}` is not the standard library or packaging")
+    if not imports_packaging:
+        violations.append(f"{script.name}: imports no `packaging`, as the charter says it does")
+    return violations
+
+
 def test_the_root_conftest_keeps_its_import_charter():
     violations, followed, unused = charter_violations(PLUGIN_ROOT)
     assert not violations, violations
@@ -159,6 +192,14 @@ def test_the_root_conftest_keeps_its_import_charter():
             "ci_full_run_record"} <= names, names
 
 
+def test_the_script_the_ci_deviation_loads_imports_only_what_the_charter_says():
+    # The deviation loads this file, so the pin reads the file it loads.
+    binding = (PLUGIN_ROOT / "tests" / "ci_environment_binding.py").read_text(encoding="utf-8")
+    assert '"scripts" / "verify_ci_environment.py"' in binding
+    assert VERIFY_SCRIPT.is_file(), VERIFY_SCRIPT
+    assert verify_script_violations(VERIFY_SCRIPT, PLUGIN_ROOT) == []
+
+
 def test_the_conftest_states_the_charter_and_names_this_pin():
     docstring = " ".join(ast.get_docstring(ast.parse((PLUGIN_ROOT / "conftest.py").read_text(
         encoding="utf-8"))).split())
@@ -168,7 +209,8 @@ def test_the_conftest_states_the_charter_and_names_this_pin():
                    "GITHUB_ACTIONS=true", "imports `packaging`",
                    "tests/import_identity_map.py, `resolve_origins`",
                    "PACT_IDENTITY_MAP_OUT is set",
-                   "tests/test_root_conftest_import_charter.py enforces"):
+                   "tests/test_root_conftest_import_charter.py enforces",
+                   "reached through getattr or a computed name"):
         assert phrase in docstring, (phrase, docstring)
 
 
@@ -262,3 +304,36 @@ def test_a_deviation_no_longer_in_use_is_reported(tmp_path):
                                                "import_identity_map.py": "import os\n"})
     _, _, unused = charter_violations(root)
     assert unused == ["tests/import_identity_map.py:resolve_origins: `find_spec`"]
+
+
+def _script_rig(tmp_path, script, scripts=None):
+    root = _rig(tmp_path, "", scripts=scripts)
+    target = tmp_path / "scripts" / "verify_ci_environment.py"
+    target.parent.mkdir()
+    target.write_text(script, encoding="utf-8")
+    return target, root
+
+
+@pytest.mark.parametrize("script, scripts", [
+    ("import yaml\nfrom packaging.version import Version\n", None),
+    ("from packaging.version import Version\n\ndef f():\n    import requests\n", None),
+    ("import packaging\ntry:\n    import tomli\nexcept ImportError:\n    tomli = None\n", None),
+    ("import packagingx\nfrom packaging import version\n", None),
+    ("import packaging\nfrom pip import main\n", None),
+    ("import packaging\nfrom . import x\n", None),
+    ("import packaging\nimport tool\n", {"tool.py": ""}),
+    ("import packaging\nimport json\n", {"json.py": ""}),
+    ("import packaging\nimport importlib\nimportlib.import_module('yaml')\n", None),
+    ("import os\n", None),
+])
+def test_a_planted_import_in_the_loaded_script_is_found(tmp_path, script, scripts):
+    target, root = _script_rig(tmp_path, script, scripts)
+    assert verify_script_violations(target, root), script
+
+
+def test_a_loaded_script_inside_the_charter_passes(tmp_path):
+    target, root = _script_rig(tmp_path, (
+        "import os\nfrom collections.abc import Mapping\n\ndef f():\n"
+        "    try:\n        from packaging.version import Version\n    except ImportError:\n"
+        "        from pip._vendor.packaging.version import Version\n"))
+    assert verify_script_violations(target, root) == []
