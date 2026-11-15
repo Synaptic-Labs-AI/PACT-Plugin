@@ -1311,13 +1311,14 @@ class TestTheDocumentedGitCallFloor:
         assert unreached == [], f"a layout outcome no own layout reaches: {unreached}"
 
     def test_each_named_layout_reason_states_the_code_at_its_site(self):
-        """Each NAMED_LAYOUT_FORMS reason carries, derived from the source:
-        the function the site is in with its return annotation, and either
-        every project_identity function its form calls with that function's
-        return annotation, or, for a call through a module-level name, that
-        name and the call its module-level assignment makes."""
-        import re
-
+        """Each NAMED_LAYOUT_FORMS reason IS the text derived from its form's
+        AST, compared by equality, so a reason that adds a claim (a flow
+        fact, a purpose) fails as surely as one that drops a fragment. A
+        bind names the project_identity function it calls and the function
+        it is in, each with its return annotation; a return of `not` and a
+        call do the same; a call through a module-level name names that
+        name and the call its assignment makes. A form of another shape has
+        no derived text and fails."""
         tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
         defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         assigned = {}
@@ -1331,21 +1332,42 @@ class TestTheDocumentedGitCallFloor:
             returns = defs[name].returns
             return f"`{name}` (-> {ast.unparse(returns) if returns else None})"
 
-        missing = {}
-        for (function, kind, form), (_count, reason) in NAMED_LAYOUT_FORMS.items():
-            expected = [annotated(function)]
-            called = [name for name in re.findall(r"\b(\w+)\(", form) if name in defs]
-            if called:
-                expected += [annotated(name) for name in called]
-            else:
-                root = form.split(".")[0]
-                assert root in assigned, (function, kind, form)
-                expected.append(f"`{root}`, a module-level assignment of a `{assigned[root]}(...)` call")
-            absent = [fragment for fragment in expected if fragment not in reason]
-            if absent:
-                missing[(function, kind, form)] = absent
-        assert missing == {}, f"a named reason that does not state the code at its site: {missing}"
+        def callee(node):
+            """The def a direct call names, or None."""
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in defs:
+                return node.func.id
+            return None
 
+        def derived(function, kind, form):
+            site = annotated(function)
+            if kind == "binds":
+                statement = ast.parse(form).body[0]
+                value = getattr(statement, "value", None)
+                if callee(value):
+                    return f"assigns a call to {annotated(callee(value))} to a local in {site}"
+            if kind == "returns":
+                value = ast.parse(form, mode="eval").body
+                if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not) and callee(value.operand):
+                    return f"returns `not` applied to a call to {annotated(callee(value.operand))} in {site}"
+            if kind == "calls":
+                value = ast.parse(form, mode="eval").body
+                if (
+                    isinstance(value, ast.Attribute) and isinstance(value.value, ast.Name)
+                    and value.value.id in assigned
+                ):
+                    root = value.value.id
+                    return (
+                        f"calls a method on `{root}`, a module-level assignment of a "
+                        f"`{assigned[root]}(...)` call, in {site}"
+                    )
+            return None
+
+        wrong = {
+            (function, kind, form): (reason, derived(function, kind, form))
+            for (function, kind, form), (_count, reason) in NAMED_LAYOUT_FORMS.items()
+            if reason != derived(function, kind, form)
+        }
+        assert wrong == {}, f"(stated, derived) for a named reason that is not its site's code: {wrong}"
 
 # --- the git-call floor with an override pin --------------------------------
 
