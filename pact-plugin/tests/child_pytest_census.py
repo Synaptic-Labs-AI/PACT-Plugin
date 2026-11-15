@@ -10,16 +10,27 @@ pyproject.toml addopts. A child session rooted outside the repo does not read
 that config, so it would shuffle. Every pytest child must therefore block the
 plugin itself; none may load it. The repo config is not consulted.
 
-A pytest child is deterministic when the LAST randomly flag it is given is
-`-p no:randomly` (or `-pno:randomly`). The flags are read from PYTEST_ADDOPTS
-first and the argv after it, as pytest reads them. A bare `--` does not end
-them: pytest reads every `-p` in its argv before it parses options, so a `-p`
-after `--` loads or blocks the plugin like any other. `-p randomly` and
-`-p pytest_randomly` load the plugin, so a child whose last randomly flag is one
-of them is refused even with autoload disabled. `-p no:pytest_randomly` blocks
-nothing: the plugin's entry point is named `randomly`. With no randomly flag at
-all, a child is deterministic when its environment has a non-empty
-PYTEST_DISABLE_PLUGIN_AUTOLOAD.
+A pytest child is deterministic when pytest, loading plugins as pytest 9.2
+does, registers pytest-randomly under none of the three names that run its
+hooks: its entry point `randomly`, its module `pytest_randomly`, and that module
+imported again as `pytest_randomly.__init__`. The census reads the words pytest
+reads, in pytest's order: the value of the last `-o addopts=...` (or
+`--override-ini addopts=...`) before any bare `--`, then PYTEST_ADDOPTS, then
+the argv. Each `-p
+VALUE` (or `-pVALUE`, the value stripped of spaces) applies in turn, and a bare
+`--` does not end them: pytest reads every `-p` before it parses options.
+`-p no:NAME` blocks NAME, and `pytest_NAME` unless NAME starts with `pytest_`,
+and unloads either if it was loaded; `-p NAME` loads NAME when it is one of the
+three, whatever came before. So `-p no:randomly` blocks the entry
+point and the module but not `pytest_randomly.__init__`, and `-p
+no:pytest_randomly` leaves the entry point to load. Next the entry point loads
+unless it is blocked, PYTEST_DISABLE_PLUGIN_AUTOLOAD is non-empty, or
+`--disable-plugin-autoload` comes before any bare `--`. Last, each
+comma-separated name in PYTEST_PLUGINS loads when it is one of the three and
+not blocked, with autoload disabled or not. Other PYTEST_PLUGINS names are not
+checked, so a child is refused for one of the three even when another name
+there is a module pytest cannot import, which stops pytest with a usage error
+before any test runs.
 
 A child's environment starts as the explicit `env` passed to the launch, or this
 process's when none is passed. NAME=VALUE words before the program apply to it,
@@ -28,7 +39,8 @@ bare `-` empty it, `-u NAME`, `-uNAME` and `--unset=NAME` remove a name, and its
 NAME=VALUE words set one. `sudo` starts from an empty environment unless it is
 given `-E` or `--preserve-env`, or `--preserve-env=NAMES` for those names.
 `pdm run --env NAME=VALUE` and micromamba's `-e NAME=VALUE` and `--env
-NAME=VALUE` (either tool also as `--env=NAME=VALUE`) set one. `micromamba run
+NAME=VALUE` (either tool also as `--env=NAME=VALUE`) set one. The shell builtin
+`exec -c` (alone or bundled, as in `-cl`) empties it. `micromamba run
 --clean-env` and `pixi run --clean-env` empty it, except that micromamba keeps
 each name a bare `-e NAME` or `--env NAME` gives.
 
@@ -145,6 +157,11 @@ Blind spots, examples of launches outside the census:
     --env-file`, `pdm run --env-file`).
 11. An interpreter not named above: `jython` (which cannot run current
     pytest), a custom-named or embedded interpreter, or one renamed on disk.
+12. Plugin loading the census does not read: a config file's `addopts` (the
+    child's own pytest.ini, pyproject.toml, tox.ini or setup.cfg; only an `-o
+    addopts=` override is read), an `-o addopts=` inside that value,
+    `pytest_plugins` in a conftest.py or test module, a plugin that imports
+    pytest_randomly itself, and a pytest whose loading order differs from 9.2.
 """
 import os
 import re
@@ -155,6 +172,8 @@ REMEDY = 'add "-p", "no:randomly" to the child argv'
 WORKEROUTPUT_KEY = "child_pytest_census_misses"
 AUTOLOAD_ENV = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
 ADDOPTS_ENV = "PYTEST_ADDOPTS"
+PLUGINS_ENV = "PYTEST_PLUGINS"
+NO_AUTOLOAD_FLAG = "--disable-plugin-autoload"
 _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 # pytest's program names: pytest and py.test, with a distro version suffix
 # (pytest-3, pytest3, py.test-3) and, after _command_name, without `.exe`.
@@ -168,9 +187,13 @@ _LAUNCHERS = frozenset({"py", "pyw"})
 # version and one letter (python3, python3.12t, pythonw, pypy3.10, graalpy-24.1).
 _INTERPRETER = re.compile(r"(?:python|pypy|ipython|graalpy|pyston)(?:-?[0-9]+(?:\.[0-9]+)*)?[a-z]?\Z")
 _PYTEST_MENTION = re.compile(r"py\.?test")
+# bash's exec options, alone or bundled: -c, -l and -a NAME.
+_EXEC_BUNDLE = re.compile(r"-(?:[cl]+(?:a.*)?|a.*)")
 _COVERAGE_PROGRAM = re.compile(r"coverage(-?\d+(\.\d+)*)?\Z")
-_BLOCKING = "no:randomly"
-_LOADING = frozenset({"randomly", "pytest_randomly"})
+# The names under which pytest registers pytest-randomly's hooks: its entry
+# point, its module, and the module imported again as `pytest_randomly.__init__`
+# (pytest-randomly 5.1.0 has no other module).
+_RANDOMLY_NAMES = frozenset({"randomly", "pytest_randomly", "pytest_randomly.__init__"})
 # Characters a shell reads as operators; a run of them is one lexer token.
 _OPERATOR_CHARS = "();<>|&\n"
 # Words a shell reads before a command without running them.
@@ -202,7 +225,7 @@ _WRAPPERS = {
     "timeout": frozenset({"-s", "--signal", "-k", "--kill-after"}),
     "nice": frozenset({"-n", "--adjustment"}),
     "nohup": frozenset(),
-    "exec": frozenset({"-a"}),
+    "exec": frozenset(),
     "time": frozenset({"-f", "--format", "-o", "--output"}),
     "stdbuf": frozenset({"-i", "--input", "-o", "--output", "-e", "--error"}),
     "sudo": frozenset({"-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
@@ -480,6 +503,13 @@ def _wrapper_options(part, i, name, env):
         elif name == "env" and arg in ("-i", "--ignore-environment", "-"):
             env.clear()
             i += 1
+        elif name == "exec" and _EXEC_BUNDLE.fullmatch(arg):
+            # bash's `exec [-cl] [-a name]`: -c empties the environment, and an
+            # `a` takes the rest of the word, or the next word, as its value.
+            letters = arg[1:]
+            if "c" in letters.partition("a")[0]:
+                env.clear()
+            i += 2 if letters.endswith("a") else 1
         elif name == "env" and arg in ("-u", "--unset") and i + 1 < len(part):
             env.pop(part[i + 1], None)
             i += 2
@@ -678,35 +708,77 @@ def _split(text):
         return text.split()
 
 
-def _randomly_flag(words):
-    """The last randomly flag anywhere in `words`, a bare `--` included, as
-    pytest's -p preparse reads them: "blocked", "loaded" or None."""
-    state = None
+def _plugin_args(words):
+    """Each `-p` value in `words`, stripped, in order, as pytest's preparse reads
+    them: a bare `--` does not end them."""
     i = 0
     while i < len(words):
         word = words[i]
         if word == "-p":
-            value = words[i + 1] if i + 1 < len(words) else None
+            if i + 1 < len(words):
+                yield words[i + 1].strip()
             i += 2
-        elif word.startswith("-p") and len(word) > 2:
-            value = word[2:]
+        else:
+            if word.startswith("-p") and len(word) > 2:
+                yield word[2:].strip()
             i += 1
+
+
+def _options(words):
+    """The words argparse reads as options: those before the first bare `--`."""
+    return words[:words.index("--")] if "--" in words else words
+
+
+def _override_addopts(words):
+    """The words of the last `-o addopts=VALUE` override among the options,
+    which pytest places in front of PYTEST_ADDOPTS and the argv."""
+    words = _options(words)
+    value = None
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word in ("-o", "--override-ini") and i + 1 < len(words):
+            item, i = words[i + 1], i + 2
+        elif word.startswith("--override-ini="):
+            item, i = word.split("=", 1)[1], i + 1
+        elif word.startswith("-o") and len(word) > 2:
+            item, i = word[2:], i + 1
         else:
             i += 1
             continue
-        if value == _BLOCKING:
-            state = "blocked"
-        elif value in _LOADING:
-            state = "loaded"
-    return state
+        key, separator, rest = item.partition("=")
+        if separator and key == "addopts":
+            value = rest
+    return _split(value) if value is not None else []
+
+
+def _plugin_names(name):
+    """The names `-p NAME` and `-p no:NAME` act on: NAME, and pytest_NAME unless
+    NAME already starts with pytest_."""
+    return {name} if name.startswith("pytest_") else {name, "pytest_" + name}
 
 
 def _deterministic(args, env):
     """True when pytest run with `args` and `env` leaves pytest-randomly unloaded."""
-    flag = _randomly_flag(args) or _randomly_flag(_split(env.get(ADDOPTS_ENV, "")))
-    if flag is not None:
-        return flag == "blocked"
-    return bool(env.get(AUTOLOAD_ENV))
+    words = _split(env.get(ADDOPTS_ENV, "")) + list(args)
+    words = _override_addopts(words) + words
+    blocked, loaded = set(), set()
+    for value in _plugin_args(words):
+        if value.startswith("no:"):
+            names = _plugin_names(value[3:])
+            blocked |= names
+            loaded -= names
+        elif value in _RANDOMLY_NAMES:
+            # pytest unblocks the name before loading it; only the load can
+            # change the verdict, since a later block blocks and unloads again.
+            loaded.add(value)
+    if (not env.get(AUTOLOAD_ENV) and NO_AUTOLOAD_FLAG not in _options(words)
+            and "randomly" not in blocked):
+        loaded.add("randomly")
+    for name in (env.get(PLUGINS_ENV) or "").split(","):
+        if name in _RANDOMLY_NAMES and name not in blocked:
+            loaded.add(name)
+    return not loaded
 
 
 def _record(line):

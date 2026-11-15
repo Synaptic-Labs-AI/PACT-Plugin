@@ -93,6 +93,59 @@ def test_an_explicit_load_is_refused_even_with_autoload_disabled(extra):
     assert census._miss([PY, "-m", "pytest", *extra], None, env) is not None, extra
 
 
+# Every route by which pytest 9.2 loads or blocks pytest-randomly, with the
+# verdict pytest itself gives: each row was run against pytest 9.2.0 and
+# pytest-randomly 5.1.0, and the child either registered the plugin (False) or
+# did not (True).
+_D = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
+
+
+@pytest.mark.parametrize("args, env, deterministic", [
+    ([], {}, False),
+    ([], {_D: "1"}, True),
+    (["--disable-plugin-autoload"], {}, True),
+    ([], {"PYTEST_ADDOPTS": "--disable-plugin-autoload"}, True),
+    (["--", "--disable-plugin-autoload"], {}, False),
+    (["--disable-plugin-autoload", "-p", "randomly"], {}, False),
+    (["-p", "no:randomly", "-p", "pytest_randomly"], {}, False),
+    (["-p", "pytest_randomly", "-p", "no:randomly"], {}, True),
+    (["-p", "no:randomly", "-p", "pytest_randomly.__init__"], {}, False),
+    (["-p", "pytest_randomly.__init__", "-p", "no:randomly"], {}, False),
+    (["-p", "pytest_randomly.__init__", "-p", "no:pytest_randomly.__init__",
+      "-p", "no:randomly"], {}, True),
+    (["-p", "no:pytest_randomly"], {}, False),
+    (["-p", "no:pytest_randomly.__init__"], {}, False),
+    (["-p", "no:pytest_randomly", "-p", "no:randomly"], {}, True),
+    ([], {_D: "1", "PYTEST_PLUGINS": "pytest_randomly"}, False),
+    ([], {_D: "1", "PYTEST_PLUGINS": "randomly"}, False),
+    ([], {_D: "1", "PYTEST_PLUGINS": "pytest_randomly.__init__"}, False),
+    ([], {_D: "1", "PYTEST_PLUGINS": "pytester,pytest_randomly"}, False),
+    (["-p", "no:randomly"], {"PYTEST_PLUGINS": "pytest_randomly"}, True),
+    (["-p", "no:randomly"], {"PYTEST_PLUGINS": "randomly"}, True),
+    (["-p", "no:randomly"], {"PYTEST_PLUGINS": "pytest_randomly.__init__"}, False),
+    (["-p", " no:randomly"], {}, True),
+    (["-p no:randomly"], {}, True),
+    (["-p no:randomly", "-p randomly "], {}, False),
+    (["-p", "no:randomly", "-p", "randomly "], {}, False),
+    (["-p", "no:randomly"], {"PYTEST_ADDOPTS": "-p randomly"}, True),
+    (["-p", "randomly"], {"PYTEST_ADDOPTS": "-p no:randomly"}, False),
+    (["-o", "addopts=-p no:randomly"], {}, True),
+    (["-oaddopts=-p no:randomly"], {}, True),
+    (["--override-ini", "addopts=-p no:randomly"], {}, True),
+    (["--override-ini=addopts=-p no:randomly"], {}, True),
+    (["-o", "addopts=-p no:randomly", "-o", "addopts=-q"], {}, False),
+    (["-p", "no:randomly", "-o", "addopts=-p randomly"], {}, True),
+    (["-o", "addopts=-p randomly"], {"PYTEST_ADDOPTS": "-p no:randomly"}, True),
+    ([], {"PYTEST_ADDOPTS": "-o addopts=--disable-plugin-autoload"}, True),
+    (["--", "-o", "addopts=-p no:randomly"], {}, False),
+    (["-o", "other=-p no:randomly"], {}, False),
+])
+def test_each_route_pytest_loads_or_blocks_the_plugin_by(args, env, deterministic):
+    assert census._deterministic(args, env) is deterministic, (args, env)
+    verdict = census._miss([PY, "-m", "pytest", *args], None, env)
+    assert (verdict is None) is deterministic, (args, env)
+
+
 def test_an_explicit_env_disabling_autoload_is_accepted():
     argv = [PY, "-m", "pytest"]
     assert census._miss(argv, None, {"PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}) is None
@@ -137,6 +190,27 @@ def test_without_an_explicit_env_the_inherited_env_decides(monkeypatch):
 ])
 def test_a_child_blocked_through_its_environment_is_accepted(argv, env):
     assert census._miss(argv, None, env) is None, argv
+
+
+@pytest.mark.parametrize("command, refused", [
+    ("exec -c pytest", True),
+    ("exec -cl pytest", True),
+    ("exec -lc pytest", True),
+    ("exec -ca name pytest", True),
+    ("exec -c -a name pytest", True),
+    ("exec pytest", False),
+    ("exec -l pytest", False),
+    ("exec -a name pytest", False),
+    ("exec -aname pytest", False),
+    ("exec -ac pytest", False),
+    ("exec -- pytest", False),
+])
+def test_exec_clears_the_environment_only_with_its_c_option(command, refused):
+    """bash's `exec -c` runs the command in an empty environment, so the
+    parent's PYTEST_ADDOPTS block does not reach it; `-a` takes a value, and
+    in `-ac` that value is `c`."""
+    env = {"PYTEST_ADDOPTS": "-p no:randomly"}
+    assert (census._miss(["bash", "-c", command], None, env) is not None) is refused, command
 
 
 @pytest.mark.parametrize("argv,env", [

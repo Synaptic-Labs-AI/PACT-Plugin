@@ -2,8 +2,15 @@
 Location: pact-plugin/tests/randomly_seed_gate.py
 Summary: Fails a pytest session that loaded pytest-randomly without an explicit
          integer seed.
-Used by: tests/conftest.py, whose pytest_configure calls refuse_unseeded();
-         tests/test_gate_default_block.py.
+Used by: pact-plugin/conftest.py, whose pytest_configure calls
+         refuse_unseeded(); tests/test_gate_default_block.py.
+
+SCOPE: the gate runs in every session that loads pact-plugin/conftest.py,
+which pytest loads for a run that collects any path under pact-plugin/:
+tests/ and the skills-adjacent tests alike. It does not run in a session that
+loads no conftest from pact-plugin/ (`--noconftest`, or a run collecting only
+paths outside it), nor in a child pytest rooted outside the repository; the
+child-pytest census judges those children by their launch instead.
 
 pytest-randomly is installed in the CI environment and blocked by the
 repository-root pyproject.toml addopts (`-p no:randomly`). A seeded diagnostic

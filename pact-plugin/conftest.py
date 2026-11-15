@@ -50,14 +50,21 @@ from import_identity_map import (  # noqa: E402
 
 
 def pytest_configure(config):
-    """Register the in-band plugins that run inside this process.
+    """Refuse an unseeded pytest-randomly, then register the in-band plugins
+    that run inside this process.
 
-    Plugin objects, because this module already re-exports a
-    pytest_sessionstart. Both are stdlib-only and gated on GITHUB_ACTIONS, so
-    outside CI they do nothing. The full-run recorder is registered here
-    rather than through PYTEST_PLUGINS: PYTEST_PLUGINS would inject it into
-    every nested pytest subprocess the suite spawns.
+    The seed gate runs here, not in tests/conftest.py, so a session that
+    collects only skills-adjacent tests is gated too. Plugin objects, because
+    this module already re-exports a pytest_sessionstart. Both are
+    stdlib-only and gated on GITHUB_ACTIONS, so outside CI they do nothing.
+    The full-run recorder is registered here rather than through
+    PYTEST_PLUGINS: PYTEST_PLUGINS would inject it into every nested pytest
+    subprocess the suite spawns.
     """
+    import randomly_seed_gate
+
+    randomly_seed_gate.refuse_unseeded(config)
+
     from ci_environment_binding import CIEnvironmentBinding
     from ci_full_run_record import FullRunRecord
 

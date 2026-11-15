@@ -11,7 +11,10 @@ edits without the plugin; the seed-gate arms pin the runtime refusal that fires
 in CI.
 """
 
+import os
 import shlex
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 from _pytest.config.findpaths import locate_config
 
+import child_pytest_census
 import randomly_seed_gate
 from fixtures.tracked_files import tracked_files
 
@@ -36,20 +40,9 @@ def _addopts_words(pyproject):
 
 
 def _blocks_randomly(words):
-    """True when the last -p naming pytest-randomly blocks it.
-
-    `-p randomly` and `-p pytest_randomly` (or a submodule) each load it; only
-    `-p no:randomly` blocks it, since the entry point is named `randomly`.
-    """
-    state = False
-    for index, word in enumerate(words):
-        value = (words[index + 1] if word == "-p" and index + 1 < len(words)
-                 else word[2:] if word.startswith("-p") else None)
-        if value == "no:randomly":
-            state = True
-        elif value == "randomly" or randomly_seed_gate.is_randomly_module(value or ""):
-            state = False
-    return state
+    """True when pytest, given `words` with autoload on and no PYTEST_PLUGINS,
+    leaves pytest-randomly unloaded: the child-pytest census's own reader."""
+    return child_pytest_census._deterministic(words, {})
 
 
 def _tracked_directories():
@@ -212,9 +205,30 @@ class TestSeedGate:
     def test_a_worker_defers_to_the_controller(self):
         randomly_seed_gate.refuse_unseeded(_config([], worker=True))
 
-    def test_conftest_calls_the_gate(self):
-        """The gate only works if pytest_configure calls it."""
-        source = (_PLUGIN_ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    def test_the_plugin_root_conftest_calls_the_gate(self):
+        """The gate only works if pytest_configure calls it, and only the
+        plugin-root conftest loads for a session of skills-adjacent tests."""
+        source = (_PLUGIN_ROOT / "conftest.py").read_text(encoding="utf-8")
         configure = source[source.index("def pytest_configure(config):"):]
-        configure = configure[:configure.index("\ndef ", 1)]
         assert "randomly_seed_gate.refuse_unseeded(config)" in configure
+
+    @pytest.mark.parametrize("fake_loaded", [True, False], ids=["loaded", "control"])
+    def test_a_session_of_skills_adjacent_tests_alone_is_gated(self, tmp_path, fake_loaded):
+        """A session that collects only a skills/ test never loads
+        tests/conftest.py, so the gate must run from the plugin-root conftest.
+        A stand-in plugin whose module name is pytest-randomly's makes the gate
+        see the plugin loaded without the real one installed."""
+        (tmp_path / "zz_fake_randomly.py").write_text(
+            '__name__ = "pytest_randomly.stand_in"\n', encoding="utf-8")
+        skills_test = sorted(_PLUGIN_ROOT.glob("skills/*/test_*.py"))[0]
+        plugin = ["-p", "zz_fake_randomly"] if fake_loaded else []
+        env = dict(os.environ, PYTHONPATH=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
+        run = subprocess.run(
+            [sys.executable, "-m", "pytest", "-p", "no:randomly", "-p", "no:cacheprovider",
+             *plugin, "--co", "-q", str(skills_test)],
+            cwd=_PLUGIN_ROOT, env=env, capture_output=True, text=True, timeout=120)
+        output = run.stdout + run.stderr
+        if fake_loaded:
+            assert run.returncode == 4 and "names no integer --randomly-seed" in output, output
+        else:
+            assert run.returncode == 0 and "names no integer" not in output, output
