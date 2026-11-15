@@ -320,7 +320,8 @@ ONCE_RULES = (
     ("resume its subagent once in the same round", "the one same-round re-check after the round's first-round review"),
     ("In each verify-only re-review, dispatch the cold prompt as a first-round review", "the re-review's unconditional first-round dispatch"),
     ("taken from the most recent such line", "the use of corrected placeholders in the re-review's first-round dispatch"),
-    ("the run itself wrote them", "the run-made change rule in the run receipt"),
+    ("was written by the run itself", "the run-made change rule in the run receipt"),
+    ("Decide each reproduced path on its own", "the per-path decision in the run receipt"),
     ("or another reason, stated", "the REPORT reason set"),
     ("for any reason, or none, other than", "the blocker trigger's reason test"),
     ("routes it to a tracked GitHub issue there", "the tracked-issue decline"),
@@ -761,12 +762,12 @@ class TestOperationalFactsClause:
          "the isolated-copy re-run: same interpreter by absolute path, a remote-less clone at {head}")),
         ("If the same paths appear there, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
          "the base-control run at the merge base")),
-        ("If those paths appear there too, they are a pre-existing defect: name them as pre-existing under the open questions, with the paths and the command that wrote them, not as a finding about the diff", (
+        ("Decide each reproduced path on its own. A path that also appears there is a pre-existing defect: name it as pre-existing under the open questions, with the path and the command that wrote it, not as a finding about the diff", (
          "a base-reproduced write reported as pre-existing, not as a finding")),
         ("When every reproduced path is pre-existing, the run's own result stands for the diff: a pass is a pass, and a failure is a finding about the diff", (
          "the run's own result when every reproduced path is pre-existing")),
-        ("If they appear only in the {head} clone, the run itself wrote them, and they are a finding about the diff", (
-         "the change-only write reported as a finding about the diff")),
+        ("A path that appears only in the {head} clone was written by the run itself, and it is a finding about the diff, whatever the other paths are", (
+         "the change-only write reported as a finding about the diff, whatever the other paths are")),
         ("If they do not appear in the {head} clone, report the result as unattributable because the worktree moved", (
          "only an unreproduced change left unattributable")),
     ])

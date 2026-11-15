@@ -837,11 +837,13 @@ class TestRunReceiptAttribution:
     - Paths that copy reproduces are re-run in a second remote-less clone at
       the merge base of the pre-run HEAD with the branch the work merges into,
       with no change
-      applied. Reproduced there too, they are pre-existing and reported in
+      applied. Each reproduced path is decided on its own. Reproduced there
+      too, it is pre-existing and reported in
       the HANDOFF; when every reproduced path is pre-existing, the run's own
       exit code decides (0 is a pass, nonzero is still a failure of the
-      change). Reproduced only in the change copy, they are a failure of the
-      teammate's own change, to fix, never re-run away.
+      change). Reproduced only in the change copy, it is a failure of the
+      teammate's own change whatever the other paths are, to fix, never
+      re-run away.
     - A status change the change copy does not reproduce came from outside
       the run, and the copy's run is the result.
     - No git archive export is named as the copy.
@@ -873,11 +875,11 @@ class TestRunReceiptAttribution:
          "the recipe: the pre-run HEAD plus the staged change saved before the run"),
         ("If the same paths appear there, run the same command the same way in a second clone with its remote removed, checked out at the merge base of the `HEAD` you recorded before the run with the branch your work will merge into (`git merge-base <recorded HEAD> <that branch>`, computed in the worktree), with no change applied.",
          "the base-control run at the merge base"),
-        ("If those paths appear in the merge-base clone too, they are a pre-existing defect: report them in your HANDOFF, with the paths and the command that wrote them, and do not treat them as a failure of your change.",
+        ("Decide each reproduced path on its own. A path that also appears in the merge-base clone is a pre-existing defect: report it in your HANDOFF, with the path and the command that wrote it, and do not treat it as a failure of your change.",
          "a base-reproduced write reported as pre-existing"),
         ("When every path the copy that holds your change reproduces is pre-existing, the run's own exit code decides for your change: exit code 0 counts as a pass, and a nonzero exit code is still a failure of your change.",
          "the exit code's verdict when every reproduced path is pre-existing"),
-        ("If they appear only in the copy that holds your change, the run itself wrote them: treat it as a failure of your change, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
+        ("A path that appears only in the copy that holds your change was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
          "the change-only write treated as a failure of the change"),
         ("If they do not appear in the copy that holds your change, the worktree change came from outside the run: that copy's run is your result.",
          "the unreproduced change: the copy's run is the result"),
