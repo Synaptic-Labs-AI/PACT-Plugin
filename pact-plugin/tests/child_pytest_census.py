@@ -1,9 +1,11 @@
 """
 Location: pact-plugin/tests/child_pytest_census.py
 Summary: Refuses a pytest child the suite starts without blocking pytest-randomly.
-Used by: tests/conftest.py, whose pytest_configure installs it, whose
-         pytest_testnodedown collects each xdist worker's misses, and whose
-         pytest_sessionfinish reports; tests/test_child_pytest_census.py.
+Used by: pact-plugin/conftest.py, whose pytest_configure calls register(),
+         which installs it and registers the Plugin whose hooks collect each
+         xdist worker's misses and report at session finish, in every session
+         under pact-plugin/, a session of skills/ tests alone included;
+         tests/test_child_pytest_census.py.
 
 pytest-randomly is installed in CI, where constraints-ci.txt pins it, and may or
 may not be installed locally; the root pyproject.toml addopts blocks it, and
@@ -217,6 +219,8 @@ import re
 import shlex
 import sys
 
+import pytest
+
 REMEDY = 'add "-p", "no:randomly" to the child argv'
 # The major.minor versions whose plugin loading the census replays.
 REPLAYED_VERSIONS = {"pytest": "9.2", "pytest-randomly": "5.1"}
@@ -300,6 +304,29 @@ class ChildPytestCensusError(RuntimeError):
 
 def installed():
     return _state["installed"]
+
+
+PLUGIN_NAME = "child-pytest-census"
+
+
+class Plugin:
+    """The census's session hooks: each xdist worker's misses, and the report
+    at session finish."""
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_testnodedown(self, node, error):
+        collect(node)
+
+    def pytest_sessionfinish(self, session):
+        finish(session)
+
+
+def register(config):
+    """Install the census and register its Plugin, once per session."""
+    if config.pluginmanager.has_plugin(PLUGIN_NAME):
+        return
+    install()
+    config.pluginmanager.register(Plugin(), PLUGIN_NAME)
 
 
 def install():

@@ -89,10 +89,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "pact-coding-st
 # Add plugin-level scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-# The clock-shift and child-pytest censuses; tests/ is on sys.path from the
-# insert above. The pytest-randomly seed gate and the HOME census run from
+# The clock-shift census; tests/ is on sys.path from the insert above. The
+# pytest-randomly seed gate and the HOME and child-pytest censuses run from
 # pact-plugin/conftest.py, which every session under pact-plugin/ loads.
-import child_pytest_census  # noqa: E402
 from clock_shift import clock_shift_census  # noqa: E402
 
 # Direct-import helpers for the CLAUDE.md redirect fixture below; tests/ is
@@ -226,10 +225,6 @@ def pytest_configure(config):
     # sweep command is in tests/clock_shift/clock_shift_shim.py.
     clock_shift_census.install()
 
-    # CHILD-PYTEST CENSUS. Always on: refuses a pytest child whose argv does not
-    # block pytest-randomly.
-    child_pytest_census.install()
-
 
 def pytest_runtest_setup(item):
     """Skip a `requires_non_root` test when the suite runs as root."""
@@ -242,16 +237,13 @@ def pytest_runtest_setup(item):
 
 @pytest.hookimpl(optionalhook=True)
 def pytest_testnodedown(node, error):
-    """Collect the census findings an xdist worker handed over."""
+    """Collect the clock-shift census findings an xdist worker handed over."""
     clock_shift_census.collect(node)
-    child_pytest_census.collect(node)
 
 
 def pytest_sessionfinish(session):
-    """Fail a clock-shift sweep in which a child ran on the real clock, and a
-    run in which a pytest child started without blocking pytest-randomly."""
+    """Fail a clock-shift sweep in which a child ran on the real clock."""
     clock_shift_census.finish(session)
-    child_pytest_census.finish(session)
 
 
 @pytest.fixture

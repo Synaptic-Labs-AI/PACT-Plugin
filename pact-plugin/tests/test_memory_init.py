@@ -2248,6 +2248,20 @@ class TestCIEnvironmentBinding:
         assert failed.exitstatus == 3
         assert "ALREADY ended with exit status 1" in capsys.readouterr().err
 
+    def test_session_end_note_names_a_status_an_earlier_hook_raised(
+            self, binding, monkeypatch, capsys):
+        """A census raised the session's status to 1 in its own sessionfinish,
+        after pytest had passed every sessionfinish hook the status as it stood
+        before any ran (0). With drift at session end the note names that 1,
+        read from session.exitstatus, not the 0 the hook was passed."""
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(False))
+        raised = self._Session(1)
+        binding.CIEnvironmentBinding().pytest_sessionfinish(raised, 0)
+        assert raised.exitstatus == 3
+        assert "ALREADY ended with exit status 1" in capsys.readouterr().err
+
     def _real_rig(self, tmp_path, verify_patch=None):
         """A runnable copy: the binding, the verify script (optionally
         patched), a conftest registering the binding, and a constraints file

@@ -76,9 +76,10 @@ verifier never reads a partial JSON document.
 THE EXIT STATUS IS THE ONE THE PROCESS RETURNS. pytest passes every
 sessionfinish hook the status as it stood before any of them ran, and other
 hooks raise the session's status inside their own sessionfinish: today the
-child-pytest and clock-shift censuses (through tests/conftest.py's hook), the
-HOME census (its Plugin, registered by pact-plugin/conftest.py) and the CI
-environment binding. So the recorder's hook runs trylast, after every other
+clock-shift census (through tests/conftest.py's hook), the HOME and
+child-pytest censuses (their Plugins, registered by pact-plugin/conftest.py)
+and the CI environment binding, whose hook also runs trylast so that it sees
+the censuses' status. So the recorder's hook runs trylast, after every other
 sessionfinish hook the suite registers, and reads ``session.exitstatus``.
 tests/test_ci_full_run_record.py checks that order, on the controller and on
 an xdist worker, for whatever sessionfinish hooks the suite registers, so a

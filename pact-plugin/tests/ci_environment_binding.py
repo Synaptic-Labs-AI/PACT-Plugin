@@ -14,19 +14,25 @@ a missing verify script, or a constraints file that is not exact pins ends
 the session with exit code 3: at the start through pytest.exit, at the end
 by setting the session's exit status (a hook cannot raise pytest.exit
 there), even over a run that already failed, which the report then names.
+The end check's hook runs trylast, after the censuses' sessionfinish hooks
+raise the status, and names the status they left (session.exitstatus, not
+the hook's argument, which is the status before any sessionfinish ran); it
+is registered before the full-run recorder, which therefore still runs last.
 
 Used by: pact-plugin/conftest.py, which registers CIEnvironmentBinding in
 pytest_configure. It is a plugin object rather than a module-level hook
 because that conftest already re-exports a pytest_sessionstart.
 
-Stdlib only at import time; pytest and the verify script are loaded only
-under the gate.
+The standard library and pytest at import time; the verify script is loaded
+only under the gate.
 """
 
 import importlib.util
 import os
 import pathlib
 import sys
+
+import pytest
 
 HEADING = "CI ENVIRONMENT DRIFT (pytest process)"
 END_HEADING = "CI ENVIRONMENT DRIFT (pytest process, at session end)"
@@ -80,12 +86,11 @@ class CIEnvironmentBinding:
         root = _gated_root()
         if root is None:
             return
-        import pytest
-
         problem = _check(root, "ci-environment-binding")
         if problem is not None:
             pytest.exit(f"{HEADING}\n{problem}", returncode=3)
 
+    @pytest.hookimpl(trylast=True)
     def pytest_sessionfinish(self, session, exitstatus):
         root = _gated_root()
         if root is None:
@@ -94,7 +99,7 @@ class CIEnvironmentBinding:
         problem = _check(root, "\nci-environment-binding (session end)")
         if problem is None:
             return
-        prior = int(exitstatus)
+        prior = int(session.exitstatus)
         note = ("" if prior == 0 else
                 f"\nThe session had ALREADY ended with exit status {prior} "
                 f"before this check; its test results are reported above "

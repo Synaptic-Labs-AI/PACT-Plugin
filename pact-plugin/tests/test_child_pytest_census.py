@@ -4,8 +4,9 @@ Summary: Pins the child-pytest census: which launches it refuses and accepts,
          that it is live in this session, that finish() fails the session, and
          that under real xdist a miss a test swallows still fails the run.
 Used by: the suite; the census itself is tests/child_pytest_census.py, wired in
-         tests/conftest.py.
+         pact-plugin/conftest.py.
 """
+import concurrent.futures
 import importlib.util
 import os
 import re
@@ -100,7 +101,7 @@ def test_an_explicit_load_is_refused_even_with_autoload_disabled(extra):
 _D = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
 
 
-@pytest.mark.parametrize("args, env, deterministic", [
+_ROUTE_ROWS = [
     ([], {}, False),
     ([], {_D: "1"}, True),
     (["--disable-plugin-autoload"], {}, True),
@@ -139,11 +140,77 @@ _D = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
     ([], {"PYTEST_ADDOPTS": "-o addopts=--disable-plugin-autoload"}, True),
     (["--", "-o", "addopts=-p no:randomly"], {}, False),
     (["-o", "other=-p no:randomly"], {}, False),
-])
+]
+
+
+@pytest.mark.parametrize("args, env, deterministic", _ROUTE_ROWS)
 def test_each_route_pytest_loads_or_blocks_the_plugin_by(args, env, deterministic):
     assert census._deterministic(args, env) is deterministic, (args, env)
     verdict = census._miss([PY, "-m", "pytest", *args], None, env)
     assert (verdict is None) is deterministic, (args, env)
+
+
+_PROBE_CONFTEST = """\
+import os
+
+
+def pytest_configure(config):
+    # The package module, or its __init__ imported again under that name.
+    loaded = any(str(getattr(plugin, "__name__", "")).split(".")[0] == "pytest_randomly"
+                 for _, plugin in config.pluginmanager.list_name_plugin())
+    with open(os.environ["RANDOMLY_PROBE_OUT"], "w") as handle:
+        handle.write("loaded" if loaded else "not-loaded")
+"""
+
+
+def _probe(rig, args, env):
+    """Whether a real pytest session started in `rig` with `args` and `env` (over
+    this process's environment without its PYTEST_* names) registered a
+    pytest_randomly module under any name."""
+    out = rig / "verdict.txt"
+    child_env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    child_env.update(env)
+    child_env["RANDOMLY_PROBE_OUT"] = str(out)
+    subprocess.run([PY, "-c", "import sys, pytest; sys.exit(pytest.main(sys.argv[1:]))", *args],
+                   cwd=rig, env=child_env, capture_output=True, timeout=120)
+    return out.read_text(encoding="utf-8") if out.is_file() else "no verdict"
+
+
+def test_a_real_pytest_agrees_with_every_route_row(tmp_path):
+    """The route rows are pytest 9.2's verdicts copied by hand; a pytest patch
+    release can change them with nothing else red. Each row runs here as a real
+    pytest session, in its own directory holding an empty pytest.ini and a
+    conftest that reports whether pytest-randomly registered, and must agree with
+    the row. The children start as `python -c "...pytest.main(...)"`, which the
+    census's blind spot 3 leaves unjudged on purpose: they are the experiment,
+    and some must load the plugin. They run outside the repository, so its
+    conftest and seed gate do not load in them. CI installs the lock, so a CI run
+    without pytest-randomly fails here instead of skipping. The run also fails
+    unless some row really loads the plugin and some row really blocks it, so it
+    cannot pass while the plugin is invisible to every child."""
+    if importlib.util.find_spec("pytest_randomly") is None:
+        reason = "pytest-randomly is not importable, so no real session can load it"
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail(f"{reason}; CI installs the lock, so this arm must run there")
+        pytest.skip(f"{reason}; CI installs the lock and runs this arm")
+    rigs = []
+    for index in range(len(_ROUTE_ROWS)):
+        rig = tmp_path / f"row-{index}"
+        rig.mkdir()
+        (rig / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
+        (rig / "conftest.py").write_text(_PROBE_CONFTEST, encoding="utf-8")
+        rigs.append(rig)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        verdicts = list(pool.map(lambda job: _probe(job[0], *job[1][:2]),
+                                 zip(rigs, _ROUTE_ROWS)))
+    mismatches = [(args, env, deterministic, got)
+                  for (args, env, deterministic), got in zip(_ROUTE_ROWS, verdicts)
+                  if got != ("not-loaded" if deterministic else "loaded")]
+    assert not mismatches, (
+        f"a real pytest disagrees with these route rows (args, env, row says "
+        f"deterministic, real session): {mismatches}. Re-derive the rows and the "
+        f"census replay from the installed pytest, then update REPLAYED_VERSIONS.")
+    assert "loaded" in verdicts and "not-loaded" in verdicts, verdicts
 
 
 def test_an_explicit_env_disabling_autoload_is_accepted():
@@ -769,7 +836,7 @@ def test_the_lock_pins_the_versions_the_census_replays():
 
 
 def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census_state):
-    assert census.installed(), "tests/conftest.py did not install the census"
+    assert census.installed(), "pact-plugin/conftest.py did not install the census"
     before = len(census_state["misses"])
     with pytest.raises(census.ChildPytestCensusError) as caught:
         subprocess.run([PY, "-m", "pytest", "--version"], cwd=tmp_path,
@@ -910,13 +977,31 @@ def test_a_worker_hands_its_misses_to_the_controller(census_state):
     assert reporter.lines[1] == "  [gw3] " + line
 
 
+# A rig session loads tests/conftest.py and registers the child-pytest census as
+# pact-plugin/conftest.py does, and refuses to run unless exactly one census is
+# installed, so no rig arm that expects no miss can pass with none.
 _RIG_CONFTEST = '''
 import importlib.util
+
+import pytest
 
 _spec = importlib.util.spec_from_file_location("pact_suite_conftest", {conftest!r})
 _suite = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_suite)
-pytest_configure = _suite.pytest_configure
+
+import child_pytest_census  # noqa: E402  (tests/ is on sys.path once the suite conftest ran)
+
+
+def pytest_configure(config):
+    _suite.pytest_configure(config)
+    child_pytest_census.register(config)
+    plugins = [p for p in config.pluginmanager.get_plugins()
+               if isinstance(p, child_pytest_census.Plugin)]
+    if not child_pytest_census.installed() or len(plugins) != 1:
+        raise pytest.UsageError("rig: expected one installed child-pytest census, found "
+                                "%d plugin(s)" % len(plugins))
+
+
 pytest_testnodedown = _suite.pytest_testnodedown
 pytest_sessionfinish = _suite.pytest_sessionfinish
 '''
@@ -978,3 +1063,58 @@ def test_each_number_before_the_command_is_stepped_over(duration):
     for launch in (["timeout", duration, "pytest", "-q"], ["timeout", duration, "pytest", *_BLOCK]):
         line = census._miss(launch, None, {})
         assert line is not None and line.endswith(census.WRAPPER_REMEDY), launch
+
+
+_SKILLS_TEST = "skills/pact-handoff-harvest/test_skill_loading_harvest.py"
+
+# A plugin, not a test file: a test file outside the plugin tree would make the
+# child collect from the common ancestor of the two paths. At the end of the
+# session it starts one pytest child that does not block pytest-randomly.
+_UNBLOCKED_PROBE = """
+import os
+import subprocess
+import sys
+
+import pytest
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_sessionfinish(session):
+    try:
+        subprocess.run([sys.executable, "-m", "pytest", "--version"],
+                       capture_output=True, timeout=60)
+        outcome = "ran"
+    except Exception as exc:
+        outcome = "refused: %r" % (exc,)
+    with open(os.environ["CHILD_CENSUS_PROBE_MARKER"], "w", encoding="utf-8") as handle:
+        handle.write(outcome)
+"""
+
+
+@pytest.mark.parametrize("paths", [(_SKILLS_TEST,),
+                                   (_SKILLS_TEST, "tests/test_session_home_sandbox.py")],
+                         ids=["skills-alone", "skills-and-tests"])
+def test_a_session_with_or_without_the_tests_conftest_refuses_an_unblocked_child(
+        tmp_path, paths):
+    """A real session over a skills/ test alone loads pact-plugin/conftest.py but
+    not tests/conftest.py, and its twin loads both. Each installs one census:
+    a pytest child that does not block pytest-randomly is refused before it
+    starts, and the session fails with one census report."""
+    plugin_root = Path(__file__).resolve().parents[1]
+    if not (plugin_root / _SKILLS_TEST).is_file():
+        pytest.skip("SKIPPED, NOT PASSED: %s is not in this tree" % _SKILLS_TEST)
+    (tmp_path / "child_census_launch_probe.py").write_text(_UNBLOCKED_PROBE, encoding="utf-8")
+    marker = tmp_path / "outcome"
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    env["CHILD_CENSUS_PROBE_MARKER"] = str(marker)
+    proc = subprocess.run(
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", *_BLOCK,
+         "-p", "child_census_launch_probe", *paths],
+        cwd=plugin_root, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    assert marker.read_text(encoding="utf-8").startswith(
+        "refused: ChildPytestCensusError"), output
+    assert output.count("CHILD PYTEST CENSUS: 1 ") == 1, output
+    assert proc.returncode == 1, output

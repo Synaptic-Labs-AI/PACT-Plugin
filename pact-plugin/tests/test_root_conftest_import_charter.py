@@ -268,7 +268,8 @@ def test_the_root_conftest_keeps_its_import_charter():
     assert not unused, unused
     # The walk reaches the tests/ modules the conftest imports today.
     names = {path.stem for path in followed}
-    assert {"import_identity_map", "randomly_seed_gate", "ci_environment_binding",
+    assert {"import_identity_map", "randomly_seed_gate", "home_census",
+            "child_pytest_census", "ci_environment_binding",
             "ci_full_run_record"} <= names, names
 
 

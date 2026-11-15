@@ -260,9 +260,9 @@ def test_a_failing_session_still_writes_the_record(tmp_path):
 
 CENSUS = Path(__file__).with_name("child_pytest_census.py")
 
-# The suite's child-pytest census wired as tests/conftest.py wires it: a plain
-# sessionfinish that raises the session's status after pytest has passed the
-# old one to every sessionfinish hook.
+# The child-pytest census behind a plain conftest sessionfinish, as its Plugin
+# runs it in the suite: a sessionfinish that raises the session's status after
+# pytest has passed the old one to every sessionfinish hook.
 CENSUS_CONFTEST = '''
 
 import importlib.util as _util
@@ -1058,8 +1058,10 @@ def _plugin_file(plugin):
 def _sessionfinish_order_problems(config):
     """Why the recorder would not read the final exit status in this process:
     a sessionfinish hook of the suite's own (any plugin loaded from under
-    pact-plugin/) that pytest calls after the recorder, or a missing member of
-    the hooks known to raise the status today."""
+    pact-plugin/) that pytest calls after the recorder, the CI environment
+    binding's hook called before another of the suite's (its note names the
+    status they left), or a missing member of the hooks known to raise the
+    status today."""
     manager = config.pluginmanager
     recorder = manager.get_plugin("full-run-record")
     if recorder is None:
@@ -1077,8 +1079,13 @@ def _sessionfinish_order_problems(config):
         suite[where.relative_to(_PLUGIN_ROOT).as_posix()] = position
     problems = ["%s's sessionfinish runs after the recorder's" % name
                 for name, position in sorted(suite.items()) if position > last]
+    binding = suite.get("tests/ci_environment_binding.py")
+    if binding is not None:
+        problems += ["%s's sessionfinish runs after the CI binding's" % name
+                     for name, position in sorted(suite.items())
+                     if position > binding and name != "tests/ci_environment_binding.py"]
     for member in ("tests/conftest.py", "tests/home_census.py",
-                   "tests/ci_environment_binding.py"):
+                   "tests/child_pytest_census.py", "tests/ci_environment_binding.py"):
         if member not in suite:
             problems.append("%s registers no sessionfinish hook in this process" % member)
     return problems
@@ -1087,8 +1094,9 @@ def _sessionfinish_order_problems(config):
 def test_the_recorder_reads_the_status_after_every_suite_sessionfinish_hook(request):
     """In this process (an xdist worker under the suite's own -n runs, else the
     only process), every sessionfinish hook loaded from under pact-plugin/ runs
-    before the recorder's, so the status the tests/conftest.py censuses, the
-    HOME census and the CI binding raise is the one it records."""
+    before the recorder's, so the status the censuses and the CI binding raise
+    is the one it records, and before the CI binding's, so its note names the
+    status the censuses left."""
     assert _sessionfinish_order_problems(request.config) == []
 
 
