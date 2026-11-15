@@ -23,10 +23,19 @@ being plausible honest-mistake forms, not adversarial constructions. `sys`
 means any name the file binds to the sys module (`import sys as X`), and
 `sys.path` also any name bound by `from sys import path [as P]` or assigned
 sys.path (`entries = sys.path`), in any scope of the file.
+A codegen string (a string constant or an f-string) that parses as Python,
+as written or with its `%` and `{}` placeholders read as a name, after
+dedent, is read as code for every one of these forms; its names are
+collected together with the file's and its other strings', so an alias bound
+in one string and used in another counts. Every string is also read as
+tokens (`_mutates_path`: the call and augmented-assignment forms on the
+literal names), which is all a string that does not parse is read for.
 ACCEPTED UNDER-BLOCK (adversarial-only, documented boundary): wholesale
-rebinding (`sys.path = [...]`), `getattr(sys.path, ...)` with a verb string, and
-slice-assign inside codegen strings — this pin is an honest-mistake guard,
-not an adversary-proof one. OUT OF PARTITION (different failure mode): removal
+rebinding (`sys.path = [...]`), `getattr(sys.path, ...)` with a verb string or
+`getattr(sys, "path")`, a dunder call (`sys.path.__iadd__(...)`), a name a
+placeholder supplies, and an alias or slice-assign inside a codegen string
+that does not parse — this pin is an honest-mistake guard, not an
+adversary-proof one. OUT OF PARTITION (different failure mode): removal
 mutations (remove/pop/clear/del) sabotage conftest setup rather than
 re-introduce per-file path setup; zero occurrences at introduction, and the
 failure would be loud (imports break), unlike a silent added root.
@@ -65,8 +74,8 @@ _BETWEEN = r"(?:\s|\\\n|#[^\n]*(?:\n|$))*"
 # `sys . path . insert|append|extend (` or `sys . path +=`, with `_BETWEEN`
 # between any two of them. Built in pieces so THIS file's own source never
 # holds a needle — the any-form arm scans string constants and must not flag
-# the pin itself. Slice-assignment inside a codegen string is accepted
-# under-block (see module docstring).
+# the pin itself. A codegen string that parses is also read as code
+# (`_codegen_trees`).
 _PATH_MUTATION = re.compile(
     r"\bsys" + _BETWEEN + r"\." + _BETWEEN + r"path\b" + _BETWEEN
     + r"(?:\." + _BETWEEN + r"(?:insert|append|extend)\b" + _BETWEEN + r"\(|\+=)"
@@ -112,6 +121,9 @@ _KEEP_SET = _MODULE_ALLOWLIST | {
     "tests/test_memory_store_isolation.py",
     "tests/test_merge_guard.py",
     "tests/test_pact_session_config_dir_parity.py",
+    # its driver string sets the child process's sys.path[0] the way
+    # running the hook script does
+    "tests/test_pin_caps_gate_paths.py",
     "tests/test_pin_growth.py",
     "tests/test_pin_growth_populations.py",
     "tests/test_pin_marker_writer_adversarial.py",
@@ -290,16 +302,59 @@ def _module_level_mutations(path):
     return lines
 
 
-def _any_form_present(path):
-    """True if the file contains a path mutation at any level OR embeds a
-    mutation token in a string constant (codegen). Comments are
-    AST-invisible and never match; a docstring is a string constant like
-    any other, so a token in one is a form."""
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    names = _sys_names(tree)
+# A %-style or str.format placeholder in a codegen template (`%r`, `%(x)s`,
+# `{}`, `{0!r}`), which stops the template parsing as Python.
+_PLACEHOLDER = re.compile(r"%(?:\([^)]*\))?[-#0 +]*\d*(?:\.\d+)?[rsadifxXeEgGc]|\{[^{}]*\}")
+
+
+def _codegen_trees(tree):
+    """Each string in `tree` that parses as Python, parsed: every string
+    constant, and every f-string with each placeholder read as a name, taken
+    as written and again with its `%` and `{}` placeholders read as a name,
+    each after `textwrap.dedent`. A parsed string's own strings are read the
+    same way. A string that parses in neither form is left to
+    `_mutates_path`."""
+    import textwrap
+    import warnings
+
+    trees = []
     for node in ast.walk(tree):
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            text = node.value
+        elif isinstance(node, ast.JoinedStr):
+            text = "".join(
+                part.value if isinstance(part, ast.Constant) else "_" for part in node.values
+            )
+        else:
+            continue
+        for candidate in {text, _PLACEHOLDER.sub("_", text)}:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", SyntaxWarning)
+                    parsed = ast.parse(textwrap.dedent(candidate))
+            except (SyntaxError, ValueError):
+                continue
+            trees.append(parsed)
+            trees.extend(_codegen_trees(parsed))
+    return trees
+
+
+def _any_form_present(path):
+    """True if the file contains a path mutation at any level OR embeds one
+    in a string (codegen). A string that parses as Python
+    (`_codegen_trees`) is read with the real-code matcher, and every string
+    is also read as tokens (`_mutates_path`). The names bound to sys and
+    sys.path are collected over the file and all its parsed strings
+    together, so an alias bound in one string and used in another counts.
+    Comments are AST-invisible and never match; a docstring is a string
+    constant like any other, so a form in one is a form."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    trees = [tree, *_codegen_trees(tree)]
+    names = _sys_names(ast.Module(body=[s for t in trees for s in t.body], type_ignores=[]))
+    for node in (node for t in trees for node in ast.walk(t)):
         if _is_path_mutation(node, names):
             return True
+    for node in ast.walk(tree):
         if (
             isinstance(node, ast.Constant)
             and isinstance(node.value, str)
@@ -385,13 +440,14 @@ def test_a_name_holding_sys_path_is_followed(tmp_path):
     assigned sys.path (directly or through another such name) is a path
     mutation; a mutation of a copy of the list is not."""
     module = tmp_path / "aliased.py"
+    name = "sys" + ".path"  # in pieces, so this file holds no form itself
     module.write_text(
         "import sys\n"
-        "entries = sys.path\n"
+        f"entries = {name}\n"
         "entries.insert(0, 'x')\n"
         "again = entries\n"
         "again += ['y']\n"
-        "snapshot = list(sys.path)\n"
+        f"snapshot = list({name})\n"
         "snapshot.insert(0, 'x')\n",
         encoding="utf-8",
     )
@@ -448,6 +504,44 @@ def test_a_codegen_call_form_is_read_as_tokens(tmp_path):
         assert not _mutates_path(text), text
     rejected = ["don't touch it", "f(", "    a\n  b", '"unterminated', f"don't {name}.insert (0, 'x')"]
     assert [_mutates_path(text) for text in rejected] == [False, False, False, False, True]
+
+
+def test_a_codegen_string_that_parses_is_read_as_code(tmp_path):
+    """A codegen string that parses as Python, as written or with its `%`
+    and `{}` placeholders read as a name, is read with the real-code matcher:
+    an alias of sys or of sys.path, a name assigned sys.path, an alias bound
+    in one string and used in another, an indented block and a subscript
+    assignment are all forms. A string that only reads sys.path, or mutates
+    a copy, is not."""
+    sys_ = "sys"  # the module name in pieces, so this file holds no form itself
+
+    def carrier(source):
+        path = tmp_path / "carrier.py"
+        path.write_text(source, encoding="utf-8")
+        return _any_form_present(path)
+
+    forms = [
+        f"import {sys_} as s; s.path.insert(0, %r)",
+        f"from {sys_} import path; path.insert(0, %r)",
+        f"from {sys_} import path as p; p.append(%r)",
+        f"import {sys_}; entries = {sys_}.path; entries.insert(0, %r)",
+        f"import {sys_} as s\ns.path.extend([{{root!r}}])",
+        f"import {sys_}\n{sys_}.path[0:0] = [%r]",
+    ]
+    for text in forms:
+        assert carrier(f"CHILD = {text!r}\n"), text
+    indented = f"    import {sys_} as s\n    s.path.insert(0, root)\n"
+    assert carrier(f"CHILD = {indented!r}\n")
+    assert carrier(f"def child(root):\n    return f'import {sys_} as s; s.path.insert(0, {{root!r}})'\n")
+    assert carrier(f"LINES = [{f'import {sys_} as s'!r}, 's.path.insert(0, %r)']\n")
+    nested = f"RUN = {f'import {sys_} as s; s.path.insert(0, %r)'!r}"
+    assert carrier(f"CHILD = {nested!r}\n")
+    for text in [
+        f"import {sys_} as s; print(s.path)",
+        f"import {sys_}; entries = list({sys_}.path); entries.insert(0, %r)",
+        f"import {sys_} as s; s.argv.append(%r)",
+    ]:
+        assert not carrier(f"CHILD = {text!r}\n"), text
 
 
 def test_negative_fixture_flags_every_matcher_leg():
