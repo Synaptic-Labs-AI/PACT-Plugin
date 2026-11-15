@@ -28,8 +28,8 @@ by what it is, not by its spelling:
 - TIMEIT_RUNNERS (`timeit.timeit`, `timeit.repeat`, `timeit.Timer`) only when a
   statement or setup it is given is not a lambda, since a statement string is
   compiled and run; with none given it times `pass`.
-- IMPORTING_METHODS, reached through an instance (`TestLoader().loadTestsFromName`)
-  or a package outside sys.stdlib_module_names, by attribute name alone, so
+- IMPORTING_METHODS, reached through an instance (`TestLoader().loadTestsFromName`,
+  `Profile().runctx`), by attribute name alone, so
   any object's method of that name is refused.
 
 The script the CI deviation loads, scripts/verify_ci_environment.py, is read
@@ -61,12 +61,14 @@ IMPORTING_HELPERS = frozenset({
     "pkgutil.find_loader", "pydoc.locate", "doctest.DocTestSuite",
     "logging.config.dictConfig", "logging.config.fileConfig", "xml.sax.make_parser",
     "site.addsitedir", "warnings._setoption", "xml.dom.getDOMImplementation",
-    "xml.dom.domreg.getDOMImplementation",
+    "xml.dom.domreg.getDOMImplementation", "cProfile.runctx", "profile.runctx",
+    "test.support.import_helper.import_fresh_module",
 })
 TIMEIT_RUNNERS = frozenset({"timeit.timeit", "timeit.repeat", "timeit.Timer"})
-# The same, reached through an instance or a package outside the stdlib names.
+# The same, reached through an instance. `runctx` is also a module function of
+# cProfile and profile, so IMPORTING_HELPERS names those too.
 IMPORTING_METHODS = frozenset({"loadTestsFromName", "loadTestsFromNames", "runsource",
-                               "runctx", "import_fresh_module"})
+                               "runctx"})
 # (file, enclosing function) -> the dynamic callables it may name, and how often.
 DEVIATIONS = {
     ("tests/ci_environment_binding.py", "_load_verify_script"):
@@ -443,8 +445,9 @@ def test_a_loaded_script_inside_the_charter_passes(tmp_path):
     "import code\ncode.InteractiveInterpreter().runsource('import yaml')\n",
     "import cProfile\ncProfile.runctx('import yaml', {}, {})\n",
     "import timeit\ntimeit.timeit('import yaml', number=1)\n",
-    # test.support is outside sys.stdlib_module_names, so reach it as an attribute.
-    "def f(import_helper):\n    import_helper.import_fresh_module('yaml')\n",
+    # A module function from-imported and called by its bare name, or an alias.
+    "from cProfile import runctx\nrunctx('import yaml', {}, {})\n",
+    "from profile import runctx as run\nrun('import yaml', {}, {})\n",
     "import warnings\nwarnings._setoption('ignore::yaml.YAMLError')\n",
     "import xml.dom\nxml.dom.getDOMImplementation('minidom')\n",
     "from xml.dom import domreg\ndomreg.getDOMImplementation('minidom')\n",
@@ -572,3 +575,20 @@ def test_the_identity_map_resolves_origins_when_its_out_variable_is_set(
     monkeypatch.setattr(identity, "resolve_origins", _reached)
     with pytest.raises(_Reached):
         identity.pytest_sessionfinish(None, 0)
+
+
+# The matcher on its own, where the static rule cannot also red the row: the
+# `test` package is outside sys.stdlib_module_names, so any charter rig that
+# imports import_fresh_module is refused for the import alone.
+@pytest.mark.parametrize("source, callable_", [
+    ("from cProfile import runctx\nrunctx('import yaml', {}, {})\n", "cProfile.runctx"),
+    ("from profile import runctx as run\nrun('import yaml', {}, {})\n", "profile.runctx"),
+    ("import cProfile\ncProfile.Profile().runctx('import yaml', {}, {})\n", "runctx"),
+    ("from test.support.import_helper import import_fresh_module\nimport_fresh_module('yaml')\n",
+     "test.support.import_helper.import_fresh_module"),
+    ("from test.support import import_helper\nimport_helper.import_fresh_module('yaml')\n",
+     "test.support.import_helper.import_fresh_module"),
+])
+def test_a_helper_reached_through_any_import_form_is_seen(source, callable_):
+    names = {name for _, name, _ in _dynamic_references(ast.parse(source))}
+    assert callable_ in names, names
