@@ -69,16 +69,13 @@ ACTIONS_ENVELOPE = re.compile(
 SHA = re.compile(r"[0-9a-fA-F]{40}")
 # The run line's unexpanded
 # `${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}`,
-# as shlex splits it, and the same expansion under the variable's earlier name,
-# SEED, which logs from before the rename carry, so they stay comparable; and
-# pytest-randomly's own report-header line. SEED_LINE is
+# as shlex splits it, and pytest-randomly's own report-header line. SEED_LINE is
 # the only accepted spelling: 1 to 10 ASCII digits holds every 32-bit seed, and
 # every seed the seed guard in .github/workflows/tests.yml admits (at most 9).
 # SEED_LIKE_LINE is the same line with any run of Unicode digits; a header line
 # that matches it but not SEED_LINE is refused rather than read.
-_SEED_ARGVS = tuple(
-    ["${%s:+-p" % name, "randomly", "--randomly-seed=$%s" % name, "--randomly-dont-reset-seed}"]
-    for name in ("PACT_SHUFFLE_SEED", "SEED"))
+_SEED_ARGV = ["${PACT_SHUFFLE_SEED:+-p", "randomly", "--randomly-seed=$PACT_SHUFFLE_SEED",
+              "--randomly-dont-reset-seed}"]
 SEED_LINE = re.compile(r"Using --randomly-seed=([0-9]{1,10})")
 SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=\d+")
 SESSION_BANNER = re.compile(r"=+ test session starts =+")
@@ -241,15 +238,14 @@ def _command_argv(lines: list[str]) -> list[str]:
     # not the resolved values. The argv text is therefore the same for every
     # seed and cannot tell a shuffled run from an ordered one; the seed comes
     # from pytest-randomly's header line instead. Exactly two shapes are
-    # accepted: the 9-token ordered line, and the same with the four seed tokens,
-    # under the variable's current name or its earlier SEED, before the literal
-    # JUnit argument. This widens the accepted VALUE and
+    # accepted: the 9-token ordered line, and the same with the four seed tokens
+    # before the literal JUnit argument. This widens the accepted VALUE and
     # adds one reviewed shape, never an open-ended command.
-    seeded_length = 9 + len(_SEED_ARGVS[0])
+    seeded_length = 9 + len(_SEED_ARGV)
     if (len(argv) not in (9, seeded_length) or argv[:7] != [
             "python", "-m", "pytest", "-ra", "-n", "4", "--dist"]
             or argv[7] not in ("loadfile", "load", "$DIST")
-            or len(argv) == seeded_length and argv[8:-1] not in _SEED_ARGVS
+            or len(argv) == seeded_length and argv[8:-1] != _SEED_ARGV
             or argv[-1] != "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"):
         raise EvidenceError(f"unexpected full-suite pytest argv: {argv!r}")
     return argv

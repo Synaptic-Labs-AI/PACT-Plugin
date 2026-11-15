@@ -177,9 +177,12 @@ controller's finish() reports and fails.
 
 A launch the census cannot read (a word or env value that is not text) is
 recorded as a fault line naming PYTEST_CURRENT_TEST and the launch, and fails
-the session, when any of its words names pytest (`pytest` or `py.test`). A
-malformed launch that names neither is left to the launcher's own error. The
-launch itself is never aborted for a fault.
+the session, when one of its words names pytest as a program or module:
+pytest's program (`pytest`, `py.test`, by path or not) or `pytest/__main__.py`,
+or `pytest` after `-m` or `--module`. A word that only contains `pytest`, such
+as a tmp_path under /tmp/pytest-of-<user>/, does not. A malformed launch that
+names pytest in neither way is left to the launcher's own error. The launch
+itself is never aborted for a fault.
 
 Blind spots, examples of launches outside the census:
 1. A pytest started by a shell script file or another program the census does
@@ -261,7 +264,8 @@ _LAUNCHERS = frozenset({"py", "pyw"})
 # An interpreter's name, after _command_name: one of these, optionally with a
 # version and one letter (python3, python3.12t, pythonw, pypy3.10, graalpy-24.1).
 _INTERPRETER = re.compile(r"(?:python|pypy|ipython|graalpy|pyston)(?:-?[0-9]+(?:\.[0-9]+)*)?[a-z]?\Z")
-_PYTEST_MENTION = re.compile(r"py\.?test")
+# A bundled `-m` option naming pytest's module (`-mpytest`, `-Impytest.__main__`).
+_BUNDLED_MODULE = re.compile(r"-[A-Za-z]*m(pytest|pytest\.__main__)\Z")
 _COVERAGE_PROGRAM = re.compile(r"coverage(-?\d+(\.\d+)*)?\Z")
 # The names under which pytest registers pytest-randomly's hooks: its entry
 # point, its module, and the module imported again as `pytest_randomly.__init__`
@@ -403,8 +407,17 @@ def _shown(argv):
 
 
 def _names_pytest(argv):
-    """True when any word of a launch the census could not judge names pytest."""
-    return any(_PYTEST_MENTION.search(_text(item)) for item in _items(argv))
+    """True when a launch the census could not judge names pytest as a program or
+    module: a word that is pytest's program or `pytest/__main__.py`, or pytest's
+    module after `-m` (bundled or not) or `--module`. Each item is split into
+    words, so shell text counts too; a word that only contains `pytest` (a
+    tmp_path under /tmp/pytest-of-<user>/) does not."""
+    words = [word for item in _items(argv) for word in _split(_text(item))]
+    return any(
+        _is_pytest_script(word) or bool(_BUNDLED_MODULE.match(word))
+        or (word in _PYTEST_MODULES and at > 0
+            and (words[at - 1] == "--module" or re.fullmatch(r"-[A-Za-z]*m", words[at - 1])))
+        for at, word in enumerate(words))
 
 
 def _miss(argv, cwd, env):

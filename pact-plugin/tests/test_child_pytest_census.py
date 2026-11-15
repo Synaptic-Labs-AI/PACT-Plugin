@@ -913,8 +913,12 @@ def test_a_malformed_launch_that_names_no_pytest_is_left_to_its_launcher(census_
 
 @pytest.mark.parametrize("argv,env", [
     ([PY, "-m", "pytest", 1], None),
-    (["bash", "-c", b"pytest", 1], None),
+    ([PY, "-mpytest", 1], None),
+    ([PY, "-I", "-m", "pytest.__main__", 1], None),
+    (["coverage", "run", "--module", "pytest", 1], None),
+    (["bash", "-c", b"cd x && pytest -q", 1], None),
     (["py.test", "-q"], {"A": 1}),
+    ([PY, "/venv/lib/python3.12/site-packages/pytest/__main__.py"], {"A": 1}),
 ])
 def test_a_pytest_launch_the_census_cannot_read_fails_the_run_by_name(
         census_state, argv, env):
@@ -924,6 +928,20 @@ def test_a_pytest_launch_the_census_cannot_read_fails_the_run_by_name(
     assert len(added) == 1, added
     assert "could not inspect a pytest launch" in added[0], added
     assert "test_a_pytest_launch_the_census_cannot_read" in added[0], added
+
+
+@pytest.mark.parametrize("argv, env", [
+    # A tmp_path lives under /tmp/pytest-of-<user>/; the word only contains pytest.
+    (["/usr/bin/python3", "/tmp/pytest-of-ubuntu/pytest-7/test_x0/script.py"],
+     {"HOME": "/h", "N": 1}),
+    (["git", "-C", "/tmp/pytest-of-u/pytest-1/repo", "status", 1], None),
+    (["pip", "install", "pytest-xdist", 1], None),
+])
+def test_a_malformed_launch_that_only_contains_pytest_is_left_to_its_launcher(
+        census_state, argv, env):
+    before = list(census_state["misses"])
+    census._audit("subprocess.Popen", (None, argv, None, env))
+    assert census_state["misses"] == before
 
 
 def test_a_live_pytest_launch_the_census_cannot_read_is_recorded(census_state):

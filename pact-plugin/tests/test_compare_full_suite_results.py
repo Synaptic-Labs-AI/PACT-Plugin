@@ -397,8 +397,6 @@ SEEDED_COMMAND = ('python -m pytest -ra -n 4 --dist "$DIST" '
                   '--junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"')
 SEED_TOKENS = ["${PACT_SHUFFLE_SEED:+-p", "randomly", "--randomly-seed=$PACT_SHUFFLE_SEED",
                "--randomly-dont-reset-seed}"]
-# The seeded line as logs from before the variable's rename carry it.
-EARLIER_SEEDED_COMMAND = SEEDED_COMMAND.replace("PACT_SHUFFLE_SEED", "SEED")
 
 
 def read_runs(output):
@@ -408,17 +406,6 @@ def read_runs(output):
 def test_the_shipped_run_line_is_the_seeded_shape():
     assert shlex.split(ci_contract.WORKFLOW_TEST_CMD) == shlex.split(SEEDED_COMMAND)
     assert comparator._command_argv([ci_contract.WORKFLOW_TEST_CMD])[8:12] == SEED_TOKENS
-
-
-def test_a_log_from_before_the_seed_rename_compares_with_one_after(tmp_path):
-    first = make_run(tmp_path, "one", command=EARLIER_SEEDED_COMMAND, seeds=(7,))
-    second = make_run(tmp_path, "two", 101, command=SEEDED_COMMAND, seeds=(7,))
-    completed, comparison, output = invoke(tmp_path, first, second)
-    assert completed.returncode == 0, comparison
-    assert comparison["status"] == "identical"
-    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [7, 7]
-    assert [run["argv"][8] for run in read_runs(output)] == [
-        "${SEED:+-p", "${PACT_SHUFFLE_SEED:+-p"]
 
 
 def test_seeded_run_line_is_accepted_and_its_seed_is_recorded(tmp_path):
@@ -770,7 +757,6 @@ def test_each_census_header_written_by_finish_is_recognised(monkeypatch, module_
         {"census": name, "problems": 1, "lines": ["a miss"]}]
 
 
-
 def test_the_information_line_the_real_home_census_writes_is_no_census_failure(monkeypatch):
     import home_census as census
     monkeypatch.setitem(census._state, "misses", [])
@@ -861,7 +847,7 @@ def test_two_seed_lines_are_refused(tmp_path):
 @pytest.mark.parametrize("mutation", [
     "literal_seed", "no_wrapper", "extra_token", "seed_after_junit", "wrong_junit",
     "previous_seeded_line", "dont_reset_outside_expansion", "other_variable",
-    "names_mixed"])
+    "names_mixed", "earlier_name"])
 def test_seeded_shape_is_exact(tmp_path, mutation):
     """The second shape admits exactly four tokens in exactly one place."""
     seed_text = '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}'
@@ -877,6 +863,8 @@ def test_seeded_shape_is_exact(tmp_path, mutation):
             seed_text, '-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed')
     elif mutation == "other_variable":
         changed = SEEDED_COMMAND.replace("PACT_SHUFFLE_SEED", "OTHER_SEED")
+    elif mutation == "earlier_name":
+        changed = SEEDED_COMMAND.replace("PACT_SHUFFLE_SEED", "SEED")
     elif mutation == "names_mixed":
         changed = SEEDED_COMMAND.replace('--randomly-seed="$PACT_SHUFFLE_SEED"',
                                          '--randomly-seed="$SEED"')
