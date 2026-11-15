@@ -543,6 +543,15 @@ def test_a_listed_shell_blind_spot_is_accepted(text):
     ["git", "bisect", "run", "echo", "python", "-m", "pytest"],
     ["git", "submodule", "foreach", "git", "status"],
     ["git", "rebase", "--exec", "make check", "main"],
+    # The command bisect run and submodule foreach run is in program position.
+    ["git", "submodule", "foreach", "echo", "python", "-m", "pytest"],
+    ["git", "submodule", "foreach", "--recursive", "git", "grep", "python", "-m", "pytest"],
+    ["git", "submodule", "foreach", "git grep python -m pytest"],
+    ["git", "submodule", "foreach", "timeout", "5", "echo", "python", "-m", "pytest"],
+    ["timeout", "5", "git", "submodule", "foreach", "echo", "python", "-m", "pytest"],
+    ["bash", "-c", "git submodule foreach echo python -m pytest"],
+    # A rebase value is one word; this one only mentions pytest.
+    ["git", "rebase", "-x", "echo python -m pytest", "main"],
     # A shell keyword or builtin that tests or looks up its words runs none.
     ["bash", "-c", "[[ -x /venv/bin/pytest ]] && echo ok"],
     ["type", "pytest"],
@@ -756,6 +765,8 @@ _WRAPPED = [
     ["git", "rebase", "-x", "python -m pytest", "main"],
     ["git", "rebase", "--exec=pytest", "main"],
     ["git", "rebase", "-xpytest", "main"],
+    # foreach's own command that starts pytest, through a chain.
+    ["git", "submodule", "foreach", "timeout", "5", "pytest"],
     # Programs that run their arguments stay refused.
     ["xargs", "-n1", "pytest"],
     ["xargs", "-I", "{}", "python3", "-m", "pytest", "{}"],
@@ -781,6 +792,16 @@ _WRAPPED = [
 ])
 def test_a_listed_wrapper_blind_spot_is_accepted(argv):
     assert census._miss(argv, None, {}) is None, argv
+
+
+def test_the_words_after_a_rebase_value_are_read_as_a_mention():
+    """`-x` takes one word, so `python -m pytest` after it are arguments of git,
+    a program the census does not read: the [mention] family judges them, unblocked
+    refused and blocked accepted, as for `make check python -m pytest`."""
+    argv = ["git", "rebase", "-x", "echo", "python", "-m", "pytest"]
+    line = census._miss(argv, None, {})
+    assert line is not None and line.endswith(census.REMEDY), line
+    assert census._miss([*argv, *_BLOCK], None, {}) is None
 
 
 def _with_block(argv):

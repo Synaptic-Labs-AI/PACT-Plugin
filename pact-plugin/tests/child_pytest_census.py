@@ -109,7 +109,13 @@ refused whether or not it does:
   too: `git bisect run` the argv after `run`, `git submodule foreach` its
   remaining words and `git rebase --exec` (or `-x`) each value, both as shell
   text, so `git bisect run pytest` is refused and `git bisect run make test`
-  is not.
+  is not. The command bisect run and foreach run is in program position, so
+  `git submodule foreach echo python -m pytest` is a mention. A rebase value is
+  one word and the words after it are rebase's own arguments, so
+  `git rebase -x 'echo python -m pytest' main` is a mention while
+  `git rebase -x echo python -m pytest` is read as `make check python -m
+  pytest` is: there `python -m pytest` are arguments of git, which the census
+  does not read.
 - [shell] Any family above inside the command text of a shell run with `-c`
   (below).
 `-m py.test` and `-m _pytest` start no pytest session and are no family.
@@ -989,10 +995,12 @@ def _command_search(part, program, depth):
 
 def _git_subcommand(part, at, depth):
     """True when git's subcommand at `at` runs a command that starts pytest, else
-    the index of the word in program position: `bisect run`'s command, or the
-    subcommand itself. `bisect run` runs the argv after it; `submodule foreach`
-    runs its remaining words, and `rebase --exec`/`-x` each value, as shell
-    text."""
+    the index of the word in program position: the command `bisect run` or
+    `submodule foreach` runs, followed along a chain, or the subcommand itself.
+    `bisect run` runs the argv after it; `submodule foreach` runs its remaining
+    words, and `rebase --exec`/`-x` each value, as shell text. A rebase value is
+    one word, so the words after it are rebase's own arguments and the
+    subcommand keeps the program position."""
     subcommand = part[at]
     if subcommand == "bisect" and part[at + 1:at + 2] == ["run"]:
         found = _command_search(part, at + 1, depth + 1)
@@ -1005,7 +1013,14 @@ def _git_subcommand(part, at, depth):
             i += 1
             while i < len(part) and part[i] in ("--recursive", "-q", "--quiet"):
                 i += 1
-            return True if _text_starts_pytest(" ".join(part[i:]), depth) else at
+            if _text_starts_pytest(" ".join(part[i:]), depth):
+                return True
+            if i >= len(part):
+                return at
+            if _command_name(part[i]) in _CHAINED | _DISPATCHERS and depth < _MAX_DEPTH:
+                found = _command_search(part, i, depth + 1)
+                return found if isinstance(found, int) and found is not True else i
+            return i
     if subcommand == "rebase":
         for i in range(at + 1, len(part)):
             word = part[i]
