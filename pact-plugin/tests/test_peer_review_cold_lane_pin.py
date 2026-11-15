@@ -304,7 +304,6 @@ ONCE_RULES = (
     ("Each round gets that one fresh dispatch at most", "the per-round dispatch bound"),
     ("The status row carries no severity", "the did-not-run row's routing"),
     ("Send it no message other than a HALT or the re-check message", "the lead's message bar"),
-    ("when the record holds no valid first-round cold report", "the first-round fallback in a re-review"),
     ("whichever report raised it", "the re-check list's scope"),
     ("ends in exactly one disposition", "the disposition rule"),
     ("verified invalid, when you find", "the verified-invalid disposition"),
@@ -319,13 +318,8 @@ ONCE_RULES = (
     ("with every placeholder value it was dispatched with", "the full placeholder record at spawn"),
     ("in the changed code at `{head}`", "the evidence location for verified invalid"),
     ("resume its subagent once in the same round", "the same-round re-check after a first-round fallback"),
-    ("even when the list is empty", "the no-skip rule"),
-    ("first decide whether the round needs a first-round review", "the re-review's first-round trigger"),
-    ("when unsure, the round needs one", "the trigger's unsure default"),
+    ("In each verify-only re-review, dispatch the cold prompt as a first-round review", "the re-review's unconditional first-round dispatch"),
     ("taken from the most recent such line", "the use of corrected placeholders in the re-review's first-round dispatch"),
-    ("a hunk in such a fix that changes anything its finding does not name", "the over-reaching fix hunk"),
-    ("only records that fix in the release notes", "the release-note exemption"),
-    ("its re-check message named", "the head a re-check report records"),
     ("or another reason, stated", "the REPORT reason set"),
     ("for any reason, or none, other than", "the blocker trigger's reason test"),
     ("routes it to a tracked GitHub issue there", "the tracked-issue decline"),
@@ -335,10 +329,8 @@ ONCE_RULES = (
     ("Cold findings count under the **Failed cycle** test", "the cold failed-cycle rule"),
     ("in the same parallel block as the warm reviewers", "the same-block spawn rule"),
     ("placeholder values `/PACT:imPACT` corrects", "the imPACT-correction record"),
-    ("a lead line of corrected placeholder values", "the resume test on corrections"),
     ("greedy-fix exclusion summary excludes it", "the greedy-fix decline"),
     ("as a status row with no severity, which step 4 does not route", "the verified-invalid status row"),
-    ("a resume other than a same-round re-check", "the retry exemption for the same-round re-check"),
     ("However many findings choose it, run one such round", "the one-round bound on re-review answers"),
     ("filling each slot in angle brackets from that finding in the record", "the question's slot-filling rule"),
     ("the valid first-round report is the round's end state instead", "the same-round re-check fallback"),
@@ -422,6 +414,13 @@ RETIRED_LANE_STEMS = (
     "followed by the re-check message",
     "for a re-check, the re-check message",
     "appends the re-check message",
+    # The per-hunk trigger that chose between a first round and a re-check
+    # alone; every verify-only round now runs a first-round review.
+    "needs a first-round review",
+    "attribute",
+    "release notes",
+    "even when the list is empty",
+    "a resume other than a same-round re-check",
 )
 # Each validity list ends at its consequence clause.
 VALIDITY_ENDS = ("; otherwise",)
@@ -1106,8 +1105,8 @@ class TestLeadFacingRules:
          "the per-finding fields, bound with their quantifier")),
         ("Validity", "; otherwise it is not valid", (
          "the validity consequence — an incomplete report is not valid, and the next step handles it")),
-        ("No report or an invalid one", "When a cold dispatch, or a resume other than a same-round re-check (as **Re-check** says), returns no report or a report that is not valid, or such a resume is not possible, run one fresh cold dispatch", (
-         "the re-dispatch trigger, all three causes")),
+        ("No report or an invalid one", "When a cold dispatch returns no report or a report that is not valid, run one fresh cold dispatch", (
+         "the re-dispatch trigger")),
         ("No report or an invalid one", "after any HALT and any /PACT:imPACT are resolved", (
          "the re-dispatch timing")),
         ("No report or an invalid one", "as a first-round review with the placeholders as /PACT:imPACT corrected them; in a verify-only re-review it is the round's first-round review under **Re-check**, with that rule's one same-round re-check", (
@@ -1177,20 +1176,12 @@ class TestLeadFacingRules:
         ("Remediation", "route its findings to warm fixers", "where its findings go"),
         ("Remediation", "Send it no message other than a HALT or the re-check message", (
          "the bar on any other message")),
-        ("Re-check", "It needs one when the record holds no valid first-round cold report; when the record holds a lead line of corrected placeholder values appended after the most recent valid cold report; or when git diff from the {head} recorded with the most recent valid cold report (for a re-check report, the {head} its re-check message named) to the current {head} carries any hunk that is not a fix you dispatched for a cold finding in the record with no disposition", (
-         "the first-round trigger, all three causes, and the head a re-check report records")),
-        ("Re-check", "A hunk in the same commit as one of those fixes that only records that fix in the release notes, or only bumps a version for it, does not count", (
-         "the release-note and version-bump exemption, bound to the fix's own commit")),
-        ("Re-check", "A hunk you cannot attribute to one of those fixes counts, including a commit merged in from the base and a fix to a warm finding; so does a hunk in such a fix that changes anything its finding does not name, and so does a recorded {head} that git cannot resolve; when unsure, the round needs one", (
-         "the trigger's attribution rule, the over-reaching fix hunk, and the unsure default")),
-        ("Re-check", "When the round needs one, dispatch the cold prompt as a first-round review, with any placeholder value that a lead line of corrections in the record changed taken from the most recent such line, except {base} and {head}, which follow their definitions", (
-         "the first-round dispatch the trigger selects, filled from the latest corrections, with base and head always fresh")),
-        ("Re-check", "when that review is valid and the record holds earlier findings with no disposition, resume its subagent once in the same round with the re-check message listing them, and that re-check's report is the round's end state", (
-         "the same-round re-check of earlier findings after the fallback")),
+        ("Re-check", "In each verify-only re-review, dispatch the cold prompt as a first-round review, with any placeholder value that a lead line of corrections in the record changed taken from the most recent such line, except {base} and {head}, which follow their definitions", (
+         "the unconditional first-round dispatch, filled from the latest corrections, with base and head always fresh")),
+        ("Re-check", "when that review is valid and the record holds earlier findings with no disposition, resume its subagent once in the same round with the re-check message listing every one of them, whichever report raised it, and that re-check's report is the round's end state", (
+         "the one same-round re-check of every earlier undisposed finding")),
         ("Re-check", "if that re-check is not valid or not possible, the valid first-round report is the round's end state instead, with no fresh dispatch, and the earlier findings keep no disposition until the next round's re-check", (
          "the same-round re-check's fallback — the valid first round stands, no retry")),
-        ("Re-check", "Otherwise send the re-check message listing every cold finding in the record with no disposition, whichever report raised it, even when the list is empty", (
-         "the re-check list and the no-skip rule")),
         ("Re-check", "The re-check message is the paragraph below followed by the listed findings", (
          "the message composition — checklist plus findings")),
         ("Re-check", "copied verbatim from the record, never from synthesized rows", (
@@ -1321,8 +1312,8 @@ class TestOutsideSectionRules:
         ("pr", "takes the place of a teachback", "what stands in for the cold lane's teachback"),
         ("pr", "When a warm reviewer's findings need fixing", (
          "the warm scoping of reviewer-to-fixer reuse")),
-        ("pr", "Warm: confirm each finding was addressed; cold: a re-check of every cold finding with no disposition, or a fresh first-round review when **Re-check** requires one", (
-         "the Verify-Only depth row naming both cold cases")),
+        ("pr", "Warm: confirm each finding was addressed; cold: a first-round review, then a re-check of every cold finding with no disposition", (
+         "the Verify-Only depth row: a cold first round, then the re-check")),
         ("pr", "Reuse the warm reviewer who found the issues; the cold reviewer re-checks every cold finding with no disposition", (
          "the Verify-Only re-review routing")),
         ("pr", "and per open question in each first-round or re-check cold report,", (
