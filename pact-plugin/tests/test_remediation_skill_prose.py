@@ -2168,6 +2168,26 @@ class _DetectionGraph:
             return None
         return shown
 
+    def class_statement_name(self, expression, module: str) -> bool:
+        """Whether a base, keyword value or decorator of a class statement
+        (`_class_statement_names`) is reached through one of the project's
+        own names (`project_name`, a class of the same module included) and
+        does not resolve to a project function. Defining the class runs that
+        object's code (a base's `__init_subclass__`, a metaclass, a class
+        decorator) with no call node, so the name is reported. A project
+        function there is followed by `references` like any other use."""
+        import ast
+
+        found = self.target(expression, module) if isinstance(expression, ast.Call) else (
+            self.refers_to(expression, module)
+        )
+        if found is not None:
+            return False
+        head = expression
+        while isinstance(head, (ast.Attribute, ast.Subscript, ast.Call)):
+            head = head.func if isinstance(head, ast.Call) else head.value
+        return isinstance(head, ast.Name) and self.project_name(head.id, module) is not None
+
     def references(self, node, module: str):
         """Yield (expression, (module, def)) for each call into a project
         function inside `node`, and for each project function used as a
@@ -2193,6 +2213,16 @@ class _DetectionGraph:
                 found = self.refers_to(sub, module)
                 if found is not None:
                     yield sub, found
+
+
+def _class_statement_names(node):
+    """(role, expression) for each base, keyword value (`metaclass=`
+    included) and decorator of the class statement `node`."""
+    return (
+        [("base", base) for base in node.bases]
+        + [(f"keyword {keyword.arg}", keyword.value) for keyword in node.keywords]
+        + [("decorator", decorator) for decorator in node.decorator_list]
+    )
 
 
 def _import_time_code(tree):
@@ -2494,9 +2524,16 @@ def route_inputs() -> dict:
     is `("call", "<call to no function ...>")`, and every use of a
     module-level name of another project module that is not a function (a
     constant, a class, an object) is `("call", "<name imported from a
-    project module ...>")`, marked when the use is an annotation. Nothing
-    classifies any of these unless NOT_A_ROUTE names it, so the census fails
-    closed. A project
+    project module ...>")`, marked when the use is an annotation. Every
+    class statement, in a function or at import, whose base, keyword value
+    (`metaclass=` included) or decorator is reached through a project name
+    (a class of the same module included) and does not resolve to a project
+    function (`_DetectionGraph.class_statement_name`) is `("call", "<class
+    statement on a project name ...>")`, since defining the class runs that
+    object's code (a base's `__init_subclass__` or `__class_getitem__`, a
+    metaclass, a class decorator) with no call node. Nothing classifies any
+    of these unless NOT_A_ROUTE names it, so the census fails closed. A
+    project
     function used as a value (passed, stored, returned) counts as a call
     where it is named, so the function it reaches is read even when the call
     is elsewhere.
@@ -2519,7 +2556,8 @@ def route_inputs() -> dict:
     class, in a function or at import, whatever the class defines; a method
     of any other project object (a compiled pattern, a logger, a context
     variable, an instance); a method on any `self` attribute; and a method
-    on a local holding anything else. No method is followed into a class.
+    on a local holding anything else; and every class statement on a
+    project name. No method is followed into a class.
 
     The process and home directories are each ONE condition, `("cwd",)` and
     `("home",)`, whichever function reads them, so a new reader of either is
@@ -2533,8 +2571,10 @@ def route_inputs() -> dict:
     C extension (`ctypes`), which no source anchor can see; a method called
     on a function's parameter, or on a local proved a standard-library
     value only by taking a parameter as one, whose type the census cannot
-    see; and a plain attribute read, `with`, `for` or formatting of an
-    object a project function returned, which runs no code the census sees.
+    see; a class statement whose base, keyword value or decorator is a
+    local or a parameter; and a plain attribute read, `with`, `for` or
+    formatting of an object a project function returned, which runs no code
+    the census sees.
     Each such object is built somewhere, and every project class build is
     reported, so its origin is a named condition. A condition names a
     callee, not a site: a further call of an already named callee is
@@ -2639,6 +2679,12 @@ def route_inputs() -> dict:
                     f"{module}: a method of what {producer} returns"
                 )
                 add(("call", f"<call to no function {shown}>"), f"{site}:{sub.lineno}", key)
+            if isinstance(sub, ast.ClassDef):
+                for role, expression in _class_statement_names(sub):
+                    if graph.class_statement_name(expression, module):
+                        add(("call", f"<class statement on a project name {module}: "
+                                     f"{sub.name} {role} {ast.unparse(expression)}>"),
+                            f"{site}:{sub.lineno}", key)
         for read, shown in _env_reads(node, module, key[1], graph):
             if isinstance(read, ast.Constant) and isinstance(read.value, str):
                 add(("env", read.value), f"{site}:{read.lineno}", key)
@@ -2940,43 +2986,48 @@ class TestEveryRouteEntryConditionIsARoute:
             "a method of a compiled literal pattern"
         ),
         ("call", "<name imported from a project module memory_api: MemoryObject in an annotation>"): (
-            "the models record class, named in an annotation"
+            "models' @dataclass class with methods, named in an annotation"
         ),
         ("call", "<name imported from a project module memory_api: ProjectScopeDisagreementError>"): (
             "pact_session's error class, the base of a class memory_api defines"
+        ),
+        ("call", "<class statement on a project name memory_api: "
+                 "ProjectIdentityUnresolvedError base ProjectScopeDisagreementError>"): (
+            "a base whose project classes define no __init_subclass__ or __class_getitem__ "
+            "and name no metaclass"
         ),
         ("call", "<name imported from a project module project_identity: CANONICAL_ID_MAX_LENGTH>"): (
             "database's id length constant, which the importing function returns"
         ),
         ("call", "<name imported from a project module search: MemoryObject in an annotation>"): (
-            "the models record class, named in an annotation"
+            "models' @dataclass class with methods, named in an annotation"
         ),
         ("call", "<name imported from a project module shared.claude_md_manager: Document in an annotation>"): (
-            "claude_md_markers' document class, named in an annotation"
+            "claude_md_markers' class with methods, named in an annotation"
         ),
         ("call", "<name imported from a project module shared.claude_md_manager: Located in an annotation>"): (
-            "claude_md_markers' record class, named in an annotation"
+            "claude_md_markers' NamedTuple class, named in an annotation"
         ),
         ("call", "<name imported from a project module shared.claude_md_manager: SessionRoot in an annotation>"): (
-            "project_scope's record class, named in an annotation"
+            "project_scope's NamedTuple class, named in an annotation"
         ),
         ("call", "<name imported from a project module shared.project_scope: _UNSAFE_SLUG_CHARS_RE>"): (
             "pact_context's compiled pattern, whose sub replaces unsafe characters in the session id"
         ),
         ("call", "<name imported from a project module shared.session_resume: Document in an annotation>"): (
-            "claude_md_markers' document class, named in an annotation"
+            "claude_md_markers' class with methods, named in an annotation"
         ),
         ("call", "<name imported from a project module shared.session_resume: ManagedDocument in an annotation>"): (
-            "claude_md_manager's record class, named in an annotation"
+            "claude_md_manager's NamedTuple class, named in an annotation"
         ),
         ("call", "<name imported from a project module shared.session_resume: SessionRoot in an annotation>"): (
-            "project_scope's record class, named in an annotation"
+            "project_scope's NamedTuple class, named in an annotation"
         ),
         ("call", "<name imported from a project module working_memory: Document in an annotation>"): (
-            "claude_md_markers' document class, named in an annotation"
+            "claude_md_markers' class with methods, named in an annotation"
         ),
         ("call", "<name imported from a project module working_memory: Located in an annotation>"): (
-            "claude_md_markers' record class, named in an annotation"
+            "claude_md_markers' NamedTuple class, named in an annotation"
         ),
         ("call", "<name imported from a project module graph: _connection_sqlite3>"): (
             "the sqlite3 module database imports, read for its IntegrityError class in a module-level tuple"
@@ -3064,6 +3115,111 @@ class TestEveryRouteEntryConditionIsARoute:
                 wrong.setdefault(f"reason says {says}, the code is {kind}", set()).add(condition)
         assert wrong == {}, wrong
         assert len(builds) >= 1 and len(patterns) >= 1, (builds, patterns)  # control
+
+    def test_each_class_reason_states_the_class_it_names(self):
+        """Each NOT_A_ROUTE reason for a class is the text computed from the
+        class: for a name used in an annotation, its module, whether it is a
+        NamedTuple, a @dataclass or a plain class, and whether its body
+        defines a method; for a class statement on a project base, that the
+        base and every project class it derives from define no
+        `__init_subclass__` or `__class_getitem__` and name no metaclass. Any
+        other form computes no reason, so it fails here until the arm reads
+        it."""
+        import ast
+        import re as regex
+
+        graph = _DetectionGraph()
+        annotated = regex.compile(r"<name imported from a project module ([\w.]+): (\w+) in an annotation>")
+        statement = regex.compile(r"<class statement on a project name ([\w.]+): \w+ (base|keyword \w+|decorator) (\w+)>")
+        inert = "a base whose project classes define no __init_subclass__ or __class_getitem__ and name no metaclass"
+
+        def class_node(name, module):
+            assert graph.load(module), module
+            owned = graph.project_name(name, module)
+            if owned is None or not owned[1] or not graph.load(owned[0]):
+                return None, None
+            return owned[0], graph.classes.get(owned[0], {}).get(owned[1])
+
+        def annotation_reason(owner, node):
+            bases = [ast.unparse(base) for base in node.bases]
+            decorators = [ast.unparse(decorator) for decorator in node.decorator_list]
+            form = (
+                "NamedTuple " if bases in (["NamedTuple"], ["typing.NamedTuple"]) and not decorators
+                else "@dataclass " if decorators in (["dataclass"], ["dataclasses.dataclass"]) and not bases
+                else "" if not bases and not decorators
+                else None
+            )
+            if form is None or node.keywords:
+                return None
+            short = owner.rpartition(".")[2]
+            methods = any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) for item in node.body)
+            return (f"{short}{chr(39) if short.endswith('s') else chr(39) + 's'} {form}class"
+                    f"{' with methods' if methods else ''}, named in an annotation")
+
+        def no_hooks(owner, node, depth=0):
+            if depth > 8 or any(keyword.arg == "metaclass" for keyword in node.keywords) or any(
+                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and item.name in ("__init_subclass__", "__class_getitem__")
+                for item in node.body
+            ):
+                return False
+            for base in node.bases:
+                if isinstance(base, ast.Name):
+                    parent_owner, parent = class_node(base.id, owner)
+                    if parent is not None and not no_hooks(parent_owner, parent, depth + 1):
+                        return False
+                    if parent is None and graph.project_name(base.id, owner) is not None:
+                        return False
+                elif not (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+                          and graph.project_name(base.value.id, owner) is None):
+                    return False
+            return True
+
+        computed, wrong = 0, {}
+        for condition, reason in self.NOT_A_ROUTE.items():
+            text = condition[1] if condition[0] == "call" else ""
+            if not (annotated.fullmatch(text) or text.startswith("<class statement")):
+                continue
+            expected = None
+            found = annotated.fullmatch(text)
+            if found:
+                owner, node = class_node(found.group(2), found.group(1))
+                expected = annotation_reason(owner, node) if node is not None else None
+            found = statement.fullmatch(text)
+            if found:
+                module, role, name = found.groups()
+                owner, node = class_node(name, module)
+                expected = inert if role == "base" and node is not None and no_hooks(owner, node) else None
+            computed += 1
+            if reason != expected:
+                wrong[condition] = (reason, expected)
+        assert wrong == {}, wrong
+        assert computed >= 2, computed  # control
+
+    def test_a_class_statement_on_a_project_class_is_reported(self):
+        """A base, keyword value or decorator of a class statement reached
+        through a project name is reported: a class of the same module, an
+        imported class, subscripted or not. A standard-library name is not,
+        and neither is a project function, which `references` follows."""
+        import ast
+
+        graph = _DetectionGraph()
+        assert graph.load("memory_api")
+        function = next(name for module, name in sorted(graph.defs) if module == "memory_api" and "." not in name)
+
+        def reported(source):
+            node = ast.parse(source).body[0]
+            return [graph.class_statement_name(expression, "memory_api")
+                    for _role, expression in _class_statement_names(node)]
+
+        assert "PACTMemory" in graph.classes["memory_api"]  # control: a same-module class
+        assert reported("class X(PACTMemory): pass") == [True]
+        assert reported("class X(PACTMemory[int]): pass") == [True]
+        assert reported("class X(metaclass=PACTMemory): pass") == [True]
+        assert reported("@PACTMemory\nclass X: pass") == [True]
+        assert reported("class X(ProjectScopeDisagreementError): pass") == [True]
+        assert reported("@dataclass\nclass X(RuntimeError, metaclass=type): pass") == [False, False, False]
+        assert reported(f"@{function}\nclass X: pass") == [False]
 
     def test_every_entry_condition_is_driven_or_excluded(self, route_driven_conditions):
         conditions = route_entry_conditions()
