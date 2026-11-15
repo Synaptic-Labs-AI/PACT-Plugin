@@ -871,7 +871,9 @@ def _literal_script(value: str, plugin_root: Path,
     skipped too: it is the package marker joined onto some directory
     (`package / "__init__.py"`), and resolved against every root it would
     match each root's own package marker, never the file the code names.
-    A path that carries its directory ("hooks/__init__.py") still resolves.
+    A path that carries its directory ("hooks/__init__.py") still resolves,
+    and so does a join of an anchored directory to the marker
+    (_anchored_join_files).
     """
     if not value.endswith(".py") or "\n" in value or len(value) > 200:
         return []
@@ -1141,6 +1143,110 @@ def _module_anchors(tree: ast.Module, rel: str,
                 if found_anchor is not None:
                     resolved[name] = found_anchor
     return constants, anchors, resolved
+
+
+def _parameter_anchors(tree: ast.Module,
+                       resolved: dict[str, tuple[int, tuple[str, ...]]]
+                       ) -> dict[int, dict[str, set[tuple[int, tuple[str, ...]]]]]:
+    """For each function, the anchors its parameters are given by a direct call
+    in the same module: {id(function): {parameter: anchors}}.
+
+    Only the exact slot binds: the n-th positional argument to the n-th
+    positional parameter, a keyword to the parameter it names. An argument
+    whose location cannot be resolved (a tmp_path, a computed path) adds
+    nothing, so a parameter some call sites anchor and others do not is read
+    with the anchors alone.
+    """
+    functions: dict[str, list[ast.FunctionDef | ast.AsyncFunctionDef]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            functions.setdefault(node.name, []).append(node)
+    bound: dict[int, dict[str, set[tuple[int, tuple[str, ...]]]]] = {}
+    for call in ast.walk(tree):
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)):
+            continue
+        targets = functions.get(call.func.id, ())
+        if len(targets) != 1:
+            continue  # unknown or redefined: which body the call reaches is open
+        function = targets[0]
+        positional = [arg.arg for arg in (*function.args.posonlyargs,
+                                          *function.args.args)]
+        slots = list(zip(positional, call.args))
+        slots += [(keyword.arg, keyword.value) for keyword in call.keywords
+                  if keyword.arg is not None]
+        for parameter, argument in slots:
+            if isinstance(argument, ast.Starred):
+                break  # *args shifts every later slot
+            found = _anchor_of(argument, resolved)
+            if found is not None:
+                bound.setdefault(id(function), {}).setdefault(
+                    parameter, set()).add(found)
+    return bound
+
+
+def _anchored_join_files(tree: ast.Module, rel: str,
+                         module_files: dict[str, str],
+                         plugin_root: Path) -> list[Path]:
+    """Production .py files a module names by joining an anchored directory to
+    file literals: `ROOT / "hooks" / "x.py"`, `HERE.joinpath("x.py")`,
+    `os.path.join(BASE, "x.py")`, including through a function's local name or a
+    parameter an in-module call binds to an anchor. A test that reads such a
+    file depends on it. A join onto a base that is not anchored (a tmp_path, a
+    parameter no call anchors) names nothing. As for a whole literal, test-tree
+    files and conftests are not edges.
+    """
+    _, _, resolved = _module_anchors(tree, rel, module_files)
+    parameters = _parameter_anchors(tree, resolved)
+    module_parts = Path(rel).parts
+    scopes: list[tuple[ast.AST, dict[str, set[tuple[int, tuple[str, ...]]]]]] = [
+        (tree, {})]
+    scopes += [(node, parameters.get(id(node), {})) for node in ast.walk(tree)
+               if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    found: list[Path] = []
+    for scope, bound in scopes:
+        # One reading per combination would multiply; a parameter with several
+        # anchors is read once per anchor, the others at their first.
+        readings: list[dict[str, tuple[int, tuple[str, ...]]]] = [{}]
+        for parameter, anchors in bound.items():
+            ordered = sorted(anchors)
+            readings = [{**reading, parameter: anchor}
+                        for reading in readings for anchor in ordered]
+            if len(readings) > 16:
+                readings = readings[:16]
+        for reading in readings:
+            anchors = {**resolved, **reading}
+            assigned = [node for node in ast.walk(scope)
+                        if isinstance(node, ast.Assign) and len(node.targets) == 1
+                        and isinstance(node.targets[0], ast.Name)]
+            for _ in range(len(assigned)):
+                grew = False
+                for node in assigned:
+                    name = node.targets[0].id
+                    if name not in anchors:
+                        local = _anchor_of(node.value, anchors)
+                        if local is not None:
+                            anchors[name] = local
+                            grew = True
+                if not grew:
+                    break
+            for node in ast.walk(scope):
+                joined = (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)) or (
+                    isinstance(node, ast.Call)
+                    and _call_name(node) in ("joinpath", "join"))
+                if not joined:
+                    continue
+                anchor = _anchor_of(node, anchors)
+                if anchor is None or not anchor[1] or not anchor[1][-1].endswith(".py"):
+                    continue
+                directory = _anchor_directory(anchor, module_parts)
+                if directory is None:
+                    continue
+                candidate = plugin_root / directory
+                if (candidate.name == "conftest.py" or directory.startswith("tests/")
+                        or not candidate.is_file()):
+                    continue
+                found.append(candidate)
+    return found
 
 
 def _repo_reach(tree: ast.Module, rel: str, plugin_root: Path,
@@ -2825,6 +2931,7 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
                         root).as_posix()
                 except ValueError:
                     pass
+    edges.extend(_anchored_join_files(tree, module_rel, module_files, root))
     test_side = module_rel.startswith("tests/") or _is_test_file(module_rel)
     return FileScan(
         edges=tuple(dict.fromkeys(to_rel(edges))),
@@ -2988,8 +3095,9 @@ def import_closure(plugin_root: Path, start: list[str]) -> frozenset[str]:
 
     Follows every import statement (module level and function local, so a
     package's eager `__init__` imports are followed too), relative imports,
-    and string literals naming a production .py file. Over-approximates by
-    design: it is the floor a manifest's seam lists must cover.
+    string literals naming a production .py file, and joins of an anchored
+    directory to file literals that name one. Over-approximates by design: it
+    is the floor a manifest's seam lists must cover.
     """
     return ScanIndex(plugin_root).closure(list(start))
 

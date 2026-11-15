@@ -1142,6 +1142,94 @@ class TestImportClosure:
         closure = core.import_closure(plugin, ["tests/test_d.py"])
         assert {"hooks/__init__.py", "hooks/shared/direct.py"} <= closure
 
+    # A read of an anchored directory joined to file literals names that file,
+    # whether the base is a module name, an inline expression, a local, or a
+    # parameter an in-module call binds to an anchor. The package marker the
+    # join ends at is the file; a bare "__init__.py" literal alone is not.
+    @pytest.mark.parametrize("source", [
+        'from pathlib import Path\n'
+        'SHARED = Path(__file__).resolve().parent.parent / "hooks" / "shared"\n'
+        'TEXT = (SHARED / "__init__.py").read_text()\n',
+        'from pathlib import Path\n'
+        'TEXT = (Path(__file__).parent.parent / "hooks" / "shared" / "__init__.py")'
+        '.read_text()\n',
+        'from pathlib import Path\n'
+        'def read():\n'
+        '    shared = Path(__file__).parent.parent / "hooks" / "shared"\n'
+        '    return shared.joinpath("__init__.py").read_text()\n',
+        'import os\n'
+        'PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "hooks",\n'
+        '                    "shared", "__init__.py")\n',
+        'from pathlib import Path\n'
+        'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n'
+        'def guarded(conftest, hooks_root):\n'
+        '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+        'def test_real():\n'
+        '    guarded(None, HOOKS)\n'
+        'def test_rig(tmp_path):\n'
+        '    guarded(None, tmp_path)\n',
+        'from pathlib import Path\n'
+        'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n'
+        'def guarded(conftest, hooks_root):\n'
+        '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+        'def test_real():\n'
+        '    guarded(conftest=None, hooks_root=HOOKS)\n',
+    ], ids=["module-name", "inline", "local-joinpath", "os-path-join",
+            "parameter-positional", "parameter-keyword"])
+    def test_an_anchored_join_to_a_file_names_that_file(self, core, tmp_path, source):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "tests" / "test_e.py", source)
+        closure = core.import_closure(plugin, ["tests/test_e.py"])
+        assert {"hooks/shared/__init__.py", "hooks/shared/eager.py"} <= closure
+
+    @pytest.mark.parametrize("source", [
+        'def read(tmp_path):\n'
+        '    return (tmp_path / "hooks" / "shared" / "__init__.py").read_text()\n',
+        'from pathlib import Path\n'
+        'def guarded(hooks_root):\n'
+        '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+        'def test_rig(tmp_path):\n'
+        '    guarded(tmp_path)\n',
+        'from pathlib import Path\n'
+        'BASE = Path("/somewhere/else")\n'
+        'TEXT = (BASE / "hooks" / "shared" / "__init__.py").read_text()\n',
+        'from pathlib import Path\n'
+        'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n'
+        'def guarded(conftest, hooks_root):\n'
+        '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+        'def test_wrong_slot():\n'
+        '    guarded(HOOKS, None)\n',
+    ], ids=["tmp-path", "unbound-parameter", "absolute-base", "anchor-in-other-slot"])
+    def test_a_join_onto_a_base_that_is_not_anchored_names_nothing(
+            self, core, tmp_path, source):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "tests" / "test_f.py", source)
+        closure = core.import_closure(plugin, ["tests/test_f.py"])
+        assert "hooks/shared/__init__.py" not in closure, sorted(closure)
+
+    @pytest.mark.parametrize("module, read", [
+        ("tests/test_conftest_import_guard.py", "hooks/shared/__init__.py"),
+        ("tests/test_import_bar_cause_presence.py", "scripts/memory_repair/__init__.py"),
+    ])
+    def test_the_real_joined_reads_are_in_their_modules_closures(self, core, module, read):
+        """The two real modules that read a package marker through an anchored
+        join: one through a parameter its call binds to HOOKS, which only the
+        join modelling reaches; one through a module-level PACKAGE_DIR, whose
+        file its imports of the package also reach."""
+        plugin = ci_contract.require_root("the real plugin tree") / "pact-plugin"
+        assert read in core.import_closure(plugin, [module])
+
+    def test_an_anchored_join_to_a_test_file_or_conftest_is_no_edge(self, core, tmp_path):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "tests" / "test_g.py",
+               'from pathlib import Path\n'
+               'ROOT = Path(__file__).resolve().parents[1]\n'
+               'A = (ROOT / "tests" / "helper.py").read_text()\n'
+               'B = (ROOT / "conftest.py").read_text()\n')
+        closure = core.import_closure(plugin, ["tests/test_g.py"])
+        assert "tests/helper.py" not in closure and "conftest.py" not in closure
+        assert "hooks/shared/unrelated.py" not in closure
+
 
 class TestScanIndex:
     """What one module contributes to its exclusions' views."""
