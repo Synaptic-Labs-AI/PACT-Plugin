@@ -76,7 +76,7 @@ fi
 if ! command -v ruff >/dev/null 2>&1; then
     printf 'GATE REFUSED: ruff is not available, so the lint legs cannot run.\n' >&2
     printf '  A missing linter must not read as a pass. From the repo root, these three commands create the\n' >&2
-    printf '  repository venv (.venv), install the CI lock into it (all 40 locked packages, ruff at the version\n' >&2
+    printf '  repository venv (.venv), install the CI lock into it (every locked package, ruff at the version\n' >&2
     printf '  CI pins among them) and put it first on PATH, as .cursor/install.sh does. This is the local\n' >&2
     printf '  install, not the CI one: it accepts source builds, whose build dependencies are not hash-checked.\n' >&2
     printf '    python3 -m venv .venv\n' >&2

@@ -447,10 +447,38 @@ class TestHashCheckedInstall:
         prose = " ".join(printed)
         for phrase in ("repository venv (.venv)", "not the CI one"):
             assert phrase in prose, phrase
-        pins = re.findall(r"(?m)^[A-Za-z0-9][A-Za-z0-9._-]*==",
-                          (root / "constraints-ci.txt").read_text(encoding="utf-8"))
-        assert f"all {len(pins)} locked packages" in prose, (len(pins), prose)
+        # A count of the lock's packages here would go stale on every lock
+        # refresh that adds or drops one, so the remedy names none.
+        assert "every locked package" in prose, prose
+        assert not re.search(r"\d+ locked package", prose), prose
         assert "-c constraints-ci.txt" not in text
+
+    @pytest.mark.parametrize("pins", [1, 41])
+    def test_the_lint_gate_remedy_does_not_change_with_the_lock_size(self, tmp_path, pins):
+        """The refusal printed with ruff absent is the same text whatever the
+        lock holds."""
+        root = ci_contract.require_root("the lint gate remedy")
+        rig = tmp_path / "repo"
+        (rig / "scripts").mkdir(parents=True)
+        (rig / "pact-plugin").mkdir()
+        shutil.copy(root / "scripts" / "verify-local-lint-gate.sh", rig / "scripts")
+        (rig / "constraints-ci.txt").write_text(
+            "".join(f"pkg{n}==1.0 --hash=sha256:{n:064x}\n" for n in range(pins)),
+            encoding="utf-8")
+        bin_dir = tmp_path / "bin"  # dirname only, so no ruff resolves
+        bin_dir.mkdir()
+        (bin_dir / "dirname").symlink_to(shutil.which("dirname"))
+        proc = subprocess.run(
+            [shutil.which("bash"), str(rig / "scripts" / "verify-local-lint-gate.sh")],
+            env={"PATH": str(bin_dir), "HOME": str(tmp_path / "home")},
+            capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 2, (proc.returncode, proc.stderr)
+        real = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
+        block = real[real.index("printf 'GATE REFUSED: ruff is not available"):]
+        expected = [line.split("'")[1].removesuffix("\\n")
+                    for line in block[:block.index("exit 2")].splitlines()
+                    if line.strip().startswith("printf")]
+        assert proc.stderr.splitlines() == expected, proc.stderr
 
     def test_the_environment_check_remedy_is_the_local_install(self):
         """The verifier's MISSING remedy is printed wherever it runs, CI or a
