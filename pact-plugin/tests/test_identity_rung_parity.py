@@ -210,7 +210,8 @@ def _marker_predicates() -> set:
     return _marker_predicate_forms()[0]
 
 
-# {home shape: (whether the cwd marker walk from the target lands on HOME,
+# {home shape: (whether the cwd marker walk from the target, with every `.git`
+# git looks past left out, lands on HOME,
 # the answer every route gives when the session's checkout is HOME, or None
 # when it is not)}, measured with the filesystem and git by the matrix fixture.
 HOME_FACTS: dict = {}
@@ -218,18 +219,34 @@ HOME_FACTS: dict = {}
 
 def _home_facts(shape: str, target: Path) -> None:
     """Record, once per home shape, where the cwd marker walk lands and
-    whether git's toplevel for the target, or the target itself, is HOME."""
+    whether git's toplevel for the target, or the target itself, is HOME.
+    The walk leaves out a `.git` directory when git, asked there, names
+    another top level and a common dir other than that `.git`: git looked
+    past it, so it is no marker."""
     import subprocess
+
+    def ask(where, *flags):
+        return subprocess.run(
+            ["git", "-C", str(where), "rev-parse", *flags],
+            capture_output=True, text=True, timeout=30, check=False,
+        ).stdout.strip()
 
     home = home_for(shape, target)
     if home is None or shape in HOME_FACTS:
         return
     home = home.resolve()
     walk = PACTMemory._find_project_root(target / "sub").resolve()
-    toplevel = subprocess.run(
-        ["git", "-C", str(target), "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True, timeout=30, check=False,
-    ).stdout.strip()
+    while walk != home and (walk / ".git").is_dir():
+        top = ask(walk, "--show-toplevel")
+        common = ask(walk, "--path-format=absolute", "--git-common-dir")
+        other_marker = (walk / ".claude").is_dir() or (walk / "CLAUDE.md").exists()
+        if other_marker or not (
+            top and common and Path(top).resolve() != walk
+            and Path(common).resolve() != (walk / ".git").resolve()
+        ):
+            break
+        walk = PACTMemory._find_project_root(walk.parent).resolve()
+    toplevel = ask(target, "--show-toplevel")
     at_home = target.resolve() == home or (toplevel and Path(toplevel).resolve() == home)
     HOME_FACTS[shape] = (walk == home, f"bound:{home.name}" if at_home else None)
 
@@ -369,6 +386,20 @@ class TestEveryRungGivesAShapeTheSameAnswer:
             if answer != (f"bound:{USER_SETTING_ID}", "user setting", None)
         }
         assert wrong == {}, f"a home-target cell left out of the agreement arm answered: {wrong}"
+
+    def test_a_stray_git_with_no_repository_above_declines_on_every_route(self, matrix):
+        """A `.git` directory with no repository above gets no answer from
+        git, the same None git's errors give, so it stays a marker git
+        cannot answer for: every route declines it as a broken marker, the
+        user-setting route included, and no override is read."""
+        cells, _sites, _fired, _executed = matrix
+        answers = {
+            route: (answer, override)
+            for (shape, route), (answer, _rung, override) in cells.items()
+            if shape == "stray_dotgit_without_repository"
+        }
+        assert set(answers) == set(ROUTES), sorted(answers)
+        assert set(answers.values()) == {("broken_git_marker", None)}, answers
 
     def test_every_unreached_cell_is_a_recorded_exception(self, matrix):
         cells, _sites, _fired, _executed = matrix

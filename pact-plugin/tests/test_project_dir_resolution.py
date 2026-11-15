@@ -317,7 +317,7 @@ class TestHomeScopeWarning:
         monkeypatch.setattr("subprocess.run", _no_git)
         monkeypatch.setattr(
             PACTMemory, "_find_project_root",
-            staticmethod(lambda start: resolved_root),
+            staticmethod(lambda start, skipped_git=frozenset(): resolved_root),
         )
 
     def test_home_resolution_warns(self, tmp_path, monkeypatch, caplog):
@@ -1785,7 +1785,7 @@ class TestDeclinedDeclaration:
         # If Strategy 3 ran at all it would land here; the arm proves it is
         # not reached on the declined arm.
         monkeypatch.setattr(
-            PACTMemory, "_find_project_root", staticmethod(lambda start: home)
+            PACTMemory, "_find_project_root", staticmethod(lambda start, skipped_git=frozenset(): home)
         )
         with caplog.at_level(logging.WARNING):
             assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")
@@ -1817,7 +1817,7 @@ class TestDeclinedDeclaration:
 
         monkeypatch.setattr("subprocess.run", _no_git)
         monkeypatch.setattr(
-            PACTMemory, "_find_project_root", staticmethod(lambda start: home)
+            PACTMemory, "_find_project_root", staticmethod(lambda start, skipped_git=frozenset(): home)
         )
         with caplog.at_level(logging.WARNING):
             name, label = PACTMemory._detect_project_id_with_source()

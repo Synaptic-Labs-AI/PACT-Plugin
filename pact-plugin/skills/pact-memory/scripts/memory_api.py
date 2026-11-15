@@ -152,9 +152,10 @@ class _DetectedIdentity(NamedTuple):
     rung declines before the identity read (a repository with no working
     tree, a `.git` naming a linked worktree's admin dir that does not link
     back, a broken `.git` marker, a declaration that cannot be resolved) and
-    when the checkout the session is in is the user's home directory (a
-    stray `.git` that git skips, such as an empty directory or a dangling
-    symlink, does not make its folder a checkout).
+    when the checkout the session is in is the user's home directory
+    (inside a repository, a stray `.git` that git looks past, such as an
+    empty directory or a dangling symlink, does not make its folder a
+    checkout).
     `path` is None (the reason is
     kept) when
     the checkout's `.git` is a redirect, or points at a git directory outside
@@ -886,6 +887,22 @@ def _is_home(root: Path) -> bool:
     except (OSError, RuntimeError):
         return False
     return os.path.normcase(str(root)) == os.path.normcase(str(home))
+
+
+def _git_skips_marker(root: Path, common: Optional[Path], toplevel: Optional[str]) -> bool:
+    """Whether git skipped the `.git` directory at `root` for a checkout
+    elsewhere: git's answers asked at `root` name a common dir that is not
+    `root/.git` and a top level that is not `root`. A `.git` file is never
+    skipped (git refuses a bad gitfile rather than looking past it), and no
+    answer is no evidence: git's errors (an unreadable or untrusted `.git`)
+    answer None too."""
+    dot_git = root / ".git"
+    if common is None or not toplevel or not dot_git.is_dir():
+        return False
+    return (
+        os.path.realpath(toplevel) != os.path.realpath(root)
+        and os.path.realpath(common) != os.path.realpath(dot_git)
+    )
 
 
 def _home_checkout(
@@ -2284,7 +2301,7 @@ class PACTMemory:
         )
 
     @staticmethod
-    def _find_project_root(start: Path) -> Path:
+    def _find_project_root(start: Path, skipped_git: frozenset = frozenset()) -> Path:
         """
         Walk UP from `start` looking for a project marker; return the first
         marker-containing directory.
@@ -2299,6 +2316,8 @@ class PACTMemory:
 
         Args:
             start: Path to begin the walk from (typically Path.cwd()).
+            skipped_git: resolved directories whose `.git` is not a marker
+                (the cwd-marker rung passes the ones git looked past).
 
         Returns:
             First ancestor (inclusive of `start`) containing a project marker,
@@ -2309,7 +2328,7 @@ class PACTMemory:
         except (OSError, RuntimeError):
             return start
         for parent in [current] + list(current.parents):
-            if (parent / ".git").exists():
+            if parent not in skipped_git and (parent / ".git").exists():
                 return parent
             if (parent / ".claude").is_dir():
                 return parent
@@ -2622,8 +2641,8 @@ class PACTMemory:
         declaration was present at all and no repository was found, so a
         repository pin outranks it wherever one is read. No rung reads a pin
         when the checkout the session is in is the HOME directory, a linked
-        worktree included (a stray `.git` that git skips does not make its
-        folder a checkout): the git-root, declared and recorded rungs land
+        worktree included (inside a repository, a stray `.git` that git looks
+        past does not make its folder a checkout): the git-root, declared and recorded rungs land
         there on its folder name, and the cwd-marker rung, whose HOME landing
         never asks git, binds the user setting there when one exists. A
         session in a worktree outside HOME reads its repository's pin even
@@ -2763,15 +2782,33 @@ class PACTMemory:
         )
         try:
             cwd_start = _cwd_or_none()
-            cwd_root = (
-                PACTMemory._find_project_root(cwd_start) if cwd_start is not None else None
-            )
+            cwd_root = None
             cwd_common_dir = None
             marker_toplevel = None
+            # A `.git` GIT LOOKED PAST IS NO MARKER: when git, asked at the
+            # walk's root, names a checkout elsewhere (`_git_skips_marker`),
+            # the walk runs again without that `.git`, so the root is where
+            # the same folder with no `.git` would land. The answers asked at
+            # a root are kept, so no root is asked twice.
+            skipped: set = set()
+            asked: dict = {}
+            while cwd_start is not None:
+                cwd_root = PACTMemory._find_project_root(cwd_start, frozenset(skipped))
+                cwd_common_dir = marker_toplevel = None
+                if not cwd_root.name or _is_home(cwd_root):
+                    break
+                key = Path(os.path.realpath(cwd_root))
+                if key not in asked:
+                    common = main_repo_common_dir(str(cwd_root))
+                    asked[key] = (
+                        common,
+                        _git_rev_parse(str(cwd_root), "--show-toplevel") if common is not None else None,
+                    )
+                cwd_common_dir, marker_toplevel = asked[key]
+                if key in skipped or not _git_skips_marker(cwd_root, cwd_common_dir, marker_toplevel):
+                    break
+                skipped.add(key)
             if cwd_root is not None and cwd_root.name and not _is_home(cwd_root):
-                cwd_common_dir = main_repo_common_dir(str(cwd_root))
-                if cwd_common_dir is not None:
-                    marker_toplevel = _git_rev_parse(str(cwd_root), "--show-toplevel")
                 # A REPOSITORY THE WALK FINDS DECIDES BEFORE THE USER SETTING,
                 # exactly as on the git-root rung: it binds its pin or its
                 # origin, or declines, and the setting is never read. The same

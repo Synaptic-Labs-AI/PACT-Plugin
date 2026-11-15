@@ -259,6 +259,17 @@ def _stray_dangling_dotgit(base: Path) -> Path:
     return target
 
 
+def _stray_dotgit_without_repository(base: Path) -> Path:
+    """An empty `.git` directory in a folder with no repository above it.
+    Git finds no repository here, so it gives no answer, and git's errors
+    on a `.git` it cannot read or does not trust give that same None.
+    Reading a None as a `.git` git looked past would send those to another
+    root, so this `.git` stays a marker that git cannot answer for."""
+    target = base / "folder"
+    (target / ".git").mkdir(parents=True)
+    return target
+
+
 # A shape whose `home` is set runs with HOME pointed at that directory.
 _home_linked_worktree.home = lambda target: target
 _home_main_checkout.home = lambda target: target.parent / "home"
@@ -299,6 +310,7 @@ _BUILDERS = {
     "home_stray_hooks_only_dotgit": _stray_hooks_only_dotgit,
     "home_stray_objectless_dotgit": _stray_objectless_dotgit,
     "home_stray_dangling_dotgit": _stray_dangling_dotgit,
+    "stray_dotgit_without_repository": _stray_dotgit_without_repository,
 }
 
 

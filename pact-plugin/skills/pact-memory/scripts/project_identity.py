@@ -1010,8 +1010,9 @@ def read_user_setting(config_path: Path) -> Optional[str]:
     The user-scope fallback for a session with no repository at all. Applied
     by the caller only when no repository is found, so a repo-scoped override
     wins wherever one is read. When the checkout the session is in is the
-    home directory, a linked worktree included (a stray `.git` that git skips
-    does not make its folder a checkout), no override is read, and the
+    home directory, a linked worktree included (inside a repository, a stray
+    `.git` that git looks past does not make its folder a checkout), no
+    override is read, and the
     cwd-marker route applies this setting there. Never raises.
     """
     try:

@@ -458,7 +458,7 @@ class TestCwdRungDisclosesAnOperatorPin:
         plain.mkdir()
         monkeypatch.chdir(plain)
         monkeypatch.setattr(
-            PACTMemory, "_find_project_root", staticmethod(lambda start: repo.resolve())
+            PACTMemory, "_find_project_root", staticmethod(lambda start, skipped_git=frozenset(): repo.resolve())
         )
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         # NEUTRALISE THE HIGHER RUNGS so the cwd walk is the one that answers:

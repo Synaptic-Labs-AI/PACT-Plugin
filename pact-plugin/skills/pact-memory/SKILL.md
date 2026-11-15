@@ -403,8 +403,9 @@ Two operator surfaces answer, and they are deliberately ordered:
   worktree's admin directory that does not link back to it, when the checkout
   the session is in is the user's home directory (a linked worktree
   included), or when no git directory is found (a broken `.git` marker or a declaration that cannot be
-  resolved). A stray `.git` that git skips, such as an empty directory or a
-  dangling symlink, does not make its folder a checkout. When git cannot see
+  resolved). Inside a repository, a stray `.git` that git looks past, such as
+  an empty directory or a dangling symlink, does not make its folder a
+  checkout. When git cannot see
   that home checkout from the working directory, the user-scope `project_id` below binds there if it is set. A
   session in a checkout outside the home directory reads its pin even when
   the repository's main checkout is the home directory.
