@@ -300,14 +300,30 @@ def test_an_env_whose_keys_cannot_be_read_is_a_fault_that_fails_the_run(census_s
     assert "test_an_env_whose_keys_cannot_be_read" in added[0], added
 
 
-def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census_state):
+def _interpreter(tmp_path, where):
+    """The running interpreter, or a link to it at a path whose length alone
+    crosses the refusal line's 200-character launch text."""
+    if where == "as-installed":
+        return PY
+    link = tmp_path / ("d" * 100) / ("e" * 100) / "python3"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(PY)
+    return str(link)
+
+
+@pytest.mark.parametrize("where", ["as-installed", "long-path"])
+def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census_state, where):
+    """The refusal names the test and shows the launch as given, however long
+    the interpreter's path, and the child never starts."""
     assert census.installed(), "tests/conftest.py did not install the census"
     marker = tmp_path / "started"
-    line = _refused(lambda: subprocess.run(
-        [PY, "-c", "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()", str(marker)],
-        env={"PATH": os.defpath}), census_state)
+    argv = [_interpreter(tmp_path, where), "-c",
+            "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()", str(marker)]
+    line = _refused(lambda: subprocess.run(argv, env={"PATH": os.defpath}), census_state)
     assert not marker.exists(), "the child started before the refusal"
-    assert "test_the_census_is_live" in line and "pathlib.Path(sys.argv[1]).touch()" in line, line
+    shown = census._shown(argv)
+    assert shown and " ".join(argv).startswith(shown), shown
+    assert "test_the_census_is_live" in line and "child [%s]" % shown in line, line
 
 
 class _Reporter:
