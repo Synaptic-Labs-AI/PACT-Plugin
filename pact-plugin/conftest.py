@@ -5,8 +5,8 @@ Location: pact-plugin/conftest.py
 Summary: Makes every skills/*/scripts dir importable for the pin test files
 beside skill artifacts (skills/<skill>/test_*.py), which sit outside
 tests/conftest.py's subtree, and runs what every session needs: the
-import-identity harness, the pytest-randomly seed gate and the CI in-band
-plugins. tests/conftest.py owns the full path block for tests/; the
+import-identity harness, the pytest-randomly seed gate, the HOME census and
+the CI in-band plugins. tests/conftest.py owns the full path block for tests/; the
 membership guard keeps the overlap a no-op when both conftests load in one
 run.
 
@@ -84,15 +84,16 @@ from import_identity_map import (  # noqa: E402
 
 
 def pytest_configure(config):
-    """Refuse an unseeded pytest-randomly, then register the in-band plugins
-    that run inside this process.
+    """Refuse an unseeded pytest-randomly, install the HOME census, then
+    register the in-band plugins that run inside this process.
 
-    The seed gate runs here, not in tests/conftest.py, so a session that
-    collects only skills-adjacent tests is gated too. Plugin objects, because
-    this module already re-exports a pytest_sessionstart. Both import only
-    the standard library and pytest, except the CI binding's script load,
-    which the import charter names. Both are gated on GITHUB_ACTIONS, so
-    outside CI they do nothing.
+    The seed gate and the HOME census run here, not in tests/conftest.py, so a
+    session that collects only skills-adjacent tests is gated and censused
+    too. The census and the two CI plugins are plugin objects, because this
+    module already re-exports a pytest_sessionstart and a
+    pytest_sessionfinish. The two CI plugins import only the standard library
+    and pytest, except the CI binding's script load, which the import charter
+    names. Both are gated on GITHUB_ACTIONS, so outside CI they do nothing.
     The full-run recorder is registered here rather than through
     PYTEST_PLUGINS: PYTEST_PLUGINS would inject it into every nested pytest
     subprocess the suite spawns.
@@ -100,6 +101,10 @@ def pytest_configure(config):
     import randomly_seed_gate
 
     randomly_seed_gate.refuse_unseeded(config)
+
+    import home_census
+
+    home_census.register(config)
 
     from ci_environment_binding import CIEnvironmentBinding
     from ci_full_run_record import FullRunRecord

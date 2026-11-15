@@ -89,10 +89,10 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "pact-coding-st
 # Add plugin-level scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-# The clock-shift, child-pytest and HOME censuses; tests/ is on sys.path from
-# the insert above. The pytest-randomly seed gate runs from pact-plugin/conftest.py.
+# The clock-shift and child-pytest censuses; tests/ is on sys.path from the
+# insert above. The pytest-randomly seed gate and the HOME census run from
+# pact-plugin/conftest.py, which every session under pact-plugin/ loads.
 import child_pytest_census  # noqa: E402
-import home_census  # noqa: E402
 from clock_shift import clock_shift_census  # noqa: E402
 
 # Direct-import helpers for the CLAUDE.md redirect fixture below; tests/ is
@@ -230,50 +230,6 @@ def pytest_configure(config):
     # block pytest-randomly.
     child_pytest_census.install()
 
-    # HOME CENSUS. Always on: refuses a child process started without HOME.
-    config.addinivalue_line("markers", home_census.MARKER_HELP)
-    home_census.install()
-    # A plugin object, not a hook in this conftest: pytest calls
-    # pytest_fixture_setup through the fixture node's hook proxy, which drops
-    # conftests off the node's path (a session fixture's node is the rootdir,
-    # a skills/ module is outside tests/), and keeps every registered plugin.
-    if not config.pluginmanager.has_plugin(_SHARED_FIXTURE_PLUGIN):
-        config.pluginmanager.register(_SharedFixtureBracket(), _SHARED_FIXTURE_PLUGIN)
-
-
-@pytest.hookimpl(hookwrapper=True)
-def pytest_runtest_protocol(item, nextitem):
-    """Tell the HOME census which test is running, for its opt-out marker."""
-    home_census.enter(item)
-    try:
-        yield
-    finally:
-        home_census.leave()
-
-
-_SHARED_FIXTURE_PLUGIN = "home-census-shared-fixtures"
-
-
-class _SharedFixtureBracket:
-    """Tells the HOME census when a wider-scoped fixture sets up or tears
-    down, which the opt-out marker never covers."""
-
-    @pytest.hookimpl(hookwrapper=True)
-    def pytest_fixture_setup(self, fixturedef, request):
-        """Finalizers run last-in, first-out: the first added here runs after
-        the fixture's own teardown, and the one added after the fixture body
-        runs before it."""
-        if fixturedef.scope == "function":
-            yield
-            return
-        home_census.shared_fixture_begins()
-        fixturedef.addfinalizer(home_census.shared_fixture_ends)
-        try:
-            yield
-        finally:
-            home_census.shared_fixture_ends()
-            fixturedef.addfinalizer(home_census.shared_fixture_begins)
-
 
 def pytest_runtest_setup(item):
     """Skip a `requires_non_root` test when the suite runs as root."""
@@ -289,16 +245,13 @@ def pytest_testnodedown(node, error):
     """Collect the census findings an xdist worker handed over."""
     clock_shift_census.collect(node)
     child_pytest_census.collect(node)
-    home_census.collect(node)
 
 
 def pytest_sessionfinish(session):
-    """Fail a clock-shift sweep in which a child ran on the real clock, a run in
-    which a pytest child started without blocking pytest-randomly, and a run in
-    which a child started without HOME."""
+    """Fail a clock-shift sweep in which a child ran on the real clock, and a
+    run in which a pytest child started without blocking pytest-randomly."""
     clock_shift_census.finish(session)
     child_pytest_census.finish(session)
-    home_census.finish(session)
 
 
 @pytest.fixture

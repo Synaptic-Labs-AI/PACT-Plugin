@@ -5,7 +5,7 @@ Summary: Pins the HOME census: which launches it refuses and accepts, its one
          session, and that under real xdist a refusal a test swallows still
          fails the run.
 Used by: the suite; the census itself is tests/home_census.py, wired in
-         tests/conftest.py.
+         pact-plugin/conftest.py.
 """
 import asyncio
 import os
@@ -217,14 +217,12 @@ def test_leave_clears_what_enter_set(census_state, kwargs, exempt, unreasoned):
     assert "marker has no reason" not in line, line
 
 
-def test_the_conftest_enters_and_leaves_around_each_test(request, census_state):
-    """MUTANT: tests/conftest.py's pytest_runtest_protocol stops calling enter()
+def test_the_plugin_enters_and_leaves_around_each_test(request, census_state):
+    """MUTANT: the census Plugin's pytest_runtest_protocol stops calling enter()
     or leave()."""
-    suite = _CONFTEST
-    plugins = [p for p in request.config.pluginmanager.get_plugins()
-               if getattr(p, "__file__", None) and Path(p.__file__).resolve() == suite]
-    assert len(plugins) == 1, plugins
-    wrapper = plugins[0].pytest_runtest_protocol(item=_item({"reason": "r"}), nextitem=None)
+    plugin = request.config.pluginmanager.get_plugin(census.PLUGIN_NAME)
+    assert isinstance(plugin, census.Plugin), plugin
+    wrapper = plugin.pytest_runtest_protocol(item=_item({"reason": "r"}), nextitem=None)
     next(wrapper)
     assert census_state["exempt"] == "r"
     with pytest.raises(StopIteration):
@@ -475,14 +473,31 @@ def test_a_repeated_refusal_is_recorded_once(census_state):
     assert len(census_state["misses"]) == before + 1
 
 
+# A rig session loads tests/conftest.py and registers the HOME census as
+# pact-plugin/conftest.py does, and refuses to run unless exactly one census
+# is installed, so no rig arm that expects no refusal can pass with none.
 _RIG_CONFTEST = '''
 import importlib.util
+
+import pytest
 
 _spec = importlib.util.spec_from_file_location("pact_suite_conftest", {conftest!r})
 _suite = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_suite)
-pytest_configure = _suite.pytest_configure
-pytest_runtest_protocol = _suite.pytest_runtest_protocol
+
+import home_census  # noqa: E402  (tests/ is on sys.path once the suite conftest ran)
+
+
+def pytest_configure(config):
+    _suite.pytest_configure(config)
+    home_census.register(config)
+    plugins = [p for p in config.pluginmanager.get_plugins()
+               if isinstance(p, home_census.Plugin)]
+    if not home_census.installed() or len(plugins) != 1:
+        raise pytest.UsageError("rig: expected one installed HOME census, found %d "
+                                "plugin(s), installed=%s" % (len(plugins), home_census.installed()))
+
+
 pytest_testnodedown = _suite.pytest_testnodedown
 pytest_sessionfinish = _suite.pytest_sessionfinish
 '''
@@ -689,7 +704,7 @@ def shared():
 @pytest.mark.child_env_without_home(reason="rig: a marked test that triggers a session fixture")
 def test_marked(shared, request):
     plugins = [p for p in request.config.pluginmanager.get_plugins()
-               if type(p).__name__ == "_SharedFixtureBracket"]
+               if type(p).__name__ == "Plugin" and type(p).__module__ == "home_census"]
     assert len(plugins) == 1, plugins
     _launch("tests call")
 '''
@@ -741,10 +756,11 @@ def test_the_marker_never_covers_a_session_or_skills_fixture(tmp_path):
     assert proc.returncode == 1, output
 
 
-def test_this_session_registers_one_bracket_plugin(request):
+def test_this_session_registers_one_census_plugin(request):
     plugins = [p for p in request.config.pluginmanager.get_plugins()
-               if type(p).__name__ == "_SharedFixtureBracket"]
-    assert len(plugins) == 1, plugins
+               if isinstance(p, census.Plugin)]
+    assert len(plugins) == 1 and census.installed(), plugins
+    assert request.config.pluginmanager.get_plugin(census.PLUGIN_NAME) is plugins[0]
 
 
 def _real_session(*paths, plugin_dir=None, marker=None):
@@ -789,30 +805,28 @@ def pytest_sessionfinish(session):
 '''
 
 
-def test_a_session_of_skills_tests_alone_has_no_census(tmp_path):
-    """A real session over a skills/ test alone does not load tests/conftest.py,
-    so no census is installed: a launch without HOME made in that session runs,
-    and no census line is printed. Its twins load the conftest by adding a tests/
-    module: one prints the census line, and in the other the same launch is
-    refused, which shows the probe's launch is one an installed census judges."""
+@pytest.mark.parametrize("paths", [(_SKILLS_TEST,),
+                                   (_SKILLS_TEST, "tests/test_session_home_sandbox.py")],
+                         ids=["skills-alone", "skills-and-tests"])
+def test_a_session_with_or_without_the_tests_conftest_has_one_census(tmp_path, paths):
+    """A real session over a skills/ test alone loads pact-plugin/conftest.py but
+    not tests/conftest.py, and its twin loads both. Each installs one census:
+    one census line, and a launch without HOME made in that session is refused
+    before its child starts."""
     if not (Path(__file__).resolve().parents[1] / _SKILLS_TEST).is_file():
         pytest.skip("SKIPPED, NOT PASSED: %s is not in this tree" % _SKILLS_TEST)
+    rc, output = _real_session(*paths)
+    assert rc == 0 and re.search(r"^[0-9]+ passed", output, re.M), output
+    assert len(re.findall(r"HOME CENSUS: installed, [0-9]+ launch(es)? checked, 0 refused",
+                          output)) == 1, output
+    assert output.count("HOME CENSUS") == 1, output
+
     (tmp_path / "home_census_launch_probe.py").write_text(_LAUNCH_PROBE, encoding="utf-8")
     marker = tmp_path / "outcome"
-    rc, output = _real_session(_SKILLS_TEST, plugin_dir=tmp_path, marker=marker)
-    assert rc == 0 and re.search(r"^[0-9]+ passed", output, re.M), output
-    assert marker.read_text(encoding="utf-8") == "ran", output
-    assert "HOME CENSUS" not in output, output
-
-    rc, output = _real_session(_SKILLS_TEST, "tests/test_session_home_sandbox.py")
-    assert rc == 0 and re.search(r"^[0-9]+ passed", output, re.M), output
-    assert re.search(r"HOME CENSUS: installed, [0-9]+ launch(es)? checked, 0 refused", output), output
-
-    marker.unlink()
-    rc, output = _real_session(_SKILLS_TEST, "tests/test_session_home_sandbox.py",
-                               plugin_dir=tmp_path, marker=marker)
+    rc, output = _real_session(*paths, plugin_dir=tmp_path, marker=marker)
     assert marker.read_text(encoding="utf-8").startswith("refused: HomeCensusError"), output
     assert "HOME CENSUS: 1 child(ren) started without HOME" in output, output
+    assert output.count("HOME CENSUS") == 1, output
     assert rc == 1, output
 
 
@@ -823,12 +837,14 @@ def _git_rig(*args, cwd):
 
 
 @pytest.mark.parametrize("changed", ["pact-plugin/tests/home_census.py",
-                                     "pact-plugin/tests/conftest.py"])
+                                     "pact-plugin/tests/conftest.py",
+                                     "pact-plugin/conftest.py"])
 def test_a_change_to_the_census_or_conftest_selects_this_module_in_the_fast_suite(
         tmp_path, changed):
-    """OUTCOME PIN. A change to the census, or to the conftest that wires it,
-    re-selects this module in the fast suite. Runs on a copy of the tracked tree
-    in a fresh repository with no remote; the real checkout is only read."""
+    """OUTCOME PIN. A change to the census, to the root conftest that wires it,
+    or to tests/conftest.py, re-selects this module in the fast suite. Runs on a
+    copy of the tracked tree in a fresh repository with no remote; the real
+    checkout is only read."""
     import importlib.util
     import uuid
 
@@ -932,7 +948,7 @@ def _not_seen_item(start):
 def test_the_docstring_says_a_test_that_does_not_run_is_judged_where_it_runs():
     item = _not_seen_item("a test that does not run")
     assert ("Such a test is judged on the machine where it does run, in any session "
-            "that loads pact-plugin/tests/conftest.py") in item, item
+            "that loads pact-plugin/conftest.py") in item, item
     assert ("a launch it makes there that the census refuses is stopped before the "
             "child starts.") in item, item
     assert " not judged" not in item and " never " not in item, item

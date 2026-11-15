@@ -1,11 +1,11 @@
 """
 Location: pact-plugin/tests/home_census.py
 Summary: Refuses a child process the suite starts without HOME in its environment.
-Used by: tests/conftest.py, whose pytest_configure installs it and registers its
-         marker, whose pytest_runtest_protocol tells it which test is running,
-         whose pytest_testnodedown collects each xdist worker's refusals and
-         launch count, and whose pytest_sessionfinish reports;
-         tests/test_home_census.py.
+Used by: pact-plugin/conftest.py, whose pytest_configure calls register(),
+         which installs it, registers its marker and registers the Plugin
+         whose hooks tell it which test and which wider-scoped fixture is
+         running, collect each xdist worker's refusals and launch count, and
+         report at session finish; tests/test_home_census.py.
 
 A child started without HOME finds its home through the password database: the
 real one, outside the sandbox the suite runs in.
@@ -51,15 +51,15 @@ triggered it, so a shared fixture's verdict does not depend on test order. A
 marker without such a reason exempts nothing; the refusal line says the reason
 is missing.
 
-The census is installed, and told which test is running, by
-pact-plugin/tests/conftest.py, whose pytest_runtest_protocol pytest runs for
-every test of a session that loads it: there a marked test under
-pact-plugin/skills/ is exempt like any other. That conftest also registers a
-plugin that tells the census when a wider-scoped fixture sets up or tears down;
-as a plugin rather than a conftest hook it sees every fixture of the session, a
-session fixture and a skills/ module's fixture included. A session that does not
-load that conftest, such as a run of pact-plugin/skills/ tests alone, has no
-census installed: it judges no launch and prints no census line.
+The census is installed, once per session, by pact-plugin/conftest.py, which
+pytest loads for every session rooted at or below pact-plugin/: a session of
+pact-plugin/skills/ tests alone included, which does not load
+pact-plugin/tests/conftest.py. Its Plugin, a plugin rather than conftest hooks,
+sees every test and every fixture of the session: a marked test under
+pact-plugin/skills/ is exempt like any other, and a session fixture and a
+skills/ module's fixture count as wider-scoped. A session that does not load
+pact-plugin/conftest.py has no census installed: it judges no launch and prints
+no census line.
 
 NOT SEEN, AND OUTSIDE THE CENSUS:
 - os.spawn* and os.exec*, and os.fork() followed by an exec: on POSIX the exec
@@ -71,7 +71,7 @@ NOT SEEN, AND OUTSIDE THE CENSUS:
   in the suite's own processes.
 - a test that does not run: skipped, deselected or not collected. Such a test
   is judged on the machine where it does run, in any session that loads
-  pact-plugin/tests/conftest.py, and a launch it makes there that the census
+  pact-plugin/conftest.py, and a launch it makes there that the census
   refuses is stopped before the child starts.
 - the C-level process environment: the census judges an inherited launch by
   os.environ, not by the C-level process environment, so changes made with
@@ -79,6 +79,8 @@ NOT SEEN, AND OUTSIDE THE CENSUS:
 """
 import os
 import sys
+
+import pytest
 
 MARKER = "child_env_without_home"
 MARKER_HELP = (MARKER + "(reason): this test starts a child without HOME on purpose; "
@@ -106,6 +108,54 @@ def install():
         return
     sys.addaudithook(_audit)
     _state["installed"] = True
+
+
+PLUGIN_NAME = "home-census"
+
+
+class Plugin:
+    """The census's session hooks: which test and which wider-scoped fixture is
+    running, each xdist worker's findings, and the report at session finish."""
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_protocol(self, item, nextitem):
+        enter(item)
+        try:
+            yield
+        finally:
+            leave()
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_fixture_setup(self, fixturedef, request):
+        """Finalizers run last-in, first-out: the first added here runs after
+        the fixture's own teardown, and the one added after the fixture body
+        runs before it."""
+        if fixturedef.scope == "function":
+            yield
+            return
+        shared_fixture_begins()
+        fixturedef.addfinalizer(shared_fixture_ends)
+        try:
+            yield
+        finally:
+            shared_fixture_ends()
+            fixturedef.addfinalizer(shared_fixture_begins)
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_testnodedown(self, node, error):
+        collect(node)
+
+    def pytest_sessionfinish(self, session):
+        finish(session)
+
+
+def register(config):
+    """Install the census and register its marker and Plugin, once per session."""
+    if config.pluginmanager.has_plugin(PLUGIN_NAME):
+        return
+    config.addinivalue_line("markers", MARKER_HELP)
+    install()
+    config.pluginmanager.register(Plugin(), PLUGIN_NAME)
 
 
 def enter(item):
