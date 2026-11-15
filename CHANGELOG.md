@@ -18,7 +18,7 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
-## v4.8.36: find order-dependent tests and isolate the state tests shared
+## v4.8.35: find order-dependent tests and isolate the state tests shared
 
 ### Summary
 
