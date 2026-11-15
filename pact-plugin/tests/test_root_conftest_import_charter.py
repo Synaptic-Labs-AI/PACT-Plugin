@@ -17,6 +17,21 @@ DEVIATIONS allows it: one (file, enclosing function) site, with an exact count
 for each callable. A deviation the real tree no longer uses is reported too, so
 the charter cannot keep naming a deviation that is gone.
 
+A standard-library helper that imports a module it is given by name is matched
+by what it is, not by its spelling:
+- IMPORTING_HELPERS by their dotted path, resolved through the file's own import
+  aliases (`import pydoc`, `import logging.config as lc`, `from pydoc import
+  locate as find`), so `timeit.default_timer` or a local named `locate` is not
+  one. The alias map is file-wide, so a local that rebinds an imported module's
+  name (`def f(pydoc): pydoc.locate`) is still read as the module: an
+  over-refusal.
+- TIMEIT_RUNNERS (`timeit.timeit`, `timeit.repeat`, `timeit.Timer`) only when a
+  statement or setup it is given is not a lambda, since a statement string is
+  compiled and run; with none given it times `pass`.
+- IMPORTING_METHODS, reached through an instance (`TestLoader().loadTestsFromName`)
+  or a package outside sys.stdlib_module_names, by attribute name alone, so
+  any object's method of that name is refused.
+
 The script the CI deviation loads, scripts/verify_ci_environment.py, is read
 statically too: at every scope it imports only the standard library and
 `packaging` (or pip's vendored copy), it does import `packaging`, as the
@@ -38,12 +53,20 @@ DYNAMIC_IMPORTS = frozenset({
     "spec_from_loader", "module_from_spec", "exec_module", "load_module",
     "SourceFileLoader", "SourcelessFileLoader", "ExtensionFileLoader",
     "run_path", "run_module", "exec", "eval",
-    # Standard-library helpers that import a module they are given by name.
-    "resolve_name", "walk_packages", "get_loader", "find_loader", "locate",
-    "loadTestsFromName", "loadTestsFromNames", "DocTestSuite", "dictConfig", "fileConfig",
-    "make_parser", "addsitedir", "runsource", "runctx", "timeit", "import_fresh_module",
-    "_setoption", "getDOMImplementation",
 })
+# Standard-library helpers that import a module they are given by name (each
+# measured to import it on Python 3.12), by dotted path.
+IMPORTING_HELPERS = frozenset({
+    "pkgutil.resolve_name", "pkgutil.walk_packages", "pkgutil.get_loader",
+    "pkgutil.find_loader", "pydoc.locate", "doctest.DocTestSuite",
+    "logging.config.dictConfig", "logging.config.fileConfig", "xml.sax.make_parser",
+    "site.addsitedir", "warnings._setoption", "xml.dom.getDOMImplementation",
+    "xml.dom.domreg.getDOMImplementation",
+})
+TIMEIT_RUNNERS = frozenset({"timeit.timeit", "timeit.repeat", "timeit.Timer"})
+# The same, reached through an instance or a package outside the stdlib names.
+IMPORTING_METHODS = frozenset({"loadTestsFromName", "loadTestsFromNames", "runsource",
+                               "runctx", "import_fresh_module"})
 # (file, enclosing function) -> the dynamic callables it may name, and how often.
 DEVIATIONS = {
     ("tests/ci_environment_binding.py", "_load_verify_script"):
@@ -64,25 +87,73 @@ def _imports(tree):
             yield module, tuple(alias.name for alias in node.names), node.lineno
 
 
-def _dynamic_references(node, scope=""):
-    """(enclosing function or class, dotted; name, line) for every name in
-    DYNAMIC_IMPORTS that `node` refers to or imports by name."""
-    for child in ast.iter_child_nodes(node):
-        name = None
-        if isinstance(child, ast.Name):
-            name = child.id
-        elif isinstance(child, ast.Attribute):
-            name = child.attr
-        elif isinstance(child, ast.ImportFrom):
-            for alias in child.names:
-                if alias.name in DYNAMIC_IMPORTS:
-                    yield scope, alias.name, child.lineno
-        if name in DYNAMIC_IMPORTS:
-            yield scope, name, child.lineno
-        inner = scope
-        if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            inner = f"{scope}.{child.name}" if scope else child.name
-        yield from _dynamic_references(child, inner)
+def _import_aliases(tree):
+    """{bound name: dotted module or object} for every import in `tree`, at any
+    scope."""
+    aliases = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.asname:
+                    aliases[alias.asname] = alias.name
+                else:
+                    top = alias.name.split(".")[0]
+                    aliases[top] = top
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            for alias in node.names:
+                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+    return aliases
+
+
+def _dotted(node, aliases):
+    """The dotted path a Name or Attribute chain resolves to through `aliases`,
+    or None."""
+    if isinstance(node, ast.Name):
+        return aliases.get(node.id)
+    if isinstance(node, ast.Attribute):
+        base = _dotted(node.value, aliases)
+        return f"{base}.{node.attr}" if base else None
+    return None
+
+
+def _times_only_lambdas(call):
+    """True when every statement or setup a timeit runner is given is a lambda."""
+    given = list(call.args[:2]) + [k.value for k in call.keywords if k.arg in ("stmt", "setup")]
+    return all(isinstance(value, ast.Lambda) for value in given)
+
+
+def _dynamic_references(tree):
+    """(enclosing function or class, dotted; callable, line) for every dynamic
+    import callable `tree` refers to or imports by name."""
+    aliases = _import_aliases(tree)
+    harmless = set()  # timeit runners given only lambdas
+
+    def walk(node, scope):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.Call) and _dotted(child.func, aliases) in TIMEIT_RUNNERS \
+                    and _times_only_lambdas(child):
+                harmless.add(id(child.func))
+            names = []
+            if isinstance(child, ast.Name):
+                names.append(child.id)
+            elif isinstance(child, ast.Attribute):
+                names.append(child.attr)
+            elif isinstance(child, ast.ImportFrom):
+                names.extend(alias.name for alias in child.names)
+            for name in names:
+                if name in DYNAMIC_IMPORTS or (
+                        name in IMPORTING_METHODS and isinstance(child, ast.Attribute)):
+                    yield scope, name, child.lineno
+            dotted = _dotted(child, aliases)
+            if dotted in IMPORTING_HELPERS or (
+                    dotted in TIMEIT_RUNNERS and id(child) not in harmless):
+                yield scope, dotted, child.lineno
+            inner = scope
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                inner = f"{scope}.{child.name}" if scope else child.name
+            yield from walk(child, inner)
+
+    yield from walk(tree, "")
 
 
 def _in_dir(directory, dotted):
@@ -366,7 +437,7 @@ def test_a_loaded_script_inside_the_charter_passes(tmp_path):
     "import unittest\nunittest.TestLoader().loadTestsFromNames(['yaml'])\n",
     "import doctest\ndoctest.DocTestSuite('yaml')\n",
     "import logging.config\nlogging.config.dictConfig({'version': 1})\n",
-    "from logging.config import fileConfig\n",
+    "from logging.config import fileConfig as load\nload('x.ini')\n",
     "import xml.sax\nxml.sax.make_parser(['yaml'])\n",
     "import site\nsite.addsitedir('x')\n",
     "import code\ncode.InteractiveInterpreter().runsource('import yaml')\n",
@@ -376,10 +447,39 @@ def test_a_loaded_script_inside_the_charter_passes(tmp_path):
     "def f(import_helper):\n    import_helper.import_fresh_module('yaml')\n",
     "import warnings\nwarnings._setoption('ignore::yaml.YAMLError')\n",
     "import xml.dom\nxml.dom.getDOMImplementation('minidom')\n",
+    "from xml.dom import domreg\ndomreg.getDOMImplementation('minidom')\n",
+    # Through an alias, and from a function's own import.
+    "import pydoc as docs\ndocs.locate('yaml')\n",
+    "def f():\n    from pydoc import locate\n    return locate('yaml')\n",
+    "import logging.config as lc\nlc.dictConfig({'version': 1})\n",
+    # A timeit runner given a statement that is not a lambda.
+    "import timeit\ndef f(statement):\n    return timeit.timeit(statement)\n",
+    "import timeit\ntimeit.Timer(stmt='import yaml')\n",
+    "import timeit\ntimeit.Timer(lambda: None, 'import yaml')\n",
+    "from timeit import repeat\nrepeat('import yaml')\n",
+    # An instance-method helper is matched by attribute name on any object.
+    "def f(loader):\n    return loader.loadTestsFromName('yaml')\n",
+    # The alias map is file-wide: a local that rebinds the module's name is
+    # still read as the module (an over-refusal).
+    "import pydoc\ndef f(pydoc):\n    return pydoc.locate\n",
 ])
 def test_a_helper_that_imports_by_name_is_refused(tmp_path, conftest):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest))
     assert violations, conftest
+
+
+# A name a helper shares, or a helper's harmless use, imports nothing.
+@pytest.mark.parametrize("conftest", [
+    "import timeit\ntimeit.default_timer()\n",
+    "def f():\n    locate = 1\n    return locate\n",
+    "import timeit\ntimeit.Timer(lambda: None).timeit(1)\n",
+    "import timeit\ntimeit.timeit(stmt=lambda: None, setup=lambda: None, number=1)\n",
+    "import timeit\ntimeit.Timer()\n",
+    "def f():\n    runsource = 1\n    return runsource\n",
+])
+def test_a_name_a_helper_shares_is_not_refused(tmp_path, conftest):
+    violations, _, _ = charter_violations(_rig(tmp_path, conftest))
+    assert violations == [], (conftest, violations)
 
 
 # The charter's blind spot, pinned as listed: each of these imports the named
@@ -391,6 +491,9 @@ def test_a_helper_that_imports_by_name_is_refused(tmp_path, conftest):
     "import pkgutil\npkgutil.get_data('yaml', 'x')\n",
     "from importlib.metadata import EntryPoint\nEntryPoint('e', 'yaml:load', 'g').load()\n",
     "import cProfile\ncProfile.run('import yaml')\n",
+    "import profile\nprofile.run('import yaml')\n",
+    "import pdb\npdb.run('import yaml')\n",
+    "import pickle\npickle.load(open('x', 'rb'))\n",
     "def pytest_configure(config):\n"
     "    config.addinivalue_line('filterwarnings', 'ignore::yaml.YAMLError')\n",
     "import importlib\ngetattr(importlib, 'import_module')('yaml')\n",
