@@ -824,8 +824,10 @@ class TestRunReceiptAttribution:
     - Before each run, HEAD and the status are recorded and the staged change
       is saved to a file outside the worktree.
     - A moved HEAD is re-run once before the HANDOFF, in the isolated copy
-      that holds the change, never in the worktree. That copy's run is the result, and any paths it
-      writes go through the merge-base check below.
+      that holds the change, never in the worktree. That copy's run is the
+      result, and only paths that differ between its status before and after
+      the run go through the merge-base check; its own staged files are never
+      read as written by the run.
     - If that copy cannot be built or the command cannot be run in it, the
       result is reported as unattributable, naming what moved and stating
       the unmet exit-code precondition, and is not re-run again. That exit
@@ -834,18 +836,18 @@ class TestRunReceiptAttribution:
     - A status-only change is re-run with the same interpreter, by absolute
       path, in the same copy: a remote-less clone at the pre-run HEAD with
       the saved staged change applied, never the live index.
-    - Paths that copy reproduces are re-run in a second remote-less clone at
-      the merge base of the pre-run HEAD with the branch the work merges into,
-      with no change
-      applied. Each reproduced path is decided on its own. Reproduced there
-      too, it is pre-existing and reported in
-      the HANDOFF; when every reproduced path is pre-existing, the run's own
-      exit code decides (0 is a pass, nonzero is still a failure of the
-      change). Reproduced only in the change copy, it is a failure of the
-      teammate's own change whatever the other paths are, to fix, never
-      re-run away.
-    - A status change the change copy does not reproduce came from outside
-      the run, and the copy's run is the result.
+    - Worktree paths that also change in that copy are re-run in a second
+      remote-less clone at the merge base of the pre-run HEAD with the branch
+      the work merges into, with no change applied. Each reproduced path is
+      decided on its own: one that also appears in the merge-base clone is
+      pre-existing and reported in the HANDOFF; one that does not is a
+      failure of the teammate's own change whatever the other paths are, to
+      fix, never re-run away. When every reproduced path is pre-existing,
+      that copy's exit code decides (0 is a pass, nonzero is still a failure
+      of the change).
+    - When none of the worktree's changed paths change in the copy, the
+      change came from outside the run and the copy's run is the result; a
+      partly reproduced set is decided only through its reproduced paths.
     - No git archive export is named as the copy.
 
     Each arm is bound to the Step 0 receipt bullet, so the phrase cannot be
@@ -863,7 +865,7 @@ class TestRunReceiptAttribution:
          "the record step: the staged change saved before the run, outside the worktree"),
         ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, in the isolated copy that holds your change described below, not in the worktree, and never report the moved run as a pass or a failure of your change.",
          "the moved-HEAD branch: one re-run, in the change copy, never the worktree"),
-        ("That copy's run is your result; any paths its status shows after the run follow the merge-base check below as reproduced paths.",
+        ("That copy's run is your result; any paths that differ between its status before and after the run follow the merge-base check below as reproduced paths.",
          "the moved-HEAD copy run as the result, its writes routed to the merge-base check"),
         ("If that copy cannot be built or the command cannot be run in it, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
          "the stop: unattributable only when the copy cannot be built or run, naming what moved, with the unmet precondition stated"),
@@ -873,15 +875,15 @@ class TestRunReceiptAttribution:
          "the isolated-copy re-run, with the same interpreter by absolute path"),
         ("a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone. Compare its status before and after.",
          "the recipe: the pre-run HEAD plus the staged change saved before the run"),
-        ("If the same paths appear there, run the same command the same way in a second clone with its remote removed, checked out at the merge base of the `HEAD` you recorded before the run with the branch your work will merge into (`git merge-base <recorded HEAD> <that branch>`, computed in the worktree), with no change applied.",
+        ("If any of the paths that changed in the worktree also change there, run the same command the same way in a second clone with its remote removed, checked out at the merge base of the `HEAD` you recorded before the run with the branch your work will merge into (`git merge-base <recorded HEAD> <that branch>`, computed in the worktree), with no change applied.",
          "the base-control run at the merge base"),
         ("Decide each reproduced path on its own. A path that also appears in the merge-base clone is a pre-existing defect: report it in your HANDOFF, with the path and the command that wrote it, and do not treat it as a failure of your change.",
          "a base-reproduced write reported as pre-existing"),
-        ("When every path the copy that holds your change reproduces is pre-existing, the run's own exit code decides for your change: exit code 0 counts as a pass, and a nonzero exit code is still a failure of your change.",
+        ("When every reproduced path is pre-existing, that copy's exit code decides for your change: exit code 0 counts as a pass, and a nonzero exit code is still a failure of your change.",
          "the exit code's verdict when every reproduced path is pre-existing"),
-        ("A path that appears only in the copy that holds your change was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
+        ("A reproduced path that does not appear in the merge-base clone was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
          "the change-only write treated as a failure of the change"),
-        ("If they do not appear in the copy that holds your change, the worktree change came from outside the run: that copy's run is your result.",
+        ("If none of the paths that changed in the worktree change in the copy that holds your change, the worktree change came from outside the run: that copy's run is your result.",
          "the unreproduced change: the copy's run is the result"),
     )
 

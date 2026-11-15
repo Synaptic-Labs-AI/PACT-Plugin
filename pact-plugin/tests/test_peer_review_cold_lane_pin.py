@@ -760,16 +760,16 @@ class TestOperationalFactsClause:
          "the moved-HEAD branch of the run receipt")),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path, in an isolated copy under {scratch_dir}: a clone of the repository with its remote removed, checked out at {head}. Compare its status before and after", (
          "the isolated-copy re-run: same interpreter by absolute path, a remote-less clone at {head}")),
-        ("If the same paths appear there, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
+        ("If any of the paths that changed in the worktree also change there, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
          "the base-control run at the merge base")),
         ("Decide each reproduced path on its own. A path that also appears there is a pre-existing defect: name it as pre-existing under the open questions, with the path and the command that wrote it, not as a finding about the diff", (
          "a base-reproduced write reported as pre-existing, not as a finding")),
-        ("When every reproduced path is pre-existing, the run's own result stands for the diff: a pass is a pass, and a failure is a finding about the diff", (
-         "the run's own result when every reproduced path is pre-existing")),
-        ("A path that appears only in the {head} clone was written by the run itself, and it is a finding about the diff, whatever the other paths are", (
+        ("When every reproduced path is pre-existing, the {head} clone's run stands for the diff: a pass is a pass, and a failure is a finding about the diff", (
+         "the {head} clone's run as the result when every reproduced path is pre-existing")),
+        ("A reproduced path that does not appear there was written by the run itself, and it is a finding about the diff, whatever the other paths are", (
          "the change-only write reported as a finding about the diff, whatever the other paths are")),
-        ("If they do not appear in the {head} clone, report the result as unattributable because the worktree moved", (
-         "only an unreproduced change left unattributable")),
+        ("If none of the paths that changed in the worktree change in the {head} clone, the worktree change came from outside the run, and the {head} clone's run stands for the diff", (
+         "an unreproduced change: the {head} clone's run stands, as in the teammate rule")),
     ])
     def test_operational_facts_token_present(self, token, lost):
         assert token in _clause("OPERATIONAL FACTS"), (
