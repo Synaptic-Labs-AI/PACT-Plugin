@@ -821,10 +821,11 @@ class TestWorktreeSetupVenvLinkReportPins:
 class TestRunReceiptAttribution:
     """The pact-agent-teams Step 0 run receipt, branch by branch.
 
-    - A moved HEAD is re-run once before the HANDOFF. If that re-run also
-      moves, or its status change is again unreproduced, or a re-run is
-      impossible, it is reported as unattributable, naming what moved and
-      stating the unmet exit-code precondition, and is not re-run again.
+    - A moved HEAD is re-run once before the HANDOFF. If the re-run moves
+      HEAD again, or changes the status in a way the change copy does not
+      reproduce, or a re-run is impossible, it is reported as unattributable,
+      naming what moved and stating the unmet exit-code precondition, and is
+      not re-run again. The stop reads the same after either trigger.
       That exit never takes paths the change copy reproduces: on any run,
       those follow the pre-existing and failure branches.
     - A status-only change is re-run with the same interpreter, by absolute
@@ -832,7 +833,8 @@ class TestRunReceiptAttribution:
     - Paths that copy reproduces are re-run in a second remote-less clone at
       the merge base with the branch the work merges into, with no change
       applied. Reproduced there too, they are pre-existing and reported in the
-      HANDOFF. Reproduced only in the change copy, they are a failure of the
+      HANDOFF; when every reproduced path is pre-existing, the run's own exit
+      code decides (0 is a pass, nonzero is still a failure of the change). Reproduced only in the change copy, they are a failure of the
       teammate's own change, to fix, never re-run away.
     - A status change the change copy does not reproduce is handled as a
       moved HEAD, under the same one-re-run bound.
@@ -851,7 +853,7 @@ class TestRunReceiptAttribution:
     REQUIRED_PHRASES = (
         ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, and never report the moved run as a pass or a failure of your change.",
          "the moved-HEAD branch: one re-run before the HANDOFF"),
-        ("If that re-run also moves, or its status change is again not reproduced in the copy that holds your change, or a re-run is impossible, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
+        ("If the re-run moves `HEAD` again, or changes the status in a way the copy that holds your change does not reproduce, or a re-run is impossible, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
          "the bound: after one re-run, unattributable, naming what moved, with the unmet precondition stated"),
         ("This exit never applies to paths the copy that holds your change reproduces; on any run, those follow the pre-existing and failure branches below.",
          "a reproduced write never reaches the unattributable exit"),
@@ -863,6 +865,8 @@ class TestRunReceiptAttribution:
          "the base-control run at the merge base"),
         ("If those paths appear in the merge-base clone too, they are a pre-existing defect: report them in your HANDOFF, with the paths and the command that wrote them, and do not treat them as a failure of your change.",
          "a base-reproduced write reported as pre-existing"),
+        ("When every path the copy that holds your change reproduces is pre-existing, the run's own exit code decides for your change: exit code 0 counts as a pass, and a nonzero exit code is still a failure of your change.",
+         "the exit code's verdict when every reproduced path is pre-existing"),
         ("If they appear only in the copy that holds your change, the run itself wrote them: treat it as a failure of your change, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
          "the change-only write treated as a failure of the change"),
         ("If they do not appear in the copy that holds your change, the worktree moved during the run: handle it as a moved `HEAD`.",
