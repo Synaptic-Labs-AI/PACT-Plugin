@@ -24,9 +24,9 @@ by what it is, not by its spelling:
   locate as find`), so `timeit.default_timer` or a local named `locate` is not
   one. The alias map is file-wide, so a local that rebinds an imported module's
   name (`def f(pydoc): pydoc.locate`) is still read as the module: an
-  over-refusal. Only an import binds a module here, so a helper reached through
-  a parameter, an assignment or a star import is not seen, and one under an
-  alias name reused for another module may not be seen.
+  over-refusal. Only an import binds a module here, so a helper whose module is
+  reached through a parameter, an assignment or a star import is not seen, and
+  one under an alias name reused for another module may not be seen.
 - TIMEIT_RUNNERS (`timeit.timeit`, `timeit.repeat`, `timeit.Timer`) only when a
   statement or setup it is given is not a lambda, since a statement string is
   compiled and run; with none given it times `pass`.
@@ -313,9 +313,9 @@ def test_the_conftest_states_the_charter_and_names_this_pin():
 
 def test_this_pin_states_its_import_binding_blind_spot():
     docstring = " ".join(__doc__.split())
-    assert ("Only an import binds a module here, so a helper reached through a parameter, "
-            "an assignment or a star import is not seen, and one under an alias name reused "
-            "for another module may not be seen.") in docstring, docstring
+    assert ("Only an import binds a module here, so a helper whose module is reached through "
+            "a parameter, an assignment or a star import is not seen, and one under an alias "
+            "name reused for another module may not be seen.") in docstring, docstring
 
 
 def _rig(tmp_path, conftest, modules=None, scripts=None):
@@ -536,6 +536,14 @@ def test_a_listed_blind_spot_is_not_seen(tmp_path, conftest):
 def test_a_helper_bound_other_than_by_an_import_is_not_seen(tmp_path, conftest):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest))
     assert violations == [], (conftest, violations)
+
+
+# The blind spot is the helper's module, not the helper: a helper itself
+# assigned to a name is still read through its module's import.
+def test_an_assigned_dotted_path_helper_is_seen(tmp_path):
+    conftest = "import pydoc\nloc = pydoc.locate\nloc('yaml')\n"
+    violations, _, _ = charter_violations(_rig(tmp_path, conftest))
+    assert violations, conftest
 
 
 # A dynamic import callable and an instance-method helper are matched by name,
