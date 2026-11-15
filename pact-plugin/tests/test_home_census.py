@@ -313,7 +313,7 @@ def _interpreter(tmp_path, where):
 def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census_state, where):
     """The refusal names the test and shows the launch as given, however long
     the interpreter's path, and the child never starts."""
-    assert census.installed(), "tests/conftest.py did not install the census"
+    assert census.installed(), "pact-plugin/conftest.py did not install the census"
     marker = tmp_path / "started"
     argv = [_interpreter(tmp_path, where), "-c",
             "import pathlib, sys; pathlib.Path(sys.argv[1]).touch()", str(marker)]
@@ -575,10 +575,11 @@ def test_unmarked_in_skills():
 @pytest.mark.parametrize("order", [("tests", "skills"), ("skills", "tests")],
                          ids=["tests-first", "skills-first"])
 def test_the_marker_exempts_a_skills_test_in_a_session_that_loads_the_conftest(tmp_path, order):
-    """A session that loads tests/conftest.py runs its pytest_runtest_protocol for
-    every test, so a marked test under skills/ is exempt and its unmarked twin is
+    """The census Plugin's pytest_runtest_protocol runs for every test of the
+    session, so a marked test under skills/ is exempt and its unmarked twin is
     refused, whichever directory is collected first. The rig mirrors the plugin's
-    layout: the conftest under tests/, the tests under skills/<skill>/."""
+    layout: under tests/, a conftest that registers the census as
+    pact-plugin/conftest.py does; the tests under skills/<skill>/."""
     plugin = tmp_path / "pact-plugin"
     (plugin / "tests").mkdir(parents=True)
     (plugin / "skills" / "rig-skill").mkdir(parents=True)
@@ -729,7 +730,7 @@ def test_the_marker_never_covers_a_session_or_skills_fixture(tmp_path):
     fixture's node is the rootdir and a skills/ module is outside tests/, so a
     conftest hook would not see either; the registered plugin does. Both
     fixtures are refused in setup and teardown under a marked test, whose own
-    calls stay exempt, and exactly one bracket plugin is registered."""
+    calls stay exempt, and exactly one census Plugin is registered."""
     root = tmp_path / "repo"
     (root / "tests").mkdir(parents=True)
     (root / "skills" / "rig-skill").mkdir(parents=True)
@@ -912,8 +913,8 @@ def test_plain():
 @pytest.mark.parametrize("gate", ["closed", "run"])
 def test_a_gated_test_is_judged_where_it_runs_and_stopped_before_its_child(tmp_path, gate):
     """A test that does not run in one session is judged in a session where it
-    does run, by the census that session's tests/conftest.py installs, and its
-    refused launch never starts the child. Closed gate: skipped, no refusal.
+    does run, by the census that session's conftest registers as
+    pact-plugin/conftest.py does, and its refused launch never starts the child. Closed gate: skipped, no refusal.
     Open gate: refused, the run fails, and the child's marker is never made."""
     (tmp_path / "conftest.py").write_text(
         _RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
