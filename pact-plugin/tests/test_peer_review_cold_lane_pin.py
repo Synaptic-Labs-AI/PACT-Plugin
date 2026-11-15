@@ -324,6 +324,8 @@ ONCE_RULES = (
     ("when unsure, the round needs one", "the trigger's unsure default"),
     ("taken from the most recent such line", "the use of corrected placeholders in the re-review's first-round dispatch"),
     ("a hunk in such a fix that changes anything its finding does not name", "the over-reaching fix hunk"),
+    ("only records that fix in the release notes", "the release-note exemption"),
+    ("its re-check message named", "the head a re-check report records"),
     ("or another reason, stated", "the REPORT reason set"),
     ("for any reason, or none, other than", "the blocker trigger's reason test"),
     ("routes it to a tracked GitHub issue there", "the tracked-issue decline"),
@@ -1175,8 +1177,10 @@ class TestLeadFacingRules:
         ("Remediation", "route its findings to warm fixers", "where its findings go"),
         ("Remediation", "Send it no message other than a HALT or the re-check message", (
          "the bar on any other message")),
-        ("Re-check", "It needs one when the record holds no valid first-round cold report; when the record holds a lead line of corrected placeholder values appended after the most recent valid cold report; or when git diff from the {head} recorded with the most recent valid cold report to the current {head} carries any hunk that is not a fix you dispatched for a cold finding in the record with no disposition", (
-         "the first-round trigger, all three causes")),
+        ("Re-check", "It needs one when the record holds no valid first-round cold report; when the record holds a lead line of corrected placeholder values appended after the most recent valid cold report; or when git diff from the {head} recorded with the most recent valid cold report (for a re-check report, the {head} its re-check message named) to the current {head} carries any hunk that is not a fix you dispatched for a cold finding in the record with no disposition", (
+         "the first-round trigger, all three causes, and the head a re-check report records")),
+        ("Re-check", "A hunk in the same commit as one of those fixes that only records that fix in the release notes, or only bumps a version for it, does not count", (
+         "the release-note and version-bump exemption, bound to the fix's own commit")),
         ("Re-check", "A hunk you cannot attribute to one of those fixes counts, including a commit merged in from the base and a fix to a warm finding; so does a hunk in such a fix that changes anything its finding does not name, and so does a recorded {head} that git cannot resolve; when unsure, the round needs one", (
          "the trigger's attribution rule, the over-reaching fix hunk, and the unsure default")),
         ("Re-check", "When the round needs one, dispatch the cold prompt as a first-round review, with any placeholder value that a lead line of corrections in the record changed taken from the most recent such line, except {base} and {head}, which follow their definitions", (
@@ -1317,6 +1321,8 @@ class TestOutsideSectionRules:
         ("pr", "takes the place of a teachback", "what stands in for the cold lane's teachback"),
         ("pr", "When a warm reviewer's findings need fixing", (
          "the warm scoping of reviewer-to-fixer reuse")),
+        ("pr", "Warm: confirm each finding was addressed; cold: a re-check of every cold finding with no disposition, or a fresh first-round review when **Re-check** requires one", (
+         "the Verify-Only depth row naming both cold cases")),
         ("pr", "Reuse the warm reviewer who found the issues; the cold reviewer re-checks every cold finding with no disposition", (
          "the Verify-Only re-review routing")),
         ("pr", "and per open question in each first-round or re-check cold report,", (
