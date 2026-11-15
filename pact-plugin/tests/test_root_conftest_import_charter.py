@@ -38,6 +38,11 @@ DYNAMIC_IMPORTS = frozenset({
     "spec_from_loader", "module_from_spec", "exec_module", "load_module",
     "SourceFileLoader", "SourcelessFileLoader", "ExtensionFileLoader",
     "run_path", "run_module", "exec", "eval",
+    # Standard-library helpers that import a module they are given by name.
+    "resolve_name", "walk_packages", "get_loader", "find_loader", "locate",
+    "loadTestsFromName", "loadTestsFromNames", "DocTestSuite", "dictConfig", "fileConfig",
+    "make_parser", "addsitedir", "runsource", "runctx", "timeit", "import_fresh_module",
+    "_setoption",
 })
 # (file, enclosing function) -> the dynamic callables it may name, and how often.
 DEVIATIONS = {
@@ -210,7 +215,14 @@ def test_the_conftest_states_the_charter_and_names_this_pin():
                    "tests/import_identity_map.py, `resolve_origins`",
                    "PACT_IDENTITY_MAP_OUT is set",
                    "tests/test_root_conftest_import_charter.py enforces",
-                   "reached through getattr or a computed name"):
+                   "reached through getattr or a computed name",
+                   "Exactly two functions deviate",
+                   "a standard-library helper that imports a module it is given by name",
+                   "unittest.mock.patch's target", "pickle.load and pickle.loads",
+                   "importlib.resources.files", "pkgutil.get_data",
+                   "an importlib.metadata entry point's load()",
+                   "the run of cProfile, profile or pdb",
+                   "a warning category named in a filter string"):
         assert phrase in docstring, (phrase, docstring)
 
 
@@ -337,3 +349,118 @@ def test_a_loaded_script_inside_the_charter_passes(tmp_path):
         "    try:\n        from packaging.version import Version\n    except ImportError:\n"
         "        from pip._vendor.packaging.version import Version\n"))
     assert verify_script_violations(target, root) == []
+
+
+# Each standard-library helper that imports a module it is given by name, refused
+# by its name (all measured to import the named module on Python 3.12).
+@pytest.mark.parametrize("conftest", [
+    "import pkgutil\npkgutil.resolve_name('yaml')\n",
+    "import pkgutil\nlist(pkgutil.walk_packages(['.']))\n",
+    "import pkgutil\npkgutil.get_loader('yaml.x')\n",
+    "import pkgutil\npkgutil.find_loader('yaml.x')\n",
+    "import pydoc\npydoc.locate('yaml')\n",
+    "import unittest\nunittest.TestLoader().loadTestsFromName('yaml')\n",
+    "import unittest\nunittest.TestLoader().loadTestsFromNames(['yaml'])\n",
+    "import doctest\ndoctest.DocTestSuite('yaml')\n",
+    "import logging.config\nlogging.config.dictConfig({'version': 1})\n",
+    "from logging.config import fileConfig\n",
+    "import xml.sax\nxml.sax.make_parser(['yaml'])\n",
+    "import site\nsite.addsitedir('x')\n",
+    "import code\ncode.InteractiveInterpreter().runsource('import yaml')\n",
+    "import cProfile\ncProfile.runctx('import yaml', {}, {})\n",
+    "import timeit\ntimeit.timeit('import yaml', number=1)\n",
+    # test.support is outside sys.stdlib_module_names, so reach it as an attribute.
+    "def f(import_helper):\n    import_helper.import_fresh_module('yaml')\n",
+    "import warnings\nwarnings._setoption('ignore::yaml.YAMLError')\n",
+])
+def test_a_helper_that_imports_by_name_is_refused(tmp_path, conftest):
+    violations, _, _ = charter_violations(_rig(tmp_path, conftest))
+    assert violations, conftest
+
+
+# The charter's blind spot, pinned as listed: each of these imports the named
+# module, and the pin does not see it.
+@pytest.mark.parametrize("conftest", [
+    "from unittest import mock\nmock.patch('yaml.safe_load').start()\n",
+    "import pickle\npickle.loads(b'cyaml\\nYAMLObject\\n.')\n",
+    "import importlib.resources\nimportlib.resources.files('yaml')\n",
+    "import pkgutil\npkgutil.get_data('yaml', 'x')\n",
+    "from importlib.metadata import EntryPoint\nEntryPoint('e', 'yaml:load', 'g').load()\n",
+    "import cProfile\ncProfile.run('import yaml')\n",
+    "def pytest_configure(config):\n"
+    "    config.addinivalue_line('filterwarnings', 'ignore::yaml.YAMLError')\n",
+    "import importlib\ngetattr(importlib, 'import_module')('yaml')\n",
+])
+def test_a_listed_blind_spot_is_not_seen(tmp_path, conftest):
+    violations, _, _ = charter_violations(_rig(tmp_path, conftest))
+    assert violations == [], (conftest, violations)
+
+
+# The deviations' gates, as the charter states them.
+@pytest.mark.parametrize("value", [None, "", "false", "1"])
+def test_the_ci_binding_loads_no_script_unless_github_actions_is_true(monkeypatch, value):
+    import ci_environment_binding as binding
+    if value is None:
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    else:
+        monkeypatch.setenv("GITHUB_ACTIONS", value)
+
+    def refuse(script):
+        raise AssertionError(f"_load_verify_script ran with GITHUB_ACTIONS={value!r}")
+
+    monkeypatch.setattr(binding, "_load_verify_script", refuse)
+    plugin = binding.CIEnvironmentBinding()
+    plugin.pytest_sessionstart(None)
+    plugin.pytest_sessionfinish(None, 0)
+
+
+class _Reached(Exception):
+    pass
+
+
+def _reached(*args):
+    raise _Reached(args)
+
+
+def test_the_ci_binding_loads_its_script_when_github_actions_is_true(monkeypatch):
+    import ci_environment_binding as binding
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(binding, "_load_verify_script", _reached)
+    plugin = binding.CIEnvironmentBinding()
+    with pytest.raises(_Reached):
+        plugin.pytest_sessionstart(None)
+    with pytest.raises(_Reached):
+        plugin.pytest_sessionfinish(None, 0)
+
+
+def _identity_map_session(monkeypatch):
+    import import_identity_map as identity
+    monkeypatch.setitem(identity._state, "nested", False)
+    monkeypatch.setitem(identity._state, "sessionstart_path", list(sys.path))
+    monkeypatch.setitem(identity._state, "collected_files", {__file__})
+    return identity
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_the_identity_map_resolves_no_origins_unless_its_out_variable_is_set(
+        monkeypatch, value):
+    identity = _identity_map_session(monkeypatch)
+    if value is None:
+        monkeypatch.delenv("PACT_IDENTITY_MAP_OUT", raising=False)
+    else:
+        monkeypatch.setenv("PACT_IDENTITY_MAP_OUT", value)
+
+    def refuse(names):
+        raise AssertionError(f"resolve_origins ran with PACT_IDENTITY_MAP_OUT={value!r}")
+
+    monkeypatch.setattr(identity, "resolve_origins", refuse)
+    identity.pytest_sessionfinish(None, 0)
+
+
+def test_the_identity_map_resolves_origins_when_its_out_variable_is_set(
+        monkeypatch, tmp_path):
+    identity = _identity_map_session(monkeypatch)
+    monkeypatch.setenv("PACT_IDENTITY_MAP_OUT", str(tmp_path / "map.json"))
+    monkeypatch.setattr(identity, "resolve_origins", _reached)
+    with pytest.raises(_Reached):
+        identity.pytest_sessionfinish(None, 0)
