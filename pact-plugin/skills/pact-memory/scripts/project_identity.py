@@ -114,6 +114,9 @@ class OriginRead(NamedTuple):
     `empty_entry` — the url list holds an empty (or whitespace-only) value.
                     Which url git then fetches depends on the git version,
                     so no url in the list is the repository's identity.
+    `not_own_file` — the first url does not come from the repository's own
+                    config file, so the url git reads can differ between
+                    its worktrees and branches.
     `unavailable` — git could not answer: missing, timed out, or the
                     repository's configuration could not be read.
 
@@ -165,6 +168,13 @@ EMPTY_URL_ENTRY_DETAIL = (
     "depends on the git version; remove the empty value"
 )
 
+# The `detail` for an origin that does not come from the repository's own
+# config file.
+NOT_OWN_FILE_ORIGIN_DETAIL = (
+    "its remote.origin.url does not come from the repository's own config "
+    "file, and git can read a different url in another worktree or branch"
+)
+
 # The `detail` for a decline whose `.git` points at a git directory outside
 # the checkout that is neither a linked worktree's nor a submodule's admin
 # dir. Its override file sits in that external directory, which a forged `.git`
@@ -200,6 +210,7 @@ ORIGIN_PRESENT = "present"
 ORIGIN_ABSENT = "absent"
 ORIGIN_UNAVAILABLE = "unavailable"
 ORIGIN_EMPTY_ENTRY = "empty_entry"
+ORIGIN_NOT_OWN_FILE = "not_own_file"
 
 
 def decline_record(
@@ -857,9 +868,19 @@ def read_origin(git_dir: Path) -> OriginRead:
     repository's config. The override is read from this repository's common
     dir, so the origin must come from the same repository.
 
-    THE IDENTITY RULE: the origin is the FIRST `remote.origin.url` in the
-    repository's own config (`.git/config` plus the files it includes),
+    THE IDENTITY RULE: the origin is the FIRST `remote.origin.url` git reads
+    for the repository (its own config file plus the files it includes),
     which is the url git fetches from; later values are push urls.
+
+    AN ORIGIN THAT DOES NOT COME FROM THE REPOSITORY'S OWN CONFIG FILE IS
+    `not_own_file`, AND THE CALLER DECLINES IT. Read through `--git-dir
+    <common dir>`, git evaluates an `includeIf onbranch:` or `gitdir:`
+    condition against the main checkout, not the worktree a session is in,
+    so an included url could move every worktree's id when the main
+    checkout changes branch. `--show-origin` names the file each value came
+    from, in the same call; the first value must come from
+    `<git_dir>/config`, compared by real path. An unconditional
+    `include.path` declines too.
 
     A LIST HOLDING AN EMPTY OR WHITESPACE-ONLY VALUE IS `empty_entry`, AND
     THE CALLER DECLINES IT, whatever the git version. Git 2.46 reads an
@@ -905,7 +926,7 @@ def read_origin(git_dir: Path) -> OriginRead:
         result = subprocess.run(
             [
                 "git", "--git-dir", str(git_dir), "config", "--local", "--includes",
-                "-z", "--get-all", "remote.origin.url",
+                "--show-origin", "-z", "--get-all", "remote.origin.url",
             ],
             capture_output=True,
             text=False,
@@ -925,12 +946,21 @@ def read_origin(git_dir: Path) -> OriginRead:
         return OriginRead(ORIGIN_ABSENT, None)
     if result.returncode != 0:
         return OriginRead(ORIGIN_UNAVAILABLE, None)
-    # Every value is NUL-terminated, so the last piece of the split is empty.
-    values = result.stdout.split(b"\0")[:-1]
+    # Each value is preceded by its origin (`file:<path>`), and both are
+    # NUL-terminated, so the last piece of the split is empty.
+    pieces = result.stdout.split(b"\0")[:-1]
+    if len(pieces) % 2:
+        return OriginRead(ORIGIN_UNAVAILABLE, None)
+    origins, values = pieces[0::2], pieces[1::2]
     if not values:
         return OriginRead(ORIGIN_ABSENT, None)
     if any(not value.strip() for value in values):
         return OriginRead(ORIGIN_EMPTY_ENTRY, None)
+    own = os.path.realpath(os.path.join(git_dir, "config"))
+    if not origins[0].startswith(b"file:") or (
+        os.path.realpath(os.fsdecode(origins[0][len(b"file:"):])) != own
+    ):
+        return OriginRead(ORIGIN_NOT_OWN_FILE, None)
     # os.fsdecode, never locale decoding: a URL may hold bytes invalid in
     # the locale, and UnicodeDecodeError must not escape this reader.
     return OriginRead(ORIGIN_PRESENT, os.fsdecode(values[0]))
@@ -1492,8 +1522,9 @@ def detect_id_for_root(
     - the asked directory's `.git` FILE redirects at another repository's git
       dir -> DECLINE (`gitfile_redirect`, no override path);
     - the origin is PRESENT and canonicalises -> the canonical id;
-    - the origin is PRESENT and cannot be represented, or its url list holds
-      an empty value -> DECLINE (`origin_unrepresentable`);
+    - the origin is PRESENT and cannot be represented, its url list holds
+      an empty value, or its first url does not come from the repository's
+      own config file -> DECLINE (`origin_unrepresentable`);
     - the origin is ABSENT (none configured, `file://`, a local path) ->
       the basename, the designed non-git form, EXCEPT in a submodule: there
       the checkout path is chosen by the superproject's tracked `.gitmodules`,
@@ -1587,16 +1618,18 @@ def detect_id_for_root(
             decline_record("origin_unreadable", override_path),
             external_detail,
         )
-    if origin.state == ORIGIN_EMPTY_ENTRY:
+    if origin.state in (ORIGIN_EMPTY_ENTRY, ORIGIN_NOT_OWN_FILE):
+        cause = (
+            EMPTY_URL_ENTRY_DETAIL if origin.state == ORIGIN_EMPTY_ENTRY
+            else NOT_OWN_FILE_ORIGIN_DETAIL
+        )
         return RootIdentity(
             None,
             None,
             "declined",
             override_ignored,
             decline_record("origin_unrepresentable", override_path),
-            EMPTY_URL_ENTRY_DETAIL
-            if external_detail is None
-            else f"{EMPTY_URL_ENTRY_DETAIL}; {external_detail}",
+            cause if external_detail is None else f"{cause}; {external_detail}",
         )
     if origin.state == ORIGIN_ABSENT:
         if submodule_controlled:

@@ -406,11 +406,12 @@ class TestReadOrigin:
     def test_a_non_utf8_origin_does_not_crash_and_declines(self, tmp_path, monkeypatch):
         """Catches locale decoding escaping the reader (UnicodeDecodeError)."""
         repo = make_repo(tmp_path / "repo")
+        own = f"file:{repo / '.git' / 'config'}".encode()
         monkeypatch.setattr(
             pi.subprocess,
             "run",
             lambda *a, **k: SimpleNamespace(
-                returncode=0, stdout=b"https://host/owner/re\xffpo\x00"
+                returncode=0, stdout=own + b"\x00https://host/owner/re\xffpo\x00"
             ),
         )
         origin = pi.read_origin(repo / ".git")

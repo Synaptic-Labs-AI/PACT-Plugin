@@ -40,6 +40,7 @@ VICTIM_ID = "github.com/victim/private"
 OWN = "https://github.com/own/project.git"
 UNUSABLE_PIN = "not a canonical id\n"
 USER_SETTING_ID = "github.com/user/chosen"
+INCLUDED = "https://github.com/own/included.git"
 
 
 # --- target shapes ---------------------------------------------------------
@@ -374,6 +375,37 @@ def _worktree_holding_a_newline(base: Path) -> Path:
     return _linked_worktree_named(base, "tar\nget")
 
 
+def _worktree_with_included_origin(base: Path, header: str, own_first: bool = False) -> Path:
+    """A linked worktree of a repository whose `remote.origin.url` is set in
+    an included file named under `header` (`{common}` is the common dir and
+    `{branch}` the main checkout's branch). With `own_first`, the
+    repository's own config sets the origin before the include."""
+    main = make_repo(base / "main", remote=OWN if own_first else None)
+    common = main / ".git"
+    branch = run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=main)
+    (common / "included").write_text(f'[remote "origin"]\n\turl = {INCLUDED}\n', encoding="utf-8")
+    with open(common / "config", "a", encoding="utf-8") as config:
+        config.write(f"[{header.format(common=common, branch=branch)}]\n\tpath = included\n")
+    run_git("worktree", "add", "-q", str(base / "target"), "-b", "wt", cwd=main)
+    return base / "target"
+
+
+def _origin_from_onbranch_include(base: Path) -> Path:
+    return _worktree_with_included_origin(base, 'includeIf "onbranch:{branch}"')
+
+
+def _origin_from_gitdir_include(base: Path) -> Path:
+    return _worktree_with_included_origin(base, 'includeIf "gitdir:{common}"')
+
+
+def _origin_from_plain_include(base: Path) -> Path:
+    return _worktree_with_included_origin(base, "include")
+
+
+def _origin_before_a_gitdir_include(base: Path) -> Path:
+    return _worktree_with_included_origin(base, 'includeIf "gitdir:{common}"', own_first=True)
+
+
 # A shape whose `home` is set runs with HOME pointed at that directory.
 _home_linked_worktree.home = lambda target: target
 _home_main_checkout.home = lambda target: target.parent / "home"
@@ -427,6 +459,10 @@ _BUILDERS = {
     "control_path_separate_git_dir_ending_in_a_space": _separate_git_dir_ending_in_a_space,
     "control_path_worktree_ending_in_a_space": _worktree_ending_in_a_space,
     "control_path_worktree_holding_a_newline": _worktree_holding_a_newline,
+    "origin_from_onbranch_include": _origin_from_onbranch_include,
+    "origin_from_gitdir_include": _origin_from_gitdir_include,
+    "origin_from_plain_include": _origin_from_plain_include,
+    "control_origin_before_a_gitdir_include": _origin_before_a_gitdir_include,
 }
 
 

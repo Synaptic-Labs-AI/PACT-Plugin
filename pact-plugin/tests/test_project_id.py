@@ -751,8 +751,9 @@ class TestDetectProjectId:
 
         # FOUR calls since the identity change: `--git-common-dir`,
         # `--show-toplevel` and `--git-dir` describe the repository shape,
-        # then `config --local --includes -z --get-all` reads the origin from
-        # the common dir itself (`--git-dir`), never from the work tree.
+        # then `config --local --includes --show-origin -z --get-all` reads
+        # the origin, and the file it came from, from the common dir itself
+        # (`--git-dir`), never from the work tree.
         # `common.parent` alone cannot
         # name the identity root for a submodule or a
         # `--separate-git-dir` repository.
@@ -776,8 +777,8 @@ class TestDetectProjectId:
 
         origin_args, origin_kwargs = mock_run.call_args_list[3]
         assert origin_args[0] == [
-            "git", "--git-dir", "/some/repo/.git", "config", "--local", "--includes", "-z",
-            "--get-all", "remote.origin.url",
+            "git", "--git-dir", "/some/repo/.git", "config", "--local", "--includes",
+            "--show-origin", "-z", "--get-all", "remote.origin.url",
         ]
         assert origin_kwargs["text"] is False
         assert origin_kwargs["timeout"] == 5

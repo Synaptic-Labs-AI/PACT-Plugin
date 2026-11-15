@@ -45,8 +45,9 @@ def _add_url(repo: Path, url: str) -> None:
 
 class TestTheOriginIsTheUrlGitFetches:
     """The origin is the first `remote.origin.url` in the repository's own
-    config, includes followed. git fetches from the first of several urls;
-    the last one is a push-only url."""
+    config. git fetches from the first of several urls; the last one is a
+    push-only url. A first url that does not come from the repository's own
+    config file declines."""
 
     def test_the_first_of_two_urls_wins(self, tmp_path):
         assert_outside_repository(tmp_path)
@@ -55,7 +56,10 @@ class TestTheOriginIsTheUrlGitFetches:
 
         assert _origin_id(repo) == (CANONICAL, "first.example/o/first")
 
-    def test_a_url_set_only_through_an_include_is_present(self, tmp_path):
+    def test_a_url_set_only_through_an_include_declines(self, tmp_path):
+        """An included file's url can differ between a repository's
+        worktrees and branches, so it is no identity: it declines, with the
+        override as the remedy."""
         assert_outside_repository(tmp_path)
         repo = make_repo(tmp_path / "repo")
         included = tmp_path / "included.cfg"
@@ -65,7 +69,54 @@ class TestTheOriginIsTheUrlGitFetches:
         )
         run_git("config", "include.path", str(included), cwd=repo)
 
-        assert _origin_id(repo) == (CANONICAL, "included.example/o/inc")
+        assert pi.read_origin(repo / ".git") == pi.OriginRead(pi.ORIGIN_NOT_OWN_FILE, None)
+        identity = pi.detect_id_for_root(repo, common_dir(repo))
+        assert identity.project_id is None
+        assert identity.decline_reason == pi.decline_record(
+            "origin_unrepresentable", str(common_dir(repo) / "pact-project-id")
+        )
+        assert identity.detail == pi.NOT_OWN_FILE_ORIGIN_DETAIL
+
+    def test_a_url_in_the_own_config_before_an_include_is_present(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "repo", remote="git@own.example:o/own.git")
+        included = tmp_path / "included.cfg"
+        included.write_text(
+            '[remote "origin"]\n\turl = git@included.example:o/inc.git\n',
+            encoding="utf-8",
+        )
+        run_git("config", "include.path", str(included), cwd=repo)
+
+        assert _origin_id(repo) == (CANONICAL, "own.example/o/own")
+
+    def test_the_own_config_is_matched_by_its_real_path(self, tmp_path, monkeypatch):
+        """git names the file it read by the spelling of the git dir it was
+        given; a spelling of the same file through a symlink is still the
+        repository's own config."""
+        import subprocess
+
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "repo")
+        link = tmp_path / "link"
+        link.symlink_to(repo / ".git")
+        answer = f"file:{repo / '.git' / 'config'}".encode() + b"\0git@own.example:o/own.git\0"
+
+        def git_answers(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 0, answer, b"")
+
+        monkeypatch.setattr(pi.subprocess, "run", git_answers)
+        assert pi.read_origin(link) == pi.OriginRead(pi.ORIGIN_PRESENT, "git@own.example:o/own.git")
+
+    def test_an_answer_without_an_origin_for_each_value_is_unavailable(self, tmp_path, monkeypatch):
+        import subprocess
+
+        assert_outside_repository(tmp_path)
+
+        def git_answers(command, **_kwargs):
+            return subprocess.CompletedProcess(command, 0, b"git@own.example:o/own.git\0", b"")
+
+        monkeypatch.setattr(pi.subprocess, "run", git_answers)
+        assert pi.read_origin(tmp_path) == pi.OriginRead(pi.ORIGIN_UNAVAILABLE, None)
 
     @pytest.mark.parametrize(
         "urls",

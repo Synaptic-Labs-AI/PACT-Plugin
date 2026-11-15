@@ -2362,6 +2362,7 @@ class TestAWithheldPinPathStillReportsItsReason:
             (pi.ORIGIN_ABSENT, None): pi.OriginRead(pi.ORIGIN_ABSENT, None),
             (pi.ORIGIN_UNAVAILABLE, None): pi.OriginRead(pi.ORIGIN_UNAVAILABLE, None),
             (pi.ORIGIN_EMPTY_ENTRY, None): pi.OriginRead(pi.ORIGIN_EMPTY_ENTRY, None),
+            (pi.ORIGIN_NOT_OWN_FILE, None): pi.OriginRead(pi.ORIGIN_NOT_OWN_FILE, None),
             (pi.ORIGIN_PRESENT, pi.OUTCOME_CANONICAL): pi.OriginRead(
                 pi.ORIGIN_PRESENT, "https://github.com/o/sep.git"
             ),

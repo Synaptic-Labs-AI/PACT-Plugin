@@ -466,6 +466,29 @@ class TestEveryRungGivesAShapeTheSameAnswer:
         }
         assert wrong == {}, f"a path ending in a space or holding a newline changed the answer: {wrong}"
 
+    def test_an_origin_from_another_file_declines_on_every_route(self, matrix):
+        """A linked worktree whose origin comes from a file the repository's
+        own config includes (an `includeIf onbranch:`, an `includeIf
+        gitdir:`, a plain `include.path`) declines as unrepresentable on
+        every route; with the origin set in the repository's own config
+        before such an include, every route binds it."""
+        cells, _sites, _fired, _executed = matrix
+        own = f"bound:{pi.normalize_remote_url(OWN)}"
+        included = [shape for shape in SHAPES if shape.startswith("origin_from_")]
+        assert len(included) == 3, included
+        wrong = {
+            (shape, route): cells[(shape, route)][0]
+            for shape in included for route in ROUTES
+            if cells[(shape, route)][0] != "origin_unrepresentable"
+        }
+        wrong.update({
+            ("control_origin_before_a_gitdir_include", route): answer
+            for route in ROUTES
+            for answer in [cells[("control_origin_before_a_gitdir_include", route)][0]]
+            if answer != own
+        })
+        assert wrong == {}, f"an included origin answered other than its rule: {wrong}"
+
     def test_every_unreached_cell_is_a_recorded_exception(self, matrix):
         cells, _sites, _fired, _executed = matrix
         unreached = {
