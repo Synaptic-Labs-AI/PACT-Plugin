@@ -3022,6 +3022,18 @@ class PACTMemory:
                 # and from `find_git_marker`, but `_find_project_root` does not
                 # stop at a ceiling, and `git -C <root>` examines the root
                 # itself.
+                if cwd_common_dir is not None and marker_git_dir is None:
+                    # git answered with a common dir but gave no git dir for
+                    # the marker (it failed, or printed back an option it
+                    # predates): a marker git could not answer for, not one
+                    # without a working tree.
+                    return _decline(
+                        "cwd",
+                        "broken_git_marker",
+                        root=cwd_root,
+                        pre_change_name=cwd_root.name,
+                        detail=f"cwd: {str(cwd_root)!r} gave no git dir",
+                    )
                 guarded = _root_guard(
                     cwd_root, cwd_common_dir, "cwd", root=cwd_root, toplevel=marker_toplevel,
                 )

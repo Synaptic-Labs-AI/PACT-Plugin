@@ -2599,7 +2599,9 @@ class TestTheLegacyProbeLetsTheCallersErrorThrough:
 # list`: with REJECT_Z it rejects `-z` exactly as git before 2.36 does (its
 # `list` options carry no 'z', so parse_options prints "unknown switch `z'"
 # and the usage and exits 129); with FAIL_LISTING every `worktree list`
-# fails as git does on a repository it cannot read. With ECHO followed by
+# fails as git does on a repository it cannot read; with
+# FAIL_ABSOLUTE_GIT_DIR every `rev-parse --absolute-git-dir` fails. With
+# ECHO followed by
 # a `rev-parse` option, it answers as a git that predates that option:
 # rev-parse prints an option it does not know back as an argument, in its
 # place, and answers the rest.
@@ -2626,6 +2628,14 @@ for argument in "$@"; do
     -z) [ "$listing" = 1 ] && nul=1 ;;
   esac
 done
+if [ "{mode}" = FAIL_ABSOLUTE_GIT_DIR ]; then
+  for argument in "$@"; do
+    if [ "$argument" = --absolute-git-dir ]; then
+      echo "fatal: cannot answer" >&2
+      exit 128
+    fi
+  done
+fi
 if [ "$listing" = 1 ] && [ "{mode}" = FAIL_LISTING ]; then
   echo "fatal: not a git repository: '.'" >&2
   exit 128
@@ -2828,3 +2838,31 @@ class TestAnOldGitsEchoedOptionIsNoAnswer:
         assert ask(memory_api, repo) not in (None, (None, None))  # control: real git answers
         _git_on_path(monkeypatch, tmp_path / "bin", f"ECHO{option}")
         assert ask(memory_api, repo) in (None, (None, None))
+
+
+class TestTheCwdMarkerDeclinesAMarkerGitCannotAnswerFor:
+    """On the cwd-marker rung a repository git gives no git dir for (git
+    failed, or printed back `--absolute-git-dir` because it predates it)
+    declines as a marker git could not answer for; a bare repository, for
+    which git gives a git dir and no top level, still declines as having no
+    working tree."""
+
+    @staticmethod
+    def _cwd_routes(answers):
+        return {route: answer for route, answer in answers.items() if route.startswith("cwd marker")}
+
+    @pytest.mark.parametrize("mode", ["ECHO--absolute-git-dir", "FAIL_ABSOLUTE_GIT_DIR"])
+    def test_no_git_dir_declines_as_a_broken_marker(self, tmp_path, mode):
+        assert_outside_repository(tmp_path)
+        answers = self._cwd_routes(_route_answers(tmp_path, "control_own_checkout", mode))
+        assert answers, "control: the cwd-marker routes ran"
+        wrong = {
+            route: answer for route, answer in answers.items()
+            if answer[0] is not None or answer[1] != "broken_git_marker"
+        }
+        assert wrong == {}, f"a marker git gave no git dir for: {wrong}"
+
+    def test_a_bare_repository_still_has_no_working_tree(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        answers = self._cwd_routes(_route_answers(tmp_path, "bare_target", "PASS"))
+        assert answers and {answer[1] for answer in answers.values()} == {"no_working_tree"}, answers
