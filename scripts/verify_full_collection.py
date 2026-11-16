@@ -191,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
     if config_problems:
         return _failure("PARSE FAILURE", "; ".join(config_problems))
 
+    # `-p no:randomly` repeats the root config's block for a checkout that has
+    # none: the suite's own tests run this guard in temporary checkouts with
+    # no root pyproject.toml, where this flag alone keeps pytest-randomly out.
     argv = [sys.executable, "-m", "pytest", "--collect-only", "-q",
             "-p", "no:cacheprovider", "-p", "no:randomly"]
     try:

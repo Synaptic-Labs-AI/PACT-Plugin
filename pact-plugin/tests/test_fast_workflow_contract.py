@@ -579,13 +579,50 @@ class TestHashCheckedInstall:
                     if line.strip().startswith("printf")]
         assert proc.stderr.splitlines() == expected, proc.stderr
 
-    def test_the_environment_check_remedy_is_the_local_install(self):
-        """The verifier's MISSING remedy is printed wherever it runs, CI or a
-        developer's machine, so it names the install that works on both."""
+    def test_the_environment_check_remedy_is_one_install_per_host(self):
+        """The verifier's MISSING remedy has exactly two spellings: the CI
+        install and the local one."""
         root = ci_contract.require_root("the environment check remedy")
         text = (root / "scripts" / "verify_ci_environment.py").read_text(encoding="utf-8")
         printed = re.findall(r"install the pinned set: (python[^\"]*)\"", text)
-        assert printed == [_LOCAL_LOCK_INSTALL], printed
+        assert printed == [_CI_LOCK_INSTALL, _LOCAL_LOCK_INSTALL], printed
+
+    @pytest.mark.parametrize("github_actions, expected, other", [
+        ("true", _CI_LOCK_INSTALL, _LOCAL_LOCK_INSTALL),
+        (None, _LOCAL_LOCK_INSTALL, _CI_LOCK_INSTALL),
+        ("false", _LOCAL_LOCK_INSTALL, _CI_LOCK_INSTALL),
+    ])
+    def test_the_environment_check_remedy_names_the_install_for_its_host(
+            self, monkeypatch, github_actions, expected, other):
+        """In a GitHub Actions run the remedy is the CI install, which refuses
+        a source build; anywhere else it is the local install, with the
+        source-build risk stated beside it."""
+        import importlib.util
+
+        root = ci_contract.require_root("the environment check remedy")
+        spec = importlib.util.spec_from_file_location(
+            "_remedy_verify_ci_environment",
+            root / "scripts" / "verify_ci_environment.py")
+        verify = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = verify
+        try:
+            spec.loader.exec_module(verify)
+            if github_actions is None:
+                monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+            else:
+                monkeypatch.setenv("GITHUB_ACTIONS", github_actions)
+            rendered = verify.Verdict(
+                wrong_version={}, missing=("alpha",), unexpected=(),
+                shadowed={}, interpreter_mismatch=None).render()
+        finally:
+            sys.modules.pop(spec.name, None)
+        remedy = [line for line in rendered.splitlines()
+                  if "install the pinned set:" in line]
+        assert len(remedy) == 1, rendered
+        assert f"install the pinned set: {expected}" in remedy[0], rendered
+        assert f"install the pinned set: {other}" not in remedy[0], rendered
+        assert ("builds it from source" in remedy[0]) is (
+            expected == _LOCAL_LOCK_INSTALL), rendered
 
     def test_the_tripwire_names_the_ci_install(self):
         """test_memory_init's tripwire tells a workflow author which install to

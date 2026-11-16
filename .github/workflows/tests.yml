@@ -286,6 +286,9 @@ jobs:
     # reads it on its run line and may not carry `env:`, so a narrower scope
     # would need a second copy under another name. The PACT_ prefix keeps it
     # apart from any SEED a test or tool reads.
+    # It is set, as an empty string, in every run without a seed: a job-level
+    # env key cannot be left unset, and the guard, the run line's `:+` and the
+    # artifact name treat an empty value exactly as an unset one.
     env:
       DIST: ${{ inputs.dist || 'loadfile' }}
       PACT_SHUFFLE_SEED: ${{ inputs.shuffle_seed || '' }}

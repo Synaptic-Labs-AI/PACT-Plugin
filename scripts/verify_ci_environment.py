@@ -169,8 +169,16 @@ class Verdict:
             out.append("MISSING (pinned or required by a pin, not installed):")
             out += [f"  {n}" for n in self.missing]
         if self.wrong_version or self.missing:
-            remedies.append(
-                "install the pinned set: python -m pip install --require-hashes -r constraints-ci.txt")
+            # The workflows install with --only-binary=:all:, which refuses a
+            # source build; a developer machine may have no wheel for a pin.
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                remedies.append(
+                    "install the pinned set: python -m pip install --only-binary=:all: --require-hashes -r constraints-ci.txt")
+            else:
+                remedies.append(
+                    "install the pinned set: python -m pip install --require-hashes -r constraints-ci.txt"
+                    " (where a pin has no wheel for this platform, pip builds it from source,"
+                    " and that build's own dependencies install without hash checks)")
         if self.unexpected:
             out.append("UNEXPECTED (installed, outside the pinned set's dependency closure):")
             out += [f"  {n}" for n in self.unexpected]
