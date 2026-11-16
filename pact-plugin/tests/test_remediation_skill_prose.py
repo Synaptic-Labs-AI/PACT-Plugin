@@ -2289,8 +2289,10 @@ def _class_statement_names(node):
 def _import_time_code(tree):
     """The code `tree` runs when it is imported, as one function the census
     reads like any other: every module-level statement, class bodies
-    included, with each function's and lambda's body removed (its
-    decorators and defaults run at import and are kept). Left out: a
+    included, with each function's body removed (its decorators and
+    defaults run at import and are kept). A lambda's body is kept,
+    wherever the lambda stands, since a lambda called at import runs it.
+    Left out: a
     module-level `if` whose test is exactly `__name__ == "__main__"` and
     which has no `else` branch, since on import `__name__` is the module's
     name. Any other test that mentions `__name__` (reversed operands, an
@@ -2314,8 +2316,6 @@ def _import_time_code(tree):
         for node in ast.walk(statement):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 node.body = [ast.Pass()]
-            elif isinstance(node, ast.Lambda):
-                node.body = ast.Constant(value=None)
     code = ast.FunctionDef(
         name="<import>",
         args=ast.arguments(posonlyargs=[], args=[], vararg=None, kwonlyargs=[],
@@ -2566,7 +2566,7 @@ def route_inputs() -> dict:
     the project's own modules (the memory scripts and `hooks/`), helpers and
     re-exports included, and the code that runs when the modules it reaches
     are imported (`_import_time_code`: module statements and class bodies,
-    with decorators and defaults). The modules read at import are every
+    with decorators, defaults and lambda bodies). The modules read at import are every
     module holding a reached function, every project module one of them
     imports (at module level, or inside a reached function), transitively,
     and the package of each dotted prefix of every such module's name; a
@@ -3541,6 +3541,43 @@ class TestEveryRouteEntryConditionIsARoute:
         assert reads(f'import os\nif "__main__" == __name__:\n    {read}\n')
         assert reads(f'import os\nif __name__ == "__main__":\n    pass\nelse:\n    {read}\n')
         assert reads(f'import os\nif __name__ == "__main__":\n    pass\n{read}\n')
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            'NAMES = sorted(["A"], key=lambda name: os.environ.get("X", name))\n',
+            'DEFAULT = (lambda: os.environ.get("X"))()\n',
+            'class Box:\n    root = (lambda: os.environ.get("X"))()\n',
+            '@(lambda cls: os.environ.get("X") and cls)\nclass Box:\n    pass\n',
+            'BIGGEST = max([1], key=lambda _: bool(os.environ.get("X")))\n',
+            'def f(value=(lambda: os.environ.get("X"))()):\n    return value\n',
+            'TABLE = {"k": lambda: os.environ.get("X")}\nTABLE["k"]()\n',
+            'class Box:\n    def method(self, value=(lambda: os.environ.get("X"))()):\n        pass\n',
+        ],
+        ids=[
+            "sorted key", "called at once", "class body", "decorator", "max key",
+            "function default", "table entry called at import", "method default",
+        ],
+    )
+    def test_a_lambda_body_is_import_time_code(self, source):
+        """A lambda's body is kept in `_import_time_code`, wherever the lambda
+        stands in code that runs on import: a key function, a lambda called
+        at once, a class body, a decorator, a default value, or a table
+        entry called at import. A lambda inside a function body is not, since
+        the function's body is not run on import."""
+        import ast
+
+        def reads(text):
+            code = _import_time_code(ast.parse("import os\n" + text))
+            return any(
+                isinstance(node, ast.Call) and ast.unparse(node.func) == "os.environ.get"
+                for node in ast.walk(code)
+            )
+
+        assert reads(source)
+        # Controls: a lambda inside a function body, and a docstring naming the read.
+        assert not reads('def f():\n    return (lambda: os.environ.get("X"))()\n')
+        assert not reads('"""(lambda: os.environ.get("X"))()"""\n')
 
     def test_the_graph_resolves_relative_imports_and_fails_closed(self, tmp_path, monkeypatch):
         """Control for `_DetectionGraph.load`: a relative import resolves
