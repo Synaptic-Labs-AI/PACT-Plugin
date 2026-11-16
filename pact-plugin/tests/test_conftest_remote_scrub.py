@@ -41,7 +41,8 @@ def test_child_sees_the_variable_scrubbed():
 
 
 def test_scrub_removes_an_exported_cloud_signal():
-    env = dict(os.environ)
+    # No PYTEST_* name from the shell that runs the suite reaches the child.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
     env["CLAUDE_CODE_REMOTE"] = "true"
     env[_CHILD_FLAG] = "1"
     result = subprocess.run(

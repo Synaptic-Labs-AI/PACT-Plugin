@@ -154,9 +154,8 @@ def test_the_conftest_fails_a_test_that_leaves_a_marker_under_an_importer_id(tmp
     (tmp_path / "conftest.py").write_text(
         _MARKER_RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
     (tmp_path / "test_marker_rig.py").write_text(_MARKER_RIG_TESTS, encoding="utf-8")
-    env = {key: value for key, value in os.environ.items()
-           if not key.startswith("PYTEST_XDIST_")
-           and key not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    # No PYTEST_* name from the shell that runs the suite reaches the child.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
     record = tmp_path / "session_id.txt"
     try:
         proc = subprocess.run(

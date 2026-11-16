@@ -134,16 +134,21 @@ def _rig(tmp_path, suite_text, extra_conftest=""):
     return root, plugin_root, workspace
 
 
+def _child_environ():
+    """This process's environment without any PYTEST_* name, so a child pytest
+    takes no PYTEST_ADDOPTS, PYTEST_PLUGINS or PYTEST_DISABLE_PLUGIN_AUTOLOAD
+    (nor this session's xdist or current-test names) from the shell that runs
+    the suite. A rig adds back what it sets on purpose."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+
+
 def _run(plugin_root, workspace=None, args=(), gated=True, extra_env=None):
-    env = os.environ.copy()
+    env = _child_environ()
     env.pop("GITHUB_ACTIONS", None)
     env.pop("GITHUB_WORKSPACE", None)
-    for name in [name for name in env if name.startswith("PYTEST_XDIST_")]:
-        env.pop(name)
     # The certifying session that runs THIS module has claimed ownership;
     # the rig session is a fresh outermost session and must claim its own.
     env.pop(OWNER_ENV, None)
-    env.pop("PYTEST_ADDOPTS", None)
     if gated:
         env["GITHUB_ACTIONS"] = "true"
     if workspace is not None:
@@ -1187,9 +1192,8 @@ def test_the_recorder_reads_the_status_last_on_the_controller_and_a_worker(tmp_p
     (tmp_path / "pact_order_probe.py").write_text(_ORDER_PROBE, encoding="utf-8")
     results = tmp_path / "results"
     results.mkdir()
-    env = {key: value for key, value in os.environ.items()
-           if not key.startswith(("PYTEST_XDIST_", "GITHUB_"))
-           and key not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env = {key: value for key, value in _child_environ().items()
+           if not key.startswith("GITHUB_")}
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
     env["PACT_ORDER_PROBE_DIR"] = str(results)
     env["PACT_ORDER_PROBE_ROOT"] = str(_PLUGIN_ROOT)

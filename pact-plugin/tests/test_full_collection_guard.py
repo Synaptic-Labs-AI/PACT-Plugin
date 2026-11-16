@@ -113,11 +113,10 @@ def _install_fake_pytest(rig, body):
 
 
 def _run_guard(rig, args=(), env_overrides=None):
-    env = None
-    if env_overrides is not None:
-        env = os.environ.copy()
-        env.pop("PYTEST_ADDOPTS", None)
-        env.update(env_overrides)
+    # No PYTEST_* name from the shell that runs the suite reaches the guard or
+    # the pytest it starts; a test adds back what it sets on purpose.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+    env.update(env_overrides or {})
     proc = subprocess.run(
         [sys.executable, str(rig / GUARD), *args], cwd=str(rig),
         capture_output=True, text=True, timeout=300, env=env)

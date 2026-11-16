@@ -285,14 +285,20 @@ def _launch(argv, site=None):
     return LAUNCH.format(argv=argv, site=site)
 
 
+def _child_environ():
+    """This process's environment without the clock-shift variables, PYTHONPATH
+    or any PYTEST_* name, so a child pytest takes no PYTEST_ADDOPTS,
+    PYTEST_PLUGINS or PYTEST_DISABLE_PLUGIN_AUTOLOAD (nor this session's xdist
+    or current-test names) from the shell that runs the suite. A rig adds back
+    what it sets on purpose."""
+    return {k: v for k, v in os.environ.items()
+            if not k.startswith(("PACT_TEST_CLOCK_SHIFT_", "PYTEST_")) and k != "PYTHONPATH"}
+
+
 def _run_child(tmp_path, source, shift=TEN_YEARS, shim_on_path=True):
     (tmp_path / "conftest.py").write_text(CONFTEST)
     (tmp_path / "test_synthetic.py").write_text(source)
-    env = {
-        k: v for k, v in os.environ.items()
-        if not k.startswith("PACT_TEST_CLOCK_SHIFT_")
-        and k not in ("PYTHONPATH", "PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS")
-    }
+    env = _child_environ()
     env["PACT_TEST_CLOCK_SHIFT_LEDGER"] = str(tmp_path / "ledger")
     if shift is not None:
         env["PACT_TEST_CLOCK_SHIFT_SECONDS"] = str(shift)
@@ -494,11 +500,7 @@ DROPS_SHIFT = '{k: v for k, v in os.environ.items() if k != "PACT_TEST_CLOCK_SHI
 def _run_xdist(tmp_path, argv="[sys.executable, '-c', 'pass']", env="None"):
     (tmp_path / "conftest.py").write_text(XDIST_CONFTEST)
     (tmp_path / "test_synthetic.py").write_text(XDIST_LAUNCH.format(argv=argv, env=env))
-    child_env = {
-        k: v for k, v in os.environ.items()
-        if not k.startswith(("PACT_TEST_CLOCK_SHIFT_", "PYTEST_XDIST_"))
-        and k not in ("PYTHONPATH", "PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS")
-    }
+    child_env = _child_environ()
     child_env["PACT_TEST_CLOCK_SHIFT_LEDGER"] = str(tmp_path / "ledger")
     child_env["PACT_TEST_CLOCK_SHIFT_SECONDS"] = str(TEN_YEARS)
     child_env["PYTHONPATH"] = str(SHIM_DIR)
@@ -555,11 +557,7 @@ def _run_xdist_after_a_crash(tmp_path, argv):
     """One worker, which test_a kills; xdist restarts it and test_b runs there."""
     (tmp_path / "conftest.py").write_text(XDIST_CONFTEST)
     (tmp_path / "test_synthetic.py").write_text(XDIST_CRASH.format(argv=argv))
-    child_env = {
-        k: v for k, v in os.environ.items()
-        if not k.startswith(("PACT_TEST_CLOCK_SHIFT_", "PYTEST_XDIST_"))
-        and k not in ("PYTHONPATH", "PYTEST_CURRENT_TEST", "PYTEST_ADDOPTS")
-    }
+    child_env = _child_environ()
     child_env["PACT_TEST_CLOCK_SHIFT_LEDGER"] = str(tmp_path / "ledger")
     child_env["PACT_TEST_CLOCK_SHIFT_SECONDS"] = str(TEN_YEARS)
     child_env["PYTHONPATH"] = str(SHIM_DIR)

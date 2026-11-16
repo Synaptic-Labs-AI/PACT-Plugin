@@ -98,21 +98,19 @@ def _suite_conftest(request):
     return found[0]
 
 
-@pytest.mark.skipif(not hasattr(os, "fork"), reason="SKIPPED, NOT PASSED: no os.fork here")
-def test_a_forked_process_does_not_remove_its_parents_directory(request, tmp_path):
+def test_a_process_that_did_not_create_the_directory_does_not_remove_it(
+        request, monkeypatch, tmp_path):
     """MUTANT: the exit handler removes the directory in any process. A process
-    forked from one that loaded the conftest inherits its exit handlers, and
-    must leave the parent's directory alone; the parent itself removes it."""
+    forked from one that loaded the conftest is this case: it inherits the exit
+    handler and the creator's pid, but os.getpid() returns its own. The call
+    runs here with the creator pid set to another process's, not in a real
+    fork, since forking a threaded xdist worker raises a DeprecationWarning."""
     conftest = _suite_conftest(request)
     target = tmp_path / "owned"
     target.mkdir()
-    pid = os.fork()
-    if pid == 0:  # the forked child
-        try:
-            conftest._remove_own_dir(str(target))
-        finally:
-            os._exit(0)
-    os.waitpid(pid, 0)
-    assert target.is_dir(), "a forked child removed its parent's directory"
+    monkeypatch.setattr(conftest, "_CREATOR_PID", os.getpid() + 1)
+    conftest._remove_own_dir(str(target))
+    assert target.is_dir(), "a process that did not create the directory removed it"
+    monkeypatch.setattr(conftest, "_CREATOR_PID", os.getpid())
     conftest._remove_own_dir(str(target))
     assert not target.exists(), "the creating process did not remove its directory"

@@ -73,6 +73,7 @@ import ast
 import dataclasses
 import importlib.util
 import json
+import os
 import re
 import subprocess
 import sys
@@ -347,6 +348,8 @@ def _collect_node_ids(args, cwd):
         [sys.executable, "-m", "pytest", "--collect-only", "-q",
          "-p", "no:cacheprovider", "-p", "no:randomly", *args],
         cwd=str(cwd), capture_output=True, text=True, timeout=300,
+        # No PYTEST_* name from the shell that runs the suite reaches the child.
+        env={key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")},
     )
     ids = {line.strip() for line in result.stdout.splitlines() if "::" in line}
     return ids, result

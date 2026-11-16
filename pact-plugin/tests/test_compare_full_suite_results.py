@@ -2510,7 +2510,7 @@ def test_module_skips_loudly_outside_the_repo_layout(tmp_path):
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", str(copied), "-q", "-rA",
          "--noconftest", "-p", "no:cacheprovider", "-p", "no:randomly"],
-        cwd=layout, capture_output=True, text=True, timeout=300, check=False)
+        cwd=layout, env=child_env(), capture_output=True, text=True, timeout=300, check=False)
     output = completed.stdout + completed.stderr
     # 5 is pytest's "no tests collected": the module skipped instead of failing
     # to import. A missing script used to abort collection with exit 2.

@@ -2186,7 +2186,8 @@ class TestCIEnvironmentBinding:
             encoding="utf-8")
         (rig / "suite" / "test_probe.py").write_text(
             "def test_probe():\n    pass\n", encoding="utf-8")
-        env = dict(os.environ, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
+        # No PYTEST_* name from the shell that runs the suite reaches the child.
+        env = dict({key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
         env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
 
         def run(pytest_pin):
@@ -2302,7 +2303,8 @@ class TestCIEnvironmentBinding:
                     seen.add(key)
                     pins.append(f"{name}=={dist.version}")
         (rig / "constraints-ci.txt").write_text("\n".join(pins) + "\n", encoding="utf-8")
-        env = dict(os.environ, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
+        # No PYTEST_* name from the shell that runs the suite reaches the child.
+        env = dict({key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
         env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
         env.pop("PYTHONPATH", None)
 

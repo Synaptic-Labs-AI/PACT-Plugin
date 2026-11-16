@@ -542,13 +542,20 @@ def test_plain():
 '''
 
 
+def _child_environ():
+    """This process's environment without any PYTEST_* name, so a child pytest
+    takes no PYTEST_ADDOPTS, PYTEST_PLUGINS or PYTEST_DISABLE_PLUGIN_AUTOLOAD
+    (nor this session's xdist or current-test names) from the shell that runs
+    the suite. A rig adds back what it sets on purpose."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+
+
 def _run_rig(tmp_path, env_literal):
     (tmp_path / "conftest.py").write_text(
         _RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
     (tmp_path / "test_swallow.py").write_text(
         _RIG_TESTS.format(env=env_literal), encoding="utf-8")
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env = _child_environ()
     proc = subprocess.run(
         [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly", "-n", "2",
          "test_swallow.py"],
@@ -614,8 +621,7 @@ def test_the_marker_exempts_a_skills_test_in_a_session_that_loads_the_conftest(t
                                                     encoding="utf-8")
     (plugin / "skills" / "rig-skill" / "test_rig_skill.py").write_text(
         _SKILLS_RIG_TESTS, encoding="utf-8")
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env = _child_environ()
     proc = subprocess.run(
         [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly", *order],
         cwd=plugin, env=env, capture_output=True, text=True, timeout=300)
@@ -685,8 +691,7 @@ def test_the_marker_never_covers_a_wider_scoped_fixture(tmp_path):
     (tmp_path / "test_scope.py").write_text(_SCOPE_RIG_TESTS, encoding="utf-8")
     (tmp_path / "test_scope_after.py").write_text(_SCOPE_RIG_AFTER, encoding="utf-8")
     log = tmp_path / "launches.log"
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env = _child_environ()
     env["HOME_CENSUS_SCOPE_LOG"] = str(log)
     proc = subprocess.run(
         [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
@@ -766,8 +771,7 @@ def test_the_marker_never_covers_a_session_or_skills_fixture(tmp_path):
     (root / "skills" / "rig-skill" / "test_rig_skill.py").write_text(_LAYOUT_SKILL,
                                                                      encoding="utf-8")
     log = tmp_path / "launches.log"
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env = _child_environ()
     env["HOME_CENSUS_SCOPE_LOG"] = str(log)
     proc = subprocess.run(
         [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
@@ -793,8 +797,7 @@ def _real_session(*paths, plugin_dir=None, marker=None):
     """A child pytest session over real tracked paths, rooted at the plugin.
     With `plugin_dir`, it also loads the launch probe plugin written there, which
     writes the outcome of one HOME-less launch to `marker`."""
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env = _child_environ()
     extra = []
     if plugin_dir is not None:
         env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(plugin_dir), env.get("PYTHONPATH")]))
@@ -1011,8 +1014,7 @@ def test_a_gated_test_is_judged_where_it_runs_and_stopped_before_its_child(tmp_p
         _RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
     (tmp_path / "test_gated.py").write_text(_GATED_RIG_TESTS, encoding="utf-8")
     marker = tmp_path / "child-started"
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env = _child_environ()
     env.update(HOME_CENSUS_RIG_GATE=gate, HOME_CENSUS_RIG_MARKER=str(marker))
     proc = subprocess.run(
         [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly", "test_gated.py"],

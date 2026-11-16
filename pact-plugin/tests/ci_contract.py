@@ -13,6 +13,7 @@ selection options.
 """
 
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -283,7 +284,9 @@ def probe_options(probe_dir, args=(), timeout=120):
                "-p", "no:cacheprovider", "-p", "no:randomly", *args]
     proc = subprocess.run(
         command, cwd=str(probe_dir), capture_output=True, text=True,
-        timeout=timeout)
+        timeout=timeout,
+        # No PYTEST_* name from the shell that runs the suite reaches the child.
+        env={key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")})
     report = None
     for raw in proc.stdout.splitlines():
         if raw.startswith("PACT-OPTION-PROBE:"):

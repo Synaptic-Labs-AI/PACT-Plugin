@@ -1970,8 +1970,9 @@ class TestRunnerArtifactDestinations:
         return root / "scripts" / "run_fast_suite.py"
 
     def _env(self, workspace):
-        env = {key: value for key, value in os.environ.items()
-               if key != "PYTEST_ADDOPTS"}
+        # No PYTEST_* name from the shell that runs the suite reaches the runner
+        # or the pytest it starts.
+        env = {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
         env["GITHUB_WORKSPACE"] = str(workspace)
         return env
 

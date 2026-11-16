@@ -408,7 +408,8 @@ class TestAutouseResetIntegration:
             "    )\n",
             encoding="utf-8",
         )
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        # No PYTEST_* name from the shell that runs the suite reaches the child.
+        env = dict({key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}, PYTHONDONTWRITEBYTECODE="1")
         env["PACT_AUTOUSE_SOURCE_ROOT"] = str(source_root)
         env["PYTHONPATH"] = os.pathsep.join(str(path) for path in (
             source_root / "tests",
@@ -419,11 +420,8 @@ class TestAutouseResetIntegration:
             source_root / "scripts",
             source_root,
         ))
-        for name in ("PYTEST_ADDOPTS", "GITHUB_ACTIONS", "GITHUB_WORKSPACE"):
+        for name in ("GITHUB_ACTIONS", "GITHUB_WORKSPACE"):
             env.pop(name, None)
-        for name in list(env):
-            if name.startswith("PYTEST_XDIST_"):
-                env.pop(name, None)
 
         def run_pair(mode):
             plugin_control = [] if mode else ["-p", "no:xdist"]

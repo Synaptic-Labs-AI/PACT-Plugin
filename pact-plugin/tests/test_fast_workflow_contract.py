@@ -26,6 +26,15 @@ import pytest
 import ci_contract
 import ci_full_run_record
 
+
+def _child_environ():
+    """This process's environment without any PYTEST_* name, so the pytest a
+    rig starts (directly, or through the full-collection guard) takes no
+    PYTEST_ADDOPTS, PYTEST_PLUGINS or PYTEST_DISABLE_PLUGIN_AUTOLOAD from the
+    shell that runs the suite."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+
+
 # The run record's file name comes from the recorder that writes it, so a
 # rename there that misses the workflow fails the step pins below.
 _RUN_RECORD = ci_full_run_record.RECORD_NAME
@@ -1286,7 +1295,7 @@ class TestRemovability:
             )
         proc = subprocess.run(
             [sys.executable, str(guard)], cwd=str(rig),
-            capture_output=True, text=True, timeout=300)
+            capture_output=True, text=True, timeout=300, env=_child_environ())
         assert proc.returncode == 0, (
             f"the full-collection guard failed in a rig with no fast files "
             f"(rc={proc.returncode}).\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
@@ -1297,7 +1306,7 @@ class TestRemovability:
              "-p", "no:cacheprovider", "-p", "no:randomly",
              *self._FAST_DEPENDENT_NODE_IDS],
             cwd=str(rig / "pact-plugin"), capture_output=True, text=True,
-            timeout=300)
+            timeout=300, env=_child_environ())
         assert arms.returncode == 0, (
             f"the fast-dependent arms did not skip cleanly in a rig with no "
             f"fast lane (rc={arms.returncode}).\nstdout:\n{arms.stdout}\n"
@@ -1321,7 +1330,7 @@ class TestRemovability:
              "-p", "no:cacheprovider", "-p", "no:randomly",
              *self._FAST_DEPENDENT_NODE_IDS],
             cwd=str(rig / "pact-plugin"), capture_output=True, text=True,
-            timeout=300)
+            timeout=300, env=_child_environ())
         assert arms.returncode != 0, (
             f"a partially deleted fast lane did not fail; output:\n"
             f"{arms.stdout}")
