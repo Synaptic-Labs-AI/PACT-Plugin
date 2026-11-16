@@ -828,9 +828,7 @@ class TestRunReceiptAttribution:
       does not count and is run again after staging.
     - A moved HEAD is re-run once before the HANDOFF, in the isolated copy
       that holds the change, never in the worktree. That copy's run is the
-      result, and only paths that differ between its status before and after
-      the run go through the merge-base check; its own staged files are never
-      read as written by the run.
+      result; its own staged files are never read as written by the run.
     - If the copy cannot be built or the command cannot be run in it, after
       a moved HEAD or a status-only change alike (its own sub-bullet after
       both branches), the result is reported as unattributable, naming what
@@ -848,7 +846,12 @@ class TestRunReceiptAttribution:
       the branch the work merges into that writes only this worktree's
       FETCH_HEAD and no tag or shared remote-tracking ref; if the fetch
       fails, nothing counts as pre-existing.
-    - Worktree paths that also change in that copy are re-run in a second
+    - One reproduced-path rule, its own sub-bullet after both branches and
+      the unbuildable exit, serves both re-runs: every path that differs
+      between the copy's status before and after its run is reproduced,
+      whatever the worktree status did, and a worktree path the copy does
+      not change came from outside the run. With no reproduced path the
+      copy's run stands; with any, the command is re-run in a second
       remote-less clone at the merge base of the pre-run HEAD with the branch
       the work merges into, with no change applied. Each reproduced path is
       decided on its own: one that also appears in the merge-base clone is
@@ -864,9 +867,6 @@ class TestRunReceiptAttribution:
       tests and the precondition unmet through them; any other failing test
       blocks it. The exit-code precondition names that exception and the
       unattributable exit, so it does not contradict this bullet.
-    - When none of the worktree's changed paths change in the copy, the
-      change came from outside the run and the copy's run is the result; a
-      partly reproduced set is decided only through its reproduced paths.
     - No git archive export is named as the copy.
 
     Each arm is bound to the Step 0 receipt bullet, read through its
@@ -888,8 +888,8 @@ class TestRunReceiptAttribution:
          "the record step: the staged change saved before the run, outside the worktree"),
         ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, in the isolated copy that holds your change described below, not in the worktree, and never report the moved run as a pass or a failure of your change.",
          "the moved-HEAD branch: one re-run, in the change copy, never the worktree"),
-        ("That copy's run is your result; any paths that differ between its status before and after the run follow the merge-base check below as reproduced paths.",
-         "the moved-HEAD copy run as the result, its writes routed to the merge-base check"),
+        ("never report the moved run as a pass or a failure of your change. That copy's run is your result.",
+         "the moved-HEAD copy run as the result"),
         ("If the copy that holds your change cannot be built or the command cannot be run in it, after a moved `HEAD` or a status-only change alike, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
          "the stop: unattributable only when the copy cannot be built or run, naming what moved, with the unmet precondition stated"),
         ("This exit never applies to paths the copy that holds your change reproduces; on any run, those follow the pre-existing and failure branches below.",
@@ -900,8 +900,10 @@ class TestRunReceiptAttribution:
          "the recipe: the pre-run HEAD plus the staged change saved before the run"),
         ("The reproduced-path check and the failing-test rule below both use one merge-base clone. To build it, fetch the branch your work will merge into with `git fetch --no-tags --refmap= <remote> refs/heads/<that branch>`, which writes only this worktree's `FETCH_HEAD` among refs and no tag; right after it, before any other fetch in this worktree, compute the merge base of the `HEAD` you recorded before the run with the fetched commit, in the worktree, with `git merge-base <recorded HEAD> FETCH_HEAD`; and make a clone of the repository with its remote removed, checked out at that merge base, with no change applied.",
          "the one merge-base clone both rules use: a fetch that moves no shared ref or tag, the merge base against FETCH_HEAD right after it, no change applied"),
-        ("If any of the paths that changed in the worktree also change there, run the same command the same way in the merge-base clone.",
-         "the reproduced-path check names the merge-base clone"),
+        ("After either re-run, every path that differs between the status of the copy that holds your change before and after its run is a reproduced path, and a path that changed in the worktree but does not change in that copy came from outside the run and is not a failure of your change.",
+         "one reproduced-path rule for both re-runs: every path the copy's run changes"),
+        ("If there is no reproduced path, that copy's run stands as your result. If there is any, run the same command the same way in the merge-base clone.",
+         "the reproduced-path check names the merge-base clone, and no reproduced path leaves the copy's run standing"),
         ("If that fetch fails, treat no reproduced path and no failing test as pre-existing: each one is a failure of your change, and say in your HANDOFF that the fetch failed.",
          "a failed fetch makes nothing pre-existing"),
         ("Decide each reproduced path on its own. A path that also appears in the merge-base clone is a pre-existing defect: report it in your HANDOFF, with the path and the command that wrote it, and do not treat it as a failure of your change.",
@@ -916,8 +918,6 @@ class TestRunReceiptAttribution:
          "any other failing test still blocks the HANDOFF"),
         ("A reproduced path that does not appear in the merge-base clone was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
          "the change-only write treated as a failure of the change"),
-        ("If none of the paths that changed in the worktree change in the copy that holds your change, the worktree change came from outside the run.",
-         "the unreproduced change: the copy's run is the result"),
     )
 
     def _bullet(self) -> str:
@@ -1026,6 +1026,32 @@ class TestRunReceiptAttribution:
         assert "cannot be built" not in moved_sub, (
             f"the {self.REL_PATH} unattributable exit sits inside the moved-HEAD "
             "branch, where the status-only re-run does not reach it"
+        )
+
+    def test_one_reproduced_path_rule_follows_both_branches(self):
+        # Both re-runs share one rule for which paths are reproduced, placed
+        # after both branches and the exit, so neither branch carries its own
+        # rule that the other can override.
+        bullet = self._bullet()
+        moved = bullet.find("  - If `HEAD` differs")
+        exit_ = bullet.find("  - If the copy that holds your change cannot be built")
+        shared = bullet.find("  - After either re-run, every path that differs")
+        decide = bullet.find("  - Decide each reproduced path on its own")
+        assert -1 not in (moved, exit_, shared, decide) and moved < exit_ < shared < decide, (
+            f"the {self.REL_PATH} reproduced-path rule must be one sub-bullet "
+            "after both branches and the unattributable exit, before the "
+            f"per-path decision (positions moved={moved}, exit={exit_}, "
+            f"shared={shared}, decide={decide})"
+        )
+        branches = bullet[moved:exit_]
+        for stray in ("reproduced path", "outside the run", "also change there"):
+            assert stray not in branches, (
+                f"the {self.REL_PATH} re-run branches carry their own "
+                f"reproduced-path wording ({stray!r}); only the shared rule may"
+            )
+        assert bullet.count("came from outside the run") == 1, (
+            f"the {self.REL_PATH} receipt must say once, in the shared rule, "
+            "which paths came from outside the run"
         )
 
     def test_receipt_names_no_archive_export(self):

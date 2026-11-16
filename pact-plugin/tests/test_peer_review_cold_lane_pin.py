@@ -760,14 +760,16 @@ class TestOperationalFactsClause:
         ("untracked docs/", "the path-convention fact (untracked docs/ is normal)"),
         ("When a re-run below needs it, build the {head} clone: a clone of the repository with its remote removed, under {scratch_dir}, checked out at {head}", (
          "the instruction to build the {head} clone, once, before both branches that use it")),
-        ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone, never in the worktree, and do not report the worktree run: that clone's run stands for the diff, and any paths that differ between its status before and after the run follow the merge-base check below as reproduced paths", (
+        ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone, never in the worktree, and do not report the worktree run: report that clone's run in its place", (
          "the moved-HEAD branch: one re-run in the {head} clone, never the worktree")),
         ("If the {head} clone cannot be built or the command cannot be run in it, after a moved HEAD or a status-only change alike, report the result as unattributable because the worktree changed, naming HEAD or the paths that changed, not as a finding about the diff", (
          "unattributable only when the {head} clone cannot be built or run, after either re-run")),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path, in the {head} clone. Compare its status before and after", (
          "the status-only re-run in the {head} clone, same interpreter by absolute path")),
-        ("If any of the paths that changed in the worktree also change there, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
-         "the base-control run at the merge base")),
+        ("After either re-run, every path that differs between the {head} clone's status before and after its run is a reproduced path, and a path that changed in the worktree but does not change in the {head} clone came from outside the run and is not a finding about the diff", (
+         "one reproduced-path rule for both re-runs: every path the clone's run changes")),
+        ("If there is no reproduced path, the {head} clone's run stands for the diff. If there is any, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
+         "the base-control run at the merge base, and no reproduced path leaves the clone's run standing")),
         ("Decide each reproduced path on its own. A path that also appears there is a pre-existing defect: name it as pre-existing under the open questions, with the path and the command that wrote it, not as a finding about the diff", (
          "a base-reproduced write reported as pre-existing, not as a finding")),
         ("When every reproduced path is pre-existing, the {head} clone's run stands for the diff", (
@@ -776,8 +778,6 @@ class TestOperationalFactsClause:
          "the general per-test comparison with a merge-base clone, for every reported result")),
         ("A reproduced path that does not appear there was written by the run itself, and it is a finding about the diff, whatever the other paths are", (
          "the change-only write reported as a finding about the diff, whatever the other paths are")),
-        ("If none of the paths that changed in the worktree change in the {head} clone, the worktree change came from outside the run, and the {head} clone's run stands for the diff", (
-         "an unreproduced change: the {head} clone's run stands, as in the teammate rule")),
     ])
     def test_operational_facts_token_present(self, token, lost):
         assert token in _clause("OPERATIONAL FACTS"), (
@@ -797,6 +797,31 @@ class TestOperationalFactsClause:
         assert "cannot be built" not in clause[moved:status_only], (
             "the cold prompt's unattributable exit sits inside the moved-HEAD "
             "branch, where the status-only re-run does not reach it"
+        )
+
+    def test_one_reproduced_path_rule_follows_both_branches(self):
+        # Both re-runs share one rule for which paths are reproduced, placed
+        # after both branches and the exit, so neither branch carries its own
+        # rule that the other can override.
+        clause = _clause("OPERATIONAL FACTS")
+        moved = clause.find("If HEAD differs")
+        exit_ = clause.find("If the {head} clone cannot be built")
+        shared = clause.find("After either re-run, every path that differs")
+        decide = clause.find("Decide each reproduced path on its own")
+        assert -1 not in (moved, exit_, shared, decide) and moved < exit_ < shared < decide, (
+            "the cold prompt's reproduced-path rule must follow both branches "
+            "and the unattributable exit, before the per-path decision "
+            f"(positions moved={moved}, exit={exit_}, shared={shared}, decide={decide})"
+        )
+        branches = clause[moved:exit_]
+        for stray in ("reproduced path", "outside the run", "also change there", "stands for the diff"):
+            assert stray not in branches, (
+                "the cold prompt's re-run branches carry their own "
+                f"reproduced-path or outcome wording ({stray!r}); only the shared rule may"
+            )
+        assert clause.count("came from outside the run") == 1, (
+            "the cold prompt must say once, in the shared rule, which paths "
+            "came from outside the run"
         )
 
     def test_head_clone_defined_before_first_use(self):
@@ -1678,3 +1703,37 @@ class TestPersonaSites:
         assert "always" in lines[0], (
             f"the persona's cold reviewer bullet no longer says always: {lines[0]!r}"
         )
+
+
+class TestVerifyOnlyScopedToWarm:
+    """The two sentences that call a re-review verify-only and not a fresh
+    review must name the warm lane and point to the Cold Reviewer Lane, so
+    neither can be read as excusing the cold first-round review that every
+    verify-only round runs."""
+
+    SITES = (
+        ("**Key rules**:", "warm re-review is verify-only (minimal scope), and the cold lane runs a full first-round review every round, per the Cold Reviewer Lane"),
+        ("After remediation fixes are applied,", "warm re-review is **verify-only** — not a fresh review. The cold lane still runs a full first-round review every round, per the Cold Reviewer Lane:"),
+    )
+
+    @pytest.mark.parametrize("lead, scoped", SITES)
+    def test_site_is_scoped_to_the_warm_lane(self, lead, scoped):
+        text = _peer_review_text()
+        lines = [line for line in text.splitlines() if line.startswith(lead)]
+        assert len(lines) == 1, f"expected one line starting {lead!r}, found {len(lines)}"
+        assert scoped in lines[0], (
+            f"the line starting {lead!r} no longer scopes verify-only to the "
+            f"warm lane with a pointer to the Cold Reviewer Lane ({scoped!r})"
+        )
+
+    def test_no_unscoped_verify_only_claim(self):
+        text = _strip_ticks(_peer_review_text()).replace("**", "")
+        claims = [m.start() for m in re.finditer(r"re-review is verify-only", text)]
+        assert len(claims) == len(self.SITES), (
+            f"expected {len(self.SITES)} 're-review is verify-only' claims, found {len(claims)}"
+        )
+        for pos in claims:
+            assert text[max(0, pos - 5):pos] == "warm ", (
+                "a 're-review is verify-only' claim is not scoped to the warm "
+                f"lane: {text[max(0, pos - 40):pos + 60]!r}"
+            )
