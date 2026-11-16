@@ -610,6 +610,72 @@ def test_a_census_failed_green_run_names_the_census(tmp_path, finish, name):
         {"census": name, "problems": 1, "lines": [finish[1].strip()]}]
 
 
+# What the logging module writes to stderr when a handler cannot format a
+# record (measured from a real pytest 9.2 session whose pytest_sessionfinish
+# logs a bad record, serial and -n 2). A second such block, or one after any
+# newline-terminated stderr line, starts at the beginning of a log line inside
+# the session-finish span, before the census header.
+LOGGING_ERROR_BLOCK = (
+    "--- Logging error ---",
+    "Traceback (most recent call last):",
+    '  File "/usr/lib/python3.12/logging/__init__.py", line 1160, in emit',
+    "    msg = self.format(record)",
+    "TypeError: not enough arguments for format string",
+    "Call stack:",
+    '  File "/home/runner/work/PACT-Plugin/conftest.py", line 21, in pytest_sessionfinish',
+    "Message: 'bad %s %s'",
+    "Arguments: (2,)",
+)
+
+
+def test_a_logging_error_before_a_census_header_keeps_the_census_outcome(tmp_path):
+    """Only a section line pytest itself writes ends the session-finish span, so a
+    stderr line of dashes before the census header cannot hide it."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(*LOGGING_ERROR_BLOCK, CLOCK_CENSUS_HEADER,
+                                    CENSUS_PROBLEM))
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["evidence_errors"] == [], comparison
+    assert comparison["deltas"] == [
+        {"type": "census", "run": "two", "before": [], "after": ["clock_shift"]}]
+    assert [run["validity"] for run in comparison["input_runs"]] == [
+        "clean", "census_outcome"]
+    assert read_runs(output)[1]["census_failures"] == [
+        {"census": "clock_shift", "problems": 1, "lines": [CENSUS_PROBLEM.strip()]}]
+
+
+def test_a_logging_error_in_the_report_header_keeps_the_seed(tmp_path):
+    """A stderr line of dashes inside the report header does not end it, so the
+    pytest-randomly seed line after it is still read."""
+    first = make_run(tmp_path, "one", command=SEEDED_COMMAND,
+                     header_lines=(*LOGGING_ERROR_BLOCK, "Using --randomly-seed=7"))
+    second = make_run(tmp_path, "two", 101, command=SEEDED_COMMAND)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [7, None]
+
+
+@pytest.mark.parametrize("line", [
+    "=" * 31 + " warnings summary " + "=" * 31,
+    "=" * 27 + " short test summary info " + "=" * 28,
+    "=" * 35 + " FAILURES " + "=" * 35,
+    "=" * 30 + " 1 failed, 2 passed in 0.10s " + "=" * 30,
+], ids=["warnings-summary", "short-summary", "failures", "final-summary"])
+def test_pytest_section_lines_end_the_session_finish_span(line):
+    assert comparator.PYTEST_SECTION.fullmatch(line)
+
+
+@pytest.mark.parametrize("line", [
+    "--- Logging error ---", "-" * 29 + " Captured stdout call " + "-" * 29,
+    "_" * 30 + " test_beta " + "_" * 30, "=" * 40, "===  ===", "-----",
+], ids=["logging-error", "captured-output", "test-header", "bare-equals", "empty-title",
+        "dashes"])
+def test_other_separator_shaped_lines_do_not(line):
+    assert not comparator.PYTEST_SECTION.fullmatch(line)
+
+
 @pytest.mark.parametrize("finish, found", [
     (("HOME CENSUS: 2 distinct child(ren) started without HOME", "  [gw0] test_z (call): child"),
      1),
@@ -1069,6 +1135,55 @@ def test_real_census_output_lands_in_the_session_finish_span(tmp_path, parallel)
     assert completed.returncode == 1, completed.stdout + completed.stderr
     assert shape in completed.stdout  # the decoy reached the captured output
     lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
+    _header, finish_span = comparator._session_spans(lines)
+    failures = comparator._census_failures(finish_span)
+    assert [(failure["census"], failure["problems"]) for failure in failures] == [
+        ("child_pytest", 1)], completed.stdout
+
+
+LOGGING_ERROR_RIG_CONFTEST = RIG_CONFTEST.replace("""\
+def pytest_sessionfinish(session):
+""", """\
+import logging
+import sys
+
+_probe = logging.getLogger("probe")
+_probe.propagate = False
+_probe.addHandler(logging.StreamHandler(sys.stderr))
+
+
+def pytest_sessionfinish(session):
+    _probe.warning("bad %s %s", 1)
+    _probe.warning("bad %s %s", 2)
+""")
+
+
+@pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
+def test_real_logging_error_before_the_census_keeps_it_in_the_span(tmp_path, parallel):
+    """Real pytest output with stderr merged into stdout, as the Actions log
+    has it: a logging error at session finish puts a '--- Logging error ---'
+    line at the start of a log line before the census header, and the census
+    is still read from the session-finish span."""
+    assert "_probe.warning" in LOGGING_ERROR_RIG_CONFTEST
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "conftest.py").write_text(LOGGING_ERROR_RIG_CONFTEST, encoding="utf-8")
+    shape = CHILD_CENSUS_HEADER.replace(": 1 ", ": 9 ")
+    (rig / "test_rig.py").write_text(RIG_TESTS.format(shape=shape), encoding="utf-8")
+    env = {**child_env(), "PYTHONPATH": str(Path(__file__).parent)}
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
+         "-p", "no:randomly", *parallel],
+        cwd=rig, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        text=True, timeout=300, check=False)
+    assert completed.returncode == 1, completed.stdout
+    lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
+    _commands, _banner, end, finish = comparator._step_bounds(lines)
+    census = next(index for index, line in enumerate(lines)
+                  if line.startswith("CHILD PYTEST CENSUS: 1 "))
+    assert any(lines[index] == "--- Logging error ---"
+               for index in range(end, census)), completed.stdout
+    assert end < census < finish, completed.stdout
     _header, finish_span = comparator._session_spans(lines)
     failures = comparator._census_failures(finish_span)
     assert [(failure["census"], failure["problems"]) for failure in failures] == [

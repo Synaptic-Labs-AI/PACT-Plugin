@@ -85,7 +85,12 @@ _SEED_ARGV = ["${PACT_SHUFFLE_SEED:+-p", "randomly", "--randomly-seed=$PACT_SHUF
 SEED_LINE = re.compile(r"Using --randomly-seed=([0-9]{1,10})")
 SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=\d+")
 SESSION_BANNER = re.compile(r"=+ test session starts =+")
-SECTION_SEPARATOR = re.compile(r"[=_-]{3,}( .*)?")
+# A top-level section line pytest itself writes (write_sep("=", title)): the
+# report sections and the final summary line. Only these end the report
+# header and the session-finish span. "_" and "-" separators appear only
+# inside those sections, and a stray line of dashes on stderr, such as the
+# logging module's "--- Logging error ---", must not end either part.
+PYTEST_SECTION = re.compile(r"=+ \S(?:.*\S)? =+")
 SHORT_SUMMARY_HEADER = re.compile(r"=+ short test summary info =+")
 # The header line each census's finish() writes when it fails the session.
 # Each finish() (child_pytest_census, clock_shift_census, home_census) starts
@@ -257,16 +262,16 @@ def _step_bounds(lines: list[str]) -> tuple[list[int], int | None, int | None, i
         return commands, None, None, None
     end = banner + 1
     while (end < len(lines) and lines[end].strip()
-           and not SECTION_SEPARATOR.fullmatch(lines[end])):
+           and not PYTEST_SECTION.fullmatch(lines[end])):
         end += 1
     finish = end
-    while finish < len(lines) and not SECTION_SEPARATOR.fullmatch(lines[finish]):
+    while finish < len(lines) and not PYTEST_SECTION.fullmatch(lines[finish]):
         finish += 1
     return commands, banner, end, finish
 
 
 def _test_text_range(lines: list[str], summary_index: int) -> range:
-    """pytest's report sections: from the first section separator after the
+    """pytest's report sections: from the first pytest section line after the
     session-finish span through the final summary line.
 
     Every text a test produces (captured output, assert messages, tracebacks,
@@ -335,8 +340,8 @@ def _session_spans(lines: list[str]) -> tuple[list[str], list[str]]:
 
     The header starts after the first session-start banner that follows the
     step's echoed run command, so a banner from an earlier step cannot anchor
-    it, and ends at the first blank line or section separator. The
-    session-finish span runs from there to the next section separator: it holds
+    it, and ends at the first blank line or pytest section line. The
+    session-finish span runs from there to the next pytest section line: it holds
     the progress lines and what pytest_sessionfinish writes, and no test's
     captured output, which pytest prints only inside a later section. A missing
     banner is refused: reading no seed would look like a valid ordered run.
