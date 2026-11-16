@@ -178,11 +178,12 @@ def _printed(line):
     return line.split("'")[1].removesuffix("\\n").replace("\\\\", "\\")
 
 
-def _render_lint_gate_remedy(root, scratch, venv):
+def _render_lint_gate_remedy(root, scratch, venv, target="gone", readlink=True):
     """The stderr the lint gate prints when ruff is missing, run from a scratch
     root that holds a copy of the script and the lock and whose .venv is absent
-    ("absent"), a venv directory ("existing") or a link to nothing ("dangling").
-    PATH holds only dirname, so no ruff resolves."""
+    ("absent"), a venv directory ("existing") or a link whose text is target,
+    as given, to a path that does not exist ("dangling"). PATH holds only
+    dirname and, unless readlink is false, readlink, so no ruff resolves."""
     scratch.mkdir()
     (scratch / "scripts").mkdir()
     (scratch / "pact-plugin").mkdir()
@@ -191,10 +192,12 @@ def _render_lint_gate_remedy(root, scratch, venv):
     if venv == "existing":
         (scratch / ".venv" / "bin").mkdir(parents=True)
     elif venv == "dangling":
-        (scratch / ".venv").symlink_to(scratch / "gone")
+        (scratch / ".venv").symlink_to(target)
+        assert not (scratch / ".venv").exists(), target
     bin_dir = scratch / "bin"
     bin_dir.mkdir()
-    (bin_dir / "dirname").symlink_to(shutil.which("dirname"))
+    for tool in ("dirname", "readlink") if readlink else ("dirname",):
+        (bin_dir / tool).symlink_to(shutil.which(tool))
     proc = subprocess.run(
         [shutil.which("bash"), str(scratch / "scripts" / "verify-local-lint-gate.sh")],
         env={"PATH": str(bin_dir), "HOME": str(scratch)},
@@ -491,17 +494,16 @@ class TestHashCheckedInstall:
     _REMEDY_INSTALL = (".venv/bin/python -m pip install --only-binary=:all: --require-hashes "
                        "--no-deps -r .venv/ruff-lock.txt")
 
-    @pytest.mark.parametrize("venv", ["absent", "existing", "dangling"])
+    @pytest.mark.parametrize("venv", ["absent", "existing"])
     def test_the_lint_gate_remedy_installs_ruff_alone(self, tmp_path, venv):
         """The remedy runs on a developer's machine and the gate needs ruff only,
         so it refuses an interpreter below the floor, copies ruff's own entry out
         of the lock, installs that entry from a wheel with its hashes and nothing
         else, and activates the venv. With no .venv it creates one with python3;
-        with a .venv, even a link to nothing, it never runs `python3 -m venv`,
-        which would re-initialise the venv with whatever python3 is first on
-        PATH, and it checks the floor with the venv's own interpreter. The full
-        environment, which compiles a package on some platforms, stays
-        .cursor/install.sh's."""
+        with a .venv it never runs `python3 -m venv`, which would re-initialise
+        the venv with whatever python3 is first on PATH, and it checks the floor
+        with the venv's own interpreter. The full environment, which compiles a
+        package on some platforms, stays .cursor/install.sh's."""
         root = ci_contract.require_root("the lint gate remedy")
         printed = _lint_gate_remedy_lines(root, tmp_path / "root", venv)
         commands = [line for line in printed
@@ -545,6 +547,32 @@ class TestHashCheckedInstall:
         assert not _STANDALONE_NUMBER.search(prose), prose
         script = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
         assert "-c constraints-ci.txt" not in script
+
+    @pytest.mark.parametrize("target, readlink", [
+        ("gone", True), ("gone%s\\n", True), ("gone", False),
+    ], ids=["plain", "percent-and-backslash", "no-readlink"])
+    def test_the_lint_gate_remedy_names_a_broken_venv_link(self, tmp_path, target, readlink):
+        """A .venv link to nothing still counts as a venv, so nothing is created
+        over it, and no command could install into it, so the remedy prints none.
+        It names the link's target as a printf argument, so a % or backslash in
+        the path prints as itself, says so when the target cannot be read, and
+        gives the two ways out: restore that venv, or remove the link and run the
+        gate again for the commands that create one."""
+        root = ci_contract.require_root("the lint gate remedy")
+        scratch = tmp_path / "root"
+        printed = [line.strip() for line in _render_lint_gate_remedy(
+            root, scratch, "dangling", target, readlink).splitlines()]
+        text = " ".join(printed)
+        assert "venv (.venv) is a link to a directory that does not exist" in text, printed
+        assert "Restore the venv it points at" in text, printed
+        named = (f".venv -> {target}" if readlink
+                 else ".venv -> (the link target could not be read)")
+        assert named in printed, printed
+        assert "rm .venv" in printed, printed
+        assert "venv (.venv) exists" not in text, printed
+        assert not [line for line in printed
+                    if line.startswith(("python3 ", ".venv/", ". ", "sed "))
+                    or "pip install" in line or "-m venv" in line], printed
 
     def test_the_remedy_extracts_exactly_the_locks_ruff_entry(self, tmp_path):
         """The printed extraction, run as printed against the real lock, yields
@@ -606,17 +634,23 @@ class TestHashCheckedInstall:
         as a copy of the script prints it in a scratch root in the same state."""
         root = ci_contract.require_root("the lint gate remedy")
         script = root / "scripts" / "verify-local-lint-gate.sh"
-        bin_dir = tmp_path / "bin"  # dirname only, so no ruff resolves
+        bin_dir = tmp_path / "bin"  # dirname and readlink only, so no ruff resolves
         bin_dir.mkdir()
-        (bin_dir / "dirname").symlink_to(shutil.which("dirname"))
+        for tool in ("dirname", "readlink"):
+            (bin_dir / tool).symlink_to(shutil.which(tool))
         proc = subprocess.run(
             [shutil.which("bash"), str(script)],
             env={"PATH": str(bin_dir), "HOME": str(tmp_path / "home")},
             capture_output=True, text=True, timeout=30)
         assert proc.returncode == 2, (proc.returncode, proc.stderr)
         venv = root / ".venv"
-        state = "existing" if venv.exists() or venv.is_symlink() else "absent"
-        expected = _render_lint_gate_remedy(root, tmp_path / "copy", state)
+        if venv.is_symlink() and not venv.exists():
+            # The copy's link must name the same target, so it prints the same line.
+            expected = _render_lint_gate_remedy(root, tmp_path / "copy", "dangling",
+                                                os.readlink(venv))
+        else:
+            state = "existing" if venv.exists() else "absent"
+            expected = _render_lint_gate_remedy(root, tmp_path / "copy", state)
         assert proc.stderr == expected, proc.stderr
         assert proc.stderr.startswith("GATE REFUSED: ruff is not available"), proc.stderr
 
