@@ -151,7 +151,9 @@ has its command text opened, and so does one behind an assignment.
 The text is read as bash reads it:
 - Quotes and escapes are resolved, and a backslash-newline joins the lines.
   bash's `$'...'` quoting is resolved to the word it builds, escapes included
-  (`$'py\x74est'` is `pytest`), and `$"..."` is read as a double-quoted string.
+  (`$'py\x74est'` is `pytest`), and `$"..."` is read as a double-quoted string,
+  wherever quotes are read: inside substitutions and arithmetic too, and in a
+  heredoc delimiter (`<<$'EOF'` ends at a line `EOF` and is quoted).
 - A `#` that starts a word begins a comment to the end of the line; a `#` inside
   a word or inside quotes is text (`--base-url=http://x/#frag`).
 - Each command between `;`, `&`, `&&`, `||`, `|`, `|&`, a newline, `(` and `)`
@@ -572,6 +574,9 @@ def _closing(text, i, close):
         if char == "\\":
             i += 2
             continue
+        if close == ")" and text.startswith("$'", i):
+            i = _ansi_c(text, i)[1]
+            continue
         if char in "'\"" and close == ")":
             end = text.find(char, i + 1) if char == "'" else _double_end(text, i + 1)
             i = len(text) if end < 0 else end + 1
@@ -595,6 +600,9 @@ def _arithmetic_end(text, i):
         char = text[i]
         if char == "\\":
             i += 2
+            continue
+        if text.startswith("$'", i):
+            i = _ansi_c(text, i)[1]
             continue
         if char in "'\"":
             end = text.find(char, i + 1) if char == "'" else _double_end(text, i + 1)
@@ -729,12 +737,14 @@ def _heredoc_operator(text, i, heredocs):
         i += 1
     start = i
     while i < len(text) and text[i] not in " \t\r" + _OPERATOR_CHARS:
-        if text[i] in "'\"":
+        if text.startswith("$'", i):
+            i = _ansi_c(text, i)[1]
+        elif text[i] in "'\"":
             end = text.find(text[i], i + 1)
             i = len(text) if end < 0 else end + 1
         else:
             i += 2 if text[i] == "\\" else 1
-    word = text[start:i]
+    word = _dollar_quotes(text[start:i])
     quoted = any(char in word for char in "'\"\\")
     heredocs.append((re.sub(r"""\\(.)|['"]""", r"\1", word), strip_tabs, quoted))
     return i

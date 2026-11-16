@@ -590,6 +590,10 @@ def test_a_listed_shell_blind_spot_is_accepted(text):
     ["find", ".", "-name", "*.py", "-exec", "grep", "-l", "pytest", "{}", ";"],
     # A $'...' word that only mentions pytest.
     ["bash", "-c", "echo $'python -m py\\x74est'"],
+    # A substitution holding $'...' ends where bash ends it, so the words after
+    # it stay inside the double quotes; a $'...' heredoc delimiter is quoted.
+    ["bash", "-c", "echo \"$(echo $'it\\'s') python -m pytest\""],
+    ["bash", "-c", "cat <<$'EOF'\n$(pytest -q)\nEOF"],
 ])
 def test_a_mention_of_pytest_that_launches_no_pytest_is_ignored(argv):
     assert census._miss(argv, None, {}) is None
@@ -646,6 +650,16 @@ _LAUNCHER_FORMS = [
     ["bash", "-c", '$"pytest" -q'],
     # An escaped quote inside $'...' does not end it.
     ["bash", "-c", "echo $'it\\'s # x'; pytest -q"],
+    # So does one inside a substitution body or arithmetic. A backtick body ends
+    # at its first unescaped backtick whatever the quotes, as in bash.
+    ["bash", "-c", "echo \"a $(echo $'it\\'s') b\"; pytest -q"],
+    ["bash", "-c", "echo \"a `echo $'it\\'s'` b\"; pytest -q"],
+    ["bash", "-c", "(( $'a\\'' )); pytest -q"],
+    # A $'...' or $"..." heredoc delimiter is the word bash builds from it.
+    ["bash", "-c", "cat <<$'EOF'\nbody\nEOF\npytest -q"],
+    ["bash", "-c", "cat <<$\"EOF\"\nbody\nEOF\npytest -q"],
+    ["bash", "-c", "cat <<$'E\\'F'\nbody\nE'F\npytest -q"],
+    ["bash", "-c", "cat <<$'E\\x4fF'\nbody\nEOF\npytest -q"],
     # An interpreter in the program position, after an assignment or in a shell,
     # running pytest's script.
     ["A=1", "python3", "/venv/bin/pytest"],
