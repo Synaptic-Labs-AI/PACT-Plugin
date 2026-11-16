@@ -843,8 +843,14 @@ class TestRunReceiptAttribution:
       pre-existing and reported in the HANDOFF; one that does not is a
       failure of the teammate's own change whatever the other paths are, to
       fix, never re-run away. When every reproduced path is pre-existing,
-      that copy's exit code decides (0 is a pass, nonzero is still a failure
-      of the change).
+      that copy's run decides: 0 is a pass, and its failing tests follow the
+      general rule below.
+    - For every reported run, with or without a status change, a failing
+      test is pre-existing only when the same test fails, with the same
+      command and interpreter, in a remote-less merge-base clone with no
+      change applied. Only then may the teammate hand off, naming those
+      tests and the precondition unmet through them; any other failing test
+      blocks it. The exit-code precondition names that one exception.
     - When none of the worktree's changed paths change in the copy, the
       change came from outside the run and the copy's run is the result; a
       partly reproduced set is decided only through its reproduced paths.
@@ -879,8 +885,14 @@ class TestRunReceiptAttribution:
          "the base-control run at the merge base"),
         ("Decide each reproduced path on its own. A path that also appears in the merge-base clone is a pre-existing defect: report it in your HANDOFF, with the path and the command that wrote it, and do not treat it as a failure of your change.",
          "a base-reproduced write reported as pre-existing"),
-        ("When every reproduced path is pre-existing, that copy's exit code decides for your change: exit code 0 counts as a pass, and a nonzero exit code is still a failure of your change.",
-         "the exit code's verdict when every reproduced path is pre-existing"),
+        ("When every reproduced path is pre-existing, that copy's run decides for your change: exit code 0 counts as a pass, and its failing tests follow the pre-existing-failure rule at the end of this bullet.",
+         "the all-pre-existing branch defers failing tests to the general rule"),
+        ("For any run whose result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in a clone with its remote removed, checked out at the merge base described above, with no change applied.",
+         "the general per-test comparison with a merge-base clone, for every reported run"),
+        ("When every failing test is pre-existing, you may hand off: name each such test, with the command, in your HANDOFF, and state there that the exit-code precondition above is unmet only through those pre-existing tests.",
+         "the pre-existing-failure hand-off, naming the tests and the unmet precondition"),
+        ("Any other failing test is a failure of your change and blocks the HANDOFF.",
+         "any other failing test still blocks the HANDOFF"),
         ("A reproduced path that does not appear in the merge-base clone was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
          "the change-only write treated as a failure of the change"),
         ("If none of the paths that changed in the worktree change in the copy that holds your change, the worktree change came from outside the run: that copy's run is your result.",
@@ -901,6 +913,15 @@ class TestRunReceiptAttribution:
     def test_receipt_branch_present(self, phrase, lost):
         assert phrase in self._bullet(), (
             f"the {self.REL_PATH} Step 0 run-receipt bullet lost {lost} ({phrase!r})"
+        )
+
+    def test_precondition_names_the_pre_existing_exception(self):
+        text = (SKILLS_DIR / self.REL_PATH).read_text(encoding="utf-8")
+        line = "- All relevant tests have been run with exit code 0, except failing tests that the run-receipt bullet below finds pre-existing."
+        assert text.count(line) == 1, (
+            f"the {self.REL_PATH} exit-code precondition must name its one "
+            "exception, failing tests the run-receipt bullet finds pre-existing, "
+            "so it does not contradict that bullet"
         )
 
     def test_receipt_names_no_archive_export(self):

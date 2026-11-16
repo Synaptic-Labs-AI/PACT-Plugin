@@ -322,6 +322,7 @@ ONCE_RULES = (
     ("taken from the most recent such line", "the use of corrected placeholders in the re-review's first-round dispatch"),
     ("was written by the run itself", "the run-made change rule in the run receipt"),
     ("Decide each reproduced path on its own", "the per-path decision in the run receipt"),
+    ("For any test result you report, with or without a status change", "the general per-test comparison with a merge-base clone"),
     ("or another reason, stated", "the REPORT reason set"),
     ("for any reason, or none, other than", "the blocker trigger's reason test"),
     ("routes it to a tracked GitHub issue there", "the tracked-issue decline"),
@@ -764,8 +765,10 @@ class TestOperationalFactsClause:
          "the base-control run at the merge base")),
         ("Decide each reproduced path on its own. A path that also appears there is a pre-existing defect: name it as pre-existing under the open questions, with the path and the command that wrote it, not as a finding about the diff", (
          "a base-reproduced write reported as pre-existing, not as a finding")),
-        ("When every reproduced path is pre-existing, the {head} clone's run stands for the diff: a pass is a pass, and a failure is a finding about the diff", (
+        ("When every reproduced path is pre-existing, the {head} clone's run stands for the diff", (
          "the {head} clone's run as the result when every reproduced path is pre-existing")),
+        ("For any test result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in a clone of the repository with its remote removed, checked out at the commit git merge-base {base} {head} prints in the worktree: name each such test, with the command, under the open questions; any other failing test is a finding about the diff", (
+         "the general per-test comparison with a merge-base clone, for every reported result")),
         ("A reproduced path that does not appear there was written by the run itself, and it is a finding about the diff, whatever the other paths are", (
          "the change-only write reported as a finding about the diff, whatever the other paths are")),
         ("If none of the paths that changed in the worktree change in the {head} clone, the worktree change came from outside the run, and the {head} clone's run stands for the diff", (
