@@ -322,6 +322,7 @@ ONCE_RULES = (
     ("taken from the most recent such line", "the use of corrected placeholders in the re-review's first-round dispatch"),
     ("was written by the run itself", "the run-made change rule in the run receipt"),
     ("Decide each reproduced path on its own", "the per-path decision in the run receipt"),
+    ("A same-round re-check resume that returns no report", "the re-check resume's exclusion from the no-report rule"),
     ("For any test result you report, with or without a status change", "the general per-test comparison with a merge-base clone"),
     ("or another reason, stated", "the REPORT reason set"),
     ("for any reason, or none, other than", "the blocker trigger's reason test"),
@@ -1131,8 +1132,10 @@ class TestLeadFacingRules:
          "the per-finding fields, bound with their quantifier")),
         ("Validity", "; otherwise it is not valid", (
          "the validity consequence — an incomplete report is not valid, and the next step handles it")),
-        ("No report or an invalid one", "When a cold dispatch returns no report or a report that is not valid, run one fresh cold dispatch", (
-         "the re-dispatch trigger")),
+        ("No report or an invalid one", "When a first-round cold dispatch returns no report or a report that is not valid, run one fresh cold dispatch", (
+         "the re-dispatch trigger, scoped to a first-round dispatch")),
+        ("No report or an invalid one", "A same-round re-check resume that returns no report or a report that is not valid, or cannot be resumed, follows **Re-check** instead: the valid first-round report is the round's end state, with no fresh dispatch", (
+         "the re-check resume's exclusion from the fresh dispatch")),
         ("No report or an invalid one", "after any HALT and any /PACT:imPACT are resolved", (
          "the re-dispatch timing")),
         ("No report or an invalid one", "as a first-round review with the placeholders as /PACT:imPACT corrected them; in a verify-only re-review it is the round's first-round review under **Re-check**, with that rule's one same-round re-check", (
