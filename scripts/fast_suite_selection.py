@@ -1440,7 +1440,7 @@ def _resolve_scope(bindings, outer: _Env, module_env: _Env, declared_global: set
 def _anchored_join_files(tree: ast.Module, rel: str,
                          module_files: dict[str, str],
                          plugin_root: Path) -> tuple[list[Path], list[str]]:
-    """(production .py files, unproven sites) for a module that joins an
+    """(production .py paths, unproven sites) for a module that joins an
     anchored directory to file names (`ROOT / "hooks" / "x.py"`,
     `HERE.joinpath("x.py")`, `os.path.join(BASE, "x.py")`). A test that reads
     such a file depends on it.
@@ -1487,8 +1487,11 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     expression is read under at most _JOIN_READINGS combinations of its
     names' paths. A module that reaches any of these limits is unproven.
 
-    The joined path must name an existing file ending in .py; as for a whole
-    literal, test-tree files and conftests are not edges.
+    The joined path must name a file ending in .py; as for a whole literal,
+    test-tree files and conftests are not edges. A path that is no file in this
+    tree, one the change deletes, is returned too: the scan makes it an import
+    target rather than an edge, so a change that deletes it selects the module,
+    as a change that deletes an imported module does.
     """
     notes: list[str] = []
     strings = _literal_string_names(tree)
@@ -1629,8 +1632,7 @@ def _anchored_join_files(tree: ast.Module, rel: str,
                 if directory is None:
                     continue
                 candidate = plugin_root / directory
-                if (candidate.name == "conftest.py" or directory.startswith("tests/")
-                        or not candidate.is_file()):
+                if candidate.name == "conftest.py" or directory.startswith("tests/"):
                     continue
                 found.append(candidate)
     return found, list(dict.fromkeys(notes))
@@ -3319,7 +3321,10 @@ def _scan_file(path: Path, plugin_root: Path, roots: list[Path],
                 except ValueError:
                     pass
     joined, join_sites = _anchored_join_files(tree, module_rel, module_files, root)
-    edges.extend(joined)
+    # A joined path that is not a file in this tree (one the change deletes)
+    # is a target, as a deleted import is: a change to it selects the module.
+    edges.extend(path for path in joined if path.is_file())
+    targets.update(path for path in joined if not path.is_file())
     test_side = module_rel.startswith("tests/") or _is_test_file(module_rel)
     return FileScan(
         edges=tuple(dict.fromkeys(to_rel(edges))),
@@ -3906,9 +3911,11 @@ def _review_applies(key: str, view: ExclusionView) -> bool:
 
 
 def broad_reasons(view: ExclusionView, facts: ChangeFacts) -> tuple[str, ...]:
-    """Why an exclusion is BROAD: each unreviewed unproven test-side module
-    or requested fixture, and each production climb out of the plugin.
-    Empty means CONFINED."""
+    """Why an exclusion is BROAD: each unproven site, unless reviewed, of any
+    module in its closure, test-side or production (a production module carries
+    one when its joined-path reads reach the resolver's limits), and of each
+    fixture it requests, and each production climb out of the plugin. Empty
+    means CONFINED."""
     reasons: list[str] = []
     for module, sites in view.unproven:
         if module in facts.reviewed or module.split("::", 1)[0] in facts.reviewed:

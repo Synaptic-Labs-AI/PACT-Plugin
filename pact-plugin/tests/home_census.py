@@ -34,7 +34,9 @@ controller through workeroutput, collect() gathers them as each worker goes
 down, and the controller's finish() reports and fails. finish() raises only a
 clean exit status (0) to 1. An environment the census cannot inspect (a key
 test that raises) is recorded as a fault line and fails the session; that
-launch is not aborted.
+launch is not aborted. Fault lines are reported under their own header,
+`HOME CENSUS: M launch(es) the census could not inspect`, after the refusal
+block, so the refusal header counts only children started without HOME.
 
 A run with no refusal ends with one information line from the controller (or a
 session without xdist), `HOME CENSUS: installed, N launches checked, 0 refused`
@@ -44,11 +46,13 @@ One launch can raise both events (a Popen that starts its child through
 posix_spawn), so N counts events, not children.
 
 THE ONE EXEMPTION: `@pytest.mark.child_env_without_home(reason="...")` on a
-test, its class or its module, with a non-empty string reason, exempts the
-launches made by that test's own call and by its function-scoped fixtures'
-setup and teardown. A launch made while a wider-scoped (class, module, package
-or session) fixture sets up or tears down is never exempt, whichever test
-triggered it, so a shared fixture's verdict does not depend on test order. A
+test, its class or its module, with a non-empty string reason, is in force
+from the start to the end of that test's runtest protocol: its setup, call and
+teardown, its function-scoped fixtures, and any hook that runs during them (a
+conftest's pytest_runtest_setup or pytest_runtest_makereport, for example). A
+launch made while a wider-scoped (class, module, package or session) fixture
+sets up or tears down is never exempt, whichever test triggered it, so a shared
+fixture's verdict does not depend on test order. A
 marker without such a reason exempts nothing; the refusal line says the reason
 is missing.
 
@@ -95,9 +99,11 @@ REMEDY = ('pass HOME in the child env (the child_env fixture, or HOME from '
           'os.environ), or mark the test %s(reason=...)' % MARKER)
 WORKEROUTPUT_KEY = "home_census_refusals"
 WORKEROUTPUT_COUNT_KEY = "home_census_launches_checked"
+WORKEROUTPUT_FAULTS_KEY = "home_census_faults"
 
-_state = {"installed": False, "misses": [], "forwarded": [], "exempt": None,
-          "unreasoned": False, "checked": 0, "forwarded_checked": 0, "shared": 0}
+_state = {"installed": False, "misses": [], "forwarded": [], "faults": [],
+          "forwarded_faults": [], "exempt": None, "unreasoned": False, "checked": 0,
+          "forwarded_checked": 0, "shared": 0}
 
 
 class HomeCensusError(RuntimeError):
@@ -221,7 +227,7 @@ def _audit(event, args):
             lacking = "is given an environment without HOME" if not _has_home(env) else None
     except Exception as exc:  # a census fault must not break the launch it watches
         _record("%s: HOME census could not inspect the environment of [%s]: %r" % (
-            _current_test(), _shown(argv), exc))
+            _current_test(), _shown(argv), exc), "faults")
         return
     if lacking is None:
         return
@@ -249,9 +255,9 @@ def _shown(argv):
     return " ".join(" ".join(words).split())[:200]
 
 
-def _record(line):
-    if line not in _state["misses"]:
-        _state["misses"].append(line)
+def _record(line, kind="misses"):
+    if line not in _state[kind]:
+        _state[kind].append(line)
 
 
 def collect(node):
@@ -260,6 +266,8 @@ def collect(node):
     name = getattr(getattr(node, "gateway", None), "id", "worker")
     for line in output.get(WORKEROUTPUT_KEY) or ():
         _state["forwarded"].append("[%s] %s" % (name, line))
+    for line in output.get(WORKEROUTPUT_FAULTS_KEY) or ():
+        _state["forwarded_faults"].append("[%s] %s" % (name, line))
     _state["forwarded_checked"] += output.get(WORKEROUTPUT_COUNT_KEY, 0)
 
 
@@ -270,24 +278,31 @@ def finish(session):
     workeroutput = getattr(session.config, "workeroutput", None)
     if workeroutput is not None:
         workeroutput[WORKEROUTPUT_KEY] = list(_state["misses"])
+        workeroutput[WORKEROUTPUT_FAULTS_KEY] = list(_state["faults"])
         workeroutput[WORKEROUTPUT_COUNT_KEY] = _state["checked"]
         return
     problems = list(_state["misses"]) + list(_state["forwarded"])
+    faults = list(_state["faults"]) + list(_state["forwarded_faults"])
     reporter = session.config.pluginmanager.get_plugin("terminalreporter")
     # xdist's progress can leave the terminal mid-line ("....[100%]"), which
     # write_line does not break, so the report would join it. Start a new line.
     if reporter is not None and getattr(getattr(reporter, "_tw", None), "width_of_current_line", 0):
         reporter.write("\n")
     write = reporter.write_line if reporter is not None else (lambda line: print(line, file=sys.stderr))
-    if not problems:
+    if not problems and not faults:
         if _state["installed"]:
             checked = _state["checked"] + _state["forwarded_checked"]
             write("HOME CENSUS: installed, %d %s checked, 0 refused"
                   % (checked, "launch" if checked == 1 else "launches"))
         return
-    write("HOME CENSUS: %d distinct child(ren) started without HOME" % len(problems))
-    for line in problems:
-        write("  " + line)
+    if problems:
+        write("HOME CENSUS: %d distinct child(ren) started without HOME" % len(problems))
+        for line in problems:
+            write("  " + line)
+    if faults:
+        write("HOME CENSUS: %d launch(es) the census could not inspect" % len(faults))
+        for line in faults:
+            write("  " + line)
     # Raise a clean status only: an interrupted, internal-error or usage-error
     # session keeps the status that says so.
     if int(session.exitstatus) == 0:

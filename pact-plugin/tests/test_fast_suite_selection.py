@@ -1576,6 +1576,43 @@ class TestJoinLimits:
         assert result.added_back == (), _reasons(result)
 
 
+class TestDeletedJoinedPath:
+    """A file an excluded test reads only through an anchored join, in a
+    directory no import root or whole literal reaches, re-selects the test
+    when the change edits it and when it deletes it."""
+
+    _READER = ('from pathlib import Path\n'
+               'SHARED = Path(__file__).resolve().parents[1] / "hooks" / "shared"\n'
+               'def test_reads():\n'
+               '    assert (SHARED / "joined_only.py").read_text()\n')
+
+    def _select(self, core, tmp_path, delete):
+        repo, plugin, _ = _git_rig(tmp_path)
+        target = plugin / "hooks" / "shared" / "joined_only.py"
+        _write(target, "VALUE = 1\n")
+        (plugin / "tests" / "test_slow.py").write_text(self._READER, encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "rig")
+        base = _git(repo, "rev-parse", "HEAD")
+        if delete:
+            target.unlink()
+        else:
+            target.write_text("VALUE = 2\n", encoding="utf-8")
+        _git(repo, "commit", "-q", "-am", "change")
+        manifest = _facts_manifest(core)
+        changed = ["pact-plugin/hooks/shared/joined_only.py"]
+        facts = core.gather_facts(repo, manifest, changed, base)
+        return core.select(core.discover(repo), manifest, changed, "ok", facts)
+
+    @pytest.mark.parametrize("delete", [False, True], ids=["edited", "deleted"])
+    def test_a_change_to_a_joined_path_reselects_its_reader(self, core, tmp_path, delete):
+        """MUTANT: a joined path that is no file in the head tree is dropped.
+        The deleted row then leaves the test out, and the full suite fails it
+        with FileNotFoundError."""
+        result = self._select(core, tmp_path, delete)
+        assert ("tests/test_slow.py", "closure") in _reasons(result), _reasons(result)
+
+
 class TestScanIndex:
     """What one module contributes to its exclusions' views."""
 

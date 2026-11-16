@@ -27,7 +27,8 @@ _HOME = {"HOME": "/sandbox/home"}
 def census_state():
     """Restore the census's recorded lines, so a deliberate refusal here does
     not fail the session that runs this module."""
-    saved = {key: list(census._state[key]) for key in ("misses", "forwarded")}
+    saved = {key: list(census._state[key])
+             for key in ("misses", "forwarded", "faults", "forwarded_faults")}
     counts = {key: census._state[key] for key in ("checked", "forwarded_checked")}
     try:
         yield census._state
@@ -290,12 +291,52 @@ def test_an_env_whose_keys_cannot_be_read_is_a_fault_that_fails_the_run(census_s
     class Opaque:
         def __iter__(self):
             raise LookupError("these keys cannot be read")
-    before = len(census_state["misses"])
+    before, misses = len(census_state["faults"]), list(census_state["misses"])
     census._audit("subprocess.Popen", (None, ["true"], None, Opaque()))
-    added = census_state["misses"][before:]
+    added = census_state["faults"][before:]
     assert len(added) == 1 and "could not inspect the environment" in added[0], added
     assert "LookupError('these keys cannot be read')" in added[0], added
     assert "test_an_env_whose_keys_cannot_be_read" in added[0], added
+    assert census_state["misses"] == misses, "a fault is not a child started without HOME"
+
+
+_FAULT = "t::f (call): HOME census could not inspect the environment of [true]: LookupError()"
+
+
+@pytest.mark.parametrize("refusals, faults, expected", [
+    ([], [_FAULT], ["HOME CENSUS: 1 launch(es) the census could not inspect", "  " + _FAULT]),
+    (["t::r (call): child [true] is given an environment without HOME"], [_FAULT],
+     ["HOME CENSUS: 1 distinct child(ren) started without HOME",
+      "  t::r (call): child [true] is given an environment without HOME",
+      "HOME CENSUS: 1 launch(es) the census could not inspect", "  " + _FAULT]),
+], ids=["fault-only", "refusal-and-fault"])
+def test_a_fault_is_counted_under_its_own_header(census_state, refusals, faults, expected):
+    """MUTANT: a fault line is counted with the children started without HOME.
+    The refusal header then counts a launch that was never judged, and a run
+    with only a fault reads as a run with a HOME-less child."""
+    census_state["misses"][:], census_state["forwarded"][:] = refusals, []
+    census_state["faults"][:], census_state["forwarded_faults"][:] = faults, []
+    reporter = _Reporter()
+    session = _Session(_Config(reporter))
+    census.finish(session)
+    assert reporter.lines == expected
+    assert session.exitstatus == 1
+
+
+def test_a_worker_hands_its_faults_to_the_controller(census_state):
+    census_state["misses"][:], census_state["forwarded"][:] = [], []
+    census_state["faults"][:], census_state["forwarded_faults"][:] = [_FAULT], []
+    workeroutput = {}
+    census.finish(_Session(_Config(_Reporter(), workeroutput=workeroutput)))
+    assert workeroutput[census.WORKEROUTPUT_FAULTS_KEY] == [_FAULT]
+    assert workeroutput[census.WORKEROUTPUT_KEY] == []
+    census_state["faults"][:] = []  # the controller process recorded nothing itself
+    census.collect(type("Node", (), {"workeroutput": workeroutput,
+                                     "gateway": type("Gateway", (), {"id": "gw2"})()})())
+    reporter = _Reporter()
+    census.finish(_Session(_Config(reporter)))
+    assert reporter.lines == ["HOME CENSUS: 1 launch(es) the census could not inspect",
+                              "  [gw2] " + _FAULT]
 
 
 def _interpreter(tmp_path, where):
@@ -873,6 +914,38 @@ def _git_rig_env():
     return env
 
 
+def _git_out(*args, cwd):
+    return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
+                          timeout=120, env=_git_rig_env()).stdout.strip()
+
+
+def _select_after_changing(rig, base, changed):
+    """Append a name this module's source cannot contain to `changed`, so the
+    change reaches this module only through how it depends on that file; commit
+    it, and ask the rig's own selector. The selector runs git through
+    os.environ, so the repository-locating variables are out of it meanwhile."""
+    import importlib.util
+    import uuid
+
+    changed_file = rig / changed
+    changed_file.write_text(changed_file.read_text(encoding="utf-8")
+                            + "\n_probe_%s = 1\n" % uuid.uuid4().hex, encoding="utf-8")
+    _git_rig("commit", "-qam", "change it", cwd=rig)
+    spec = importlib.util.spec_from_file_location(
+        "_home_census_selection_probe", rig / "scripts" / "fast_suite_selection.py")
+    core = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = core  # dataclass annotations resolve through sys.modules
+    saved = {name: os.environ.pop(name) for name in _GIT_LOCATORS if name in os.environ}
+    try:
+        spec.loader.exec_module(core)
+        manifest = core.load_manifest(rig / "scripts" / "fast_suite_exclusions.json")
+        selection, changed_paths, status = core.select_for_change(rig, manifest, base)
+    finally:
+        os.environ.update(saved)
+        sys.modules.pop(spec.name, None)
+    return selection, changed_paths, status
+
+
 def _git_rig(*args, cwd):
     subprocess.run(["git", "-c", "user.name=rig", "-c", "user.email=rig@invalid", *args],
                    cwd=cwd, check=True, capture_output=True, timeout=120, env=_git_rig_env())
@@ -915,7 +988,7 @@ def _tracked_tree_rig(tmp_path_factory):
     if not (root / "scripts" / "fast_suite_selection.py").is_file():
         pytest.skip("SKIPPED, NOT PASSED: not a PACT source checkout, so there is no selector to ask")
     listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True, capture_output=True,
-                            timeout=120).stdout.decode("utf-8").split("\0")
+                            timeout=120, env=_git_rig_env()).stdout.decode("utf-8").split("\0")
     rig = tmp_path_factory.mktemp("selection") / "repo"
     for rel in filter(None, listed):
         source = root / rel
@@ -926,8 +999,7 @@ def _tracked_tree_rig(tmp_path_factory):
     _git_rig("init", "-q", cwd=rig)
     _git_rig("add", "-A", cwd=rig)
     _git_rig("commit", "-qm", "base", cwd=rig)
-    base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rig, check=True, capture_output=True,
-                          text=True, timeout=60).stdout.strip()
+    base = _git_out("rev-parse", "HEAD", cwd=rig)
     return rig, base
 
 
@@ -940,10 +1012,8 @@ def _rig_at_base(_tracked_tree_rig):
     rig, base = _tracked_tree_rig
     _git_rig("reset", "-q", "--hard", base, cwd=rig)
     _git_rig("clean", "-fdq", cwd=rig)
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rig, check=True, capture_output=True,
-                          text=True, timeout=60).stdout.strip()
-    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=rig,
-                            check=True, capture_output=True, text=True, timeout=120).stdout
+    head = _git_out("rev-parse", "HEAD", cwd=rig)
+    status = _git_out("status", "--porcelain", "--untracked-files=all", cwd=rig)
     assert (head, status) == (base, ""), "the shared rig is not at base before this row"
     return rig, base
 
@@ -956,30 +1026,33 @@ def test_a_change_to_the_census_or_conftest_selects_this_module_in_the_fast_suit
     """OUTCOME PIN. A change to the census, to the root conftest that wires it,
     or to tests/conftest.py, re-selects this module in the fast suite. Runs on
     the shared copy of the tracked tree, reset to base for this row."""
-    import importlib.util
-    import uuid
-
     rig, base = _rig_at_base
-    # A name this module's source cannot contain, so the change reaches this
-    # module only through how it depends on the changed file.
-    probe = "_probe_" + uuid.uuid4().hex
-    changed_file = rig / changed
-    changed_file.write_text(changed_file.read_text(encoding="utf-8") + "\n%s = 1\n" % probe,
-                            encoding="utf-8")
-    _git_rig("commit", "-qam", "change it", cwd=rig)
-
-    spec = importlib.util.spec_from_file_location(
-        "_home_census_selection_probe", rig / "scripts" / "fast_suite_selection.py")
-    core = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = core  # dataclass annotations resolve through sys.modules
-    try:
-        spec.loader.exec_module(core)
-        manifest = core.load_manifest(rig / "scripts" / "fast_suite_exclusions.json")
-        selection, changed_paths, status = core.select_for_change(rig, manifest, base)
-    finally:
-        sys.modules.pop(spec.name, None)
+    selection, changed_paths, status = _select_after_changing(rig, base, changed)
     assert (status, changed_paths) == ("ok", [changed])
     assert "tests/test_home_census.py" in selection.included, selection
+
+
+def test_the_selection_rig_ignores_a_repository_the_shell_points_git_at(
+        _rig_at_base, tmp_path, monkeypatch):
+    """MUTANT: a git call of the selection rig, or the selector it drives,
+    passes the shell's GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE through. The
+    change then lands in the decoy repository, or the selector reads it."""
+    rig, base = _rig_at_base
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    subprocess.run(["git", "init", "-q", str(decoy)], check=True, capture_output=True,
+                   timeout=60, env=_git_rig_env())
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(decoy / ".git" / "index"))
+    changed = "pact-plugin/tests/home_census.py"
+    selection, changed_paths, status = _select_after_changing(rig, base, changed)
+    assert (status, changed_paths) == ("ok", [changed])
+    assert "tests/test_home_census.py" in selection.included, selection
+    decoy_log = subprocess.run(["git", "log", "--oneline"], cwd=decoy, capture_output=True,
+                               text=True, timeout=60, env=_git_rig_env())
+    assert decoy_log.returncode != 0, ("the decoy repository received a commit", decoy_log.stdout)
+    assert os.environ["GIT_DIR"] == str(decoy / ".git"), "the shell's variables are restored"
 
 
 _GATED_RIG_TESTS = '''
