@@ -1164,7 +1164,80 @@ NAMED_LAYOUT_FORMS = {
     ('find_git_marker', 'binds', 'ceilings = _git_ceiling_directories()'): (1, "assigns a call to `_git_ceiling_directories` (-> set) to a local in `find_git_marker` (-> Optional[Path])"),
     ('find_git_marker', 'binds', "cross_filesystem = _git_env_bool('GIT_DISCOVERY_ACROSS_FILESYSTEM')"): (1, "assigns a call to `_git_env_bool` (-> bool) to a local in `find_git_marker` (-> Optional[Path])"),
     ('git_dir_answer', 'calls', 'DETECTION_GIT_DIRS.get'): (1, "calls a method on `DETECTION_GIT_DIRS`, a module-level assignment of a `contextvars.ContextVar(...)` call, in `git_dir_answer` (-> Optional[str])"),
+    ('_redirect_target_is_foreign', 'uses', 'an `if` or `elif` test: _submodule_admin_dir(target)'): (1, "uses a call to `_submodule_admin_dir` (-> bool) in an `if` or `elif` test in `_redirect_target_is_foreign` (-> bool)"),
+    ('_submodule_checkout', 'uses', 'an `if` or `elif` test: _submodule_admin_dir(common_dir)'): (1, "uses a call to `_submodule_admin_dir` (-> bool) in an `if` or `elif` test in `_submodule_checkout` (-> bool)"),
 }
+
+
+# The words a layout-walk report gives for the place a project_identity call
+# stands when no read form covers it, keyed by (parent node type, field).
+# A place not listed here is reported by its node type and field.
+LAYOUT_CALL_PLACES = {
+    ("If", "test"): "an `if` or `elif` test",
+    ("While", "test"): "a `while` test",
+    ("Assert", "test"): "an `assert` test",
+    ("Assert", "msg"): "an `assert` message",
+    ("IfExp", "test"): "a ternary test",
+    ("IfExp", "body"): "a ternary branch",
+    ("IfExp", "orelse"): "a ternary branch",
+    ("comprehension", "ifs"): "a comprehension `if`",
+    ("match_case", "guard"): "a match guard",
+    ("Match", "subject"): "a match subject with no capture",
+    ("Raise", "exc"): "a `raise`",
+    ("Raise", "cause"): "a raise cause",
+    ("Expr", "value"): "an expression statement, its value discarded",
+}
+
+
+def _layout_call_place(node, parents, defined) -> str | None:
+    """Where the project_identity call `node` stands, or None when a form the
+    walk reads or already reports covers it.
+
+    Climbing from the call toward its statement: the whole value of a
+    `return` is read (classified by `_return_kind`), and any other value of
+    a `return` is reported as `returns`; an assignment, annotated or
+    augmented assignment or walrus value, a `with` item and a `for` or
+    comprehension iterable are reported as `binds` or `iterates`, a match
+    subject as `binds` when a case captures; an argument of a callee that is
+    not a module-level def of project_identity is reported as `passes`. A
+    direct argument (positional, keyword or starred) of a module-level def of
+    project_identity is read, since that def is followed. Every other place
+    returns its words: the first `LAYOUT_CALL_PLACES` slot on the way up, or
+    else the statement's node type and field."""
+    child, place = node, None
+    while id(child) in parents:
+        parent, field = parents[id(child)]
+        kind = type(parent).__name__
+        if place is None and (kind, field) in LAYOUT_CALL_PLACES:
+            place = LAYOUT_CALL_PLACES[(kind, field)]
+        if isinstance(parent, ast.Return):
+            return None
+        if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and field == "value":
+            return None
+        if isinstance(parent, ast.withitem) and field == "context_expr":
+            return None
+        if isinstance(parent, (ast.For, ast.AsyncFor, ast.comprehension)) and field == "iter":
+            return None
+        if isinstance(parent, ast.Match) and field == "subject" and any(
+            (isinstance(part, (ast.MatchAs, ast.MatchStar)) and part.name)
+            or (isinstance(part, ast.MatchMapping) and part.rest)
+            for case in parent.cases for part in ast.walk(case.pattern)
+        ):
+            return None
+        call, direct = parent, child is node
+        if isinstance(parent, (ast.keyword, ast.Starred)) and id(parent) in parents:
+            call = parents[id(parent)][0]
+        if isinstance(call, ast.Call) and call is not child and (
+            child in call.args or parent in call.args or parent in call.keywords
+        ):
+            if not (isinstance(call.func, ast.Name) and call.func.id in defined):
+                return None
+            if direct:
+                return None
+        if isinstance(parent, ast.stmt):
+            return place if place is not None else f"`{kind}.{field}`"
+        child = parent
+    return place
 
 
 def _layout_predicate_forms() -> tuple:
@@ -1190,16 +1263,15 @@ def _layout_predicate_forms() -> tuple:
     a module-level def of project_identity (a container method such as
     `append`, `setdefault` or `extend` included); a return that carries such
     a result inside another expression (`or`, `not`, a ternary); a
-    project_identity function used as a value; and an annotation
-    `_return_kind` cannot classify. The census arm
+    project_identity function used as a value; an annotation
+    `_return_kind` cannot classify; and a project_identity call in any place
+    none of those covers (`_layout_call_place`): a test of an `if`, `elif`,
+    `while` or `assert`, a ternary, a comprehension `if` or a match guard, a
+    match subject with no capture, a `raise` or its cause, a discarded
+    expression statement, and any other place, at any depth inside it (a
+    display, a subscript, an f-string, an operator). The census arm
     compares the Counter with NAMED_LAYOUT_FORMS exactly, so a new form fails
-    it.
-
-    NOT COVERED: a project_identity call inside a display (a tuple, list
-    or dict) that is subscripted in an `if`, `elif`, `while` or `assert`
-    test (`if (_pred(d),)[0]:`, `while [_pred(d)][0]:`), and a
-    project_identity call in an f-string that is a statement of its own,
-    whose value is discarded (`f"{_pred(d)}"`). The walk reports neither."""
+    it."""
     import builtins
 
     tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
@@ -1304,6 +1376,18 @@ def _layout_predicate_forms() -> tuple:
                 )
             ):
                 unresolved[(name, "returns", ast.unparse(node.value))] += 1
+        parents = {
+            id(child): (parent, field)
+            for parent in ast.walk(function)
+            for field, value in ast.iter_fields(parent)
+            for child in (value if isinstance(value, list) else [value])
+            if isinstance(child, ast.AST)
+        }
+        for node in ast.walk(function):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in defined:
+                place = _layout_call_place(node, parents, defined)
+                if place is not None:
+                    unresolved[(name, "uses", f"{place}: {ast.unparse(node)}")] += 1
     return predicates, unresolved
 
 
@@ -1595,6 +1679,64 @@ class TestTheDocumentedGitCallFloor:
                 wrong[key] = (result, returned, lines.get(key), declined)
         assert wrong == {}, f"(result, true returns, expected line, decline) per excluded outcome: {wrong}"
 
+    @pytest.mark.parametrize(
+        ("statement", "place"),
+        [
+            ("if (_p(x),)[0]:\n        pass", "an `if` or `elif` test"),
+            ("if False:\n        pass\n    elif [_p(x)][0]:\n        pass", "an `if` or `elif` test"),
+            ("while {'k': _p(x)}['k']:\n        break", "a `while` test"),
+            ("assert (_p(x),)[0] or True", "an `assert` test"),
+            ("f'{_p(x)}'", "an expression statement, its value discarded"),
+            ("(_p(x),)[0]", "an expression statement, its value discarded"),
+            ("_p(x) and None", "an expression statement, its value discarded"),
+            ("None if (_p(x),)[0] else None", "a ternary test"),
+            ("match 0:\n        case 0 if (_p(x),)[0]:\n            pass", "a match guard"),
+            ("if [1 for _ in (0,) if (_p(x),)[0]]:\n        pass", "a comprehension `if`"),
+            ("raise ValueError() from (_p(x),)[0]", "a raise cause"),
+            ("match _p(x):\n        case True:\n            pass", "a match subject with no capture"),
+            ("raise (_p(x),)[0]", "a `raise`"),
+            ("_q(not _p(x))", "an expression statement, its value discarded"),
+            ("del [_p(x)][0]", "`Delete.targets`"),
+        ],
+        ids=[
+            "tuple in if", "list in elif", "dict in while", "tuple in assert", "f-string statement",
+            "subscripted tuple statement", "boolean operand statement", "ternary test", "match guard",
+            "comprehension if", "raise cause", "match subject", "raise argument",
+            "nested in a project argument", "del target",
+        ],
+    )
+    def test_a_project_call_in_an_unread_place_is_reported(self, statement, place):
+        """`_layout_call_place` gives the words for every place a
+        project_identity call stands that no read or reported form covers,
+        however deep the call sits inside it. Controls, each None: the call
+        bound by an assignment, returned whole or inside another expression,
+        iterated, used as a `with` item or a captured match subject, and
+        passed as a direct argument to a project def or to any other
+        callee."""
+        defined = {"_p", "_q"}
+
+        def places(body):
+            function = ast.parse(f"def f(x):\n    {body}\n").body[0]
+            parents = {
+                id(child): (parent, field)
+                for parent in ast.walk(function)
+                for field, value in ast.iter_fields(parent)
+                for child in (value if isinstance(value, list) else [value])
+                if isinstance(child, ast.AST)
+            }
+            return [
+                _layout_call_place(node, parents, defined) for node in ast.walk(function)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "_p"
+            ]
+
+        assert places(statement) == [place]
+        for read in (
+            "y = (_p(x),)[0]", "return _p(x)", "return not _p(x)", "for y in [_p(x)]:\n        pass",
+            "with _p(x) as y:\n        pass", "match _p(x):\n        case y:\n            pass",
+            "return _q(_p(x))", "return _q(value=_p(x))", "return _q(*_p(x))", "print(_p(x))",
+        ):
+            assert places(read) == [None], read
+
     def test_each_named_layout_reason_states_the_code_at_its_site(self):
         """Each NAMED_LAYOUT_FORMS reason IS the text derived from its form's
         AST, compared by equality, so a reason that adds a claim (a flow
@@ -1603,7 +1745,9 @@ class TestTheDocumentedGitCallFloor:
         it is in, each with its return annotation; a return of `not` applied
         to a direct call names the same two; a method called on a
         module-level name names that name and the call its assignment makes.
-        A form of another shape has no derived text and fails."""
+        A call in a place no read form covers names that function, the
+        place in the walk's own words and the function it is in. A form of
+        another shape has no derived text and fails."""
         tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
         defs = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
         assigned = {}
@@ -1634,6 +1778,11 @@ class TestTheDocumentedGitCallFloor:
                 value = ast.parse(form, mode="eval").body
                 if isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not) and callee(value.operand):
                     return f"returns `not` applied to a call to {annotated(callee(value.operand))} in {site}"
+            if kind == "uses":
+                place, _, call = form.partition(": ")
+                value = ast.parse(call, mode="eval").body
+                if callee(value) and place in set(LAYOUT_CALL_PLACES.values()):
+                    return f"uses a call to {annotated(callee(value))} in {place} in {site}"
             if kind == "calls":
                 value = ast.parse(form, mode="eval").body
                 if (
