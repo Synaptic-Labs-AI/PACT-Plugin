@@ -1058,6 +1058,59 @@ def test_a_blocked_child_runs(tmp_path, census_state):
     assert census_state["misses"] == before
 
 
+@pytest.mark.parametrize("event, args", [
+    # Popen's executable= names the program; argv[0] is only the shown name.
+    ("subprocess.Popen", ("/venv/bin/pytest", ["anything", "-q"], None, {})),
+    ("subprocess.Popen", (PY, ["foo", "-m", "pytest"], None, {})),
+    # With shell=True the executable is the shell, and its -c text is read.
+    ("subprocess.Popen", ("/bin/bash", ["/bin/bash", "-c", "pytest -q"], None, {})),
+    # posix_spawn's path names the program in the same way.
+    ("os.posix_spawn", ("/venv/bin/pytest", ["shown", "-q"], {})),
+])
+def test_the_program_a_launch_runs_is_judged_not_its_shown_name(census_state, event, args):
+    with pytest.raises(census.ChildPytestCensusError):
+        census._audit(event, args)
+
+
+@pytest.mark.parametrize("event, args", [
+    ("subprocess.Popen", (PY, ["foo", "-m", "pytest", "-p", "no:randomly"], None, {})),
+    ("subprocess.Popen", ("/usr/bin/true", ["pytest", "-q"], None, {})),
+    ("subprocess.Popen", ("/bin/bash", ["/bin/bash", "-c", "pytest -q -p no:randomly"],
+                          None, {})),
+    ("os.posix_spawn", ("/usr/bin/true", ["pytest", "-q"], {})),
+])
+def test_a_launch_whose_program_blocks_or_is_no_pytest_is_accepted(census_state, event, args):
+    before = list(census_state["misses"])
+    census._audit(event, args)
+    assert census_state["misses"] == before
+
+
+def test_an_unreadable_launch_whose_executable_is_pytest_fails_by_name(census_state):
+    before = len(census_state["misses"])
+    census._audit("subprocess.Popen", ("/venv/bin/pytest", ["anything", 1], None, None))
+    added = census_state["misses"][before:]
+    assert len(added) == 1 and "could not inspect a pytest launch" in added[0], added
+
+
+def test_a_live_launch_naming_pytest_as_its_executable_is_refused(tmp_path, census_state):
+    before = len(census_state["misses"])
+    with pytest.raises(census.ChildPytestCensusError) as caught:
+        subprocess.run(["anything", "-q"], executable=str(tmp_path / "bin" / "pytest"),
+                       cwd=tmp_path, capture_output=True, timeout=60)
+    assert census_state["misses"][before:] == [str(caught.value)]
+
+
+def test_a_live_blocked_launch_through_an_executable_runs(tmp_path, census_state):
+    # The shown name sits beside the interpreter, which finds its environment
+    # from argv[0]; the census judges the executable, not this name.
+    shown = str(Path(PY).with_name("shown-name"))
+    before = list(census_state["misses"])
+    proc = subprocess.run([shown, "-m", "pytest", "--version", *_BLOCK], executable=PY,
+                          cwd=tmp_path, capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert census_state["misses"] == before
+
+
 def test_a_non_pytest_launch_is_untouched(census_state):
     before = list(census_state["misses"])
     proc = subprocess.run([PY, "-c", "print('ok')"], capture_output=True, text=True,

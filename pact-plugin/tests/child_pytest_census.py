@@ -37,6 +37,12 @@ a child is refused for one of the three even when another name there is a
 module pytest cannot import, which stops pytest with a usage error before any
 test runs.
 
+The program judged is the one the launch runs: Popen's `executable=` when it is
+given (with `shell=True`, the shell), or posix_spawn's path, in place of argv[0],
+which is then only the name the child is shown. So
+`subprocess.run(["anything", "-q"], executable="/venv/bin/pytest")` is a pytest
+child.
+
 A child's environment starts as the explicit `env` passed to the launch, or this
 process's when none is passed, and the NAME=VALUE words before the program apply
 to it.
@@ -395,11 +401,12 @@ def install():
 
 def _audit(event, args):
     if event == "subprocess.Popen":
-        _executable, argv, cwd, env = args
+        executable, argv, cwd, env = args
     elif event == "os.posix_spawn":
-        (_executable, argv, env), cwd = args, None
+        (executable, argv, env), cwd = args, None
     else:
         return
+    argv = _launched(executable, argv)
     try:
         line = _miss(argv, cwd, env)
     except Exception as exc:  # a census fault must not break the launch it watches
@@ -412,6 +419,18 @@ def _audit(event, args):
     if line:
         _record(line)
         raise ChildPytestCensusError(line)
+
+
+def _launched(executable, argv):
+    """The argv as the program the launch runs sees it: the event's executable
+    (Popen's executable=, defaulting to argv[0], or posix_spawn's path), then
+    argv's arguments; argv[0] is only the name the child is shown."""
+    if executable is None or isinstance(argv, (str, bytes, os.PathLike)):
+        return argv
+    try:
+        return [executable, *list(argv)[1:]]
+    except TypeError:
+        return argv
 
 
 def _current_test():
