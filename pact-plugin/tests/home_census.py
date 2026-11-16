@@ -112,6 +112,13 @@ def install():
     """Install the launch audit hook once."""
     if _state["installed"]:
         return
+    # Python calls every audit hook on every audit event. Measured per event on
+    # Python 3.12.3, Neoverse-V1: no hooks 213 ns, one census about 445 ns, the
+    # ordinary session's two (HOME and child-pytest) about 550 ns, all three 636
+    # ns (the clock-shift census installs only when PACT_TEST_CLOCK_SHIFT_SECONDS
+    # is set); +1.4% to +1.8% wall-clock on test_session_init and test_merge_guard.
+    # A do-nothing hook alone adds about 214 ns, which no early return removes; one
+    # dispatcher shared by the censuses would save about 86 ns (about 0.4%), not taken.
     sys.addaudithook(_audit)
     _state["installed"] = True
 
