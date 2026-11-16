@@ -106,16 +106,18 @@ if ! command -v ruff >/dev/null 2>&1; then
             printf '  it first on PATH. ruff publishes wheels for Linux, macOS and Windows, so nothing is compiled.\n' >&2
         fi
         printf '  The full test environment, which compiles a package on some platforms, is .cursor/install.sh.\n' >&2
-        printf '  The commands below are for a POSIX shell. On Windows the same steps use .venv\\Scripts\\python\n' >&2
-        printf '  in place of .venv/bin/python, and .venv\\Scripts\\activate to put the venv first on PATH.\n' >&2
+        printf '  The commands below are one command for a POSIX shell: a failed step, the floor check included,\n' >&2
+        printf '  stops the rest. On Windows the same steps use .venv\\Scripts\\python in place of .venv/bin/python,\n' >&2
+        printf '  and .venv\\Scripts\\activate to put the venv first on PATH.\n' >&2
         if [ -e "$repo_root/.venv" ] || [ -L "$repo_root/.venv" ]; then
-            printf '    .venv/bin/python -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else sys.version)" && sed -n "/^ruff==/,/[0-9a-f]$/p" constraints-ci.txt > .venv/ruff-lock.txt\n' >&2
+            printf '    .venv/bin/python -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else sys.version)" \\\n' >&2
         else
-            printf '    python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else sys.version)" && python3 -m venv .venv\n' >&2
-            printf '    sed -n "/^ruff==/,/[0-9a-f]$/p" constraints-ci.txt > .venv/ruff-lock.txt\n' >&2
+            printf '    python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else sys.version)" \\\n' >&2
+            printf '      && python3 -m venv .venv \\\n' >&2
         fi
-        printf '    .venv/bin/python -m pip install --only-binary=:all: --require-hashes --no-deps -r .venv/ruff-lock.txt\n' >&2
-        printf '    . .venv/bin/activate\n' >&2
+        printf '      && sed -n "/^ruff==/,/[0-9a-f]$/p" constraints-ci.txt > .venv/ruff-lock.txt \\\n' >&2
+        printf '      && .venv/bin/python -m pip install --only-binary=:all: --require-hashes --no-deps -r .venv/ruff-lock.txt \\\n' >&2
+        printf '      && . .venv/bin/activate\n' >&2
     fi
     printf '  To lint without this gate, run the CI legs directly from the repo root:\n' >&2
     printf '    ruff check --select F401,F821 --target-version py312 pact-plugin/ scripts/\n' >&2

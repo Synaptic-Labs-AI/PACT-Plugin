@@ -215,6 +215,20 @@ def _lint_gate_remedy_lines(root, scratch, venv="absent"):
     return [line.strip() for line in _render_lint_gate_remedy(root, scratch, venv).splitlines()]
 
 
+def _remedy_block(printed):
+    """The remedy's command lines as printed: the lines indented as commands
+    before the CI legs."""
+    lines = printed.splitlines()
+    end = next(i for i, line in enumerate(lines) if line.startswith("  To lint without this gate"))
+    return [line for line in lines[:end] if line.startswith("    ")]
+
+
+def _remedy_steps(block):
+    """The steps of the remedy's one command, its continuation lines joined and
+    split at each &&."""
+    return " ".join(line.strip().removesuffix("\\").strip() for line in block).split(" && ")
+
+
 def _remedy_floor_minor(check):
     """The minor version of the floor the remedy's printed check enforces."""
     found = re.findall(r"sys\.version_info >= \(3, (\d+)\)", check)
@@ -506,34 +520,37 @@ class TestHashCheckedInstall:
         with a .venv it never runs `python3 -m venv`, which would re-initialise
         the venv with whatever python3 is first on PATH, and it checks the floor
         with the venv's own interpreter. The full environment, which compiles a
-        package on some platforms, stays .cursor/install.sh's."""
+        package on some platforms, stays .cursor/install.sh's. The steps are one
+        command, each continuation line starting with &&, so a failed step stops
+        the rest when the block is pasted."""
         root = ci_contract.require_root("the lint gate remedy")
-        printed = _lint_gate_remedy_lines(root, tmp_path / "root", venv)
-        commands = [line for line in printed
-                    if line.startswith(("python3 ", ".venv/", ". ", "sed "))]
+        rendered = _render_lint_gate_remedy(root, tmp_path / "root", venv)
+        block = _remedy_block(rendered)
+        printed = [line.strip() for line in rendered.splitlines()]
+        assert all(line.endswith(" \\") for line in block[:-1]), block
+        assert not block[-1].endswith("\\"), block
+        assert all(line.strip().startswith("&& ") for line in block[1:]), block
+        steps = _remedy_steps(block)
+        commands = [line.strip() for line in block]
         cursor = [line.strip() for line in
                   (root / ".cursor" / "install.sh").read_text(encoding="utf-8").splitlines()]
+        check = steps[0]
         if venv == "absent":
-            check, _, create = commands[0].partition(" && ")
-            extract, _, target = commands[1].partition(" > ")
+            create, extraction, *rest = steps[1:]
             assert check.startswith("python3 -c "), check
-            assert [create, target, *commands[2:]] == [
-                "python3 -m venv .venv", self._REMEDY_LOCK, self._REMEDY_INSTALL,
-                ". .venv/bin/activate",
-            ], commands
+            assert create == "python3 -m venv .venv", steps
             assert create in cursor, "the remedy's venv line is not .cursor/install.sh's"
             assert "repository venv (.venv), install ruff alone" in " ".join(printed)
         else:
-            check, _, extraction = commands[0].partition(" && ")
-            extract, _, target = extraction.partition(" > ")
+            extraction, *rest = steps[1:]
             assert check.startswith(".venv/bin/python -c "), check
-            assert [target, *commands[1:]] == [
-                self._REMEDY_LOCK, self._REMEDY_INSTALL, ". .venv/bin/activate",
-            ], commands
             assert not any("-m venv" in line for line in printed), printed
             assert "venv (.venv) exists" in " ".join(printed), printed
+        extract, _, target = extraction.partition(" > ")
+        assert [target, *rest] == [
+            self._REMEDY_LOCK, self._REMEDY_INSTALL, ". .venv/bin/activate"], steps
         assert extract.startswith("sed "), extract
-        assert commands[-1] in cursor, "the remedy's activate line is not .cursor/install.sh's"
+        assert steps[-1] in cursor, "the remedy's activate line is not .cursor/install.sh's"
         # The floor check is a third copy of the floor; it must equal the other two.
         assert _remedy_floor_minor(check) == _install_floor_minor(root) \
             == _declared_floor_minor(root), check
@@ -582,8 +599,9 @@ class TestHashCheckedInstall:
         ruff's entry with every hash the lock lists for it and no other
         requirement, so the remedy installs CI's ruff and cannot drift from it."""
         root = ci_contract.require_root("the lint gate remedy")
-        extract = next(line for line in _lint_gate_remedy_lines(root, tmp_path / "root")
-                       if line.startswith("sed ")).partition(" > ")[0]
+        steps = _remedy_steps(_remedy_block(_render_lint_gate_remedy(root, tmp_path / "root",
+                                                                     "absent")))
+        extract = next(step for step in steps if step.startswith("sed ")).partition(" > ")[0]
         proc = subprocess.run(shlex.split(extract), cwd=root, capture_output=True,
                               text=True, timeout=30)
         assert proc.returncode == 0, proc
@@ -616,9 +634,9 @@ class TestHashCheckedInstall:
         this interpreter and refuses one below the floor, naming its version. A
         floor above every real interpreter stands in for a below-floor python3."""
         root = ci_contract.require_root("the lint gate remedy")
-        check = next(line for line in _lint_gate_remedy_lines(root, tmp_path / "root", venv)
-                     if line.startswith(("python3 -c ", ".venv/bin/python -c "))
-                     ).partition(" && ")[0]
+        check = _remedy_steps(_remedy_block(_render_lint_gate_remedy(root, tmp_path / "root",
+                                                                     venv)))[0]
+        assert check.startswith(("python3 -c ", ".venv/bin/python -c ")), check
         code = shlex.split(check)[2]
         if below_floor:
             code = re.sub(r"\(3, \d+\)", "(99, 0)", code)
@@ -630,6 +648,79 @@ class TestHashCheckedInstall:
             assert proc.returncode == 1 and proc.stderr.strip() == sys.version, proc
         else:
             assert proc.returncode == 0 and proc.stderr == "", proc
+
+    # An interpreter for the pasted-remedy rig: it logs each call, hands a -c
+    # program to the real interpreter, makes a venv holding a copy of itself
+    # and an activate that logs, and records a pip run without installing.
+    _REMEDY_STUB = '''\
+import os, shutil, sys
+args = sys.argv[1:]
+with open(os.environ["REMEDY_LOG"], "a", encoding="utf-8") as log:
+    log.write(" ".join(args) + "\\n")
+if args[:1] == ["-c"]:
+    os.execv(os.environ["REMEDY_REAL_PYTHON"], [os.environ["REMEDY_REAL_PYTHON"], *args])
+if args[:2] == ["-m", "venv"]:
+    os.makedirs(os.path.join(args[2], "bin"))
+    shutil.copy(__file__, os.path.join(args[2], "bin", "python"))
+    with open(os.path.join(args[2], "bin", "activate"), "w", encoding="utf-8") as act:
+        act.write('echo activate >> "$REMEDY_LOG"\\n')
+    sys.exit(0)
+sys.exit(0 if args[:2] == ["-m", "pip"] else 2)
+'''
+
+    def _remedy_stub(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"#!{sys.executable}\n{self._REMEDY_STUB}", encoding="utf-8")
+        path.chmod(0o755)
+
+    @pytest.mark.parametrize("venv", ["absent", "existing"])
+    @pytest.mark.parametrize("below_floor", [False, True], ids=["at-floor", "below-floor"])
+    def test_the_pasted_remedy_installs_only_past_the_floor(self, tmp_path, venv, below_floor):
+        """The printed remedy, pasted as one block into bash, runs its real floor
+        check through a real interpreter. Below the floor (the check's floor
+        raised past every interpreter) nothing after it runs: no venv is made,
+        a stale .venv/ruff-lock.txt is left as it is and pip is never started.
+        At the floor every step runs, and pip installs ruff's own lock entry."""
+        root = ci_contract.require_root("the lint gate remedy")
+        block = "\n".join(_remedy_block(_render_lint_gate_remedy(root, tmp_path / "render", venv)))
+        if below_floor:
+            block = re.sub(r"\(3, \d+\)", "(99, 0)", block)
+            assert "(99, 0)" in block, block
+        rig = tmp_path / "rig"
+        rig.mkdir()
+        shutil.copy(root / "constraints-ci.txt", rig)
+        self._remedy_stub(tmp_path / "bin" / "python3")
+        lock = rig / ".venv" / "ruff-lock.txt"
+        if venv == "existing":
+            self._remedy_stub(rig / ".venv" / "bin" / "python")
+            (rig / ".venv" / "bin" / "activate").write_text(
+                'echo activate >> "$REMEDY_LOG"\n', encoding="utf-8")
+            lock.write_text("stale==1.0\n", encoding="utf-8")
+        log = tmp_path / "calls.log"
+        log.touch()
+        proc = subprocess.run(
+            [shutil.which("bash"), "-c", block], cwd=rig, capture_output=True, text=True,
+            env={"PATH": f"{tmp_path / 'bin'}{os.pathsep}/usr/bin{os.pathsep}/bin",
+                 "HOME": str(tmp_path), "REMEDY_LOG": str(log),
+                 "REMEDY_REAL_PYTHON": sys.executable},
+            timeout=60)
+        calls = log.read_text(encoding="utf-8").splitlines()
+        pip_calls = [call for call in calls if call.startswith("-m pip ")]
+        if below_floor:
+            assert pip_calls == [], calls
+            assert len(calls) == 1 and calls[0].startswith("-c "), calls
+            assert proc.returncode == 1 and proc.stderr.strip() == sys.version, proc
+            if venv == "existing":
+                assert lock.read_text(encoding="utf-8") == "stale==1.0\n"
+            else:
+                assert not (rig / ".venv").exists()
+        else:
+            assert proc.returncode == 0 and proc.stderr == "", proc
+            # The install as printed, less the interpreter that runs it.
+            assert pip_calls == [self._REMEDY_INSTALL.split(" ", 1)[1]], calls
+            assert calls[-1] == "activate", calls
+            assert lock.read_text(encoding="utf-8").startswith("ruff=="), lock.read_text(
+                encoding="utf-8")
 
     def test_the_lint_gate_refuses_without_ruff_and_prints_its_remedy(self, tmp_path):
         """With no ruff on PATH the real gate, run in the real root, exits 2 and
