@@ -822,16 +822,20 @@ class TestRunReceiptAttribution:
     """The pact-agent-teams Step 0 run receipt, branch by branch.
 
     - Before each run, HEAD and the status are recorded and the staged change
-      is saved to a file outside the worktree.
-    - The whole change, new files included, is staged before each reported
-      run; a run that starts with an unstaged or untracked path of the change
-      does not count and is run again after staging.
+      is saved to a file outside the worktree, scoped to the explicit paths
+      the teammate stages by, so a peer's staged work on other paths never
+      enters the change copy; a path shared with a peer is named in the
+      HANDOFF, and a failure only a peer's hunk there explains is not the
+      teammate's.
+    - The whole change, new files included, is staged by explicit path before
+      each reported run; a run that starts with an unstaged or untracked path
+      of the change does not count and is run again after staging.
     - A moved HEAD is re-run once before the HANDOFF, in the isolated copy
       that holds the change, never in the worktree. That copy's run is the
       result; its own staged files are never read as written by the run.
     - If the copy cannot be built or the command cannot be run in it, after
-      a moved HEAD or a status-only change alike (its own sub-bullet after
-      both branches), the result is reported as unattributable, naming what
+      a moved HEAD, a status-only change or a worktree run's failing tests
+      alike (its own sub-bullet after both branches), the result is reported as unattributable, naming what
       moved and stating the unmet exit-code precondition, and is not re-run
       again. That exit
       never takes paths the change copy reproduces: on any run, those follow
@@ -861,11 +865,12 @@ class TestRunReceiptAttribution:
       that copy's run decides: 0 is a pass, and its failing tests follow the
       general rule below.
     - For every reported run, with or without a status change, a failing
-      test is pre-existing only when the same test fails, with the same
-      command and interpreter, in the baseline clone. Only then may the
-      teammate hand off, naming those
-      tests and the precondition unmet through them; any other failing test
-      blocks it. The exit-code precondition names that exception and the
+      test is a failure of the change only when the change copy fails it and
+      the baseline clone passes it. A worktree run's failing tests are re-run
+      once in the change copy; one that passes there came from outside the
+      change, and one the baseline clone also fails is pre-existing. Only
+      then may the teammate hand off, naming those tests and the
+      precondition unmet through them; any other failing test blocks it. The exit-code precondition names that exception and the
       unattributable exit, so it does not contradict this bullet.
     - No git archive export is named as the copy.
 
@@ -882,15 +887,19 @@ class TestRunReceiptAttribution:
     REL_PATH = "pact-agent-teams/SKILL.md"
     BULLET_START = "- For each of those runs, record `git rev-parse HEAD`"
     REQUIRED_PHRASES = (
-        ("Stage your whole change, new files included, before each run you report. If an unstaged or untracked path of your change exists when a run starts, stage it and run again; that run does not count.",
+        ("Stage your whole change by explicit path, new files included, before each run you report. If an unstaged or untracked path of your change exists when a run starts, stage it and run again; that run does not count.",
          "the whole change staged before each reported run, so the saved diff is the change"),
-        ("and immediately before it also save your staged change with `git diff --cached --binary` to a file outside the worktree, such as one in your session scratch directory.",
-         "the record step: the staged change saved before the run, outside the worktree"),
+        ("and immediately before it also save your staged change with `git diff --cached --binary -- <your paths>` to a file outside the worktree, such as one in your session scratch directory, where `<your paths>` are the explicit paths you stage your change by and list in your HANDOFF, new files included.",
+         "the record step: only your own staged paths saved before the run, outside the worktree"),
+        ("A peer's staged change to any other path is not part of your change and stays out of the saved file.",
+         "a peer's staged change to another path stays out of the change copy"),
+        ("A path you share with a peer carries the peer's staged hunks in that file too: name each such path in your HANDOFF, and a failure that a peer's hunk alone explains is reported, with the path, and is not a failure of your change.",
+         "a shared path is named, and a failure a peer's hunk alone explains is not the teammate's"),
         ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, in the isolated copy that holds your change described below, not in the worktree, and never report the moved run as a pass or a failure of your change.",
          "the moved-HEAD branch: one re-run, in the change copy, never the worktree"),
         ("never report the moved run as a pass or a failure of your change. That copy's run is your result.",
          "the moved-HEAD copy run as the result"),
-        ("If the copy that holds your change cannot be built or the command cannot be run in it, after a moved `HEAD` or a status-only change alike, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
+        ("If the copy that holds your change cannot be built or the command cannot be run in it, after a moved `HEAD`, a status-only change or a worktree run's failing tests alike, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
          "the stop: unattributable only when the copy cannot be built or run, naming what moved, with the unmet precondition stated"),
         ("This exit never applies to paths the copy that holds your change reproduces; on any run, those follow the pre-existing and failure branches below.",
          "a reproduced write never reaches the unattributable exit"),
@@ -908,9 +917,13 @@ class TestRunReceiptAttribution:
          "a base-reproduced write reported as pre-existing"),
         ("When every reproduced path is pre-existing, exit code 0 counts as a pass, and failing tests follow the pre-existing-failure rule at the end of this bullet.",
          "the all-pre-existing branch defers failing tests to the general rule"),
-        ("For any run whose result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in the baseline clone.",
-         "the general per-test comparison with the baseline clone, for every reported run"),
-        ("When every failing test is pre-existing, you may hand off: name each such test, with the command, in your HANDOFF, and state there that the exit-code precondition above is unmet only through those pre-existing tests.",
+        ("For any run whose result you report, with or without a status change, a failing test is a failure of your change only when it fails in the copy that holds your change and passes, with the same command and interpreter, in the baseline clone.",
+         "a failing test counts only when the change copy fails it and the baseline clone passes it, for every reported run"),
+        ("When the run you report is the worktree's, re-run its failing tests once in that copy, and no more: a test that fails in the worktree but passes in that copy came from outside your change, so report it with the command, and it does not block.",
+         "a worktree failure is re-run once in the change copy, and one that passes there is reported, not blocking"),
+        ("A failing test that also fails in the baseline clone is pre-existing.",
+         "a failing test the baseline clone also fails is pre-existing"),
+        ("When every failing test is pre-existing or from outside your change, you may hand off: name each such test, with the command, in your HANDOFF, and state there that the exit-code precondition above is unmet only through those tests.",
          "the pre-existing-failure hand-off, naming the tests and the unmet precondition"),
         ("Any other failing test is a failure of your change and blocks the HANDOFF.",
          "any other failing test still blocks the HANDOFF"),
@@ -945,7 +958,7 @@ class TestRunReceiptAttribution:
         text = (SKILLS_DIR / self.REL_PATH).read_text(encoding="utf-8")
         line = (
             "- All relevant tests have been run with exit code 0, except failing tests "
-            "that the next bullet finds pre-existing, and a run that bullet "
+            "that the next bullet finds pre-existing or from outside your change, and a run that bullet "
             "reports as unattributable because its isolated copy cannot be built or the "
             "command cannot be run in it."
         )
@@ -1070,6 +1083,40 @@ class TestRunReceiptAttribution:
             assert phrase in decision, (
                 f"the {self.REL_PATH} per-path decision lost {phrase!r}"
             )
+
+    def test_change_copy_holds_only_your_own_paths(self):
+        # A shared index holds every teammate's staged work; a whole-index
+        # diff would charge a peer's staged change to the teammate whose copy
+        # it lands in.
+        bullet = self._bullet()
+        assert "`git diff --cached --binary -- <your paths>`" in bullet, (
+            f"the {self.REL_PATH} record step must save the staged change scoped "
+            "to the teammate's own paths"
+        )
+        assert "`git diff --cached --binary`" not in bullet, (
+            f"the {self.REL_PATH} record step saves the whole shared index, so a "
+            "peer's staged work lands in the change copy"
+        )
+
+    def test_a_worktree_failure_is_decided_in_the_change_copy(self):
+        # A worktree run carries every peer's edits, so its failing test is
+        # the teammate's only when the copy holding just the teammate's change
+        # fails it too, after one bounded re-run there.
+        bullet = self._bullet()
+        rule = bullet.find("  - For any run whose result you report")
+        assert rule != -1, f"the {self.REL_PATH} failing-test rule is missing"
+        end = bullet.find("\n  - ", rule + 1)
+        text = bullet[rule:end if end != -1 else None]
+        for phrase in ("fails in the copy that holds your change and passes",
+                       "re-run its failing tests once in that copy, and no more",
+                       "came from outside your change"):
+            assert phrase in text, (
+                f"the {self.REL_PATH} failing-test rule lost {phrase!r}"
+            )
+        assert "is pre-existing only when" not in text, (
+            f"the {self.REL_PATH} failing-test rule still decides a failure by the "
+            "baseline clone alone, charging a peer's worktree edits to the teammate"
+        )
 
     def test_receipt_names_no_archive_export(self):
         # An archive export holds neither the staged change nor .git, so the
