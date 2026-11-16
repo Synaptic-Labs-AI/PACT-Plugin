@@ -1187,6 +1187,25 @@ LAYOUT_CALL_PLACES = {
     ("Raise", "cause"): "a raise cause",
     ("Expr", "value"): "an expression statement, its value discarded",
 }
+# The words for a call that only a read form would cover, standing in the
+# body of a def or lambda nested in the reached function: that body runs
+# whenever its caller runs it, not as the reached function's own code.
+NESTED_BODY_PLACE = "the body of a nested def or lambda"
+
+
+def _in_nested_body(node, parents) -> bool:
+    """Whether `node` stands in the body of a def, async def or lambda that
+    is itself inside the function `parents` was built from."""
+    child = node
+    while id(child) in parents:
+        parent, field = parents[id(child)]
+        if field == "body" and (
+            isinstance(parent, ast.Lambda)
+            or (isinstance(parent, (ast.FunctionDef, ast.AsyncFunctionDef)) and id(parent) in parents)
+        ):
+            return True
+        child = parent
+    return False
 
 
 def _layout_call_place(node, parents, defined) -> str | None:
@@ -1201,9 +1220,13 @@ def _layout_call_place(node, parents, defined) -> str | None:
     subject as `binds` when a case captures; an argument of a callee that is
     not a module-level def of project_identity is reported as `passes`. A
     direct argument (positional, keyword or starred) of a module-level def of
-    project_identity is read, since that def is followed. Every other place
-    returns its words: the first `LAYOUT_CALL_PLACES` slot on the way up, or
-    else the statement's node type and field."""
+    project_identity is read, since that def is followed. Those two reads
+    hold only for the reached function's own code: in the body of a nested
+    def or lambda the call returns NESTED_BODY_PLACE instead, since the walk
+    does not follow when that body runs. Every other place returns its
+    words: the first `LAYOUT_CALL_PLACES` slot on the way up, or else the
+    statement's node type and field."""
+    nested = _in_nested_body(node, parents)
     child, place = node, None
     while id(child) in parents:
         parent, field = parents[id(child)]
@@ -1211,7 +1234,9 @@ def _layout_call_place(node, parents, defined) -> str | None:
         if place is None and (kind, field) in LAYOUT_CALL_PLACES:
             place = LAYOUT_CALL_PLACES[(kind, field)]
         if isinstance(parent, ast.Return):
-            return None
+            value = parent.value
+            read = isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in defined
+            return NESTED_BODY_PLACE if read and nested else None
         if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and field == "value":
             return None
         if isinstance(parent, ast.withitem) and field == "context_expr":
@@ -1233,7 +1258,7 @@ def _layout_call_place(node, parents, defined) -> str | None:
             if not (isinstance(call.func, ast.Name) and call.func.id in defined):
                 return None
             if direct:
-                return None
+                return NESTED_BODY_PLACE if nested else None
         if isinstance(parent, ast.stmt):
             return place if place is not None else f"`{kind}.{field}`"
         child = parent
@@ -1269,7 +1294,8 @@ def _layout_predicate_forms() -> tuple:
     `while` or `assert`, a ternary, a comprehension `if` or a match guard, a
     match subject with no capture, a `raise` or its cause, a discarded
     expression statement, and any other place, at any depth inside it (a
-    display, a subscript, an f-string, an operator). The census arm
+    display, a subscript, an f-string, an operator); and a call that only a
+    read form would cover, in the body of a nested def or lambda. The census arm
     compares the Counter with NAMED_LAYOUT_FORMS exactly, so a new form fails
     it."""
     import builtins
@@ -1697,22 +1723,30 @@ class TestTheDocumentedGitCallFloor:
             ("raise (_p(x),)[0]", "a `raise`"),
             ("_q(not _p(x))", "an expression statement, its value discarded"),
             ("del [_p(x)][0]", "`Delete.targets`"),
+            ("def g(p):\n        return _p(p)\n    return any(map(g, [x]))", NESTED_BODY_PLACE),
+            ("def g(p):\n        return _p(p)\n    sorted([x], key=g)", NESTED_BODY_PLACE),
+            ("async def g(p):\n        return _p(p)\n    max([x], key=g)", NESTED_BODY_PLACE),
+            ("def g(p):\n        return _q(_p(p))\n    list(map(g, [x]))", NESTED_BODY_PLACE),
+            ("return _q(lambda p: _p(p))", NESTED_BODY_PLACE),
         ],
         ids=[
             "tuple in if", "list in elif", "dict in while", "tuple in assert", "f-string statement",
             "subscripted tuple statement", "boolean operand statement", "ternary test", "match guard",
             "comprehension if", "raise cause", "match subject", "raise argument",
             "nested in a project argument", "del target",
+            "nested def returned through map", "nested def as a sorted key", "async nested def as a max key",
+            "nested def passing it to a project def", "lambda passed to a project def",
         ],
     )
     def test_a_project_call_in_an_unread_place_is_reported(self, statement, place):
         """`_layout_call_place` gives the words for every place a
         project_identity call stands that no read or reported form covers,
-        however deep the call sits inside it. Controls, each None: the call
-        bound by an assignment, returned whole or inside another expression,
-        iterated, used as a `with` item or a captured match subject, and
-        passed as a direct argument to a project def or to any other
-        callee."""
+        however deep the call sits inside it, the body of a nested def or
+        lambda included. Controls, each None: the call bound by an
+        assignment, returned whole or inside another expression, iterated,
+        used as a `with` item or a captured match subject, passed as a direct
+        argument to a project def or to any other callee, in a lambda handed
+        to another callee, and bound inside a nested def."""
         defined = {"_p", "_q"}
 
         def places(body):
@@ -1734,6 +1768,7 @@ class TestTheDocumentedGitCallFloor:
             "y = (_p(x),)[0]", "return _p(x)", "return not _p(x)", "for y in [_p(x)]:\n        pass",
             "with _p(x) as y:\n        pass", "match _p(x):\n        case y:\n            pass",
             "return _q(_p(x))", "return _q(value=_p(x))", "return _q(*_p(x))", "print(_p(x))",
+            "return any(map(lambda p: _p(p), [x]))", "def g(p):\n        y = _p(p)\n        return y",
         ):
             assert places(read) == [None], read
 
