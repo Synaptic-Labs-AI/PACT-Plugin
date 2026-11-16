@@ -61,6 +61,12 @@ WORKFLOW_DATABASE_ID = 291463576
 SUMMARY_OUTCOME = re.compile(
     r"\b(?:passed|failed|errors?|skipped|xfailed|xpassed|deselected|no tests ran)\b")
 SUMMARY_TIME = re.compile(r"\bin \d+(?:\.\d+)?s\b")
+# Actions writes every log line as a timestamp and one space before the text, an
+# empty output line included, so an empty line strips to "" and ends the report
+# header. Measured 2026-11-16 on runs 43861607028 (ordered) and 43861611679
+# (seed 103): every empty line in both the `gh run view --log` form and the
+# job-logs API form was the timestamp, "Z " and nothing after it, with no bare
+# "Z" and no carriage return.
 TIMESTAMP_TEXT = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z "
 OPTIONAL_BOM = re.escape(chr(0xFEFF)) + "?"
 TIMESTAMP = re.compile("^" + OPTIONAL_BOM + TIMESTAMP_TEXT)

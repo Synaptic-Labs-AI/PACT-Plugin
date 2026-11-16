@@ -243,6 +243,32 @@ def test_forward_mapping_literal_control():
     ) == ("tests.test_demo.TestThing", "test_case[a-b]")
 
 
+# Byte-exact empty lines from a real full-suite log (run 43861611679), the line
+# after the report header's "4 workers [N items]": first the `gh run view --log`
+# form, then the job-logs API form.
+REAL_EMPTY_LINES = (
+    b"full-suite\tRun test suite\t2026-11-16T11:54:13.8907517Z ",
+    b"2026-11-16T11:54:13.8907525Z ",
+)
+
+
+@pytest.mark.parametrize("empty_line", REAL_EMPTY_LINES, ids=["run-view-log", "job-logs-api"])
+def test_a_real_empty_log_line_ends_the_report_header(tmp_path, empty_line):
+    log = tmp_path / "run.log"
+    log.write_bytes(b"\n".join([
+        actions_line(ci_contract.WORKFLOW_TEST_CMD).encode("utf-8"),
+        actions_line(SESSION_BANNER_TEXT).encode("utf-8"),
+        actions_line("Using --randomly-seed=103").encode("utf-8"),
+        empty_line,
+        actions_line("." * 72 + " [  0%]").encode("utf-8"),
+    ]) + b"\n")
+    lines = comparator._log_lines(log)
+    assert lines[3] == ""
+    header, finish_span = comparator._session_spans(lines)
+    assert header == ["Using --randomly-seed=103"]
+    assert finish_span[1:] == ["." * 72 + " [  0%]"]
+
+
 def test_real_actions_job_step_timestamp_envelope(tmp_path):
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101)
