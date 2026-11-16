@@ -840,21 +840,20 @@ class TestRunReceiptAttribution:
       path, in the same copy: a remote-less clone at the pre-run HEAD with
       the saved staged change applied, never the live index. That copy's run
       is the result, stated once per branch.
-    - One merge-base clone, defined in its own sub-bullet before every
+    - One baseline clone, defined in its own sub-bullet before every
       branch, serves both the reproduced-path check and the failing-test
-      rule. Its merge base is taken against FETCH_HEAD right after a fetch of
-      the branch the work merges into that writes only this worktree's
-      FETCH_HEAD and no tag or shared remote-tracking ref; if the fetch
-      fails, nothing counts as pre-existing.
+      rule: a remote-less clone at the HEAD recorded before the run, with no
+      change applied. The teammate's subject is its own change, so a failure
+      an earlier commit on the branch caused is pre-existing to it; the
+      receipt names no merge base and no fetch.
     - One reproduced-path rule, its own sub-bullet after both branches and
       the unbuildable exit, serves both re-runs: every path that differs
       between the copy's status before and after its run is reproduced,
       whatever the worktree status did, and a worktree path the copy does
       not change came from outside the run. With no reproduced path the
-      copy's run stands; with any, the command is re-run in a second
-      remote-less clone at the merge base of the pre-run HEAD with the branch
-      the work merges into, with no change applied. Each reproduced path is
-      decided on its own by the merge-base clone's own run: one that also
+      copy's run stands; with any, the command is re-run in the baseline
+      clone. Each reproduced path is decided on its own by the baseline
+      clone's own run: one that also
       changes between that clone's status before and after its run is
       pre-existing and reported in the HANDOFF; one that does not is a
       failure of the teammate's own change whatever the other paths are, to
@@ -863,8 +862,8 @@ class TestRunReceiptAttribution:
       general rule below.
     - For every reported run, with or without a status change, a failing
       test is pre-existing only when the same test fails, with the same
-      command and interpreter, in a remote-less merge-base clone with no
-      change applied. Only then may the teammate hand off, naming those
+      command and interpreter, in the baseline clone. Only then may the
+      teammate hand off, naming those
       tests and the precondition unmet through them; any other failing test
       blocks it. The exit-code precondition names that exception and the
       unattributable exit, so it does not contradict this bullet.
@@ -877,7 +876,7 @@ class TestRunReceiptAttribution:
 
     WHAT THIS CANNOT CATCH: a contradicting instruction added outside the
     bullet, and whether a teammate actually re-runs in an isolated copy or
-    runs the merge-base control.
+    runs the baseline control.
     """
 
     REL_PATH = "pact-agent-teams/SKILL.md"
@@ -899,25 +898,23 @@ class TestRunReceiptAttribution:
          "the isolated-copy re-run, with the same interpreter by absolute path"),
         ("a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone. Compare its status before and after. That copy's run is your result.",
          "the recipe: the pre-run HEAD plus the staged change saved before the run"),
-        ("The reproduced-path check and the failing-test rule below both use one merge-base clone. To build it, fetch the branch your work will merge into with `git fetch --no-tags --refmap= <remote> refs/heads/<that branch>`, which writes only this worktree's `FETCH_HEAD` among refs and no tag; right after it, before any other fetch in this worktree, compute the merge base of the `HEAD` you recorded before the run with the fetched commit, in the worktree, with `git merge-base <recorded HEAD> FETCH_HEAD`; and make a clone of the repository with its remote removed, checked out at that merge base, with no change applied.",
-         "the one merge-base clone both rules use: a fetch that moves no shared ref or tag, the merge base against FETCH_HEAD right after it, no change applied"),
+        ("The reproduced-path check and the failing-test rule below both use one baseline clone: a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with no change applied.",
+         "the one baseline clone both rules use: the recorded pre-run HEAD with no change applied"),
         ("After either re-run, every path that differs between the status of the copy that holds your change before and after its run is a reproduced path, and a path that changed in the worktree but does not change in that copy came from outside the run and is not a failure of your change.",
          "one reproduced-path rule for both re-runs: every path the copy's run changes"),
-        ("If there is no reproduced path, that copy's run stands as your result. If there is any, run the same command the same way in the merge-base clone.",
-         "the reproduced-path check names the merge-base clone, and no reproduced path leaves the copy's run standing"),
-        ("If that fetch fails, treat no reproduced path and no failing test as pre-existing: each one is a failure of your change, and say in your HANDOFF that the fetch failed.",
-         "a failed fetch makes nothing pre-existing"),
-        ("Decide each reproduced path on its own. A reproduced path that also changes between the merge-base clone's status before and after its run is a pre-existing defect: report it in your HANDOFF, with the path and the command that wrote it, and do not treat it as a failure of your change.",
+        ("If there is no reproduced path, that copy's run stands as your result. If there is any, run the same command the same way in the baseline clone.",
+         "the reproduced-path check names the baseline clone, and no reproduced path leaves the copy's run standing"),
+        ("Decide each reproduced path on its own. A reproduced path that also changes between the baseline clone's status before and after its run is a pre-existing defect: report it in your HANDOFF, with the path and the command that wrote it, and do not treat it as a failure of your change.",
          "a base-reproduced write reported as pre-existing"),
         ("When every reproduced path is pre-existing, exit code 0 counts as a pass, and failing tests follow the pre-existing-failure rule at the end of this bullet.",
          "the all-pre-existing branch defers failing tests to the general rule"),
-        ("For any run whose result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in the merge-base clone.",
-         "the general per-test comparison with a merge-base clone, for every reported run"),
+        ("For any run whose result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in the baseline clone.",
+         "the general per-test comparison with the baseline clone, for every reported run"),
         ("When every failing test is pre-existing, you may hand off: name each such test, with the command, in your HANDOFF, and state there that the exit-code precondition above is unmet only through those pre-existing tests.",
          "the pre-existing-failure hand-off, naming the tests and the unmet precondition"),
         ("Any other failing test is a failure of your change and blocks the HANDOFF.",
          "any other failing test still blocks the HANDOFF"),
-        ("A reproduced path that does not change in the merge-base clone's run was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
+        ("A reproduced path that does not change in the baseline clone's run was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
          "the change-only write treated as a failure of the change"),
     )
 
@@ -975,41 +972,41 @@ class TestRunReceiptAttribution:
             f"the result once per branch (moved HEAD, status-only), found {count}"
         )
 
-    def test_merge_base_clone_is_defined_before_every_branch(self):
+    def test_baseline_clone_is_defined_before_every_branch(self):
         # The definition must be its own sub-bullet ahead of the branches, so
-        # neither rule that names "the merge-base clone" reads it as conditional.
+        # neither rule that names "the baseline clone" reads it as conditional.
         bullet = self._bullet()
-        define = bullet.find("both use one merge-base clone")
+        define = bullet.find("both use one baseline clone")
         first_branch = bullet.find("  - If `HEAD` differs")
         assert define != -1 and first_branch != -1 and define < first_branch, (
-            f"the {self.REL_PATH} run-receipt bullet must define the merge-base "
+            f"the {self.REL_PATH} run-receipt bullet must define the baseline "
             "clone in its own sub-bullet before the first branch"
         )
-        assert bullet.count("the merge-base clone") >= 2, (
-            f"the {self.REL_PATH} reproduced-path check and failing-test rule must "
-            "each name the merge-base clone"
+        assert bullet.count("the baseline clone") >= 3, (
+            f"the {self.REL_PATH} reproduced-path check, per-path decision and "
+            "failing-test rule must each name the baseline clone"
         )
 
-    def test_merge_base_steps_are_in_run_order(self):
-        # Fetch, then compute the merge base against the fetched ref, then the
-        # clone at that commit: no sentence may name the clone's commit first.
+    def test_baseline_is_the_recorded_head_without_the_change(self):
+        # The teammate's subject is its own staged change, so its baseline is
+        # the commit it ran on without that change; a merge base with the
+        # target branch would charge it with failures earlier branch commits
+        # caused, and a fetch would only serve that merge base.
         bullet = self._bullet()
-        start = bullet.find("  - The reproduced-path check and the failing-test rule below both use one merge-base clone.")
-        assert start != -1, f"the {self.REL_PATH} merge-base definition sub-bullet is missing"
+        start = bullet.find("  - The reproduced-path check and the failing-test rule below both use one baseline clone")
+        assert start != -1, f"the {self.REL_PATH} baseline definition sub-bullet is missing"
         end = bullet.find("\n", start)
         sub = bullet[start:end if end != -1 else None]
-        fetch = sub.find("`git fetch --no-tags --refmap= <remote> refs/heads/<that branch>`")
-        merge_base = sub.find("`git merge-base <recorded HEAD> FETCH_HEAD`")
-        clone = sub.find("checked out at that merge base")
-        assert -1 not in (fetch, merge_base, clone) and fetch < merge_base < clone, (
-            f"the {self.REL_PATH} merge-base definition must run in order: the "
-            "fetch, then the merge base against the fetched ref, then the clone "
-            f"at that commit (positions fetch={fetch}, merge-base={merge_base}, clone={clone})"
+        assert "checked out at the `HEAD` you recorded before the run, with no change applied" in sub, (
+            f"the {self.REL_PATH} baseline clone must sit at the recorded "
+            f"pre-run HEAD with no change applied: {sub!r}"
         )
-        assert sub.count("checked out at") == 1 and "merge base" not in sub[:fetch].replace("merge-base clone", ""), (
-            f"the {self.REL_PATH} merge-base definition must not name the clone's "
-            "commit before the fetch"
-        )
+        lowered = bullet.lower()
+        for stray in ("merge base", "merge-base", "fetch_head", "git fetch"):
+            assert stray not in lowered, (
+                f"the {self.REL_PATH} run receipt still names {stray!r}; the "
+                "teammate's baseline is its recorded HEAD, not a merge base"
+            )
 
     def test_unbuildable_copy_exit_follows_both_branches(self):
         # The exit sits in its own sub-bullet after the status-only branch, so
@@ -1055,10 +1052,10 @@ class TestRunReceiptAttribution:
             "which paths came from outside the run"
         )
 
-    def test_pre_existing_decision_reads_the_merge_base_run(self):
-        # "Appears in the merge-base clone" reads as "exists there", and every
-        # tracked file exists in a merge-base checkout; only a change during
-        # that clone's own run makes a reproduced path pre-existing.
+    def test_pre_existing_decision_reads_the_baseline_run(self):
+        # "Appears in the baseline clone" reads as "exists there", and every
+        # tracked file exists in that checkout; only a change during that
+        # clone's own run makes a reproduced path pre-existing.
         bullet = self._bullet()
         decide = bullet.find("  - Decide each reproduced path on its own")
         assert decide != -1, f"the {self.REL_PATH} per-path decision sub-bullet is missing"
@@ -1066,10 +1063,10 @@ class TestRunReceiptAttribution:
         decision = bullet[decide:end if end != -1 else None]
         assert "appear" not in decision.lower(), (
             f"the {self.REL_PATH} per-path decision says a path 'appears' in the "
-            "merge-base clone; it must say the path changes during that clone's run"
+            "baseline clone; it must say the path changes during that clone's run"
         )
-        for phrase in ("also changes between the merge-base clone's status before and after its run",
-                       "does not change in the merge-base clone's run"):
+        for phrase in ("also changes between the baseline clone's status before and after its run",
+                       "does not change in the baseline clone's run"):
             assert phrase in decision, (
                 f"the {self.REL_PATH} per-path decision lost {phrase!r}"
             )

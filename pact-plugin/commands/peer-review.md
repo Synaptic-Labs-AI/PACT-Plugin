@@ -88,7 +88,7 @@ After remediation fixes are applied, warm re-review is **verify-only** — not a
 | **Scope** | Warm: only files changed during remediation; cold: the whole PR, per the Cold Reviewer Lane | Full PR diff |
 | **Depth** | Warm: confirm each finding was addressed; cold: a first-round review, then one re-check by resume when that review is valid and earlier cold findings with no disposition remain, per **Re-check** | Fresh architectural analysis |
 | **Agent** | Reuse the warm reviewer who found the issues; for the cold lane, dispatch a fresh cold subagent for the first-round review and resume that subagent for any re-check, per **Re-check** | Multiple reviewers in parallel, each freshly spawned under a distinct `name=` |
-| **Format** | Checklist: finding → resolved / not resolved / new issue, plus the two warm report lines below | Full review with severity ratings |
+| **Format** | Warm: checklist: finding → resolved / not resolved / new issue, plus the two warm report lines below; cold: the first-round report format, then the re-check's finding-status `RE-REVIEW CHECKLIST`, per the Cold Reviewer Lane | Full review with severity ratings |
 | **Duration** | Warm: faster than the initial review; cold: a full first-round review each round, plus a re-check when **Re-check** calls for one | Full review cycle |
 
 **Verify-only report lines.** Put these two lines in every warm verify-only dispatch, verbatim — in the description of the warm reviewer task the round creates for the review work, and in the `SendMessage` when the reviewer is reused:

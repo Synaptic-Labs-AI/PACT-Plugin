@@ -1726,6 +1726,28 @@ class TestPersonaSites:
         )
 
 
+class TestVerifyOnlyTableSplitsByLane:
+    """Every verify-only table row other than the header names the warm and
+    the cold lane, so no row reads as the cold lane's format or duty."""
+
+    @pytest.mark.parametrize("aspect", ["Scope", "Depth", "Format", "Duration"])
+    def test_row_names_both_lanes(self, aspect):
+        row = _table_row(_peer_review_text(), f"**{aspect}**", f"the verify-only {aspect} row")
+        cell = row.split("|")[2]
+        assert "Warm:" in cell and "cold:" in cell, (
+            f"the verify-only {aspect} row does not split warm from cold: {cell.strip()!r}"
+        )
+
+    def test_format_row_names_the_cold_report_formats(self):
+        row = _table_row(_peer_review_text(), "**Format**", "the verify-only Format row")
+        cell = row.split("|")[2]
+        cold = cell[cell.index("cold:"):]
+        assert "first-round report format" in cold and "RE-REVIEW CHECKLIST" in cold, (
+            "the verify-only Format row's cold side must name the first-round "
+            f"report format and the re-check's RE-REVIEW CHECKLIST: {cold!r}"
+        )
+
+
 class TestVerifyOnlyScopedToWarm:
     """The two sentences that call a re-review verify-only and not a fresh
     review must name the warm lane and point to the Cold Reviewer Lane, so

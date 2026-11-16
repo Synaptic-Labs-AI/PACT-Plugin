@@ -58,8 +58,10 @@ REPORT_BLOCK_TERMINATOR = "\n> "
 COLD_LANE_POSITIVE_CONTROL = "RE-REVIEW CHECKLIST"
 
 FORMAT_ROW = (
-    "| **Format** | Checklist: finding → resolved / not resolved / new issue, "
-    "plus the two warm report lines below | Full review with severity ratings |"
+    "| **Format** | Warm: checklist: finding → resolved / not resolved / new issue, "
+    "plus the two warm report lines below; cold: the first-round report format, "
+    "then the re-check's finding-status `RE-REVIEW CHECKLIST`, per the Cold "
+    "Reviewer Lane | Full review with severity ratings |"
 )
 TABLE_END_ROW = (
     "| **Duration** | Warm: faster than the initial review; cold: a full "
@@ -279,7 +281,9 @@ class TestContractBlock:
 
 
 class TestFormatRow:
-    """The amended Format cell names the two warm report lines, once."""
+    """The amended Format cell names the two warm report lines, once, and
+    splits the warm checklist from the cold report format like the other
+    rows of the table."""
 
     def test_amended_format_row_present_once(self):
         text = _command_text()
