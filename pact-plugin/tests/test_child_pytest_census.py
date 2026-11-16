@@ -10,6 +10,7 @@ import concurrent.futures
 import importlib.util
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -355,10 +356,10 @@ def test_a_blocked_pytest_child_inside_a_shell_command_is_accepted(argv):
     assert census._miss(argv, None, {}) is None, argv
 
 
-# Shell text as bash runs it. Each row was checked against bash 5.2 with a stub
-# pytest on PATH: the refused rows start an unblocked pytest, the accepted rows
-# do not.
-@pytest.mark.parametrize("text", [
+# Shell text as bash runs it: the refused rows start an unblocked pytest, the
+# accepted rows do not, and test_real_bash_agrees_with_every_shell_text_row runs
+# each one under bash to check it.
+_SHELL_REFUSED = [
     # Process substitution runs its command.
     "cat <(pytest -q)",
     "tee >(pytest -q) < /dev/null",
@@ -419,7 +420,10 @@ def test_a_blocked_pytest_child_inside_a_shell_command_is_accepted(argv):
     "((pytest -q); )",
     "((pytest -q)|cat)",
     "echo $((pytest -q) )",
-])
+]
+
+
+@pytest.mark.parametrize("text", _SHELL_REFUSED)
 def test_shell_text_that_runs_an_unblocked_pytest_is_refused(text):
     assert census._miss(["bash", "-c", text], None, {}) is not None, text
 
@@ -444,7 +448,7 @@ def test_a_function_body_is_judged_where_it_is_defined():
     assert census._miss(["bash", "-c", "function f { pytest -q; }"], None, {}) is not None
 
 
-@pytest.mark.parametrize("text", [
+_SHELL_ACCEPTED = [
     "pytest --base-url=http://x/#frag -p no:randomly",
     "echo hi #; pytest -q",
     "cat <(pytest -q -p no:randomly)",
@@ -482,20 +486,103 @@ def test_a_function_body_is_judged_where_it_is_defined():
     "(( (pytest) + (1) ))",
     "echo $(( (pytest) + (1) ))",
     "echo $((1+(pytest*3)))",
-])
+]
+
+
+@pytest.mark.parametrize("text", _SHELL_ACCEPTED)
 def test_shell_text_that_runs_no_unblocked_pytest_is_accepted(text):
     assert census._miss(["bash", "-c", text], None, {}) is None, text
 
 
 # Blind spot 9, pinned as listed: bash runs pytest in each, and the census does
 # not see it.
-@pytest.mark.parametrize("text", [
+_SHELL_BLIND_SPOTS = [
     "$(echo pytest) -q",
     "echo $(( $(pytest -q) ))",
     "echo $(case x in x) pytest -q;; esac)",
-])
+]
+
+
+@pytest.mark.parametrize("text", _SHELL_BLIND_SPOTS)
 def test_a_listed_shell_blind_spot_is_accepted(text):
     assert census._miss(["bash", "-c", text], None, {}) is None, text
+
+
+# A stub pytest that writes its argv, NUL-separated, to a file of its own, and a
+# python that hands `-m pytest` to it and does nothing else.
+_STUB_PYTEST = '#!/bin/sh\nprintf \'%s\\0\' "$@" > "$CENSUS_STUB_LOG/call.$$"\n'
+_STUB_PYTHON = ('#!/bin/sh\nif [ "$1" = "-m" ] && [ "$2" = "pytest" ]; then\n'
+                '  shift 2\n  exec pytest "$@"\nfi\n')
+
+
+def _bash_runs_an_unblocked_pytest(bash, stubs, rig, text):
+    """Whether bash, running `text` in `rig` with only `stubs` on PATH, started a
+    pytest whose argv does not block pytest-randomly. This reads the argv as `-p
+    no:randomly` or `-pno:randomly` and nothing else; the rows block no other way."""
+    log = rig / "calls"
+    log.mkdir()
+    script = rig / "row.sh"
+    script.write_text(text, encoding="utf-8")
+    subprocess.run([bash, str(script)], cwd=rig, stdin=subprocess.DEVNULL,
+                   env={"PATH": str(stubs), "HOME": str(rig), "CENSUS_STUB_LOG": str(log)},
+                   capture_output=True, timeout=30)
+    for call in log.iterdir():
+        args = call.read_bytes().decode().split("\0")[:-1]
+        blocked = "-pno:randomly" in args or any(
+            a == "-p" and b == "no:randomly" for a, b in zip(args, args[1:]))
+        if not blocked:
+            return True
+    return False
+
+
+def test_real_bash_agrees_with_every_shell_text_row(tmp_path):
+    """The shell-text rows say what bash does with each text; this runs each under
+    the real bash and checks it. It covers the tables whose rows state bash's own
+    behaviour: _SHELL_REFUSED (bash starts an unblocked pytest), _SHELL_ACCEPTED
+    (it does not) and _SHELL_BLIND_SPOTS (it does, and the census does not see
+    it). The other tables with shell text are not covered: their rows encode a
+    refusal the census makes on purpose where bash would run nothing (`printf x;
+    make check python -m pytest`), or need a program or directory that is not
+    there (`zsh`, `uv`, `cd x`).
+    Each row runs in its own directory with PATH holding only a stub pytest,
+    python and python3, so no real pytest, interpreter, package or network tool
+    can start; a command bash cannot find just fails. bash reads each row from a
+    script file, which it parses as it parses `-c` text, because the census
+    leaves a script file unread (blind spot 1) and would refuse the row itself
+    given as `-c` text. Reading the pipes waits for any background or coproc
+    child still holding them. The rows describe bash 5.2, so the test skips
+    where no bash 5.2 or later is found (macOS ships bash 3.2, which has no
+    `coproc`); CI runs bash 5.2 on Linux, so a CI run fails here instead of
+    skipping. It also fails unless some row really started an unblocked pytest
+    and some row really did not."""
+    bash = shutil.which("bash")
+    version = subprocess.run(
+        [bash, "-c", 'echo "${BASH_VERSINFO[0]} ${BASH_VERSINFO[1]}"'], capture_output=True,
+        text=True, timeout=30).stdout.split() if bash else []
+    if [int(part) for part in version] < [5, 2]:
+        reason = f"no bash 5.2 or later on PATH (found {bash} {'.'.join(version)})"
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail(f"{reason}; CI runs bash 5.2, so this arm must run there")
+        pytest.skip(f"{reason}; the shell-text rows describe bash 5.2")
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    for name, body in (("pytest", _STUB_PYTEST), ("python", _STUB_PYTHON),
+                       ("python3", _STUB_PYTHON)):
+        (stubs / name).write_text(body, encoding="utf-8")
+        (stubs / name).chmod(0o755)
+    rows = ([(text, True) for text in _SHELL_REFUSED]
+            + [(text, False) for text in _SHELL_ACCEPTED]
+            + [(text, True) for text in _SHELL_BLIND_SPOTS])
+    results = []
+    for index, (text, expected) in enumerate(rows):
+        rig = tmp_path / f"row-{index}"
+        rig.mkdir()
+        results.append((text, expected, _bash_runs_an_unblocked_pytest(bash, stubs, rig, text)))
+    mismatches = [(text, expected, ran) for text, expected, ran in results if ran != expected]
+    assert not mismatches, (
+        f"real bash disagrees with these shell-text rows (text, row says bash starts an "
+        f"unblocked pytest, bash did): {mismatches}")
+    assert {ran for _, _, ran in results} == {True, False}, results
 
 
 @pytest.mark.parametrize("argv", [
