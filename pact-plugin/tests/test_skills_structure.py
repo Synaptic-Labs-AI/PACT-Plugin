@@ -854,7 +854,8 @@ class TestRunReceiptAttribution:
       copy's run stands; with any, the command is re-run in a second
       remote-less clone at the merge base of the pre-run HEAD with the branch
       the work merges into, with no change applied. Each reproduced path is
-      decided on its own: one that also appears in the merge-base clone is
+      decided on its own by the merge-base clone's own run: one that also
+      changes between that clone's status before and after its run is
       pre-existing and reported in the HANDOFF; one that does not is a
       failure of the teammate's own change whatever the other paths are, to
       fix, never re-run away. When every reproduced path is pre-existing,
@@ -906,7 +907,7 @@ class TestRunReceiptAttribution:
          "the reproduced-path check names the merge-base clone, and no reproduced path leaves the copy's run standing"),
         ("If that fetch fails, treat no reproduced path and no failing test as pre-existing: each one is a failure of your change, and say in your HANDOFF that the fetch failed.",
          "a failed fetch makes nothing pre-existing"),
-        ("Decide each reproduced path on its own. A path that also appears in the merge-base clone is a pre-existing defect: report it in your HANDOFF, with the path and the command that wrote it, and do not treat it as a failure of your change.",
+        ("Decide each reproduced path on its own. A reproduced path that also changes between the merge-base clone's status before and after its run is a pre-existing defect: report it in your HANDOFF, with the path and the command that wrote it, and do not treat it as a failure of your change.",
          "a base-reproduced write reported as pre-existing"),
         ("When every reproduced path is pre-existing, exit code 0 counts as a pass, and failing tests follow the pre-existing-failure rule at the end of this bullet.",
          "the all-pre-existing branch defers failing tests to the general rule"),
@@ -916,7 +917,7 @@ class TestRunReceiptAttribution:
          "the pre-existing-failure hand-off, naming the tests and the unmet precondition"),
         ("Any other failing test is a failure of your change and blocks the HANDOFF.",
          "any other failing test still blocks the HANDOFF"),
-        ("A reproduced path that does not appear in the merge-base clone was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
+        ("A reproduced path that does not change in the merge-base clone's run was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
          "the change-only write treated as a failure of the change"),
     )
 
@@ -1053,6 +1054,25 @@ class TestRunReceiptAttribution:
             f"the {self.REL_PATH} receipt must say once, in the shared rule, "
             "which paths came from outside the run"
         )
+
+    def test_pre_existing_decision_reads_the_merge_base_run(self):
+        # "Appears in the merge-base clone" reads as "exists there", and every
+        # tracked file exists in a merge-base checkout; only a change during
+        # that clone's own run makes a reproduced path pre-existing.
+        bullet = self._bullet()
+        decide = bullet.find("  - Decide each reproduced path on its own")
+        assert decide != -1, f"the {self.REL_PATH} per-path decision sub-bullet is missing"
+        end = bullet.find("\n  - ", decide + 1)
+        decision = bullet[decide:end if end != -1 else None]
+        assert "appear" not in decision.lower(), (
+            f"the {self.REL_PATH} per-path decision says a path 'appears' in the "
+            "merge-base clone; it must say the path changes during that clone's run"
+        )
+        for phrase in ("also changes between the merge-base clone's status before and after its run",
+                       "does not change in the merge-base clone's run"):
+            assert phrase in decision, (
+                f"the {self.REL_PATH} per-path decision lost {phrase!r}"
+            )
 
     def test_receipt_names_no_archive_export(self):
         # An archive export holds neither the staged change nor .git, so the

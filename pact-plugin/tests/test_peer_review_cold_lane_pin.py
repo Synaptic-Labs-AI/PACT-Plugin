@@ -770,13 +770,13 @@ class TestOperationalFactsClause:
          "one reproduced-path rule for both re-runs: every path the clone's run changes")),
         ("If there is no reproduced path, the {head} clone's run stands for the diff. If there is any, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
          "the base-control run at the merge base, and no reproduced path leaves the clone's run standing")),
-        ("Decide each reproduced path on its own. A path that also appears there is a pre-existing defect: name it as pre-existing under the open questions, with the path and the command that wrote it, not as a finding about the diff", (
+        ("Decide each reproduced path on its own. A reproduced path that also changes between that second clone's status before and after its run is a pre-existing defect: name it as pre-existing under the open questions, with the path and the command that wrote it, not as a finding about the diff", (
          "a base-reproduced write reported as pre-existing, not as a finding")),
         ("When every reproduced path is pre-existing, the {head} clone's run stands for the diff", (
          "the {head} clone's run as the result when every reproduced path is pre-existing")),
         ("For any test result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in a clone of the repository with its remote removed, checked out at the commit git merge-base {base} {head} prints in the worktree: name each such test, with the command, under the open questions; any other failing test is a finding about the diff", (
          "the general per-test comparison with a merge-base clone, for every reported result")),
-        ("A reproduced path that does not appear there was written by the run itself, and it is a finding about the diff, whatever the other paths are", (
+        ("A reproduced path that does not change in that second clone's run was written by the run itself, and it is a finding about the diff, whatever the other paths are", (
          "the change-only write reported as a finding about the diff, whatever the other paths are")),
     ])
     def test_operational_facts_token_present(self, token, lost):
@@ -823,6 +823,27 @@ class TestOperationalFactsClause:
             "the cold prompt must say once, in the shared rule, which paths "
             "came from outside the run"
         )
+
+    def test_pre_existing_decision_reads_the_merge_base_run(self):
+        # "Appears there" reads as "exists in that clone", and every tracked
+        # file exists in a merge-base checkout; only a change during that
+        # clone's own run makes a reproduced path pre-existing.
+        clause = _clause("OPERATIONAL FACTS")
+        decide = clause.find("Decide each reproduced path on its own")
+        end = clause.find("For any test result you report", decide)
+        assert -1 not in (decide, end), (
+            "the cold prompt's per-path decision or the failing-test rule after it is missing"
+        )
+        decision = clause[decide:end]
+        assert "appear" not in decision.lower(), (
+            "the cold prompt's per-path decision says a path 'appears' in the "
+            "merge-base clone; it must say the path changes during that clone's run"
+        )
+        for phrase in ("also changes between that second clone's status before and after its run",
+                       "does not change in that second clone's run"):
+            assert phrase in decision, (
+                f"the cold prompt's per-path decision lost {phrase!r}"
+            )
 
     def test_head_clone_defined_before_first_use(self):
         clause = _clause("OPERATIONAL FACTS")
@@ -1709,7 +1730,9 @@ class TestVerifyOnlyScopedToWarm:
     """The two sentences that call a re-review verify-only and not a fresh
     review must name the warm lane and point to the Cold Reviewer Lane, so
     neither can be read as excusing the cold first-round review that every
-    verify-only round runs."""
+    verify-only round runs. Any other sentence, diagram or fenced line that
+    says re-review is verify-only, in any wording or case, must be scoped to
+    the warm lane too."""
 
     SITES = (
         ("**Key rules**:", "warm re-review is verify-only (minimal scope), and the cold lane runs a full first-round review every round, per the Cold Reviewer Lane"),
@@ -1727,13 +1750,70 @@ class TestVerifyOnlyScopedToWarm:
         )
 
     def test_no_unscoped_verify_only_claim(self):
-        text = _strip_ticks(_peer_review_text()).replace("**", "")
-        claims = [m.start() for m in re.finditer(r"re-review is verify-only", text)]
-        assert len(claims) == len(self.SITES), (
-            f"expected {len(self.SITES)} 're-review is verify-only' claims, found {len(claims)}"
+        claims = _verify_only_claims(_peer_review_text())
+        assert len(claims) >= len(self.SITES), (
+            f"the claim matcher found {len(claims)} verify-only claims in "
+            f"peer-review.md, fewer than the {len(self.SITES)} scoped sites; "
+            "it no longer reads the file"
         )
-        for pos in claims:
-            assert text[max(0, pos - 5):pos] == "warm ", (
-                "a 're-review is verify-only' claim is not scoped to the warm "
-                f"lane: {text[max(0, pos - 40):pos + 60]!r}"
-            )
+        unscoped = [sentence for sentence, scoped in claims if not scoped]
+        assert not unscoped, (
+            "a sentence says re-review is verify-only without scoping it to "
+            f"the warm lane: {unscoped!r}"
+        )
+
+    @pytest.mark.parametrize("text", [
+        "Re-review is verify-only for both lanes.",
+        "Re-reviews are verify-only.",
+        "All re-review rounds stay verify-only.",
+        "├─ Cycle N: remediation tasks → re-review (verify-only) → check",
+        "Verify-only applies to every re-review.",
+    ])
+    def test_matcher_flags_an_unscoped_claim(self, text):
+        claims = _verify_only_claims(text)
+        assert claims and not all(scoped for _, scoped in claims), (
+            f"the verify-only claim matcher did not flag {text!r}"
+        )
+
+    @pytest.mark.parametrize("text", [
+        "warm re-review is verify-only (minimal scope), and the cold lane runs a full first-round review every round, per the Cold Reviewer Lane;",
+        "After remediation fixes are applied, warm re-review is **verify-only** — not a fresh review.",
+        "├─ Cycle N: remediation tasks → re-review (warm: verify-only; cold: first-round) → check",
+        'This blocking finding has no disposition. Decline it, or run one more verify-only re-review round?", with the literal options "Decline it", described as "Record it as declined by you; it no longer holds merge readiness.", and "Run one more verify-only re-review round", described as "Run one verify-only re-review round in which the cold re-check checks it."',
+        "a remediation cycle fails when its verify-only re-review leaves a blocking finding open",
+    ])
+    def test_matcher_passes_a_scoped_claim_or_a_noun_use(self, text):
+        claims = _verify_only_claims(text)
+        assert all(scoped for _, scoped in claims), (
+            f"the verify-only claim matcher flagged {text!r}: {claims!r}"
+        )
+
+
+_RE_REVIEW = r"\bre-?review(?:s|ing|ed)?\b"
+_VERIFY_ONLY = r"\bverify[- ]only\b"
+# A claim names re-review and calls it verify-only, in either order; a
+# verify-only directly followed by re-review is the noun phrase "verify-only
+# re-review", not a claim, and is skipped in both orders.
+_CLAIM_FORWARD = re.compile(
+    rf"(?P<rr>{_RE_REVIEW})(?:(?!{_VERIFY_ONLY}).)*?(?P<vo>{_VERIFY_ONLY})(?!\s+re-?review)",
+    re.IGNORECASE)
+_CLAIM_BACKWARD = re.compile(
+    rf"(?P<vo>{_VERIFY_ONLY})(?!\s+re-?review)(?:(?!{_VERIFY_ONLY}).)*?(?P<rr>{_RE_REVIEW})",
+    re.IGNORECASE)
+_SENTENCE_SPLIT = re.compile(r"(?<=[.;!?])\s+|\n|\|")
+_WARM_BEFORE = re.compile(r"\bwarm:?\s+$", re.IGNORECASE)
+
+
+def _verify_only_claims(text: str) -> list[tuple[str, bool]]:
+    """Each sentence that says re-review is verify-only, with whether it is
+    scoped to the warm lane: "warm" directly before its re-review word, or
+    "warm" (optionally with a colon) directly before its verify-only word.
+    Case-insensitive; fenced and diagram lines are read like prose."""
+    claims = []
+    for sentence in _SENTENCE_SPLIT.split(_strip_ticks(text).replace("**", "")):
+        for pattern in (_CLAIM_FORWARD, _CLAIM_BACKWARD):
+            for m in pattern.finditer(sentence):
+                scoped = bool(_WARM_BEFORE.search(sentence[:m.start("rr")])
+                              or _WARM_BEFORE.search(sentence[:m.start("vo")]))
+                claims.append((sentence.strip(), scoped))
+    return claims
