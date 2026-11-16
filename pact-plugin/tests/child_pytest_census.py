@@ -150,6 +150,8 @@ in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
 has its command text opened, and so does one behind an assignment.
 The text is read as bash reads it:
 - Quotes and escapes are resolved, and a backslash-newline joins the lines.
+  bash's `$'...'` quoting is resolved to the word it builds, escapes included
+  (`$'py\x74est'` is `pytest`), and `$"..."` is read as a double-quoted string.
 - A `#` that starts a word begins a comment to the end of the line; a `#` inside
   a word or inside quotes is text (`--base-url=http://x/#frag`).
 - Each command between `;`, `&`, `&&`, `||`, `|`, `|&`, a newline, `(` and `)`
@@ -477,10 +479,80 @@ def _where(cwd):
     return os.fsdecode(cwd) if cwd is not None else os.getcwd()
 
 
+# bash's $'...' escapes: octal, \x{H...}, \xHH, \uHHHH, \UHHHHHHHH, \cX, or one
+# character, which _ANSI_C_SIMPLE maps or which keeps its backslash.
+_ANSI_C_ESCAPE = re.compile(r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]+)\}|x([0-9A-Fa-f]{1,2})"
+                            r"|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c(\\\\|[^'])|(.))", re.S)
+_ANSI_C_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
+                  "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c(text, i):
+    """(the word bash's $'...' quoting at text[i] builds, as a single-quoted word;
+    the index past its closing quote). A NUL ends the quoted string, as in bash."""
+    out, j = [], i + 2
+    while j < len(text) and text[j] != "'":
+        escape = _ANSI_C_ESCAPE.match(text, j)
+        if escape is None:  # a plain character, or a backslash that ends the text
+            out.append(text[j])
+            j += 1
+            continue
+        octal, braced, hex_, short, long_, control, other = escape.groups()
+        j = escape.end()
+        if octal or braced or hex_:
+            out.append(chr((int(octal, 8) if octal else int(braced or hex_, 16)) & 0xFF))
+        elif short or long_:
+            code = int(short or long_, 16)
+            # bash writes a surrogate or a code point past U+10FFFF as bytes no
+            # printable str holds; it is never a letter of a program name, so one
+            # placeholder stands in.
+            out.append(chr(code) if code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF
+                       else "\ufffd")
+        elif control:
+            out.append("\x1c" if control == "\\\\" else "\x7f" if control == "?"
+                       else chr(ord(control) & 0x1F))
+        else:
+            out.append(_ANSI_C_SIMPLE.get(other, "\\" + other))
+    word = "".join(out).split("\0", 1)[0]
+    return "'" + word.replace("'", "'\\''") + "'", min(j + 1, len(text))
+
+
+def _dollar_quotes(text):
+    """Shell text with bash's $'...' quoting resolved to the word it builds and
+    $"..." read as a plain double-quoted string, as bash does with no translation;
+    a $ inside other quotes is text."""
+    out, i = [], 0
+    while i < len(text):
+        if text.startswith("$'", i):
+            word, i = _ansi_c(text, i)
+            out.append(word)
+            continue
+        if text.startswith('$"', i):
+            i += 1
+        end = i + 2 if text[i] == "\\" else _quote_end(text, i)
+        out.append(text[i:end])
+        i = end
+    return "".join(out)
+
+
+def _quote_end(text, i):
+    """The index past a quoted string starting at text[i], else i + 1."""
+    if text[i] == "'":
+        end = text.find("'", i + 1)
+        return len(text) if end < 0 else end + 1
+    if text[i] == '"':
+        j = i + 1
+        while j < len(text) and text[j] != '"':
+            j += 2 if text[j] == "\\" else 1
+        return min(j + 1, len(text))
+    return i + 1
+
+
 def _lex(text):
     """The words of shell text, with each run of operator characters its own word.
-    `#` is text here: _scan has already removed the comments a shell would."""
-    text = text.replace("\\\n", " ")
+    `#` is text here: _scan has already removed the comments a shell would.
+    $'...' and $"..." are resolved first (_dollar_quotes)."""
+    text = _dollar_quotes(text).replace("\\\n", " ")
     lexer = shlex.shlex(text, posix=True, punctuation_chars=_OPERATOR_CHARS)
     lexer.commenters = ""
     lexer.whitespace = " \t\r"
@@ -587,6 +659,9 @@ def _scan(text):
         elif char == "\\":
             out.append(text[i:i + 2])
             i += 2
+        elif text.startswith("$'", i):  # resolved here so an escaped quote stays inside
+            word, i = _ansi_c(text, i)
+            out.append(word)
         elif char == "'":
             end = text.find("'", i + 1)
             end = len(text) if end < 0 else end + 1

@@ -588,6 +588,8 @@ def test_a_listed_shell_blind_spot_is_accepted(text):
     # find runs only the words after its -exec actions.
     ["find", ".", "-name", "pytest"],
     ["find", ".", "-name", "*.py", "-exec", "grep", "-l", "pytest", "{}", ";"],
+    # A $'...' word that only mentions pytest.
+    ["bash", "-c", "echo $'python -m py\\x74est'"],
 ])
 def test_a_mention_of_pytest_that_launches_no_pytest_is_ignored(argv):
     assert census._miss(argv, None, {}) is None
@@ -634,6 +636,16 @@ _LAUNCHER_FORMS = [
     ["pytest.exe", "-q"],
     # The same forms inside a shell command.
     ["bash", "-c", "py -3 -m pytest"],
+    # bash's $'...' quoting builds the word it names, escapes included, and
+    # $"..." is a double-quoted string.
+    ["bash", "-c", "$'pytest' -q"],
+    ["bash", "-c", "$'py\\x74est' -q"],
+    ["bash", "-c", "$'py\\164est' -q"],
+    ["bash", "-c", "$'py\\u0074est' -q"],
+    ["bash", "-c", "python3 -m $'py\\x74est'"],
+    ["bash", "-c", '$"pytest" -q'],
+    # An escaped quote inside $'...' does not end it.
+    ["bash", "-c", "echo $'it\\'s # x'; pytest -q"],
     # An interpreter in the program position, after an assignment or in a shell,
     # running pytest's script.
     ["A=1", "python3", "/venv/bin/pytest"],
@@ -971,6 +983,7 @@ def test_a_malformed_launch_that_names_no_pytest_is_left_to_its_launcher(census_
     (["bash", "-c", "echo `pytest -q`", 1], None),
     (["bash", "-c", "echo $(pytest -q)", 1], None),
     (["bash", "-c", "cd x;pytest -q 'unclosed", 1], None),
+    (["bash", "-c", "$'py\\x74est' -q", 1], None),
     (["py.test", "-q"], {"A": 1}),
     ([PY, "/venv/lib/python3.12/site-packages/pytest/__main__.py"], {"A": 1}),
 ])
