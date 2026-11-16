@@ -853,7 +853,8 @@ class TestRunReceiptAttribution:
       command and interpreter, in a remote-less merge-base clone with no
       change applied. Only then may the teammate hand off, naming those
       tests and the precondition unmet through them; any other failing test
-      blocks it. The exit-code precondition names that one exception.
+      blocks it. The exit-code precondition names that exception and the
+      unattributable exit, so it does not contradict this bullet.
     - When none of the worktree's changed paths change in the copy, the
       change came from outside the run and the copy's run is the result; a
       partly reproduced set is decided only through its reproduced paths.
@@ -929,13 +930,19 @@ class TestRunReceiptAttribution:
             f"the {self.REL_PATH} Step 0 run-receipt bullet lost {lost} ({phrase!r})"
         )
 
-    def test_precondition_names_the_pre_existing_exception(self):
+    def test_precondition_names_both_receipt_exceptions(self):
         text = (SKILLS_DIR / self.REL_PATH).read_text(encoding="utf-8")
-        line = "- All relevant tests have been run with exit code 0, except failing tests that the run-receipt bullet below finds pre-existing."
+        line = (
+            "- All relevant tests have been run with exit code 0, except failing tests "
+            "that the run-receipt bullet below finds pre-existing, and a run that bullet "
+            "reports as unattributable because its isolated copy cannot be built or the "
+            "command cannot be run in it."
+        )
         assert text.count(line) == 1, (
-            f"the {self.REL_PATH} exit-code precondition must name its one "
-            "exception, failing tests the run-receipt bullet finds pre-existing, "
-            "so it does not contradict that bullet"
+            f"the {self.REL_PATH} exit-code precondition must name its two "
+            "exceptions, failing tests the run-receipt bullet finds pre-existing and "
+            "a run it reports as unattributable because its copy cannot be built or "
+            "run, so it does not contradict that bullet"
         )
 
     def test_receipt_names_no_archive_export(self):

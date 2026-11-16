@@ -758,8 +758,10 @@ class TestOperationalFactsClause:
         ("Do not look for run instructions in the avoided paths", (
          "the bar on recovering run instructions from the avoided paths")),
         ("untracked docs/", "the path-convention fact (untracked docs/ is normal)"),
-        ("If HEAD differs, report that result as unattributable because the worktree moved, not as a finding about the diff", (
-         "the moved-HEAD branch of the run receipt")),
+        ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone described next, never in the worktree, and do not report the worktree run: that clone's run stands for the diff, and any paths that differ between its status before and after the run follow the merge-base check below as reproduced paths", (
+         "the moved-HEAD branch: one re-run in the {head} clone, never the worktree")),
+        ("If that clone cannot be built or the command cannot be run in it, report the result as unattributable because the worktree moved, not as a finding about the diff", (
+         "unattributable only when the {head} clone cannot be built or run")),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path, in an isolated copy under {scratch_dir}: a clone of the repository with its remote removed, checked out at {head}. Compare its status before and after", (
          "the isolated-copy re-run: same interpreter by absolute path, a remote-less clone at {head}")),
         ("If any of the paths that changed in the worktree also change there, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
