@@ -838,7 +838,11 @@ class TestRunReceiptAttribution:
       the pre-existing and failure branches.
     - A status-only change is re-run with the same interpreter, by absolute
       path, in the same copy: a remote-less clone at the pre-run HEAD with
-      the saved staged change applied, never the live index.
+      the saved staged change applied, never the live index. That copy's run
+      is the result, stated once per branch.
+    - The merge base is computed from a freshly fetched remote-tracking ref
+      of the branch the work merges into, changing no other ref; if the fetch
+      fails, nothing counts as pre-existing.
     - Worktree paths that also change in that copy are re-run in a second
       remote-less clone at the merge base of the pre-run HEAD with the branch
       the work merges into, with no change applied. Each reproduced path is
@@ -887,13 +891,17 @@ class TestRunReceiptAttribution:
          "a reproduced write never reaches the unattributable exit"),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path (for example the worktree's venv `python`), in an isolated copy that holds your staged change:",
          "the isolated-copy re-run, with the same interpreter by absolute path"),
-        ("a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone. Compare its status before and after.",
+        ("a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone. Compare its status before and after. That copy's run is your result.",
          "the recipe: the pre-run HEAD plus the staged change saved before the run"),
-        ("If any of the paths that changed in the worktree also change there, run the same command the same way in a second clone with its remote removed, checked out at the merge base of the `HEAD` you recorded before the run with the branch your work will merge into (`git merge-base <recorded HEAD> <that branch>`, computed in the worktree), with no change applied.",
+        ("If any of the paths that changed in the worktree also change there, run the same command the same way in a second clone with its remote removed, checked out at the merge base of the `HEAD` you recorded before the run with the branch your work will merge into, with no change applied.",
          "the base-control run at the merge base"),
+        ("First fetch that branch with `git fetch <remote> <that branch>`, changing no ref but its remote-tracking ref, then compute the merge base in the worktree with `git merge-base <recorded HEAD> <remote>/<that branch>`.",
+         "the merge base taken from a freshly fetched remote-tracking ref, changing no other ref"),
+        ("If that fetch fails, treat no reproduced path and no failing test as pre-existing: each one is a failure of your change, and say in your HANDOFF that the fetch failed.",
+         "a failed fetch makes nothing pre-existing"),
         ("Decide each reproduced path on its own. A path that also appears in the merge-base clone is a pre-existing defect: report it in your HANDOFF, with the path and the command that wrote it, and do not treat it as a failure of your change.",
          "a base-reproduced write reported as pre-existing"),
-        ("When every reproduced path is pre-existing, that copy's run decides for your change: exit code 0 counts as a pass, and its failing tests follow the pre-existing-failure rule at the end of this bullet.",
+        ("When every reproduced path is pre-existing, exit code 0 counts as a pass, and failing tests follow the pre-existing-failure rule at the end of this bullet.",
          "the all-pre-existing branch defers failing tests to the general rule"),
         ("For any run whose result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in a clone with its remote removed, checked out at the merge base described above, with no change applied.",
          "the general per-test comparison with a merge-base clone, for every reported run"),
@@ -903,7 +911,7 @@ class TestRunReceiptAttribution:
          "any other failing test still blocks the HANDOFF"),
         ("A reproduced path that does not appear in the merge-base clone was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
          "the change-only write treated as a failure of the change"),
-        ("If none of the paths that changed in the worktree change in the copy that holds your change, the worktree change came from outside the run: that copy's run is your result.",
+        ("If none of the paths that changed in the worktree change in the copy that holds your change, the worktree change came from outside the run.",
          "the unreproduced change: the copy's run is the result"),
     )
 
@@ -943,6 +951,14 @@ class TestRunReceiptAttribution:
             "exceptions, failing tests the run-receipt bullet finds pre-existing and "
             "a run it reports as unattributable because its copy cannot be built or "
             "run, so it does not contradict that bullet"
+        )
+
+    def test_each_branch_states_its_result_once(self):
+        # Once in the moved-HEAD branch and once in the status-only branch.
+        count = self._bullet().count("copy's run is your result")
+        assert count == 2, (
+            f"the {self.REL_PATH} run-receipt bullet must state the copy's run as "
+            f"the result once per branch (moved HEAD, status-only), found {count}"
         )
 
     def test_receipt_names_no_archive_export(self):
