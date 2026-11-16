@@ -351,7 +351,7 @@ def _pruned_session_records(ledger: Path) -> List[dict]:
     try:
         if not stat.S_ISREG(os.lstat(ledger).st_mode):
             return []
-        fd = os.open(ledger, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        fd = os.open(ledger, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
     except Exception:
         return []
     try:

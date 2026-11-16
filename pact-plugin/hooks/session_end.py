@@ -655,7 +655,8 @@ def _append_ledger_line(slug_dir: Path, line: str) -> None:
             pass
         fd = os.open(
             ledger,
-            os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+            os.O_WRONLY | os.O_APPEND | os.O_CREAT
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
             0o600,
         )
         try:

@@ -1095,7 +1095,7 @@ def read_override(common_dir: Path) -> OverrideRead:
     try:
         # O_NONBLOCK and a second check on the descriptor: a FIFO put in
         # place after the lstat is refused, not waited on.
-        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
         with open(fd, "rb") as handle:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 return OverrideRead(None, path, "not_regular")
@@ -1247,11 +1247,12 @@ def read_git_file(path) -> Optional[str]:
     checkout's git dir reads as naming nothing and binds that checkout. The
     type is checked before the open, so a FIFO is never opened, and again on
     the open descriptor; O_NONBLOCK keeps that open from waiting on a FIFO
-    put in its place between the two checks.
+    put in its place between the two checks. Each flag a platform may lack
+    (Windows has no O_NONBLOCK) is taken through getattr with 0.
     """
     if not stat.S_ISREG(os.stat(path).st_mode):
         return None
-    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
     with open(fd, "rb") as handle:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return None

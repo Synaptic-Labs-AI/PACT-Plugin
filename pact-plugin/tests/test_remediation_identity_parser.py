@@ -2275,3 +2275,45 @@ class TestAnIncludeOnlyOriginDeclinesOnEveryBranch:
         with open(repo / ".git" / "config", "a", encoding="utf-8") as config:
             config.write(("# padding\n" * ((pi.GIT_FILE_LIMIT // 10) + 1)))
         assert self._read(repo).state == pi.ORIGIN_CONFIG_UNREAD
+
+
+# The open flags a platform may lack (Windows has neither of the first two).
+_OPTIONAL_OPEN_FLAGS = ("O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC")
+
+
+@pytest.fixture
+def without_optional_open_flags(monkeypatch):
+    """`os` as on a platform that defines none of `_OPTIONAL_OPEN_FLAGS`."""
+    for name in _OPTIONAL_OPEN_FLAGS:
+        monkeypatch.delattr(os, name, raising=False)
+    assert not [name for name in _OPTIONAL_OPEN_FLAGS if hasattr(os, name)]
+
+
+class TestEveryReaderOpensWithoutAnOptionalFlag:
+    """Each guarded open takes a flag a platform may lack through getattr, so
+    on such a platform the regular file is still read, not refused or raised
+    on."""
+
+    def test_the_git_file_reader(self, tmp_path, without_optional_open_flags):
+        (tmp_path / ".git").write_text("gitdir: /x\n")
+        assert pi.read_git_file(tmp_path / ".git") == "gitdir: /x\n"
+
+    def test_the_override_reader(self, tmp_path, without_optional_open_flags):
+        (tmp_path / "pact-project-id").write_text("github.com/me/p\n")
+        read = pi.read_override(tmp_path)
+        assert (read.value, read.reason) == ("github.com/me/p", None)
+
+    def test_the_prune_ledger_reader(self, tmp_path, without_optional_open_flags):
+        from scripts import memory_api
+
+        ledger = tmp_path / "ledger"
+        ledger.write_text('{"session_id": "s"}\n')
+        assert memory_api._pruned_session_records(ledger) == [{"session_id": "s"}]
+
+    def test_the_prune_ledger_writer(self, tmp_path, without_optional_open_flags):
+        import session_end
+
+        session_end._append_ledger_line(tmp_path, '{"session_id": "s"}\n')
+        assert (tmp_path / session_end.PRUNE_LEDGER_NAME).read_text() == (
+            '{"session_id": "s"}\n'
+        )
