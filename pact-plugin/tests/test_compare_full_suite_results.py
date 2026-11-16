@@ -582,6 +582,9 @@ CHILD_CENSUS_HEADER = ("CHILD PYTEST CENSUS: 1 distinct pytest child(ren) starte
                        "blocking pytest-randomly")
 CLOCK_CENSUS_HEADER = "clock-shift census: 1 problem(s); this run did not shift every clock"
 HOME_CENSUS_HEADER = "HOME CENSUS: 1 distinct child(ren) started without HOME"
+HOME_FAULT_HEADER = "HOME CENSUS: 1 launch(es) the census could not inspect"
+HOME_FAULT_LINE = ("  [gw2] t::f (call): HOME census could not inspect the environment of "
+                   "[true]: LookupError()")
 CENSUS_PROBLEM = "  [gw0] test_x (call): child"
 
 
@@ -595,7 +598,9 @@ CENSUS_PROBLEM = "  [gw0] test_x (call): child"
       "environment without HOME"), "home"),
     (("." * 40 + " [100%]" + HOME_CENSUS_HEADER, "  [gw2] test_w (call): child"),
      "home"),
-], ids=["child", "clock", "child-after-xdist-progress", "home", "home-after-xdist-progress"])
+    ((HOME_FAULT_HEADER, HOME_FAULT_LINE), "home_uninspected"),
+], ids=["child", "clock", "child-after-xdist-progress", "home", "home-after-xdist-progress",
+        "home-faults-only"])
 def test_a_census_failed_green_run_names_the_census(tmp_path, finish, name):
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=finish)
@@ -674,6 +679,35 @@ def test_pytest_section_lines_end_the_session_finish_span(line):
         "dashes"])
 def test_other_separator_shaped_lines_do_not(line):
     assert not comparator.PYTEST_SECTION.fullmatch(line)
+
+
+def test_a_run_with_both_home_census_blocks_counts_both(tmp_path):
+    """The HOME census writes its refusal block and then its fault block; each
+    header counts only its own lines, and both are named."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(HOME_CENSUS_HEADER, CENSUS_PROBLEM,
+                                    HOME_FAULT_HEADER, HOME_FAULT_LINE))
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["deltas"] == [{"type": "census", "run": "two", "before": [],
+                                     "after": ["home", "home_uninspected"]}]
+    assert [run["validity"] for run in comparison["input_runs"]] == [
+        "clean", "census_outcome"]
+    assert read_runs(output)[1]["census_failures"] == [
+        {"census": "home", "problems": 1, "lines": [CENSUS_PROBLEM.strip()]},
+        {"census": "home_uninspected", "problems": 1, "lines": [HOME_FAULT_LINE.strip()]}]
+
+
+def test_a_home_fault_block_shorter_than_its_header_is_refused(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(HOME_FAULT_HEADER.replace(": 1 ", ": 2 "), HOME_FAULT_LINE))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two", "error": "the home_uninspected census header counts 2 "
+                                "problem(s) but 1 problem line(s) follow it"}]
 
 
 @pytest.mark.parametrize("finish, found", [
@@ -1083,6 +1117,49 @@ def test_the_information_line_the_real_home_census_writes_is_no_census_failure(m
         assert session.exitstatus == 0
         assert written == [line]
         assert comparator._census_failures(written) == []
+
+
+class _UnreadableEnvironment:
+    """An environment the HOME census cannot read, so its audit hook records a
+    fault rather than a refusal."""
+
+    def __iter__(self):
+        raise LookupError()
+
+
+@pytest.mark.parametrize("with_refusal", [False, True], ids=["faults-only", "both-blocks"])
+def test_the_home_census_fault_block_finish_writes_is_recognised(monkeypatch, with_refusal):
+    """The real home_census renders its fault lines (its audit hook, locally and
+    as an xdist worker's forwarded line) and its fault header (finish()), and the
+    comparator reads them as the home_uninspected census, beside the refusal
+    block when there is one."""
+    import home_census as census
+    for key, value in (("misses", ["a miss"] if with_refusal else []), ("forwarded", []),
+                       ("faults", []), ("forwarded_faults", []), ("exempt", None),
+                       ("shared", 0), ("checked", 0), ("forwarded_checked", 0)):
+        monkeypatch.setitem(census._state, key, value)
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "t.py::f (call)")
+    census._audit("os.posix_spawn", ("/bin/true", ["true"], _UnreadableEnvironment()))
+    assert len(census._state["faults"]) == 1, census._state
+    census.collect(types.SimpleNamespace(
+        gateway=types.SimpleNamespace(id="gw2"),
+        workeroutput={census.WORKEROUTPUT_FAULTS_KEY: list(census._state["faults"])}))
+    written = []
+    reporter = types.SimpleNamespace(write_line=written.append)
+    session = types.SimpleNamespace(
+        exitstatus=0, config=types.SimpleNamespace(
+            pluginmanager=types.SimpleNamespace(get_plugin=lambda _name: reporter)))
+    census.finish(session)
+    assert session.exitstatus == 1
+    failures = comparator._census_failures(written)
+    expected = [("home_uninspected", 2)]
+    if with_refusal:
+        expected.insert(0, ("home", 1))
+    assert [(failure["census"], failure["problems"]) for failure in failures] == expected, written
+    fault_lines = failures[-1]["lines"]
+    assert fault_lines[1].startswith("[gw2] "), fault_lines
+    assert all("HOME census could not inspect the environment of [true]: LookupError()"
+               in line for line in fault_lines), fault_lines
 
 
 RIG_CONFTEST = """\
@@ -1615,6 +1692,88 @@ def test_a_child_report_in_a_ci_failure_message_can_only_refuse(
     assert comparison["evidence_errors"] == [{"run": "two", "error": error}], comparison
 
 
+def _add_summary_entries(directory, entries):
+    """Put SKIPPED and XFAIL entries, each followed by the rest of its reason,
+    at the top of the short test summary, where -ra prints them."""
+    log = directory / "run.log"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    index = next(index for index, line in enumerate(lines)
+                 if line.endswith(SHORT_SUMMARY_TEXT)) + 1
+    lines[index:index] = [actions_line(text) for text in entries]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+# Each reason continues on lines that read like summary entries, as pytest
+# prints them under CI=true (test_real_ci_short_summary_shape measures it).
+MULTILINE_REASONS = {
+    "skip-xpass": ("skip", f"first line\nXPASS {ALPHA}"),
+    "skip-failed": ("skip", f"first line\nFAILED {ALPHA} - x"),
+    "xfail-xpass": ("xfail", f"expected\nXPASS {ALPHA}"),
+    "xfail-error": ("xfail", f"expected\nERROR {ALPHA} - y\nXPASS {ALPHA}"),
+}
+
+
+def _multiline_reason_run(root, name, run_id, kind, reason):
+    nodes = [ALPHA, BETA, GAMMA]
+    directory = make_run(root, name, run_id, nodes=nodes,
+                         cases=[case(ALPHA, "xpass", "unexpected"), case(BETA, kind, reason),
+                                case(GAMMA)])
+    first, *rest = reason.split("\n")
+    entry = (f"SKIPPED [1] tests/test_example.py:7: {first}" if kind == "skip"
+             else f"XFAIL {BETA} - {first}")
+    _add_summary_entries(directory, (entry, *rest))
+    return directory
+
+
+@pytest.mark.parametrize("reason", list(MULTILINE_REASONS))
+def test_a_multiline_skip_or_xfail_reason_adds_no_xpass_entry(tmp_path, reason):
+    """A skip or xfail reason line that starts with 'XPASS ', 'ERROR ' or
+    'FAILED ' is passed over by the reason's length in the run's evidence, so a
+    good run with one real xpass is compared as good."""
+    kind, text = MULTILINE_REASONS[reason]
+    first = _multiline_reason_run(tmp_path, "one", 100, kind, text)
+    second = _multiline_reason_run(tmp_path, "two", 101, kind, text)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical", comparison
+    assert [run["validity"] for run in comparison["input_runs"]] == ["clean", "clean"]
+    assert [run["totals"]["xpassed"] for run in read_runs(output)] == [1, 1]
+
+
+@pytest.mark.parametrize("entry, error", [
+    ("SKIPPED [1] tests/test_example.py:7: a reason the record does not hold",
+     "a SKIPPED summary entry has no reason in the run's evidence: "
+     "'SKIPPED [1] tests/test_example.py:7: a reason the record does not hold'"),
+    (f"XFAIL {GAMMA} - expected",
+     f"a XFAIL summary entry has no reason in the run's evidence: "
+     f"'XFAIL {GAMMA} - expected'"),
+], ids=["skip", "xfail"])
+def test_a_summary_entry_whose_reason_is_unknown_is_refused(tmp_path, entry, error):
+    """An entry whose reason the run's own evidence does not hold cannot be
+    measured, so the run is refused rather than read."""
+    first = make_run(tmp_path, "one", cases=[case(ALPHA, "xpass", "unexpected"), case(BETA)])
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA, "xpass", "unexpected"), case(BETA)])
+    _add_summary_entries(second, (entry,))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [{"run": "two", "error": error}], comparison
+
+
+def test_an_xpass_reason_continuing_with_an_xpass_line_is_refused(tmp_path):
+    """An XPASS entry's own reason is not in the run's evidence, so a reason line
+    that starts 'XPASS <node>' is counted and the count check refuses the run;
+    it is never compared as a different outcome."""
+    first = make_run(tmp_path, "one", cases=[case(ALPHA, "xpass", "unexpected"), case(BETA)])
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA, "xpass", f"unexpected\nXPASS {BETA}"), case(BETA)])
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two", "error": "raw XPASS evidence count/uniqueness mismatch: 2 lines, "
+                                "record xpassed=1"}], comparison
+
+
 CI_SHAPE_RIG = """\
 import pytest
 
@@ -1624,8 +1783,22 @@ def test_skipped():
     pass
 
 
+@pytest.mark.skip(reason="first line\\nXPASS test_rig.py::test_xpass\\nFAILED test_rig.py::test_xpass - x")
+def test_skipped_over_lines():
+    pass
+
+
+def test_skipped_at_call():
+    pytest.skip("called\\nXPASS test_rig.py::test_xpass")
+
+
 @pytest.mark.xfail(reason="expected")
 def test_xfail():
+    assert False
+
+
+@pytest.mark.xfail(reason="expected\\nXPASS test_rig.py::test_xpass\\nERROR test_rig.py::test_xpass - y")
+def test_xfail_over_lines():
     assert False
 
 
@@ -1651,23 +1824,33 @@ def test_errors(broken):
 @pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
 def test_real_ci_short_summary_shape(tmp_path, parallel):
     """Real pytest under CI=true: -ra prints skips, xfails, xpasses, errors and
-    failures in that order, error and failure messages run on untrimmed after
-    their entry, and the comparator reads only the one real XPASS entry."""
+    failures in that order; skip and xfail reasons, and error and failure
+    messages, run on untrimmed and unindented after their entry, a reason line
+    looking like an entry; and the comparator reads only the one real XPASS
+    entry, passing over each reason by its length in JUnit."""
     rig = tmp_path / "rig"
     rig.mkdir()
     (rig / "test_rig.py").write_text(CI_SHAPE_RIG, encoding="utf-8")
     env = {**child_env(), "CI": "true"}
+    junit = tmp_path / "junit.xml"
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
-         "-p", "no:randomly", *parallel],
+         "-p", "no:randomly", f"--junitxml={junit}", *parallel],
         cwd=rig, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert completed.returncode == 1, completed.stdout + completed.stderr
     lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
     report = comparator._test_text_range(lines, len(lines) - 1)
     summary = [lines[index] for index in comparator._short_summary_range(lines, report)]
-    assert [line.split(" ", 1)[0] for line in summary] == [
-        "SKIPPED", "XFAIL", "XPASS", "ERROR", "XPASS", "FAILED", "XPASS", "-----"], summary
-    assert comparator._xpass_lines(summary) == [
+    words = [line.split(" ", 1)[0] for line in summary]
+    first_xpass = summary.index("XPASS test_rig.py::test_xpass - unexpected")
+    assert set(words[:first_xpass]) == {"SKIPPED", "XFAIL", "XPASS", "FAILED", "ERROR"}, summary
+    assert words[first_xpass + 1:] == ["ERROR", "XPASS", "FAILED", "XPASS", "-----"], summary
+    cases = comparator._parse_junit(junit)
+    skip_reasons = [case["reason"] for case in cases if case["outcome"] == "skip"]
+    xfail_reasons = {f"test_rig.py::{case['name']}": [case["reason"]]
+                     for case in cases if case["outcome"] == "xfail"}
+    assert sum(reason.count("\n") for reason in skip_reasons) == 3, skip_reasons
+    assert comparator._xpass_lines(summary, skip_reasons, xfail_reasons) == [
         "test_rig.py::test_xpass - unexpected"], summary
 
 

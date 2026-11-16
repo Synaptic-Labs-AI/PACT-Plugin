@@ -112,6 +112,10 @@ CENSUS_HEADERS = {
         r"this run did not shift every clock"),
     "home": re.compile(
         _PROGRESS_PREFIX + r"HOME CENSUS: ([0-9]{1,9}) distinct child\(ren\) started without HOME"),
+    # The HOME census writes launches it could not inspect in their own block,
+    # after its refusal block when both occur; a fault alone fails the session.
+    "home_uninspected": re.compile(
+        _PROGRESS_PREFIX + r"HOME CENSUS: ([0-9]{1,9}) launch\(es\) the census could not inspect"),
 }
 COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
 # A wide-encoding document hides an ASCII token behind interleaved NUL bytes, so
@@ -525,20 +529,59 @@ def _parse_junit(path: Path) -> list[dict]:
     return cases
 
 
-def _xpass_lines(summary: list[str]) -> list[str]:
+def _reason_extra_lines(reasons: list[str], entry: str, kind: str) -> int:
+    """How many lines after an entry its reason continues over.
+
+    pytest prints a skip or xfail reason whole, one log line per reason line,
+    with no indentation (measured on 9.2 under CI=true, serial and xdist). A
+    continuation line can therefore start like a new entry; the reason, known
+    from the run's own evidence, says how many lines to pass over.
+    """
+    counts = {reason.count("\n") for reason in reasons}
+    if not counts:
+        raise EvidenceError(f"a {kind} summary entry has no reason in the run's evidence: "
+                            f"{entry!r}")
+    if len(counts) > 1:
+        raise EvidenceError(f"a {kind} summary entry matches reasons of different "
+                            f"lengths: {entry!r}")
+    return counts.pop()
+
+
+def _xpass_lines(summary: list[str], skip_reasons: list[str],
+                 xfail_reasons: dict[str, list[str]]) -> list[str]:
     """The XPASS entries of the short test summary.
 
     -ra prints its entries in a fixed order: skips, xfails, xpasses, errors,
     failures (measured on 9.2, serial and xdist). Every error and failure
     message therefore follows the last XPASS entry, so lines are read only up
-    to the first ERROR or FAILED entry.
+    to the first ERROR or FAILED entry. Each SKIPPED and XFAIL entry passes
+    over the lines its reason continues on, read from the run record's skip
+    sites and the JUnit xfail reasons, so a reason line that starts with
+    'XPASS ', 'ERROR ' or 'FAILED ' is never read as an entry. An XPASS
+    entry's own reason is not in that evidence: a continuation line of it that
+    starts with 'XPASS ' is counted, and the count check then refuses the run.
     """
     payloads = []
-    for line in summary:
+    index = 0
+    while index < len(summary):
+        line = summary[index]
+        index += 1
         if line.startswith(("ERROR ", "FAILED ")):
             break
         if line.startswith("XPASS "):
             payloads.append(line[len("XPASS "):])
+        elif line.startswith("SKIPPED "):
+            index += _reason_extra_lines(
+                [reason for reason in skip_reasons
+                 if line.endswith(": " + reason.partition("\n")[0])
+                 or not reason and line.endswith(":")], line, "SKIPPED")
+        elif line.startswith("XFAIL "):
+            rest = re.sub(r"^at (?:setup|call|teardown) of ", "", line[len("XFAIL "):])
+            index += _reason_extra_lines(
+                [reason for node_id, reasons in xfail_reasons.items()
+                 for reason in reasons
+                 if rest == (node_id + " - " + reason.partition("\n")[0]
+                             if reason else node_id)], line, "XFAIL")
     return payloads
 
 
@@ -558,8 +601,16 @@ def _resolve_xpass(payload: str, terminal: list[str]) -> tuple[str, str | None]:
 
 
 def _apply_xpass(cases: list[dict], lines: list[str], terminal: list[str],
-                 expected_count: int) -> None:
-    payloads = _xpass_lines(lines)
+                 record: dict) -> None:
+    expected_count = record["xpassed"]
+    sites = record.get("skip_sites")
+    skip_reasons = [site["reason"] for site in sites if isinstance(site, dict)
+                    and isinstance(site.get("reason"), str)] if isinstance(sites, list) else []
+    xfail_reasons = {}
+    for case in cases:
+        if case["outcome"] == "xfail":
+            xfail_reasons.setdefault(case["node_id"], []).append(case["reason"] or "")
+    payloads = _xpass_lines(lines, skip_reasons, xfail_reasons)
     if len(payloads) != expected_count or len(set(payloads)) != len(payloads):
         raise EvidenceError(
             f"raw XPASS evidence count/uniqueness mismatch: {len(payloads)} lines, "
@@ -906,7 +957,7 @@ def _validate_junit(record: dict, lines: list[str], terminal: list[str],
                 raise EvidenceError(f"JUnit file disagrees for {case['node_id']}")
     if seen_keys != set(node_for_key):
         raise EvidenceError("one or more terminal IDs have no JUnit case")
-    _apply_xpass(cases, lines, terminal, record["xpassed"])
+    _apply_xpass(cases, lines, terminal, record)
     _require_one_outcome_kind_per_node(cases)
     outcome_counts = Counter(case["outcome"] for case in cases)
     teardown_after_pass = _teardown_after_pass_count(cases)
