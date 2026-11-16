@@ -758,8 +758,8 @@ class TestOperationalFactsClause:
         ("Do not look for run instructions in the avoided paths", (
          "the bar on recovering run instructions from the avoided paths")),
         ("untracked docs/", "the path-convention fact (untracked docs/ is normal)"),
-        ("The {head} clone is a clone of the repository with its remote removed, under {scratch_dir}, checked out at {head}", (
-         "the {head} clone defined once, before both branches that use it")),
+        ("When a re-run below needs it, build the {head} clone: a clone of the repository with its remote removed, under {scratch_dir}, checked out at {head}", (
+         "the instruction to build the {head} clone, once, before both branches that use it")),
         ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone, never in the worktree, and do not report the worktree run: that clone's run stands for the diff, and any paths that differ between its status before and after the run follow the merge-base check below as reproduced paths", (
          "the moved-HEAD branch: one re-run in the {head} clone, never the worktree")),
         ("If that clone cannot be built or the command cannot be run in it, report the result as unattributable because the worktree moved, not as a finding about the diff", (
@@ -786,7 +786,7 @@ class TestOperationalFactsClause:
 
     def test_head_clone_defined_before_first_use(self):
         clause = _clause("OPERATIONAL FACTS")
-        define = clause.find("The {head} clone is a clone of the repository")
+        define = clause.find("build the {head} clone: a clone of the repository")
         first_branch = clause.find("If HEAD differs")
         assert define != -1 and first_branch != -1 and define < first_branch, (
             "the cold prompt must define the {head} clone before the moved-HEAD "

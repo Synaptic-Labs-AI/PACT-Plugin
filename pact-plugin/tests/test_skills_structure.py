@@ -945,7 +945,7 @@ class TestRunReceiptAttribution:
         text = (SKILLS_DIR / self.REL_PATH).read_text(encoding="utf-8")
         line = (
             "- All relevant tests have been run with exit code 0, except failing tests "
-            "that the run-receipt bullet below finds pre-existing, and a run that bullet "
+            "that the next bullet finds pre-existing, and a run that bullet "
             "reports as unattributable because its isolated copy cannot be built or the "
             "command cannot be run in it."
         )
@@ -954,6 +954,14 @@ class TestRunReceiptAttribution:
             "exceptions, failing tests the run-receipt bullet finds pre-existing and "
             "a run it reports as unattributable because its copy cannot be built or "
             "run, so it does not contradict that bullet"
+        )
+        # "The next bullet" must be the receipt bullet: an inserted bullet reds.
+        lines = text.split("\n")
+        at = next(i for i, ln in enumerate(lines) if ln == line or ln.startswith(line))
+        after = next(ln for ln in lines[at + 1:] if ln.startswith("- "))
+        assert after.startswith(self.BULLET_START), (
+            f"the {self.REL_PATH} exit-code precondition says 'the next bullet', "
+            f"but the next bullet is not the run-receipt bullet: {after[:80]!r}"
         )
 
     def test_each_branch_states_its_result_once(self):
