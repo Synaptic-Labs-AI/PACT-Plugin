@@ -503,10 +503,17 @@ _SHELL_BLIND_SPOTS = [
     "$(echo pytest) -q",
     "echo $(( $(pytest -q) ))",
     "echo $(case x in x) pytest -q;; esac)",
+    "{pytest,-q}",
+    "py{,}test -q",
+]
+# Also in blind spot 9, but bash runs it only where the path exists, so the
+# real-bash differential, whose sandbox has no /venv, does not run it.
+_SHELL_BLIND_SPOTS_OUTSIDE_THE_SANDBOX = [
+    "/venv/bin/py*test -q",
 ]
 
 
-@pytest.mark.parametrize("text", _SHELL_BLIND_SPOTS)
+@pytest.mark.parametrize("text", _SHELL_BLIND_SPOTS + _SHELL_BLIND_SPOTS_OUTSIDE_THE_SANDBOX)
 def test_a_listed_shell_blind_spot_is_accepted(text):
     assert census._miss(["bash", "-c", text], None, {}) is None, text
 
@@ -543,10 +550,12 @@ def test_real_bash_agrees_with_every_shell_text_row(tmp_path):
     the real bash and checks it. It covers the tables whose rows state bash's own
     behaviour: _SHELL_REFUSED (bash starts an unblocked pytest), _SHELL_ACCEPTED
     (it does not) and _SHELL_BLIND_SPOTS (it does, and the census does not see
-    it). The other tables with shell text are not covered: their rows encode a
-    refusal the census makes on purpose where bash would run nothing (`printf x;
-    make check python -m pytest`), or need a program or directory that is not
-    there (`zsh`, `uv`, `cd x`).
+    it). _SHELL_BLIND_SPOTS_OUTSIDE_THE_SANDBOX is a known divergence it skips:
+    its glob matches a pytest only where that path exists, which the sandbox
+    does not provide. The other tables with shell text are not covered: their
+    rows encode a refusal the census makes on purpose where bash would run
+    nothing (`printf x; make check python -m pytest`), or need a program or
+    directory that is not there (`zsh`, `uv`, `cd x`).
     Each row runs in its own directory with PATH holding only a stub pytest,
     python and python3, so no real pytest, interpreter, package or network tool
     can start; a command bash cannot find just fails. bash reads each row from a

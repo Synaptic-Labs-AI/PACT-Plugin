@@ -156,7 +156,9 @@ programs like any other, so a pytest after them is refused as [wrapper].
 A shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) run with `-c` (alone, or bundled as
 in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
 has its command text opened, and so does one behind an assignment.
-The text is read as bash reads it:
+The text is read by bash's rules for quoting, comments, separators,
+redirections, heredocs and substitutions, as listed here; bash's expansions are
+not performed (blind spot 9):
 - Quotes and escapes are resolved, and a backslash-newline joins the lines.
   bash's `$'...'` quoting is resolved to the word it builds, escapes included
   (`$'py\x74est'` is `pytest`), and `$"..."` is read as a double-quoted string,
@@ -241,8 +243,10 @@ Blind spots, examples of launches outside the census:
    what a substitution's output becomes (`$(echo pytest) -q`), `export`,
    aliases, `eval`, `env -S`, a script fed to a shell's stdin (`bash <<EOF`,
    `bash -s`), a command substitution inside arithmetic (`$(( $(pytest) ))`), and
-   a `case` pattern's `)` inside a `$( )` (it ends the substitution early). An
-   operator written alone inside quotes (`";"`) is read as an operator.
+   a `case` pattern's `)` inside a `$( )` (it ends the substitution early),
+   brace expansion (`{pytest,-q}`, `py{,}test -q`) and pathname expansion
+   (`/venv/bin/py*test -q`). An operator written alone inside quotes (`";"`) is
+   read as an operator.
 10. pytest run from a file the census cannot name: a renamed or wrapper copy of
     the console script, a zipapp (`python pytest.pyz`), or a module other than
     `pytest` and `pytest.__main__` that starts a session (`python -m runpy`, a
