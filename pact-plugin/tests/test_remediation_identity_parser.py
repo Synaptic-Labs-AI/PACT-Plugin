@@ -1811,3 +1811,33 @@ class TestTheStoreReadsTheGitFileWhole:
         assert answer.returncode != 0  # control: git refuses it
         assert database._gitfile_target(str(marker)) is None
         assert pi.gitfile_target(marker.read_text(encoding="utf-8")) is None
+
+
+class TestTheOwnFileOriginBinds:
+    """The first url from the repository's own config file binds; urls
+    from included files are skipped wherever they sit."""
+
+    def test_an_included_url_before_the_own_one_is_skipped(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "repo")
+        included = tmp_path / "included.cfg"
+        included.write_text('[remote "origin"]\n\turl = git@included.example:o/inc.git\n', encoding="utf-8")
+        run_git("config", "include.path", str(included), cwd=repo)
+        run_git("config", "--add", "remote.origin.url", "git@own.example:o/own.git", cwd=repo)
+        assert pi.read_origin(repo / ".git") == pi.OriginRead(pi.ORIGIN_PRESENT, "git@own.example:o/own.git")
+
+    def test_the_first_of_two_own_urls_binds_past_an_include(self, tmp_path, monkeypatch):
+        """Pairs as git answers them: included, own, own."""
+        import subprocess
+
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "repo")
+        own_file = f"file:{repo / '.git' / 'config'}".encode()
+        answer = (
+            b"file:/elsewhere/inc\0https://h/o/inc.git\0"
+            + own_file + b"\0https://h/o/first.git\0" + own_file + b"\0https://h/o/second.git\0"
+        )
+        monkeypatch.setattr(
+            pi.subprocess, "run", lambda command, **_k: subprocess.CompletedProcess(command, 0, answer, b"")
+        )
+        assert pi.read_origin(repo / ".git") == pi.OriginRead(pi.ORIGIN_PRESENT, "https://h/o/first.git")

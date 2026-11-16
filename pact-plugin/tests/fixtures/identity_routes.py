@@ -375,17 +375,22 @@ def _worktree_holding_a_newline(base: Path) -> Path:
     return _linked_worktree_named(base, "tar\nget")
 
 
-def _worktree_with_included_origin(base: Path, header: str, own_first: bool = False) -> Path:
+def _worktree_with_included_origin(
+    base: Path, header: str, own_first: bool = False, own_after: bool = False
+) -> Path:
     """A linked worktree of a repository whose `remote.origin.url` is set in
     an included file named under `header` (`{common}` is the common dir and
     `{branch}` the main checkout's branch). With `own_first`, the
-    repository's own config sets the origin before the include."""
+    repository's own config sets the origin before the include; with
+    `own_after`, after it."""
     main = make_repo(base / "main", remote=OWN if own_first else None)
     common = main / ".git"
     branch = run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=main)
     (common / "included").write_text(f'[remote "origin"]\n\turl = {INCLUDED}\n', encoding="utf-8")
     with open(common / "config", "a", encoding="utf-8") as config:
         config.write(f"[{header.format(common=common, branch=branch)}]\n\tpath = included\n")
+    if own_after:
+        run_git("config", "remote.origin.url", OWN, cwd=main)
     run_git("worktree", "add", "-q", str(base / "target"), "-b", "wt", cwd=main)
     return base / "target"
 
@@ -404,6 +409,12 @@ def _origin_from_plain_include(base: Path) -> Path:
 
 def _origin_before_a_gitdir_include(base: Path) -> Path:
     return _worktree_with_included_origin(base, 'includeIf "gitdir:{common}"', own_first=True)
+
+
+def _origin_after_an_onbranch_include(base: Path) -> Path:
+    """The main checkout's branch includes a file setting another url
+    BEFORE the repository's own config sets its origin."""
+    return _worktree_with_included_origin(base, 'includeIf "onbranch:{branch}"', own_after=True)
 
 
 # A shape whose `home` is set runs with HOME pointed at that directory.
@@ -463,6 +474,7 @@ _BUILDERS = {
     "origin_from_gitdir_include": _origin_from_gitdir_include,
     "origin_from_plain_include": _origin_from_plain_include,
     "control_origin_before_a_gitdir_include": _origin_before_a_gitdir_include,
+    "control_origin_after_an_onbranch_include": _origin_after_an_onbranch_include,
 }
 
 

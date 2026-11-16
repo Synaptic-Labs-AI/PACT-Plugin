@@ -114,9 +114,9 @@ class OriginRead(NamedTuple):
     `empty_entry` — the url list holds an empty (or whitespace-only) value.
                     Which url git then fetches depends on the git version,
                     so no url in the list is the repository's identity.
-    `not_own_file` — the first url does not come from the repository's own
-                    config file, so the url git reads can differ between
-                    its worktrees and branches.
+    `not_own_file` — no url comes from the repository's own config file:
+                    a url from an included file can differ between its
+                    worktrees and branches.
     `unavailable` — git could not answer: missing, timed out, or the
                     repository's configuration could not be read.
 
@@ -171,8 +171,8 @@ EMPTY_URL_ENTRY_DETAIL = (
 # The `detail` for an origin that does not come from the repository's own
 # config file.
 NOT_OWN_FILE_ORIGIN_DETAIL = (
-    "its remote.origin.url does not come from the repository's own config "
-    "file, and git can read a different url in another worktree or branch"
+    "no remote.origin.url comes from the repository's own config file, and a "
+    "url from an included file can differ between worktrees and branches"
 )
 
 # The `detail` for a decline whose `.git` points at a git directory outside
@@ -868,19 +868,21 @@ def read_origin(git_dir: Path) -> OriginRead:
     repository's config. The override is read from this repository's common
     dir, so the origin must come from the same repository.
 
-    THE IDENTITY RULE: the origin is the FIRST `remote.origin.url` git reads
-    for the repository (its own config file plus the files it includes),
-    which is the url git fetches from; later values are push urls.
+    THE IDENTITY RULE: the origin is the FIRST `remote.origin.url` in the
+    repository's own config file (`<git_dir>/config`); values git reads from
+    files that config includes are skipped, wherever they sit. With no
+    include before it, that is the url git fetches from; later values are
+    push urls.
 
-    AN ORIGIN THAT DOES NOT COME FROM THE REPOSITORY'S OWN CONFIG FILE IS
-    `not_own_file`, AND THE CALLER DECLINES IT. Read through `--git-dir
+    INCLUDED VALUES ARE SKIPPED, AND WITH NO VALUE FROM THE OWN FILE THE READ
+    IS `not_own_file`, WHICH THE CALLER DECLINES. Read through `--git-dir
     <common dir>`, git evaluates an `includeIf onbranch:` or `gitdir:`
     condition against the main checkout, not the worktree a session is in,
-    so an included url could move every worktree's id when the main
-    checkout changes branch. `--show-origin` names the file each value came
-    from, in the same call; the first value must come from
-    `<git_dir>/config`, compared by real path. An unconditional
-    `include.path` declines too.
+    so an included url, before or instead of the own one, could move every
+    worktree's id when the main checkout changes branch. `--show-origin`
+    names the file each value came from, in the same call, and the own file
+    is matched by real path. An unconditional `include.path` is skipped
+    too.
 
     A LIST HOLDING AN EMPTY OR WHITESPACE-ONLY VALUE IS `empty_entry`, AND
     THE CALLER DECLINES IT, whatever the git version. Git 2.46 reads an
@@ -957,13 +959,19 @@ def read_origin(git_dir: Path) -> OriginRead:
     if any(not value.strip() for value in values):
         return OriginRead(ORIGIN_EMPTY_ENTRY, None)
     own = os.path.realpath(os.path.join(git_dir, "config"))
-    if not origins[0].startswith(b"file:") or (
-        os.path.realpath(os.fsdecode(origins[0][len(b"file:"):])) != own
-    ):
+    first_own = next(
+        (
+            value for origin, value in zip(origins, values)
+            if origin.startswith(b"file:")
+            and os.path.realpath(os.fsdecode(origin[len(b"file:"):])) == own
+        ),
+        None,
+    )
+    if first_own is None:
         return OriginRead(ORIGIN_NOT_OWN_FILE, None)
     # os.fsdecode, never locale decoding: a URL may hold bytes invalid in
     # the locale, and UnicodeDecodeError must not escape this reader.
-    return OriginRead(ORIGIN_PRESENT, os.fsdecode(values[0]))
+    return OriginRead(ORIGIN_PRESENT, os.fsdecode(first_own))
 
 
 def read_override(common_dir: Path) -> OverrideRead:
@@ -1531,8 +1539,8 @@ def detect_id_for_root(
       dir -> DECLINE (`gitfile_redirect`, no override path);
     - the origin is PRESENT and canonicalises -> the canonical id;
     - the origin is PRESENT and cannot be represented, its url list holds
-      an empty value, or its first url does not come from the repository's
-      own config file -> DECLINE (`origin_unrepresentable`);
+      an empty value, or no url comes from the repository's own config file
+      -> DECLINE (`origin_unrepresentable`);
     - the origin is ABSENT (none configured, `file://`, a local path) ->
       the basename, the designed non-git form, EXCEPT in a submodule: there
       the checkout path is chosen by the superproject's tracked `.gitmodules`,

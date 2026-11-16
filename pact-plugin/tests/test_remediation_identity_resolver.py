@@ -2725,3 +2725,34 @@ class TestTheWorktreeCheckRefusesWithoutAListing:
             or "git could not list" not in (answer[2] or "")
         }
         assert wrong == {}, f"a newline-holding worktree was read from a listing without NUL: {wrong}"
+
+
+class TestTheOwnOriginBindsWhateverAnIncludeBeforeItSays:
+    """An `includeIf onbranch:` include placed before the repository's own
+    `remote.origin.url` is skipped: the own value binds on every route,
+    whichever branch the main checkout is on, so switching branch does not
+    move the id."""
+
+    @pytest.mark.parametrize("switch_branch", [False, True])
+    def test_every_route_binds_the_own_origin(self, tmp_path, switch_branch):
+        from fixtures.identity_routes import OWN, ROUTES, SHAPES, _clear
+        from scripts import project_identity as pi
+
+        assert_outside_repository(tmp_path)
+        own = pi.normalize_remote_url(OWN)
+        answers = {}
+        for index, (route, (run, _sources)) in enumerate(ROUTES.items()):
+            if "forced" in route:
+                continue
+            base = tmp_path / f"cell{index}"
+            base.mkdir()
+            target = SHAPES["control_origin_after_an_onbranch_include"](base)
+            if switch_branch:
+                run_git("checkout", "-q", "-b", "elsewhere", cwd=base / "main")
+            elsewhere = base / "elsewhere"
+            elsewhere.mkdir()
+            with pytest.MonkeyPatch.context() as cell:
+                _clear(cell)
+                answers[route] = run(cell, target, elsewhere).project_id
+        wrong = {route: answer for route, answer in answers.items() if answer != own}
+        assert wrong == {}, f"an include before the own origin moved the id: {wrong}"
