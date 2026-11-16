@@ -694,16 +694,13 @@ def _validate_log(directory: Path, record: dict,
     full_run_ok = [line for line in lines if line.startswith("FULL-RUN-OK ")]
     if any(not line.endswith(f"subject={expected_sha}") for line in full_run_ok):
         raise EvidenceError("FULL-RUN-OK names a different SHA")
-    environment_indexes = [index for index, line in enumerate(lines)
-                           if "CI environment matches constraints-ci.txt." in line]
-    if (len(environment_indexes) < 2
-            or min(environment_indexes) > summary_index
-            or max(environment_indexes) < summary_index):
-        raise EvidenceError("before/after environment evidence is not clean")
     # Assumed, not measured here: run.log is the job log download, which carries
     # each step's stdout and stderr together, so the binding's stderr heading is
     # in it on a real drift run. The binding's session-end check runs after the
-    # censuses and sets 3 even over a run a census raised to 1.
+    # censuses and sets 3 even over a run a census raised to 1. Drift is named
+    # before the match lines are counted: when the installed set changed during
+    # the run, the after-tests verify step reports the drift too and prints no
+    # match line, so a count-first check would hide the cause.
     if any("CI ENVIRONMENT DRIFT" in line for line in lines):
         message = ("the CI environment binding reported environment drift (a CI "
                    "ENVIRONMENT DRIFT heading is in the log), so the run is invalid "
@@ -712,6 +709,12 @@ def _validate_log(directory: Path, record: dict,
         if names and record["exitstatus"] == 3:
             message += f", and it set exit status 3 over the {names} census failure"
         raise EvidenceError(message)
+    environment_indexes = [index for index, line in enumerate(lines)
+                           if "CI environment matches constraints-ci.txt." in line]
+    if (len(environment_indexes) < 2
+            or min(environment_indexes) > summary_index
+            or max(environment_indexes) < summary_index):
+        raise EvidenceError("before/after environment evidence is not clean")
     if any("PYTEST_ADDOPTS is set" in line for line in lines):
         raise EvidenceError(
             "a check in the log reported PYTEST_ADDOPTS is set, so the run's "

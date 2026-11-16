@@ -677,12 +677,14 @@ def test_a_census_line_beside_a_clean_exit_is_refused(tmp_path):
                   "the log disagree"}]
 
 
-DRIFT_LINES = (
+# What the in-process CI binding writes at session end when it finds drift.
+BINDING_DRIFT_LINES = (
     "CI ENVIRONMENT DRIFT (pytest process, at session end)",
     "UNEXPECTED: some-package",
     "The session had ALREADY ended with exit status 1 before this check; its test "
     "results are reported above and are not hidden by this exit status.",
 )
+ENVIRONMENT_MATCH = "CI environment matches constraints-ci.txt."
 
 
 def append_log_lines(directory, texts):
@@ -692,10 +694,31 @@ def append_log_lines(directory, texts):
                    encoding="utf-8")
 
 
-def test_a_drift_log_names_the_ci_environment_binding(tmp_path):
+def add_drift(directory, shape="installed-set"):
+    """Write a real drift run's log shape.
+
+    installed-set: the installed packages changed during the run, so the
+    after-tests verify step reports the drift too and prints no match line,
+    leaving only the before-tests one. process-only: only the pytest process's
+    own path changed, so the after-tests step still matches.
+    """
+    if shape == "installed-set":
+        log = directory / "run.log"
+        lines = log.read_text(encoding="utf-8").splitlines()
+        last = max(index for index, line in enumerate(lines) if ENVIRONMENT_MATCH in line)
+        lines[last:last + 1] = [actions_line("UNEXPECTED: some-package")]
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    append_log_lines(directory, BINDING_DRIFT_LINES)
+
+
+@pytest.mark.parametrize("shape", ["installed-set", "process-only"])
+def test_a_drift_log_names_the_ci_environment_binding(tmp_path, shape):
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101)
-    append_log_lines(second, DRIFT_LINES)
+    add_drift(second, shape)
+    if shape == "installed-set":
+        log = (second / "run.log").read_text(encoding="utf-8")
+        assert log.count(ENVIRONMENT_MATCH) == 1
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, comparison
     assert comparison["evidence_errors"] == [
@@ -711,7 +734,7 @@ def test_drift_over_a_census_failure_names_the_binding_and_the_census(tmp_path):
     second = make_run(tmp_path, "two", 101, census_failed=True,
                       finish_lines=(CHILD_CENSUS_HEADER, "  [gw0] test_x (call): child"),
                       record_updates={"exitstatus": 3})
-    append_log_lines(second, DRIFT_LINES)
+    add_drift(second)
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, comparison
     assert comparison["evidence_errors"] == [
@@ -727,7 +750,7 @@ def test_drift_beside_a_census_at_exit_1_does_not_claim_the_binding_set_3(tmp_pa
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101, census_failed=True,
                       finish_lines=(CHILD_CENSUS_HEADER, "  [gw0] test_x (call): child"))
-    append_log_lines(second, DRIFT_LINES)
+    add_drift(second)
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, comparison
     assert comparison["evidence_errors"] == [
@@ -743,7 +766,7 @@ def test_drift_stays_the_reason_beside_a_malformed_census_block(tmp_path):
     second = make_run(tmp_path, "two", 101, census_failed=True,
                       finish_lines=(CHILD_CENSUS_HEADER,),
                       record_updates={"exitstatus": 3})
-    append_log_lines(second, DRIFT_LINES)
+    add_drift(second)
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, comparison
     assert comparison["evidence_errors"] == [
