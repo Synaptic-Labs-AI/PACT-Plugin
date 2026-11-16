@@ -1803,7 +1803,8 @@ def _verified_worktree_roots(
             marker = Path(worktree) / ".git"
             if not marker.is_file():
                 continue
-            target = project_identity.gitfile_target(os.fsdecode(marker.read_bytes()))
+            text = project_identity.read_git_file(marker)
+            target = project_identity.gitfile_target(text) if text is not None else None
             if target is None:
                 continue
             admin = Path(target)
@@ -1812,9 +1813,10 @@ def _verified_worktree_roots(
             admin = admin.resolve()
             if admin.parent != admin_parent:
                 continue
-            back = Path(project_identity.worktree_admin_gitdir(
-                os.fsdecode((admin / "gitdir").read_bytes())
-            ))
+            back_text = project_identity.read_git_file(admin / "gitdir")
+            if back_text is None:
+                continue
+            back = Path(project_identity.worktree_admin_gitdir(back_text))
             if not back.is_absolute():
                 back = admin / back
             if back.resolve() != marker.resolve():

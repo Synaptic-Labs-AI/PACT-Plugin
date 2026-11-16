@@ -1893,3 +1893,94 @@ class TestTheSubmoduleCheckRefusesWhatItCannotCheck:
         monkeypatch.setattr(pi, "_submodule_admin_dir", lambda path: True)
         monkeypatch.setattr(pi, "_resolved_git_dir", lambda asked: Path("/somewhere"))
         assert pi._submodule_checkout(submodule, Path("bad\0common"), submodule) is True
+
+
+# A sparse file this large takes no disk, and reading it whole would take
+# this much memory.
+_HUGE = 64 << 20
+
+
+def _sparse(path: Path, head: str) -> Path:
+    """`path` holding `head` and then zeros up to _HUGE bytes, sparse."""
+    with open(path, "wb") as handle:
+        handle.write(head.encode())
+        handle.truncate(_HUGE)
+    return path
+
+
+def _peak_bytes(read) -> tuple:
+    """(what `read()` returns, the most memory it held at once)."""
+    import tracemalloc
+
+    tracemalloc.start()
+    try:
+        answer = read()
+        return answer, tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+
+
+class TestAnOversizedGitFileIsNotReadWhole:
+    """Every reader of a `.git` file or a worktree admin `gitdir` file reads
+    at most git's 1 MiB limit and treats a longer file as naming nothing;
+    a planted file far larger than the limit is never held in memory."""
+
+    LIMIT = 8 << 20
+
+    def test_the_marker_reader(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        (tmp_path / "store").mkdir()
+        _sparse(tmp_path / ".git", f"gitdir: {tmp_path / 'store'}\n")
+        answer, peak = _peak_bytes(lambda: pi._marker_target(tmp_path))
+        assert answer is None and peak < self.LIMIT, (answer, peak)
+
+    def test_the_stores_gitfile_reader(self, tmp_path):
+        from scripts import database
+
+        (tmp_path / "store").mkdir()
+        marker = _sparse(tmp_path / ".git", f"gitdir: {tmp_path / 'store'}\n")
+        answer, peak = _peak_bytes(lambda: database._gitfile_target(str(marker)))
+        assert answer is None and peak < self.LIMIT, (answer, peak)
+
+    def test_the_stores_admin_gitdir_reader(self, tmp_path):
+        from scripts import database
+
+        root = tmp_path / "root"
+        root.mkdir()
+        admin = tmp_path / "common" / "worktrees" / "wt"
+        admin.mkdir(parents=True)
+        _sparse(admin / "gitdir", f"{root}/.git\n")
+        answer, peak = _peak_bytes(
+            lambda: database._worktree_admin_of(str(root), str(tmp_path / "common"), "wt")
+        )
+        assert answer is False and peak < self.LIMIT, (answer, peak)
+
+    def _gate_roots(self, tmp_path, oversized: str):
+        """The read gate's roots for a main checkout and one linked worktree
+        whose `.git` file ("dotgit") or admin `gitdir` file ("admin") is
+        oversized, with the memory the gate held. The listing is git's own,
+        taken before the file is made oversized, so it names the worktree."""
+        from scripts import memory_api
+
+        assert_outside_repository(tmp_path)
+        main = make_repo(tmp_path / "main")
+        common = (main / ".git").resolve()
+        worktree = tmp_path / "wt"
+        run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+        listing = memory_api._worktree_records(["--git-dir", str(common)])
+        assert memory_api._verified_worktree_roots(main, common, listing) == [
+            main.resolve(), worktree.resolve(),
+        ]  # control: the worktree is a gate root while its files are whole
+        if oversized == "dotgit":
+            _sparse(worktree / ".git", f"gitdir: {common / 'worktrees' / 'wt'}\n")
+        else:
+            _sparse(common / "worktrees" / "wt" / "gitdir", f"{worktree / '.git'}\n")
+        return main, _peak_bytes(lambda: memory_api._verified_worktree_roots(main, common, listing))
+
+    def test_the_read_gates_dotgit_reader(self, tmp_path):
+        main, (roots, peak) = self._gate_roots(tmp_path, "dotgit")
+        assert roots == [main.resolve()] and peak < self.LIMIT, (roots, peak)
+
+    def test_the_read_gates_admin_gitdir_reader(self, tmp_path):
+        main, (roots, peak) = self._gate_roots(tmp_path, "admin")
+        assert roots == [main.resolve()] and peak < self.LIMIT, (roots, peak)

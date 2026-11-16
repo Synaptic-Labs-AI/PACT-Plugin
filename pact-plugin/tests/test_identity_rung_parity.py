@@ -1157,6 +1157,7 @@ NAMED_LAYOUT_FORMS = {
     ('_gitfile_points_at_foreign_gitdir', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_gitfile_points_at_foreign_gitdir` (-> bool)"),
     ('_marker_names_external_git_dir', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_marker_names_external_git_dir` (-> bool)"),
     ('_marker_names_external_git_dir', 'returns', 'not _submodule_admin_dir(git_dir)'): (1, "returns `not` applied to a call to `_submodule_admin_dir` (-> bool) in `_marker_names_external_git_dir` (-> bool)"),
+    ('_marker_target', 'binds', 'text = read_git_file(marker)'): (1, "assigns a call to `read_git_file` (-> Optional[str]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
     ('_marker_target', 'binds', 'marker = find_git_marker(root)'): (1, "assigns a call to `find_git_marker` (-> Optional[Path]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
     ('_resolved_git_dir', 'binds', 'raw = git_dir_answer(asked_root)'): (1, "assigns a call to `git_dir_answer` (-> Optional[str]) to a local in `_resolved_git_dir` (-> Optional[Path])"),
     ('_submodule_checkout', 'binds', 'git_dir = _resolved_git_dir(asked)'): (1, "assigns a call to `_resolved_git_dir` (-> Optional[Path]) to a local in `_submodule_checkout` (-> bool)"),

@@ -1143,9 +1143,24 @@ def gitfile_target(text: str) -> Optional[str]:
     is dropped; the rest is the path, verbatim. None when the file does not
     start with `gitdir: `, names no path, or is larger than the 1 MiB git
     reads."""
-    if len(os.fsencode(text)) > 1 << 20 or not text.startswith("gitdir: "):
+    if len(os.fsencode(text)) > GIT_FILE_LIMIT or not text.startswith("gitdir: "):
         return None
     return text.rstrip("\r\n")[len("gitdir: "):] or None
+
+
+# The most git reads of a `.git` file (`read_gitfile_gently` refuses a
+# larger one); the same bound is taken for a worktree's admin `gitdir` file.
+GIT_FILE_LIMIT = 1 << 20
+
+
+def read_git_file(path) -> Optional[str]:
+    """The text of a `.git` file or a worktree admin `gitdir` file, decoded
+    with `os.fsdecode`, or None when it is larger than GIT_FILE_LIMIT. At
+    most GIT_FILE_LIMIT + 1 bytes are read, whatever the file's size.
+    Raises what `open` raises."""
+    with open(path, "rb") as handle:
+        data = handle.read(GIT_FILE_LIMIT + 1)
+    return os.fsdecode(data) if len(data) <= GIT_FILE_LIMIT else None
 
 
 def worktree_admin_gitdir(text: str) -> str:
@@ -1481,8 +1496,10 @@ def _marker_target(root: Path) -> Optional[Tuple[Path, Path]]:
         if not marker.is_file():
             # A real `.git` DIRECTORY: an ordinary checkout.
             return None
-        text = os.fsdecode(marker.read_bytes())
+        text = read_git_file(marker)
     except (OSError, RuntimeError):
+        return None
+    if text is None:
         return None
     target = gitfile_target(text)
     if target is None:
