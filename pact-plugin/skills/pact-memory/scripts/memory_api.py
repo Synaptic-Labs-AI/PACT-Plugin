@@ -654,8 +654,8 @@ _DECLINE_CAUSES = {
 # its own remedy, so an unworkable `<git-common-dir>` pin is never printed.
 _UNPINNABLE_REMEDIES = {
     "broken_git_marker": (
-        "Repair or remove the broken `.git` marker, or check that git is "
-        "installed and can read it."
+        "Check that git is installed and can read the repository here: "
+        "`git rev-parse --git-dir` run here prints git's own reason."
     ),
     "no_working_tree": (
         "Run from a checkout with a working tree; a bare repository has none."
@@ -671,15 +671,15 @@ _UNPINNABLE_REMEDIES = {
 # `--separate-git-dir` layout, so no reader of this text can judge whether a
 # pin there is safe. Pinning one's own layout is the USER's decision,
 # described in the memory skill.
-# The removal clause waits on a listing that RAN: a real worktree on a git
-# that could not answer is never told to remove its `.git`.
+# No removal advice: a worktree the user moved and a separate-git-dir layout
+# are git's own layouts that refuse here too.
 _REDIRECT_REMEDY = (
     "Check that git can answer for this checkout (`git rev-parse --git-dir`, "
-    "`git worktree list`). Once `git worktree list` runs successfully, if it "
-    "lists no worktree at this checkout, its `.git` file is not one git made "
-    "for it: fix or remove that file, or run from the repository it points "
-    "at. A `git init --separate-git-dir` layout of your own is a user "
-    "decision: see the pact-memory skill."
+    "`git worktree list`), or run from the repository the `.git` points at. "
+    "A linked worktree you moved is re-registered by running `git worktree "
+    "repair` in it; the user runs that, not an agent. A `git init "
+    "--separate-git-dir` layout of your own is a user decision: see the "
+    "pact-memory skill."
 )
 
 

@@ -1429,13 +1429,14 @@ class TestARedirectsRemedyIsItsMarker:
         assert code == 1
         message = envelope["message"]
         assert str(admin_root) not in message
-        assert "`.git` file" in message
+        assert "run from the repository the `.git` points at" in message
+        assert "remove" not in message.lower()
         code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
         assert show["result"]["decline_reason"]["reason"] == "gitfile_redirect"
         assert show["result"]["decline_reason"]["override_path"] is None
 
-        # Follow the remedy the refusal printed: remove the forged marker.
-        (forged / ".git").unlink()
+        # Follow the remedy the refusal printed: run from the repository the
+        # `.git` points at. The forged marker stays in place.
         assert victim_ids() == before
         assert not (admin_root / "pact-project-id").exists()
 

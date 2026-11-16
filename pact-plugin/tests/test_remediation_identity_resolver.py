@@ -2957,12 +2957,26 @@ class TestARedirectRefusalNamesWhatWasObserved:
         details = list(memory_api._REDIRECT_CAUSE_DETAILS.values())
         assert not [d for d in details if "another repository" in d], details
 
-    def test_the_remedy_asks_for_removal_only_after_the_listing_runs(self):
+    def test_no_remedy_advises_removing_a_git_marker(self):
+        """A moved worktree and a separate-git-dir checkout are layouts git
+        made, and an unreadable repository is not a broken one, so neither
+        remedy tells the reader to remove or delete a `.git`."""
         from scripts import memory_api
 
-        remedy = memory_api._REDIRECT_REMEDY
-        gate = remedy.index("Once `git worktree list` runs successfully")
-        assert remedy.index("remove") > gate, remedy
+        for remedy in (
+            memory_api._REDIRECT_REMEDY,
+            memory_api._UNPINNABLE_REMEDIES["broken_git_marker"],
+        ):
+            lowered = remedy.lower()
+            assert "remove" not in lowered and "delete" not in lowered, remedy
+
+    def test_the_redirect_remedy_names_the_users_own_layouts_as_theirs(self):
+        from scripts import memory_api
+
+        remedy = " ".join(memory_api._REDIRECT_REMEDY.split())
+        assert "running `git worktree repair` in it" in remedy, remedy
+        assert "user decision: see the pact-memory skill" in remedy, remedy
+        assert "the user runs that, not an agent" in remedy, remedy
 
 
 class TestNoRouteBindsWithoutAGitDir:
