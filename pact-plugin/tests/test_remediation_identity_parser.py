@@ -2056,11 +2056,16 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
 
     @pytest.mark.parametrize("kind", ["fifo", "link", "dir"])
     def test_the_reader(self, tmp_path, kind):
+        """In the same child a regular file is read first (control), so the
+        reader is shown to read, not to answer None for anything."""
+        regular = tmp_path / "regular"
+        regular.write_text("gitdir: /x\n")
         marker = self._kinds(tmp_path / ".git", kind)
         assert _in_child(
             "from scripts import project_identity as pi\n"
-            "print(pi.read_git_file(sys.argv[1]))", str(marker)
-        ) == "None"
+            "print(repr(pi.read_git_file(sys.argv[1])))\n"
+            "print(repr(pi.read_git_file(sys.argv[2])))", str(regular), str(marker)
+        ).splitlines() == [repr("gitdir: /x\n"), "None"]
 
     def test_the_reader_reads_a_regular_file_and_a_link_to_one(self, tmp_path):
         (tmp_path / "real").write_text("gitdir: /x\n")
@@ -2070,10 +2075,13 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
 
     def test_the_reader_never_opens_a_fifo(self, tmp_path):
         """A writer waiting on the FIFO is released only when a reader opens
-        it, so a writer still waiting after the read shows it was not opened."""
+        it, so a writer still waiting after the read shows it was not opened.
+        Control: the same reader reads a regular file whole."""
         import sys
         import time
 
+        (tmp_path / "regular").write_text("gitdir: /x\n")
+        assert pi.read_git_file(tmp_path / "regular") == "gitdir: /x\n"
         fifo = self._kinds(tmp_path / ".git", "fifo")
         writer = subprocess.Popen(
             [sys.executable, "-c", "import sys; open(sys.argv[1], 'wb')", str(fifo)]
@@ -2091,7 +2099,9 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
     def test_a_fifo_put_in_place_after_the_type_check_is_not_read(self, tmp_path):
         """The type is checked again on the open descriptor, and the open does
         not wait: here the first check is shown a regular file and the path
-        is a FIFO, as when one is swapped in between the two."""
+        is a FIFO, as when one is swapped in between the two. Control, in the
+        same child and under the same patched `stat`: the regular file is
+        read whole."""
         regular = tmp_path / "regular"
         regular.write_text("gitdir: /x\n")
         fifo = self._kinds(tmp_path / ".git", "fifo")
@@ -2099,46 +2109,65 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
             "import os\nfrom scripts import project_identity as pi\n"
             "real_stat = os.stat\n"
             "os.stat = lambda p, *a, **k: real_stat(sys.argv[2] if str(p) == sys.argv[1] else p, *a, **k)\n"
-            "print(pi.read_git_file(sys.argv[1]))", str(fifo), str(regular)
-        ) == "None"
+            "print(repr(pi.read_git_file(sys.argv[2])))\n"
+            "print(repr(pi.read_git_file(sys.argv[1])))", str(fifo), str(regular)
+        ).splitlines() == [repr("gitdir: /x\n"), "None"]
 
     def test_an_override_file_swapped_for_a_fifo_is_refused(self, tmp_path):
         """The override reader checks the open descriptor too, and its open
         does not wait: its lstat is shown a regular file while the path is a
-        FIFO, as when one is swapped in between the two."""
+        FIFO, as when one is swapped in between the two. Control, in the same
+        child: a regular override file in another common dir is read."""
         regular = tmp_path / "regular"
         regular.write_text("github.com/me/p\n")
         common = tmp_path / "common"
         common.mkdir()
+        whole = tmp_path / "whole"
+        whole.mkdir()
+        (whole / "pact-project-id").write_text("github.com/me/p\n")
         fifo = self._kinds(common / "pact-project-id", "fifo")
         assert _in_child(
             "import os\nfrom pathlib import Path\nfrom scripts import project_identity as pi\n"
             "real_lstat = os.lstat\n"
             "os.lstat = lambda p, *a, **k: real_lstat(sys.argv[2] if str(p) == sys.argv[1] else p, *a, **k)\n"
+            "control = pi.read_override(Path(sys.argv[4]))\n"
+            "print(control.reason is None and control.value is not None)\n"
             "print(pi.read_override(Path(sys.argv[3])).reason)",
-            str(fifo), str(regular), str(common),
-        ) == "not_regular"
+            str(fifo), str(regular), str(common), str(whole),
+        ).splitlines() == ["True", "not_regular"]
 
     @pytest.mark.parametrize("kind", ["fifo", "link"])
     def test_the_stores_gitfile_reader(self, tmp_path, kind):
+        """Control first, in the same child: a regular gitfile names its
+        target."""
+        (tmp_path / "regular").mkdir()
+        (tmp_path / "regular" / ".git").write_text(f"gitdir: {tmp_path / 'store'}\n")
         marker = self._kinds(tmp_path / ".git", kind)
         assert _in_child(
             "from scripts import database\n"
-            "print(database._gitfile_target(sys.argv[1]))", str(marker)
-        ) == "None"
+            "print(database._gitfile_target(sys.argv[1]))\n"
+            "print(database._gitfile_target(sys.argv[2]))",
+            str(tmp_path / "regular" / ".git"), str(marker),
+        ).splitlines() == [os.path.realpath(tmp_path / "store"), "None"]
 
     @pytest.mark.parametrize("kind", ["fifo", "link"])
     def test_the_stores_admin_gitdir_reader(self, tmp_path, kind):
+        """Control first, in the same child: an admin dir whose regular
+        `gitdir` names the root back is the root's."""
         root = tmp_path / "root"
         root.mkdir()
+        whole = tmp_path / "common" / "worktrees" / "whole"
+        whole.mkdir(parents=True)
+        (whole / "gitdir").write_text(f"{root / '.git'}\n")
         admin = tmp_path / "common" / "worktrees" / "wt"
         admin.mkdir(parents=True)
         self._kinds(admin / "gitdir", kind)
         assert _in_child(
             "from scripts import database\n"
-            "print(database._worktree_admin_of(*sys.argv[1:]))",
-            str(root), str(tmp_path / "common"), "wt",
-        ) == "False"
+            "print(database._worktree_admin_of(sys.argv[1], sys.argv[2], 'whole'))\n"
+            "print(database._worktree_admin_of(sys.argv[1], sys.argv[2], 'wt'))",
+            str(root), str(tmp_path / "common"),
+        ).splitlines() == ["True", "False"]
 
     @pytest.mark.parametrize("kind", ["fifo", "link"])
     def test_the_read_gates_admin_gitdir_reader(self, tmp_path, kind):
@@ -2166,18 +2195,40 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
             str(main), str(common), json.dumps(listing),
         ) == str([main.resolve()])
 
-    @pytest.mark.parametrize("kind", ["none", "fifo", "link"])
+    @pytest.mark.parametrize("kind", [
+        "none",
+        "fifo",
+        pytest.param("link", id="link-refused-by-the-islink-check-before-any-read"),
+    ])
     def test_a_legacy_row_below_such_a_marker_does_not_hang_the_read(
         self, tmp_path, kind
     ):
         """The legacy gate reaches the nested `.git` of every row it checks;
-        a row under a folder whose `.git` is a FIFO, or a link to one, is
-        refused, not waited on."""
+        a row under a folder whose `.git` is a FIFO is refused, not waited
+        on. A `.git` that is a link is refused by the gate's islink check
+        before any read; without that check the reader would refuse it too,
+        so that parameter fails only when both are gone, and it is a control
+        for the pair, not a test of the reader. Each run first shows, in its
+        own child, that a
+        row under a regular `.git` file naming the root's own submodule git
+        dir is read and kept, so the reader is shown to read."""
         assert_outside_repository(tmp_path)
         root = make_repo(tmp_path / "proj", remote="https://example.com/me/proj.git")
         sub = root / "vendor" / "pkg"
         sub.mkdir(parents=True)
         (sub / "a.py").write_text("x\n")
+        assert self._legacy_row_kept(tmp_path / "control", "own-submodule-file") == "True"
+        assert self._legacy_row_kept(tmp_path, kind, root, sub) == str(kind == "none")
+
+    @staticmethod
+    def _legacy_row_kept(tmp_path, kind, root=None, sub=None) -> str:
+        """Whether a legacy row under `sub` stays in the read scope, with
+        `sub/.git` made as `kind`, read in a child process."""
+        if root is None:
+            root = make_repo(tmp_path / "proj", remote="https://example.com/me/proj.git")
+            sub = root / "vendor" / "pkg"
+            sub.mkdir(parents=True)
+            (sub / "a.py").write_text("x\n")
         out = _in_child(
             "import os\nfrom pathlib import Path\n"
             "from scripts import memory_api\nfrom scripts.memory_api import PACTMemory\n"
@@ -2190,13 +2241,15 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
             " files=[str(sub / 'a.py')], sync_to_claude=False)\n"
             "if kind == 'fifo':\n    os.mkfifo(sub / '.git')\n"
             "elif kind == 'link':\n    os.mkfifo(sub / 'f')\n    (sub / '.git').symlink_to(sub / 'f')\n"
+            "elif kind == 'own-submodule-file':\n"
+            "    (sub / '.git').write_text('gitdir: ' + str((root / '.git' / 'modules' / 'pkg').resolve()) + chr(10))\n"
             "print(legacy in PACTMemory(db_path=db)._read_project_scopes())",
             str(root), str(sub), str(tmp_path / "m.db"), kind,
         )
-        # Control ("none"): with no `.git` below, the row is this project's.
-        # Otherwise the row is refused, the direction a check that cannot
-        # read the marker takes.
-        assert out.splitlines()[-1] == str(kind == "none")
+        # "none": with no `.git` below, the row is this project's. A FIFO or
+        # a link is refused, the direction a check that cannot read the
+        # marker takes.
+        return out.splitlines()[-1]
 
     def test_a_link_to_a_gitfile_naming_another_checkouts_git_dir_is_refused(
         self, tmp_path
