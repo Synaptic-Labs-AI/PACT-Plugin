@@ -762,8 +762,8 @@ class TestOperationalFactsClause:
          "the instruction to build the {head} clone, once, before both branches that use it")),
         ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone, never in the worktree, and do not report the worktree run: that clone's run stands for the diff, and any paths that differ between its status before and after the run follow the merge-base check below as reproduced paths", (
          "the moved-HEAD branch: one re-run in the {head} clone, never the worktree")),
-        ("If that clone cannot be built or the command cannot be run in it, report the result as unattributable because the worktree moved, not as a finding about the diff", (
-         "unattributable only when the {head} clone cannot be built or run")),
+        ("If the {head} clone cannot be built or the command cannot be run in it, after a moved HEAD or a status-only change alike, report the result as unattributable because the worktree changed, naming HEAD or the paths that changed, not as a finding about the diff", (
+         "unattributable only when the {head} clone cannot be built or run, after either re-run")),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path, in the {head} clone. Compare its status before and after", (
          "the status-only re-run in the {head} clone, same interpreter by absolute path")),
         ("If any of the paths that changed in the worktree also change there, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
@@ -782,6 +782,21 @@ class TestOperationalFactsClause:
     def test_operational_facts_token_present(self, token, lost):
         assert token in _clause("OPERATIONAL FACTS"), (
             f"the cold prompt's OPERATIONAL FACTS clause lost {lost} ({token!r})"
+        )
+
+    def test_unbuildable_clone_exit_follows_both_branches(self):
+        clause = _clause("OPERATIONAL FACTS")
+        moved = clause.find("If HEAD differs")
+        status_only = clause.find("If only the status differs")
+        exit_ = clause.find("If the {head} clone cannot be built")
+        assert -1 not in (moved, status_only, exit_) and moved < status_only < exit_, (
+            "the cold prompt's unattributable exit must follow both the moved-HEAD "
+            "and the status-only branches "
+            f"(positions moved={moved}, status-only={status_only}, exit={exit_})"
+        )
+        assert "cannot be built" not in clause[moved:status_only], (
+            "the cold prompt's unattributable exit sits inside the moved-HEAD "
+            "branch, where the status-only re-run does not reach it"
         )
 
     def test_head_clone_defined_before_first_use(self):

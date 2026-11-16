@@ -831,9 +831,11 @@ class TestRunReceiptAttribution:
       result, and only paths that differ between its status before and after
       the run go through the merge-base check; its own staged files are never
       read as written by the run.
-    - If that copy cannot be built or the command cannot be run in it, the
-      result is reported as unattributable, naming what moved and stating
-      the unmet exit-code precondition, and is not re-run again. That exit
+    - If the copy cannot be built or the command cannot be run in it, after
+      a moved HEAD or a status-only change alike (its own sub-bullet after
+      both branches), the result is reported as unattributable, naming what
+      moved and stating the unmet exit-code precondition, and is not re-run
+      again. That exit
       never takes paths the change copy reproduces: on any run, those follow
       the pre-existing and failure branches.
     - A status-only change is re-run with the same interpreter, by absolute
@@ -888,7 +890,7 @@ class TestRunReceiptAttribution:
          "the moved-HEAD branch: one re-run, in the change copy, never the worktree"),
         ("That copy's run is your result; any paths that differ between its status before and after the run follow the merge-base check below as reproduced paths.",
          "the moved-HEAD copy run as the result, its writes routed to the merge-base check"),
-        ("If that copy cannot be built or the command cannot be run in it, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
+        ("If the copy that holds your change cannot be built or the command cannot be run in it, after a moved `HEAD` or a status-only change alike, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
          "the stop: unattributable only when the copy cannot be built or run, naming what moved, with the unmet precondition stated"),
         ("This exit never applies to paths the copy that holds your change reproduces; on any run, those follow the pre-existing and failure branches below.",
          "a reproduced write never reaches the unattributable exit"),
@@ -1006,6 +1008,24 @@ class TestRunReceiptAttribution:
         assert sub.count("checked out at") == 1 and "merge base" not in sub[:fetch].replace("merge-base clone", ""), (
             f"the {self.REL_PATH} merge-base definition must not name the clone's "
             "commit before the fetch"
+        )
+
+    def test_unbuildable_copy_exit_follows_both_branches(self):
+        # The exit sits in its own sub-bullet after the status-only branch, so
+        # the moved-HEAD and status-only re-runs both reach it.
+        bullet = self._bullet()
+        moved = bullet.find("  - If `HEAD` differs")
+        status_only = bullet.find("  - If only the status differs")
+        exit_ = bullet.find("  - If the copy that holds your change cannot be built")
+        assert -1 not in (moved, status_only, exit_) and moved < status_only < exit_, (
+            f"the {self.REL_PATH} unattributable exit must be its own sub-bullet "
+            "after both the moved-HEAD and the status-only branches "
+            f"(positions moved={moved}, status-only={status_only}, exit={exit_})"
+        )
+        moved_sub = bullet[moved:status_only]
+        assert "cannot be built" not in moved_sub, (
+            f"the {self.REL_PATH} unattributable exit sits inside the moved-HEAD "
+            "branch, where the status-only re-run does not reach it"
         )
 
     def test_receipt_names_no_archive_export(self):
