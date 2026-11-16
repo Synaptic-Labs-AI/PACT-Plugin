@@ -850,24 +850,18 @@ def _git_rig(*args, cwd):
                    env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
 
 
-@pytest.mark.parametrize("changed", ["pact-plugin/tests/home_census.py",
-                                     "pact-plugin/tests/conftest.py",
-                                     "pact-plugin/conftest.py"])
-def test_a_change_to_the_census_or_conftest_selects_this_module_in_the_fast_suite(
-        tmp_path, changed):
-    """OUTCOME PIN. A change to the census, to the root conftest that wires it,
-    or to tests/conftest.py, re-selects this module in the fast suite. Runs on a
-    copy of the tracked tree in a fresh repository with no remote; the real
+@pytest.fixture(scope="module")
+def _tracked_tree_rig(tmp_path_factory):
+    """One copy of the tracked tree, committed as base in a fresh repository
+    with no remote, for every row of the selection pin below. The tree is about
+    29 MB, so a copy per row would write that much again for each row. The real
     checkout is only read."""
-    import importlib.util
-    import uuid
-
     root = Path(__file__).resolve().parents[2]
     if not (root / "scripts" / "fast_suite_selection.py").is_file():
         pytest.skip("SKIPPED, NOT PASSED: not a PACT source checkout, so there is no selector to ask")
     listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True, capture_output=True,
                             timeout=120).stdout.decode("utf-8").split("\0")
-    rig = tmp_path / "repo"
+    rig = tmp_path_factory.mktemp("selection") / "repo"
     for rel in filter(None, listed):
         source = root / rel
         if source.is_file() and not source.is_symlink():
@@ -879,6 +873,38 @@ def test_a_change_to_the_census_or_conftest_selects_this_module_in_the_fast_suit
     _git_rig("commit", "-qm", "base", cwd=rig)
     base = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rig, check=True, capture_output=True,
                           text=True, timeout=60).stdout.strip()
+    return rig, base
+
+
+@pytest.fixture
+def _rig_at_base(_tracked_tree_rig):
+    """The shared rig, reset to base so an earlier row's change and commit do
+    not reach this row. The selector reads base...HEAD, the blobs at those two
+    commits, and test files found by walking the tree; ignored files, such as
+    the __pycache__ its import leaves, are not test files, so clean keeps them."""
+    rig, base = _tracked_tree_rig
+    _git_rig("reset", "-q", "--hard", base, cwd=rig)
+    _git_rig("clean", "-fdq", cwd=rig)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=rig, check=True, capture_output=True,
+                          text=True, timeout=60).stdout.strip()
+    status = subprocess.run(["git", "status", "--porcelain", "--untracked-files=all"], cwd=rig,
+                            check=True, capture_output=True, text=True, timeout=120).stdout
+    assert (head, status) == (base, ""), "the shared rig is not at base before this row"
+    return rig, base
+
+
+@pytest.mark.parametrize("changed", ["pact-plugin/tests/home_census.py",
+                                     "pact-plugin/tests/conftest.py",
+                                     "pact-plugin/conftest.py"])
+def test_a_change_to_the_census_or_conftest_selects_this_module_in_the_fast_suite(
+        _rig_at_base, changed):
+    """OUTCOME PIN. A change to the census, to the root conftest that wires it,
+    or to tests/conftest.py, re-selects this module in the fast suite. Runs on
+    the shared copy of the tracked tree, reset to base for this row."""
+    import importlib.util
+    import uuid
+
+    rig, base = _rig_at_base
     # A name this module's source cannot contain, so the change reaches this
     # module only through how it depends on the changed file.
     probe = "_probe_" + uuid.uuid4().hex
