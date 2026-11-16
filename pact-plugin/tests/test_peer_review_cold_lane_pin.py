@@ -758,12 +758,14 @@ class TestOperationalFactsClause:
         ("Do not look for run instructions in the avoided paths", (
          "the bar on recovering run instructions from the avoided paths")),
         ("untracked docs/", "the path-convention fact (untracked docs/ is normal)"),
-        ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone described next, never in the worktree, and do not report the worktree run: that clone's run stands for the diff, and any paths that differ between its status before and after the run follow the merge-base check below as reproduced paths", (
+        ("The {head} clone is a clone of the repository with its remote removed, under {scratch_dir}, checked out at {head}", (
+         "the {head} clone defined once, before both branches that use it")),
+        ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone, never in the worktree, and do not report the worktree run: that clone's run stands for the diff, and any paths that differ between its status before and after the run follow the merge-base check below as reproduced paths", (
          "the moved-HEAD branch: one re-run in the {head} clone, never the worktree")),
         ("If that clone cannot be built or the command cannot be run in it, report the result as unattributable because the worktree moved, not as a finding about the diff", (
          "unattributable only when the {head} clone cannot be built or run")),
-        ("If only the status differs, re-run the same command with the same interpreter, by absolute path, in an isolated copy under {scratch_dir}: a clone of the repository with its remote removed, checked out at {head}. Compare its status before and after", (
-         "the isolated-copy re-run: same interpreter by absolute path, a remote-less clone at {head}")),
+        ("If only the status differs, re-run the same command with the same interpreter, by absolute path, in the {head} clone. Compare its status before and after", (
+         "the status-only re-run in the {head} clone, same interpreter by absolute path")),
         ("If any of the paths that changed in the worktree also change there, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
          "the base-control run at the merge base")),
         ("Decide each reproduced path on its own. A path that also appears there is a pre-existing defect: name it as pre-existing under the open questions, with the path and the command that wrote it, not as a finding about the diff", (
@@ -780,6 +782,18 @@ class TestOperationalFactsClause:
     def test_operational_facts_token_present(self, token, lost):
         assert token in _clause("OPERATIONAL FACTS"), (
             f"the cold prompt's OPERATIONAL FACTS clause lost {lost} ({token!r})"
+        )
+
+    def test_head_clone_defined_before_first_use(self):
+        clause = _clause("OPERATIONAL FACTS")
+        define = clause.find("The {head} clone is a clone of the repository")
+        first_branch = clause.find("If HEAD differs")
+        assert define != -1 and first_branch != -1 and define < first_branch, (
+            "the cold prompt must define the {head} clone before the moved-HEAD "
+            "branch, the first branch that uses it"
+        )
+        assert "described next" not in clause, (
+            "the cold prompt points forward to a clone it has not defined yet"
         )
 
     @pytest.mark.parametrize("token, lost", [
