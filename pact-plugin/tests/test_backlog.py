@@ -6137,17 +6137,53 @@ cat "$CANNED_PLAIN"
 """
 
 # (name, -z listing or REJECT/FAIL, plain listing, the answer: "records",
-# "unreadable" for a listing that cannot be read whole, or None for no listing)
+# "unreadable" for a listing that cannot be read whole, or None for no
+# listing). `{a}` and `{b}` are checkouts holding a `.git`, `{w}` a path that
+# does not exist, `{d}` a directory with no `.git`.
 _LISTINGS = [
-    ("nul", "worktree /a\0HEAD 1\0branch refs/heads/main\0\0worktree /b\nc\0HEAD 2\0detached\0\0",
+    ("nul", "worktree {a}\0HEAD 1\0branch refs/heads/main\0\0worktree {b}\nc\0HEAD 2\0detached\0\0",
      "", "records"),
     ("plain", "REJECT",
-     "worktree /a\nHEAD 1\nbranch refs/heads/main\n\nworktree /b\nHEAD 2\ndetached\n\n", "records"),
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {b}\nHEAD 2\ndetached\n\n", "records"),
     ("plain, a path holding a newline", "REJECT",
-     "worktree /a\nHEAD 1\n\nworktree /b\nc\nHEAD 2\n\n", "unreadable"),
-    ("plain, an unknown field", "REJECT", "worktree /a\nHEAD 1\nfoo bar\n\n", "unreadable"),
-    ("plain, a repeated field", "REJECT", "worktree /a\nHEAD 1\nHEAD 2\n\n", "unreadable"),
-    ("plain, a record not led by its path", "REJECT", "HEAD 1\nworktree /a\n\n", "unreadable"),
+     "worktree {a}\nHEAD 1\n\nworktree {b}\nc\nHEAD 2\n\n", "unreadable"),
+    ("plain, an unknown field", "REJECT", "worktree {a}\nHEAD 1\nfoo bar\n\n", "unreadable"),
+    ("plain, a repeated field", "REJECT", "worktree {a}\nHEAD 1\nHEAD 2\n\n", "unreadable"),
+    ("plain, a record not led by its path", "REJECT", "HEAD 1\nworktree {a}\n\n", "unreadable"),
+    ("plain, a bare main repository", "REJECT", "worktree {d}\nbare\n\n", "records"),
+    ("plain, a stale worktree git marks prunable", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nHEAD 2\nprunable gitdir file points to non-existent location\n\n",
+     "records"),
+    ("plain, a path cut before 'locked'", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nlocked\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'detached'", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\ndetached\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'bare'", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nbare\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'bare', the cut path a directory", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nbare\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'prunable', the cut path a directory", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nprunable\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'prunable', the cut path absent", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nprunable\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'locked', the cut path a checkout", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {b}\nlocked\nHEAD 2\n\n", "unreadable"),
+    ("plain, a record ended after its path", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {b}\n\n", "unreadable"),
+    ("plain, 'prunable' with no reason", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nHEAD 2\nprunable\n\n", "unreadable"),
+    ("plain, 'prunable' with no reason, on a checkout", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {b}\nHEAD 2\nprunable\n\n", "unreadable"),
+    ("plain, a bare record with a branch", "REJECT",
+     "worktree {d}\nbare\nbranch refs/heads/main\n\n", "unreadable"),
+    ("plain, every field git prints, in git's order", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\n"
+     "worktree {b}\nHEAD 2\ndetached\nlocked\n\n"
+     "worktree {a}\nHEAD 3\nbranch refs/heads/x\nlocked on a usb disk\n\n"
+     "worktree {w}\nHEAD 4\nbranch refs/heads/y\n"
+     "prunable gitdir file points to non-existent location\n\n", "records"),
+    ("plain, a bare main repository with a worktree", "REJECT",
+     "worktree {d}\nbare\n\nworktree {b}\nHEAD 2\nbranch refs/heads/x\n\n", "records"),
     ("no listing", "FAIL", "", None),
 ]
 
@@ -6179,6 +6215,11 @@ def test_the_worktree_listing_is_read_as_the_memory_skill_reads_it(
     the same listings: one a reader could not hold whole is no listing."""
     from scripts import memory_api
 
+    paths = {name: tmp_path / name for name in "abwd"}
+    for name in "ab":
+        (paths[name] / ".git").mkdir(parents=True)
+    paths["d"].mkdir()
+    nul, plain = (text.format(**paths) for text in (nul, plain))
     _canned_git(tmp_path, monkeypatch, nul, plain)
     ours = backlog._worktree_records(["-C", str(tmp_path)])
     theirs = memory_api._worktree_records(["-C", str(tmp_path)])
@@ -6213,3 +6254,49 @@ def test_without_nul_a_path_holding_a_newline_records_no_worktree(tmp_path, monk
     (tmp_path / "w").mkdir()
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path / "main")
     assert backlog.checkout_roots() == [str(tmp_path / "main")]
+
+
+def test_without_nul_every_layout_git_lists_still_reads(tmp_path, monkeypatch):
+    """On a git that rejects `-z`, real listings of every record shape git
+    prints read whole in both readers: a branch, a detached HEAD, a lock with
+    and without a reason, a moved worktree git marks prunable, and a bare
+    main repository."""
+    import os
+    import shutil
+    import stat
+
+    from scripts import memory_api
+
+    real_git = shutil.which("git")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        '#!/bin/sh\nfor a in "$@"; do [ "$a" = "-z" ] && exit 129; done\n'
+        f'exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+
+    def git(*args, cwd):
+        subprocess.run([real_git, *args], cwd=cwd, check=True, capture_output=True)
+
+    main = _repo(tmp_path / "main")
+    git("worktree", "add", "-q", str(tmp_path / "branch"), "-b", "b1", cwd=main)
+    git("worktree", "add", "-q", "--detach", str(tmp_path / "detached"), cwd=main)
+    git("worktree", "add", "-q", str(tmp_path / "locked"), "-b", "b2", cwd=main)
+    git("worktree", "lock", str(tmp_path / "locked"), cwd=main)
+    git("worktree", "add", "-q", str(tmp_path / "locked-why"), "-b", "b3", cwd=main)
+    git("worktree", "lock", "--reason", "on a usb disk", str(tmp_path / "locked-why"), cwd=main)
+    git("worktree", "add", "-q", str(tmp_path / "moved"), "-b", "b4", cwd=main)
+    (tmp_path / "moved").rename(tmp_path / "moved-away")
+    bare = tmp_path / "bare.git"
+    git("clone", "-q", "--bare", str(main), str(bare), cwd=tmp_path)
+    git("worktree", "add", "-q", str(tmp_path / "bare-wt"), "b1", cwd=bare)
+
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    for where, count in ((main, 6), (bare, 2)):
+        ours = backlog._worktree_records(["-C", str(where)])
+        theirs = memory_api._worktree_records(["-C", str(where)])
+        assert ours == theirs, (where, ours, theirs)
+        assert isinstance(ours, list) and len(ours) == count, (where, ours)

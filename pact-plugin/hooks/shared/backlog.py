@@ -372,10 +372,16 @@ def project_root() -> Path:
 # `git worktree list` rejects `-z` on a git older than 2.36 with this exit.
 _GIT_USAGE_ERROR = 129
 
-# The fields `git worktree list --porcelain` prints, one per line: a key and
-# a value, or a bare flag.
-_PORCELAIN_KEYS = ("worktree ", "HEAD ", "branch ", "locked ", "prunable ")
-_PORCELAIN_FLAGS = ("bare", "detached", "locked", "prunable")
+# The fields `git worktree list --porcelain` prints, one per line, each a
+# key and a value (ending in a space here) or a bare flag, with its place
+# in the order git prints a record (builtin/worktree.c,
+# show_worktree_porcelain): `worktree`, then `bare` or `HEAD`, then
+# `detached` or `branch`, then `locked`, then `prunable`, which git prints
+# only with a reason.
+_PORCELAIN_ORDER = (
+    ("worktree ", 0), ("bare", 1), ("HEAD ", 1), ("detached", 2),
+    ("branch ", 2), ("locked", 3), ("locked ", 3), ("prunable ", 4),
+)
 
 
 # `_worktree_records`' answer for a listing git printed that cannot be read
@@ -393,9 +399,10 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
     rejects `-z` as a usage error, and the listing is asked again without
     it. That listing is one field per line, with a blank line ending each
     record, and git prints a path there unquoted, so a path holding a newline
-    cannot be read whole: any line that is not a porcelain field, a record
-    that does not start with its `worktree` line, or a field repeated in one
-    record makes the listing unreadable: `UNREADABLE_LISTING`, not records.
+    cannot be read whole: a record whose lines are not git's fields in git's
+    order (`_plain_record_fields_in_order`), or whose path does not hold
+    what git lists there (`_plain_record_path_holds`), makes the listing
+    unreadable: `UNREADABLE_LISTING`, not records.
     None is a failed or timed-out git. A caller reads neither as an empty
     listing.
 
@@ -428,15 +435,57 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
     if current:
         records.append(current)
     if not nul:
-        for record in records:
-            keys = [
-                field if field in _PORCELAIN_FLAGS
-                else next((key for key in _PORCELAIN_KEYS if field.startswith(key)), None)
-                for field in record
-            ]
-            if None in keys or keys[0] != "worktree " or len(set(keys)) != len(keys):
+        for index, record in enumerate(records):
+            if not (
+                _plain_record_fields_in_order(record)
+                and _plain_record_path_holds(index, record)
+            ):
                 return UNREADABLE_LISTING
     return records
+
+
+def _plain_record_fields_in_order(record: List[str]) -> bool:
+    """Whether a record of a listing without `-z` holds only fields git
+    prints, in the order git prints them (`_PORCELAIN_ORDER`).
+
+    git prints a record's `worktree` line first and its `bare` or `HEAD`
+    line second. A path cut at a newline puts the rest of the folder name
+    between those two lines, or ends the record after the `worktree` line,
+    so its record is refused here.
+    """
+    places = []
+    for field in record:
+        place = next(
+            (
+                rank for key, rank in _PORCELAIN_ORDER
+                if (field.startswith(key) if key.endswith(" ") else field == key)
+            ),
+            None,
+        )
+        if place is None:
+            return False
+        places.append(place)
+    if places[:2] != [0, 1] or any(a >= b for a, b in zip(places, places[1:])):
+        return False
+    return record[1] != "bare" or 2 not in places
+
+
+def _plain_record_path_holds(index: int, record: List[str]) -> bool:
+    """Whether a record of a listing without `-z` names a path as git lists
+    it, so a path cut at a newline is caught: one stat, no git call.
+
+    The main repository's record may say `bare`, and then its path must be a
+    directory. A record git marks `prunable` may name a path that does not
+    exist (git marks a worktree whose folder is gone). Any other path must
+    hold a `.git`.
+    """
+    path = record[0][len("worktree "):]
+    if "bare" in record:
+        return index == 0 and os.path.isdir(path)
+    if os.path.lexists(os.path.join(path, ".git")):
+        return True
+    prunable = any(field.startswith("prunable ") for field in record)
+    return prunable and not os.path.lexists(path)
 
 
 def checkout_roots() -> List[str]:
