@@ -1216,3 +1216,48 @@ def test_the_observed_order_check_refuses_a_wrong_order():
     assert _observed_order_problems([_STATUS_RAISERS[0], _BINDING, *_STATUS_RAISERS[1:],
                                      _RECORDER])
     assert _observed_order_problems([*_STATUS_RAISERS, _RECORDER])
+
+
+def test_the_observed_order_check_refuses_a_recorder_that_is_not_last_on_its_own():
+    """MUTANT: the 'not the last call' check is dropped. Every census is before
+    the binding here, so that check alone refuses the sequence."""
+    calls = [*_STATUS_RAISERS, _RECORDER, _BINDING]
+    assert _observed_order_problems(calls) == [
+        "the recorder was not the suite's last sessionfinish call: %s" % calls]
+
+
+def _computed_order_config(called, recorder=True):
+    """A config whose sessionfinish implementations pytest would call in the
+    order `called` (plugin-relative files), the recorder among them as the
+    'full-run-record' plugin when `recorder` is true."""
+    plugins = {where: SimpleNamespace(__file__=str(_PLUGIN_ROOT / where)) for where in called}
+    impls = [SimpleNamespace(plugin=plugins[where], hookwrapper=False, wrapper=False)
+             for where in called]
+    hook = SimpleNamespace(pytest_sessionfinish=SimpleNamespace(
+        get_hookimpls=lambda: list(reversed(impls))))  # pluggy lists last-called first
+    manager = SimpleNamespace(get_plugin=lambda name: (
+        plugins.get(_RECORDER) if name == "full-run-record" and recorder else None))
+    return SimpleNamespace(pluginmanager=manager, hook=hook)
+
+
+@pytest.mark.parametrize("called, expected", [
+    ([*_STATUS_RAISERS, _BINDING, _RECORDER], []),
+    ([*_STATUS_RAISERS, _RECORDER, _BINDING],
+     ["%s's sessionfinish runs after the recorder's" % _BINDING]),
+    ([_STATUS_RAISERS[0], _BINDING, *_STATUS_RAISERS[1:], _RECORDER],
+     ["%s's sessionfinish runs after the CI binding's" % member
+      for member in sorted(_STATUS_RAISERS[1:])]),
+    ([*_STATUS_RAISERS[:2], _BINDING, _RECORDER],
+     ["%s registers no sessionfinish hook in this process" % _STATUS_RAISERS[2]]),
+], ids=["in-order", "binding-after-recorder", "census-after-binding", "census-missing"])
+def test_the_computed_order_check_refuses_each_wrong_order(called, expected):
+    """MUTANTS: each of the computed check's three refusals is dropped in turn
+    (after the recorder, after the binding, a missing member); each row names
+    exactly one of them."""
+    assert _sessionfinish_order_problems(_computed_order_config(called)) == expected
+
+
+def test_the_computed_order_check_refuses_a_missing_recorder():
+    config = _computed_order_config([*_STATUS_RAISERS, _BINDING, _RECORDER], recorder=False)
+    assert _sessionfinish_order_problems(config) == [
+        "the full-run-record plugin is not registered"]

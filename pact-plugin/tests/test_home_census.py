@@ -324,6 +324,18 @@ def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census
     assert "test_the_census_is_live" in line and "child [%s]" % shown in line, line
 
 
+@pytest.mark.parametrize("length, shown_length", [(199, 199), (200, 200), (201, 200),
+                                                  (450, 200)])
+def test_a_launch_is_shown_cut_to_200_characters(length, shown_length):
+    """MUTANTS: the cap is dropped, or moved off 200. A launch text at the cap
+    is shown whole; a longer one is cut to the cap."""
+    argv = ["x" * (length - 3), "-c"]  # joined with a space: exactly `length` characters
+    text = " ".join(argv)
+    assert len(text) == length
+    assert census._shown(argv) == text[:shown_length]
+    assert len(census._shown(argv)) == shown_length
+
+
 class _Reporter:
     def __init__(self):
         self.lines = []
@@ -844,10 +856,50 @@ def test_a_session_with_or_without_the_tests_conftest_has_one_census(tmp_path, p
     assert rc == 1, output
 
 
+# Variables that point git at another repository, index or object store. A
+# shell that exports one (a git hook, `git rebase --exec`, a developer's own
+# setup) would otherwise make the rig's commands act on that repository.
+_GIT_LOCATORS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
+                 "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
+                 "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX")
+
+
+def _git_rig_env():
+    env = {key: value for key, value in os.environ.items() if key not in _GIT_LOCATORS}
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    return env
+
+
 def _git_rig(*args, cwd):
     subprocess.run(["git", "-c", "user.name=rig", "-c", "user.email=rig@invalid", *args],
-                   cwd=cwd, check=True, capture_output=True, timeout=120,
-                   env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"})
+                   cwd=cwd, check=True, capture_output=True, timeout=120, env=_git_rig_env())
+
+
+def test_the_git_rig_ignores_a_repository_the_shell_points_git_at(tmp_path, monkeypatch):
+    """MUTANT: _git_rig passes the shell's GIT_DIR, GIT_WORK_TREE and
+    GIT_INDEX_FILE through. The rig then commits into the decoy repository and
+    leaves its own directory without one."""
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    subprocess.run(["git", "init", "-q", str(decoy)], check=True, capture_output=True,
+                   timeout=60, env=_git_rig_env())
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "a.txt").write_text("a\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_DIR", str(decoy / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(decoy))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(decoy / ".git" / "index"))
+    _git_rig("init", "-q", cwd=rig)
+    _git_rig("add", "-A", cwd=rig)
+    _git_rig("commit", "-qm", "base", cwd=rig)
+    assert (rig / ".git" / "HEAD").is_file()
+    clean = _git_rig_env()
+    log = subprocess.run(["git", "log", "--oneline"], cwd=rig, capture_output=True, text=True,
+                         timeout=60, env=clean)
+    assert log.returncode == 0 and log.stdout.count("\n") == 1, log
+    decoy_log = subprocess.run(["git", "log", "--oneline"], cwd=decoy, capture_output=True,
+                               text=True, timeout=60, env=clean)
+    assert decoy_log.returncode != 0, ("the decoy repository received a commit", decoy_log.stdout)
 
 
 @pytest.fixture(scope="module")

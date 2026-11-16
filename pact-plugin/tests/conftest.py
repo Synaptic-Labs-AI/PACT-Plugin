@@ -14,9 +14,11 @@ symbols); pytest-fixture-injected symbols would need a conftest
 re-export to be discoverable, but none are currently defined there.
 """
 
+import atexit
 import functools
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,7 +45,27 @@ if not os.environ.get("HF_HOME"):
         os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")),
         "huggingface",
     )
-_SESSION_HOME_DIR = tempfile.mkdtemp(prefix="pact-home-suite-")
+_CREATOR_PID = os.getpid()
+
+
+def _remove_own_dir(path):
+    """Remove a directory this process created. A process forked from this one
+    inherits the exit handler and must not remove its parent's directory."""
+    if os.getpid() == _CREATOR_PID:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _process_temp_dir(prefix):
+    """A temporary directory this process removes when it exits. Each process
+    that loads this conftest (a serial session, an xdist controller and each of
+    its workers, a session that errors at collection) runs its exit handlers,
+    so none leaves its directory behind; a worker that crashes does."""
+    path = tempfile.mkdtemp(prefix=prefix)
+    atexit.register(_remove_own_dir, path)
+    return path
+
+
+_SESSION_HOME_DIR = _process_temp_dir("pact-home-suite-")
 os.makedirs(os.path.join(_SESSION_HOME_DIR, ".claude"))
 os.environ["HOME"] = _SESSION_HOME_DIR
 os.environ.pop("CLAUDE_CONFIG_DIR", None)
@@ -147,9 +169,7 @@ import validate_handoff  # noqa: E402, F401
 _MEMORY_DIR_ENV = "PACT_TEST_MEMORY_DIR"
 
 # Session-wide fallback store, created once and reused. See pytest_configure.
-_SESSION_MEMORY_DIR = os.path.join(
-    tempfile.mkdtemp(prefix="pact-memory-suite-"), "pact-memory"
-)
+_SESSION_MEMORY_DIR = os.path.join(_process_temp_dir("pact-memory-suite-"), "pact-memory")
 
 
 def pytest_configure(config):

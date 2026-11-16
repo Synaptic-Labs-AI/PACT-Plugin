@@ -705,6 +705,24 @@ def test_the_suite_conftest_collects_the_workers_findings(request, monkeypatch, 
     assert census._state["workers"] == [4343434]
 
 
+def test_the_suite_conftest_fails_the_session_through_the_census(request, monkeypatch,
+                                                                  tmp_path):
+    """MUTANT: tests/conftest.py's pytest_sessionfinish stops calling the
+    census's finish(), so a sweep whose child ran on the real clock passes."""
+    suite = Path(__file__).resolve().with_name("conftest.py")
+    plugins = [p for p in request.config.pluginmanager.get_plugins()
+               if getattr(p, "__file__", None) and Path(p.__file__).resolve() == suite]
+    assert len(plugins) == 1, plugins
+    _fresh_census(monkeypatch, tmp_path, misses=["t::c (call): python3 -c pass -- x"])
+    lines = []
+    session = SimpleNamespace(exitstatus=0, config=SimpleNamespace(pluginmanager=SimpleNamespace(
+        get_plugin=lambda name: SimpleNamespace(write_line=lines.append, write=lines.append,
+                                                _tw=SimpleNamespace(width_of_current_line=0)))))
+    plugins[0].pytest_sessionfinish(session=session)
+    assert session.exitstatus == 1, lines
+    assert "  t::c (call): python3 -c pass -- x" in lines, lines
+
+
 def _git_rig(*args, cwd):
     subprocess.run(["git", "-c", "user.name=rig", "-c", "user.email=rig@invalid", *args],
                    cwd=cwd, check=True, capture_output=True, timeout=120)
