@@ -1093,33 +1093,96 @@ def _sessionfinish_order_problems(config):
 
 def test_the_recorder_reads_the_status_after_every_suite_sessionfinish_hook(request):
     """In this process (an xdist worker under the suite's own -n runs, else the
-    only process), every sessionfinish hook loaded from under pact-plugin/ runs
-    before the recorder's, so the status the censuses and the CI binding raise
-    is the one it records, and before the CI binding's, so its note names the
-    status the censuses left."""
+    only process), every sessionfinish hook loaded from under pact-plugin/ is
+    ordered before the recorder's, and before the CI binding's, so the status
+    the censuses raise is the one both read. This row COMPUTES the order from
+    the registrations of the suite's own running session, which the probe below
+    cannot see; the probe below is the one that OBSERVES pytest's call order."""
     assert _sessionfinish_order_problems(request.config) == []
 
 
-_ORDER_PROBE = '''
+# A plugin for a real child session. Once every sessionfinish implementation is
+# registered it wraps each one (not the wrappers, which take no turn) with a spy
+# that records the implementation's file as it is called, so the order is the
+# one pytest really calls them in, never one worked out from the registrations.
+# The spy replaces pluggy's HookImpl.function, the attribute pluggy 1.x's
+# _multicall reads at call time (`hook_impl.function(*args)`); a pluggy that
+# stopped reading it would record no call, and the test's member check fails.
+_ORDER_PROBE = """
 import json
 import os
+import sys
+from pathlib import Path
 
 import pytest
+
+_CALLS = []
+_ROOT = Path(os.environ["PACT_ORDER_PROBE_ROOT"]).resolve()
+
+
+def _where(plugin):
+    name = getattr(plugin, "__file__", None) or getattr(
+        sys.modules.get(type(plugin).__module__), "__file__", None)
+    if not name:
+        return "<unknown>"
+    path = Path(name).resolve()
+    return path.relative_to(_ROOT).as_posix() if _ROOT in path.parents else "<outside>"
+
+
+def _spy(function, where):
+    def spy(*args, **kwargs):
+        _CALLS.append(where)
+        return function(*args, **kwargs)
+    return spy
 
 
 @pytest.hookimpl(trylast=True)
 def pytest_sessionstart(session):
-    import test_ci_full_run_record as pins
+    for impl in session.config.hook.pytest_sessionfinish.get_hookimpls():
+        if not (impl.hookwrapper or getattr(impl, "wrapper", False)):
+            impl.function = _spy(impl.function, _where(impl.plugin))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_sessionfinish(session):
+    yield
     where = getattr(session.config, "workerinput", {}).get("workerid", "controller")
     path = os.path.join(os.environ["PACT_ORDER_PROBE_DIR"], where + ".json")
     with open(path, "w", encoding="utf-8") as handle:
-        json.dump(pins._sessionfinish_order_problems(session.config), handle)
-'''
+        json.dump(_CALLS, handle)
+"""
+
+# The sessionfinish implementations that raise the exit status (the clock-shift
+# census through tests/conftest.py, the HOME and child-pytest censuses through
+# their Plugins), the CI binding that names the status they left, and the
+# recorder that must read it last.
+_STATUS_RAISERS = ("tests/conftest.py", "tests/home_census.py", "tests/child_pytest_census.py")
+_BINDING = "tests/ci_environment_binding.py"
+_RECORDER = "tests/ci_full_run_record.py"
+
+
+def _observed_order_problems(calls):
+    """Why an observed sessionfinish call sequence would not let the recorder
+    read the final status, or the CI binding name it. Reads only the calls."""
+    suite = [where for where in calls if not where.startswith("<")]
+    problems = ["%s was called %d time(s), not once" % (member, suite.count(member))
+                for member in (*_STATUS_RAISERS, _BINDING, _RECORDER)
+                if suite.count(member) != 1]
+    if problems:
+        return problems
+    if suite[-1] != _RECORDER:
+        problems.append("the recorder was not the suite's last sessionfinish call: %s" % suite)
+    binding = suite.index(_BINDING)
+    problems += ["%s was called after the CI binding" % member
+                 for member in _STATUS_RAISERS if suite.index(member) > binding]
+    return problems
 
 
 def test_the_recorder_reads_the_status_last_on_the_controller_and_a_worker(tmp_path):
-    """A real `-n 1` session rooted at the plugin: on the controller and on its
-    worker, every suite sessionfinish hook runs before the recorder's."""
+    """A real `-n 1` session rooted at the plugin. On the controller and on its
+    worker, the observed sessionfinish calls put every status-raising census
+    before the CI binding and the recorder last among the suite's calls. The
+    order is watched as pytest calls the implementations, not computed."""
     pytest.importorskip("xdist")
     (tmp_path / "pact_order_probe.py").write_text(_ORDER_PROBE, encoding="utf-8")
     results = tmp_path / "results"
@@ -1129,6 +1192,7 @@ def test_the_recorder_reads_the_status_last_on_the_controller_and_a_worker(tmp_p
            and key not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
     env["PACT_ORDER_PROBE_DIR"] = str(results)
+    env["PACT_ORDER_PROBE_ROOT"] = str(_PLUGIN_ROOT)
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
          "-n", "1", "-p", "pact_order_probe", "tests/test_session_home_sandbox.py"],
@@ -1137,4 +1201,18 @@ def test_the_recorder_reads_the_status_last_on_the_controller_and_a_worker(tmp_p
     assert proc.returncode == 0, output
     found = {path.stem: json.loads(path.read_text(encoding="utf-8"))
              for path in results.glob("*.json")}
-    assert found == {"controller": [], "gw0": []}, (found, output)
+    assert sorted(found) == ["controller", "gw0"], (found, output)
+    problems = {where: _observed_order_problems(calls) for where, calls in found.items()}
+    assert problems == {"controller": [], "gw0": []}, (problems, found)
+
+
+def test_the_observed_order_check_refuses_a_wrong_order():
+    """The observed-order check fails a sequence with the recorder before a
+    census, the binding before a census, or a member missing."""
+    good = ["<outside>", "conftest.py", *_STATUS_RAISERS, _BINDING, _RECORDER]
+    assert _observed_order_problems(good) == []
+    assert _observed_order_problems([*_STATUS_RAISERS[:2], _BINDING, _RECORDER,
+                                     _STATUS_RAISERS[2]])
+    assert _observed_order_problems([_STATUS_RAISERS[0], _BINDING, *_STATUS_RAISERS[1:],
+                                     _RECORDER])
+    assert _observed_order_problems([*_STATUS_RAISERS, _RECORDER])
