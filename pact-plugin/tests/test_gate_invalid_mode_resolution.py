@@ -287,21 +287,44 @@ def _yields_inside_helper(fixture):
         for node in ast.walk(fixture))
 
 
-def _environ_writes(tree, fixture):
-    """Line numbers where ``fixture`` writes os.environ, under any name the
-    module binds it to: ``import os as o``, ``from os import environ [as e]``,
-    or a plain assignment such as ``env = os.environ``."""
+def _environ_writes(tree, fixture, module_name=None):
+    """Line numbers where ``fixture`` writes the process environment, under any
+    name the module binds os or os.environ to: ``import os as o``, ``from os
+    import environ [as e]``, or a plain assignment such as ``env = os.environ``.
+
+    A write is a mutating call on environ (pop, popitem, clear, update,
+    setdefault), a subscript assignment or delete, ``environ |= ...``, an
+    assignment to ``os.environ`` itself, or a call to ``os.putenv`` or
+    ``os.unsetenv`` (also from-imported). A call from the fixture to a function
+    defined in the same file counts when that function writes, one level deep,
+    and is reported at the call's line in the fixture. The calls followed are
+    ``f()`` for a module-level function, ``m.f()`` where ``m`` is this file
+    imported by ``import <module_name> [as m]``, ``C.f()`` for a module-level
+    class ``C``, and ``self.f()`` for a method of the class that holds the
+    fixture, read as the fixture's first parameter.
+
+    Not seen: writes through monkeypatch.setenv or delenv; a helper two or more
+    calls deep, or one defined in another module; a method inherited from a
+    base class, or reached through super(); a function or method reached
+    through getattr, sys.modules, a dotted import path or a from-import of this
+    file; and os or os.environ reached through getattr, sys.modules or a
+    parameter."""
     os_names = {"os"} | {alias.asname for node in ast.walk(tree)
                          if isinstance(node, ast.Import)
                          for alias in node.names if alias.name == "os" and alias.asname}
-    environ_names = {alias.asname or alias.name for node in ast.walk(tree)
-                     if isinstance(node, ast.ImportFrom) and node.module == "os"
-                     for alias in node.names if alias.name == "environ"}
+    from_os = {alias.asname or alias.name: alias.name for node in ast.walk(tree)
+               if isinstance(node, ast.ImportFrom) and node.module == "os"
+               for alias in node.names}
+    environ_names = {name for name, imported in from_os.items() if imported == "environ"}
+    env_setters = {name for name, imported in from_os.items()
+                   if imported in ("putenv", "unsetenv")}
+
+    def is_os_environ(node):
+        return (isinstance(node, ast.Attribute) and node.attr == "environ"
+                and isinstance(node.value, ast.Name) and node.value.id in os_names)
 
     def is_environ(node):
-        return (isinstance(node, ast.Name) and node.id in environ_names) or (
-            isinstance(node, ast.Attribute) and node.attr == "environ"
-            and isinstance(node.value, ast.Name) and node.value.id in os_names)
+        return (isinstance(node, ast.Name) and node.id in environ_names) or is_os_environ(node)
 
     while True:
         rebound = {target.id for node in ast.walk(tree)
@@ -311,15 +334,52 @@ def _environ_writes(tree, fixture):
             break
         environ_names |= rebound
 
-    return [node.lineno for node in ast.walk(fixture) if (
-        isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-        and node.func.attr in ("pop", "popitem", "clear", "update", "setdefault")
-        and is_environ(node.func.value)
-    ) or (
-        isinstance(node, (ast.Assign, ast.Delete))
-        and any(isinstance(target, ast.Subscript) and is_environ(target.value)
-                for target in getattr(node, "targets", []))
-    )]
+    def writes(node):
+        if isinstance(node, ast.Call):
+            func = node.func
+            return (isinstance(func, ast.Attribute) and (
+                (func.attr in ("pop", "popitem", "clear", "update", "setdefault")
+                 and is_environ(func.value))
+                or (func.attr in ("putenv", "unsetenv") and isinstance(func.value, ast.Name)
+                    and func.value.id in os_names))
+            ) or (isinstance(func, ast.Name) and func.id in env_setters)
+        if isinstance(node, ast.AugAssign):
+            return is_environ(node.target)
+        if isinstance(node, (ast.Assign, ast.Delete)):
+            return any((isinstance(target, ast.Subscript) and is_environ(target.value))
+                       or is_os_environ(target)
+                       for target in node.targets)
+        return False
+
+    def functions(body):
+        return {node.name: node for node in body
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not fixture}
+
+    helpers = functions(tree.body)
+    classes = {node.name: functions(node.body) for node in tree.body if isinstance(node, ast.ClassDef)}
+    own = next((node for node in ast.walk(tree)
+                if isinstance(node, ast.ClassDef) and fixture in node.body), None)
+    receiver = fixture.args.args[0].arg if own is not None and fixture.args.args else None
+    this_file = {alias.asname or alias.name for node in ast.walk(tree) if isinstance(node, ast.Import)
+                 for alias in node.names if module_name and alias.name == module_name}
+
+    def target(call):
+        func = call.func
+        if isinstance(func, ast.Name):
+            return helpers.get(func.id)
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            owner = func.value.id
+            if owner in this_file:
+                return helpers.get(func.attr)
+            if owner == receiver:
+                return functions(own.body).get(func.attr)
+            return classes.get(owner, {}).get(func.attr)
+        return None
+
+    return sorted({node.lineno for node in ast.walk(fixture) if writes(node) or (
+        isinstance(node, ast.Call) and (helper := target(node)) is not None
+        and any(writes(inner) for inner in ast.walk(helper))
+    )})
 
 
 class TestTeardownRestoresAmbientModes:
@@ -368,7 +428,7 @@ class TestTeardownRestoresAmbientModes:
         assert _reloads_every_gate_read(tree, fixture), (
             f"{module_file}: the helper must name every gate mode variable and module "
             f"{_gate_import_reads()}, but names {_helper_arguments(tree, fixture)}")
-        writes = _environ_writes(tree, fixture)
+        writes = _environ_writes(tree, fixture, Path(module_file).stem)
         assert not writes, f"{module_file}: the fixture writes os.environ at lines {writes}"
 
     @pytest.mark.parametrize("module_file", [
@@ -394,7 +454,8 @@ class TestTeardownRestoresAmbientModes:
         assert _reloads_every_gate_read(tree, fixture), (
             f"{module_file}: the helper must name every gate mode variable and module "
             f"{_gate_import_reads()}, but names {_helper_arguments(tree, fixture)}")
-        assert not _environ_writes(tree, fixture), f"{module_file}: the fixture writes os.environ"
+        assert not _environ_writes(tree, fixture, Path(module_file).stem), (
+            f"{module_file}: the fixture writes os.environ")
 
     def test_the_gate_reads_the_pins_compare_against_are_real(self):
         """The variables and modules the two fixture pins require come from the
@@ -419,11 +480,87 @@ class TestTeardownRestoresAmbientModes:
         tree = ast.parse(source)
         assert _environ_writes(tree, _restore_fixture(tree)) == [4]
 
+    @pytest.mark.parametrize("source", [
+        "import os\n"
+        "def _restore_gate_modules():\n    yield\n    os.environ |= {'X': 'warn'}\n",
+        "import os\n"
+        "def _restore_gate_modules():\n    yield\n    os.environ = {}\n",
+        "import os\n"
+        "def _restore_gate_modules():\n    yield\n    os.putenv('X', 'warn')\n",
+        "import os\n"
+        "def _restore_gate_modules():\n    yield\n    os.unsetenv('X')\n",
+        "from os import unsetenv as drop\n"
+        "def _restore_gate_modules():\n    yield\n    drop('X')\n",
+        "import os\n"
+        "def _set():\n    os.environ['X'] = 'warn'\n"
+        "def _restore_gate_modules():\n    _set()\n    yield\n",
+        "import os\nimport rig as m\n"
+        "def _set():\n    os.environ['X'] = 'warn'\n"
+        "def _restore_gate_modules():\n    m._set()\n    yield\n",
+        "import os\n"
+        "class T:\n    @staticmethod\n    def _set():\n        os.environ['X'] = 'warn'\n"
+        "def _restore_gate_modules():\n    T._set()\n    yield\n",
+        "import os\n"
+        "class T:\n    def _set(self):\n        os.environ['X'] = 'warn'\n"
+        "    def _restore_gate_modules(self):\n        self._set()\n        yield\n",
+    ], ids=["or-equals", "rebinding-os-environ", "putenv", "unsetenv",
+            "from-imported-unsetenv", "helper-one-level", "helper-through-this-module",
+            "helper-through-a-module-class", "helper-through-self"])
+    def test_the_write_check_sees_each_write_form(self, source):
+        """Each form changes the process environment, so each must count, at the
+        fixture's own line for a helper's write."""
+        tree = ast.parse(source)
+        fixture = _restore_fixture(tree)
+        expected = [fixture.lineno + (1 if "_set" in source else 2)]
+        assert _environ_writes(tree, fixture, "rig") == expected
+
     def test_the_write_check_ignores_a_read(self):
         source = ("from os import environ\n"
                   "def _restore_gate_modules():\n    environ.get('X')\n    yield\n")
         tree = ast.parse(source)
         assert _environ_writes(tree, _restore_fixture(tree)) == []
+
+    @pytest.mark.parametrize("source", [
+        "from os import environ\n"
+        "def _restore_gate_modules():\n    environ = {}\n    yield\n",
+        "import os\n"
+        "def _read():\n    return os.environ.get('X')\n"
+        "def _restore_gate_modules():\n    _read()\n    yield\n",
+        "import os\n"
+        "def _set():\n    os.environ['X'] = 'warn'\n"
+        "def _via():\n    _set()\n"
+        "def _restore_gate_modules():\n    _via()\n    yield\n",
+        "import os\n"
+        "class Other:\n    def _set(self):\n        return 1\n"
+        "def _set():\n    os.environ['X'] = 'warn'\n"
+        "def _restore_gate_modules(other):\n    other._set()\n    yield\n",
+        "import os\n"
+        "class B:\n    def _set(self):\n        os.environ['X'] = 'warn'\n"
+        "class T(B):\n    def _restore_gate_modules(self):\n        self._set()\n        yield\n",
+        "import os\n"
+        "class B:\n    def _set(self):\n        os.environ['X'] = 'warn'\n"
+        "class T(B):\n    def _restore_gate_modules(self):\n        super()._set()\n        yield\n",
+        "import os\n"
+        "class T:\n    def _set(self):\n        os.environ['X'] = 'warn'\n"
+        "    def _restore_gate_modules(self):\n        getattr(self, '_set')()\n        yield\n",
+        "import os\nimport sys\n"
+        "def _set():\n    os.environ['X'] = 'warn'\n"
+        "def _restore_gate_modules():\n    sys.modules[__name__]._set()\n    yield\n",
+        "import os\nimport tests.rig\n"
+        "def _set():\n    os.environ['X'] = 'warn'\n"
+        "def _restore_gate_modules():\n    tests.rig._set()\n    yield\n",
+        "import os\nfrom tests import rig\n"
+        "def _set():\n    os.environ['X'] = 'warn'\n"
+        "def _restore_gate_modules():\n    rig._set()\n    yield\n",
+    ], ids=["rebinding-a-local-name", "helper-that-reads", "helper-two-levels-deep",
+            "same-named-method-on-another-object", "inherited-method", "super-call",
+            "getattr-method", "sys-modules", "dotted-import-path", "from-import-of-this-file"])
+    def test_the_write_check_does_not_count_these(self, source):
+        """Rebinding a local name, calling a reading helper and calling another
+        object's method write nothing. The rest are the named blind spots,
+        pinned as not seen."""
+        tree = ast.parse(source)
+        assert _environ_writes(tree, _restore_fixture(tree), "rig") == []
 
 
 class TestNoTestLeavesAGateReloaded:

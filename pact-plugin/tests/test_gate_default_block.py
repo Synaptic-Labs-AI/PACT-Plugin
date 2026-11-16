@@ -12,6 +12,7 @@ static arms below red on both edits whether or not the plugin is installed; the
 seed-gate arms pin the runtime refusal wherever the plugin is loaded.
 """
 
+import ast
 import os
 import shlex
 import subprocess
@@ -131,6 +132,28 @@ class TestNoNearerConfigShadowsTheRoot:
         assert locate_config(plugin, [plugin])[1] == tmp_path / "pact-plugin" / name
 
 
+def _configure_calls_the_gate(source):
+    """True when the module-level pytest_configure in ``source`` itself calls
+    ``randomly_seed_gate.refuse_unseeded(config)``, outside any function nested
+    in it."""
+    configure = next((node for node in ast.parse(source).body
+                      if isinstance(node, ast.FunctionDef) and node.name == "pytest_configure"),
+                     None)
+    if configure is None:
+        return False
+    stack = list(configure.body)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if (isinstance(node, ast.Call)
+                and ast.unparse(node.func) == "randomly_seed_gate.refuse_unseeded"
+                and [ast.unparse(arg) for arg in node.args] == ["config"]):
+            return True
+        stack.extend(ast.iter_child_nodes(node))
+    return False
+
+
 def _config(args, loaded=True, worker=False, modules=()):
     """A config stub. `loaded` registers the plugin under its entry-point name;
     `modules` registers plugin objects under those module names, as
@@ -224,8 +247,22 @@ class TestSeedGate:
         """The gate only works if pytest_configure calls it, and only the
         plugin-root conftest loads for a session of skills-adjacent tests."""
         source = (_PLUGIN_ROOT / "conftest.py").read_text(encoding="utf-8")
-        configure = source[source.index("def pytest_configure(config):"):]
-        assert "randomly_seed_gate.refuse_unseeded(config)" in configure
+        assert _configure_calls_the_gate(source), (
+            "pact-plugin/conftest.py's pytest_configure must itself call "
+            "randomly_seed_gate.refuse_unseeded(config)")
+
+    @pytest.mark.parametrize("source, calls", [
+        ("def pytest_configure(config):\n"
+         "    randomly_seed_gate.refuse_unseeded(config)\n", True),
+        ("def pytest_configure(config):\n    pass\n\n\n"
+         "def later(config):\n    randomly_seed_gate.refuse_unseeded(config)\n", False),
+        ("def pytest_configure(config):\n"
+         "    def inner():\n        randomly_seed_gate.refuse_unseeded(config)\n", False),
+        ("def pytest_configure(config):\n"
+         "    randomly_seed_gate.refuse_unseeded(None)\n", False),
+    ], ids=["in-the-body", "in-a-later-function", "in-a-nested-function", "another-argument"])
+    def test_the_call_check_reads_only_pytest_configures_own_body(self, source, calls):
+        assert _configure_calls_the_gate(source) is calls, source
 
     @pytest.mark.parametrize("fake_loaded", [True, False], ids=["loaded", "control"])
     def test_a_session_of_skills_adjacent_tests_alone_is_gated(self, tmp_path, fake_loaded):

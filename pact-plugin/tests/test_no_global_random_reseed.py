@@ -12,13 +12,28 @@ What it detects: a reference, called or not, to a global random-state setter
 tracked test_*.py or conftest.py under skills/; an untracked file is not read. A
 name resolves through the file's own
 imports at any scope (`import random as r`, `from random import seed`, `import
-numpy as np`), and a from-import of a setter counts too. A method of a local
+numpy as np`), and a from-import of a setter counts too. After `from random
+import *` or `from numpy.random import *`, a bare setter name (`seed(1)`)
+counts when the star import is the module-level binding of that name in force
+where it is read: the last one above the read for a read at module level, and
+the last one in the file for a read inside a function or lambda. A module-level
+def, class, import or assignment target rebinds the name. A method of a local
 generator (`random.Random(1).seed(2)`) is not a setter.
+
+Over-refused on purpose, in a module that star-imports random or numpy.random:
+a parameter or local variable named like a setter (`def f(seed): seed`), and a
+rebinding the rule does not read (one inside a class body, an `except ... as`
+clause, a `global` statement in a function, an assignment expression inside a
+comprehension, or a star import from another module) leave the name read as
+the setter. A comprehension's own loop variable is not a rebinding, and a read
+of it inside the comprehension is not a read of the setter.
 
 What it cannot see: a setter reached through getattr or a computed name; one
 whose module is bound other than by an import (an assignment such as
-`m = random`, or a parameter); a setter outside SETTERS; and a reseed inside a
-non-test module or a library the tests import.
+`m = random`, or a parameter); a star import from a module that re-exports
+the setters (`from mylib import *` where mylib star-imports random); a setter
+outside SETTERS; and a reseed inside a non-test module or a library the tests
+import.
 """
 import ast
 import os
@@ -66,17 +81,68 @@ def _dotted(node, aliases):
     return None
 
 
+COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _star_setters(tree):
+    """{id of a Name read: setter} for each read a star import of random or
+    numpy.random binds to a setter, by the module-level binding in force there."""
+    bindings, reads = {}, []
+
+    def bind(name, line, setter=None):
+        bindings.setdefault(name, []).append((line, setter))
+
+    def visit(node, deferred, own_scope, local):
+        for child in ast.iter_child_nodes(node):
+            module_scope = not deferred and not own_scope
+            if module_scope and isinstance(child, ast.ImportFrom):
+                for alias in child.names:
+                    if alias.name != "*":
+                        dotted = f"{child.module}.{alias.name}"
+                        bind(alias.asname or alias.name, child.lineno, dotted if dotted in SETTERS else None)
+                    elif not child.level:
+                        for setter in SETTERS:
+                            module, _, name = setter.rpartition(".")
+                            if module == child.module:
+                                bind(name, child.lineno, setter)
+            elif module_scope and isinstance(child, ast.Import):
+                for alias in child.names:
+                    bind(alias.asname or alias.name.split(".")[0], child.lineno)
+            elif module_scope and isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                bind(child.name, child.lineno)
+            elif isinstance(child, ast.Name):
+                if isinstance(child.ctx, ast.Load) and child.id not in local:
+                    reads.append((child, deferred))
+                elif module_scope:
+                    bind(child.id, child.lineno)
+            inner = local | ({name.id for loop in child.generators
+                              for name in ast.walk(loop.target) if isinstance(name, ast.Name)}
+                             if isinstance(child, COMPREHENSIONS) else set())
+            visit(child, deferred or isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)),
+                  own_scope or isinstance(child, (ast.ClassDef, *COMPREHENSIONS)), inner)
+
+    visit(tree, False, False, frozenset())
+    found = {}
+    for read, deferred in reads:
+        seen = sorted(bindings.get(read.id, []), key=lambda binding: binding[0])
+        in_force = seen if deferred else [b for b in seen if b[0] < read.lineno]
+        if in_force and in_force[-1][1]:
+            found[id(read)] = in_force[-1][1]
+    return found
+
+
 def global_reseeds(source, where="<rig>"):
     """'where:line: setter' for every global random-state setter `source` refers to."""
     tree = ast.parse(source)
     aliases = _aliases(tree)
+    starred = _star_setters(tree)
     found = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module and not node.level:
             found += [f"{where}:{node.lineno}: imports {node.module}.{alias.name}"
                       for alias in node.names if f"{node.module}.{alias.name}" in SETTERS]
         elif isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Store):
-            dotted = _dotted(node, aliases)
+            dotted = starred.get(id(node)) or _dotted(node, aliases)
             if dotted in SETTERS:
                 found.append(f"{where}:{node.lineno}: {dotted}")
     return found
@@ -131,6 +197,20 @@ def test_an_untracked_file_is_not_read(tmp_path):
     "import numpy as np\nnp.random.seed(0)\n",
     "from numpy import random as npr\nnpr.seed(0)\n",
     "import numpy.random\nnumpy.random.set_state(None)\n",
+    "from random import *\nseed(1)\n",
+    "from random import *\nsetstate(getstate())\n",
+    "from numpy.random import *\nseed(0)\n",
+    "from random import *\ndef f(seed):\n    return seed\n",
+    "from random import *\nseed(1)\ndef seed(x):\n    return x\n",
+    "def seed(x):\n    return x\nfrom random import *\nseed(1)\n",
+    "from random import *\ndef f():\n    seed(1)\n",
+    "from random import *\nfrom mylib import *\nseed(1)\n",
+    "from random import *\nclass C:\n    seed = print\n    seed(1)\n",
+    "from random import *\ntry:\n    pass\nexcept Exception as seed:\n    pass\nseed(1)\n",
+    "from random import *\ndef f():\n    global seed\n    seed = print\nf()\nseed(1)\n",
+    "from random import *\n[(seed := print) for _ in 'a']\nseed(1)\n",
+    "from random import *\n[seed for seed in range(2)]\nseed(1)\n",
+    "from random import *\nprint([0 for seed in range(2)], seed(1))\n",
 ])
 def test_a_global_reseed_is_refused(source):
     assert global_reseeds(source), source
@@ -143,6 +223,15 @@ def test_a_global_reseed_is_refused(source):
     "from random import Random\nRandom(3).randint(0, 4)\n",
     "def seed(x):\n    return x\nseed(1)\n",
     "import numpy as np\nnp.random.default_rng(0).integers(4)\n",
+    "from random import *\ndef seed(x):\n    return x\nseed(1)\n",
+    "from random import *\nRandom(1).seed(2)\n",
+    "from random import *\nseed = print\nseed(1)\n",
+    "from os import *\nseed(1)\n",
+    "from random import *\ndef f():\n    seed(1)\ndef seed(x):\n    return x\n",
+    "from random import *\nfrom mylib import seed\nseed(1)\n",
+    "from random import *\nfor seed in range(2):\n    seed\n",
+    "from mylib import *\nseed(1)\n",
+    "from random import *\nprint([seed for seed in range(2)])\n",
 ])
 def test_a_local_generator_or_a_same_named_helper_is_not_refused(source):
     assert global_reseeds(source) == [], source
