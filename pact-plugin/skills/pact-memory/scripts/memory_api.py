@@ -1629,7 +1629,9 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
         # decoding: a path may contain bytes invalid in the locale, and
         # UnicodeDecodeError would escape this reader.
         answer = project_identity.one_git_answer(result)
-        if answer is None:
+        # A git older than 2.5 prints `--git-common-dir` back as an
+        # argument: that is no answer, not a path relative to `start`.
+        if answer is None or answer == "--git-common-dir":
             return None
         common = Path(answer)
         if not common.is_absolute():
@@ -1987,7 +1989,13 @@ def _ask_git_dir_and_toplevel(start: Optional[str]) -> "tuple[Optional[str], Opt
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return None, None
-    return _parse_git_dir_and_toplevel(result.stdout, result.returncode, start)
+    git_dir, toplevel = _parse_git_dir_and_toplevel(result.stdout, result.returncode, start)
+    # Both paths are ones git prints absolute. A git dir that is not, such
+    # as `--absolute-git-dir` printed back by a git older than 2.13, is no
+    # answer at all; a top level that is not is no top level.
+    if git_dir is not None and not os.path.isabs(git_dir):
+        return None, None
+    return git_dir, toplevel if toplevel is None or os.path.isabs(toplevel) else None
 
 
 def _parse_git_dir_and_toplevel(
@@ -2052,7 +2060,11 @@ def _ask_rev_parse(start: Optional[str], args: tuple) -> Optional[str]:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return None
-    return project_identity.one_git_answer(result)
+    answer = project_identity.one_git_answer(result)
+    # Every path this asks for is one git prints absolute; anything else,
+    # such as the option itself printed back by a git that predates it, is
+    # no answer.
+    return answer if answer is not None and os.path.isabs(answer) else None
 
 
 def main_repo_root(

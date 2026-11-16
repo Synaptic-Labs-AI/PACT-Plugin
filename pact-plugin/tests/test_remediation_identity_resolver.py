@@ -2599,8 +2599,25 @@ class TestTheLegacyProbeLetsTheCallersErrorThrough:
 # list`: with REJECT_Z it rejects `-z` exactly as git before 2.36 does (its
 # `list` options carry no 'z', so parse_options prints "unknown switch `z'"
 # and the usage and exits 129); with FAIL_LISTING every `worktree list`
-# fails as git does on a repository it cannot read.
+# fails as git does on a repository it cannot read. With ECHO followed by
+# a `rev-parse` option, it answers as a git that predates that option:
+# rev-parse prints an option it does not know back as an argument, in its
+# place, and answers the rest.
 _GIT_WRAPPER = """#!/bin/sh
+case "{mode}" in
+  ECHO*)
+    option="{mode}"
+    option="${{option#ECHO}}"
+    echoed=0
+    for argument in "$@"; do
+      shift
+      if [ "$argument" = "$option" ]; then echoed=1; else set -- "$@" "$argument"; fi
+    done
+    if [ "$echoed" = 1 ]; then
+      printf '%s\\n' "$option"
+    fi
+    ;;
+esac
 worktree=0; listing=0; nul=0
 for argument in "$@"; do
   case "$argument" in
@@ -2756,3 +2773,58 @@ class TestTheOwnOriginBindsWhateverAnIncludeBeforeItSays:
                 answers[route] = run(cell, target, elsewhere).project_id
         wrong = {route: answer for route, answer in answers.items() if answer != own}
         assert wrong == {}, f"an include before the own origin moved the id: {wrong}"
+
+
+
+class TestAnOldGitsEchoedOptionIsNoAnswer:
+    """A git that predates `rev-parse --absolute-git-dir` (2.13) or
+    `--git-common-dir` (2.5) prints the option back as if it were an
+    argument. Such an answer is no answer: it is never read as a path."""
+
+    @pytest.mark.parametrize(
+        "shape", ["control_own_checkout", "control_own_linked_worktree", "control_own_submodule"]
+    )
+    def test_an_echoed_git_dir_binds_no_folder_name(self, tmp_path, shape):
+        """Each route binds the repository's own origin or declines; the
+        cwd-marker routes, the ones that ask for the absolute git dir, never
+        read the echo as a git dir that git looked past."""
+        assert_outside_repository(tmp_path)
+        answers = _route_answers(tmp_path, shape, "ECHO--absolute-git-dir")
+        canonical = {
+            answer[0] for answer in _route_answers(tmp_path / "real", shape, "PASS").values()
+        }
+        assert len(canonical) == 1 and None not in canonical  # control: git binds one id
+        wrong = {
+            route: answer for route, answer in answers.items()
+            if answer[0] is not None and answer[0] not in canonical
+        }
+        assert wrong == {}, f"an echoed --absolute-git-dir was read as a git dir: {wrong}"
+
+    @pytest.mark.parametrize("shape", ["control_own_checkout", "control_own_linked_worktree"])
+    def test_an_echoed_common_dir_is_a_marker_git_cannot_answer_for(self, tmp_path, shape):
+        """No common dir is read from the echo, so every route declines the
+        checkout as a marker git could not answer for, never as a redirect."""
+        assert_outside_repository(tmp_path)
+        answers = _route_answers(tmp_path, shape, "ECHO--git-common-dir")
+        wrong = {
+            route: answer for route, answer in answers.items()
+            if answer[0] is not None or answer[1] != "broken_git_marker"
+        }
+        assert wrong == {}, f"an echoed --git-common-dir was read as a path: {wrong}"
+
+    @pytest.mark.parametrize(
+        ("option", "ask"),
+        [
+            ("--absolute-git-dir", lambda m, root: m._ask_git_dir_and_toplevel(str(root))),
+            ("--git-common-dir", lambda m, root: m.main_repo_common_dir(str(root))),
+            ("--show-toplevel", lambda m, root: m._ask_rev_parse(str(root), ("--show-toplevel",))),
+        ],
+    )
+    def test_each_reader_takes_an_echo_as_no_answer(self, tmp_path, monkeypatch, option, ask):
+        from scripts import memory_api
+
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "repo", remote=REMOTE)
+        assert ask(memory_api, repo) not in (None, (None, None))  # control: real git answers
+        _git_on_path(monkeypatch, tmp_path / "bin", f"ECHO{option}")
+        assert ask(memory_api, repo) in (None, (None, None))
