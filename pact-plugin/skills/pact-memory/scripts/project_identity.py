@@ -248,22 +248,42 @@ ORIGIN_CONFIG_UNREAD = "config_unread"
 
 def _holds_include_section(text: str) -> bool:
     """Whether git config `text` has a section header naming `include` or
-    `includeIf`, in any case and with any subsection form, at the start of a
-    line. A header git ignores (`[include "x"]`, `[includeIf]`) also counts;
-    that only declines."""
-    for line in text.splitlines():
-        head = line.lstrip(" \t")
-        if not head.startswith("["):
-            continue
-        name = head[1:]
-        for end, char in enumerate(name):
-            if char.isspace() or char in '".]':
-                name = name[:end]
+    `includeIf`, read as git's own parser reads a header (`git_parse_source`
+    and `get_base_var` in git's config.c):
+
+    - a UTF-8 byte order mark at the start of the file is skipped;
+    - before a `[`, only git's whitespace is skipped (`isspace` in git's
+      ctype.c: space, tab, carriage return and line feed), and a header may
+      follow another header on the same line;
+    - the section name runs from the `[` to the first `]` or git whitespace,
+      compared case-folded, a dotted name by its first part.
+
+    A header git refuses (`[ include]`, a form feed before the `[`) makes
+    git refuse the whole file, so the origin read is already unavailable
+    there and the answer here does not matter. A header git reads but does
+    not act on (`[include "x"]`, `[include.x]`) counts; that only declines.
+    """
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    for line in text.split("\n"):
+        rest = line
+        while True:
+            rest = rest.lstrip(" \t\r")
+            if not rest.startswith("["):
                 break
-        else:
-            continue
-        if name.lower() in ("include", "includeif"):
-            return True
+            name_end = 0
+            for index, char in enumerate(rest):
+                if index and char in " \t\r]":
+                    name_end = index
+                    break
+            if not name_end:
+                break
+            if rest[1:name_end].lower().split(".")[0] in ("include", "includeif"):
+                return True
+            close = rest.find("]", name_end)
+            if close < 0:
+                break
+            rest = rest[close + 1:]
     return False
 
 

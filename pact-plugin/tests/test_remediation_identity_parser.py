@@ -2367,3 +2367,81 @@ class TestEveryOriginStateIsDocumented:
         doc = " ".join(pi.read_origin.__doc__.split())
         for state in (pi.ORIGIN_ABSENT, pi.ORIGIN_INCLUDE_ONLY, pi.ORIGIN_CONFIG_UNREAD):
             assert state.upper() in doc, state
+
+
+# Config section headers, each written into a repository's own config with
+# `path = inc` (the file `inc` sets an origin). `{repo}` is the checkout.
+_HEADER_FORMS = {
+    "plain": "[include]\n\tpath = inc\n",
+    "upper case": "[INCLUDE]\n\tpath = inc\n",
+    "leading space": " [include]\n\tpath = inc\n",
+    "leading tab": "\t[include]\n\tpath = inc\n",
+    "leading carriage return": "\r[include]\n\tpath = inc\n",
+    "space after the bracket": "[ include]\n\tpath = inc\n",
+    "space before the bracket": "[include ]\n\tpath = inc\n",
+    "form feed before": "\f[include]\n\tpath = inc\n",
+    "vertical tab before": "\v[include]\n\tpath = inc\n",
+    "key on the same line": "[include] path = inc\n",
+    "after another header": "[gc] [include]\n\tpath = inc\n",
+    "CRLF lines": "[include]\r\n\tpath = inc\r\n",
+    "includeIf": '[includeIf "gitdir:{repo}/"]\n\tpath = inc\n',
+    "includeIf after a tab": '[includeIf\t"gitdir:{repo}/"]\n\tpath = inc\n',
+    "includeIf after two spaces": '[includeIf  "gitdir:{repo}/"]\n\tpath = inc\n',
+    "INCLUDEIF": '[INCLUDEIF "gitdir:{repo}/"]\n\tpath = inc\n',
+    "dotted subsection": "[include.x]\n\tpath = inc\n",
+    "quoted subsection": '[include "x"]\n\tpath = inc\n',
+    "BOM at the start of the file": None,
+    "another section": "[core]\n\tpath = inc\n",
+    "a comment": "# [include]\n",
+    "a longer name": "[includes]\n\tpath = inc\n",
+    "a value": "[core]\n\tx = [include]\n",
+}
+
+
+class TestTheIncludeScanReadsAHeaderAsGitDoes:
+    """For each header form, git's own parse decides the answer. Where git
+    reads the file, the scan finds an include section exactly when git lists
+    a key in an `include` or `includeIf` section. Where git refuses the
+    file, the origin read is unavailable, so it declines whatever the scan
+    says."""
+
+    @pytest.mark.parametrize("form", list(_HEADER_FORMS))
+    def test_the_scan_agrees_with_git(self, tmp_path, form):
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "proj")
+        git_dir = (repo / ".git").resolve()
+        (git_dir / "inc").write_text('[remote "origin"]\n\turl = https://github.com/me/inc.git\n')
+        config = git_dir / "config"
+        original = config.read_text()
+        body = _HEADER_FORMS[form]
+        if body is None:
+            config.write_bytes(("﻿[include]\n\tpath = inc\n" + original).encode())
+        else:
+            config.write_bytes((original + body.format(repo=repo.resolve())).encode())
+        listed = subprocess.run(
+            ["git", "config", "--file", str(config), "--list", "--name-only"],
+            capture_output=True, text=True,
+        )
+        if listed.returncode != 0:
+            assert pi.read_origin(git_dir).state == pi.ORIGIN_UNAVAILABLE
+            return
+        git_says = any(
+            name.split(".")[0] in ("include", "includeif") for name in listed.stdout.split()
+        )
+        assert pi._holds_include_section(pi.read_git_file(config)) == git_says
+
+    def test_a_bom_before_an_onbranch_include_declines_off_the_branch(self, tmp_path):
+        """The measured case: an origin set only through an `onbranch`
+        include on the config's first line, after a BOM, with the main
+        checkout on another branch."""
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "proj")
+        git_dir = (repo / ".git").resolve()
+        (git_dir / "inc").write_text('[remote "origin"]\n\turl = https://github.com/me/inc.git\n')
+        branch = run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
+        config = git_dir / "config"
+        config.write_bytes(
+            (f'﻿[includeIf "onbranch:{branch}"]\n\tpath = inc\n' + config.read_text()).encode()
+        )
+        run_git("checkout", "-q", "-b", "elsewhere", cwd=repo)
+        assert pi.read_origin(git_dir).state == pi.ORIGIN_INCLUDE_ONLY
