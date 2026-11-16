@@ -2317,3 +2317,31 @@ class TestEveryReaderOpensWithoutAnOptionalFlag:
         assert (tmp_path / session_end.PRUNE_LEDGER_NAME).read_text() == (
             '{"session_id": "s"}\n'
         )
+
+
+class TestAnOverrideFileSwappedForALinkIsRefused:
+    """The override open does not follow a link: a symlink put in place
+    after the lstat, here by showing the lstat a regular file while the path
+    is a link to a file holding a canonical id, is unreadable, not bound."""
+
+    def test_the_link_is_not_followed(self, tmp_path, monkeypatch):
+        regular = tmp_path / "regular"
+        regular.write_text("github.com/me/regular\n")
+        target = tmp_path / "linked"
+        target.write_text("github.com/linked/by-override\n")
+        common = tmp_path / "common"
+        common.mkdir()
+        (common / "pact-project-id").symlink_to(target)
+        real_lstat = os.lstat
+        monkeypatch.setattr(
+            pi.os, "lstat",
+            lambda p, *a, **k: real_lstat(
+                regular if str(p) == str(common / "pact-project-id") else p, *a, **k
+            ),
+        )
+        read = pi.read_override(common)
+        assert (read.value, read.reason) == (None, "unreadable"), read
+
+    def test_control_a_regular_override_binds(self, tmp_path):
+        (tmp_path / "pact-project-id").write_text("github.com/me/regular\n")
+        assert pi.read_override(tmp_path).value == "github.com/me/regular"

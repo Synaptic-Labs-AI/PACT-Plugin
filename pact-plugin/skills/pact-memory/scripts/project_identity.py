@@ -1093,9 +1093,14 @@ def read_override(common_dir: Path) -> OverrideRead:
     except OSError:
         return OverrideRead(None, path, "unreadable")
     try:
-        # O_NONBLOCK and a second check on the descriptor: a FIFO put in
-        # place after the lstat is refused, not waited on.
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+        # O_NOFOLLOW, O_NONBLOCK and a second check on the descriptor: a
+        # symlink put in place after the lstat fails the open (unreadable),
+        # and a FIFO there is refused, not waited on.
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
         with open(fd, "rb") as handle:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
                 return OverrideRead(None, path, "not_regular")
