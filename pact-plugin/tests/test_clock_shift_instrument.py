@@ -726,6 +726,14 @@ def test_a_change_to_the_census_selects_this_module_in_the_fast_suite(tmp_path):
         pytest.skip("SKIPPED, NOT PASSED: not a PACT source checkout, so there is no selector to ask")
     listed = subprocess.run(["git", "ls-files", "-z"], cwd=root, check=True, capture_output=True,
                             timeout=120).stdout.decode("utf-8").split("\0")
+    # The copy is the whole tracked tree, read from the working tree. A clone
+    # would judge the last commit, not an uncommitted edit to the selector or
+    # the census. Borrowing the real repository's objects would write into its
+    # .git. And the selector reads nearly every file: pact-plugin/ is 96% of the
+    # bytes, and the manifest names .github/ and root files. Keeping only
+    # pact-plugin/, scripts/, .github/ and the root files gave the same Selection
+    # and saved 0.36% of the rig's bytes. Also dropping every Markdown file below
+    # the root saved 9%, but the rig would no longer match the tree it stands for.
     rig = tmp_path / "repo"
     for rel in filter(None, listed):
         source = root / rel
