@@ -86,6 +86,7 @@ SEED_LINE = re.compile(r"Using --randomly-seed=([0-9]{1,10})")
 SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=\d+")
 SESSION_BANNER = re.compile(r"=+ test session starts =+")
 SECTION_SEPARATOR = re.compile(r"[=_-]{3,}( .*)?")
+SHORT_SUMMARY_HEADER = re.compile(r"=+ short test summary info =+")
 # The header line each census's finish() writes when it fails the session.
 # Each finish() (child_pytest_census, clock_shift_census, home_census) starts
 # the header on a new line when the terminal reporter's writer says its line is
@@ -283,18 +284,20 @@ def _test_text_range(lines: list[str], summary_index: int) -> range:
 def _short_summary_range(lines: list[str], report: range) -> range:
     """The 'short test summary info' section, where -ra prints its XPASS lines.
 
-    It is the last section before the final summary line, and each of its lines
-    starts with the outcome pytest gave the test, so a line there that starts
-    with 'XPASS ' is pytest's own.
+    It is the last section before the final summary line. On CI pytest prints
+    each failure's whole message there, untrimmed and over several lines, so
+    the walk back from the summary line stops only at the section's own
+    header and passes over any other separator-shaped line a message holds.
+    A message that itself holds a whole child report, header line included,
+    moves the start inside that message; the XPASS count against the run
+    record then fails, so the run is refused, never miscounted.
     """
     if not report:
         return range(0)
     summary_index = report[-1]
     for index in range(summary_index - 1, report.start - 1, -1):
-        if SECTION_SEPARATOR.fullmatch(lines[index]):
-            if "short test summary info" in lines[index]:
-                return range(index + 1, summary_index)
-            break
+        if SHORT_SUMMARY_HEADER.fullmatch(lines[index]):
+            return range(index + 1, summary_index)
     return range(0)
 
 
@@ -517,8 +520,21 @@ def _parse_junit(path: Path) -> list[dict]:
     return cases
 
 
-def _xpass_lines(lines: list[str]) -> list[str]:
-    return [line[len("XPASS "):] for line in lines if line.startswith("XPASS ")]
+def _xpass_lines(summary: list[str]) -> list[str]:
+    """The XPASS entries of the short test summary.
+
+    -ra prints its entries in a fixed order: skips, xfails, xpasses, errors,
+    failures (measured on 9.2, serial and xdist). Every error and failure
+    message therefore follows the last XPASS entry, so lines are read only up
+    to the first ERROR or FAILED entry.
+    """
+    payloads = []
+    for line in summary:
+        if line.startswith(("ERROR ", "FAILED ")):
+            break
+        if line.startswith("XPASS "):
+            payloads.append(line[len("XPASS "):])
+    return payloads
 
 
 def _resolve_xpass(payload: str, terminal: list[str]) -> tuple[str, str | None]:
@@ -930,6 +946,13 @@ def _validate_run_outcomes(record: dict, metadata: dict, lines: list[str],
             f"the {names} census reported a failure beside exit status "
             f"{record['exitstatus']}, which a census does not produce, so another "
             "cause set the exit status")
+    if red and record["exitstatus"] not in (1, 2):
+        # pytest ends a session with failures or errors at 1, or at 2 when it
+        # was interrupted (collection errors). 3 is pytest's internal error or
+        # the CI binding's drift status, and 4 and 5 carry no test outcome.
+        raise EvidenceError(
+            f"red test outcomes beside exit status {record['exitstatus']}, which "
+            "a test failure does not produce, so another cause set the exit status")
     census = not red and bool(census_failures)
     failing = red or census
     if failing and overall_conclusion != "failure":
@@ -961,11 +984,10 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     lines, argv, summary, environment_passes, report = _validate_log(
         directory, record, expected_sha)
     # Evidence is read outside pytest's report sections, where only a test's
-    # own text can be; XPASS lines also from the short summary pytest writes.
+    # own text can be; XPASS lines only from the short summary, the one place
+    # -ra prints them.
     evidence = [line for index, line in enumerate(lines) if index not in report]
-    short_summary = _short_summary_range(lines, report)
-    xpass_source = [line for index, line in enumerate(lines)
-                    if index not in report or index in short_summary]
+    xpass_source = [lines[index] for index in _short_summary_range(lines, report)]
     header, finish_span = _session_spans(lines)
     shuffle_seed = _shuffle_seed(header)
     census_failures = _census_failures(finish_span)

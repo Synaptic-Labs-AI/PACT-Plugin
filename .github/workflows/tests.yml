@@ -127,23 +127,22 @@
 #     - pytest-randomly  : shuffled-order DIAGNOSTIC runs only. Installed with
 #                          the rest of the set, so ordered and shuffled runs
 #                          share one environment. That is the point: an
-#                          ordered and a seeded run then differ in test
-#                          order and in the random state pytest-randomly
-#                          seeds from `shuffle_seed` (see the run step), never
-#                          in the installed set, so the comparator attributes
-#                          any delta between them to order or to that seeded
-#                          random state, and
-#                          verify_ci_environment.py holds both runs to the
-#                          same lock. It is BLOCKED by
+#                          ordered and a seeded run then differ in test order
+#                          and in the random state pytest-randomly seeds from
+#                          `shuffle_seed` (see the run step), never in the
+#                          installed set, so the comparator attributes any
+#                          delta between them to order or to that seeded
+#                          random state, and verify_ci_environment.py holds
+#                          both runs to the same lock. It is BLOCKED by
 #                          `addopts = "-p no:randomly"` in the root
 #                          pyproject.toml. Only a workflow_dispatch with a
 #                          `shuffle_seed` loads it (`-p randomly` on the run
 #                          line). tests/randomly_seed_gate.py fails a session
 #                          that has it loaded with no explicit seed, which is
 #                          what losing or shadowing that addopts line causes.
-#                          Child pytest sessions the suite starts must
-#                          block it themselves; tests/child_pytest_census.py
-#                          refuses one that does not.
+#                          Child pytest sessions the suite starts must block
+#                          it themselves; tests/child_pytest_census.py refuses
+#                          one that does not.
 #
 #   CONSTRAINTS: constraints-ci.txt at the repo root is the CI requirement set,
 #   a lock generated from the hand-edited constraints-ci.in. It pins every

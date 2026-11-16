@@ -49,6 +49,13 @@ def case(node_id, outcome="pass", reason=None, duration=0.01):
             "outcome": outcome, "reason": reason, "duration": duration}
 
 
+def child_env():
+    """This process's environment without any PYTEST_* variable, so a developer
+    shell that exports one cannot change what a child pytest loads or runs."""
+    return {key: value for key, value in os.environ.items()
+            if not key.startswith("PYTEST_")}
+
+
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=1, sort_keys=True), encoding="utf-8")
@@ -883,10 +890,11 @@ def test_a_census_line_beside_an_exit_status_a_census_cannot_set_is_refused(
                   f"set the exit status"}]
 
 
-@pytest.mark.parametrize("exitstatus", [1, 2, 3])
+@pytest.mark.parametrize("exitstatus", [1, 2])
 def test_a_red_run_with_a_census_line_keeps_its_test_outcome(tmp_path, exitstatus):
     """The census-status refusal is for green runs: a red run's exit status has a
-    test failure behind it, so any status beside a census line is consistent."""
+    test failure behind it, so either status a failure sets (1, or 2 for an
+    interrupted session) is consistent beside a census line."""
     first = make_run(tmp_path, "one")
     second = make_run(tmp_path, "two", 101,
                       cases=[case(ALPHA), case(BETA, "failure", "boom")],
@@ -898,6 +906,25 @@ def test_a_red_run_with_a_census_line_keeps_its_test_outcome(tmp_path, exitstatu
     run = read_runs(output)[1]
     assert run["validity"] == "test_outcome"
     assert [failure["census"] for failure in run["census_failures"]] == ["child_pytest"]
+
+
+@pytest.mark.parametrize("census", [False, True], ids=["plain", "census"])
+@pytest.mark.parametrize("exitstatus", [3, 4, 5])
+def test_a_red_run_beside_an_exit_status_a_failure_cannot_set_is_refused(
+        tmp_path, exitstatus, census):
+    """3 is pytest's internal error (and the CI binding's drift status), 4 a usage
+    error, 5 no tests collected: none is a test outcome, red or not."""
+    first = make_run(tmp_path, "one")
+    finish = (CHILD_CENSUS_HEADER, CENSUS_PROBLEM) if census else ()
+    second = make_run(tmp_path, "two", 101,
+                      cases=[case(ALPHA), case(BETA, "failure", "boom")],
+                      finish_lines=finish, record_updates={"exitstatus": exitstatus})
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": f"red test outcomes beside exit status {exitstatus}, which a test "
+                  "failure does not produce, so another cause set the exit status"}]
 
 
 def test_every_output_carries_schema_version_2(tmp_path):
@@ -1034,8 +1061,7 @@ def test_real_census_output_lands_in_the_session_finish_span(tmp_path, parallel)
     (rig / "conftest.py").write_text(RIG_CONFTEST, encoding="utf-8")
     shape = CHILD_CENSUS_HEADER.replace(": 1 ", ": 9 ")
     (rig / "test_rig.py").write_text(RIG_TESTS.format(shape=shape), encoding="utf-8")
-    env = {**os.environ, "PYTHONPATH": str(Path(__file__).parent)}
-    env.pop("PYTEST_ADDOPTS", None)
+    env = {**child_env(), "PYTHONPATH": str(Path(__file__).parent)}
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
          "-p", "no:randomly", *parallel],
@@ -1082,7 +1108,7 @@ def test_a_real_seeded_session_is_read_by_the_comparator_and_the_seed_gate(tmp_p
     (rig / "test_two.py").write_text(
         "def test_a():\n    pass\n\n\ndef test_b():\n    pass\n", encoding="utf-8")
     loaded = tmp_path / "loaded.txt"
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env = child_env()
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(Path(__file__).parent), env.get("PYTHONPATH")) if part)
     env["SEEDED_RIG_LOADED"] = str(loaded)
@@ -1159,7 +1185,7 @@ def test_the_ci_shuffle_shape_runs_shuffled_with_its_seed(tmp_path, parallel):
     (rig / "conftest.py").write_text(CI_SHAPE_RIG_CONFTEST, encoding="utf-8")
     (rig / "test_order.py").write_text(
         "".join(f"def {name}():\n    pass\n\n\n" for name in CI_SHAPE_TESTS), encoding="utf-8")
-    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env = child_env()
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(Path(__file__).parent), env.get("PYTHONPATH")) if part)
 
@@ -1406,11 +1432,128 @@ def test_bad_xpass_evidence_is_invalid(tmp_path, mutation):
         lines = [line.replace("XPASS " + ALPHA, "XPASS tests/test_example.py::test_missing")
                  for line in lines]
     elif mutation == "count":
-        lines.append(actions_line("XPASS " + ALPHA + " - unexpected"))
+        index = next(index for index, line in enumerate(lines) if "XPASS " in line)
+        lines.insert(index, actions_line("XPASS " + ALPHA + " - unexpected"))
     log.write_text("\n".join(lines) + "\n", encoding="utf-8")
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2
     assert comparison["status"] == "invalid"
+
+
+# On CI pytest 9.2 prints each failure's whole message in the short test
+# summary, untrimmed, one message line per log line after its FAILED entry
+# (measured with CI=true, -ra, serial and -n 2; test_real_ci_short_summary_shape
+# below re-measures it). These are message lines such a failure carried.
+CI_FAILURE_MESSAGES = {
+    "xpass-line": (f"XPASS {ALPHA}",),
+    "separator-line": ("-----",),
+    "both": ("-----", f"XPASS {ALPHA}", f"XPASS {BETA}"),
+}
+
+
+def _add_ci_failure_message(directory, message):
+    """Add BETA's FAILED entry and its message lines after the XPASS entries,
+    where -ra prints failures."""
+    log = directory / "run.log"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    index = max(index for index, line in enumerate(lines) if "XPASS " in line) + 1
+    lines[index:index] = [actions_line(text) for text in
+                          (f"FAILED {BETA} - RuntimeError: boom", *message)]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("message", list(CI_FAILURE_MESSAGES))
+def test_a_ci_failure_message_in_the_short_summary_keeps_the_red_run(tmp_path, message):
+    """A failure message that holds an XPASS line or a separator-shaped line is
+    still compared as a red run, with the real XPASS entry counted."""
+    xpass = case(ALPHA, "xpass", "unexpected")
+    first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
+    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "failure", "boom")])
+    _add_ci_failure_message(second, CI_FAILURE_MESSAGES[message])
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["status"] == "different", comparison
+    assert comparison["evidence_errors"] == [], comparison
+    run = read_runs(output)[1]
+    assert run["validity"] == "test_outcome", run
+    assert not any(delta["type"] == "xpass" for delta in comparison["deltas"]), comparison
+
+
+@pytest.mark.parametrize("child_lines, error", [
+    (("FAILED test_probe.py::test_child - x",),
+     "raw XPASS evidence count/uniqueness mismatch: 0 lines, record xpassed=1"),
+    (("XPASS test_probe.py::test_child", "FAILED test_probe.py::test_child - x"),
+     "unmapped XPASS payload: 'test_probe.py::test_child'"),
+], ids=["no-xpass", "child-xpass"])
+def test_a_child_report_in_a_ci_failure_message_can_only_refuse(
+        tmp_path, child_lines, error):
+    """A failure message holding a whole child report, its own summary header
+    included, moves the short summary's start inside the message. The run is
+    then refused, never miscounted."""
+    xpass = case(ALPHA, "xpass", "unexpected")
+    first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
+    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "failure", "boom")])
+    _add_ci_failure_message(
+        second, ("=" * 3 + " short test summary info " + "=" * 3, *child_lines))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [{"run": "two", "error": error}], comparison
+
+
+CI_SHAPE_RIG = """\
+import pytest
+
+
+@pytest.mark.skip(reason="a plain skip")
+def test_skipped():
+    pass
+
+
+@pytest.mark.xfail(reason="expected")
+def test_xfail():
+    assert False
+
+
+@pytest.mark.xfail(reason="unexpected")
+def test_xpass():
+    pass
+
+
+def test_fails():
+    raise RuntimeError("boom\\nXPASS test_rig.py::test_xpass\\n-----")
+
+
+@pytest.fixture
+def broken():
+    raise RuntimeError("setup broke\\nXPASS test_rig.py::test_xpass")
+
+
+def test_errors(broken):
+    pass
+"""
+
+
+@pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
+def test_real_ci_short_summary_shape(tmp_path, parallel):
+    """Real pytest under CI=true: -ra prints skips, xfails, xpasses, errors and
+    failures in that order, error and failure messages run on untrimmed after
+    their entry, and the comparator reads only the one real XPASS entry."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "test_rig.py").write_text(CI_SHAPE_RIG, encoding="utf-8")
+    env = {**child_env(), "CI": "true"}
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
+         "-p", "no:randomly", *parallel],
+        cwd=rig, env=env, capture_output=True, text=True, timeout=300, check=False)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
+    report = comparator._test_text_range(lines, len(lines) - 1)
+    summary = [lines[index] for index in comparator._short_summary_range(lines, report)]
+    assert [line.split(" ", 1)[0] for line in summary] == [
+        "SKIPPED", "XFAIL", "XPASS", "ERROR", "XPASS", "FAILED", "XPASS", "-----"], summary
+    assert comparator._xpass_lines(summary) == [
+        "test_rig.py::test_xpass - unexpected"], summary
 
 
 @pytest.mark.parametrize("mutation", [
@@ -1586,10 +1729,8 @@ def test_real_pytest_junit_xpass_and_duplicate_representation(tmp_path):
         "def test_xpass():\n"
         "    pass\n", encoding="utf-8")
     xml_path = child / "results.xml"
-    env = os.environ.copy()
-    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-    for key in ("GITHUB_ACTIONS", "GITHUB_WORKSPACE", "PACT_FULL_RUN_RECORD_OWNER",
-                "PYTEST_ADDOPTS"):
+    env = {**child_env(), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    for key in ("GITHUB_ACTIONS", "GITHUB_WORKSPACE", "PACT_FULL_RUN_RECORD_OWNER"):
         env.pop(key, None)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", f"--junitxml={xml_path}"],
@@ -1671,10 +1812,8 @@ def test_real_pytest_xfail_teardown_shape_needs_no_pass_accounting(tmp_path):
         "def test_plain_pass():\n"
         "    assert True\n", encoding="utf-8")
     xml_path = child / "results.xml"
-    env = os.environ.copy()
-    env["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
-    for key in ("GITHUB_ACTIONS", "GITHUB_WORKSPACE", "PACT_FULL_RUN_RECORD_OWNER",
-                "PYTEST_ADDOPTS"):
+    env = {**child_env(), "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
+    for key in ("GITHUB_ACTIONS", "GITHUB_WORKSPACE", "PACT_FULL_RUN_RECORD_OWNER"):
         env.pop(key, None)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", f"--junitxml={xml_path}"],
@@ -1928,12 +2067,11 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     workspace.mkdir()
     xml = workspace / ".full-suite-results.xml"
     where = f"comparator script actually loaded: {SCRIPT}"
-    env = {**os.environ, "GITHUB_ACTIONS": "true",
+    env = {**child_env(), "GITHUB_ACTIONS": "true",
            "GITHUB_WORKSPACE": str(workspace), "GITHUB_RUN_ID": "200",
            "GITHUB_RUN_ATTEMPT": "1", "GITHUB_SHA": SHA,
            "PYTHONPATH": str(tests_dir)}
     env.pop("PACT_FULL_RUN_RECORD_OWNER", None)
-    env.pop("PYTEST_ADDOPTS", None)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
          "-p", "no:randomly", f"--junitxml={xml}"],
@@ -2028,6 +2166,9 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
             actions_line("CI environment matches constraints-ci.txt."),
             actions_line(f"FULL-COLLECTION-OK 2 test files and "
                          f"{run_record['collected']} items match discovery; subject={SHA}"),
+            # The real XPASS lines, under the short test summary header -ra
+            # prints them beneath.
+            actions_line(SHORT_SUMMARY_TEXT),
             *[actions_line(raw) for raw in completed.stdout.splitlines()
               if raw.startswith("XPASS ")],
             actions_line(f"===== {run_record['summary_line']} ====="),
@@ -2295,7 +2436,9 @@ def test_xpass_with_teardown_xfail_reconciles(tmp_path):
         log_path = directory / "run.log"
         lines = log_path.read_text(encoding="utf-8").replace(old, new).splitlines()
         index = next(i for i, line in enumerate(lines) if new in line)
-        lines.insert(index, actions_line(f"XPASS {BETA} - expected"))
+        # -ra prints the XPASS line in the short test summary, under its header.
+        lines[index:index] = [actions_line(SHORT_SUMMARY_TEXT),
+                              actions_line(f"XPASS {BETA} - expected")]
         log_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return directory
 
