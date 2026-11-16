@@ -631,8 +631,8 @@ def _warn_case_variant(
 
 _DECLINE_CAUSES = {
     "gitfile_redirect": (
-        "the `.git` marker names another repository's git directory, and git "
-        "does not confirm this checkout as one of that repository's worktrees"
+        "git does not confirm this checkout as a worktree of the repository "
+        "git reports for it"
     ),
     "origin_unreadable": "git could not read the repository's origin remote",
     "origin_unrepresentable": (
@@ -672,10 +672,15 @@ _UNPINNABLE_REMEDIES = {
 # `--separate-git-dir` layout, so no reader of this text can judge whether a
 # pin there is safe. Pinning one's own layout is the USER's decision,
 # described in the memory skill.
+# The removal clause waits on a listing that RAN: a real worktree on a git
+# that could not answer is never told to remove its `.git`.
 _REDIRECT_REMEDY = (
-    "Fix or remove the `.git` file, or run from the repository it points at. "
-    "A `git init --separate-git-dir` layout of your own is a user decision: "
-    "see the pact-memory skill."
+    "Check that git can answer for this checkout (`git rev-parse --git-dir`, "
+    "`git worktree list`). Once `git worktree list` runs successfully, if it "
+    "lists no worktree at this checkout, its `.git` file is not one git made "
+    "for it: fix or remove that file, or run from the repository it points "
+    "at. A `git init --separate-git-dir` layout of your own is a user "
+    "decision: see the pact-memory skill."
 )
 
 
@@ -813,9 +818,10 @@ def _root_guard(
 
     1. No common dir, but a `.git` marker git could not answer for: a broken
        repository, not an umbrella folder -> `broken_git_marker`.
-    2. A linked-worktree shape that `git worktree list` does not back: a
-       forged `.git` file naming another repository's worktree admin dir
-       -> `gitfile_redirect`.
+    2. A linked-worktree shape that `git worktree list` does not back (a
+       forged `.git` file naming another repository's worktree admin dir),
+       or one git gave no evidence for (`_worktree_redirect_cause`)
+       -> `gitfile_redirect`, with the detail of that one cause.
     3. A common dir git answers for, but no working tree: a bare repository,
        or a `.git` file naming one -> `no_working_tree`. Every rung reaches
        this shape (the cwd-marker rung through a `GIT_CEILING_DIRECTORIES`
@@ -860,18 +866,8 @@ def _root_guard(
             "gitfile_redirect",
             label=label,
             root=root,
-            detail=(
-                f"{source}: {str(asked_root)!r} resolves to another "
-                "repository's worktree admin dir but is not one of its "
-                "listed worktrees"
-                if cause == REDIRECT_UNLISTED
-                else f"{source}: {str(asked_root)!r} has a linked-worktree "
-                "`.git`, and git could not list the worktrees of the "
-                "repository it names, so it cannot be checked"
-            ),
-            cause_detail=(
-                None if cause == REDIRECT_UNLISTED else _UNLISTABLE_WORKTREES_DETAIL
-            ),
+            detail=f"{source}: {str(asked_root)!r}",
+            cause_detail=_REDIRECT_CAUSE_DETAILS[cause],
         )
     if toplevel is None:
         return _decline(
@@ -1827,15 +1823,22 @@ def _verified_worktree_roots(
     return list(dict.fromkeys(roots))
 
 
-# The `cause_detail` of a refusal whose listing git could not give.
-_UNLISTABLE_WORKTREES_DETAIL = (
-    "git could not list the worktrees of the repository the `.git` marker "
-    "names, so the checkout could not be checked against them"
-)
-
 # `_worktree_redirect_cause`'s answers when the check refuses.
 REDIRECT_UNLISTED = "unlisted"
-REDIRECT_UNVERIFIABLE = "unverifiable"
+REDIRECT_NO_GIT_DIR = "no_git_dir"
+REDIRECT_UNRESOLVABLE = "unresolvable"
+REDIRECT_UNLISTABLE = "unlistable"
+
+# Each cause's `cause_detail`: what was observed, and nothing more.
+_REDIRECT_CAUSE_DETAILS = {
+    REDIRECT_UNLISTED: (
+        "git reports a git directory for it other than the repository's "
+        "common directory, and that repository's worktree list does not hold it"
+    ),
+    REDIRECT_NO_GIT_DIR: "git gave no git directory for it",
+    REDIRECT_UNRESOLVABLE: "a path git gave for it would not resolve",
+    REDIRECT_UNLISTABLE: "git could not list that repository's worktrees",
+}
 
 
 def _worktree_redirect(
@@ -1871,10 +1874,11 @@ def _worktree_redirect_cause(
     `git_dir` and `toplevel`, when the caller already holds git's answers
     for `asked_root`, are used instead of asking git again.
 
-    MISSING EVIDENCE REFUSES. `REDIRECT_UNLISTED`: git's listing does not
-    hold the checkout. `REDIRECT_UNVERIFIABLE`: the check could not be made,
-    because git gave no git dir, no listing (`_listed_worktree_toplevels` is
-    None) or a path that would not resolve. A git that does not answer with
+    MISSING EVIDENCE REFUSES, and the cause names what was missing:
+    `REDIRECT_UNLISTED` (git's listing does not hold the checkout),
+    `REDIRECT_NO_GIT_DIR` (git gave no git dir), `REDIRECT_UNRESOLVABLE` (a
+    path would not resolve) or `REDIRECT_UNLISTABLE` (no listing:
+    `_listed_worktree_toplevels` is None). A git that does not answer with
     a toplevel is not refused here: that shape has no working tree, and
     `_root_guard` declines it `no_working_tree`.
     """
@@ -1884,14 +1888,14 @@ def _worktree_redirect_cause(
         if git_dir is None:
             git_dir_raw = _git_rev_parse(str(asked_root), "--git-dir")
             if git_dir_raw is None:
-                return REDIRECT_UNVERIFIABLE
+                return REDIRECT_NO_GIT_DIR
             git_dir = Path(git_dir_raw)
             if not git_dir.is_absolute():
                 git_dir = Path(asked_root) / git_dir
         git_dir = Path(git_dir).resolve()
         common_path = Path(common_dir).resolve()
     except (OSError, RuntimeError, ValueError):
-        return REDIRECT_UNVERIFIABLE
+        return REDIRECT_UNRESOLVABLE
     if git_dir == common_path:
         return None
     # LISTED BY THE REPOSITORY THE COMMON DIR BELONGS TO: a submodule's
@@ -1899,7 +1903,7 @@ def _worktree_redirect_cause(
     # a directory would report the SUPERPROJECT's worktrees.
     listed = _listed_worktree_toplevels(None, git_dir=common_path)
     if listed is None:
-        return REDIRECT_UNVERIFIABLE
+        return REDIRECT_UNLISTABLE
     if toplevel is None:
         toplevel_raw = _git_rev_parse(str(asked_root), "--show-toplevel")
         if toplevel_raw is None:
@@ -1908,7 +1912,7 @@ def _worktree_redirect_cause(
     try:
         toplevel = Path(toplevel).resolve()
     except (OSError, RuntimeError, ValueError):
-        return REDIRECT_UNVERIFIABLE
+        return REDIRECT_UNRESOLVABLE
     return REDIRECT_UNLISTED if toplevel not in listed else None
 
 

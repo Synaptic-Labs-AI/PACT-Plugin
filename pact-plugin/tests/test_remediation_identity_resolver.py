@@ -2600,7 +2600,9 @@ class TestTheLegacyProbeLetsTheCallersErrorThrough:
 # `list` options carry no 'z', so parse_options prints "unknown switch `z'"
 # and the usage and exits 129); with FAIL_LISTING every `worktree list`
 # fails as git does on a repository it cannot read; with
-# FAIL_ABSOLUTE_GIT_DIR every `rev-parse --absolute-git-dir` fails. With
+# FAIL_ABSOLUTE_GIT_DIR every `rev-parse --absolute-git-dir` fails; with
+# FAIL_GIT_DIR every `rev-parse --git-dir` fails (the global `--git-dir <dir>`
+# option before a command is answered). With
 # ECHO followed by
 # a `rev-parse` option, it answers as a git that predates that option:
 # rev-parse prints an option it does not know back as an argument, in its
@@ -2628,6 +2630,15 @@ for argument in "$@"; do
     -z) [ "$listing" = 1 ] && nul=1 ;;
   esac
 done
+if [ "{mode}" = FAIL_GIT_DIR ]; then
+  revparse=0
+  for argument in "$@"; do
+    case "$argument" in
+      rev-parse) revparse=1 ;;
+      --git-dir) if [ "$revparse" = 1 ]; then echo "fatal: cannot answer" >&2; exit 128; fi ;;
+    esac
+  done
+fi
 if [ "{mode}" = FAIL_ABSOLUTE_GIT_DIR ]; then
   for argument in "$@"; do
     if [ "$argument" = --absolute-git-dir ]; then
@@ -2725,17 +2736,16 @@ class TestTheWorktreeCheckRefusesWithoutAListing:
         """When git cannot list the worktrees at all, a linked-worktree
         pointer declines on every route, forged or real, and the detail says
         the listing could not be had rather than that a redirect was found."""
-        from fixtures.identity_routes import VICTIM_ID
+        from scripts import memory_api
 
+        unlistable = memory_api._REDIRECT_CAUSE_DETAILS[memory_api.REDIRECT_UNLISTABLE]
         assert_outside_repository(tmp_path)
         for shape in ("forged_worktree_admin", "control_own_linked_worktree"):
             answers = _route_answers(tmp_path / shape, shape, "FAIL_LISTING")
             wrong = {
                 route: answer for route, answer in answers.items()
-                if answer[0] is not None or answer[0] == VICTIM_ID
-                or answer[1] != "gitfile_redirect"
-                or "git could not list" not in (answer[2] or "")
-                or "is not one of its listed worktrees" in (answer[2] or "")
+                if answer[0] is not None or answer[1] != "gitfile_redirect"
+                or answer[2] != unlistable
             }
             assert wrong == {}, f"{shape} passed or misreported without a listing: {wrong}"
 
@@ -2744,12 +2754,15 @@ class TestTheWorktreeCheckRefusesWithoutAListing:
         line, so a worktree whose folder holds a newline cannot be read
         whole: the listing is unreadable and the worktree declines on every
         route, saying git could not list the worktrees."""
+        from scripts import memory_api
+
+        unlistable = memory_api._REDIRECT_CAUSE_DETAILS[memory_api.REDIRECT_UNLISTABLE]
         assert_outside_repository(tmp_path)
         answers = _route_answers(tmp_path, "control_path_worktree_holding_a_newline", "REJECT_Z")
         wrong = {
             route: answer for route, answer in answers.items()
             if answer[0] is not None or answer[1] != "gitfile_redirect"
-            or "git could not list" not in (answer[2] or "")
+            or answer[2] != unlistable
         }
         assert wrong == {}, f"a newline-holding worktree was read from a listing without NUL: {wrong}"
 
@@ -2866,3 +2879,57 @@ class TestTheCwdMarkerDeclinesAMarkerGitCannotAnswerFor:
         assert_outside_repository(tmp_path)
         answers = self._cwd_routes(_route_answers(tmp_path, "bare_target", "PASS"))
         assert answers and {answer[1] for answer in answers.values()} == {"no_working_tree"}, answers
+
+
+class TestARedirectRefusalNamesWhatWasObserved:
+    """Every `gitfile_redirect` refusal carries the detail of the one cause
+    that reached it, and no sentence of the refusal claims more: the cause
+    sentence names no other repository's git directory, and the remedy asks
+    for removal only once git's listing has run."""
+
+    # (shape, git wrapper mode, the detail every refusing route must carry)
+    CASES = [
+        *[(shape, "PASS", "foreign") for shape in (
+            "foreign_gitdir", "relative_foreign_gitdir", "symlinked_git",
+            "forged_submodule_admin", "symlinked_submodule_admin",
+        )],
+        *[(shape, "PASS", "unlisted") for shape in (
+            "forged_worktree_admin", "forged_separate_store_worktree",
+            "forged_worktree_config_dotgit",
+        )],
+        ("control_own_linked_worktree", "FAIL_LISTING", "unlistable"),
+        ("control_own_checkout", "FAIL_GIT_DIR", "no_git_dir"),
+    ]
+
+    @staticmethod
+    def _detail(key: str) -> str:
+        from scripts import memory_api
+        from scripts import project_identity as pi
+
+        if key == "foreign":
+            return pi.FOREIGN_GIT_DIR_DETAIL
+        return memory_api._REDIRECT_CAUSE_DETAILS[key]
+
+    @pytest.mark.parametrize("shape,mode,key", CASES)
+    def test_each_refusal_names_its_own_cause(self, tmp_path, shape, mode, key):
+        assert_outside_repository(tmp_path)
+        answers = _route_answers(tmp_path, shape, mode)
+        refused = {route: a for route, a in answers.items() if a[1] == "gitfile_redirect"}
+        assert refused, f"control: {shape} refused on some route ({answers})"
+        wrong = {route: a for route, a in refused.items() if a[2] != self._detail(key)}
+        assert wrong == {}, f"{shape} under {mode} named another cause: {wrong}"
+
+    def test_the_cause_sentence_claims_no_other_repository(self):
+        from scripts import memory_api
+
+        cause = memory_api._DECLINE_CAUSES["gitfile_redirect"]
+        assert "another repository" not in cause, cause
+        details = list(memory_api._REDIRECT_CAUSE_DETAILS.values())
+        assert not [d for d in details if "another repository" in d], details
+
+    def test_the_remedy_asks_for_removal_only_after_the_listing_runs(self):
+        from scripts import memory_api
+
+        remedy = memory_api._REDIRECT_REMEDY
+        gate = remedy.index("Once `git worktree list` runs successfully")
+        assert remedy.index("remove") > gate, remedy

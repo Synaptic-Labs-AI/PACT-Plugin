@@ -162,6 +162,14 @@ class RootIdentity(NamedTuple):
     detail: Optional[str] = None
 
 
+# The `detail` for a `.git` marker refused by its target's shape
+# (`_redirect_target_is_foreign`): a directory named `.git`, or a submodule's
+# git dir whose `core.worktree` is not the marker's directory or is unset.
+FOREIGN_GIT_DIR_DETAIL = (
+    "its `.git` names another directory called `.git`, or a submodule's git "
+    "directory that does not record it as that submodule's working tree"
+)
+
 # The `detail` for an origin url list holding an empty value.
 EMPTY_URL_ENTRY_DETAIL = (
     "its remote.origin.url list holds an empty value, so the url git uses "
@@ -1638,6 +1646,7 @@ def detect_id_for_root(
             "declined",
             _without_path(override_ignored),
             decline_record("gitfile_redirect", None),
+            FOREIGN_GIT_DIR_DETAIL,
         )
 
     # A GIT DIR OUTSIDE THE CHECKOUT THAT IS NEITHER A LINKED WORKTREE'S NOR A

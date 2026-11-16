@@ -1651,8 +1651,8 @@ class TestASymlinkedGitMarkerIsJudgedLikeAGitfile:
 
 class TestTheRedirectCheckRefusesWhatItCannotCheck:
     """Each exit of the linked-worktree check whose evidence git did not
-    give refuses as unverifiable; only a git dir equal to the common dir,
-    and a git that answers there is no toplevel, pass it on."""
+    give refuses, naming what was missing; only a git dir equal to the
+    common dir, and a git that answers there is no toplevel, pass it on."""
 
     def _linked(self, tmp_path):
         main = make_repo(tmp_path / "main")
@@ -1660,7 +1660,7 @@ class TestTheRedirectCheckRefusesWhatItCannotCheck:
         run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
         return worktree, (main / ".git").resolve()
 
-    def test_no_git_dir_answer_is_unverifiable(self, tmp_path, monkeypatch):
+    def test_no_git_dir_answer_names_no_git_dir(self, tmp_path, monkeypatch):
         from scripts import memory_api
 
         assert_outside_repository(tmp_path)
@@ -1670,37 +1670,37 @@ class TestTheRedirectCheckRefusesWhatItCannotCheck:
             memory_api, "_git_rev_parse",
             lambda start, *args: None if "--git-dir" in args else real(start, *args),
         )
-        assert memory_api._worktree_redirect_cause(worktree, common) == memory_api.REDIRECT_UNVERIFIABLE
+        assert memory_api._worktree_redirect_cause(worktree, common) == memory_api.REDIRECT_NO_GIT_DIR
 
-    def test_a_git_dir_that_will_not_resolve_is_unverifiable(self, tmp_path):
+    def test_a_git_dir_that_will_not_resolve_is_unresolvable(self, tmp_path):
         from scripts import memory_api
 
         assert_outside_repository(tmp_path)
         worktree, common = self._linked(tmp_path)
         assert memory_api._worktree_redirect_cause(
             worktree, common, git_dir=Path("bad\0dir")
-        ) == memory_api.REDIRECT_UNVERIFIABLE
+        ) == memory_api.REDIRECT_UNRESOLVABLE
 
-    def test_a_toplevel_that_will_not_resolve_is_unverifiable(self, tmp_path):
+    def test_a_toplevel_that_will_not_resolve_is_unresolvable(self, tmp_path):
         from scripts import memory_api
 
         assert_outside_repository(tmp_path)
         worktree, common = self._linked(tmp_path)
         assert memory_api._worktree_redirect_cause(
             worktree, common, toplevel=Path("bad\0top")
-        ) == memory_api.REDIRECT_UNVERIFIABLE
+        ) == memory_api.REDIRECT_UNRESOLVABLE
 
-    def test_no_listing_is_unverifiable(self, tmp_path, monkeypatch):
+    def test_no_listing_is_unlistable(self, tmp_path, monkeypatch):
         from scripts import memory_api
 
         assert_outside_repository(tmp_path)
         worktree, common = self._linked(tmp_path)
         monkeypatch.setattr(memory_api, "_listed_worktree_toplevels", lambda *a, **k: None)
-        assert memory_api._worktree_redirect_cause(worktree, common) == memory_api.REDIRECT_UNVERIFIABLE
+        assert memory_api._worktree_redirect_cause(worktree, common) == memory_api.REDIRECT_UNLISTABLE
 
     def test_the_listed_worktree_passes_and_the_unlisted_one_is_named(self, tmp_path, monkeypatch):
         """Controls: the real worktree passes; the same worktree missing
-        from the listing is unlisted, not unverifiable."""
+        from the listing is unlisted, not unlistable."""
         from scripts import memory_api
 
         assert_outside_repository(tmp_path)
