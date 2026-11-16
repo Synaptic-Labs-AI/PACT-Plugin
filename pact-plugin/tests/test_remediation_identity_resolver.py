@@ -2933,3 +2933,55 @@ class TestARedirectRefusalNamesWhatWasObserved:
         remedy = memory_api._REDIRECT_REMEDY
         gate = remedy.index("Once `git worktree list` runs successfully")
         assert remedy.index("remove") > gate, remedy
+
+
+class TestNoRouteBindsWithoutAGitDir:
+    """The forged-worktree check needs git's `--git-dir` answer to know
+    whether it applies; a git that gives none, or one that will not resolve,
+    declines on every route instead of binding what the other answers say."""
+
+    @pytest.mark.parametrize("shape", ["forged_worktree_admin", "control_own_checkout"])
+    def test_every_route_declines_when_git_gives_no_git_dir(self, tmp_path, shape):
+        from scripts import memory_api
+
+        no_git_dir = memory_api._REDIRECT_CAUSE_DETAILS[memory_api.REDIRECT_NO_GIT_DIR]
+        assert_outside_repository(tmp_path)
+        answers = _route_answers(tmp_path, shape, "FAIL_GIT_DIR")
+        wrong = {
+            route: answer for route, answer in answers.items()
+            if answer[0] is not None or answer[1] != "gitfile_redirect"
+            or answer[2] != no_git_dir
+        }
+        assert wrong == {}, f"{shape} bound or misreported without a git dir: {wrong}"
+
+    def test_control_the_same_checkout_binds_when_git_answers(self, tmp_path):
+        from fixtures.identity_routes import OWN
+        from scripts import project_identity as pi
+
+        assert_outside_repository(tmp_path)
+        answers = _route_answers(tmp_path, "control_own_checkout", "PASS")
+        own = pi.normalize_remote_url(OWN)
+        assert {answer[0] for answer in answers.values()} == {own}, answers
+
+    def test_a_git_dir_that_will_not_resolve_is_no_root(self, tmp_path, monkeypatch):
+        """A `--git-dir` answer that names a symlink loop resolves to
+        nothing, so the root lookup gives no root and the guard names the
+        path that would not resolve."""
+        from scripts import memory_api
+
+        assert_outside_repository(tmp_path)
+        checkout = make_repo(tmp_path / "proj")
+        (tmp_path / "loop-a").symlink_to(tmp_path / "loop-b")
+        (tmp_path / "loop-b").symlink_to(tmp_path / "loop-a")
+        real = memory_api._git_rev_parse
+        monkeypatch.setattr(
+            memory_api, "_git_rev_parse",
+            lambda start, *args: str(tmp_path / "loop-a")
+            if args == ("--git-dir",) else real(start, *args),
+        )
+        common = memory_api.main_repo_common_dir(str(checkout))
+        assert common is not None  # control: git answers the common dir
+        assert memory_api.main_repo_root(str(checkout), common) is None
+        assert memory_api._worktree_redirect_cause(checkout, common) == (
+            memory_api.REDIRECT_UNRESOLVABLE
+        )

@@ -2125,38 +2125,39 @@ def main_repo_root(
         # No working tree: a bare repository, or a repository git cannot
         # describe. There is no root to name.
         return None
+    # NO ROOT WITHOUT THE GIT DIR. The git dir decides whether the forged-
+    # worktree check runs at all, so a git dir git did not give, or one that
+    # will not resolve, declines here; the caller's guard names the cause
+    # (`gitfile_redirect`), as for every other refusal of that check.
     git_dir_raw = _git_rev_parse(start, "--git-dir")
-    if git_dir_raw is not None:
-        try:
-            git_dir = Path(git_dir_raw)
-            if not git_dir.is_absolute():
-                base = Path(start) if start is not None else Path.cwd()
-                git_dir = base / git_dir
-            git_dir = git_dir.resolve()
-            common_path = common.resolve()
-            main_git = (common_path.parent / ".git").resolve()
-            if git_dir != common_path:
-                # ANY LINKED WORKTREE IS VERIFIED, of a main checkout or of a
-                # submodule: a forged `.git` FILE naming another
-                # repository's worktree admin dir makes every git answer
-                # agree, and a genuine linked worktree is listed. The caller
-                # reports the refusal: every resolver rung names it as
-                # `gitfile_redirect` through its own guard, so a warning here
-                # would log the one cause twice.
-                asked = Path(start) if start is not None else Path.cwd()
-                if _worktree_redirect(
-                    asked, common_path, git_dir=git_dir, toplevel=Path(toplevel)
-                ):
-                    return None
-                if main_git == common_path:
-                    # LINKED WORKTREE of a main checkout: the main checkout
-                    # is the identity.
-                    return common_path.parent
-        except (OSError, RuntimeError):
-            # A path that will not resolve cannot prove the worktree shape;
-            # the toplevel is the safe answer.
-            pass
-    return Path(toplevel).resolve()
+    if git_dir_raw is None:
+        return None
+    try:
+        git_dir = Path(git_dir_raw)
+        if not git_dir.is_absolute():
+            base = Path(start) if start is not None else Path.cwd()
+            git_dir = base / git_dir
+        git_dir = git_dir.resolve()
+        common_path = common.resolve()
+        main_git = (common_path.parent / ".git").resolve()
+        root = Path(toplevel).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if git_dir != common_path:
+        # ANY LINKED WORKTREE IS VERIFIED, of a main checkout or of a
+        # submodule: a forged `.git` FILE naming another repository's
+        # worktree admin dir makes every git answer agree, and a genuine
+        # linked worktree is listed. The caller reports the refusal: every
+        # resolver rung names it as `gitfile_redirect` through its own guard,
+        # so a warning here would log the one cause twice.
+        asked = Path(start) if start is not None else Path.cwd()
+        if _worktree_redirect(asked, common_path, git_dir=git_dir, toplevel=root):
+            return None
+        if main_git == common_path:
+            # LINKED WORKTREE of a main checkout: the main checkout is the
+            # identity.
+            return common_path.parent
+    return root
 
 
 def _declared_path_exists(declared_dir: str) -> bool:
