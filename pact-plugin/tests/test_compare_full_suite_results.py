@@ -984,6 +984,94 @@ def test_a_real_seeded_session_is_read_by_the_comparator_and_the_seed_gate(tmp_p
     assert loaded.read_text(encoding="utf-8") == "True", completed.stdout
 
 
+CI_SHAPE_RIG_CONFTEST = """\
+import os
+
+import pytest
+
+import randomly_seed_gate
+
+
+def pytest_configure(config):
+    randomly_seed_gate.refuse_unseeded(config)
+    with open(os.environ["SEEDED_RIG_LOADED"], "w") as handle:
+        handle.write(str(randomly_seed_gate.randomly_loaded(config.pluginmanager)))
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_collection_modifyitems(config, items):
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "main")
+    with open(os.path.join(os.environ["SEEDED_RIG_ORDER"], worker), "w") as handle:
+        handle.write(" ".join(item.name for item in items))
+"""
+CI_SHAPE_TESTS = [f"test_{index:02d}" for index in range(10)]
+
+
+def _ci_seed_flags(seed):
+    """The words tests.yml's run line adds for a seed: its
+    `${PACT_SHUFFLE_SEED:+...}` expansion, read from ci_contract.WORKFLOW_TEST_CMD
+    (which test_memory_init pins to the workflow), with the seed substituted."""
+    words = shlex.split(ci_contract.WORKFLOW_TEST_CMD)
+    opener = "${PACT_SHUFFLE_SEED:+"
+    start = next(index for index, word in enumerate(words) if word.startswith(opener))
+    end = next(index for index in range(start, len(words)) if words[index].endswith("}"))
+    found = [words[start][len(opener):], *words[start + 1:end], words[end][:-1]]
+    return [word.replace("$PACT_SHUFFLE_SEED", str(seed)) for word in found]
+
+
+@pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
+def test_the_ci_shuffle_shape_runs_shuffled_with_its_seed(tmp_path, parallel):
+    """CI's shuffled run as a real session: the rig's config blocks pytest-randomly
+    as the root pyproject.toml does (`addopts = -p no:randomly`), and the command
+    line adds exactly the words tests.yml adds for a seed. The run must load the
+    plugin, pass the real seed gate, print the seed where the comparator reads
+    it, and collect the tests in a shuffled order every process agrees on. The
+    same rig without those words is the control: it must keep the plugin blocked
+    and the file order, so the config's block is shown to be in force. The child
+    starts as `python -c "...pytest.main(...)"` outside the repository, as the
+    arm above does. CI installs the lock, so a CI run without pytest-randomly
+    fails here instead of skipping."""
+    if importlib.util.find_spec("pytest_randomly") is None:
+        reason = "pytest-randomly is not importable, so no real seeded session can run"
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail(f"{reason}; CI installs the lock, so this arm must run there")
+        pytest.skip(f"{reason}; CI installs the lock and runs this arm")
+    seed = 4242
+    flags = _ci_seed_flags(seed)
+    assert flags[:2] == ["-p", "randomly"] and f"--randomly-seed={seed}" in flags, flags
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "pytest.ini").write_text("[pytest]\naddopts = -p no:randomly\n", encoding="utf-8")
+    (rig / "conftest.py").write_text(CI_SHAPE_RIG_CONFTEST, encoding="utf-8")
+    (rig / "test_order.py").write_text(
+        "".join(f"def {name}():\n    pass\n\n\n" for name in CI_SHAPE_TESTS), encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    env["PYTHONPATH"] = os.pathsep.join(
+        part for part in (str(Path(__file__).parent), env.get("PYTHONPATH")) if part)
+
+    def run(name, extra):
+        loaded, order = tmp_path / f"{name}-loaded.txt", tmp_path / f"{name}-order"
+        order.mkdir()
+        completed = subprocess.run(
+            [sys.executable, "-c", "import sys, pytest; sys.exit(pytest.main(sys.argv[1:]))",
+             "-ra", "-p", "no:cacheprovider", *extra, *parallel],
+            cwd=rig, env={**env, "SEEDED_RIG_LOADED": str(loaded), "SEEDED_RIG_ORDER": str(order)},
+            capture_output=True, text=True, timeout=300, check=False)
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        orders = {tuple(path.read_text(encoding="utf-8").split()) for path in order.iterdir()}
+        assert len(orders) == 1, (orders, completed.stdout)
+        return completed.stdout, loaded.read_text(encoding="utf-8"), list(orders.pop())
+
+    stdout, loaded, order = run("seeded", flags)
+    header, _finish = comparator._session_spans([ci_contract.WORKFLOW_TEST_CMD, *stdout.splitlines()])
+    assert comparator._shuffle_seed(header) == seed, stdout
+    assert loaded == "True", stdout
+    assert sorted(order) == CI_SHAPE_TESTS and order != CI_SHAPE_TESTS, (order, stdout)
+    _stdout, control_loaded, control_order = run("control", [])
+    assert control_loaded == "False" and control_order == CI_SHAPE_TESTS, (
+        control_loaded, control_order)
+
+
 def test_two_seed_lines_are_refused(tmp_path):
     first = make_run(tmp_path, "one", seeds=(7, 8))
     second = make_run(tmp_path, "two", 101, seeds=(7,))

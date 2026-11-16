@@ -109,6 +109,9 @@ _ROUTE_ROWS = [
     ([], {"PYTEST_ADDOPTS": "--disable-plugin-autoload"}, True),
     (["--", "--disable-plugin-autoload"], {}, False),
     (["--disable-plugin-autoload", "-p", "randomly"], {}, False),
+    # CI's shuffled shape: the config's block, then the run line's load.
+    (["-p", "no:randomly", "-p", "randomly"], {}, False),
+    (["-p", "randomly", "-p", "no:randomly"], {}, True),
     (["-p", "no:randomly", "-p", "pytest_randomly"], {}, False),
     (["-p", "pytest_randomly", "-p", "no:randomly"], {}, True),
     (["-p", "no:randomly", "-p", "pytest_randomly.__init__"], {}, False),
