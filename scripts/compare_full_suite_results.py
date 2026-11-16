@@ -685,11 +685,36 @@ def _validate_log(directory: Path, record: dict,
                            if "CI environment matches constraints-ci.txt." in line]
     if (len(environment_indexes) < 2
             or min(environment_indexes) > summary_index
-            or max(environment_indexes) < summary_index
-            or any("CI ENVIRONMENT DRIFT" in line or "PYTEST_ADDOPTS is set" in line
-                   for line in lines)):
+            or max(environment_indexes) < summary_index):
         raise EvidenceError("before/after environment evidence is not clean")
+    # Assumed, not measured here: run.log is the job log download, which carries
+    # each step's stdout and stderr together, so the binding's stderr heading is
+    # in it on a real drift run. The binding's session-end check runs after the
+    # censuses and sets 3 even over a run a census raised to 1.
+    if any("CI ENVIRONMENT DRIFT" in line for line in lines):
+        message = ("the CI environment binding reported environment drift (a CI "
+                   "ENVIRONMENT DRIFT heading is in the log), so the run is invalid "
+                   "infrastructure")
+        names = _census_names(lines)
+        if names and record["exitstatus"] == 3:
+            message += f", and it set exit status 3 over the {names} census failure"
+        raise EvidenceError(message)
+    if any("PYTEST_ADDOPTS is set" in line for line in lines):
+        raise EvidenceError(
+            "a check in the log reported PYTEST_ADDOPTS is set, so the run's "
+            "options are not the reviewed command alone")
     return lines, argv, summary, len(environment_indexes)
+
+
+def _census_names(lines: list[str]) -> str:
+    """The censuses that failed the session, joined for a message; empty when the
+    session-finish span holds none or cannot be read, so a malformed census block
+    never replaces the drift refusal."""
+    try:
+        failures = _census_failures(_session_spans(lines)[1])
+    except EvidenceError:
+        return ""
+    return " and ".join(failure["census"] for failure in failures)
 
 
 def _require_one_outcome_kind_per_node(cases: list[dict]) -> None:

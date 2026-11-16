@@ -651,6 +651,108 @@ def test_a_census_line_beside_a_clean_exit_is_refused(tmp_path):
                   "the log disagree"}]
 
 
+DRIFT_LINES = (
+    "CI ENVIRONMENT DRIFT (pytest process, at session end)",
+    "UNEXPECTED: some-package",
+    "The session had ALREADY ended with exit status 1 before this check; its test "
+    "results are reported above and are not hidden by this exit status.",
+)
+
+
+def append_log_lines(directory, texts):
+    log = directory / "run.log"
+    log.write_text(log.read_text(encoding="utf-8")
+                   + "".join(actions_line(text) + "\n" for text in texts),
+                   encoding="utf-8")
+
+
+def test_a_drift_log_names_the_ci_environment_binding(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    append_log_lines(second, DRIFT_LINES)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": "the CI environment binding reported environment drift (a CI "
+                  "ENVIRONMENT DRIFT heading is in the log), so the run is invalid "
+                  "infrastructure"}]
+
+
+def test_drift_over_a_census_failure_names_the_binding_and_the_census(tmp_path):
+    """The binding's session-end check sets 3 over a run a census raised to 1."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(CHILD_CENSUS_HEADER, "  [gw0] test_x (call): child"),
+                      record_updates={"exitstatus": 3})
+    append_log_lines(second, DRIFT_LINES)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": "the CI environment binding reported environment drift (a CI "
+                  "ENVIRONMENT DRIFT heading is in the log), so the run is invalid "
+                  "infrastructure, and it set exit status 3 over the child_pytest "
+                  "census failure"}]
+
+
+def test_drift_beside_a_census_at_exit_1_does_not_claim_the_binding_set_3(tmp_path):
+    """The suffix says the binding set 3; a record still at 1 does not show that."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(CHILD_CENSUS_HEADER, "  [gw0] test_x (call): child"))
+    append_log_lines(second, DRIFT_LINES)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": "the CI environment binding reported environment drift (a CI "
+                  "ENVIRONMENT DRIFT heading is in the log), so the run is invalid "
+                  "infrastructure"}]
+
+
+def test_drift_stays_the_reason_beside_a_malformed_census_block(tmp_path):
+    """A census header with no problem line cannot replace the drift refusal."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True,
+                      finish_lines=(CHILD_CENSUS_HEADER,),
+                      record_updates={"exitstatus": 3})
+    append_log_lines(second, DRIFT_LINES)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": "the CI environment binding reported environment drift (a CI "
+                  "ENVIRONMENT DRIFT heading is in the log), so the run is invalid "
+                  "infrastructure"}]
+
+
+def test_an_inherited_pytest_addopts_is_named(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    append_log_lines(second, (
+        "PYTEST_ADDOPTS is set in this process; inherited options can narrow it",))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two",
+         "error": "a check in the log reported PYTEST_ADDOPTS is set, so the run's "
+                  "options are not the reviewed command alone"}]
+
+
+def test_missing_environment_evidence_keeps_its_own_refusal(tmp_path):
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    log = second / "run.log"
+    kept = [line for line in log.read_text(encoding="utf-8").splitlines()
+            if "CI environment matches constraints-ci.txt." not in line]
+    log.write_text("\n".join(kept) + "\n", encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two", "error": "before/after environment evidence is not clean"}]
+
+
 @pytest.mark.parametrize("exitstatus", [2, 3, 4])
 def test_a_census_line_beside_an_exit_status_a_census_cannot_set_is_refused(
         tmp_path, exitstatus):
