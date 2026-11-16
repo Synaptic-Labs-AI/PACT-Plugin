@@ -2593,3 +2593,135 @@ class TestTheLegacyProbeLetsTheCallersErrorThrough:
             with memory_api._legacy_probe_context(str(store), None) as (conn, reason):
                 assert conn is None and reason == "no schema"
                 raise sqlite3.OperationalError(callers)
+
+
+# A `git` that answers every command as the real one does, except `worktree
+# list`: with REJECT_Z it rejects `-z` exactly as git before 2.36 does (its
+# `list` options carry no 'z', so parse_options prints "unknown switch `z'"
+# and the usage and exits 129); with FAIL_LISTING every `worktree list`
+# fails as git does on a repository it cannot read.
+_GIT_WRAPPER = """#!/bin/sh
+worktree=0; listing=0; nul=0
+for argument in "$@"; do
+  case "$argument" in
+    worktree) worktree=1 ;;
+    list) [ "$worktree" = 1 ] && listing=1 ;;
+    -z) [ "$listing" = 1 ] && nul=1 ;;
+  esac
+done
+if [ "$listing" = 1 ] && [ "{mode}" = FAIL_LISTING ]; then
+  echo "fatal: not a git repository: '.'" >&2
+  exit 128
+fi
+if [ "$nul" = 1 ] && [ "{mode}" = REJECT_Z ]; then
+  echo "error: unknown switch \\`z'" >&2
+  echo "usage: git worktree list [<options>]" >&2
+  echo "" >&2
+  echo "    --porcelain           machine-readable output" >&2
+  exit 129
+fi
+exec "{git}" "$@"
+"""
+
+
+def _git_on_path(monkeypatch, folder: Path, mode: str) -> None:
+    """Put a `git` wrapper of `mode` first on PATH."""
+    import shutil
+    import stat
+
+    real = shutil.which("git")
+    assert real is not None
+    folder.mkdir()
+    wrapper = folder / "git"
+    wrapper.write_text(_GIT_WRAPPER.format(mode=mode, git=real), encoding="utf-8")
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    import os
+
+    monkeypatch.setenv("PATH", f"{folder}{os.pathsep}{os.environ['PATH']}")
+
+
+def _route_answers(tmp_path, shape: str, mode: str) -> dict:
+    """{route: (project id, decline reason, decline detail)} for `shape` on
+    every route that is not forced, with the `git` wrapper of `mode`."""
+    from fixtures.identity_routes import ROUTES, SHAPES, _clear
+
+    tmp_path.mkdir(parents=True, exist_ok=True)
+
+    answers = {}
+    for index, (route, (run, _sources)) in enumerate(ROUTES.items()):
+        if "forced" in route:
+            continue
+        base = tmp_path / f"cell{index}"
+        base.mkdir()
+        target = SHAPES[shape](base)
+        elsewhere = base / "elsewhere"
+        elsewhere.mkdir()
+        with pytest.MonkeyPatch.context() as cell:
+            _clear(cell)
+            _git_on_path(cell, base / "bin", mode)
+            detected = run(cell, target, elsewhere)
+        reason = (detected.decline_reason or {}).get("reason")
+        answers[route] = (detected.project_id, reason, detected.decline_detail)
+    return answers
+
+
+class TestTheWorktreeCheckRefusesWithoutAListing:
+    """The forged-worktree check reads git's worktree listing; a git that
+    cannot give one never lets the pointer through."""
+
+    def test_a_git_that_rejects_the_nul_listing_still_refuses_a_forged_pointer(self, tmp_path):
+        """Before 2.36 git rejects `worktree list -z`; the listing is read
+        without it, and the forged pointer declines on every route."""
+        from fixtures.identity_routes import VICTIM_ID
+
+        assert_outside_repository(tmp_path)
+        answers = _route_answers(tmp_path, "forged_worktree_admin", "REJECT_Z")
+        wrong = {
+            route: answer for route, answer in answers.items()
+            if answer[0] == VICTIM_ID or answer[1] != "gitfile_redirect"
+        }
+        assert wrong == {}, f"a forged worktree pointer passed on an older git: {wrong}"
+
+    def test_a_git_that_rejects_the_nul_listing_still_binds_a_real_worktree(self, tmp_path):
+        """The listing without `-z` lists the real linked worktree, so it
+        binds its own origin on every route."""
+        from fixtures.identity_routes import OWN
+        from scripts import project_identity as pi
+
+        assert_outside_repository(tmp_path)
+        own = pi.normalize_remote_url(OWN)
+        answers = _route_answers(tmp_path, "control_own_linked_worktree", "REJECT_Z")
+        wrong = {route: answer for route, answer in answers.items() if answer[0] != own}
+        assert wrong == {}, f"a real worktree did not bind on an older git: {wrong}"
+
+    def test_no_listing_refuses_and_says_git_could_not_list(self, tmp_path):
+        """When git cannot list the worktrees at all, a linked-worktree
+        pointer declines on every route, forged or real, and the detail says
+        the listing could not be had rather than that a redirect was found."""
+        from fixtures.identity_routes import VICTIM_ID
+
+        assert_outside_repository(tmp_path)
+        for shape in ("forged_worktree_admin", "control_own_linked_worktree"):
+            answers = _route_answers(tmp_path / shape, shape, "FAIL_LISTING")
+            wrong = {
+                route: answer for route, answer in answers.items()
+                if answer[0] is not None or answer[0] == VICTIM_ID
+                or answer[1] != "gitfile_redirect"
+                or "git could not list" not in (answer[2] or "")
+                or "is not one of its listed worktrees" in (answer[2] or "")
+            }
+            assert wrong == {}, f"{shape} passed or misreported without a listing: {wrong}"
+
+    def test_a_path_the_listing_without_nul_cannot_hold_whole_refuses(self, tmp_path):
+        """Without `-z` git prints a worktree path unquoted, one field per
+        line, so a worktree whose folder holds a newline cannot be read
+        whole: the listing is unreadable and the worktree declines on every
+        route, saying git could not list the worktrees."""
+        assert_outside_repository(tmp_path)
+        answers = _route_answers(tmp_path, "control_path_worktree_holding_a_newline", "REJECT_Z")
+        wrong = {
+            route: answer for route, answer in answers.items()
+            if answer[0] is not None or answer[1] != "gitfile_redirect"
+            or "git could not list" not in (answer[2] or "")
+        }
+        assert wrong == {}, f"a newline-holding worktree was read from a listing without NUL: {wrong}"

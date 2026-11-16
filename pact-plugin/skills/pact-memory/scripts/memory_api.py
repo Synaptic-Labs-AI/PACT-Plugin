@@ -631,8 +631,8 @@ def _warn_case_variant(
 
 _DECLINE_CAUSES = {
     "gitfile_redirect": (
-        "the `.git` marker redirects at another repository's git directory, "
-        "so its remote belongs to that repository"
+        "the `.git` marker names another repository's git directory, and git "
+        "does not confirm this checkout as one of that repository's worktrees"
     ),
     "origin_unreadable": "git could not read the repository's origin remote",
     "origin_unrepresentable": (
@@ -846,9 +846,14 @@ def _root_guard(
             if asked_root is not None
             else None
         )
-    if asked_root is not None and _worktree_redirect(
-        asked_root, common_dir, toplevel=Path(toplevel) if toplevel else None,
-    ):
+    cause = (
+        _worktree_redirect_cause(
+            asked_root, common_dir, toplevel=Path(toplevel) if toplevel else None,
+        )
+        if asked_root is not None
+        else None
+    )
+    if cause is not None:
         # No override path: the common dir is the TARGET repository's.
         return _decline(
             source,
@@ -859,6 +864,13 @@ def _root_guard(
                 f"{source}: {str(asked_root)!r} resolves to another "
                 "repository's worktree admin dir but is not one of its "
                 "listed worktrees"
+                if cause == REDIRECT_UNLISTED
+                else f"{source}: {str(asked_root)!r} has a linked-worktree "
+                "`.git`, and git could not list the worktrees of the "
+                "repository it names, so it cannot be checked"
+            ),
+            cause_detail=(
+                None if cause == REDIRECT_UNLISTED else _UNLISTABLE_WORKTREES_DETAIL
             ),
         )
     if toplevel is None:
@@ -1530,12 +1542,12 @@ _DETECTION_ANSWERS: "contextvars.ContextVar[Optional[dict]]" = contextvars.Conte
 )
 
 
-# THE PASS'S RAW WORKTREE LISTINGS, keyed by the `--git-dir` argument
-# exactly as git was given it, each the (returncode, stdout) git answered.
-# Set beside `_DETECTION_ANSWERS` as a fresh dict for each construction's
-# detection pass and handed to that instance's FIRST legacy read, whose gate
-# runs the same `worktree list --porcelain -z` command for the same common
-# dir; every later read asks git afresh.
+# THE PASS'S WORKTREE LISTINGS, keyed by the `--git-dir` argument exactly as
+# git was given it, each the records `_worktree_records` read. Only a listing
+# git gave is kept. Set beside `_DETECTION_ANSWERS` as a fresh dict for each
+# construction's detection pass and handed to that instance's FIRST legacy
+# read, whose gate asks for the same listing of the same common dir; every
+# later read asks git afresh.
 _DETECTION_LISTINGS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "_DETECTION_LISTINGS", default=None
 )
@@ -1662,41 +1674,96 @@ def _listed_worktree_toplevels(start, *, git_dir: Optional[Path] = None) -> Opti
     )
 
 
-def _ask_worktree_toplevels(start, git_dir: Optional[Path]) -> Optional[set]:
-    command = ["git"]
-    if git_dir is not None:
-        command += ["--git-dir", str(git_dir)]
-    elif start is not None:
-        command += ["-C", str(start)]
-    command += ["worktree", "list", "--porcelain", "-z"]
+# git's exit status for a usage error (parse-options), which is how a git
+# older than 2.36 answers `worktree list -z`: that option did not exist yet.
+_GIT_USAGE_ERROR = 129
+
+# The fields `git worktree list --porcelain` prints, one per line: a key and
+# a value, or a bare flag.
+_PORCELAIN_KEYS = ("worktree ", "HEAD ", "branch ", "locked ", "prunable ")
+_PORCELAIN_FLAGS = ("bare", "detached", "locked", "prunable")
+
+
+def _worktree_records(prefix: list) -> Optional[List[List[str]]]:
+    """`git <prefix> worktree list --porcelain` as records, each the list of
+    its fields, or None when no listing can be had.
+
+    `-z` is asked first: every field then ends in NUL and an empty field ends
+    a record, so a path holding a newline stays whole. A git older than 2.36
+    rejects `-z` as a usage error, and the listing is asked again without
+    it. That listing is one field per line, with a blank line ending each
+    record, and git prints a path there unquoted, so a path holding a newline
+    cannot be read whole: any line that is not a porcelain field, a record
+    that does not start with its `worktree` line, or a field repeated in one
+    record makes the listing unreadable (None). None also covers a failed or
+    timed-out git; a caller must read it as "no listing", never as an empty
+    one.
+    """
     from shared.project_scope import git_env_without_location
 
-    try:
-        result = subprocess.run(
-            command, capture_output=True, text=False, timeout=5,
+    def ask(extra: list):
+        return subprocess.run(
+            ["git", *prefix, "worktree", "list", "--porcelain", *extra],
+            capture_output=True, text=False, timeout=5,
             env=git_env_without_location(),
         )
+
+    try:
+        result = ask(["-z"])
+        nul = result.returncode != _GIT_USAGE_ERROR
+        if not nul:
+            result = ask([])
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None
+    if result.returncode != 0:
+        return None
+    records, current = [], []
+    for field in os.fsdecode(result.stdout).split("\0" if nul else "\n"):
+        if field:
+            current.append(field)
+        elif current:
+            records.append(current)
+            current = []
+    if current:
+        records.append(current)
+    if not nul:
+        for record in records:
+            keys = [
+                field if field in _PORCELAIN_FLAGS
+                else next((key for key in _PORCELAIN_KEYS if field.startswith(key)), None)
+                for field in record
+            ]
+            if None in keys or keys[0] != "worktree " or len(set(keys)) != len(keys):
+                return None
+    return records
+
+
+def _ask_worktree_toplevels(start, git_dir: Optional[Path]) -> Optional[set]:
+    prefix = (
+        ["--git-dir", str(git_dir)] if git_dir is not None
+        else ["-C", str(start)] if start is not None
+        else []
+    )
+    records = _worktree_records(prefix)
+    if records is None:
         return None
     listings = _DETECTION_LISTINGS.get()
     if listings is not None and git_dir is not None:
-        listings[str(git_dir)] = (result.returncode, result.stdout)
-    if result.returncode != 0:
-        return None
+        listings[str(git_dir)] = records
     toplevels = set()
-    # `-z` ends every field with NUL, so a path holding a newline stays whole.
-    for line in os.fsdecode(result.stdout).split("\0"):
-        if not line.startswith("worktree "):
-            continue
-        try:
-            toplevels.add(Path(line[len("worktree "):]).resolve())
-        except (OSError, RuntimeError):
-            continue
+    for record in records:
+        for field in record:
+            if not field.startswith("worktree "):
+                continue
+            try:
+                toplevels.add(Path(field[len("worktree "):]).resolve())
+            except (OSError, RuntimeError):
+                continue
     return toplevels
 
 
 def _verified_worktree_roots(
-    repo_root: Path, common_dir: Optional[Path], listing: Optional[tuple] = None
+    repo_root: Path, common_dir: Optional[Path], listing: Optional[list] = None
 ) -> List[Path]:
     """The gate roots: the identity root plus every TWO-WAY-LINKED worktree.
 
@@ -1709,43 +1776,19 @@ def _verified_worktree_roots(
     `gitdir` names `W/.git` back. Anything else is dropped, which can only
     narrow the gate; a listing failure narrows it to the identity root.
 
-    `listing`, the (returncode, stdout) the detection pass got from this same
-    command for this same `common_dir`, is used instead of asking git again.
+    `listing`, the records (`_worktree_records`) the detection pass got for
+    this same `common_dir`, is used instead of asking git again.
     """
     roots = [Path(repo_root).resolve()]
     if common_dir is None:
         return roots
-    from shared.project_scope import git_env_without_location
-
-    if listing is None:
-        try:
-            result = subprocess.run(
-                ["git", "--git-dir", str(common_dir), "worktree", "list", "--porcelain", "-z"],
-                capture_output=True,
-                text=False,
-                timeout=5,
-                env=git_env_without_location(),
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
-            return roots
-        listing = (result.returncode, result.stdout)
-    returncode, stdout = listing
-    if returncode != 0:
+    records = listing if listing is not None else _worktree_records(["--git-dir", str(common_dir)])
+    if records is None:
         return roots
     try:
         admin_parent = (Path(common_dir) / "worktrees").resolve()
     except (OSError, RuntimeError, ValueError):
         return roots
-    # `-z`: every field ends in NUL and an empty field ends a record.
-    records, current = [], []
-    for field in os.fsdecode(stdout).split("\0"):
-        if field:
-            current.append(field)
-        elif current:
-            records.append(current)
-            current = []
-    if current:
-        records.append(current)
     for record in records[1:]:  # the first record is the main worktree
         worktree = next(
             (f[len("worktree "):] for f in record if f.startswith("worktree ")), None
@@ -1778,11 +1821,33 @@ def _verified_worktree_roots(
     return list(dict.fromkeys(roots))
 
 
+# The `cause_detail` of a refusal whose listing git could not give.
+_UNLISTABLE_WORKTREES_DETAIL = (
+    "git could not list the worktrees of the repository the `.git` marker "
+    "names, so the checkout could not be checked against them"
+)
+
+# `_worktree_redirect_cause`'s answers when the check refuses.
+REDIRECT_UNLISTED = "unlisted"
+REDIRECT_UNVERIFIABLE = "unverifiable"
+
+
 def _worktree_redirect(
     asked_root, common_dir, *, git_dir: Optional[Path] = None,
     toplevel: Optional[Path] = None,
 ) -> bool:
-    """Whether the linked-worktree shape is NOT backed by git's listing.
+    """Whether the check refuses the shape (`_worktree_redirect_cause`)."""
+    return _worktree_redirect_cause(
+        asked_root, common_dir, git_dir=git_dir, toplevel=toplevel
+    ) is not None
+
+
+def _worktree_redirect_cause(
+    asked_root, common_dir, *, git_dir: Optional[Path] = None,
+    toplevel: Optional[Path] = None,
+) -> Optional[str]:
+    """Why the linked-worktree shape is NOT backed by git's listing, or None
+    when it is (or is not a linked-worktree shape).
 
     A `.git` FILE naming another repository's WORKTREE ADMIN dir makes every
     git answer agree — `--git-dir`, `--git-common-dir` and `--show-toplevel`
@@ -1799,39 +1864,46 @@ def _worktree_redirect(
 
     `git_dir` and `toplevel`, when the caller already holds git's answers
     for `asked_root`, are used instead of asking git again.
+
+    MISSING EVIDENCE REFUSES. `REDIRECT_UNLISTED`: git's listing does not
+    hold the checkout. `REDIRECT_UNVERIFIABLE`: the check could not be made,
+    because git gave no git dir, no listing (`_listed_worktree_toplevels` is
+    None) or a path that would not resolve. A git that does not answer with
+    a toplevel is not refused here: that shape has no working tree, and
+    `_root_guard` declines it `no_working_tree`.
     """
     if asked_root is None or common_dir is None:
-        return False
+        return None
     try:
         if git_dir is None:
             git_dir_raw = _git_rev_parse(str(asked_root), "--git-dir")
             if git_dir_raw is None:
-                return False
+                return REDIRECT_UNVERIFIABLE
             git_dir = Path(git_dir_raw)
             if not git_dir.is_absolute():
                 git_dir = Path(asked_root) / git_dir
         git_dir = Path(git_dir).resolve()
         common_path = Path(common_dir).resolve()
     except (OSError, RuntimeError, ValueError):
-        return False
+        return REDIRECT_UNVERIFIABLE
     if git_dir == common_path:
-        return False
+        return None
     # LISTED BY THE REPOSITORY THE COMMON DIR BELONGS TO: a submodule's
     # admin dir sits inside the superproject's `.git`, so a listing run from
     # a directory would report the SUPERPROJECT's worktrees.
     listed = _listed_worktree_toplevels(None, git_dir=common_path)
     if listed is None:
-        return False
+        return REDIRECT_UNVERIFIABLE
     if toplevel is None:
         toplevel_raw = _git_rev_parse(str(asked_root), "--show-toplevel")
         if toplevel_raw is None:
-            return False
+            return None
         toplevel = Path(toplevel_raw)
     try:
         toplevel = Path(toplevel).resolve()
-    except (OSError, RuntimeError):
-        return False
-    return toplevel not in listed
+    except (OSError, RuntimeError, ValueError):
+        return REDIRECT_UNVERIFIABLE
+    return REDIRECT_UNLISTED if toplevel not in listed else None
 
 
 def _cwd_or_none() -> Optional[Path]:
@@ -2169,8 +2241,11 @@ class PACTMemory:
                         list, asked of the common dir the identity was read
                         from; none when the detection pass already listed
                         that common dir). No call is repeated with the same
-                        argument. These counts assume no override pin. With
-                        a canonical override pin, which answers before the
+                        argument. A git older than 2.36 rejects the worktree
+                        listing's `-z`, and the listing is then asked once
+                        more without it. These counts assume no override
+                        pin. With a canonical override pin, which answers
+                        before the
                         origin is read, the counts are:
                           checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
                           linked worktree: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
