@@ -81,8 +81,15 @@ SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=\d+")
 SESSION_BANNER = re.compile(r"=+ test session starts =+")
 SECTION_SEPARATOR = re.compile(r"[=_-]{3,}( .*)?")
 # The header line each census's finish() writes when it fails the session.
-# Under xdist the controller writes it straight after the last progress
-# marker, on the same line, so an optional progress prefix is allowed.
+# Each finish() (child_pytest_census, clock_shift_census, home_census) starts
+# the header on a new line when the terminal reporter's writer says its line is
+# open, as xdist's last progress line ("....[100%]") leaves it. The optional
+# progress prefix stays so a header that still follows a progress marker on one
+# line is read: the new-line check reads pytest's private _tw.width_of_current_line
+# and quietly skips the break if a release renames it; logs recorded before the
+# censuses started the new line carry the joined form; and, not measured, the
+# stderr print a finish() falls back to without a reporter might land after an
+# open progress line in the merged job log.
 _PROGRESS_PREFIX = r"(?:[^\[]*\[ *[0-9]{1,3}%\])?"
 CENSUS_HEADERS = {
     "child_pytest": re.compile(
