@@ -179,6 +179,13 @@ FOREIGN_GIT_DIR_DETAIL = (
     "directory that does not record it as that submodule's working tree"
 )
 
+# The `detail` for a `.git` marker naming a submodule's git dir whose
+# `core.worktree` git could not read.
+CORE_WORKTREE_UNREAD_DETAIL = (
+    "its `.git` names a submodule's git directory, and git could not read "
+    "that directory's core.worktree"
+)
+
 # The `detail` for an origin url list holding an empty value.
 EMPTY_URL_ENTRY_DETAIL = (
     "its remote.origin.url list holds an empty value, so the url git uses "
@@ -1462,7 +1469,15 @@ def _refuse_submodule_basename(
 
 
 def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool:
-    """Whether a SUBMODULE admin dir records a checkout other than `asked_root`.
+    """Whether a SUBMODULE admin dir records a checkout other than `asked_root`
+    (`_admin_dir_refusal`)."""
+    return _admin_dir_refusal(admin_dir, asked_root) is not None
+
+
+def _admin_dir_refusal(admin_dir: Path, asked_root: Path) -> Optional[str]:
+    """None when a SUBMODULE admin dir records `asked_root` as its checkout,
+    else the detail of the refusal: CORE_WORKTREE_UNREAD_DETAIL when git
+    could not read `core.worktree`, FOREIGN_GIT_DIR_DETAIL otherwise.
 
     A `.git` FILE pointing at `<other>/.git/modules/<name>` makes git report
     that submodule's git dir and common dir, which are EQUAL — so the
@@ -1475,7 +1490,7 @@ def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool
     MEASURED: a genuine submodule's `core.worktree` is `../../../submod`,
     resolving to the submodule checkout the caller is standing in; a forged
     pointer's resolves to somebody else's checkout. A BARE OR UNSET
-    `core.worktree` is UNPROVABLE and answers True (decline): `git submodule
+    `core.worktree` is UNPROVABLE and is refused: `git submodule
     deinit` leaves exactly that state while the submodule's origin survives,
     so treating it as innocent bound another repository's id.
     """
@@ -1494,8 +1509,12 @@ def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool
         # `<...>/.git/modules/<name>` shape (a submodule admin dir), and git
         # being unable to answer there says nothing about whether the pointer
         # is genuine. A live submodule always records `core.worktree`, so
-        # nothing legitimate is refused by answering True here.
-        return True
+        # nothing legitimate is refused here.
+        return CORE_WORKTREE_UNREAD_DETAIL
+    if result.returncode not in (0, 1) or (result.returncode == 1 and result.stdout):
+        # `git config --get` exits 1 with no output when the key is unset;
+        # any other failure is git not reading it.
+        return CORE_WORKTREE_UNREAD_DETAIL
     value = one_git_answer(result)
     if value is None:
         # AN UNSET `core.worktree` IS UNPROVABLE, NOT PROVEN-INNOCENT, and the
@@ -1505,7 +1524,7 @@ def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool
         # canonical id for reads AND writes. A live submodule always records
         # it (measured: `../../../../checks/ForeignProj`), so failing closed
         # here refuses only the deinit-ed state that cannot be checked.
-        return True
+        return FOREIGN_GIT_DIR_DETAIL
     recorded = Path(value)
     if not recorded.is_absolute():
         recorded = admin_dir / recorded
@@ -1513,21 +1532,28 @@ def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool
         recorded = recorded.resolve()
         asked = Path(asked_root).resolve()
     except (OSError, RuntimeError, ValueError):
-        return True
+        return FOREIGN_GIT_DIR_DETAIL
     try:
         # SAME INODE, NOT THE SAME SPELLING: on a case-insensitive filesystem
         # a genuinely recorded `core.worktree` can differ from the checkout
         # path only by case. `samefile` settles that without folding the
         # comparison, which would be wrong on a case-sensitive filesystem.
-        return not os.path.samefile(recorded, asked)
+        return None if os.path.samefile(recorded, asked) else FOREIGN_GIT_DIR_DETAIL
     except OSError:
         # A recorded path that does not exist cannot be this checkout's
         # worktree, and the question is unprovable: fail closed.
-        return True
+        return FOREIGN_GIT_DIR_DETAIL
 
 
 def _redirect_target_is_foreign(target: Path, marker_root: Path) -> bool:
-    """Whether a `.git` marker's resolved TARGET is another repository's git dir.
+    """Whether a `.git` marker's resolved TARGET is another repository's git
+    dir (`_redirect_target_refusal`)."""
+    return _redirect_target_refusal(target, marker_root) is not None
+
+
+def _redirect_target_refusal(target: Path, marker_root: Path) -> Optional[str]:
+    """None unless a `.git` marker's resolved TARGET is another repository's
+    git dir; then the detail of the refusal.
 
     ONE predicate for every route by which `.git` can redirect: a gitfile's
     `gitdir:` line and a symlinked `.git`, so the routes cannot drift apart.
@@ -1557,14 +1583,21 @@ def _redirect_target_is_foreign(target: Path, marker_root: Path) -> bool:
       the accepted residual.
     """
     if target.name == ".git":
-        return True
+        return FOREIGN_GIT_DIR_DETAIL
     if _submodule_admin_dir(target) and not os.path.exists(target / "commondir"):
-        return _admin_dir_names_another_checkout(target, marker_root)
-    return False
+        return _admin_dir_refusal(target, marker_root)
+    return None
 
 
 def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
-    """Whether `<root>/.git` redirects at another repository's git dir.
+    """Whether `<root>/.git` redirects at another repository's git dir
+    (`_gitfile_redirect_detail`)."""
+    return _gitfile_redirect_detail(root) is not None
+
+
+def _gitfile_redirect_detail(root: Path) -> Optional[str]:
+    """None unless `<root>/.git` redirects at another repository's git dir;
+    then the detail of the refusal.
 
     Two routes reach the same question, and both answer through
     `_redirect_target_is_foreign`:
@@ -1608,8 +1641,8 @@ def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
     # legitimate subdirectory of a genuine submodule would be refused.
     target = _marker_target(root)
     if target is None:
-        return False
-    return _redirect_target_is_foreign(*target)
+        return None
+    return _redirect_target_refusal(*target)
 
 
 def _marker_target(root: Path) -> Optional[Tuple[Path, Path]]:
@@ -1739,7 +1772,8 @@ def detect_id_for_root(
     # asked about (the cwd, or the declared directory).
     asked = Path(asked_root) if asked_root is not None else Path(root)
     override_path = str(common_dir / _OVERRIDE_FILENAME)
-    if _gitfile_points_at_foreign_gitdir(asked):
+    redirect_detail = _gitfile_redirect_detail(asked)
+    if redirect_detail is not None:
         # THE REASON NAMES THE REAL CAUSE. Without it the rung's generic
         # "origin could not be read or represented" warning sends the
         # operator to inspect a remote when the `.git` marker is the thing
@@ -1753,7 +1787,7 @@ def detect_id_for_root(
             "declined",
             _without_path(override_ignored),
             decline_record("gitfile_redirect", None),
-            FOREIGN_GIT_DIR_DETAIL,
+            redirect_detail,
         )
 
     # A GIT DIR OUTSIDE THE CHECKOUT THAT IS NEITHER A LINKED WORKTREE'S NOR A

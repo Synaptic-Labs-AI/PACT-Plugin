@@ -271,12 +271,19 @@ def matrix(tmp_path_factory):
     sites = _resolver_call_sites()
     path = memory_api.__file__
     predicates = _marker_predicates()
+    defs = {
+        node.name: node for node in ast.parse(Path(pi.__file__).read_text(encoding="utf-8")).body
+        if isinstance(node, ast.FunctionDef)
+    }
+    refusals = {name for name in predicates if _return_kind(defs[name], defs)[0] == "refusal"}
     fired = set()
     files = {str(file): file.relative_to(PLUGIN_ROOT).as_posix() for file in _identity_caller_files()}
     executed = set()
 
     def tracer(frame, event, arg):
-        if event == "return" and frame.f_code.co_name in predicates and arg is True:
+        if event == "return" and frame.f_code.co_name in predicates and (
+            arg is True or (frame.f_code.co_name in refusals and isinstance(arg, str))
+        ):
             fired.add(frame.f_code.co_name)
         if event == "call" and frame.f_code.co_name in IDENTITY_FUNCTIONS:
             caller = frame.f_back
@@ -618,7 +625,9 @@ class TestTheMatrixCoversTheCode:
 
     def test_every_marker_predicate_fires(self, matrix):
         """Each `.git`-marker predicate the identity layer applies answers
-        True for some shape, so a new predicate needs a shape here."""
+        True for some shape, and each refusal (a check `_return_kind` reads
+        as answering None or a detail) answers a detail for some shape, so a
+        new check needs a shape here."""
         _cells, _sites, fired, _executed = matrix
         predicates, unresolved, excluded = _marker_predicate_forms()
         assert unresolved == [], f"a use of the asked root the census cannot read: {unresolved}"
@@ -858,9 +867,10 @@ FLOOR_LAYOUTS = {
 }
 
 
-# The `.git`-layout predicates: every `-> bool` function of project_identity
-# that detect_id_for_root reaches from the asked root (the marker predicates
-# and every project_identity function they call, transitively). Each truthy
+# The `.git`-layout predicates: every `-> bool` function and every refusal
+# (`_is_refusal`: answers None or a detail string) of project_identity that
+# detect_id_for_root reaches from the asked root (the marker predicates and
+# every project_identity function they call, transitively). Each truthy
 # `return` is one layout outcome the identity code distinguishes, and each
 # operand of a returned `or` is one outcome of its own.
 #
@@ -869,29 +879,28 @@ FLOOR_LAYOUTS = {
 # says how a layout reaching them ends: a decline, or, for the user's own
 # dot-git store, a bind through a pin, counted in the pinned table.
 NOT_A_FLOOR_LAYOUT = {
-    # Every truthy return of the three predicates below reaches one place:
-    # detect_id_for_root's `if _gitfile_points_at_foreign_gitdir(asked)`
-    # check, which returns a `gitfile_redirect` decline. Nothing else calls
-    # them. A usable pin is read before that check, so a pinned checkout
-    # binds its pin.
-    "_gitfile_points_at_foreign_gitdir": (
-        "its one truthy return hands the `.git` marker's target to "
-        "`_redirect_target_is_foreign`, so it is true for exactly the cases "
+    # Every detail the three refusals below return reaches one place:
+    # detect_id_for_root's `_gitfile_redirect_detail(asked)` check, which
+    # returns a `gitfile_redirect` decline carrying that detail. A usable pin
+    # is read before that check, so a pinned checkout binds its pin.
+    "_gitfile_redirect_detail": (
+        "its one detail-giving return hands the `.git` marker's target to "
+        "`_redirect_target_refusal`, so it refuses for exactly the cases "
         "the next reason lists, and each declines `gitfile_redirect` at "
         "detect_id_for_root's redirect check. The one own layout it reaches "
         "is the user's `--separate-git-dir=<dir>/.git` store: unpinned it "
         "declines there too, and pinned it binds through the pin read first "
         "(TestTheGitCallFloorWithAPin)"
     ),
-    "_redirect_target_is_foreign": (
-        "true when the target is named `.git` (the foreign_gitdir, "
+    "_redirect_target_refusal": (
+        "refuses when the target is named `.git` (the foreign_gitdir, "
         "relative_foreign_gitdir and symlinked_git shapes decline "
         "`gitfile_redirect`; the user's own dot-git store is the pinned "
-        "exception above), and whenever `_admin_dir_names_another_checkout` "
-        "is true for a submodule admin dir with no `commondir` file"
+        "exception above), and whenever `_admin_dir_refusal` refuses for a "
+        "submodule admin dir with no `commondir` file"
     ),
-    "_admin_dir_names_another_checkout": (
-        "true for a submodule admin dir whose recorded checkout cannot be "
+    "_admin_dir_refusal": (
+        "refuses for a submodule admin dir whose recorded checkout cannot be "
         "proven to be the asked one. Reached by a shape: `os.path.samefile` "
         "says the recorded checkout is another one, a forgery (the "
         "forged_submodule_admin and symlinked_submodule_admin shapes decline "
@@ -904,7 +913,7 @@ NOT_A_FLOOR_LAYOUT = {
         "a direct call or a mocked `samefile`: with the checkout really "
         "deleted, the git-root, CLAUDE_PROJECT_DIR and cwd-marker routes "
         "decline `broken_git_marker` in their root guard before this "
-        "predicate is called"
+        "refusal is called"
     ),
     "_git_env_bool": "reads a git environment flag, not the `.git` layout",
 }
@@ -1088,12 +1097,55 @@ def _predicate_results(function, defined: dict, seen: frozenset) -> dict:
     return found
 
 
+def _is_refusal(function, defined: dict, seen: frozenset) -> bool:
+    """Whether `function` is annotated exactly `Optional[str]` and every
+    value it returns is None, a module-level name of project_identity bound
+    once to a string constant, a ternary of two such values, or a direct
+    call to a project_identity function that is itself a refusal: a check
+    whose answer is None (it does not refuse) or the detail it refuses
+    with."""
+    if not (function.returns is not None and ast.unparse(function.returns) == "Optional[str]"):
+        return False
+    tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
+    bindings = collections.Counter(
+        target.id for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Name)
+    )
+    details = {
+        node.targets[0].id for node in tree.body
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+        and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+        and bindings[node.targets[0].id] == 1
+    }
+    seen = seen | {function.name}
+
+    def admitted(value) -> bool:
+        if isinstance(value, ast.Constant) and value.value is None:
+            return True
+        if isinstance(value, ast.Name) and value.id in details:
+            return True
+        if isinstance(value, ast.IfExp):
+            return admitted(value.body) and admitted(value.orelse)
+        if (
+            isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id in defined and value.func.id not in seen
+        ):
+            return _is_refusal(defined[value.func.id], defined, seen)
+        return False
+
+    returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
+    return bool(returns) and all(node.value is not None and admitted(node.value) for node in returns)
+
+
 def _return_kind(function, defined: "dict | None" = None, seen: frozenset = frozenset()) -> tuple:
-    """("predicate" or "not a predicate", None), or (None, why the walk
-    cannot classify `function`). The walk reads these forms and no others,
-    each admitted by a check on what it names:
+    """("predicate", "refusal" or "not a predicate", None), or (None, why
+    the walk cannot classify `function`). The walk reads these forms and no
+    others, each admitted by a check on what it names:
     - PREDICATE: the annotation is the bare name `bool`, and `bool` is not
       rebound in project_identity;
+    - REFUSAL: `_is_refusal` admits it, so it answers None or a detail
+      string, and its detail is its layout outcome;
     - NOT A PREDICATE, `-> None`: every return in the body is bare or
       returns None;
     - NOT A PREDICATE, any other annotation: `_not_a_bool_type` admits it,
@@ -1117,6 +1169,8 @@ def _return_kind(function, defined: "dict | None" = None, seen: frozenset = froz
         if _resolved("bool") is not builtins.bool:
             return None, "is annotated `bool`, but `bool` is rebound in project_identity"
         return "predicate", None
+    if _is_refusal(function, defined, seen):
+        return "refusal", None
     if returns is None:
         return None, "has no return annotation"
     if isinstance(returns, ast.Constant) and returns.value is None:
@@ -1151,10 +1205,10 @@ def _return_kind(function, defined: "dict | None" = None, seen: frozenset = froz
 # reason's text from the source and requires the reason to equal it; a new or
 # changed form fails the census arm.
 NAMED_LAYOUT_FORMS = {
-    ('_admin_dir_names_another_checkout', 'binds', 'value = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `_admin_dir_names_another_checkout` (-> bool)"),
+    ('_admin_dir_refusal', 'binds', 'value = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `_admin_dir_refusal` (-> Optional[str])"),
     ('_marker_target', 'binds', 'target = gitfile_target(text)'): (1, "assigns a call to `gitfile_target` (-> Optional[str]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
     ('git_dir_answer', 'binds', 'answer = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `git_dir_answer` (-> Optional[str])"),
-    ('_gitfile_points_at_foreign_gitdir', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_gitfile_points_at_foreign_gitdir` (-> bool)"),
+    ('_gitfile_redirect_detail', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_gitfile_redirect_detail` (-> Optional[str])"),
     ('_marker_names_external_git_dir', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_marker_names_external_git_dir` (-> bool)"),
     ('_marker_names_external_git_dir', 'returns', 'not _submodule_admin_dir(git_dir)'): (1, "returns `not` applied to a call to `_submodule_admin_dir` (-> bool) in `_marker_names_external_git_dir` (-> bool)"),
     ('_marker_target', 'binds', 'text = read_git_file(marker)'): (1, "assigns a call to `read_git_file` (-> Optional[str]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
@@ -1164,7 +1218,7 @@ NAMED_LAYOUT_FORMS = {
     ('find_git_marker', 'binds', 'ceilings = _git_ceiling_directories()'): (1, "assigns a call to `_git_ceiling_directories` (-> set) to a local in `find_git_marker` (-> Optional[Path])"),
     ('find_git_marker', 'binds', "cross_filesystem = _git_env_bool('GIT_DISCOVERY_ACROSS_FILESYSTEM')"): (1, "assigns a call to `_git_env_bool` (-> bool) to a local in `find_git_marker` (-> Optional[Path])"),
     ('git_dir_answer', 'calls', 'DETECTION_GIT_DIRS.get'): (1, "calls a method on `DETECTION_GIT_DIRS`, a module-level assignment of a `contextvars.ContextVar(...)` call, in `git_dir_answer` (-> Optional[str])"),
-    ('_redirect_target_is_foreign', 'uses', 'an `if` or `elif` test: _submodule_admin_dir(target)'): (1, "uses a call to `_submodule_admin_dir` (-> bool) in an `if` or `elif` test in `_redirect_target_is_foreign` (-> bool)"),
+    ('_redirect_target_refusal', 'uses', 'an `if` or `elif` test: _submodule_admin_dir(target)'): (1, "uses a call to `_submodule_admin_dir` (-> bool) in an `if` or `elif` test in `_redirect_target_refusal` (-> Optional[str])"),
     ('_submodule_checkout', 'uses', 'an `if` or `elif` test: _submodule_admin_dir(common_dir)'): (1, "uses a call to `_submodule_admin_dir` (-> bool) in an `if` or `elif` test in `_submodule_checkout` (-> bool)"),
 }
 
@@ -1331,7 +1385,7 @@ def _layout_predicate_forms() -> tuple:
         function = defined[frontier.pop()]
         name = function.name
         kind, why = _return_kind(function, defined)
-        if kind == "predicate":
+        if kind in ("predicate", "refusal"):
             predicates.add(name)
         elif kind is None:
             unresolved[(name, "annotation", why)] += 1

@@ -2604,7 +2604,8 @@ class TestTheLegacyProbeLetsTheCallersErrorThrough:
 # fails as git does on a repository it cannot read; with
 # FAIL_ABSOLUTE_GIT_DIR every `rev-parse --absolute-git-dir` fails; with
 # FAIL_GIT_DIR every `rev-parse --git-dir` fails (the global `--git-dir <dir>`
-# option before a command is answered). With
+# option before a command is answered); with FAIL_CORE_WORKTREE every read of
+# `core.worktree` fails. With
 # ECHO followed by
 # a `rev-parse` option, it answers as a git that predates that option:
 # rev-parse prints an option it does not know back as an argument, in its
@@ -2632,6 +2633,14 @@ for argument in "$@"; do
     -z) [ "$listing" = 1 ] && nul=1 ;;
   esac
 done
+if [ "{mode}" = FAIL_CORE_WORKTREE ]; then
+  for argument in "$@"; do
+    if [ "$argument" = core.worktree ]; then
+      echo "fatal: cannot read" >&2
+      exit 128
+    fi
+  done
+fi
 if [ "{mode}" = FAIL_GIT_DIR ]; then
   revparse=0
   for argument in "$@"; do
@@ -3006,3 +3015,26 @@ class TestNoRouteBindsWithoutAGitDir:
         assert memory_api._worktree_redirect_cause(checkout, common) == (
             memory_api.REDIRECT_UNRESOLVABLE
         )
+
+
+class TestAnUnreadableCoreWorktreeIsNamed:
+    """A `.git` naming a submodule's git dir is checked against that git
+    dir's `core.worktree`. When git cannot read it, the refusal says so,
+    not that the git dir records another working tree."""
+
+    def test_a_real_submodule_declines_naming_the_unread_core_worktree(self, tmp_path):
+        from scripts import project_identity as pi
+
+        assert_outside_repository(tmp_path)
+        answers = _route_answers(tmp_path, "control_own_submodule", "FAIL_CORE_WORKTREE")
+        refused = {route: a for route, a in answers.items() if a[1] == "gitfile_redirect"}
+        assert refused, f"control: the submodule refused on some route ({answers})"
+        wrong = {
+            route: a for route, a in refused.items() if a[2] != pi.CORE_WORKTREE_UNREAD_DETAIL
+        }
+        assert wrong == {}, wrong
+
+    def test_control_the_same_submodule_binds_when_git_reads_it(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        answers = _route_answers(tmp_path, "control_own_submodule", "PASS")
+        assert not [a for a in answers.values() if a[1] == "gitfile_redirect"], answers

@@ -2458,3 +2458,53 @@ class TestTheIncludeScanReadsAHeaderAsGitDoes:
         )
         run_git("checkout", "-q", "-b", "elsewhere", cwd=repo)
         assert pi.read_origin(git_dir).state == pi.ORIGIN_INCLUDE_ONLY
+
+
+class TestTheSubmoduleWorktreeCheckNamesItsCause:
+    """`_admin_dir_refusal` answers None for a submodule git dir that records
+    the asked checkout, and otherwise the detail of what it saw: an unset or
+    different `core.worktree`, or one git could not read."""
+
+    @staticmethod
+    def _submodule(tmp_path):
+        superproject = _superproject_with_submodule(tmp_path)
+        checkout = superproject / "vendor" / "lib"
+        return superproject / ".git" / "modules" / "vendor" / "lib", checkout
+
+    def test_the_recorded_checkout_passes(self, tmp_path):
+        admin, checkout = self._submodule(tmp_path)
+        assert pi._admin_dir_refusal(admin, checkout) is None
+
+    def test_another_checkout_is_named_as_such(self, tmp_path):
+        admin, _checkout = self._submodule(tmp_path)
+        (tmp_path / "elsewhere").mkdir()
+        assert pi._admin_dir_refusal(admin, tmp_path / "elsewhere") == pi.FOREIGN_GIT_DIR_DETAIL
+
+    def test_an_unset_core_worktree_is_named_as_not_recorded(self, tmp_path):
+        admin, checkout = self._submodule(tmp_path)
+        run_git("--git-dir", str(admin), "config", "--unset", "core.worktree", cwd=tmp_path)
+        assert pi._admin_dir_refusal(admin, checkout) == pi.FOREIGN_GIT_DIR_DETAIL
+
+    def test_a_core_worktree_git_cannot_read_is_named_as_unread(self, tmp_path, monkeypatch):
+        admin, checkout = self._submodule(tmp_path)
+        real = pi.subprocess.run
+
+        def run(command, *args, **kwargs):
+            if "core.worktree" in command:
+                return subprocess.CompletedProcess(command, 128, b"", b"fatal: cannot read")
+            return real(command, *args, **kwargs)
+
+        monkeypatch.setattr(pi.subprocess, "run", run)
+        assert pi._admin_dir_refusal(admin, checkout) == pi.CORE_WORKTREE_UNREAD_DETAIL
+
+    def test_a_git_that_cannot_run_is_named_as_unread(self, tmp_path, monkeypatch):
+        admin, checkout = self._submodule(tmp_path)
+        real = pi.subprocess.run
+
+        def run(command, *args, **kwargs):
+            if "core.worktree" in command:
+                raise OSError("git cannot run")
+            return real(command, *args, **kwargs)
+
+        monkeypatch.setattr(pi.subprocess, "run", run)
+        assert pi._admin_dir_refusal(admin, checkout) == pi.CORE_WORKTREE_UNREAD_DETAIL
