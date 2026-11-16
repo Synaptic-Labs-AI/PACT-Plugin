@@ -478,6 +478,21 @@ _BUILDERS = {
 }
 
 
+# What a forged-pointer builder built, declared by the builder: git's
+# answers about such a target cannot tell it from an honest submodule,
+# separate-git-dir or worktree pointer, so the decline it must get is
+# stated here rather than derived (test_every_declining_shape_answers_
+# its_one_derived_reason).
+_foreign_gitdir.declines = "gitfile_redirect"
+_forged_separate_store_worktree.declines = "gitfile_redirect"
+_forged_submodule_admin.declines = "gitfile_redirect"
+_forged_worktree_admin.declines = "gitfile_redirect"
+_forged_worktree_config_dotgit.declines = "gitfile_redirect"
+_relative_foreign_gitdir.declines = "gitfile_redirect"
+_symlinked_git.declines = "gitfile_redirect"
+_symlinked_submodule_admin.declines = "gitfile_redirect"
+
+
 def _with_sub(build):
     def builder(base: Path) -> Path:
         target = build(base)
@@ -485,7 +500,7 @@ def _with_sub(build):
         return target
 
     builder.__name__ = build.__name__
-    for attribute in ("layout", "home"):
+    for attribute in ("layout", "home", "declines"):
         if hasattr(build, attribute):
             setattr(builder, attribute, getattr(build, attribute))
     return builder

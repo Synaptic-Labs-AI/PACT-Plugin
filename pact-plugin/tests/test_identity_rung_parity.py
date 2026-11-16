@@ -345,6 +345,40 @@ SPLIT_BY_VISIBILITY = {
 }
 
 
+
+def _git_derived_decline(target: Path):
+    """The decline git's own answers about `target` predict, independently
+    of the resolver, or None when they predict none: no git dir answer ->
+    `broken_git_marker`; a bare repository -> `no_working_tree`; a
+    `remote.origin.url` none of whose values comes from the common dir's
+    own config file -> `origin_unrepresentable`."""
+    import os
+    import subprocess
+
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull)
+
+    def git(*args):
+        return subprocess.run(["git", *args], capture_output=True, env=env, timeout=10)
+
+    if git("-C", str(target), "rev-parse", "--absolute-git-dir").returncode != 0:
+        return "broken_git_marker"
+    if git("-C", str(target), "rev-parse", "--is-bare-repository").stdout.strip() == b"true":
+        return "no_working_tree"
+    common = git("-C", str(target), "rev-parse", "--path-format=absolute", "--git-common-dir")
+    if common.returncode != 0:
+        return None
+    common_dir = os.fsdecode(common.stdout[:-1])
+    urls = git("--git-dir", common_dir, "config", "--show-origin", "-z", "--get-all", "remote.origin.url")
+    origins = urls.stdout.split(b"\0")[:-1][0::2] if urls.returncode == 0 else []
+    own = os.path.realpath(os.path.join(common_dir, "config"))
+    if origins and not any(
+        origin.startswith(b"file:") and os.path.realpath(os.fsdecode(origin[len(b"file:"):])) == own
+        for origin in origins
+    ):
+        return "origin_unrepresentable"
+    return None
+
 def _reached(cells) -> dict:
     """{shape: {route: (answer, override report)}} for the cells whose own
     rung answered, except the user setting at a home target (see
@@ -440,6 +474,42 @@ class TestEveryRungGivesAShapeTheSameAnswer:
         for shape in SPLIT_BY_VISIBILITY:
             answers = {cells[(shape, route)][0] for route in ROUTES}
             assert len(answers) > 1, (shape, answers)
+
+    def test_every_declining_shape_answers_its_one_derived_reason(self, matrix, tmp_path_factory):
+        """Every shape whose routes all decline, and every shape for which a
+        reason is derived, answers that reason on every route. The reason
+        has exactly one source: git's own answers about the built target
+        (`_git_derived_decline`), or the builder's own declaration of what
+        it built (`declines`, for a forged pointer git's answers cannot
+        tell from an honest one). A declining shape with no source, a shape
+        with both, and a shape that binds where a reason is derived all
+        fail. The bare-repository pair splits by design and is held by
+        test_a_stray_git_answers_as_the_same_folder_with_none."""
+        cells, _sites, _fired, _executed = matrix
+        derived, wrong = {}, {}
+        for shape, build in SHAPES.items():
+            if shape in SPLIT_BY_VISIBILITY:
+                continue
+            base = tmp_path_factory.mktemp("declines")
+            assert_outside_repository(base)
+            oracle = _git_derived_decline(build(base))
+            declared = getattr(build, "declines", None)
+            if oracle is not None and declared is not None:
+                wrong[shape] = ("two sources", oracle, declared)
+            derived[shape] = oracle or declared
+        declining = {
+            shape for shape in derived
+            if all(not cells[(shape, route)][0].startswith("bound:") for route in ROUTES)
+        }
+        for shape in sorted(declining | {shape for shape, reason in derived.items() if reason}):
+            if derived[shape] is None:
+                wrong[shape] = ("no derived reason", sorted({cells[(shape, route)][0] for route in ROUTES}))
+                continue
+            for route in ROUTES:
+                if cells[(shape, route)][0] != derived[shape]:
+                    wrong[(shape, route)] = (cells[(shape, route)][0], derived[shape])
+        assert wrong == {}, f"a declining shape answered other than its derived reason: {wrong}"
+        assert {"no_working_tree", "broken_git_marker"} <= set(derived.values()), derived  # control
 
     def test_a_stray_git_with_no_repository_above_declines_on_every_route(self, matrix):
         """A `.git` directory with no repository above gets no answer from
@@ -1044,10 +1114,11 @@ def _layout_predicate_forms() -> tuple:
     compares the Counter with NAMED_LAYOUT_FORMS exactly, so a new form fails
     it.
 
-    NOT COVERED: a project_identity call inside a tuple that is subscripted
-    in a branch test (`if (_pred(d),)[0]:`), and a project_identity call in
-    an f-string that is a statement of its own, whose value is discarded
-    (`f"{_pred(d)}"`). The walk reports neither."""
+    NOT COVERED: a project_identity call inside a display (a tuple, list
+    or dict) that is subscripted in an `if`, `elif`, `while` or `assert`
+    test (`if (_pred(d),)[0]:`, `while [_pred(d)][0]:`), and a
+    project_identity call in an f-string that is a statement of its own,
+    whose value is discarded (`f"{_pred(d)}"`). The walk reports neither."""
     import builtins
 
     tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
