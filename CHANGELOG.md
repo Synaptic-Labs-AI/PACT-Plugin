@@ -36,7 +36,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
   - When every reproduced path is pre-existing, the copy's run decides: a pass is a pass, and a failure is a failure of the change. When the copy reproduces none of the changed paths, the change came from outside the run, and the copy's run is the result, for the teammate and the cold reviewer alike.
   - A run whose `HEAD` moved is re-run once in that copy, and that copy's run is the result; it is reported as unattributable only when the copy cannot be built or the command cannot run in it, and the teammate's HANDOFF checklist names that case, beside pre-existing failing tests, as the only exceptions to its exit-code precondition.
   - For any run whose result is reported, a failing test counts against the change only if the same test passes, with the same command, in a remote-less clone at the merge base; a teammate whose only failures also fail there may hand off, naming them and the unmet exit-code precondition.
-  - The teammate's merge-base clone is built from a freshly fetched remote-tracking ref of the branch the work merges into; if that fetch fails, nothing counts as pre-existing, so a stale local base cannot pass a regression off as a pre-existing failure.
+  - The teammate's merge-base clone is built from the commit a fresh fetch of the branch the work merges into leaves in that worktree's FETCH_HEAD, a fetch that moves no remote-tracking ref or tag other worktrees read; if that fetch fails, nothing counts as pre-existing, so a stale local base cannot pass a regression off as a pre-existing failure.
 - The verify-only Duration row now says the cold lane runs a full first-round review each round.
 
 ### Shuffled-order diagnostic runs

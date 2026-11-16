@@ -842,9 +842,10 @@ class TestRunReceiptAttribution:
       is the result, stated once per branch.
     - One merge-base clone, defined in its own sub-bullet before every
       branch, serves both the reproduced-path check and the failing-test
-      rule. Its merge base is taken from an explicit-refspec fetch of the
-      branch the work merges into, which writes only that remote-tracking
-      ref and FETCH_HEAD; if the fetch fails, nothing counts as pre-existing.
+      rule. Its merge base is taken against FETCH_HEAD right after a fetch of
+      the branch the work merges into that writes only this worktree's
+      FETCH_HEAD and no tag or shared remote-tracking ref; if the fetch
+      fails, nothing counts as pre-existing.
     - Worktree paths that also change in that copy are re-run in a second
       remote-less clone at the merge base of the pre-run HEAD with the branch
       the work merges into, with no change applied. Each reproduced path is
@@ -895,8 +896,8 @@ class TestRunReceiptAttribution:
          "the isolated-copy re-run, with the same interpreter by absolute path"),
         ("a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone. Compare its status before and after. That copy's run is your result.",
          "the recipe: the pre-run HEAD plus the staged change saved before the run"),
-        ("The reproduced-path check and the failing-test rule below both use one merge-base clone. To build it, fetch the branch your work will merge into with `git fetch <remote> +refs/heads/<that branch>:refs/remotes/<remote>/<that branch>`, which writes only `<remote>/<that branch>` and `FETCH_HEAD` among refs; compute the merge base of the `HEAD` you recorded before the run with that branch in the worktree with `git merge-base <recorded HEAD> <remote>/<that branch>`; and make a clone of the repository with its remote removed, checked out at that merge base, with no change applied.",
-         "the one merge-base clone both rules use: an explicit-refspec fetch, the merge base against the fetched ref, no change applied"),
+        ("The reproduced-path check and the failing-test rule below both use one merge-base clone. To build it, fetch the branch your work will merge into with `git fetch --no-tags --refmap= <remote> refs/heads/<that branch>`, which writes only this worktree's `FETCH_HEAD` among refs and no tag; right after it, before any other fetch in this worktree, compute the merge base of the `HEAD` you recorded before the run with the fetched commit, in the worktree, with `git merge-base <recorded HEAD> FETCH_HEAD`; and make a clone of the repository with its remote removed, checked out at that merge base, with no change applied.",
+         "the one merge-base clone both rules use: a fetch that moves no shared ref or tag, the merge base against FETCH_HEAD right after it, no change applied"),
         ("If any of the paths that changed in the worktree also change there, run the same command the same way in the merge-base clone.",
          "the reproduced-path check names the merge-base clone"),
         ("If that fetch fails, treat no reproduced path and no failing test as pre-existing: each one is a failure of your change, and say in your HANDOFF that the fetch failed.",
@@ -986,8 +987,8 @@ class TestRunReceiptAttribution:
         assert start != -1, f"the {self.REL_PATH} merge-base definition sub-bullet is missing"
         end = bullet.find("\n", start)
         sub = bullet[start:end if end != -1 else None]
-        fetch = sub.find("`git fetch <remote> +refs/heads/<that branch>:refs/remotes/<remote>/<that branch>`")
-        merge_base = sub.find("`git merge-base <recorded HEAD> <remote>/<that branch>`")
+        fetch = sub.find("`git fetch --no-tags --refmap= <remote> refs/heads/<that branch>`")
+        merge_base = sub.find("`git merge-base <recorded HEAD> FETCH_HEAD`")
         clone = sub.find("checked out at that merge base")
         assert -1 not in (fetch, merge_base, clone) and fetch < merge_base < clone, (
             f"the {self.REL_PATH} merge-base definition must run in order: the "
