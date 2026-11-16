@@ -214,6 +214,66 @@ def _restore_fixture(tree):
                 and node.name == "_restore_gate_modules")
 
 
+_HOOKS_DIR = Path(__file__).resolve().parent.parent / "hooks"
+
+
+def _gate_import_reads():
+    """{hook module: mode variables it resolves at import}, from every
+    ``get_enum("NAME")`` a hooks/*.py file calls at module scope (try and if
+    bodies included, function and class bodies not). A reload has to redo exactly
+    these reads under the restored environment."""
+    reads = {}
+    for path in sorted(_HOOKS_DIR.glob("*.py")):
+        stack = list(ast.parse(path.read_text(encoding="utf-8")).body)
+        while stack:
+            node = stack.pop()
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                continue
+            name = getattr(node.func, "attr", getattr(node.func, "id", None)) \
+                if isinstance(node, ast.Call) else None
+            if name == "get_enum" and node.args and isinstance(node.args[0], ast.Constant):
+                reads.setdefault(path.stem, set()).add(node.args[0].value)
+            stack.extend(ast.iter_child_nodes(node))
+    return reads
+
+
+def _strings(node, constants, seen=()):
+    """The strings a literal, a tuple or list of them, or a module-level constant
+    naming one, spells; None when any part cannot be read statically."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return {node.value}
+    if isinstance(node, ast.Name) and node.id in constants and node.id not in seen:
+        return _strings(constants[node.id], constants, (*seen, node.id))
+    if isinstance(node, (ast.Tuple, ast.List)):
+        parts = [_strings(element, constants, seen) for element in node.elts]
+        return None if None in parts else set().union(*parts)
+    return None
+
+
+def _helper_arguments(tree, fixture):
+    """(variables, modules) for each ``with restored_env_and_reloaded(...)`` in
+    ``fixture``, read through the module's own constants."""
+    constants = {target.id: node.value for node in tree.body if isinstance(node, ast.Assign)
+                 for target in node.targets if isinstance(target, ast.Name)}
+    return [(_strings(item.context_expr.args[0], constants),
+             _strings(item.context_expr.args[1], constants))
+            for node in ast.walk(fixture) if isinstance(node, ast.With)
+            for item in node.items
+            if isinstance(item.context_expr, ast.Call)
+            and getattr(item.context_expr.func, "id", None) == "restored_env_and_reloaded"
+            and len(item.context_expr.args) == 2]
+
+
+def _reloads_every_gate_read(tree, fixture):
+    """True when a helper call in ``fixture`` names every mode variable and every
+    module in _gate_import_reads(), so a restore cannot skip a gate or a variable."""
+    reads = _gate_import_reads()
+    variables, modules = set().union(*reads.values()), set(reads)
+    return any(named_variables is not None and named_modules is not None
+               and named_variables >= variables and named_modules >= modules
+               for named_variables, named_modules in _helper_arguments(tree, fixture))
+
+
 def _yields_inside_helper(fixture):
     """True when ``fixture`` yields inside a ``with restored_env_and_reloaded(...)``."""
     return any(
@@ -305,6 +365,9 @@ class TestTeardownRestoresAmbientModes:
         fixture = _restore_fixture(tree)
         assert _yields_inside_helper(fixture), (
             f"{module_file}: the fixture must yield inside restored_env_and_reloaded")
+        assert _reloads_every_gate_read(tree, fixture), (
+            f"{module_file}: the helper must name every gate mode variable and module "
+            f"{_gate_import_reads()}, but names {_helper_arguments(tree, fixture)}")
         writes = _environ_writes(tree, fixture)
         assert not writes, f"{module_file}: the fixture writes os.environ at lines {writes}"
 
@@ -328,7 +391,17 @@ class TestTeardownRestoresAmbientModes:
             f"{module_file}: the fixture must be autouse and function-scoped: {keywords}")
         assert _yields_inside_helper(fixture), (
             f"{module_file}: the fixture must yield inside restored_env_and_reloaded")
+        assert _reloads_every_gate_read(tree, fixture), (
+            f"{module_file}: the helper must name every gate mode variable and module "
+            f"{_gate_import_reads()}, but names {_helper_arguments(tree, fixture)}")
         assert not _environ_writes(tree, fixture), f"{module_file}: the fixture writes os.environ"
+
+    def test_the_gate_reads_the_pins_compare_against_are_real(self):
+        """The variables and modules the two fixture pins require come from the
+        gates' own import-time reads, and include this file's two mode variables,
+        so the pins cannot pass against an empty requirement."""
+        reads = _gate_import_reads()
+        assert {INLINE_ENV, VARIETY_ENV} <= set().union(*reads.values()), reads
 
     @pytest.mark.parametrize("source", [
         "from os import environ\n"

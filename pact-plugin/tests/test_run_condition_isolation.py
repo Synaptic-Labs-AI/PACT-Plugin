@@ -135,6 +135,21 @@ def test_registers_an_importer_id_and_leaves_no_marker():
 '''
 
 
+def _summary_counts(output):
+    """pytest's final summary as {outcome: count}, such as {"passed": 2,
+    "error": 1, "warning": 1}; the plural keys errors and warnings read as
+    error and warning."""
+    summary = None
+    for line in output.splitlines():
+        found = re.match(r"^=*\s*(\d+ [a-z]+(?:, \d+ [a-z]+)*) in [\d.]+s", line)
+        if found:
+            summary = found.group(1)
+    assert summary is not None, f"no pytest summary line in:\n{output}"
+    singular = {"errors": "error", "warnings": "warning"}
+    return {singular.get(key, key): int(count)
+            for count, key in re.findall(r"(\d+) ([a-z]+)", summary)}
+
+
 def test_the_conftest_fails_a_test_that_leaves_a_marker_under_an_importer_id(tmp_path):
     (tmp_path / "conftest.py").write_text(
         _MARKER_RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
@@ -152,8 +167,10 @@ def test_the_conftest_fails_a_test_that_leaves_a_marker_under_an_importer_id(tmp
         assert record.exists(), output
         marker = embedding_marker(record.read_text())
         # A teardown error is counted beside its passed call, so the marker test
-        # shows as one of the two passes and as the one error.
-        assert re.search(r"^2 passed, 1 error in ", output, re.MULTILINE), output
+        # shows as one of the two passes and as the one error. Read by key, so a
+        # counted warning or another outcome does not break the match.
+        counts = _summary_counts(output)
+        assert counts.get("passed") == 2 and counts.get("error") == 1, (counts, output)
         assert proc.returncode == 1, output
         assert ("ERROR test_marker_rig.py::test_leaves_a_marker_under_an_importer_id"
                 in output), output

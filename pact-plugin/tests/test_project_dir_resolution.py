@@ -1115,11 +1115,21 @@ class TestR5EnvFileSeam:
         self, tmp_path
     ):
         sid5 = f"r5-env-file-{uuid.uuid4().hex}"
+        try:
+            self._r5_body(tmp_path, sid5)
+        finally:
+            embedding_marker(sid5).unlink(missing_ok=True)
+
+    def test_r5_reaches_its_marker_and_the_test_removes_it(self, tmp_path):
+        """The R5 flow reaches the embedding marker for this test's own session
+        id (its save under the exported value does), and the test removes that
+        marker, so no later run inherits it."""
+        sid5 = f"r5-marker-{uuid.uuid4().hex}"
         marker = embedding_marker(sid5)
         try:
             self._r5_body(tmp_path, sid5)
             assert marker.exists(), (
-                "session_init did not reach the embedding marker for this "
+                "the R5 flow did not reach the embedding marker for this "
                 "test's session id, so the cleanup below is not exercised"
             )
         finally:
@@ -1949,12 +1959,16 @@ class TestDeclinedDeclaration:
         )
 
 
-class TestPerTestSessionIdsLeaveNoMarker:
+class TestFreshSessionIdLeavesNoMarker:
     """A save in this module reaches the embedding marker for its session id.
-    Each test gets its own id, and that id's marker is removed afterwards, so
-    no run inherits an "already attempted" marker from an earlier one."""
+    fresh_session_id, the helper this module's autouse fixture uses, binds SID
+    to a new id and removes that id's marker when its scope ends, so no run
+    inherits an "already attempted" marker from an earlier one. The first test
+    drives the helper directly, because the fixture's own cleanup runs after the
+    test body and no test can observe it; the second checks that the autouse
+    fixture binds each test a fresh id through that helper."""
 
-    def test_a_save_marks_the_current_id_and_the_scope_removes_the_marker(
+    def test_fresh_session_id_marks_the_current_id_and_its_scope_removes_the_marker(
         self, tmp_path, monkeypatch
     ):
         seen: set[str] = set()
@@ -1979,3 +1993,10 @@ class TestPerTestSessionIdsLeaveNoMarker:
                 "session id, so this arm proves nothing about its cleanup"
             )
         assert not marker.exists()
+
+    def test_the_autouse_fixture_binds_this_test_a_fresh_id(self, _per_test_session_id):
+        """SID is the id the autouse fixture yielded: a new record-rung id it
+        recorded as used, whose marker does not exist when the test starts."""
+        assert SID == _per_test_session_id
+        assert SID.startswith("record-rung-") and SID in _SEEN_SIDS
+        assert not embedding_marker(SID).exists()
