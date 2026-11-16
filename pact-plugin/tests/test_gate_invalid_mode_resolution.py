@@ -279,8 +279,12 @@ class TestTeardownRestoresAmbientModes:
         assert INLINE_ENV not in os.environ
         assert importlib.import_module("dispatch_gate").INLINE_MISSION_MODE == "warn"
 
-    # Kept the last test in this file that reloads a gate, so the leftover
-    # check at the end of the file reads what it leaves behind.
+    # Kept the last test in this file that reloads dispatch_gate. With the
+    # per-test reload in place its position does not matter. It matters only
+    # if that reload is removed: then, in file order, the leftover check at the
+    # end of the file catches the dispatch leftover only because this test
+    # leaves one. Under a shuffled order the end check may not catch a removed
+    # per-test reload; the every-test fixture check above does.
     def test_an_ambient_value_removed_inside_comes_back(self, monkeypatch):
         monkeypatch.setenv(INLINE_ENV, "deny")
         with contextlib.redirect_stderr(io.StringIO()):
