@@ -840,9 +840,11 @@ class TestRunReceiptAttribution:
       path, in the same copy: a remote-less clone at the pre-run HEAD with
       the saved staged change applied, never the live index. That copy's run
       is the result, stated once per branch.
-    - The merge base is computed from a freshly fetched remote-tracking ref
-      of the branch the work merges into, changing no other ref; if the fetch
-      fails, nothing counts as pre-existing.
+    - One merge-base clone, defined in its own sub-bullet before every
+      branch, serves both the reproduced-path check and the failing-test
+      rule. Its merge base is taken from an explicit-refspec fetch of the
+      branch the work merges into, which writes only that remote-tracking
+      ref and FETCH_HEAD; if the fetch fails, nothing counts as pre-existing.
     - Worktree paths that also change in that copy are re-run in a second
       remote-less clone at the merge base of the pre-run HEAD with the branch
       the work merges into, with no change applied. Each reproduced path is
@@ -893,17 +895,17 @@ class TestRunReceiptAttribution:
          "the isolated-copy re-run, with the same interpreter by absolute path"),
         ("a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone. Compare its status before and after. That copy's run is your result.",
          "the recipe: the pre-run HEAD plus the staged change saved before the run"),
-        ("If any of the paths that changed in the worktree also change there, run the same command the same way in a second clone with its remote removed, checked out at the merge base of the `HEAD` you recorded before the run with the branch your work will merge into, with no change applied.",
-         "the base-control run at the merge base"),
-        ("First fetch that branch with `git fetch <remote> <that branch>`, changing no ref but its remote-tracking ref, then compute the merge base in the worktree with `git merge-base <recorded HEAD> <remote>/<that branch>`.",
-         "the merge base taken from a freshly fetched remote-tracking ref, changing no other ref"),
+        ("The reproduced-path check and the failing-test rule below both use one merge-base clone. To build it, fetch the branch your work will merge into with `git fetch <remote> +refs/heads/<that branch>:refs/remotes/<remote>/<that branch>`, which writes only `<remote>/<that branch>` and `FETCH_HEAD` among refs; compute the merge base of the `HEAD` you recorded before the run with that branch in the worktree with `git merge-base <recorded HEAD> <remote>/<that branch>`; and make a clone of the repository with its remote removed, checked out at that merge base, with no change applied.",
+         "the one merge-base clone both rules use: an explicit-refspec fetch, the merge base against the fetched ref, no change applied"),
+        ("If any of the paths that changed in the worktree also change there, run the same command the same way in the merge-base clone.",
+         "the reproduced-path check names the merge-base clone"),
         ("If that fetch fails, treat no reproduced path and no failing test as pre-existing: each one is a failure of your change, and say in your HANDOFF that the fetch failed.",
          "a failed fetch makes nothing pre-existing"),
         ("Decide each reproduced path on its own. A path that also appears in the merge-base clone is a pre-existing defect: report it in your HANDOFF, with the path and the command that wrote it, and do not treat it as a failure of your change.",
          "a base-reproduced write reported as pre-existing"),
         ("When every reproduced path is pre-existing, exit code 0 counts as a pass, and failing tests follow the pre-existing-failure rule at the end of this bullet.",
          "the all-pre-existing branch defers failing tests to the general rule"),
-        ("For any run whose result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in a clone with its remote removed, checked out at the merge base described above, with no change applied.",
+        ("For any run whose result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in the merge-base clone.",
          "the general per-test comparison with a merge-base clone, for every reported run"),
         ("When every failing test is pre-existing, you may hand off: name each such test, with the command, in your HANDOFF, and state there that the exit-code precondition above is unmet only through those pre-existing tests.",
          "the pre-existing-failure hand-off, naming the tests and the unmet precondition"),
@@ -959,6 +961,42 @@ class TestRunReceiptAttribution:
         assert count == 2, (
             f"the {self.REL_PATH} run-receipt bullet must state the copy's run as "
             f"the result once per branch (moved HEAD, status-only), found {count}"
+        )
+
+    def test_merge_base_clone_is_defined_before_every_branch(self):
+        # The definition must be its own sub-bullet ahead of the branches, so
+        # neither rule that names "the merge-base clone" reads it as conditional.
+        bullet = self._bullet()
+        define = bullet.find("both use one merge-base clone")
+        first_branch = bullet.find("  - If `HEAD` differs")
+        assert define != -1 and first_branch != -1 and define < first_branch, (
+            f"the {self.REL_PATH} run-receipt bullet must define the merge-base "
+            "clone in its own sub-bullet before the first branch"
+        )
+        assert bullet.count("the merge-base clone") >= 2, (
+            f"the {self.REL_PATH} reproduced-path check and failing-test rule must "
+            "each name the merge-base clone"
+        )
+
+    def test_merge_base_steps_are_in_run_order(self):
+        # Fetch, then compute the merge base against the fetched ref, then the
+        # clone at that commit: no sentence may name the clone's commit first.
+        bullet = self._bullet()
+        start = bullet.find("  - The reproduced-path check and the failing-test rule below both use one merge-base clone.")
+        assert start != -1, f"the {self.REL_PATH} merge-base definition sub-bullet is missing"
+        end = bullet.find("\n", start)
+        sub = bullet[start:end if end != -1 else None]
+        fetch = sub.find("`git fetch <remote> +refs/heads/<that branch>:refs/remotes/<remote>/<that branch>`")
+        merge_base = sub.find("`git merge-base <recorded HEAD> <remote>/<that branch>`")
+        clone = sub.find("checked out at that merge base")
+        assert -1 not in (fetch, merge_base, clone) and fetch < merge_base < clone, (
+            f"the {self.REL_PATH} merge-base definition must run in order: the "
+            "fetch, then the merge base against the fetched ref, then the clone "
+            f"at that commit (positions fetch={fetch}, merge-base={merge_base}, clone={clone})"
+        )
+        assert sub.count("checked out at") == 1 and "merge base" not in sub[:fetch].replace("merge-base clone", ""), (
+            f"the {self.REL_PATH} merge-base definition must not name the clone's "
+            "commit before the fetch"
         )
 
     def test_receipt_names_no_archive_export(self):
