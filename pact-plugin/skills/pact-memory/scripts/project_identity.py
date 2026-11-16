@@ -110,7 +110,16 @@ class OriginRead(NamedTuple):
     """The answer to "what does this repository's origin say?".
 
     `present`     — git answered with a configured value.
-    `absent`      — git answered, and no origin is configured.
+    `absent`      — git answered, no origin is configured, and the
+                    repository's own config file holds no include section.
+    `include_only` — git answered that no origin is configured, but the
+                    repository's own config file holds an include section,
+                    so an included file can set the origin on some branch
+                    or worktree.
+    `config_unread` — git answered that no origin is configured, and the
+                    repository's own config file could not be read to look
+                    for an include section (larger than the bounded reader
+                    takes, or not a regular file).
     `empty_entry` — the url list holds an empty (or whitespace-only) value.
                     Which url git then fetches depends on the git version,
                     so no url in the list is the repository's identity.
@@ -989,9 +998,12 @@ def read_origin(git_dir: Path) -> OriginRead:
     (`x-access-token:<token>@` is routine in CI).
 
     Exit status is the whole distinction, never stderr text (git messages are
-    localised): exit 1 with an empty answer is "no such key" = ABSENT; any
-    other non-zero status is "git could not answer" = UNAVAILABLE. A missing
-    git, a timeout and an unreadable configuration are all UNAVAILABLE.
+    localised): exit 1 with an empty answer is "no such key", and then the
+    repository's own config file decides (`_absent_origin`): ABSENT with no
+    include section in it, INCLUDE_ONLY with one, CONFIG_UNREAD when it
+    cannot be read. Any other non-zero status is "git could not answer" =
+    UNAVAILABLE. A missing git, a timeout and a configuration git cannot
+    read are all UNAVAILABLE.
 
     CONTRACT: call this only with a git directory git has ALREADY answered
     for (a common dir from `rev-parse --git-common-dir`). A directory that

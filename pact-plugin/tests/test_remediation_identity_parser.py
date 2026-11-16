@@ -2345,3 +2345,25 @@ class TestAnOverrideFileSwappedForALinkIsRefused:
     def test_control_a_regular_override_binds(self, tmp_path):
         (tmp_path / "pact-project-id").write_text("github.com/me/regular\n")
         assert pi.read_override(tmp_path).value == "github.com/me/regular"
+
+
+class TestEveryOriginStateIsDocumented:
+    """`OriginRead`'s docstring names each origin state the module defines,
+    and `read_origin`'s names each state the no-origin answer can become."""
+
+    @staticmethod
+    def _states():
+        return {
+            getattr(pi, name) for name in dir(pi)
+            if name.startswith("ORIGIN_") and name.isupper()
+        }
+
+    def test_the_state_list_names_every_state(self):
+        doc = pi.OriginRead.__doc__
+        missing = sorted(s for s in self._states() if f"`{s}`" not in doc)
+        assert missing == [], missing
+
+    def test_read_origin_names_every_no_origin_state(self):
+        doc = " ".join(pi.read_origin.__doc__.split())
+        for state in (pi.ORIGIN_ABSENT, pi.ORIGIN_INCLUDE_ONLY, pi.ORIGIN_CONFIG_UNREAD):
+            assert state.upper() in doc, state
