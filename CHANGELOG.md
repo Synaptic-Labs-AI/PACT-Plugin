@@ -127,7 +127,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
 ### Fast-suite test selection
 
 - The resolver no longer reads a bare `"__init__.py"` string as a script that a test runs, which had pulled unrelated modules into the closure. A path that carries its directory still resolves.
-- The resolver follows a read of an anchored directory joined to file literals (`ROOT / "hooks" / "x.py"`, `joinpath`, `os.path.join`), resolving names per scope as Python does, and through parameters that a default value or an in-module call gives an anchored path. A module whose reads reach the resolver's limits is treated as unproven, so every exclusion that loads it comes back on any change. This finds dependencies the import closure missed, among them two hooks that load a shared module by file path.
+- The resolver follows a read of an anchored directory joined to file names (`ROOT / "hooks" / "x.py"`, `joinpath`, `os.path.join`), resolving names per scope as Python does, and through parameters that a default value or an in-module call gives an anchored path. A joined name counts as its strings when every binding of it in the module is a string literal or a loop over a literal tuple or list, in place or held by a module-level name bound once; an f-string with no placeholder counts as its text. A join whose name it cannot read (a parameter, a call, an f-string with a placeholder) still names no file and records nothing, and the resolver's docstring says so. A module whose reads reach the resolver's limits is treated as unproven, so every exclusion that loads it comes back on any change. This finds dependencies the import closure missed, among them two hooks that load a shared module by file path.
 
 ### Why
 

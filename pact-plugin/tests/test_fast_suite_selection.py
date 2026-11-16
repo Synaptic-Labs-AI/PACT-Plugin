@@ -1421,6 +1421,87 @@ class TestImportClosure:
         assert "hooks/shared/unrelated.py" not in closure
 
 
+class TestJoinPieces:
+    """What an anchored join's appended piece can be. The directory,
+    hooks/shared, is not an import root, so no whole-literal rule reaches
+    these files: only the join resolver does. Each row is
+    (source, the files it names, whether it records an unproven site)."""
+
+    _HEAD = ('import os\n'
+             'from pathlib import Path\n'
+             'SHARED = Path(__file__).resolve().parents[1] / "hooks" / "shared"\n')
+    _BOTH = ["hooks/shared/direct.py", "hooks/shared/eager.py"]
+
+    def _join(self, core, tmp_path, body):
+        plugin = tmp_path / "pact-plugin"
+        _write(plugin / "hooks" / "shared" / "direct.py", "value = 1\n")
+        _write(plugin / "hooks" / "shared" / "eager.py", "thing = 1\n")
+        source = self._HEAD + body
+        _write(plugin / "tests" / "test_j.py", source)
+        files, sites = core._anchored_join_files(ast.parse(source), "tests/test_j.py", {},
+                                                 plugin)
+        return sorted(path.relative_to(plugin).as_posix() for path in files), sites
+
+    @pytest.mark.parametrize("body,named", [
+        ('for name in ("direct.py", "eager.py"):\n    (SHARED / name).read_text()\n',
+         _BOTH),
+        ('for name in ["direct.py", "eager.py"]:\n    SHARED.joinpath(name).read_text()\n',
+         _BOTH),
+        ('T = [os.path.join(SHARED, n) for n in ("direct.py", "eager.py")]\n', _BOTH),
+        ('NAMES = ("direct.py", "eager.py")\n'
+         'def test_x():\n    for name in NAMES:\n        (SHARED / name).read_text()\n',
+         _BOTH),
+        ('for folder, name in (("shared", "direct.py"),):\n'
+         '    (SHARED.parent / folder / name).read_text()\n', ["hooks/shared/direct.py"]),
+        ('NAME = "direct.py"\nT = (SHARED / NAME).read_text()\n',
+         ["hooks/shared/direct.py"]),
+        ('T = (SHARED / f"direct.py").read_text()\n', ["hooks/shared/direct.py"]),
+    ], ids=["loop-tuple", "loop-list-joinpath", "comprehension-os-path-join",
+            "loop-over-module-constant", "loop-rows-unpacked",
+            "module-constant-name", "f-string-without-placeholder"])
+    def test_a_piece_bound_only_to_string_literals_names_its_files(
+            self, core, tmp_path, body, named):
+        assert self._join(core, tmp_path, body) == (named, [])
+
+    @pytest.mark.parametrize("body", [
+        'def pick():\n    return "direct.py"\nT = (SHARED / pick()).read_text()\n',
+        'n = "direct"\nT = (SHARED / f"{n}.py").read_text()\n',
+        'def read(name):\n    return (SHARED / name).read_text()\nread("direct.py")\n',
+        'name = "direct.py"\ndef other(name):\n    return name\n'
+        'T = (SHARED / name).read_text()\n',
+        'def pick():\n    return "eager.py"\nname = "direct.py"\nname = pick()\n'
+        'T = (SHARED / name).read_text()\n',
+        'NAMES = ("direct.py",)\nNAMES = ("eager.py",)\n'
+        'for name in NAMES:\n    (SHARED / name).read_text()\n',
+        'PARTS = ("direct.py",)\nT = os.path.join(SHARED, *PARTS)\n',
+        'T = (SHARED / "nested" / str(1)).read_text()\n',
+    ], ids=["call-result", "f-string-with-placeholder", "parameter",
+            "name-also-a-parameter", "name-also-assigned-a-call",
+            "module-constant-bound-twice", "starred-pieces",
+            "call-after-a-literal"])
+    def test_a_piece_it_cannot_read_names_nothing_and_records_nothing(
+            self, core, tmp_path, body):
+        """The docstring's stated gap. Marking these joins unproven makes an
+        exclusion broad whose closure loads a production module that loads
+        hook files by a computed name, so a reach review stops clearing it."""
+        assert self._join(core, tmp_path, body) == ([], [])
+
+    def test_string_names_outside_an_anchored_expression_do_not_count_as_readings(
+            self, core, tmp_path):
+        """9 x 9 string readings exceed the readings limit only if counted."""
+        nine = ", ".join(f'"{letter}"' for letter in "abcdefghi")
+        body = (f"for a in ({nine}):\n    for b in ({nine}):\n"
+                '        T = "-".join([a, b])\n')
+        assert 9 * 9 > core._JOIN_READINGS
+        assert self._join(core, tmp_path, body) == ([], [])
+
+    def test_a_piece_on_a_base_it_cannot_anchor_names_nothing_and_records_nothing(
+            self, core, tmp_path):
+        body = ('def test_x(tmp_path):\n    for name in ("direct.py",):\n'
+                '        (tmp_path / name).read_text()\n')
+        assert self._join(core, tmp_path, body) == ([], [])
+
+
 def _over_the_join_limits(core, kind, over=True):
     """A module that reaches one of the join resolver's limits (or, with
     over=False, stops one short of it), and the unproven site it records."""

@@ -956,6 +956,72 @@ def _literal_loop_names(tree: ast.AST) -> set[str]:
     return names
 
 
+def _literal_string_names(tree: ast.Module) -> dict[str, frozenset[str]]:
+    """Names every binding of which, anywhere in the module, is a string
+    literal, and the strings they take: `name = "x.py"`, and a `for` or
+    comprehension target over a tuple or list of string literals (rows of
+    them unpack by position), written in place or held by a module-level
+    name bound exactly once, in the module body. A name with any other
+    binding (a parameter, an import, another assignment) is not one."""
+    once: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            once[node.id] = once.get(node.id, 0) + 1
+    tables = {node.targets[0].id: node.value for node in tree.body
+              if isinstance(node, ast.Assign) and len(node.targets) == 1
+              and isinstance(node.targets[0], ast.Name)
+              and once.get(node.targets[0].id) == 1}
+    literal: dict[int, set[str]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            text = _str_constant(node.value) if node.value is not None else None
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if text is not None and len(targets) == 1 and isinstance(targets[0], ast.Name):
+                literal[id(targets[0])] = {text}
+        if not isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            continue
+        rows = node.iter
+        if isinstance(rows, ast.Name):
+            rows = tables.get(rows.id)
+        if not isinstance(rows, (ast.Tuple, ast.List)) or not rows.elts:
+            continue
+        if isinstance(node.target, ast.Name):
+            texts = [_str_constant(row) for row in rows.elts]
+            if all(text is not None for text in texts):
+                literal[id(node.target)] = set(texts)
+        elif isinstance(node.target, ast.Tuple) and all(
+                isinstance(target, ast.Name) for target in node.target.elts):
+            width = len(node.target.elts)
+            if all(isinstance(row, (ast.Tuple, ast.List)) and len(row.elts) == width
+                   and all(_str_constant(cell) is not None for cell in row.elts)
+                   for row in rows.elts):
+                for column, target in enumerate(node.target.elts):
+                    literal[id(target)] = {row.elts[column].value for row in rows.elts}
+    found: dict[str, set[str]] = {}
+    other: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            if id(node) in literal:
+                found.setdefault(node.id, set()).update(literal[id(node)])
+            else:
+                other.add(node.id)
+        elif isinstance(node, ast.arg):
+            other.add(node.arg)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            other.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            other.update((alias.asname or alias.name).split(".")[0] for alias in node.names)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            other.update(node.names)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            other.add(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            other.add(node.name)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            other.add(node.rest)
+    return {name: frozenset(texts) for name, texts in found.items() if name not in other}
+
+
 def _module_rows(tree: ast.Module) -> dict[str, ast.AST]:
     """Module-level names bound to a value (rows of a literal table too)."""
     bound: dict[str, ast.AST] = {}
@@ -1028,21 +1094,39 @@ def _scan_wrapper_names(tree: ast.Module) -> frozenset[str]:
     return frozenset(wrappers)
 
 
+def _join_text(node: ast.AST,
+               anchors: dict[str, tuple[int, tuple[str, ...]] | str]) -> str | None:
+    """The text a joined piece adds: a str literal, an f-string with no
+    placeholder, or a name the reading binds to a str. None otherwise."""
+    text = _str_constant(node)
+    if text is not None:
+        return text
+    if isinstance(node, ast.JoinedStr) and all(
+            _str_constant(value) is not None for value in node.values):
+        return "".join(value.value for value in node.values)
+    if isinstance(node, ast.Name):
+        found = anchors.get(node.id)
+        return found if isinstance(found, str) else None
+    return None
+
+
 def _anchor_of(node: ast.AST,
-               anchors: dict[str, tuple[int, tuple[str, ...]]]
+               anchors: dict[str, tuple[int, tuple[str, ...]] | str]
                ) -> tuple[int, tuple[str, ...]] | None:
     """Where an anchored expression points: (levels above its own FILE,
     literal subfolders joined after that).
 
     Path(__file__) is (0, ()); .parent adds a level; .parents[n] adds n + 1;
     os.path.dirname adds one; `/ "x"`, joinpath("x") and os.path.join(.., "x")
-    append "x"; .resolve() and Path()/str() wrappers change nothing; a name
-    bound to another anchor continues from it. None for anything else.
+    append "x" (a piece _join_text reads); .resolve() and Path()/str()
+    wrappers change nothing; a name bound to another anchor continues from
+    it. None for anything else.
     """
     if isinstance(node, ast.Name):
         if node.id == "__file__":
             return 0, ()
-        return anchors.get(node.id)
+        found = anchors.get(node.id)
+        return found if isinstance(found, tuple) else None
     if isinstance(node, ast.Attribute) and node.attr == "parent":
         inner = _anchor_of(node.value, anchors)
         return None if inner is None else _up(*inner)
@@ -1063,7 +1147,7 @@ def _anchor_of(node: ast.AST,
         return level, parts
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
         inner = _anchor_of(node.left, anchors)
-        text = _str_constant(node.right)
+        text = _join_text(node.right, anchors)
         if inner is None or text is None:
             return None
         return _join(inner, text.split("/"))
@@ -1083,7 +1167,7 @@ def _anchor_of(node: ast.AST,
                 head, rest = _anchor_of(node.func.value, anchors), node.args
             else:
                 head, rest = _anchor_of(node.args[0], anchors), node.args[1:]
-            texts = [_str_constant(part) for part in rest]
+            texts = [_join_text(part, anchors) for part in rest]
             if head is None or any(text is None for text in texts):
                 return None
             return _join(head, [piece for text in texts
@@ -1286,24 +1370,31 @@ def _scope_bindings(scope: _Scope, nodes: list[ast.AST]):
     return bindings, declared_global, exports
 
 
-def _anchors_of(node: ast.AST, env: _Env, notes: list[str]) -> frozenset[_Anchor]:
+def _anchors_of(node: ast.AST, env: _Env, notes: list[str],
+                strings: dict[str, frozenset[str]] | None = None) -> frozenset[_Anchor]:
     """Every anchored path an expression names: one reading per combination
-    of the anchored paths its names carry. Over _JOIN_READINGS combinations
-    the module is unproven and the expression names nothing."""
-    names = sorted({inner.id for inner in ast.walk(node)
-                    if isinstance(inner, ast.Name) and inner.id in env}
-                   | {f"{inner.value.id}.__file__" for inner in ast.walk(node)
-                      if isinstance(inner, ast.Attribute) and inner.attr == "__file__"
-                      and isinstance(inner.value, ast.Name)
-                      and f"{inner.value.id}.__file__" in env})
+    of the anchored paths its names carry, and of the texts each name in
+    `strings` is bound to. Over _JOIN_READINGS combinations the module is
+    unproven and the expression names nothing. A string name counts only in
+    an expression that holds an anchored name or `__file__`, since nothing
+    else can name an anchored path."""
+    values = {**(strings or {}), **env}
+    loaded = {inner.id for inner in ast.walk(node) if isinstance(inner, ast.Name)}
+    file_names = {f"{inner.value.id}.__file__" for inner in ast.walk(node)
+                  if isinstance(inner, ast.Attribute) and inner.attr == "__file__"
+                  and isinstance(inner.value, ast.Name)
+                  and f"{inner.value.id}.__file__" in env}
+    anchored = bool(file_names) or "__file__" in loaded or any(name in env for name in loaded)
+    names = sorted({name for name in loaded
+                    if name in env or (anchored and name in values)} | file_names)
     count = 1
     for name in names:
-        count *= len(env[name])
+        count *= len(values[name])
     if count > _JOIN_READINGS:
         notes.append(f"{getattr(node, 'lineno', 1)}:join readings over {_JOIN_READINGS}")
         return frozenset()
     found = set()
-    for combination in itertools.product(*(sorted(env[name]) for name in names)):
+    for combination in itertools.product(*(sorted(values[name]) for name in names)):
         anchor = _anchor_of(node, dict(zip(names, combination)))
         if anchor is not None:
             found.add(anchor)
@@ -1311,7 +1402,8 @@ def _anchors_of(node: ast.AST, env: _Env, notes: list[str]) -> frozenset[_Anchor
 
 
 def _resolve_scope(bindings, outer: _Env, module_env: _Env, declared_global: set[str],
-                   injected: dict[str, frozenset[_Anchor]], notes: list[str]) -> _Env:
+                   injected: dict[str, frozenset[_Anchor]], notes: list[str],
+                   strings: dict[str, frozenset[str]] | None = None) -> _Env:
     """The anchored paths each name in one scope carries. A name the scope
     binds is its own and hides the same name outside; it carries every path
     any of its bindings names, the paths other scopes give it (calls, default
@@ -1335,7 +1427,7 @@ def _resolve_scope(bindings, outer: _Env, module_env: _Env, declared_global: set
                     continue
                 view = {**settled, name: frozenset(found)} if found else {
                     key: paths for key, paths in settled.items() if key != name}
-                found |= _anchors_of(value, view, notes)
+                found |= _anchors_of(value, view, notes, strings)
             if found:  # a name only gains paths, so one never found stays absent
                 settled[name] = frozenset(found)
         if settled == env:
@@ -1349,9 +1441,19 @@ def _anchored_join_files(tree: ast.Module, rel: str,
                          module_files: dict[str, str],
                          plugin_root: Path) -> tuple[list[Path], list[str]]:
     """(production .py files, unproven sites) for a module that joins an
-    anchored directory to file literals (`ROOT / "hooks" / "x.py"`,
+    anchored directory to file names (`ROOT / "hooks" / "x.py"`,
     `HERE.joinpath("x.py")`, `os.path.join(BASE, "x.py")`). A test that reads
     such a file depends on it.
+
+    A joined piece is read when it is a string literal, an f-string with no
+    placeholder, or a name every binding of which, anywhere in the module,
+    is a string literal (_literal_string_names); such a name is read once
+    for each string it takes. A piece of any other form (a parameter, a call,
+    an f-string with a placeholder, a starred argument, a name bound any
+    other way) names no file and records no unproven site: a test that reads
+    a production file that way is not re-selected when that file changes.
+    A join onto a base that is not anchored (tmp_path, an absolute path,
+    `self.root`) names nothing and records nothing.
 
     Names are resolved per scope, as Python resolves them: the module body,
     each def, async def and lambda, each class body, and each comprehension.
@@ -1377,7 +1479,8 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     carries its value's paths to the scope that owns the name. A call through
     an attribute, any other name or another module binds nothing.
 
-    Over-approximates, and never cuts a reading short: carrying paths into
+    Over-approximates the anchored paths a name carries, and never cuts a
+    reading short: carrying paths into
     parameters and across scopes repeats until nothing changes, at most
     _JOIN_PASSES times; a scope's own names settle within one more pass than
     it binds names (only a cycle that keeps growing takes longer); and an
@@ -1388,6 +1491,7 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     literal, test-tree files and conftests are not edges.
     """
     notes: list[str] = []
+    strings = _literal_string_names(tree)
     _, _, module_resolved = _module_anchors(tree, rel, module_files)
     file_anchors: _Env = {name: frozenset({anchor}) for name, anchor in module_resolved.items()
                           if name.endswith(".__file__")}
@@ -1448,21 +1552,22 @@ def _anchored_join_files(tree: ast.Module, rel: str,
         for index, scope in enumerate(scopes):
             outer = file_anchors if index == 0 else envs[scope["around"]]
             envs.append(_resolve_scope(scope["bindings"], outer, envs[0] if envs else {},
-                                       scope["global"], injected.get(index, {}), notes))
+                                       scope["global"], injected.get(index, {}), notes,
+                                       strings))
         return envs
 
     def contributions(envs: list[_Env]) -> dict[int, dict[str, set[_Anchor]]]:
         given: dict[int, dict[str, set[_Anchor]]] = {}
 
         def give(node: ast.AST, name: str, value: ast.AST, env: _Env) -> None:
-            paths = _anchors_of(value, env, notes)
+            paths = _anchors_of(value, env, notes, strings)
             if paths:
                 given.setdefault(scope_of[id(node)], {}).setdefault(name, set()).update(paths)
 
         for index, scope in enumerate(scopes):
             env = envs[index]
             for target, name, value in scope["exports"]:
-                paths = _anchors_of(value, env, notes)
+                paths = _anchors_of(value, env, notes, strings)
                 if paths:
                     given.setdefault(target, {}).setdefault(name, set()).update(paths)
             for node in scope["nodes"]:
@@ -1517,7 +1622,7 @@ def _anchored_join_files(tree: ast.Module, rel: str,
                 isinstance(node, ast.Call) and _call_name(node) in ("joinpath", "join"))
             if not joined:
                 continue
-            for anchor in _anchors_of(node, envs[index], notes):
+            for anchor in _anchors_of(node, envs[index], notes, strings):
                 if not anchor[1] or not anchor[1][-1].endswith(".py"):
                     continue
                 directory = _anchor_directory(anchor, module_parts)
