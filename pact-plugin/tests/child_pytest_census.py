@@ -45,7 +45,9 @@ refused whether or not it does:
 - [program] The program is pytest's own: `pytest` or `py.test`, by path or not,
   with a distro version suffix (`pytest-3`, `pytest3`, `py.test-3`), `.exe`, or a
   tool runner's `@version` pin (`pytest@8.3.0`); or the package's
-  `pytest/__main__.py`.
+  `pytest/__main__.py`. pytest's numbered temp root (`pytest-3` directly under
+  `pytest-of-<user>`) is a directory and never names the program, wherever it
+  appears.
 - [coverage] The program is `coverage run` (`coverage`, `coverage3`,
   `coverage-3.12`) given `-m pytest`, `-m pytest.__main__`, `--module pytest`, or
   pytest's program or `__main__.py` as its script.
@@ -105,10 +107,15 @@ refused whether or not it does:
   find is in that list, and its commands are the words after `-exec`,
   `-execdir`, `-ok` and `-okdir` (`find . -name x -exec pytest {} ;`). So are
   the shell builtins `command` and `builtin`, whose command is the word after
-  them (`command -v` and `command -V` run nothing), and git's subcommand is
-  searched the same way. Three git subcommands run a command, which is judged
-  too: `git bisect run` the argv after `run`, `git submodule foreach` its
-  remaining words and `git rebase --exec` (or `-x`) each value, both as shell
+  them (`command -v` and `command -V` run nothing). git's command is its
+  subcommand, the first word past git's own options, where `-C`, `-c`,
+  `--git-dir`, `--work-tree`, `--namespace`, `--config-env` and
+  `--attr-source` take the next word as their value and every other option is
+  one word, so `git -C repo pytest` is refused and
+  `git --no-pager grep python -m pytest` is a mention. Three git subcommands
+  run a command, which is judged too: `git bisect run` the argv after `run`,
+  `git submodule foreach` its remaining words and `git rebase --exec` (or `-x`)
+  each value, both as shell
   text, so `git bisect run pytest` is refused and `git bisect run make test`
   is not. The command bisect run and foreach run is in program position, so
   `git submodule foreach echo python -m pytest` is a mention. A rebase value is
@@ -266,6 +273,8 @@ _SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
 # pytest's program names: pytest and py.test, with a distro version suffix
 # (pytest-3, pytest3, py.test-3) and, after _command_name, without `.exe`.
 _PYTEST_PROGRAM = re.compile(r"py\.?test(-?[0-9]+(\.[0-9]+)*)?\Z")
+# The name of pytest's numbered temp root under `pytest-of-<user>`.
+_TEMP_ROOT = re.compile(r"pytest-[0-9]+\Z")
 # The modules `-m` can run pytest as.
 _PYTEST_MODULES = frozenset({"pytest", "pytest.__main__"})
 # The Windows launcher's names; any basename starting with python or pypy is an
@@ -314,6 +323,10 @@ _CHAINED = frozenset({"env", "nice", "nohup", "sudo", "timeout", "time", "stdbuf
 # Dispatchers whose first plain word is the program they run (`git grep` runs
 # git-grep), so that word is in program position for the [mention] stop.
 _DISPATCHERS = frozenset({"git"})
+# git's own options that take the next word as their value; every other word
+# starting with `-` before the subcommand is a flag or carries its value.
+_GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                "--config-env", "--attr-source"})
 # Subcommand verbs a program names before the command it runs (`uv run`,
 # `uv tool run`, `poetry run`, `hatch -e test run`).
 _RUN_VERBS = frozenset({"run", "tool"})
@@ -812,8 +825,11 @@ def _command_name(word):
 
 def _is_pytest_script(word):
     """True for a word naming pytest's program or console-script file, or its
-    package's __main__.py."""
+    package's __main__.py. pytest's numbered temp root (`pytest-N` directly
+    under `pytest-of-<user>`) is a directory, never the program."""
     parts = word.replace("\\", "/").split("/")
+    if len(parts) > 1 and parts[-2].startswith("pytest-of-") and _TEMP_ROOT.match(parts[-1]):
+        return False
     return bool(_PYTEST_PROGRAM.match(_command_name(word))) or parts[-2:] == ["pytest", "__main__.py"]
 
 
@@ -964,8 +980,11 @@ def _command_search(part, program, depth):
     or None when it found none. That word is the first past options,
     NAME=VALUE words, numbers and the verbs in _RUN_VERBS; while it follows an
     option it may be that option's value, so the next one is tried too. A word
-    in _CHAINED, or a dispatcher's subcommand, is searched again as a program of
-    its own. find's commands are the words after its _FIND_EXEC actions."""
+    in _CHAINED is searched again as a program of its own. find's commands are
+    the words after its _FIND_EXEC actions. A dispatcher's command is its
+    subcommand, the first word past its options, where an option in
+    _GIT_VALUE_OPTIONS takes the next word as its value; _git_subcommand judges
+    it."""
     name = _command_name(part[program])
     if name == "find":
         if depth >= _MAX_DEPTH:
@@ -983,6 +1002,15 @@ def _command_search(part, program, depth):
     if name == "command" and any(
             "v" in word or "V" in word for word in _leading_options(part, program)):
         return None  # `command -v` and `-V` describe, never run
+    if name in _DISPATCHERS:
+        at = program + 1
+        while at < len(part) and part[at].startswith("-"):
+            at += 2 if part[at] in _GIT_VALUE_OPTIONS else 1
+        if at >= len(part):
+            return None
+        if _starts_pytest(part, at, depth):
+            return True
+        return at if depth >= _MAX_DEPTH else _git_subcommand(part, at, depth)
     after_option = False
     for at in range(program + 1, len(part)):
         word = part[at]
@@ -1000,8 +1028,6 @@ def _command_search(part, program, depth):
         elif _command_name(word) in _DISPATCHERS and depth < _MAX_DEPTH:
             found = _command_search(part, at, depth + 1)
             return at if found is None else found
-        elif name in _DISPATCHERS and depth < _MAX_DEPTH:
-            return _git_subcommand(part, at, depth)
         else:
             return at
     return None

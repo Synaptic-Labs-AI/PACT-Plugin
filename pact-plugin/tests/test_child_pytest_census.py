@@ -528,6 +528,16 @@ def test_a_listed_shell_blind_spot_is_accepted(text):
     ["timeout", "5", "echo", "python", "-m", "pytest"],
     ["sudo", "-u", "bob", "echo", "python", "-m", "pytest"],
     ["git", "-C", "repo", "grep", "python", "-m", "pytest"],
+    # git's other options are one word, so the word after one is the subcommand.
+    ["git", "--no-pager", "grep", "python", "-m", "pytest"],
+    ["git", "-P", "grep", "python", "-m", "pytest"],
+    ["git", "--bare", "grep", "python", "-m", "pytest"],
+    ["git", "--git-dir=/x/.git", "grep", "python", "-m", "pytest"],
+    ["git", "-c", "core.pager=cat", "--no-pager", "grep", "python", "-m", "pytest"],
+    # pytest's numbered temp root is a directory, never pytest's program.
+    ["git", "-C", "/tmp/pytest-of-ubuntu/pytest-3", "status"],
+    ["rsync", "-a", "src/", "/tmp/pytest-of-ubuntu/pytest-12"],
+    ["git", "init", "/tmp/pytest-of-ubuntu/pytest-7"],
     # The same, reached through a wrapper chain: git's subcommand, find's first
     # -exec command and the command builtin's command are in program position.
     ["timeout", "5", "git", "grep", "python", "-m", "pytest"],
@@ -620,6 +630,7 @@ _LAUNCHER_FORMS = [
     ["py.test-3", "-q"],
     ["pytest3"],
     ["/usr/bin/pytest-3.12"],
+    ["/usr/bin/pytest-3"],
     ["pytest.exe", "-q"],
     # The same forms inside a shell command.
     ["bash", "-c", "py -3 -m pytest"],
@@ -758,6 +769,13 @@ _WRAPPED = [
     # A dispatcher's subcommand, the command builtin's command and a later find
     # action are judged through a chain as without one.
     ["timeout", "5", "git", "pytest"],
+    # git's own options are stepped over, a value with the option it follows.
+    ["git", "-C", "repo", "pytest"],
+    ["git", "-P", "pytest"],
+    ["git", "-c", "x=1", "pytest"],
+    ["git", "--git-dir", "/x/.git", "pytest"],
+    ["git", "--no-pager", "bisect", "run", "pytest"],
+    ["git", "-C", "/tmp/pytest-of-ubuntu/pytest-3", "bisect", "run", "pytest"],
     ["timeout", "5", "command", "pytest"],
     ["timeout", "5", "find", ".", "-exec", "pytest", "{}", ";"],
     ["find", ".", "-exec", "echo", "x", ";", "-exec", "python", "-m", "pytest", "{}", ";"],
@@ -971,6 +989,8 @@ def test_a_pytest_launch_the_census_cannot_read_fails_the_run_by_name(
     (["/usr/bin/python3", "/tmp/pytest-of-ubuntu/pytest-7/test_x0/script.py"],
      {"HOME": "/h", "N": 1}),
     (["git", "-C", "/tmp/pytest-of-u/pytest-1/repo", "status", 1], None),
+    (["/usr/bin/python3", "/tmp/pytest-of-ubuntu/pytest-3", 1], None),
+    (["rsync", "-a", "src/", "/tmp/pytest-of-ubuntu/pytest-12", 1], None),
     (["pip", "install", "pytest-xdist", 1], None),
 ])
 def test_a_malformed_launch_that_only_contains_pytest_is_left_to_its_launcher(
