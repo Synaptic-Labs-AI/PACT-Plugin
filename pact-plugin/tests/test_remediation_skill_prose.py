@@ -1560,6 +1560,9 @@ class _DetectionGraph:
         # {class name: its ClassDef}}, and {module: top-level names bound to
         # the process environment} (`_ENV = os.environ`).
         self.values, self.classes, self.env_aliases = {}, {}, {}
+        # {module: {simple name: {qualified name: ClassDef}}} for every class
+        # the module defines, at any depth (`_class_names`).
+        self.class_names = {}
         # {module: {module-level name: every value bound to it, None for a
         # binding that has no plain value}} (`_module_bindings`).
         self.bindings = {}
@@ -1609,6 +1612,7 @@ class _DetectionGraph:
         self.classes[module] = {
             node.name: node for node in tree.body if isinstance(node, ast.ClassDef)
         }
+        self.class_names[module] = _class_names(tree)
         for node in ast.walk(tree):
             if not (isinstance(node, ast.ImportFrom) and node.level):
                 continue
@@ -1699,11 +1703,12 @@ class _DetectionGraph:
 
     def project_name(self, name: str, module: str):
         """(owning module, name) when `name`, as `module` sees it, is one of
-        a project module's own top-level names: a function, class or
-        assigned object of `module`, or a name it imports from a project
-        module. None for anything else (the standard library, a local)."""
+        a project module's own names: a top-level function or assigned
+        object of `module`, a class it defines at any depth (`_class_names`),
+        or a name it imports from a project module. None for anything else
+        (the standard library, a local)."""
         if (module, name) in self.defs or name in self.globals.get(module, ()) or (
-            name in self.classes.get(module, {})
+            name in self.class_names.get(module, {})
         ):
             return module, name
         imported = self.aliases[module].get(name)
@@ -2171,7 +2176,8 @@ class _DetectionGraph:
     def class_statement_name(self, expression, module: str) -> bool:
         """Whether a base, keyword value or decorator of a class statement
         (`_class_statement_names`) is reached through one of the project's
-        own names (`project_name`, a class of the same module included),
+        own names (`project_name`, any class the same module defines,
+        nested ones included),
         followed through attribute, subscript, call and starred expressions
         to the name it starts from, and does not resolve to a project
         function. Defining the class runs that
@@ -2191,16 +2197,18 @@ class _DetectionGraph:
         return isinstance(head, ast.Name) and self.project_name(head.id, module) is not None
 
     def own_class_value(self, node, module: str):
-        """The class name when `node` loads a top-level class of `module`
-        itself, the same-module counterpart of `imported_name`: a class
-        object handed to other code (`type(...)`, `types.new_class(...)`, an
-        `isinstance` test, a raise, an annotation) can run its hooks with no
-        class statement. None for anything else."""
+        """The qualified names of every class of `module` itself that a
+        load of `node`'s name can mean, at any depth (`_class_names`), the
+        same-module counterpart of `imported_name`: a class object handed to
+        other code (`type(...)`, `types.new_class(...)`, an `isinstance`
+        test, a raise, an annotation, a base, keyword or decorator
+        expression) can run its hooks with no class statement of its own. A
+        name two classes share gives both. None for anything else."""
         import ast
 
         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and (
-                node.id in self.classes.get(module, {})):
-            return node.id
+                node.id in self.class_names.get(module, {})):
+            return sorted(self.class_names[module][node.id])
         return None
 
     def references(self, node, module: str):
@@ -2228,6 +2236,44 @@ class _DetectionGraph:
                 found = self.refers_to(sub, module)
                 if found is not None:
                     yield sub, found
+
+
+def _own_class_values(graph, module: str, node, callees: set, annotations: set):
+    """(qualified class name, ' in an annotation' when it is one, line) for
+    each load in `node` of a class of `module` itself
+    (`_DetectionGraph.own_class_value`) that is not the callee of a call,
+    wherever it stands: a class base, keyword or decorator expression
+    included, so a class inside `type(Cls)`, `*(Cls,)` or `@wrap(Cls)` is
+    reported as well as the statement's own head."""
+    import ast
+
+    for sub in ast.walk(node):
+        if id(sub) in callees:
+            continue
+        for own in graph.own_class_value(sub, module) or ():
+            yield f"{own}{' in an annotation' if id(sub) in annotations else ''}", sub.lineno
+
+
+def _class_names(tree) -> dict:
+    """{simple name: {qualified name: ClassDef}} for every class `tree`
+    defines, at any depth: a class in a class body is `Outer.Inner`, one in
+    a function is `function.Local`."""
+    import ast
+
+    found = {}
+
+    def walk(node, prefix):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                qualified = f"{prefix}{child.name}"
+                if isinstance(child, ast.ClassDef):
+                    found.setdefault(child.name, {})[qualified] = child
+                walk(child, qualified + ".")
+            else:
+                walk(child, prefix)
+
+    walk(tree, "")
+    return found
 
 
 def _class_statement_names(node):
@@ -2542,17 +2588,21 @@ def route_inputs() -> dict:
     project module ...>")`, marked when the use is an annotation. Every
     class statement, in a function or at import, whose base, keyword value
     (`metaclass=` included) or decorator is reached through a project name
-    (a class of the same module included), through a starred, subscripted,
-    attribute or call expression too, and does not resolve to a project
+    (any class the same module defines, nested ones included), through a
+    starred, subscripted, attribute or call expression too, and does not
+    resolve to a project
     function (`_DetectionGraph.class_statement_name`) is `("call", "<class
     statement on a project name ...>")`, since defining the class runs that
     object's code (a base's `__init_subclass__` or `__class_getitem__`, a
-    metaclass, a class decorator) with no call node. Every use of a
-    top-level class of the same module other than as the callee of a call
-    (`_DetectionGraph.own_class_value`: handed to `type` or
-    `types.new_class`, tested with `isinstance`, an attribute read from it)
-    is `("call", "<class of its own module used as a value ...>")`, marked
-    when the use is an annotation, as another module's classes are.
+    metaclass, a class decorator) with no call node. Every use of a class
+    the same module defines, at any depth (`_class_names`, keyed by
+    qualified name such as `Outer.Inner`), other than as the callee of a
+    call (`_own_class_values`: handed to `type` or `types.new_class`,
+    tested with `isinstance`, an attribute read from it, or anywhere inside
+    a class base, keyword or decorator expression) is `("call", "<class of
+    its own module used as a value ...>")`, marked when the use is an
+    annotation, as another module's classes are; a name two classes share
+    is reported for both.
     Nothing classifies any of these unless NOT_A_ROUTE names it, so the
     census fails closed. A project
     function used as a value (passed, stored, returned) counts as a call
@@ -2574,11 +2624,13 @@ def route_inputs() -> dict:
       a project function's result only when it `returns_foreign`).
     REPORTED, as a condition NOT_A_ROUTE must name with its reason: every
     other call through a project name. That is every build of a project
-    class, in a function or at import, whatever the class defines; a method
+    class (a nested one included), in a function or at import, whatever
+    the class defines; a method
     of any other project object (a compiled pattern, a logger, a context
     variable, an instance); a method on any `self` attribute; and a method
     on a local holding anything else; every class statement on a project
-    name; and every use of a class of the same module as a value. No method
+    name; and every use of a class the same module defines, at any depth,
+    as a value. No method
     is followed into a class.
 
     The process and home directories are each ONE condition, `("cwd",)` and
@@ -2686,17 +2738,10 @@ def route_inputs() -> dict:
             if isinstance(getattr(sub, field, None), ast.AST)
             for inner in ast.walk(getattr(sub, field))
         }
-        heads = {
-            id(inner) for sub in ast.walk(node) if isinstance(sub, ast.ClassDef)
-            for _role, expression in _class_statement_names(sub) for inner in ast.walk(expression)
-        }
+        for shown, line in _own_class_values(graph, module, node, callees, annotations):
+            add(("call", f"<class of its own module used as a value {module}: {shown}>"), f"{site}:{line}", key)
         for sub in ast.walk(node):
             imported_name = graph.imported_name(sub, module) if id(sub) not in callees else None
-            own = graph.own_class_value(sub, module) if id(sub) not in callees | heads else None
-            if own is not None:
-                place = " in an annotation" if id(sub) in annotations else ""
-                add(("call", f"<class of its own module used as a value {module}: {own}{place}>"),
-                    f"{site}:{sub.lineno}", key)
             if imported_name is not None:
                 place = " in an annotation" if id(sub) in annotations else ""
                 add(("call", f"<name imported from a project module {module}: {imported_name}{place}>"),
@@ -3251,7 +3296,7 @@ class TestEveryRouteEntryConditionIsARoute:
         graph = _DetectionGraph()
         annotated = regex.compile(r"<name imported from a project module ([\w.]+): (\w+) in an annotation>")
         statement = regex.compile(r"<class statement on a project name ([\w.]+): \w+ (base|keyword \w+|decorator) (\w+)>")
-        own = regex.compile(r"<class of its own module used as a value ([\w.]+): (\w+)( in an annotation)?>")
+        own = regex.compile(r"<class of its own module used as a value ([\w.]+): ([\w.]+?)( in an annotation)?>")
         inert = "a base whose project classes define no __init_subclass__ or __class_getitem__ and name no metaclass"
 
         def class_node(name, module):
@@ -3322,7 +3367,10 @@ class TestEveryRouteEntryConditionIsARoute:
             if found:
                 module, name, in_annotation = found.groups()
                 assert graph.load(module), module
-                node = graph.classes.get(module, {}).get(name)
+                node = next(
+                    (found[name] for found in graph.class_names.get(module, {}).values() if name in found),
+                    None,
+                )
                 text = described(module, node) if node is not None and no_hooks(module, node) else None
                 expected = None if text is None else (
                     f"{text}, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
@@ -3363,22 +3411,25 @@ class TestEveryRouteEntryConditionIsARoute:
         assert reported("class X(*(RuntimeError,)): pass") == [False]
 
     def test_a_class_of_its_own_module_used_as_a_value_is_reported(self):
-        """A load of a top-level class of the same module is reported
-        wherever it is not the callee of a call: handed to `type` or
-        `types.new_class`, tested with `isinstance`, named in an annotation.
-        A standard-library class and a local are not."""
+        """A load of any class the same module defines, at any depth and by
+        its qualified name, is reported wherever it is not the callee of a
+        call: handed to `type` or `types.new_class`, tested with
+        `isinstance`, named in an annotation, or inside a class base,
+        keyword or decorator expression. A name two classes share gives
+        both. A standard-library class and a local are not."""
         import ast
 
         graph = _DetectionGraph()
         assert graph.load("memory_api")
 
-        def loads(source):
+        def loads(source, module="memory_api"):
             tree = ast.parse(source)
             callees = {id(sub.func) for sub in ast.walk(tree) if isinstance(sub, ast.Call)}
             return sorted(
-                graph.own_class_value(sub, "memory_api") or "-"
+                name
                 for sub in ast.walk(tree)
                 if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load) and id(sub) not in callees
+                for name in graph.own_class_value(sub, module) or ["-"]
             )
 
         assert "PACTMemory" in graph.classes["memory_api"]  # control: a same-module class
@@ -3386,8 +3437,57 @@ class TestEveryRouteEntryConditionIsARoute:
         assert loads("X = types.new_class('X', (PACTMemory,))") == ["-", "PACTMemory"]
         assert loads("ok = isinstance(value, PACTMemory)") == ["-", "PACTMemory"]
         assert loads("def f(memory: PACTMemory): pass") == ["PACTMemory"]
+        assert loads("class X(type(PACTMemory)): pass") == ["PACTMemory"]
+        assert loads("class X(*(PACTMemory,)): pass") == ["PACTMemory"]
+        assert loads("@wrap(PACTMemory)\nclass X: pass") == ["PACTMemory"]
         assert loads("X = type('X', (RuntimeError,), {})") == ["-"]
         assert loads("memory = PACTMemory()") == []
+
+        nested = ast.parse(
+            "class Outer:\n    class Inner:\n        pass\n"
+            "def build():\n    class Inner:\n        pass\n    class Local:\n        pass\n"
+        )
+        graph.class_names["probe"] = _class_names(nested)
+        graph.aliases["probe"] = {}
+        assert {simple: sorted(found) for simple, found in graph.class_names["probe"].items()} == {
+            "Outer": ["Outer"], "Inner": ["Outer.Inner", "build.Inner"], "Local": ["build.Local"],
+        }
+        assert loads("Made = type('Made', (Inner,), {})", "probe") == ["Outer.Inner", "build.Inner"]
+        assert loads("class Sub(Local): pass", "probe") == ["build.Local"]
+        assert graph.project_name("Local", "probe") == ("probe", "Local")
+
+    def test_a_class_inside_a_class_head_expression_is_reported(self, tmp_path, monkeypatch):
+        """The value scan (`_own_class_values`) reports a class of the same
+        module wherever it stands inside a class base, keyword or decorator
+        expression, nested classes included by qualified name; a callee is
+        not a value."""
+        import ast
+        import sys
+
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "heads.py").write_text(
+            "class Base:\n    pass\n\n"
+            "def wrap(base):\n    return lambda cls: cls\n\n"
+            "class X(type(Base)):\n    pass\n\n"
+            "class Y(*(Base,)):\n    pass\n\n"
+            "@wrap(Base)\nclass Z:\n    pass\n\n"
+            "class Outer:\n    class Inner:\n        pass\n\n    class Sub(Inner):\n        pass\n\n"
+            "    Made = type('Made', (Inner,), {})\n\n"
+            "class Built(dict[str, Base]):\n    pass\n\n"
+            "made = Base()\n"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path,))
+        graph = _DetectionGraph()
+        assert graph.load("pkg.heads")
+        code = graph.import_time["pkg.heads"]
+        callees = {id(sub.func) for sub in ast.walk(code) if isinstance(sub, ast.Call)}
+        found = sorted((shown, line) for shown, line in _own_class_values(graph, "pkg.heads", code, callees, set()))
+        assert found == [
+            ("Base", 7), ("Base", 10), ("Base", 13), ("Base", 26),
+            ("Outer.Inner", 21), ("Outer.Inner", 24),
+        ], found
 
     def test_every_entry_condition_is_driven_or_excluded(self, route_driven_conditions):
         conditions = route_entry_conditions()
