@@ -1231,8 +1231,10 @@ def _submodule_checkout(
        whose `.git` is a directory, and a `--separate-git-dir` store, which
        has no `.git` marker at the root at all).
 
-    When the conjunction cannot be established the answer is False: the
-    ordinary basename ruling continues.
+    When a leg is shown false the answer is False: the ordinary basename
+    ruling continues. When a leg cannot be checked (the `.git` cannot be
+    examined, git gives no git dir, or a path will not resolve) the answer is
+    True: a check that could not be made never lets the basename through.
     """
     if root is None or common_dir is None:
         return False
@@ -1242,15 +1244,15 @@ def _submodule_checkout(
         if not (Path(root) / ".git").is_file():
             return False
     except (OSError, RuntimeError, ValueError):
-        return False
+        return True
     asked = Path(asked_root) if asked_root is not None else Path(root)
     git_dir = _resolved_git_dir(asked)
     if git_dir is None:
-        return False
+        return True
     try:
         common = Path(common_dir).resolve()
     except (OSError, RuntimeError, ValueError):
-        return False
+        return True
     return git_dir == common or git_dir.parent == common / "worktrees"
 
 

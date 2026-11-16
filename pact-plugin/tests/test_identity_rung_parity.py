@@ -923,6 +923,86 @@ def _bool_shaped(value) -> bool:
     )
 
 
+
+def _fault_dot_git_check_raises(monkeypatch, target):
+    """The root's `.git` cannot be examined: its `is_file` raises."""
+    real = Path.is_file
+
+    def is_file(self):
+        if self == target / ".git":
+            raise OSError("probe")
+        return real(self)
+
+    monkeypatch.setattr(Path, "is_file", is_file)
+    return None
+
+
+def _fault_no_git_dir(monkeypatch, target):
+    """Git gives no git dir for the asked directory."""
+    monkeypatch.setattr(pi, "git_dir_answer", lambda start: None)
+    return None
+
+
+def _fault_common_dir_loops(monkeypatch, target):
+    """The common dir handed to the check is a submodule admin path that is
+    a symlink loop, so it will not resolve. No route hands the check such a
+    common dir (the resolver declines `origin_unreadable` first), so the
+    check is called with it directly."""
+    modules = target.parent / "loop" / ".git" / "modules" / "vendor"
+    modules.mkdir(parents=True)
+    (modules / "lib").symlink_to(modules / "lib2")
+    (modules / "lib2").symlink_to(modules / "lib")
+    return modules / "lib"
+
+
+# NOT A FLOOR OUTCOME: single truthy returns of a layout predicate that no own
+# layout reaches, keyed (predicate, the guard the return sits under, its
+# ordinal among the predicate's returns under the same guard), as
+# `_outcome_keys` computes them. Each names the fault that reaches it. The
+# fault returns None when it acts through the resolver, or the common dir to
+# hand the predicate directly when no route can carry it.
+# test_each_excluded_outcome_is_reached_by_its_fault applies each fault and
+# requires that this outcome, and no other, returns True, and that the
+# resolver then declines `submodule_checkout` where a route carries the fault.
+NOT_A_FLOOR_OUTCOME = {
+    ("_submodule_checkout", "except (OSError, RuntimeError, ValueError)", 0): _fault_dot_git_check_raises,
+    ("_submodule_checkout", "if git_dir is None", 0): _fault_no_git_dir,
+    ("_submodule_checkout", "except (OSError, RuntimeError, ValueError)", 1): _fault_common_dir_loops,
+}
+
+
+def _outcome_keys(predicates: set) -> dict:
+    """{(predicate, return line, operand index): (predicate, guard, ordinal)}
+    for every outcome `_layout_outcomes` lists. The guard is the nearest
+    enclosing `if` test or `except` clause, as source (`body` when there is
+    none), and the ordinal counts the predicate's earlier returns under the
+    same guard text."""
+    tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
+    outcomes = _layout_outcomes(predicates)
+    keys = {}
+    for function in tree.body:
+        if not (isinstance(function, ast.FunctionDef) and function.name in predicates):
+            continue
+        parents = {id(child): node for node in ast.walk(function) for child in ast.iter_child_nodes(node)}
+        seen = collections.Counter()
+        returns = sorted((n for n in ast.walk(function) if isinstance(n, ast.Return)), key=lambda n: n.lineno)
+        for node in returns:
+            up, guard = node, "body"
+            while id(up) in parents:
+                up = parents[id(up)]
+                if isinstance(up, ast.If):
+                    guard = f"if {ast.unparse(up.test)}"
+                    break
+                if isinstance(up, ast.ExceptHandler):
+                    guard = f"except {ast.unparse(up.type)}" if up.type is not None else "except"
+                    break
+            ordinal = seen[guard]
+            seen[guard] += 1
+            for outcome in outcomes:
+                if outcome[0] == function.name and outcome[1] == node.lineno:
+                    keys[outcome] = (function.name, guard, ordinal)
+    return keys
+
 # The typing generics an annotation may be built from and still be read as a
 # non-bool type, checked by identity against `typing`, with every argument
 # checked in turn.
@@ -1448,7 +1528,9 @@ class TestTheDocumentedGitCallFloor:
         """Every truthy outcome of every `.git`-layout predicate is reached by
         some own layout, so a layout the identity code distinguishes cannot
         be missing from the floor. NOT_A_FLOOR_LAYOUT names the predicates
-        whose outcomes no own layout can reach, and each must still be one."""
+        whose outcomes no own layout can reach, and each must still be one;
+        NOT_A_FLOOR_OUTCOME names single outcomes, each of which must still
+        exist."""
         _measured, reached = git_calls
         predicates, unresolved = _layout_predicate_forms()
         named = {key: count for key, (count, _reason) in NAMED_LAYOUT_FORMS.items()}
@@ -1461,11 +1543,56 @@ class TestTheDocumentedGitCallFloor:
         assert {"_marker_names_external_git_dir", "_submodule_checkout"} <= predicates  # control
         assert set(NOT_A_FLOOR_LAYOUT) <= predicates, set(NOT_A_FLOOR_LAYOUT) - predicates
         outcomes = _layout_outcomes(predicates)
+        keys = _outcome_keys(predicates)
+        assert set(NOT_A_FLOOR_OUTCOME) <= set(keys.values()), set(NOT_A_FLOOR_OUTCOME) - set(keys.values())
         unreached = sorted(
             key for key in outcomes
-            if key[0] not in NOT_A_FLOOR_LAYOUT and not reached.get(key)
+            if key[0] not in NOT_A_FLOOR_LAYOUT and keys.get(key) not in NOT_A_FLOOR_OUTCOME
+            and not reached.get(key)
         )
         assert unreached == [], f"a layout outcome no own layout reaches: {unreached}"
+
+    def test_each_excluded_outcome_is_reached_by_its_fault(self, tmp_path):
+        """Each NOT_A_FLOOR_OUTCOME entry is computed, not stated: its fault,
+        applied to a submodule checkout with no origin, makes the predicate return True from
+        that outcome and from no other, and where the fault acts through the
+        resolver, detect_id_for_root declines `submodule_checkout`."""
+        from fixtures.identity_routes import SHAPES
+
+        predicates, _unresolved = _layout_predicate_forms()
+        lines = {key: outcome[1] for outcome, key in _outcome_keys(predicates).items()}
+        wrong = {}
+        for index, (key, fault) in enumerate(sorted(NOT_A_FLOOR_OUTCOME.items(), key=str)):
+            base = tmp_path / f"fault{index}"
+            base.mkdir()
+            assert_outside_repository(base)
+            target = SHAPES["control_own_submodule"](base)
+            run_git("remote", "remove", "origin", cwd=target)  # a basename is all it has
+            common = memory_api.main_repo_common_dir(str(target))
+            assert common is not None, target  # control: the checkout is a submodule
+            predicate = getattr(pi, key[0])
+            returned = []
+
+            def tracer(frame, event, value, code=predicate.__code__):
+                if frame.f_code is code and event == "return" and value is True:
+                    returned.append(frame.f_lineno)
+                return tracer
+
+            with pytest.MonkeyPatch.context() as patch:
+                given = fault(patch, target)
+                previous = sys.gettrace()
+                sys.settrace(tracer)
+                try:
+                    result = predicate(target, common if given is None else given, target)
+                finally:
+                    sys.settrace(previous)
+                declined = (
+                    (pi.detect_id_for_root(target, common).decline_reason or {}).get("reason")
+                    if given is None else "submodule_checkout"
+                )
+            if not (result is True and returned == [lines.get(key)] and declined == "submodule_checkout"):
+                wrong[key] = (result, returned, lines.get(key), declined)
+        assert wrong == {}, f"(result, true returns, expected line, decline) per excluded outcome: {wrong}"
 
     def test_each_named_layout_reason_states_the_code_at_its_site(self):
         """Each NAMED_LAYOUT_FORMS reason IS the text derived from its form's

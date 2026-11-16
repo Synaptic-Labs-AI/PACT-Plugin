@@ -1841,3 +1841,55 @@ class TestTheOwnFileOriginBinds:
             pi.subprocess, "run", lambda command, **_k: subprocess.CompletedProcess(command, 0, answer, b"")
         )
         assert pi.read_origin(repo / ".git") == pi.OriginRead(pi.ORIGIN_PRESENT, "https://h/o/first.git")
+
+
+class TestTheSubmoduleCheckRefusesWhatItCannotCheck:
+    """A submodule's folder name is chosen by its superproject, so a
+    basename is refused there. Each leg the check cannot examine refuses
+    too, rather than letting the basename through: one arm per refusing
+    exit, each reaching its exit by faking that one failure."""
+
+    def _submodule(self, tmp_path):
+        superproject = _superproject_with_submodule(tmp_path)
+        submodule = superproject / "vendor" / "lib"
+        return submodule, common_dir(submodule)
+
+    def test_the_real_submodule_declines_its_basename(self, tmp_path):
+        """Control: with every leg examined, the basename is refused."""
+        submodule, common = self._submodule(tmp_path)
+        identity = pi.detect_id_for_root(submodule, common)
+        assert identity.project_id is None and identity.decline_reason["reason"] == "submodule_checkout"
+
+    def test_a_dot_git_that_cannot_be_examined_declines(self, tmp_path, monkeypatch):
+        submodule, common = self._submodule(tmp_path)
+        real = Path.is_file
+        marker = submodule / ".git"
+
+        def is_file(self):
+            if self == marker:
+                raise OSError("cannot examine")
+            return real(self)
+
+        monkeypatch.setattr(Path, "is_file", is_file)
+        assert pi._submodule_checkout(submodule, common, submodule) is True
+
+    def test_no_git_dir_answer_declines_the_basename(self, tmp_path, monkeypatch):
+        submodule, common = self._submodule(tmp_path)
+        monkeypatch.setattr(pi, "git_dir_answer", lambda start: None)
+        identity = pi.detect_id_for_root(submodule, common)
+        assert identity.project_id is None and identity.decline_reason["reason"] == "submodule_checkout"
+
+    def test_a_git_dir_answer_that_will_not_resolve_is_no_git_dir(self, tmp_path, monkeypatch):
+        """`_resolved_git_dir` gives None for an answer that will not
+        resolve, so this reaches the same exit as no answer at all."""
+        submodule, common = self._submodule(tmp_path)
+        monkeypatch.setattr(pi, "git_dir_answer", lambda start: "bad\0dir")
+        assert pi._resolved_git_dir(submodule) is None
+        identity = pi.detect_id_for_root(submodule, common)
+        assert identity.project_id is None and identity.decline_reason["reason"] == "submodule_checkout"
+
+    def test_a_common_dir_that_will_not_resolve_declines(self, tmp_path, monkeypatch):
+        submodule, _common = self._submodule(tmp_path)
+        monkeypatch.setattr(pi, "_submodule_admin_dir", lambda path: True)
+        monkeypatch.setattr(pi, "_resolved_git_dir", lambda asked: Path("/somewhere"))
+        assert pi._submodule_checkout(submodule, Path("bad\0common"), submodule) is True
