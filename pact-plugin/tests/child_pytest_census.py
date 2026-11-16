@@ -30,10 +30,12 @@ entry point and the module but not `pytest_randomly.__init__`, and
 loads unless it is blocked, PYTEST_DISABLE_PLUGIN_AUTOLOAD is non-empty, or
 `--disable-plugin-autoload` comes before any bare `--`. Last, each
 comma-separated name in PYTEST_PLUGINS loads when it is one of the three and
-not blocked, with autoload disabled or not. Other PYTEST_PLUGINS names are not
-checked, so a child is refused for one of the three even when another name
-there is a module pytest cannot import, which stops pytest with a usage error
-before any test runs.
+not blocked, with autoload disabled or not: pytest tries a PYTEST_PLUGINS name
+as an entry point before it imports it as a module, so `randomly` loads through
+pytest-randomly's entry point. Other PYTEST_PLUGINS names are not checked, so
+a child is refused for one of the three even when another name there is a
+module pytest cannot import, which stops pytest with a usage error before any
+test runs.
 
 A child's environment starts as the explicit `env` passed to the launch, or this
 process's when none is passed, and the NAME=VALUE words before the program apply
@@ -1264,6 +1266,7 @@ def _deterministic(args, env):
     if (not env.get(AUTOLOAD_ENV) and NO_AUTOLOAD_FLAG not in _options(words)
             and "randomly" not in blocked):
         loaded.add("randomly")
+    # pytest tries each name as an entry point first, then as a module.
     for name in (env.get(PLUGINS_ENV) or "").split(","):
         if name in _RANDOMLY_NAMES and name not in blocked:
             loaded.add(name)

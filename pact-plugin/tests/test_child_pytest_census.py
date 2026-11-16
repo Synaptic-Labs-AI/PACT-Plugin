@@ -117,6 +117,8 @@ _ROUTE_ROWS = [
     (["-p", "no:pytest_randomly"], {}, False),
     (["-p", "no:pytest_randomly.__init__"], {}, False),
     (["-p", "no:pytest_randomly", "-p", "no:randomly"], {}, True),
+    # A PYTEST_PLUGINS name is tried as an entry point before a module, so
+    # `randomly` loads through the entry point even with autoload disabled.
     ([], {_D: "1", "PYTEST_PLUGINS": "pytest_randomly"}, False),
     ([], {_D: "1", "PYTEST_PLUGINS": "randomly"}, False),
     ([], {_D: "1", "PYTEST_PLUGINS": "pytest_randomly.__init__"}, False),
