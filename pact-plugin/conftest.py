@@ -25,8 +25,11 @@ tests/conftest.py instead.
 No dynamic import call (importlib.import_module, __import__, importlib.reload,
 find_spec, an importlib.util spec or loader call, runpy, exec or eval, or a
 standard-library helper that imports a module it is given by name, such as
-pkgutil.resolve_name, pydoc.locate or logging.config.dictConfig) appears in
-this file or in any tests/ module it follows, at any scope. Any other helper
+pkgutil.resolve_name, pydoc.locate or logging.config.dictConfig,
+pytest.importorskip, or a pytest plugin-manager method that imports a plugin by
+name, such as import_plugin, consider_pluginarg or load_setuptools_entrypoints)
+appears in this file or in any tests/ module it follows, at any scope, and
+none of them binds pytest_plugins. Any other helper
 that imports a module by name is forbidden here too, whether or not the pin
 sees it. Exactly two functions deviate, and only they may import outside this
 charter:
@@ -43,7 +46,9 @@ this charter. It cannot see a callable reached through getattr or a computed
 name. It cannot see a helper it matches by dotted path when that helper's
 module is bound other than by an import (a parameter, an assignment, a star
 import), and it may not see one whose import name is reused for another module
-elsewhere in the file. It cannot see a module named by a string to a
+elsewhere in the file. It cannot see pytest_plugins bound through setattr or
+globals(), or a directory tests/conftest.py puts on sys.path other than by
+sys.path.insert. It cannot see a module named by a string to a
 standard-library helper whose name is too common to refuse, among them
 unittest.mock.patch's target, pickle.load and pickle.loads,
 importlib.resources.files, pkgutil.get_data, an importlib.metadata entry point's

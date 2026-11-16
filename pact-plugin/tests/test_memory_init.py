@@ -709,8 +709,12 @@ class TestDependencyDriftIsDetectable:
         Every lock pin carries a sha256 hash, so `--require-hashes` never
         meets an unhashed line; every input pin, pip included, appears in the
         lock at the same version; and the lock header names the same pinned
-        refresh command the input documents, so a refresh by another uv
-        version is visible as a header diff. No arm runs the refresh tool."""
+        refresh command the input documents. uv copies the
+        --custom-compile-command text into the header verbatim and writes no
+        version of its own, so the header records the documented command, not
+        the uv that ran it: a refresh by another uv version that passes the
+        documented command leaves the header unchanged. No arm runs the
+        refresh tool."""
         root = self._require_root("the hashed CI lock")
         verify = self._verify_script(self._real_repo_root())
         lock = verify.read_lock(root / "constraints-ci.txt")

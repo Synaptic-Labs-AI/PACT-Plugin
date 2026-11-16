@@ -144,8 +144,13 @@ A HARMLESS COMMAND THE CENSUS STILL REFUSES IS AN ACCEPTED, DOCUMENTED LIMIT,
 not a defect to fix. A program the census does not read is refused when a word
 that may be its command starts pytest (`make check python -m pytest`,
 `python-config -m pytest`), because telling a mention from a launch there would
-need that program's own argument grammar. The refusal fails loudly, naming the
-program and the remedy.
+need that program's own argument grammar. Both refusals fail loudly with a
+remedy, but only one names the program. `python-config -m pytest`, where pytest
+may be the program's command, is refused as [wrapper]: the line names
+python-config, and blocking pytest-randomly does not lift it.
+`make check python -m pytest`, where pytest is a later word, is refused as
+[mention]: the line is the ordinary does-not-block line, which names no
+program, and adding `-p no:randomly` lifts it.
 
 The program is the first word past NAME=VALUE words, the shell's own
 `{ } ! if then elif else fi do done while until`, `function NAME`, `coproc`

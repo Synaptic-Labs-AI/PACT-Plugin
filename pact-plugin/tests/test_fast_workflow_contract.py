@@ -172,12 +172,6 @@ def _full_doc(root):
     return ci_contract.load_workflow(root, ci_contract.FULL_WORKFLOW)
 
 
-def _printed(line):
-    """The text a `printf '...\\n'` line prints: its format without the newline,
-    with each printf `\\\\` printed as one backslash."""
-    return line.split("'")[1].removesuffix("\\n").replace("\\\\", "\\")
-
-
 def _render_lint_gate_remedy(root, scratch, venv, target="gone", readlink=True):
     """The stderr the lint gate prints when ruff is missing, run from a scratch
     root that holds a copy of the script and the lock and whose .venv is absent

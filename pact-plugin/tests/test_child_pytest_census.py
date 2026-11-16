@@ -24,6 +24,13 @@ _CONFTEST = Path(__file__).resolve().with_name("conftest.py")
 _BLOCK = ["-p", "no:randomly"]
 
 
+def _child_env():
+    """This process's environment without its PYTEST_* names, so a child
+    pytest does not take PYTEST_ADDOPTS, PYTEST_PLUGINS or
+    PYTEST_DISABLE_PLUGIN_AUTOLOAD from the shell that runs the suite."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+
+
 @pytest.fixture
 def census_state():
     """Restore the census's recorded lines, so a deliberate miss here does not
@@ -174,7 +181,7 @@ def _probe(rig, args, env):
     this process's environment without its PYTEST_* names) registered a
     pytest_randomly module under any name."""
     out = rig / "verdict.txt"
-    child_env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    child_env = _child_env()
     child_env.update(env)
     child_env["RANDOMLY_PROBE_OUT"] = str(out)
     subprocess.run([PY, "-c", "import sys, pytest; sys.exit(pytest.main(sys.argv[1:]))", *args],
@@ -956,12 +963,56 @@ def test_the_words_after_a_rebase_value_are_read_as_a_mention():
     assert census._miss([*argv, *_BLOCK], None, {}) is None
 
 
+# Rows whose pytest is followed by words of the program that runs it (a rebase
+# value then rebase's own arguments, a find action then its `{}` and
+# terminator): the block goes where that pytest receives it, not on the end.
+_BLOCKED_FORMS = {
+    ("git", "rebase", "--exec", "pytest -q", "main"):
+        ["git", "rebase", "--exec", "pytest -q -p no:randomly", "main"],
+    ("git", "rebase", "-x", "python -m pytest", "main"):
+        ["git", "rebase", "-x", "python -m pytest -p no:randomly", "main"],
+    ("git", "rebase", "--exec=pytest", "main"):
+        ["git", "rebase", "--exec=pytest -p no:randomly", "main"],
+    ("git", "rebase", "-xpytest", "main"):
+        ["git", "rebase", "-xpytest -p no:randomly", "main"],
+    ("timeout", "5", "find", ".", "-exec", "pytest", "{}", ";"):
+        ["timeout", "5", "find", ".", "-exec", "pytest", *_BLOCK, "{}", ";"],
+    ("find", ".", "-exec", "echo", "x", ";", "-exec", "python", "-m", "pytest", "{}", ";"):
+        ["find", ".", "-exec", "echo", "x", ";", "-exec", "python", "-m", "pytest", *_BLOCK,
+         "{}", ";"],
+    ("find", ".", "-name", "x", "-exec", "pytest", "{}", ";"):
+        ["find", ".", "-name", "x", "-exec", "pytest", *_BLOCK, "{}", ";"],
+    ("timeout", "5", "find", "tests", "-execdir", "python3", "-m", "pytest", "{}", "+"):
+        ["timeout", "5", "find", "tests", "-execdir", "python3", "-m", "pytest", *_BLOCK,
+         "{}", "+"],
+    ("bash", "-c", "find . -ok timeout 5 pytest {} \\;"):
+        ["bash", "-c", "find . -ok timeout 5 pytest -p no:randomly {} \\;"],
+}
+
+
 def _with_block(argv):
-    """The row with pytest-randomly blocked: in the shell text when its last
-    word is one, else on the argv."""
+    """The row with pytest-randomly blocked where its pytest receives it: the
+    written form for a row in _BLOCKED_FORMS, else at the end of the shell text
+    when its last word is one, else at the end of the argv."""
+    if tuple(argv) in _BLOCKED_FORMS:
+        return _BLOCKED_FORMS[tuple(argv)]
     if " " in argv[-1]:
         return [*argv[:-1], argv[-1] + " -p no:randomly"]
     return [*argv, *_BLOCK]
+
+
+def test_each_find_and_rebase_row_is_blocked_inside_its_command():
+    """A block appended after a rebase value or a find action lands in git's or
+    find's arguments and blocks nothing, so the blocked half of the refusal
+    test would test no block. For every row that runs pytest through find or
+    git rebase, the block follows the pytest word, inside that command."""
+    rows = [argv for argv in _WRAPPED
+            if {"find", "rebase"} & set(" ".join(argv).split())]
+    assert len(rows) == len(_BLOCKED_FORMS), rows
+    for argv in rows:
+        blocked = " ".join(_with_block(argv))
+        assert re.search(r"pytest( -q)? -p no:randomly", blocked), (argv, blocked)
+        assert not blocked.endswith("-p no:randomly"), (argv, blocked)
 
 
 @pytest.mark.parametrize("argv", _WRAPPED)
@@ -1051,7 +1102,7 @@ def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census
     assert census.installed(), "pact-plugin/conftest.py did not install the census"
     before = len(census_state["misses"])
     with pytest.raises(census.ChildPytestCensusError) as caught:
-        subprocess.run([PY, "-m", "pytest", "--version"], cwd=tmp_path,
+        subprocess.run([PY, "-m", "pytest", "--version"], cwd=tmp_path, env=_child_env(),
                        capture_output=True, timeout=60)
     message = str(caught.value)
     assert census.REMEDY in message and str(tmp_path) in message, message
@@ -1062,7 +1113,7 @@ def test_the_census_is_live_and_refuses_before_the_child_starts(tmp_path, census
 def test_a_blocked_child_runs(tmp_path, census_state):
     before = list(census_state["misses"])
     proc = subprocess.run([PY, "-m", "pytest", "--version", *_BLOCK], cwd=tmp_path,
-                          capture_output=True, text=True, timeout=60)
+                          env=_child_env(), capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert census_state["misses"] == before
 
@@ -1115,7 +1166,8 @@ def test_a_live_blocked_launch_through_an_executable_runs(tmp_path, census_state
     shown = str(Path(PY).with_name("shown-name"))
     before = list(census_state["misses"])
     proc = subprocess.run([shown, "-m", "pytest", "--version", *_BLOCK], executable=PY,
-                          cwd=tmp_path, capture_output=True, text=True, timeout=60)
+                          cwd=tmp_path, env=_child_env(), capture_output=True, text=True,
+                          timeout=60)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert census_state["misses"] == before
 
@@ -1337,8 +1389,7 @@ def _run_rig(tmp_path, flag):
         _RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
     (tmp_path / "test_swallow.py").write_text(
         _RIG_TESTS.format(flag=flag), encoding="utf-8")
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env = _child_env()
     proc = subprocess.run(
         [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", *_BLOCK, "-n", "2",
          "test_swallow.py"],
@@ -1416,8 +1467,7 @@ def test_a_session_with_or_without_the_tests_conftest_refuses_an_unblocked_child
         pytest.skip("SKIPPED, NOT PASSED: %s is not in this tree" % _SKILLS_TEST)
     (tmp_path / "child_census_launch_probe.py").write_text(_UNBLOCKED_PROBE, encoding="utf-8")
     marker = tmp_path / "outcome"
-    env = {k: v for k, v in os.environ.items()
-           if not k.startswith("PYTEST_XDIST_") and k not in ("PYTEST_ADDOPTS", "PYTEST_CURRENT_TEST")}
+    env = _child_env()
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
     env["CHILD_CENSUS_PROBE_MARKER"] = str(marker)
     proc = subprocess.run(

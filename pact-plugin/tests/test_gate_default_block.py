@@ -238,7 +238,9 @@ class TestSeedGate:
             '__name__ = "pytest_randomly.stand_in"\n', encoding="utf-8")
         skills_test = sorted(_PLUGIN_ROOT.glob("skills/*/test_*.py"))[0]
         plugin = ["-p", "zz_fake_randomly"] if fake_loaded else []
-        env = dict(os.environ, PYTHONPATH=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
+        # No PYTEST_* name from the shell that runs the suite reaches the child.
+        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+        env.update(PYTHONPATH=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
         run = subprocess.run(
             [sys.executable, "-m", "pytest", "-p", "no:randomly", "-p", "no:cacheprovider",
              *plugin, "--co", "-q", str(skills_test)],

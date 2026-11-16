@@ -6,13 +6,19 @@ Used by: the suite.
 The charter: at any scope, guarded or not, pact-plugin/conftest.py imports only
 the standard library, pytest (`pytest` and `_pytest`), and modules in tests/
 whose own imports, followed through every tests/ module they import, are only
-those. A name is resolved as that conftest resolves it: tests/ first, then the
-plugin root and every skills/*/scripts directory (which it puts on sys.path),
-and only then the standard library, so a scripts-dir module that shadows a
-standard-library name is a violation. A relative import is a violation.
+those. A name is resolved as the session resolves it once tests/conftest.py has
+loaded: first every directory that file puts on sys.path with sys.path.insert,
+read from its source (an insert this pin cannot read is a violation), then
+tests/, then the plugin root and every skills/*/scripts directory (which the
+root conftest puts on sys.path), and only then the standard library. So a
+module in one of those directories that shadows a tests/ or standard-library
+name is a violation. That over-refuses an import that runs while the root
+conftest loads, before tests/conftest.py has inserted anything. A relative
+import is a violation.
 
 No file the walk reaches may name a dynamic import callable (DYNAMIC_IMPORTS),
-called or not, imported by name or reached as an attribute, except where
+called or not, imported by name or reached as an attribute, or bind
+pytest_plugins (PLUGIN_LIST) as a name or an attribute, except where
 DEVIATIONS allows it: one (file, enclosing function) site, with an exact count
 for each callable. A deviation the real tree no longer uses is reported too, so
 the charter cannot keep naming a deviation that is gone.
@@ -31,8 +37,8 @@ by what it is, not by its spelling:
   statement or setup it is given is not a lambda, since a statement string is
   compiled and run; with none given it times `pass`.
 - IMPORTING_METHODS, reached through an instance (`TestLoader().loadTestsFromName`,
-  `Profile().runctx`), by attribute name alone, so
-  any object's method of that name is refused.
+  `Profile().runctx`, `config.pluginmanager.import_plugin`), by attribute name
+  alone, so any object's method of that name is refused.
 
 The script the CI deviation loads, scripts/verify_ci_environment.py, is read
 statically too: at every scope it imports only the standard library and
@@ -54,7 +60,7 @@ DYNAMIC_IMPORTS = frozenset({
     "__import__", "import_module", "reload", "find_spec", "spec_from_file_location",
     "spec_from_loader", "module_from_spec", "exec_module", "load_module",
     "SourceFileLoader", "SourcelessFileLoader", "ExtensionFileLoader",
-    "run_path", "run_module", "exec", "eval",
+    "run_path", "run_module", "exec", "eval", "importorskip",
 })
 # Standard-library helpers that import a module they are given by name (each
 # measured to import it on Python 3.12), by dotted path.
@@ -68,9 +74,17 @@ IMPORTING_HELPERS = frozenset({
 })
 TIMEIT_RUNNERS = frozenset({"timeit.timeit", "timeit.repeat", "timeit.Timer"})
 # The same, reached through an instance. `runctx` is also a module function of
-# cProfile and profile, so IMPORTING_HELPERS names those too.
+# cProfile and profile, so IMPORTING_HELPERS names those too. The rest are
+# pytest plugin-manager methods, each measured to import a module named by a
+# string on pytest 9.2 (consider_env reads the name from PYTEST_PLUGINS,
+# consider_module and consider_conftest from a module's pytest_plugins, and
+# load_setuptools_entrypoints from an entry-point group).
 IMPORTING_METHODS = frozenset({"loadTestsFromName", "loadTestsFromNames", "runsource",
-                               "runctx"})
+                               "runctx", "import_plugin", "consider_pluginarg",
+                               "consider_preparse", "consider_env", "consider_module",
+                               "consider_conftest", "load_setuptools_entrypoints"})
+# pytest imports every module a conftest or plugin names in this variable.
+PLUGIN_LIST = "pytest_plugins"
 # (file, enclosing function) -> the dynamic callables it may name, and how often.
 DEVIATIONS = {
     ("tests/ci_environment_binding.py", "_load_verify_script"):
@@ -128,7 +142,8 @@ def _times_only_lambdas(call):
 
 def _dynamic_references(tree):
     """(enclosing function or class, dotted; callable, line) for every dynamic
-    import callable `tree` refers to or imports by name."""
+    import callable `tree` refers to or imports by name, and for every binding
+    of pytest_plugins, as a name or an attribute."""
     aliases = _import_aliases(tree)
     harmless = set()  # timeit runners given only lambdas
 
@@ -144,6 +159,8 @@ def _dynamic_references(tree):
                 names.append(child.attr)
             elif isinstance(child, ast.ImportFrom):
                 names.extend(alias.name for alias in child.names)
+            if isinstance(getattr(child, "ctx", None), ast.Store) and PLUGIN_LIST in names:
+                yield scope, PLUGIN_LIST, child.lineno
             for name in names:
                 if name in DYNAMIC_IMPORTS or (
                         name in IMPORTING_METHODS and isinstance(child, ast.Attribute)):
@@ -158,6 +175,58 @@ def _dynamic_references(tree):
             yield from walk(child, inner)
 
     yield from walk(tree, "")
+
+
+def _path_value(node, here, names):
+    """The path `node` builds from `Path(__file__)` in the file at `here`
+    (through str(), .parent, .resolve(), `/ "literal"` and a name assigned
+    once in that file), or None."""
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+            and node.func.id in ("str", "Path") and len(node.args) == 1:
+        if node.func.id == "Path" and isinstance(node.args[0], ast.Name) \
+                and node.args[0].id == "__file__":
+            return here
+        return _path_value(node.args[0], here, names)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+            and node.func.attr == "resolve" and not node.args:
+        return _path_value(node.func.value, here, names)
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        base = _path_value(node.value, here, names)
+        return base.parent if base else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) \
+            and isinstance(node.right, ast.Constant) and isinstance(node.right.value, str):
+        base = _path_value(node.left, here, names)
+        return base / node.right.value if base else None
+    if isinstance(node, ast.Name) and node.id in names:
+        rest = {name: value for name, value in names.items() if name != node.id}
+        return _path_value(names[node.id], here, rest)
+    return None
+
+
+def ahead_of_tests(plugin_root):
+    """(the directories tests/conftest.py inserts on sys.path, other than tests/
+    itself, so ahead of tests/; the lines of inserts this pin cannot read)."""
+    conftest = plugin_root / "tests" / "conftest.py"
+    if not conftest.is_file():
+        return [], []
+    tree = ast.parse(conftest.read_text(encoding="utf-8"), str(conftest))
+    aliases = _import_aliases(tree)
+    assigned = Counter(target.id for node in ast.walk(tree) if isinstance(node, ast.Assign)
+                       for target in node.targets if isinstance(target, ast.Name))
+    names = {node.targets[0].id: node.value for node in ast.walk(tree)
+             if isinstance(node, ast.Assign) and len(node.targets) == 1
+             and isinstance(node.targets[0], ast.Name) and assigned[node.targets[0].id] == 1}
+    tests = (plugin_root / "tests").resolve()
+    ahead, unread = [], []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) \
+                and node.func.attr == "insert" and _dotted(node.func.value, aliases) == "sys.path":
+            path = _path_value(node.args[1], conftest, names) if len(node.args) == 2 else None
+            if path is None:
+                unread.append(node.lineno)
+            elif path.resolve() != tests and path.resolve() not in ahead:
+                ahead.append(path.resolve())
+    return ahead, sorted(unread)
 
 
 def _in_dir(directory, dotted):
@@ -206,7 +275,10 @@ def charter_violations(plugin_root):
     `plugin_root`/conftest.py."""
     tests = plugin_root / "tests"
     shadowing = [plugin_root, *sorted(plugin_root.glob("skills/*/scripts"))]
-    violations, followed = [], []
+    ahead, unread = ahead_of_tests(plugin_root)
+    violations = [f"tests/conftest.py:{line}: a sys.path insert this pin cannot read"
+                  for line in unread]
+    followed = []
     used = {key: Counter() for key in DEVIATIONS}
     pending, seen = [plugin_root / "conftest.py"], set()
     while pending:
@@ -220,6 +292,9 @@ def charter_violations(plugin_root):
         for dotted, names, line in _imports(tree):
             if dotted is None:
                 violations.append(f"{where}:{line}: a relative import")
+            elif any(_in_dir(directory, dotted) for directory in ahead):
+                violations.append(f"{where}:{line}: `{dotted}` resolves to a directory "
+                                  "tests/conftest.py puts ahead of tests/")
             elif _in_dir(tests, dotted):
                 files = _tests_files(tests, dotted, names)
                 followed.extend(files)
@@ -240,7 +315,7 @@ def verify_script_violations(script, plugin_root):
     conftest's sys.path, so a name that tests/, the plugin root or a
     skills/*/scripts directory holds shadows the module it means."""
     tree = ast.parse(script.read_text(encoding="utf-8"), str(script))
-    shadowing = [plugin_root / "tests", plugin_root,
+    shadowing = [*ahead_of_tests(plugin_root)[0], plugin_root / "tests", plugin_root,
                  *sorted(plugin_root.glob("skills/*/scripts"))]
     violations = [f"{script.name}:{line}: dynamic import `{name}`"
                   for _, name, line in _dynamic_references(tree)]
@@ -308,7 +383,12 @@ def test_the_conftest_states_the_charter_and_names_this_pin():
                    "importlib.resources.files", "pkgutil.get_data",
                    "an importlib.metadata entry point's load()",
                    "the run of cProfile, profile or pdb",
-                   "a warning category named in a filter string"):
+                   "a warning category named in a filter string",
+                   "pytest.importorskip, or a pytest plugin-manager method that imports a "
+                   "plugin by name",
+                   "none of them binds pytest_plugins",
+                   "It cannot see pytest_plugins bound through setattr or globals(), or a "
+                   "directory tests/conftest.py puts on sys.path other than by sys.path.insert."):
         assert phrase in docstring, (phrase, docstring)
 
 
@@ -317,6 +397,8 @@ def test_this_pin_states_its_import_binding_blind_spot():
     assert ("Only an import binds a module here, so a helper whose module is reached through "
             "a parameter, an assignment or a star import is not seen, and one under an alias "
             "name reused for another module may not be seen.") in docstring, docstring
+    assert ("That over-refuses an import that runs while the root conftest loads, before "
+            "tests/conftest.py has inserted anything.") in docstring, docstring
 
 
 def _rig(tmp_path, conftest, modules=None, scripts=None):
@@ -341,6 +423,10 @@ BINDING = ("import importlib.util\n\ndef _load_verify_script(script):\n"
 IDENTITY = ("import importlib.util\n\ndef resolve_origins(names):\n"
             "    return {n: importlib.util.find_spec(n) for n in names}\n")
 DEVIATION_CONFTEST = "import ci_environment_binding\nimport import_identity_map\n"
+# A tests/conftest.py that puts tests/ and then hooks/ on sys.path, as the real one does.
+INSERTS = ("import sys\nfrom pathlib import Path\n"
+           "sys.path.insert(0, str(Path(__file__).parent))\n"
+           "sys.path.insert(0, str(Path(__file__).parent.parent / 'hooks'))\n")
 
 
 @pytest.mark.parametrize("conftest, modules, scripts", [
@@ -379,10 +465,46 @@ DEVIATION_CONFTEST = "import ci_environment_binding\nimport import_identity_map\
     (DEVIATION_CONFTEST, {"ci_environment_binding.py": BINDING.replace(
         "    return module\n", "    spec.loader.exec_module(module)\n    return module\n"),
         "import_identity_map.py": IDENTITY}, None),
+    # A plugin list in a module the walk follows.
+    ("import helper\n", {"helper.py": "pytest_plugins = ['yaml']\n"}, None),
+    # A name a directory tests/conftest.py puts ahead of tests/ holds, read
+    # through a literal path, a name assigned once and .resolve().
+    ("import helper\n", {"helper.py": "", "conftest.py": INSERTS, "../hooks/helper.py": ""},
+     None),
+    ("def pytest_configure(config):\n    import helper\n",
+     {"helper.py": "", "conftest.py": INSERTS, "../hooks/helper.py": ""}, None),
+    ("import json\n", {"conftest.py": INSERTS, "../hooks/json.py": ""}, None),
+    ("import helper\n", {"helper.py": "", "../scripts/helper.py": "", "conftest.py": (
+        "import sys\nfrom pathlib import Path\n"
+        "d = Path(__file__).resolve().parent.parent / 'scripts'\nsys.path.insert(0, str(d))\n")},
+     None),
+    # An insert the pin cannot read, including a name assigned twice.
+    ("import os\n", {"conftest.py": "import sys\nsys.path.insert(0, where())\n"}, None),
+    ("import os\n", {"conftest.py": (
+        "import sys\nfrom pathlib import Path\nd = Path(__file__).parent\nd = 'x'\n"
+        "sys.path.insert(0, str(d))\n")}, None),
 ])
 def test_a_planted_import_outside_the_charter_is_found(tmp_path, conftest, modules, scripts):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest, modules, scripts))
     assert violations, (conftest, modules, scripts)
+
+
+def test_a_directory_ahead_of_tests_with_no_shared_name_passes(tmp_path):
+    root = _rig(tmp_path, "import helper\nimport json\n",
+                {"helper.py": "", "conftest.py": INSERTS, "../hooks/other.py": ""})
+    violations, followed, _ = charter_violations(root)
+    assert violations == [], violations
+    assert [path.stem for path in followed] == ["helper"]
+    assert ahead_of_tests(root) == ([(root / "hooks").resolve()], [])
+
+
+def test_the_real_suite_conftest_inserts_are_all_read():
+    """The directories the real tests/conftest.py puts ahead of tests/ are read
+    from that file, and none of its inserts is beyond this pin."""
+    ahead, unread = ahead_of_tests(PLUGIN_ROOT)
+    assert unread == [], unread
+    found = {path.relative_to(PLUGIN_ROOT.resolve()).as_posix() for path in ahead}
+    assert {"hooks", "skills/pact-memory", "skills/pact-memory/scripts", "scripts"} <= found, found
 
 
 def test_imports_inside_the_charter_pass(tmp_path):
@@ -482,6 +604,24 @@ def test_a_loaded_script_inside_the_charter_passes(tmp_path):
     # The alias map is file-wide: a local that rebinds the module's name is
     # still read as the module (an over-refusal).
     "import pydoc\ndef f(pydoc):\n    return pydoc.locate\n",
+    # pytest's own ways of importing a module by name.
+    "import pytest\npytest.importorskip('yaml')\n",
+    "from pytest import importorskip\nimportorskip('yaml')\n",
+    "def pytest_configure(config):\n    config.pluginmanager.import_plugin('yaml')\n",
+    "def pytest_configure(config):\n    config.pluginmanager.consider_pluginarg('yaml')\n",
+    "def pytest_configure(config):\n    config.pluginmanager.consider_preparse(['-p', 'yaml'])\n",
+    "def pytest_configure(config):\n    config.pluginmanager.consider_env()\n",
+    "def pytest_configure(config):\n    config.pluginmanager.consider_module(config)\n",
+    "def pytest_configure(config):\n    config.pluginmanager.consider_conftest(config, 'x')\n",
+    "def pytest_configure(config):\n"
+    "    config.pluginmanager.load_setuptools_entrypoints('pytest11')\n",
+    # A plugin list, however it is bound by name or attribute.
+    "pytest_plugins = ['yaml']\n",
+    "pytest_plugins = 'yaml'\n",
+    "pytest_plugins: list = ['yaml']\n",
+    "pytest_plugins += ['yaml']\n",
+    "def f():\n    global pytest_plugins\n    pytest_plugins = ['yaml']\n",
+    "import sys\nsys.modules[__name__].pytest_plugins = ['yaml']\n",
 ])
 def test_a_helper_that_imports_by_name_is_refused(tmp_path, conftest):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest))
@@ -518,10 +658,25 @@ def test_a_name_a_helper_shares_is_not_refused(tmp_path, conftest):
     "    config.addinivalue_line('filterwarnings', 'ignore::yaml.YAMLError')\n",
     "import importlib\ngetattr(importlib, 'import_module')('yaml')\n",
     "import multiprocessing\nmultiprocessing.get_context('spawn').Process(target=print).start()\n",
+    "import sys\nsetattr(sys.modules[__name__], 'pytest_plugins', ['yaml'])\n",
+    "globals()['pytest_plugins'] = ['yaml']\n",
 ])
 def test_a_listed_blind_spot_is_not_seen(tmp_path, conftest):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest))
     assert violations == [], (conftest, violations)
+
+
+# The same for a directory tests/conftest.py puts on sys.path other than by
+# sys.path.insert: the pin reads only those calls.
+@pytest.mark.parametrize("suite_conftest", [
+    "import sys\nsys.path[:0] = [__file__.rsplit('/', 2)[0] + '/hooks']\n",
+    "import sys\nsys.path.append(__file__.rsplit('/', 2)[0] + '/hooks')\n",
+])
+def test_a_path_entry_made_other_than_by_insert_is_not_seen(tmp_path, suite_conftest):
+    root = _rig(tmp_path, "import helper\n",
+                {"helper.py": "", "conftest.py": suite_conftest, "../hooks/helper.py": ""})
+    violations, _, _ = charter_violations(root)
+    assert violations == [], (suite_conftest, violations)
 
 
 # The binding blind spot, pinned as stated: a helper matched by dotted path is
