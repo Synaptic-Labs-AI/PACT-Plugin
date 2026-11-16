@@ -6115,3 +6115,100 @@ class TestBacklogTeachExamples:
         assert r.stdout == ""
         assert "error:" in r.stderr
         assert self._EXAMPLES["show"] in r.stderr
+
+
+# A `git` whose `worktree list` prints a canned listing: the file named by
+# CANNED_Z when `-z` is asked (REJECT: refuse `-z` as git before 2.36 does,
+# exit 129; FAIL: exit 128), else the file named by CANNED_PLAIN.
+_CANNED_GIT = """#!/bin/sh
+z=0
+for argument in "$@"; do
+  [ "$argument" = -z ] && z=1
+done
+if [ "$z" = 1 ]; then
+  case "$CANNED_Z" in
+    REJECT) echo "error: unknown switch \\`z'" >&2; exit 129 ;;
+    FAIL) echo "fatal: cannot list" >&2; exit 128 ;;
+  esac
+  cat "$CANNED_Z"
+  exit 0
+fi
+cat "$CANNED_PLAIN"
+"""
+
+# (name, -z listing or REJECT/FAIL, plain listing, readable)
+_LISTINGS = [
+    ("nul", "worktree /a\0HEAD 1\0branch refs/heads/main\0\0worktree /b\nc\0HEAD 2\0detached\0\0",
+     "", True),
+    ("plain", "REJECT",
+     "worktree /a\nHEAD 1\nbranch refs/heads/main\n\nworktree /b\nHEAD 2\ndetached\n\n", True),
+    ("plain, a path holding a newline", "REJECT",
+     "worktree /a\nHEAD 1\n\nworktree /b\nc\nHEAD 2\n\n", False),
+    ("plain, an unknown field", "REJECT", "worktree /a\nHEAD 1\nfoo bar\n\n", False),
+    ("plain, a repeated field", "REJECT", "worktree /a\nHEAD 1\nHEAD 2\n\n", False),
+    ("plain, a record not led by its path", "REJECT", "HEAD 1\nworktree /a\n\n", False),
+    ("no listing", "FAIL", "", False),
+]
+
+
+def _canned_git(tmp_path, monkeypatch, nul: str, plain: str) -> None:
+    import os
+    import stat
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(_CANNED_GIT, encoding="utf-8")
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    if nul not in ("REJECT", "FAIL"):
+        (tmp_path / "nul").write_bytes(nul.encode())
+        nul = str(tmp_path / "nul")
+    (tmp_path / "plain").write_bytes(plain.encode())
+    monkeypatch.setenv("CANNED_Z", nul)
+    monkeypatch.setenv("CANNED_PLAIN", str(tmp_path / "plain"))
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+@pytest.mark.parametrize("name,nul,plain,readable", _LISTINGS, ids=[row[0] for row in _LISTINGS])
+def test_the_worktree_listing_is_read_as_the_memory_skill_reads_it(
+    tmp_path, monkeypatch, name, nul, plain, readable
+):
+    """Two readers of `git worktree list --porcelain` (this module's and the
+    memory skill's) give the same records for the same listing, and refuse
+    the same listings: one a reader could not hold whole is no listing."""
+    from scripts import memory_api
+
+    _canned_git(tmp_path, monkeypatch, nul, plain)
+    ours = backlog._worktree_records(["-C", str(tmp_path)])
+    theirs = memory_api._worktree_records(["-C", str(tmp_path)])
+    assert ours == theirs, (name, ours, theirs)
+    assert (ours is not None) == readable, (name, ours)
+
+
+def test_a_worktree_whose_path_holds_a_newline_is_recorded_whole(tmp_path, monkeypatch):
+    """The listing is read with `-z`, so a worktree folder named `w<newline>t`
+    is recorded as itself, and the line before its newline (`w`), another
+    directory, is not."""
+    main = _repo(tmp_path / "main")
+    linked = tmp_path / "w\nt"
+    (tmp_path / "w").mkdir()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(linked), "-b", "wt"],
+                   check=True, capture_output=True)
+    monkeypatch.setattr(backlog, "project_root", lambda: main)
+
+    roots = backlog.checkout_roots()
+    assert str(linked.resolve()) in roots, roots
+    assert str((tmp_path / "w").resolve()) not in roots, roots
+
+
+def test_without_nul_a_path_holding_a_newline_records_no_worktree(tmp_path, monkeypatch):
+    """On a git that rejects `-z`, a listing holding such a path cannot be
+    read whole, so only the project root is recorded, never `w`."""
+    _canned_git(
+        tmp_path, monkeypatch, "REJECT",
+        f"worktree {tmp_path / 'main'}\nHEAD 1\n\nworktree {tmp_path / 'w'}\nt\nHEAD 2\n\n",
+    )
+    (tmp_path / "main").mkdir()
+    (tmp_path / "w").mkdir()
+    monkeypatch.setattr(backlog, "project_root", lambda: tmp_path / "main")
+    assert backlog.checkout_roots() == [str(tmp_path / "main")]

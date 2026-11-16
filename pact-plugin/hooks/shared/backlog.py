@@ -369,6 +369,69 @@ def project_root() -> Path:
     )
 
 
+# `git worktree list` rejects `-z` on a git older than 2.36 with this exit.
+_GIT_USAGE_ERROR = 129
+
+# The fields `git worktree list --porcelain` prints, one per line: a key and
+# a value, or a bare flag.
+_PORCELAIN_KEYS = ("worktree ", "HEAD ", "branch ", "locked ", "prunable ")
+_PORCELAIN_FLAGS = ("bare", "detached", "locked", "prunable")
+
+
+def _worktree_records(at: Sequence[str]) -> Optional[List[List[str]]]:
+    """`git <at> worktree list --porcelain` as records, each the list of its
+    fields, or None when no listing can be had.
+
+    `-z` is asked first: every field then ends in NUL and an empty field ends
+    a record, so a path holding a newline stays whole. A git older than 2.36
+    rejects `-z` as a usage error, and the listing is asked again without
+    it. That listing is one field per line, with a blank line ending each
+    record, and git prints a path there unquoted, so a path holding a newline
+    cannot be read whole: any line that is not a porcelain field, a record
+    that does not start with its `worktree` line, or a field repeated in one
+    record makes the listing unreadable (None). None also covers a failed or
+    timed-out git; a caller reads it as "no listing", never as an empty one.
+
+    The same reading as the memory skill's `_worktree_records`, kept separate
+    because this module imports nothing from the skill.
+    """
+    def ask(extra: List[str]):
+        return subprocess.run(
+            ["git", *at, "worktree", "list", "--porcelain", *extra],
+            capture_output=True, timeout=_TRACKER_TIMEOUT_SECONDS,
+        )
+
+    try:
+        result = ask(["-z"])
+        nul = result.returncode != _GIT_USAGE_ERROR
+        if not nul:
+            result = ask([])
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    if result.returncode != 0:
+        return None
+    records: List[List[str]] = []
+    current: List[str] = []
+    for field in os.fsdecode(result.stdout).split("\0" if nul else "\n"):
+        if field:
+            current.append(field)
+        elif current:
+            records.append(current)
+            current = []
+    if current:
+        records.append(current)
+    if not nul:
+        for record in records:
+            keys = [
+                field if field in _PORCELAIN_FLAGS
+                else next((key for key in _PORCELAIN_KEYS if field.startswith(key)), None)
+                for field in record
+            ]
+            if None in keys or keys[0] != "worktree " or len(set(keys)) != len(keys):
+                return None
+    return records
+
+
 def checkout_roots() -> List[str]:
     """Every checkout of this project — the main one and each worktree — as
     absolute resolved paths. NEVER empty and never absent.
@@ -387,13 +450,14 @@ def checkout_roots() -> List[str]:
     still needs a mode flag. It also runs a second git call this one does not
     need. Two subprocesses per write on a path the design says can afford one.
     """
-    porcelain = _run_capture(
-        ["git", "-C", str(project_root()), "worktree", "list", "--porcelain"]
-    )
+    # A listing that cannot be read whole (`_worktree_records` is None) adds
+    # no root: a truncated path would name another directory.
+    records = _worktree_records(["-C", str(project_root())]) or []
     roots = [
-        str(Path(line[len("worktree "):]).resolve())
-        for line in (porcelain or "").splitlines()
-        if line.startswith("worktree ")
+        str(Path(field[len("worktree "):]).resolve())
+        for record in records
+        for field in record
+        if field.startswith("worktree ")
     ]
     return roots or [str(project_root())]
 
@@ -1840,7 +1904,7 @@ def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
     if not at:
         return None
     branches = _run_capture(["git", *at, "branch", "--format=%(refname:short)"])
-    worktrees = _run_capture(["git", *at, "worktree", "list", "--porcelain"])
+    worktrees = _worktree_records(at)
     if branches is None and worktrees is None:
         return None
     # NAMES ONLY. The porcelain also carries `HEAD <sha>` — once PER WORKTREE —
@@ -1850,11 +1914,11 @@ def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
     # silently suppressed. `detached`, `locked`, `bare` and `prunable` carry no
     # name and drop out with them.
     names = (branches or "").splitlines()
-    for line in (worktrees or "").splitlines():
-        if line.startswith("worktree "):
-            names.append(Path(line[len("worktree "):]).name)
-        elif line.startswith("branch "):
-            names.append(line[len("branch "):].removeprefix("refs/heads/"))
+    for field in (field for record in (worktrees or []) for field in record):
+        if field.startswith("worktree "):
+            names.append(Path(field[len("worktree "):]).name)
+        elif field.startswith("branch "):
+            names.append(field[len("branch "):].removeprefix("refs/heads/"))
     return names
 
 
