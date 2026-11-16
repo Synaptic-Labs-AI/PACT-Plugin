@@ -115,8 +115,10 @@ if ! command -v ruff >/dev/null 2>&1; then
             printf '    python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 12) else sys.version)" \\\n' >&2
             printf '      && python3 -m venv .venv \\\n' >&2
         fi
-        printf '      && sed -n "/^ruff==/,/[0-9a-f]$/p" constraints-ci.txt > .venv/ruff-lock.txt \\\n' >&2
-        printf '      && .venv/bin/python -m pip install --only-binary=:all: --require-hashes --no-deps -r .venv/ruff-lock.txt \\\n' >&2
+        printf '      && lock="$(mktemp)" \\\n' >&2
+        printf '      && sed -n "/^ruff==/,/[0-9a-f]$/p" constraints-ci.txt > "$lock" \\\n' >&2
+        printf '      && .venv/bin/python -m pip install --only-binary=:all: --require-hashes --no-deps -r "$lock" \\\n' >&2
+        printf '      && rm "$lock" \\\n' >&2
         printf '      && . .venv/bin/activate\n' >&2
     fi
     printf '  To lint without this gate, run the CI legs directly from the repo root:\n' >&2
