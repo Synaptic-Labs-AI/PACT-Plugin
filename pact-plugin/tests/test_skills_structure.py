@@ -823,6 +823,9 @@ class TestRunReceiptAttribution:
 
     - Before each run, HEAD and the status are recorded and the staged change
       is saved to a file outside the worktree.
+    - The whole change, new files included, is staged before each reported
+      run; a run that starts with an unstaged or untracked path of the change
+      does not count and is run again after staging.
     - A moved HEAD is re-run once before the HANDOFF, in the isolated copy
       that holds the change, never in the worktree. That copy's run is the
       result, and only paths that differ between its status before and after
@@ -856,8 +859,10 @@ class TestRunReceiptAttribution:
       partly reproduced set is decided only through its reproduced paths.
     - No git archive export is named as the copy.
 
-    Each arm is bound to the Step 0 receipt bullet, so the phrase cannot be
-    satisfied from elsewhere in the skill.
+    Each arm is bound to the Step 0 receipt bullet, read through its
+    indented continuation and sub-bullet lines up to the next sibling bullet
+    or blank line, so the phrase cannot be satisfied from elsewhere in the
+    skill and the rule may be laid out as sub-bullets.
 
     WHAT THIS CANNOT CATCH: a contradicting instruction added outside the
     bullet, and whether a teammate actually re-runs in an isolated copy or
@@ -867,6 +872,8 @@ class TestRunReceiptAttribution:
     REL_PATH = "pact-agent-teams/SKILL.md"
     BULLET_START = "- For each of those runs, record `git rev-parse HEAD`"
     REQUIRED_PHRASES = (
+        ("Stage your whole change, new files included, before each run you report. If an unstaged or untracked path of your change exists when a run starts, stage it and run again; that run does not count.",
+         "the whole change staged before each reported run, so the saved diff is the change"),
         ("and immediately before it also save your staged change with `git diff --cached --binary` to a file outside the worktree, such as one in your session scratch directory.",
          "the record step: the staged change saved before the run, outside the worktree"),
         ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, in the isolated copy that holds your change described below, not in the worktree, and never report the moved run as a pass or a failure of your change.",
@@ -905,9 +912,16 @@ class TestRunReceiptAttribution:
             f"{self.REL_PATH} must carry exactly one Step 0 run-receipt bullet "
             f"starting {self.BULLET_START!r}"
         )
-        start = text.index(self.BULLET_START)
-        end = text.find("\n", start)
-        return text[start:end if end != -1 else None]
+        # The bullet runs from its first line through every following
+        # indented line (continuation and sub-bullet lines), and stops at the
+        # first blank line or the first line at column 0 (the next sibling).
+        lines = text[text.index(self.BULLET_START):].split("\n")
+        extent = [lines[0]]
+        for line in lines[1:]:
+            if not line.strip() or not line[:1].isspace():
+                break
+            extent.append(line)
+        return "\n".join(extent)
 
     @pytest.mark.parametrize("phrase, lost", REQUIRED_PHRASES, ids=lambda v: v[:32] if isinstance(v, str) else v)
     def test_receipt_branch_present(self, phrase, lost):
