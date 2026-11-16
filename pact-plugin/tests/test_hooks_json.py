@@ -730,8 +730,8 @@ class TestCat2PreservationBaseline:
         plugin.mkdir()
         (plugin / "tracked.py").write_text('NAME = "TaskCreate"\n')
         (plugin / "untracked.py").write_text('NAME = "TaskCreate"\n')
-        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, timeout=300)
         subprocess.run(["git", "add", "--", "pact-plugin/tracked.py"],
-                       cwd=tmp_path, check=True)
+                       cwd=tmp_path, check=True, timeout=300)
 
         assert self._cat2_total(tmp_path) == 1

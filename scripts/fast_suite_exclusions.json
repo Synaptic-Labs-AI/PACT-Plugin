@@ -74,7 +74,7 @@
       "extra_reads": []
     },
     "tests/test_merge_guard_refused_is_mintable.py": {
-      "sha256": "f625fa7cc050ab05772e4c76d063c05f07833a01b1fa4877c579d97862936be4",
+      "sha256": "a38bc59c01b3838f861fc556e57ebfa5b770ce1ea3e0c41a4226373908bfb220",
       "reason": "Flagged site 132 is the corpus read: path.read_text() on each path tracked_glob(_TESTS, '**/*.py') returns, which is only the git-indexed .py files under pact-plugin/tests, so the read stays inside the tests tree the exclusion's scanned_tree root already names. The arm test_the_corpus_reads_only_tracked_test_files rebinds _TESTS with monkeypatch to a git init rig under tmp_path and reads only that rig. Nothing else is read.",
       "extra_reads": []
     },

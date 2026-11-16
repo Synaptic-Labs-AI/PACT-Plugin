@@ -149,9 +149,9 @@ def test_the_corpus_reads_only_tracked_test_files(tmp_path, monkeypatch):
     tests.mkdir(parents=True)
     (tests / "tracked_rows.py").write_text('ROW = "git x tracked"\n')
     (tests / "untracked_rows.py").write_text('ROW = "git x untracked"\n')
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, timeout=300)
     subprocess.run(["git", "add", "--", "pact-plugin/tests/tracked_rows.py"],
-                   cwd=tmp_path, check=True)
+                   cwd=tmp_path, check=True, timeout=300)
 
     monkeypatch.setattr(sys.modules[__name__], "_TESTS", tests)
     assert _corpus() == {"git x tracked"}

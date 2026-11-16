@@ -823,7 +823,7 @@ def test_real_census_output_lands_in_the_session_finish_span(tmp_path, parallel)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
          "-p", "no:randomly", *parallel],
-        cwd=rig, env=env, capture_output=True, text=True, check=False)
+        cwd=rig, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert completed.returncode == 1, completed.stdout + completed.stderr
     assert shape in completed.stdout  # the decoy reached the captured output
     lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
@@ -1621,7 +1621,7 @@ def test_real_pytest_pins_teardown_and_collection_shapes(tmp_path):
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
          "-p", "no:randomly", f"--junitxml={xml}"],
-        cwd=child, env=env, capture_output=True, text=True, check=False)
+        cwd=child, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert completed.returncode == 1, (
         completed.stdout + completed.stderr + "\n" + where)
     stdout_lines = completed.stdout.splitlines()
@@ -2051,7 +2051,7 @@ def test_module_skips_loudly_outside_the_repo_layout(tmp_path):
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", str(copied), "-q", "-rA",
          "--noconftest", "-p", "no:cacheprovider", "-p", "no:randomly"],
-        cwd=layout, capture_output=True, text=True, check=False)
+        cwd=layout, capture_output=True, text=True, timeout=300, check=False)
     output = completed.stdout + completed.stderr
     # 5 is pytest's "no tests collected": the module skipped instead of failing
     # to import. A missing script used to abort collection with exit 2.

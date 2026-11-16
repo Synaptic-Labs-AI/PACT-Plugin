@@ -85,6 +85,7 @@ def _run(declared: str, capture: str | Path,
         capture_output=True,
         text=True,
         env=_child_env(),
+        timeout=300,
     )
 
 
@@ -418,7 +419,7 @@ class TestAmbientPytestAddoptsCannotNarrowTheRun:
         result = subprocess.run(
             ["bash", str(_SCRIPT), str(repo), str(capture),
              "-q", "-p", "no:cacheprovider", "-p", "no:randomly"],
-            cwd=str(repo), env=env, capture_output=True, text=True)
+            cwd=str(repo), env=env, capture_output=True, text=True, timeout=300)
 
         assert result.returncode == 1, result.stderr
         stamps = _stamps(capture)
@@ -490,7 +491,7 @@ class TestTempFileAllocationFailureIsARefusal:
         result = subprocess.run(
             ["bash", str(_SCRIPT), str(repo), str(capture), "-q",
              "-p", "no:randomly"],
-            cwd=str(repo), env=env, capture_output=True, text=True)
+            cwd=str(repo), env=env, capture_output=True, text=True, timeout=300)
 
         assert result.returncode == _REFUSED, result.stderr
         assert "cannot allocate the before-run porcelain capture" in result.stderr
@@ -518,7 +519,7 @@ class TestUnusableInterpreterIsRefused:
         result = subprocess.run(
             ["bash", str(_SCRIPT), str(repo), str(capture),
              "--collect-only", "-q", "-p", "no:randomly"],
-            cwd=str(repo), env=env, capture_output=True, text=True)
+            cwd=str(repo), env=env, capture_output=True, text=True, timeout=300)
         return result, capture
 
     def test_a_failing_python3_refuses_with_exit_2_and_no_capture(self, tmp_path):

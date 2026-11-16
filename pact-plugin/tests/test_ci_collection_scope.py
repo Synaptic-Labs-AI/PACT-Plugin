@@ -346,7 +346,7 @@ def _collect_node_ids(args, cwd):
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q",
          "-p", "no:cacheprovider", "-p", "no:randomly", *args],
-        cwd=str(cwd), capture_output=True, text=True,
+        cwd=str(cwd), capture_output=True, text=True, timeout=300,
     )
     ids = {line.strip() for line in result.stdout.splitlines() if "::" in line}
     return ids, result
