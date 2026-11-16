@@ -280,8 +280,10 @@ def _run_cli(env: dict, cwd: Path, *args: str) -> dict:
     #
     # The helper wins over the caller's env deliberately: this is an isolation
     # guarantee rather than a preference, and no caller here sets either key.
-    # HOME is read from the caller's env, so a caller that dropped it fails here.
-    env = {**env, **hf_cache_env(), "HOME": env["HOME"]}
+    # The child's HOME comes only from the caller's env (hf_cache_env() sets no
+    # HOME), so a caller that dropped it fails here.
+    assert "HOME" in env, "the child env has no HOME: the caller must pass its redirected HOME"
+    env = {**env, **hf_cache_env()}
     proc = subprocess.run(
         [sys.executable, str(_CLI), *args],
         # 30s rather than 180s: the long budget absorbed a first-run model
