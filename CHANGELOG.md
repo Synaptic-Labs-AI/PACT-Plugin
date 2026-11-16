@@ -91,6 +91,7 @@ For a plugin user, two instruction files change, the pact-agent-teams skill and 
   - It refuses a child launched with an environment that has no HOME key, or one that inherits the suite's environment while that has no HOME, because such a child finds the real home through the password database. A refusal aborts the launch and names the test.
   - The only exemption is `@pytest.mark.child_env_without_home(reason=...)` with a non-empty reason, and it covers only the marked test's call and its function-scoped fixtures, never a wider-scoped fixture's setup or teardown.
   - A clean run prints `HOME CENSUS: installed, N launches checked, 0 refused`.
+  - A worker that crashes before its census finishes is a listed blind spot: a refusal a test there swallowed is not reported, and that worker's launches are missing from the launch count; a refusal no test swallowed still fails its own test.
   - Under xdist the HOME, child-pytest and clock-shift census reports start on their own line rather than after the last progress marker; the comparator reads both forms.
   - The child-pytest and HOME census refusal headers say `distinct`: an identical refusal line is recorded once, because one launch can raise two audit events, so the number counts distinct refusals, not launches.
   - A test that does not run in a session is judged on the machine where it does run, in any session that loads pact-plugin/conftest.py, and a launch it makes there that the census refuses is stopped before the child starts.

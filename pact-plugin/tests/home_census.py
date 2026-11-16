@@ -74,6 +74,11 @@ NOT SEEN, AND OUTSIDE THE CENSUS:
   is judged on the machine where it does run, in any session that loads
   pact-plugin/conftest.py, and a launch it makes there that the census
   refuses is stopped before the child starts.
+- a worker that crashes before its finish() runs: it hands over no refusals and
+  no launch count, so a refusal that a test there swallowed is not reported,
+  and that worker's launches are missing from "N launches checked". A refusal
+  the test did not swallow has already failed that test, and xdist reports the
+  crash itself.
 - the C-level process environment: the census judges an inherited launch by
   os.environ, not by the C-level process environment, so changes made with
   os.putenv/os.unsetenv, or a replaced os.environ, are not seen as such.
