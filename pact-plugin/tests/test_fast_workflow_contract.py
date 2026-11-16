@@ -178,14 +178,35 @@ def _printed(line):
     return line.split("'")[1].removesuffix("\\n").replace("\\\\", "\\")
 
 
-def _lint_gate_remedy_lines(root):
-    """The lines the lint gate prints when ruff is missing, as its printf calls
-    spell them."""
-    text = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
-    block = text[text.index("GATE REFUSED: ruff is not available"):]
-    block = block[:block.index("exit 2")]
-    return [_printed(line).strip()
-            for line in block.splitlines() if line.strip().startswith("printf")]
+def _render_lint_gate_remedy(root, scratch, venv):
+    """The stderr the lint gate prints when ruff is missing, run from a scratch
+    root that holds a copy of the script and the lock and whose .venv is absent
+    ("absent"), a venv directory ("existing") or a link to nothing ("dangling").
+    PATH holds only dirname, so no ruff resolves."""
+    scratch.mkdir()
+    (scratch / "scripts").mkdir()
+    (scratch / "pact-plugin").mkdir()
+    shutil.copy(root / "scripts" / "verify-local-lint-gate.sh", scratch / "scripts")
+    shutil.copy(root / "constraints-ci.txt", scratch)
+    if venv == "existing":
+        (scratch / ".venv" / "bin").mkdir(parents=True)
+    elif venv == "dangling":
+        (scratch / ".venv").symlink_to(scratch / "gone")
+    bin_dir = scratch / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "dirname").symlink_to(shutil.which("dirname"))
+    proc = subprocess.run(
+        [shutil.which("bash"), str(scratch / "scripts" / "verify-local-lint-gate.sh")],
+        env={"PATH": str(bin_dir), "HOME": str(scratch)},
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 2, (proc.returncode, proc.stderr)
+    return proc.stderr
+
+
+def _lint_gate_remedy_lines(root, scratch, venv="absent"):
+    """The lines the lint gate prints when ruff is missing, stripped, for one
+    .venv state (_render_lint_gate_remedy)."""
+    return [line.strip() for line in _render_lint_gate_remedy(root, scratch, venv).splitlines()]
 
 
 def _remedy_floor_minor(check):
@@ -470,27 +491,44 @@ class TestHashCheckedInstall:
     _REMEDY_INSTALL = (".venv/bin/python -m pip install --only-binary=:all: --require-hashes "
                        "--no-deps -r .venv/ruff-lock.txt")
 
-    def test_the_lint_gate_remedy_installs_ruff_alone(self):
+    @pytest.mark.parametrize("venv", ["absent", "existing", "dangling"])
+    def test_the_lint_gate_remedy_installs_ruff_alone(self, tmp_path, venv):
         """The remedy runs on a developer's machine and the gate needs ruff only,
-        so it refuses a python3 below the interpreter floor, creates .venv, copies
-        ruff's own entry out of the lock, installs that entry from a wheel with
-        its hashes and nothing else, and activates the venv. The full
+        so it refuses an interpreter below the floor, copies ruff's own entry out
+        of the lock, installs that entry from a wheel with its hashes and nothing
+        else, and activates the venv. With no .venv it creates one with python3;
+        with a .venv, even a link to nothing, it never runs `python3 -m venv`,
+        which would re-initialise the venv with whatever python3 is first on
+        PATH, and it checks the floor with the venv's own interpreter. The full
         environment, which compiles a package on some platforms, stays
         .cursor/install.sh's."""
         root = ci_contract.require_root("the lint gate remedy")
-        printed = _lint_gate_remedy_lines(root)
+        printed = _lint_gate_remedy_lines(root, tmp_path / "root", venv)
         commands = [line for line in printed
                     if line.startswith(("python3 ", ".venv/", ". ", "sed "))]
-        check, _, venv = commands[0].partition(" && ")
-        extract, _, target = commands[1].partition(" > ")
-        assert [venv, target, *commands[2:]] == [
-            "python3 -m venv .venv", self._REMEDY_LOCK, self._REMEDY_INSTALL,
-            ". .venv/bin/activate",
-        ], commands
         cursor = [line.strip() for line in
                   (root / ".cursor" / "install.sh").read_text(encoding="utf-8").splitlines()]
-        assert venv in cursor and commands[3] in cursor, (
-            "the remedy's venv and activate lines are not .cursor/install.sh's")
+        if venv == "absent":
+            check, _, create = commands[0].partition(" && ")
+            extract, _, target = commands[1].partition(" > ")
+            assert check.startswith("python3 -c "), check
+            assert [create, target, *commands[2:]] == [
+                "python3 -m venv .venv", self._REMEDY_LOCK, self._REMEDY_INSTALL,
+                ". .venv/bin/activate",
+            ], commands
+            assert create in cursor, "the remedy's venv line is not .cursor/install.sh's"
+            assert "repository venv (.venv), install ruff alone" in " ".join(printed)
+        else:
+            check, _, extraction = commands[0].partition(" && ")
+            extract, _, target = extraction.partition(" > ")
+            assert check.startswith(".venv/bin/python -c "), check
+            assert [target, *commands[1:]] == [
+                self._REMEDY_LOCK, self._REMEDY_INSTALL, ". .venv/bin/activate",
+            ], commands
+            assert not any("-m venv" in line for line in printed), printed
+            assert "venv (.venv) exists" in " ".join(printed), printed
+        assert extract.startswith("sed "), extract
+        assert commands[-1] in cursor, "the remedy's activate line is not .cursor/install.sh's"
         # The floor check is a third copy of the floor; it must equal the other two.
         assert _remedy_floor_minor(check) == _install_floor_minor(root) \
             == _declared_floor_minor(root), check
@@ -498,7 +536,7 @@ class TestHashCheckedInstall:
         assert "assert" not in check and "sys.exit(" in check, check
         prose = " ".join(line for line in printed
                          if line not in commands and not line.startswith("ruff "))
-        for phrase in ("repository venv (.venv)", "install ruff alone",
+        for phrase in ("repository venv (.venv)", "ruff alone",
                        "from a wheel only", ".cursor/install.sh", "for a POSIX shell",
                        "On Windows", ".venv\\Scripts\\python"):
             assert phrase in prose, phrase
@@ -508,12 +546,12 @@ class TestHashCheckedInstall:
         script = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
         assert "-c constraints-ci.txt" not in script
 
-    def test_the_remedy_extracts_exactly_the_locks_ruff_entry(self):
+    def test_the_remedy_extracts_exactly_the_locks_ruff_entry(self, tmp_path):
         """The printed extraction, run as printed against the real lock, yields
         ruff's entry with every hash the lock lists for it and no other
         requirement, so the remedy installs CI's ruff and cannot drift from it."""
         root = ci_contract.require_root("the lint gate remedy")
-        extract = next(line for line in _lint_gate_remedy_lines(root)
+        extract = next(line for line in _lint_gate_remedy_lines(root, tmp_path / "root")
                        if line.startswith("sed ")).partition(" > ")[0]
         proc = subprocess.run(shlex.split(extract), cwd=root, capture_output=True,
                               text=True, timeout=30)
@@ -539,14 +577,17 @@ class TestHashCheckedInstall:
     def test_the_remedy_number_check_finds_a_standalone_number(self, prose, has_number):
         assert bool(_STANDALONE_NUMBER.search(prose)) is has_number, prose
 
+    @pytest.mark.parametrize("venv", ["absent", "existing"])
     @pytest.mark.parametrize("below_floor", [False, True], ids=["at-floor", "below-floor"])
-    def test_the_remedy_floor_check_refuses_under_pythonoptimize(self, below_floor):
+    def test_the_remedy_floor_check_refuses_under_pythonoptimize(self, tmp_path, below_floor,
+                                                                   venv):
         """The printed floor check, run as printed under PYTHONOPTIMIZE=1, passes
         this interpreter and refuses one below the floor, naming its version. A
         floor above every real interpreter stands in for a below-floor python3."""
         root = ci_contract.require_root("the lint gate remedy")
-        check = next(line for line in _lint_gate_remedy_lines(root)
-                     if line.startswith("python3 -c ")).partition(" && ")[0]
+        check = next(line for line in _lint_gate_remedy_lines(root, tmp_path / "root", venv)
+                     if line.startswith(("python3 -c ", ".venv/bin/python -c "))
+                     ).partition(" && ")[0]
         code = shlex.split(check)[2]
         if below_floor:
             code = re.sub(r"\(3, \d+\)", "(99, 0)", code)
@@ -560,8 +601,9 @@ class TestHashCheckedInstall:
             assert proc.returncode == 0 and proc.stderr == "", proc
 
     def test_the_lint_gate_refuses_without_ruff_and_prints_its_remedy(self, tmp_path):
-        """With no ruff on PATH the gate exits 2 and prints its own ruff-missing
-        remedy, line for line as the script spells it."""
+        """With no ruff on PATH the real gate, run in the real root, exits 2 and
+        prints the ruff-missing remedy for that root's .venv state, line for line
+        as a copy of the script prints it in a scratch root in the same state."""
         root = ci_contract.require_root("the lint gate remedy")
         script = root / "scripts" / "verify-local-lint-gate.sh"
         bin_dir = tmp_path / "bin"  # dirname only, so no ruff resolves
@@ -572,12 +614,11 @@ class TestHashCheckedInstall:
             env={"PATH": str(bin_dir), "HOME": str(tmp_path / "home")},
             capture_output=True, text=True, timeout=30)
         assert proc.returncode == 2, (proc.returncode, proc.stderr)
-        text = script.read_text(encoding="utf-8")
-        block = text[text.index("printf 'GATE REFUSED: ruff is not available"):]
-        expected = [_printed(line)
-                    for line in block[:block.index("exit 2")].splitlines()
-                    if line.strip().startswith("printf")]
-        assert proc.stderr.splitlines() == expected, proc.stderr
+        venv = root / ".venv"
+        state = "existing" if venv.exists() or venv.is_symlink() else "absent"
+        expected = _render_lint_gate_remedy(root, tmp_path / "copy", state)
+        assert proc.stderr == expected, proc.stderr
+        assert proc.stderr.startswith("GATE REFUSED: ruff is not available"), proc.stderr
 
     def test_the_environment_check_remedy_is_one_install_per_host(self):
         """The verifier's MISSING remedy has exactly two spellings: the CI
