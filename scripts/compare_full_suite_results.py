@@ -310,13 +310,13 @@ def _command_argv(lines: list[str]) -> list[str]:
         raise EvidenceError("expected one command, optionally repeated by the Actions group header")
     argv = candidates[0]
     # `$DIST` and `${PACT_SHUFFLE_SEED:+…}` are the shipped workflow's own text:
-    # Actions echoes the `run:` body unexpanded, so a real log carries the variables,
-    # not the resolved values. The argv text is therefore the same for every
-    # seed and cannot tell a shuffled run from an ordered one; the seed comes
-    # from pytest-randomly's header line instead. Exactly two shapes are
-    # accepted: the 9-token ordered line, and the same with the four seed tokens
-    # before the literal JUnit argument. This widens the accepted VALUE and
-    # adds one reviewed shape, never an open-ended command.
+    # Actions echoes the `run:` body unexpanded, so a real log carries the
+    # variables, not the resolved values. The argv text is therefore the same
+    # for every seed and cannot tell a shuffled run from an ordered one; the
+    # seed comes from pytest-randomly's header line instead. Exactly two shapes
+    # are accepted: the 9-token ordered line, and the same with the four seed
+    # tokens before the literal JUnit argument. This widens the accepted VALUE
+    # and adds one reviewed shape, never an open-ended command.
     seeded_length = 9 + len(_SEED_ARGV)
     if (len(argv) not in (9, seeded_length) or argv[:7] != [
             "python", "-m", "pytest", "-ra", "-n", "4", "--dist"]

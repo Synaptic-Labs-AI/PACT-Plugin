@@ -371,21 +371,19 @@ jobs:
           esac
 
       # THE SEED GUARD. Empty means file order. Otherwise PACT_SHUFFLE_SEED
-      # must be a
-      # decimal integer without leading zeros, at most 9 digits (below 2^32;
-      # scripts/compare_full_suite_results.py's SEED_LINE reads 1 to 10 digits,
-      # a superset, so every seed this guard admits is read there);
-      # anything else refuses before setup, and the value is never echoed. The
-      # digit classes are spelled out rather than written as ranges, so the
-      # locale cannot widen them. This guard protects two sinks: the
-      # `order=...` line it appends to GITHUB_OUTPUT, where a newline in
-      # PACT_SHUFFLE_SEED
-      # would add an output of its own, and the artifact name, which reads
-      # only the `order` output (`ordered` or `seed-N`), never the raw input.
-      # The run line does not depend on it: there PACT_SHUFFLE_SEED stays one
-      # argv word
-      # (see the comment on that step). Same shape as the DIST guard: no
-      # `if:`, `env:`, `shell:` or `continue-on-error:`, and no pytest token.
+      # must be a decimal integer without leading zeros, at most 9 digits
+      # (below 2^32; scripts/compare_full_suite_results.py's SEED_LINE reads 1
+      # to 10 digits, a superset, so every seed this guard admits is read
+      # there); anything else refuses before setup, and the value is never
+      # echoed. The digit classes are spelled out rather than written as
+      # ranges, so the locale cannot widen them. This guard protects two sinks:
+      # the `order=...` line it appends to GITHUB_OUTPUT, where a newline in
+      # PACT_SHUFFLE_SEED would add an output of its own, and the artifact
+      # name, which reads only the `order` output (`ordered` or `seed-N`),
+      # never the raw input. The run line does not depend on it: there
+      # PACT_SHUFFLE_SEED stays one argv word (see the comment on that step).
+      # Same shape as the DIST guard: no `if:`, `env:`, `shell:` or
+      # `continue-on-error:`, and no pytest token.
       - name: Guard the diagnostic shuffle seed
         id: order
         run: |
@@ -603,25 +601,23 @@ jobs:
       - name: Verify the CI environment (before tests)
         run: python scripts/verify_ci_environment.py
 
-      # `${PACT_SHUFFLE_SEED:+…}` IS UNQUOTED ON PURPOSE: with PACT_SHUFFLE_SEED
-      # set it splits into the
-      # four words `-p randomly --randomly-seed=N --randomly-dont-reset-seed`,
-      # and with PACT_SHUFFLE_SEED empty it adds no words, so the merge gate's
-      # argv is
+      # `${PACT_SHUFFLE_SEED:+…}` IS UNQUOTED ON PURPOSE: with
+      # PACT_SHUFFLE_SEED set it splits into the four words
+      # `-p randomly --randomly-seed=N --randomly-dont-reset-seed`, and with
+      # PACT_SHUFFLE_SEED empty it adds no words, so the merge gate's argv is
       # unchanged. The split happens only between those literal words: the
       # inner "$PACT_SHUFFLE_SEED" is quoted, so whatever PACT_SHUFFLE_SEED
-      # holds stays one argv word,
-      # with no further splitting, globbing or command substitution. The seed
-      # guard is what keeps that word a decimal integer. With
-      # --randomly-dont-reset-seed the plugin does not reseed the random
-      # generators before each test. pytest-randomly 5.1.0 still seeds them
-      # from N when each process starts its session, and again when a process
-      # shuffles the tests it collected (each xdist worker; the controller
-      # collects none), so a seeded run's random draws also depend on N.
-      # The flag is there so the seed varies the order and not the reseeding:
-      # without it the plugin would also reseed before every test's setup,
-      # call and teardown, which an ordered run (plugin blocked) never does,
-      # so a shuffled-versus-ordered difference could come from that
+      # holds stays one argv word, with no further splitting, globbing or
+      # command substitution. The seed guard is what keeps that word a decimal
+      # integer. With --randomly-dont-reset-seed the plugin does not reseed the
+      # random generators before each test. pytest-randomly 5.1.0 still seeds
+      # them from N when each process starts its session, and again when a
+      # process shuffles the tests it collected (each xdist worker; the
+      # controller collects none), so a seeded run's random draws also depend
+      # on N. The flag is there so the seed varies the order and not the
+      # reseeding: without it the plugin would also reseed before every test's
+      # setup, call and teardown, which an ordered run (plugin blocked) never
+      # does, so a shuffled-versus-ordered difference could come from that
       # reseeding instead of from the order. Carried-over random state is a
       # side effect, not the aim.
       - name: Run test suite
