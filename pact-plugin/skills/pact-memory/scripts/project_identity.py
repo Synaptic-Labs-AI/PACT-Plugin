@@ -1016,7 +1016,12 @@ def read_override(common_dir: Path) -> OverrideRead:
     except OSError:
         return OverrideRead(None, path, "unreadable")
     try:
-        with path.open("rb") as handle:
+        # O_NONBLOCK and a second check on the descriptor: a FIFO put in
+        # place after the lstat is refused, not waited on.
+        fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+        with open(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return OverrideRead(None, path, "not_regular")
             # BOUNDED READ: one byte past the cap is enough to classify the
             # file as too long, so an accidentally huge or hostile file is
             # never allocated whole.
@@ -1155,10 +1160,24 @@ GIT_FILE_LIMIT = 1 << 20
 
 def read_git_file(path) -> Optional[str]:
     """The text of a `.git` file or a worktree admin `gitdir` file, decoded
-    with `os.fsdecode`, or None when it is larger than GIT_FILE_LIMIT. At
-    most GIT_FILE_LIMIT + 1 bytes are read, whatever the file's size.
-    Raises what `open` raises."""
-    with open(path, "rb") as handle:
+    with `os.fsdecode`, or None when it is not a regular file or is larger
+    than GIT_FILE_LIMIT. At most GIT_FILE_LIMIT + 1 bytes are read, whatever
+    the file's size. Raises what `os.stat` and `os.open` raise.
+
+    Only a regular file is read, as git's `read_gitfile_gently` reads only an
+    `S_ISREG` file. A symlink is followed, because git checks the file with
+    `stat`; do not add O_NOFOLLOW, or a symlinked gitfile naming another
+    checkout's git dir reads as naming nothing and binds that checkout. The
+    type is checked before the open, so a FIFO is never opened, and again on
+    the open descriptor; O_NONBLOCK keeps that open from waiting on a FIFO
+    put in its place between the two checks.
+    """
+    if not stat.S_ISREG(os.stat(path).st_mode):
+        return None
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0))
+    with open(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
         data = handle.read(GIT_FILE_LIMIT + 1)
     return os.fsdecode(data) if len(data) <= GIT_FILE_LIMIT else None
 
