@@ -36,6 +36,11 @@ by what it is, not by its spelling:
 - TIMEIT_RUNNERS (`timeit.timeit`, `timeit.repeat`, `timeit.Timer`) only when a
   statement or setup it is given is not a lambda, since a statement string is
   compiled and run; with none given it times `pass`.
+- LITERAL_NAME_HELPERS (pydoc's resolve, render_doc, doc, writedoc and help, and
+  the package doctest.testfile and DocFileSuite read a file from) only when the
+  argument naming the module is a literal string, since each imports only a
+  module named by a string; a module object, or a name the pin cannot read as a
+  literal, is not seen.
 - IMPORTING_METHODS, reached through an instance (`TestLoader().loadTestsFromName`,
   `Profile().runctx`, `config.pluginmanager.import_plugin`), by attribute name
   alone, so any object's method of that name is refused.
@@ -71,7 +76,23 @@ IMPORTING_HELPERS = frozenset({
     "site.addsitedir", "warnings._setoption", "xml.dom.getDOMImplementation",
     "xml.dom.domreg.getDOMImplementation", "cProfile.runctx", "profile.runctx",
     "test.support.import_helper.import_fresh_module",
+    # Each imports or executes what it is given on every call: a module name, a
+    # file path, a package to walk, or the test names in sys.argv.
+    "pydoc.safeimport", "pydoc.importfile", "pydoc.apropos", "pkgutil.get_data",
+    "unittest.main", "unittest.TestProgram", "unittest.main.main",
+    "unittest.main.TestProgram",
 })
+# Standard-library helpers that import a module only when it is named by a
+# string: dotted path -> (position, keyword) of that argument. Each is refused
+# only when that argument is a literal string; given a module object, or a
+# string the pin cannot read, it is not seen.
+LITERAL_NAME_HELPERS = {
+    "pydoc.resolve": (0, "thing"), "pydoc.render_doc": (0, "thing"),
+    "pydoc.doc": (0, "thing"), "pydoc.writedoc": (0, "thing"),
+    "pydoc.help": (0, "request"),
+    # The package a module-relative doctest file is read from.
+    "doctest.testfile": (3, "package"), "doctest.DocFileSuite": (None, "package"),
+}
 TIMEIT_RUNNERS = frozenset({"timeit.timeit", "timeit.repeat", "timeit.Timer"})
 # The same, reached through an instance. `runctx` is also a module function of
 # cProfile and profile, so IMPORTING_HELPERS names those too. The rest are
@@ -80,7 +101,7 @@ TIMEIT_RUNNERS = frozenset({"timeit.timeit", "timeit.repeat", "timeit.Timer"})
 # consider_module and consider_conftest from a module's pytest_plugins, and
 # load_setuptools_entrypoints from an entry-point group).
 IMPORTING_METHODS = frozenset({"loadTestsFromName", "loadTestsFromNames", "runsource",
-                               "runctx", "import_plugin", "consider_pluginarg",
+                               "runctx", "discover", "import_plugin", "consider_pluginarg",
                                "consider_preparse", "consider_env", "consider_module",
                                "consider_conftest", "load_setuptools_entrypoints"})
 # pytest imports every module a conftest or plugin names in this variable.
@@ -140,6 +161,21 @@ def _times_only_lambdas(call):
     return all(isinstance(value, ast.Lambda) for value in given)
 
 
+def _names_a_literal_module(call, aliases):
+    """The LITERAL_NAME_HELPERS path `call` calls when the argument naming the
+    module is a literal string, else None."""
+    dotted = _dotted(call.func, aliases)
+    if dotted not in LITERAL_NAME_HELPERS:
+        return None
+    position, keyword = LITERAL_NAME_HELPERS[dotted]
+    given = [k.value for k in call.keywords if k.arg == keyword]
+    if position is not None and len(call.args) > position:
+        given.append(call.args[position])
+    literal = any(isinstance(value, ast.Constant) and isinstance(value.value, str)
+                  for value in given)
+    return dotted if literal else None
+
+
 def _dynamic_references(tree):
     """(enclosing function or class, dotted; callable, line) for every dynamic
     import callable `tree` refers to or imports by name, and for every binding
@@ -152,6 +188,10 @@ def _dynamic_references(tree):
             if isinstance(child, ast.Call) and _dotted(child.func, aliases) in TIMEIT_RUNNERS \
                     and _times_only_lambdas(child):
                 harmless.add(id(child.func))
+            if isinstance(child, ast.Call):
+                literal = _names_a_literal_module(child, aliases)
+                if literal:
+                    yield scope, literal, child.lineno
             names = []
             if isinstance(child, ast.Name):
                 names.append(child.id)
@@ -380,8 +420,14 @@ def test_the_conftest_states_the_charter_and_names_this_pin():
                    "a multiprocessing spawn, whose child imports the parent's main module",
                    "a standard-library helper that imports a module it is given by name",
                    "unittest.mock.patch's target", "pickle.load and pickle.loads",
-                   "importlib.resources.files", "pkgutil.get_data",
-                   "an importlib.metadata entry point's load()",
+                   "importlib.resources.files, an importlib.metadata entry point's load()",
+                   "pydoc.locate, pydoc.safeimport, unittest.main or",
+                   "It cannot see a pydoc helper that imports a module only when it is "
+                   "named by a string (resolve, render_doc, doc, writedoc, help) unless that "
+                   "name is a literal string, nor doctest.testfile or DocFileSuite given a "
+                   "package that is not a literal string, the help method of a pydoc.Helper "
+                   "instance, the run method of a pydoc.ModuleScanner, or an encoding named "
+                   "by a string, as codecs.lookup, str.encode and bytes.decode take one.",
                    "the run of cProfile, profile or pdb",
                    "a warning category named in a filter string",
                    "pytest.importorskip, or a pytest plugin-manager method that imports a "
@@ -429,64 +475,66 @@ INSERTS = ("import sys\nfrom pathlib import Path\n"
            "sys.path.insert(0, str(Path(__file__).parent.parent / 'hooks'))\n")
 
 
-@pytest.mark.parametrize("conftest, modules, scripts", [
-    ("import yaml\n", None, None),
-    ("def pytest_configure(config):\n    import yaml\n", None, None),
-    ("try:\n    import yaml\nexcept ImportError:\n    yaml = None\n", None, None),
-    ("from requests import get\n", None, None),
-    ("import helper\n", {"helper.py": "import yaml\n"}, None),
-    ("def f():\n    from helper import x\n", {"helper.py": "def g():\n    import yaml\n"}, None),
-    ("import helper\n", {"helper.py": "import deeper\n", "deeper.py": "import yaml\n"}, None),
-    ("import pkg.mod\n", {"pkg/__init__.py": "import yaml\n", "pkg/mod.py": ""}, None),
-    ("from pkg import mod\n", {"pkg/__init__.py": "", "pkg/mod.py": "import yaml\n"}, None),
-    ("import tool\n", None, {"tool.py": ""}),
-    ("import json\n", None, {"json.py": ""}),
-    ("from . import x\n", None, None),
-    ("import helper\n", {"helper.py": "from . import other\n"}, None),
+@pytest.mark.parametrize("conftest, modules, scripts, expected", [
+    ("import yaml\n", None, None, 'conftest.py:1: `yaml` is not the standard library or pytest'),
+    ("def pytest_configure(config):\n    import yaml\n", None, None, 'conftest.py:2: `yaml` is not the standard library or pytest'),
+    ("try:\n    import yaml\nexcept ImportError:\n    yaml = None\n", None, None, 'conftest.py:2: `yaml` is not the standard library or pytest'),
+    ("from requests import get\n", None, None, 'conftest.py:1: `requests` is not the standard library or pytest'),
+    ("import helper\n", {"helper.py": "import yaml\n"}, None, 'tests/helper.py:1: `yaml` is not the standard library or pytest'),
+    ("def f():\n    from helper import x\n", {"helper.py": "def g():\n    import yaml\n"}, None, 'tests/helper.py:2: `yaml` is not the standard library or pytest'),
+    ("import helper\n", {"helper.py": "import deeper\n", "deeper.py": "import yaml\n"}, None, 'tests/deeper.py:1: `yaml` is not the standard library or pytest'),
+    ("import pkg.mod\n", {"pkg/__init__.py": "import yaml\n", "pkg/mod.py": ""}, None, 'tests/pkg/__init__.py:1: `yaml` is not the standard library or pytest'),
+    ("from pkg import mod\n", {"pkg/__init__.py": "", "pkg/mod.py": "import yaml\n"}, None, 'tests/pkg/mod.py:1: `yaml` is not the standard library or pytest'),
+    ("import tool\n", None, {"tool.py": ""}, 'conftest.py:1: `tool` resolves outside tests/'),
+    ("import json\n", None, {"json.py": ""}, 'conftest.py:1: `json` resolves outside tests/'),
+    ("from . import x\n", None, None, 'conftest.py:1: a relative import'),
+    ("import helper\n", {"helper.py": "from . import other\n"}, None, 'tests/helper.py:1: a relative import'),
     # Dynamic imports, at module scope, in a function, by alias and transitively.
-    ("__import__('yaml')\n", None, None),
-    ("import importlib\n\ndef f():\n    importlib.import_module('yaml')\n", None, None),
-    ("from importlib import import_module as load\n", None, None),
-    ("import importlib\nimportlib.reload(importlib)\n", None, None),
-    ("def f():\n    exec('import yaml')\n", None, None),
+    ("__import__('yaml')\n", None, None, 'conftest.py:1: dynamic import `__import__` in `<module>` is not a charter deviation'),
+    ("import importlib\n\ndef f():\n    importlib.import_module('yaml')\n", None, None, 'conftest.py:4: dynamic import `import_module` in `f` is not a charter deviation'),
+    ("from importlib import import_module as load\n", None, None, 'conftest.py:1: dynamic import `import_module` in `<module>` is not a charter deviation'),
+    ("import importlib\nimportlib.reload(importlib)\n", None, None, 'conftest.py:2: dynamic import `reload` in `<module>` is not a charter deviation'),
+    ("def f():\n    exec('import yaml')\n", None, None, 'conftest.py:2: dynamic import `exec` in `f` is not a charter deviation'),
     ("import helper\n", {"helper.py": "import runpy\n\ndef g():\n    runpy.run_path('x.py')\n"},
-     None),
-    ("import helper\n", {"helper.py": "from importlib.util import find_spec\n"}, None),
+     None, 'tests/helper.py:4: dynamic import `run_path` in `g` is not a charter deviation'),
+    ("import helper\n", {"helper.py": "from importlib.util import find_spec\n"}, None, 'tests/helper.py:1: dynamic import `find_spec` in `<module>` is not a charter deviation'),
     # A deviation's calls in a file or function the charter does not name.
-    ("import helper\n", {"helper.py": BINDING}, None),
+    ("import helper\n", {"helper.py": BINDING}, None, 'tests/helper.py:4: dynamic import `spec_from_file_location` in `_load_verify_script` is not a charter deviation'),
     (DEVIATION_CONFTEST, {"ci_environment_binding.py": BINDING.replace(
-        "_load_verify_script", "_load_other"), "import_identity_map.py": IDENTITY}, None),
+        "_load_verify_script", "_load_other"), "import_identity_map.py": IDENTITY}, None, 'tests/ci_environment_binding.py:4: dynamic import `spec_from_file_location` in `_load_other` is not a charter deviation'),
     (DEVIATION_CONFTEST, {"ci_environment_binding.py": BINDING, "import_identity_map.py":
-     IDENTITY + "\ndef capture_map(n):\n    return importlib.util.find_spec(n)\n"}, None),
+     IDENTITY + "\ndef capture_map(n):\n    return importlib.util.find_spec(n)\n"}, None, 'tests/import_identity_map.py:7: dynamic import `find_spec` in `capture_map` is not a charter deviation'),
     # A third call, or a repeated call, inside a deviation's own function.
     (DEVIATION_CONFTEST, {"ci_environment_binding.py": BINDING.replace(
         "    return module\n", "    importlib.import_module('yaml')\n    return module\n"),
-        "import_identity_map.py": IDENTITY}, None),
+        "import_identity_map.py": IDENTITY}, None, 'tests/ci_environment_binding.py:7: dynamic import `import_module` in `_load_verify_script` is not a charter deviation'),
     (DEVIATION_CONFTEST, {"ci_environment_binding.py": BINDING.replace(
         "    return module\n", "    spec.loader.exec_module(module)\n    return module\n"),
-        "import_identity_map.py": IDENTITY}, None),
+        "import_identity_map.py": IDENTITY}, None, 'tests/ci_environment_binding.py:7: dynamic import `exec_module` in `_load_verify_script` is not a charter deviation'),
     # A plugin list in a module the walk follows.
-    ("import helper\n", {"helper.py": "pytest_plugins = ['yaml']\n"}, None),
+    ("import helper\n", {"helper.py": "pytest_plugins = ['yaml']\n"}, None, 'tests/helper.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
     # A name a directory tests/conftest.py puts ahead of tests/ holds, read
     # through a literal path, a name assigned once and .resolve().
     ("import helper\n", {"helper.py": "", "conftest.py": INSERTS, "../hooks/helper.py": ""},
-     None),
+     None, 'conftest.py:1: `helper` resolves to a directory tests/conftest.py puts ahead of tests/'),
     ("def pytest_configure(config):\n    import helper\n",
-     {"helper.py": "", "conftest.py": INSERTS, "../hooks/helper.py": ""}, None),
-    ("import json\n", {"conftest.py": INSERTS, "../hooks/json.py": ""}, None),
+     {"helper.py": "", "conftest.py": INSERTS, "../hooks/helper.py": ""}, None, 'conftest.py:2: `helper` resolves to a directory tests/conftest.py puts ahead of tests/'),
+    ("import json\n", {"conftest.py": INSERTS, "../hooks/json.py": ""}, None, 'conftest.py:1: `json` resolves to a directory tests/conftest.py puts ahead of tests/'),
     ("import helper\n", {"helper.py": "", "../scripts/helper.py": "", "conftest.py": (
         "import sys\nfrom pathlib import Path\n"
         "d = Path(__file__).resolve().parent.parent / 'scripts'\nsys.path.insert(0, str(d))\n")},
-     None),
+     None, 'conftest.py:1: `helper` resolves to a directory tests/conftest.py puts ahead of tests/'),
     # An insert the pin cannot read, including a name assigned twice.
-    ("import os\n", {"conftest.py": "import sys\nsys.path.insert(0, where())\n"}, None),
+    ("import os\n", {"conftest.py": "import sys\nsys.path.insert(0, where())\n"}, None, 'tests/conftest.py:2: a sys.path insert this pin cannot read'),
     ("import os\n", {"conftest.py": (
         "import sys\nfrom pathlib import Path\nd = Path(__file__).parent\nd = 'x'\n"
-        "sys.path.insert(0, str(d))\n")}, None),
+        "sys.path.insert(0, str(d))\n")}, None, 'tests/conftest.py:5: a sys.path insert this pin cannot read'),
 ])
-def test_a_planted_import_outside_the_charter_is_found(tmp_path, conftest, modules, scripts):
+def test_a_planted_import_outside_the_charter_is_found(tmp_path, conftest, modules, scripts,
+                                                       expected):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest, modules, scripts))
-    assert violations, (conftest, modules, scripts)
+    # The violation the row plants, by file, line and kind, not just any one.
+    assert expected in violations, (expected, violations)
 
 
 def test_a_directory_ahead_of_tests_with_no_shared_name_passes(tmp_path):
@@ -541,21 +589,22 @@ def _script_rig(tmp_path, script, scripts=None):
     return target, root
 
 
-@pytest.mark.parametrize("script, scripts", [
-    ("import yaml\nfrom packaging.version import Version\n", None),
-    ("from packaging.version import Version\n\ndef f():\n    import requests\n", None),
-    ("import packaging\ntry:\n    import tomli\nexcept ImportError:\n    tomli = None\n", None),
-    ("import packagingx\nfrom packaging import version\n", None),
-    ("import packaging\nfrom pip import main\n", None),
-    ("import packaging\nfrom . import x\n", None),
-    ("import packaging\nimport tool\n", {"tool.py": ""}),
-    ("import packaging\nimport json\n", {"json.py": ""}),
-    ("import packaging\nimport importlib\nimportlib.import_module('yaml')\n", None),
-    ("import os\n", None),
+@pytest.mark.parametrize("script, scripts, expected", [
+    ("import yaml\nfrom packaging.version import Version\n", None, 'verify_ci_environment.py:1: `yaml` is not the standard library or packaging'),
+    ("from packaging.version import Version\n\ndef f():\n    import requests\n", None, 'verify_ci_environment.py:4: `requests` is not the standard library or packaging'),
+    ("import packaging\ntry:\n    import tomli\nexcept ImportError:\n    tomli = None\n", None, 'verify_ci_environment.py:3: `tomli` is not the standard library or packaging'),
+    ("import packagingx\nfrom packaging import version\n", None, 'verify_ci_environment.py:1: `packagingx` is not the standard library or packaging'),
+    ("import packaging\nfrom pip import main\n", None, 'verify_ci_environment.py:2: `pip` is not the standard library or packaging'),
+    ("import packaging\nfrom . import x\n", None, 'verify_ci_environment.py:2: a relative import'),
+    ("import packaging\nimport tool\n", {"tool.py": ""}, 'verify_ci_environment.py:2: `tool` resolves to a plugin module'),
+    ("import packaging\nimport json\n", {"json.py": ""}, 'verify_ci_environment.py:2: `json` resolves to a plugin module'),
+    ("import packaging\nimport importlib\nimportlib.import_module('yaml')\n", None, 'verify_ci_environment.py:3: dynamic import `import_module`'),
+    ("import os\n", None, 'verify_ci_environment.py: imports no `packaging`, as the charter says it does'),
 ])
-def test_a_planted_import_in_the_loaded_script_is_found(tmp_path, script, scripts):
+def test_a_planted_import_in_the_loaded_script_is_found(tmp_path, script, scripts, expected):
     target, root = _script_rig(tmp_path, script, scripts)
-    assert verify_script_violations(target, root), script
+    violations = verify_script_violations(target, root)
+    assert expected in violations, (expected, violations)
 
 
 def test_a_loaded_script_inside_the_charter_passes(tmp_path):
@@ -567,65 +616,85 @@ def test_a_loaded_script_inside_the_charter_passes(tmp_path):
 
 
 # Each standard-library helper that imports a module it is given by name, refused
-# by its name (all measured to import the named module on Python 3.12).
-@pytest.mark.parametrize("conftest", [
-    "import pkgutil\npkgutil.resolve_name('yaml')\n",
-    "import pkgutil\nlist(pkgutil.walk_packages(['.']))\n",
-    "import pkgutil\npkgutil.get_loader('yaml.x')\n",
-    "import pkgutil\npkgutil.find_loader('yaml.x')\n",
-    "import pydoc\npydoc.locate('yaml')\n",
-    "import unittest\nunittest.TestLoader().loadTestsFromName('yaml')\n",
-    "import unittest\nunittest.TestLoader().loadTestsFromNames(['yaml'])\n",
-    "import doctest\ndoctest.DocTestSuite('yaml')\n",
-    "import logging.config\nlogging.config.dictConfig({'version': 1})\n",
-    "from logging.config import fileConfig as load\nload('x.ini')\n",
-    "import xml.sax\nxml.sax.make_parser(['yaml'])\n",
-    "import site\nsite.addsitedir('x')\n",
-    "import code\ncode.InteractiveInterpreter().runsource('import yaml')\n",
-    "import cProfile\ncProfile.runctx('import yaml', {}, {})\n",
-    "import timeit\ntimeit.timeit('import yaml', number=1)\n",
+# by its name (all measured to import the named module on Python 3.12), each with
+# the violation it plants.
+@pytest.mark.parametrize("conftest, expected", [
+    ("import pkgutil\npkgutil.resolve_name('yaml')\n", 'conftest.py:2: dynamic import `pkgutil.resolve_name` in `<module>` is not a charter deviation'),
+    ("import pkgutil\nlist(pkgutil.walk_packages(['.']))\n", 'conftest.py:2: dynamic import `pkgutil.walk_packages` in `<module>` is not a charter deviation'),
+    ("import pkgutil\npkgutil.get_loader('yaml.x')\n", 'conftest.py:2: dynamic import `pkgutil.get_loader` in `<module>` is not a charter deviation'),
+    ("import pkgutil\npkgutil.find_loader('yaml.x')\n", 'conftest.py:2: dynamic import `pkgutil.find_loader` in `<module>` is not a charter deviation'),
+    ("import pydoc\npydoc.locate('yaml')\n", 'conftest.py:2: dynamic import `pydoc.locate` in `<module>` is not a charter deviation'),
+    ("import unittest\nunittest.TestLoader().loadTestsFromName('yaml')\n", 'conftest.py:2: dynamic import `loadTestsFromName` in `<module>` is not a charter deviation'),
+    ("import unittest\nunittest.TestLoader().loadTestsFromNames(['yaml'])\n", 'conftest.py:2: dynamic import `loadTestsFromNames` in `<module>` is not a charter deviation'),
+    ("import doctest\ndoctest.DocTestSuite('yaml')\n", 'conftest.py:2: dynamic import `doctest.DocTestSuite` in `<module>` is not a charter deviation'),
+    ("import logging.config\nlogging.config.dictConfig({'version': 1})\n", 'conftest.py:2: dynamic import `logging.config.dictConfig` in `<module>` is not a charter deviation'),
+    ("from logging.config import fileConfig as load\nload('x.ini')\n", 'conftest.py:2: dynamic import `logging.config.fileConfig` in `<module>` is not a charter deviation'),
+    ("import xml.sax\nxml.sax.make_parser(['yaml'])\n", 'conftest.py:2: dynamic import `xml.sax.make_parser` in `<module>` is not a charter deviation'),
+    ("import site\nsite.addsitedir('x')\n", 'conftest.py:2: dynamic import `site.addsitedir` in `<module>` is not a charter deviation'),
+    ("import code\ncode.InteractiveInterpreter().runsource('import yaml')\n", 'conftest.py:2: dynamic import `runsource` in `<module>` is not a charter deviation'),
+    ("import cProfile\ncProfile.runctx('import yaml', {}, {})\n", 'conftest.py:2: dynamic import `runctx` in `<module>` is not a charter deviation'),
+    ("import timeit\ntimeit.timeit('import yaml', number=1)\n", 'conftest.py:2: dynamic import `timeit.timeit` in `<module>` is not a charter deviation'),
     # A module function from-imported and called by its bare name, or an alias.
-    "from cProfile import runctx\nrunctx('import yaml', {}, {})\n",
-    "from profile import runctx as run\nrun('import yaml', {}, {})\n",
-    "import warnings\nwarnings._setoption('ignore::yaml.YAMLError')\n",
-    "import xml.dom\nxml.dom.getDOMImplementation('minidom')\n",
-    "from xml.dom import domreg\ndomreg.getDOMImplementation('minidom')\n",
+    ("from cProfile import runctx\nrunctx('import yaml', {}, {})\n", 'conftest.py:2: dynamic import `cProfile.runctx` in `<module>` is not a charter deviation'),
+    ("from profile import runctx as run\nrun('import yaml', {}, {})\n", 'conftest.py:2: dynamic import `profile.runctx` in `<module>` is not a charter deviation'),
+    ("import warnings\nwarnings._setoption('ignore::yaml.YAMLError')\n", 'conftest.py:2: dynamic import `warnings._setoption` in `<module>` is not a charter deviation'),
+    ("import xml.dom\nxml.dom.getDOMImplementation('minidom')\n", 'conftest.py:2: dynamic import `xml.dom.getDOMImplementation` in `<module>` is not a charter deviation'),
+    ("from xml.dom import domreg\ndomreg.getDOMImplementation('minidom')\n", 'conftest.py:2: dynamic import `xml.dom.domreg.getDOMImplementation` in `<module>` is not a charter deviation'),
     # Through an alias, and from a function's own import.
-    "import pydoc as docs\ndocs.locate('yaml')\n",
-    "def f():\n    from pydoc import locate\n    return locate('yaml')\n",
-    "import logging.config as lc\nlc.dictConfig({'version': 1})\n",
+    ("import pydoc as docs\ndocs.locate('yaml')\n", 'conftest.py:2: dynamic import `pydoc.locate` in `<module>` is not a charter deviation'),
+    ("def f():\n    from pydoc import locate\n    return locate('yaml')\n", 'conftest.py:3: dynamic import `pydoc.locate` in `f` is not a charter deviation'),
+    ("import logging.config as lc\nlc.dictConfig({'version': 1})\n", 'conftest.py:2: dynamic import `logging.config.dictConfig` in `<module>` is not a charter deviation'),
     # A timeit runner given a statement that is not a lambda.
-    "import timeit\ndef f(statement):\n    return timeit.timeit(statement)\n",
-    "import timeit\ntimeit.Timer(stmt='import yaml')\n",
-    "import timeit\ntimeit.Timer(lambda: None, 'import yaml')\n",
-    "from timeit import repeat\nrepeat('import yaml')\n",
+    ("import timeit\ndef f(statement):\n    return timeit.timeit(statement)\n", 'conftest.py:3: dynamic import `timeit.timeit` in `f` is not a charter deviation'),
+    ("import timeit\ntimeit.Timer(stmt='import yaml')\n", 'conftest.py:2: dynamic import `timeit.Timer` in `<module>` is not a charter deviation'),
+    ("import timeit\ntimeit.Timer(lambda: None, 'import yaml')\n", 'conftest.py:2: dynamic import `timeit.Timer` in `<module>` is not a charter deviation'),
+    ("from timeit import repeat\nrepeat('import yaml')\n", 'conftest.py:2: dynamic import `timeit.repeat` in `<module>` is not a charter deviation'),
     # An instance-method helper is matched by attribute name on any object.
-    "def f(loader):\n    return loader.loadTestsFromName('yaml')\n",
+    ("def f(loader):\n    return loader.loadTestsFromName('yaml')\n", 'conftest.py:2: dynamic import `loadTestsFromName` in `f` is not a charter deviation'),
     # The alias map is file-wide: a local that rebinds the module's name is
     # still read as the module (an over-refusal).
-    "import pydoc\ndef f(pydoc):\n    return pydoc.locate\n",
+    ("import pydoc\ndef f(pydoc):\n    return pydoc.locate\n", 'conftest.py:3: dynamic import `pydoc.locate` in `f` is not a charter deviation'),
     # pytest's own ways of importing a module by name.
-    "import pytest\npytest.importorskip('yaml')\n",
-    "from pytest import importorskip\nimportorskip('yaml')\n",
-    "def pytest_configure(config):\n    config.pluginmanager.import_plugin('yaml')\n",
-    "def pytest_configure(config):\n    config.pluginmanager.consider_pluginarg('yaml')\n",
-    "def pytest_configure(config):\n    config.pluginmanager.consider_preparse(['-p', 'yaml'])\n",
-    "def pytest_configure(config):\n    config.pluginmanager.consider_env()\n",
-    "def pytest_configure(config):\n    config.pluginmanager.consider_module(config)\n",
-    "def pytest_configure(config):\n    config.pluginmanager.consider_conftest(config, 'x')\n",
-    "def pytest_configure(config):\n"
-    "    config.pluginmanager.load_setuptools_entrypoints('pytest11')\n",
+    ("import pytest\npytest.importorskip('yaml')\n", 'conftest.py:2: dynamic import `importorskip` in `<module>` is not a charter deviation'),
+    ("from pytest import importorskip\nimportorskip('yaml')\n", 'conftest.py:1: dynamic import `importorskip` in `<module>` is not a charter deviation'),
+    ("def pytest_configure(config):\n    config.pluginmanager.import_plugin('yaml')\n", 'conftest.py:2: dynamic import `import_plugin` in `pytest_configure` is not a charter deviation'),
+    ("def pytest_configure(config):\n    config.pluginmanager.consider_pluginarg('yaml')\n", 'conftest.py:2: dynamic import `consider_pluginarg` in `pytest_configure` is not a charter deviation'),
+    ("def pytest_configure(config):\n    config.pluginmanager.consider_preparse(['-p', 'yaml'])\n", 'conftest.py:2: dynamic import `consider_preparse` in `pytest_configure` is not a charter deviation'),
+    ("def pytest_configure(config):\n    config.pluginmanager.consider_env()\n", 'conftest.py:2: dynamic import `consider_env` in `pytest_configure` is not a charter deviation'),
+    ("def pytest_configure(config):\n    config.pluginmanager.consider_module(config)\n", 'conftest.py:2: dynamic import `consider_module` in `pytest_configure` is not a charter deviation'),
+    ("def pytest_configure(config):\n    config.pluginmanager.consider_conftest(config, 'x')\n", 'conftest.py:2: dynamic import `consider_conftest` in `pytest_configure` is not a charter deviation'),
+    ("def pytest_configure(config):\n"
+    "    config.pluginmanager.load_setuptools_entrypoints('pytest11')\n", 'conftest.py:2: dynamic import `load_setuptools_entrypoints` in `pytest_configure` is not a charter deviation'),
     # A plugin list, however it is bound by name or attribute.
-    "pytest_plugins = ['yaml']\n",
-    "pytest_plugins = 'yaml'\n",
-    "pytest_plugins: list = ['yaml']\n",
-    "pytest_plugins += ['yaml']\n",
-    "def f():\n    global pytest_plugins\n    pytest_plugins = ['yaml']\n",
-    "import sys\nsys.modules[__name__].pytest_plugins = ['yaml']\n",
+    ("pytest_plugins = ['yaml']\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("pytest_plugins = 'yaml'\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("pytest_plugins: list = ['yaml']\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("pytest_plugins += ['yaml']\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("def f():\n    global pytest_plugins\n    pytest_plugins = ['yaml']\n", 'conftest.py:3: dynamic import `pytest_plugins` in `f` is not a charter deviation'),
+    ("import sys\nsys.modules[__name__].pytest_plugins = ['yaml']\n", 'conftest.py:2: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    # Helpers that import or execute what they are given on every call.
+    ("import pydoc\npydoc.safeimport('yaml')\n", 'conftest.py:2: dynamic import `pydoc.safeimport` in `<module>` is not a charter deviation'),
+    ("import pydoc\npydoc.importfile('x.py')\n", 'conftest.py:2: dynamic import `pydoc.importfile` in `<module>` is not a charter deviation'),
+    ("import pydoc\npydoc.apropos('yaml')\n", 'conftest.py:2: dynamic import `pydoc.apropos` in `<module>` is not a charter deviation'),
+    ("import pkgutil\npkgutil.get_data('yaml', 'x')\n", 'conftest.py:2: dynamic import `pkgutil.get_data` in `<module>` is not a charter deviation'),
+    ("import unittest\nunittest.main(module='yaml')\n", 'conftest.py:2: dynamic import `unittest.main` in `<module>` is not a charter deviation'),
+    ("from unittest import TestProgram\nTestProgram(module='yaml')\n", 'conftest.py:2: dynamic import `unittest.TestProgram` in `<module>` is not a charter deviation'),
+    ("from unittest.main import TestProgram\nTestProgram(module='yaml')\n", 'conftest.py:2: dynamic import `unittest.main.TestProgram` in `<module>` is not a charter deviation'),
+    ("from unittest.main import main\nmain(module='yaml')\n",'conftest.py:2: dynamic import `unittest.main.main` in `<module>` is not a charter deviation'),
+    ("def f(loader):\n    return loader.discover('.')\n", 'conftest.py:2: dynamic import `discover` in `f` is not a charter deviation'),
+    # Helpers that import only a module named by a literal string, given that way.
+    ("import pydoc\npydoc.resolve('yaml')\n", 'conftest.py:2: dynamic import `pydoc.resolve` in `<module>` is not a charter deviation'),
+    ("import pydoc\npydoc.render_doc(thing='yaml')\n", 'conftest.py:2: dynamic import `pydoc.render_doc` in `<module>` is not a charter deviation'),
+    ("import pydoc\npydoc.doc('yaml')\n", 'conftest.py:2: dynamic import `pydoc.doc` in `<module>` is not a charter deviation'),
+    ("import pydoc\npydoc.writedoc('yaml')\n", 'conftest.py:2: dynamic import `pydoc.writedoc` in `<module>` is not a charter deviation'),
+    ("import pydoc\npydoc.help('yaml')\n", 'conftest.py:2: dynamic import `pydoc.help` in `<module>` is not a charter deviation'),
+    ("import doctest\ndoctest.testfile('d.txt', package='yaml')\n", 'conftest.py:2: dynamic import `doctest.testfile` in `<module>` is not a charter deviation'),
+    ("import doctest\ndoctest.testfile('d.txt', True, None, 'yaml')\n", 'conftest.py:2: dynamic import `doctest.testfile` in `<module>` is not a charter deviation'),
+    ("from doctest import DocFileSuite\nDocFileSuite('d.txt', package='yaml')\n", 'conftest.py:2: dynamic import `doctest.DocFileSuite` in `<module>` is not a charter deviation'),
 ])
-def test_a_helper_that_imports_by_name_is_refused(tmp_path, conftest):
+def test_a_helper_that_imports_by_name_is_refused(tmp_path, conftest, expected):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest))
-    assert violations, conftest
+    assert expected in violations, (expected, violations)
 
 
 # A name a helper shares, or a helper's harmless use, imports nothing.
@@ -648,7 +717,14 @@ def test_a_name_a_helper_shares_is_not_refused(tmp_path, conftest):
     "from unittest import mock\nmock.patch('yaml.safe_load').start()\n",
     "import pickle\npickle.loads(b'cyaml\\nYAMLObject\\n.')\n",
     "import importlib.resources\nimportlib.resources.files('yaml')\n",
-    "import pkgutil\npkgutil.get_data('yaml', 'x')\n",
+    # Given a module object or a name the pin cannot read as a literal string.
+    "import pydoc, json\npydoc.render_doc(json)\n",
+    "import pydoc\ndef f(name):\n    return pydoc.resolve(name)\n",
+    "import doctest\ndef f(package):\n    return doctest.testfile('d.txt', package=package)\n",
+    "import pydoc\npydoc.Helper().help('yaml')\n",
+    "import pydoc\npydoc.ModuleScanner().run(print, key='yaml')\n",
+    "import codecs\ncodecs.lookup('rot13')\n",
+    "'x'.encode('idna')\n",
     "from importlib.metadata import EntryPoint\nEntryPoint('e', 'yaml:load', 'g').load()\n",
     "import cProfile\ncProfile.run('import yaml')\n",
     "import profile\nprofile.run('import yaml')\n",

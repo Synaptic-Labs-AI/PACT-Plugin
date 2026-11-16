@@ -25,7 +25,8 @@ tests/conftest.py instead.
 No dynamic import call (importlib.import_module, __import__, importlib.reload,
 find_spec, an importlib.util spec or loader call, runpy, exec or eval, or a
 standard-library helper that imports a module it is given by name, such as
-pkgutil.resolve_name, pydoc.locate or logging.config.dictConfig,
+pkgutil.resolve_name, pydoc.locate, pydoc.safeimport, unittest.main or
+logging.config.dictConfig,
 pytest.importorskip, or a pytest plugin-manager method that imports a plugin by
 name, such as import_plugin, consider_pluginarg or load_setuptools_entrypoints)
 appears in this file or in any tests/ module it follows, at any scope, and
@@ -51,11 +52,16 @@ globals(), or a directory tests/conftest.py puts on sys.path other than by
 sys.path.insert. It cannot see a module named by a string to a
 standard-library helper whose name is too common to refuse, among them
 unittest.mock.patch's target, pickle.load and pickle.loads,
-importlib.resources.files, pkgutil.get_data, an importlib.metadata entry point's
-load(), the run of cProfile, profile or pdb, a warning category named in a
-filter string (pytest's filterwarnings), and a multiprocessing spawn, whose
-child imports the parent's main module. Never reach an import any of these ways
-here.
+importlib.resources.files, an importlib.metadata entry point's load(), the run
+of cProfile, profile or pdb, a warning category named in a filter string
+(pytest's filterwarnings), and a multiprocessing spawn, whose child imports the
+parent's main module. It cannot see a pydoc helper that imports a module only
+when it is named by a string (resolve, render_doc, doc, writedoc, help) unless
+that name is a literal string, nor doctest.testfile or DocFileSuite given a
+package that is not a literal string, the help method of a pydoc.Helper
+instance, the run method of a pydoc.ModuleScanner, or an encoding named by a
+string, as codecs.lookup, str.encode and bytes.decode take one. Never reach an
+import any of these ways here.
 """
 
 import sys
