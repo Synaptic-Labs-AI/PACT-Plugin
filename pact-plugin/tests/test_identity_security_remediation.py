@@ -1545,7 +1545,7 @@ def test_a_newline_in_a_repo_path_does_not_forge_a_warning_line(
     # that cause. The old generic sentence is the fallback for a reason-less
     # decline and sends the operator to inspect a remote that may be fine.
     assert any(
-        "origin remote is present but cannot be represented as a project id"
+        "no single project id can be read from the repository's origin"
         in r
         for r in records
     ), records

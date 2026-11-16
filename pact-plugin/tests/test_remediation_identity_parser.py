@@ -2185,3 +2185,81 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
         delivered.mkdir()
         (delivered / ".git").symlink_to(tmp_path / "pointer")
         assert pi._gitfile_points_at_foreign_gitdir(delivered) is True
+
+
+class TestAnIncludeOnlyOriginDeclinesOnEveryBranch:
+    """An origin set only by an included file is no stable identity: an
+    `includeIf "onbranch:..."` include applies on one branch of the main
+    checkout and not on another, so the id would follow the branch. Every
+    route declines it, on the include's branch and after the main checkout
+    leaves it, rather than binding the folder name there."""
+
+    @pytest.mark.parametrize("switch_branch", [False, True])
+    def test_every_route_declines(self, tmp_path, switch_branch):
+        from fixtures.identity_routes import ROUTES, SHAPES, _clear
+
+        assert_outside_repository(tmp_path)
+        answers = {}
+        for index, (route, (run, _sources)) in enumerate(ROUTES.items()):
+            if "forced" in route:
+                continue
+            base = tmp_path / f"cell{index}"
+            base.mkdir()
+            target = SHAPES["origin_from_onbranch_include"](base)
+            if switch_branch:
+                run_git("checkout", "-q", "-b", "elsewhere", cwd=base / "main")
+            elsewhere = base / "elsewhere"
+            elsewhere.mkdir()
+            with pytest.MonkeyPatch.context() as cell:
+                _clear(cell)
+                detected = run(cell, target, elsewhere)
+            answers[route] = (
+                detected.project_id, (detected.decline_reason or {}).get("reason")
+            )
+        wrong = {
+            route: answer for route, answer in answers.items()
+            if answer != (None, "origin_unrepresentable")
+        }
+        assert wrong == {}, f"an include-only origin bound or misdeclined: {wrong}"
+
+    @staticmethod
+    def _read(repo: Path):
+        from scripts import project_identity as pi
+
+        return pi.read_origin((repo / ".git").resolve())
+
+    def test_an_include_for_other_settings_and_no_origin_declines(self, tmp_path):
+        from scripts import project_identity as pi
+
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "proj")
+        (repo / ".git" / "extra").write_text("[user]\n\tname = x\n", encoding="utf-8")
+        with open(repo / ".git" / "config", "a", encoding="utf-8") as config:
+            config.write("[Include]\n\tpath = extra\n")
+        assert self._read(repo).state == pi.ORIGIN_INCLUDE_ONLY
+
+    def test_control_no_include_and_no_origin_is_absent(self, tmp_path):
+        from scripts import project_identity as pi
+
+        assert_outside_repository(tmp_path)
+        assert self._read(make_repo(tmp_path / "proj")).state == pi.ORIGIN_ABSENT
+
+    def test_control_a_repository_with_no_config_file_is_absent(self, tmp_path):
+        """No config file holds no include, so no origin there is absent."""
+        from scripts import project_identity as pi
+
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "proj")
+        (repo / ".git" / "config").unlink()
+        assert self._read(repo).state == pi.ORIGIN_ABSENT
+
+    def test_a_config_too_large_to_check_declines(self, tmp_path):
+        """A config file larger than the bounded reader takes cannot be
+        checked for includes, so no origin there is not taken as absent."""
+        from scripts import project_identity as pi
+
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "proj")
+        with open(repo / ".git" / "config", "a", encoding="utf-8") as config:
+            config.write(("# padding\n" * ((pi.GIT_FILE_LIMIT // 10) + 1)))
+        assert self._read(repo).state == pi.ORIGIN_CONFIG_UNREAD

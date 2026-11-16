@@ -80,7 +80,7 @@ class TestTheRefusalNamesTheDecision:
         assert code == 1
         assert envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED"
         message = envelope["message"]
-        assert "cannot be represented" in message
+        assert "no single project id can be read" in message
         assert str(override) in message
         assert "None could be verified" not in message
         assert "U+003C" not in message
@@ -96,7 +96,7 @@ class TestTheRefusalNamesTheDecision:
         assert code == 1
         message = envelope["message"]
         assert "No project directory was declared" not in message
-        assert "cannot be represented" in message
+        assert "no single project id can be read" in message
         assert str(override) in message
         assert "U+003C" not in message
 
@@ -149,7 +149,7 @@ class TestAnEmptyUrlDeclineNamesItsDetailOnce:
             ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
         )
         assert code == 1, envelope
-        assert "cannot be represented" in envelope["message"]
+        assert "no single project id can be read" in envelope["message"]
         assert EMPTY_URL_ENTRY_DETAIL not in envelope["message"]
         assert EMPTY_URL_ENTRY_DETAIL not in caplog.text
 
@@ -461,7 +461,7 @@ class TestNoRekeyRefusalRendersAnAngleBracket:
         warned = "\n".join(caplog.messages)
         assert got == 0, rendered
         assert "origin_unrepresentable" in rendered, rendered
-        assert "cannot be represented" in warned, warned
+        assert "no single project id can be read" in warned, warned
         assert self._assert_plain(rendered + warned) == 0
 
 

@@ -183,6 +183,21 @@ NOT_OWN_FILE_ORIGIN_DETAIL = (
     "url from an included file can differ between worktrees and branches"
 )
 
+# The `detail` for a repository whose own config file sets no origin but
+# holds an include section.
+INCLUDE_ONLY_ORIGIN_DETAIL = (
+    "the repository's own config file sets no remote.origin.url but holds an "
+    "include section, and an included file can set the origin on one branch "
+    "or worktree and not on another"
+)
+
+# The `detail` for a repository whose own config file could not be read to
+# look for include sections.
+UNCHECKED_CONFIG_DETAIL = (
+    "the repository's own config file could not be read to check it for "
+    "include sections"
+)
+
 # The `detail` for a decline whose `.git` points at a git directory outside
 # the checkout that is neither a linked worktree's nor a submodule's admin
 # dir. Its override file sits in that external directory, which a forged `.git`
@@ -219,6 +234,60 @@ ORIGIN_ABSENT = "absent"
 ORIGIN_UNAVAILABLE = "unavailable"
 ORIGIN_EMPTY_ENTRY = "empty_entry"
 ORIGIN_NOT_OWN_FILE = "not_own_file"
+ORIGIN_INCLUDE_ONLY = "include_only"
+ORIGIN_CONFIG_UNREAD = "config_unread"
+
+def _holds_include_section(text: str) -> bool:
+    """Whether git config `text` has a section header naming `include` or
+    `includeIf`, in any case and with any subsection form, at the start of a
+    line. A header git ignores (`[include "x"]`, `[includeIf]`) also counts;
+    that only declines."""
+    for line in text.splitlines():
+        head = line.lstrip(" \t")
+        if not head.startswith("["):
+            continue
+        name = head[1:]
+        for end, char in enumerate(name):
+            if char.isspace() or char in '".]':
+                name = name[:end]
+                break
+        else:
+            continue
+        if name.lower() in ("include", "includeif"):
+            return True
+    return False
+
+
+def _absent_origin(git_dir) -> "OriginRead":
+    """The answer for a repository whose config sets no origin.
+
+    `--includes` reads only the includes that apply now, so an origin set by
+    an `includeIf "onbranch:..."` file is absent on another branch, and the
+    folder name would then bind. So the repository's own config file is read
+    (a file read, no git call): any include section there declines, and so
+    does a config file that cannot be read. A config file that does not
+    exist holds no include."""
+    try:
+        text = read_git_file(os.path.join(git_dir, "config"))
+    except FileNotFoundError:
+        # No config file: git read nothing there, so nothing is included.
+        text = ""
+    except (OSError, ValueError):
+        text = None
+    if text is None:
+        return OriginRead(ORIGIN_CONFIG_UNREAD, None)
+    if _holds_include_section(text):
+        return OriginRead(ORIGIN_INCLUDE_ONLY, None)
+    return OriginRead(ORIGIN_ABSENT, None)
+
+
+# The states that decline `origin_unrepresentable`, each with its detail.
+_ORIGIN_DECLINE_DETAILS = {
+    ORIGIN_EMPTY_ENTRY: EMPTY_URL_ENTRY_DETAIL,
+    ORIGIN_NOT_OWN_FILE: NOT_OWN_FILE_ORIGIN_DETAIL,
+    ORIGIN_INCLUDE_ONLY: INCLUDE_ONLY_ORIGIN_DETAIL,
+    ORIGIN_CONFIG_UNREAD: UNCHECKED_CONFIG_DETAIL,
+}
 
 
 def decline_record(
@@ -953,7 +1022,7 @@ def read_origin(git_dir: Path) -> OriginRead:
         return OriginRead(ORIGIN_UNAVAILABLE, None)
     if result.returncode == 1 and not result.stdout:
         # `git config --get-all` exits 1 when the key is not set.
-        return OriginRead(ORIGIN_ABSENT, None)
+        return _absent_origin(git_dir)
     if result.returncode != 0:
         return OriginRead(ORIGIN_UNAVAILABLE, None)
     # Each value is preceded by its origin (`file:<path>`), and both are
@@ -963,7 +1032,7 @@ def read_origin(git_dir: Path) -> OriginRead:
         return OriginRead(ORIGIN_UNAVAILABLE, None)
     origins, values = pieces[0::2], pieces[1::2]
     if not values:
-        return OriginRead(ORIGIN_ABSENT, None)
+        return _absent_origin(git_dir)
     if any(not value.strip() for value in values):
         return OriginRead(ORIGIN_EMPTY_ENTRY, None)
     own = os.path.realpath(os.path.join(git_dir, "config"))
@@ -1681,11 +1750,8 @@ def detect_id_for_root(
             decline_record("origin_unreadable", override_path),
             external_detail,
         )
-    if origin.state in (ORIGIN_EMPTY_ENTRY, ORIGIN_NOT_OWN_FILE):
-        cause = (
-            EMPTY_URL_ENTRY_DETAIL if origin.state == ORIGIN_EMPTY_ENTRY
-            else NOT_OWN_FILE_ORIGIN_DETAIL
-        )
+    if origin.state in _ORIGIN_DECLINE_DETAILS:
+        cause = _ORIGIN_DECLINE_DETAILS[origin.state]
         return RootIdentity(
             None,
             None,

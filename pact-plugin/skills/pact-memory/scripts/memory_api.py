@@ -636,8 +636,7 @@ _DECLINE_CAUSES = {
     ),
     "origin_unreadable": "git could not read the repository's origin remote",
     "origin_unrepresentable": (
-        "the repository's origin remote is present but cannot be represented "
-        "as a project id"
+        "no single project id can be read from the repository's origin"
     ),
     "broken_git_marker": (
         "the directory carries a `.git` marker but git could not answer for it"
