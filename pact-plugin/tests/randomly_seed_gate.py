@@ -36,11 +36,21 @@ REMEDY = (
 
 
 def _is_seed(value):
-    return value.isascii() and value.isdigit()
+    """True for a value pytest-randomly reads as an integer seed: it parses the
+    value with int(), as here, so a sign, surrounding whitespace, underscores
+    between digits and any Unicode decimal digits are accepted (`+5`, `5_0`,
+    `\u0663`). Its special values `last` and `default` are not integers, so they are
+    refused: they name no seed the run line records."""
+    try:
+        int(value)
+    except ValueError:
+        return False
+    return True
 
 
 def explicit_seed(args):
-    """True when the last --randomly-seed in the args has an integer value.
+    """True when the last --randomly-seed in the args has an integer value, as
+    _is_seed reads one.
 
     The last one counts because it is the one argparse keeps. The scan reads
     past a bare `--` on purpose: pytest applies a `--randomly-seed` placed after

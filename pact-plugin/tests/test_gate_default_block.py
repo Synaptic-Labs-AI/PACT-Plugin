@@ -158,6 +158,15 @@ class TestSeedGate:
         # "file or directory not found"; the gate's verdict is pinned as is.
         ["-p", "randomly", "tests", "--", "--randomly-seed=5"],
         ["tests", "-p", "randomly", "--", "--randomly-seed=5"],
+        # Every value pytest-randomly's int() parse accepts seeds the run (measured
+        # with pytest-randomly 5.1.0: each runs with the seed int() gives).
+        ["-p", "randomly", "--randomly-seed=+5"],
+        ["-p", "randomly", "--randomly-seed=-5"],
+        ["-p", "randomly", "--randomly-seed", " 5"],
+        ["-p", "randomly", "--randomly-seed=5_0"],
+        ["-p", "randomly", "--randomly-seed=007"],
+        ["-p", "randomly", "--randomly-seed=\u0663"],
+        ["-p", "randomly", f"--randomly-seed={2**70}"],
     ])
     def test_a_seeded_session_passes(self, args):
         randomly_seed_gate.refuse_unseeded(_config(args))
@@ -169,7 +178,12 @@ class TestSeedGate:
         ["--randomly-seed=default"],
         ["--randomly-seed="],
         ["--randomly-seed"],
-        ["--randomly-seed=٣"],
+        # Values int() refuses, as pytest-randomly does with a usage error.
+        ["--randomly-seed=\u00b2"],
+        ["--randomly-seed=5.0"],
+        ["--randomly-seed=0x5"],
+        ["--randomly-seed=_5"],
+        ["--randomly-seed=5__0"],
         ["--randomly-seed=7", "--randomly-seed=last"],
         # pytest parses a post-`--` word as the option here and refuses `x`.
         ["-p", "randomly", "--randomly-seed=5", "--", "--randomly-seed=x"],
