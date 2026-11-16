@@ -107,6 +107,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: the cwd-marker rung's forged-pointer and broken-marker guard is now tested on the route that reaches it (a `GIT_CEILING_DIRECTORIES` entry at the checkout root, with the cwd below it), and two other guards no test could make fail now have arms: a submodule whose origin was removed, and the worktree identity record's recorded root.
 - Tests: each gitfile_redirect refusal is pinned by what its fake shows (no git directory, would not resolve, could not list, could not read a path in the listing whole, could not read core.worktree, and the two forgery causes) rather than by its own detail constant, the details are checked distinct, and the remedy is checked sentence by sentence (no change to a `.git` advised; the repair and the pin named as the user's).
 - Tests: each FIFO, link and directory `.git` arm first reads a regular file through the same reader and checks its content, so an arm cannot pass on a read that never ran; the legacy link case is labelled as the islink check's control.
+- Tests: the genuine-submodule subdirectory control gives its git calls a long timeout, so a loaded machine cannot fail it through the production five-second limit (which is unchanged).
 
 ### Corrected during review
 

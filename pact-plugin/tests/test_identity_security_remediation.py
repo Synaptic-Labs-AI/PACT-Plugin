@@ -669,12 +669,24 @@ class TestSubmoduleAdminRedirect:
         assert identity.project_id == "github.com/owner/sep"
         assert identity.source == "origin remote"
 
-    def test_a_subdirectory_of_a_genuine_submodule_is_not_a_redirect(self, tmp_path):
+    def test_a_subdirectory_of_a_genuine_submodule_is_not_a_redirect(self, tmp_path, monkeypatch):
         """POSITIVE CONTROL for the walk-up: the marker is found one level up,
         and the comparison is against the MARKER's directory, so a genuine
-        submodule's own subdirectory must not be refused."""
+        submodule's own subdirectory must not be refused. A git call that
+        outlasts the production timeout is refused, which is right in
+        production and wrong for a control, so here every git call is given
+        a timeout no loaded machine reaches; the production timeout is not
+        changed."""
+        real_run = subprocess.run
+
+        def patient(args, *rest, **kwargs):
+            if isinstance(args, (list, tuple)) and args and args[0] == "git" and "timeout" in kwargs:
+                kwargs["timeout"] = max(kwargs["timeout"] or 0, 300)
+            return real_run(args, *rest, **kwargs)
+
         _super, checkout, _admin = self._submodule(tmp_path)
         (checkout / "pkg").mkdir()
+        monkeypatch.setattr(subprocess, "run", patient)
         assert pi._gitfile_points_at_foreign_gitdir(checkout / "pkg") is False
 
     def test_a_subdirectory_of_a_forged_pointer_is_a_redirect(self, tmp_path):
