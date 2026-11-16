@@ -2900,10 +2900,24 @@ class TestTheCwdMarkerDeclinesAMarkerGitCannotAnswerFor:
 class TestARedirectRefusalNamesWhatWasObserved:
     """Every `gitfile_redirect` refusal carries the detail of the one cause
     that reached it, and no sentence of the refusal claims more: the cause
-    sentence names no other repository's git directory, and the remedy asks
-    for removal only once git's listing has run."""
+    sentence names no other repository's git directory, and the remedy
+    advises no change to a `.git` and names the user as the one who runs a
+    repair or decides on a pin."""
 
-    # (shape, git wrapper mode, the detail every refusing route must carry)
+    # What each fake makes git (or the filesystem) show, in the words a
+    # refusal reaching it must use. Pinned here, not read from the detail
+    # constants, so a detail swapped for another cause's sentence fails.
+    OBSERVED = {
+        "foreign": "names another directory called `.git`",
+        "unlisted": "worktree list does not hold it",
+        "unlistable": "could not list",
+        "no_git_dir": "no git directory",
+        "unresolvable": "would not resolve",
+        "unreadable_listing": "could not read a path in the listing whole",
+        "core_worktree_unread": "could not read that directory's core.worktree",
+    }
+
+    # (shape, fake, what was observed): every route that refuses must name it.
     CASES = [
         *[(shape, "PASS", "foreign") for shape in (
             "foreign_gitdir", "relative_foreign_gitdir", "symlinked_git",
@@ -2915,25 +2929,56 @@ class TestARedirectRefusalNamesWhatWasObserved:
         )],
         ("control_own_linked_worktree", "FAIL_LISTING", "unlistable"),
         ("control_own_checkout", "FAIL_GIT_DIR", "no_git_dir"),
+        ("control_own_linked_worktree", "LOOP_GIT_DIR", "unresolvable"),
+        ("control_path_worktree_holding_a_newline", "REJECT_Z", "unreadable_listing"),
+        ("control_own_submodule", "FAIL_CORE_WORKTREE", "core_worktree_unread"),
     ]
 
     @staticmethod
-    def _detail(key: str) -> str:
+    def _details() -> list:
+        """Every refusal detail a `gitfile_redirect` can carry."""
         from scripts import memory_api
         from scripts import project_identity as pi
 
-        if key == "foreign":
-            return pi.FOREIGN_GIT_DIR_DETAIL
-        return memory_api._REDIRECT_CAUSE_DETAILS[key]
+        return [
+            *memory_api._REDIRECT_CAUSE_DETAILS.values(),
+            pi.FOREIGN_GIT_DIR_DETAIL, pi.CORE_WORKTREE_UNREAD_DETAIL,
+        ]
 
-    @pytest.mark.parametrize("shape,mode,key", CASES)
-    def test_each_refusal_names_its_own_cause(self, tmp_path, shape, mode, key):
+    @pytest.mark.parametrize("shape,fake,key", CASES)
+    def test_each_refusal_names_its_own_cause(self, tmp_path, monkeypatch, shape, fake, key):
+        from scripts import memory_api
+
         assert_outside_repository(tmp_path)
-        answers = _route_answers(tmp_path, shape, mode)
+        mode = fake
+        if fake == "LOOP_GIT_DIR":
+            # git's `--git-dir` answer names a symlink loop, so it will not resolve.
+            (tmp_path / "loop-a").symlink_to(tmp_path / "loop-b")
+            (tmp_path / "loop-b").symlink_to(tmp_path / "loop-a")
+            real = memory_api._git_rev_parse
+            monkeypatch.setattr(
+                memory_api, "_git_rev_parse",
+                lambda start, *args: str(tmp_path / "loop-a")
+                if args == ("--git-dir",) else real(start, *args),
+            )
+            mode = "PASS"
+        answers = _route_answers(tmp_path / "cells", shape, mode)
         refused = {route: a for route, a in answers.items() if a[1] == "gitfile_redirect"}
         assert refused, f"control: {shape} refused on some route ({answers})"
-        wrong = {route: a for route, a in refused.items() if a[2] != self._detail(key)}
-        assert wrong == {}, f"{shape} under {mode} named another cause: {wrong}"
+        wrong = {route: a for route, a in refused.items() if self.OBSERVED[key] not in (a[2] or "")}
+        assert wrong == {}, f"{shape} under {fake} did not say {self.OBSERVED[key]!r}: {wrong}"
+
+    def test_each_detail_names_one_observation(self):
+        """The details are distinct, and each holds exactly one of the
+        observed phrases, so no refusal can name two causes or another
+        cause's evidence."""
+        details = self._details()
+        assert len(set(details)) == len(details), details
+        for detail in details:
+            held = [key for key, phrase in self.OBSERVED.items() if phrase in detail]
+            assert len(held) == 1, (detail, held)
+        for key, phrase in self.OBSERVED.items():
+            assert sum(phrase in detail for detail in details) == 1, (key, phrase)
 
     def test_the_cause_docstring_names_every_redirect_cause(self):
         from scripts import memory_api
@@ -2971,12 +3016,30 @@ class TestARedirectRefusalNamesWhatWasObserved:
             assert "remove" not in lowered and "delete" not in lowered, remedy
 
     def test_the_redirect_remedy_names_the_users_own_layouts_as_theirs(self):
+        """The remedy's sentences: the first asks only for read-only git
+        answers or a run elsewhere; the one naming `git worktree repair`
+        says the user runs it, not an agent; the one naming a separate git
+        dir calls it the user's decision; and no sentence advises any change
+        to a `.git` file or directory."""
+        import re
+
         from scripts import memory_api
 
         remedy = " ".join(memory_api._REDIRECT_REMEDY.split())
-        assert "running `git worktree repair` in it" in remedy, remedy
-        assert "user decision: see the pact-memory skill" in remedy, remedy
-        assert "the user runs that, not an agent" in remedy, remedy
+        sentences = [s for s in re.split(r"(?<=\.) (?=[A-Z])", remedy) if s]
+        commands = [re.findall(r"`(git [^`]*)`", sentence) for sentence in sentences]
+        assert commands[0] == ["git rev-parse --git-dir", "git worktree list"], sentences[0]
+        repair = [s for s, found in zip(sentences, commands) if "git worktree repair" in found]
+        assert len(repair) == 1 and "the user runs that, not an agent" in repair[0], sentences
+        separate = [s for s in sentences if "--separate-git-dir" in s]
+        assert len(separate) == 1 and "user decision" in separate[0], sentences
+        for sentence, found in zip(sentences, commands):
+            assert set(found) <= {
+                "git rev-parse --git-dir", "git worktree list", "git worktree repair",
+                "git init --separate-git-dir",
+            }, sentence
+            if "`.git`" in sentence:
+                assert "run from the repository the `.git` points at" in sentence, sentence
 
 
 class TestNoRouteBindsWithoutAGitDir:
@@ -3029,6 +3092,25 @@ class TestNoRouteBindsWithoutAGitDir:
         assert memory_api._worktree_redirect_cause(checkout, common) == (
             memory_api.REDIRECT_UNRESOLVABLE
         )
+
+    def test_a_top_level_that_will_not_resolve_is_unresolvable(self, tmp_path):
+        """The listing check compares the checkout's top level with git's
+        listed worktrees; a top level that names a symlink loop resolves to
+        nothing, so the check names a path that would not resolve rather than
+        answering from a comparison it could not make."""
+        from scripts import memory_api
+
+        assert_outside_repository(tmp_path)
+        main = make_repo(tmp_path / "main")
+        worktree = tmp_path / "wt"
+        run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+        common = (main / ".git").resolve()
+        assert memory_api._worktree_redirect_cause(worktree, common) is None  # control: listed
+        (tmp_path / "loop-a").symlink_to(tmp_path / "loop-b")
+        (tmp_path / "loop-b").symlink_to(tmp_path / "loop-a")
+        assert memory_api._worktree_redirect_cause(
+            worktree, common, toplevel=tmp_path / "loop-a"
+        ) == memory_api.REDIRECT_UNRESOLVABLE
 
 
 class TestAnUnreadableCoreWorktreeIsNamed:

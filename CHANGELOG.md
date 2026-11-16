@@ -105,6 +105,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: the route-input census follows relative imports inside the plugin's helper packages, and fails on one it cannot resolve, so a read inside a relatively imported helper (the session-record config root) enters it; the config-root read is named as not a route; a call through a relative name that reaches no function (a class or an unfollowable re-export) fails it too.
 - Tests: three tests that hid a module through `patch.dict(sys.modules)` now bind only that key, so a module first imported inside the window (numpy) is no longer evicted for later tests in the same worker; one of them also binds the module name the import actually resolves, so its stub is used.
 - Tests: the cwd-marker rung's forged-pointer and broken-marker guard is now tested on the route that reaches it (a `GIT_CEILING_DIRECTORIES` entry at the checkout root, with the cwd below it), and two other guards no test could make fail now have arms: a submodule whose origin was removed, and the worktree identity record's recorded root.
+- Tests: each gitfile_redirect refusal is pinned by what its fake shows (no git directory, would not resolve, could not list, could not read a path in the listing whole, could not read core.worktree, and the two forgery causes) rather than by its own detail constant, the details are checked distinct, and the remedy is checked sentence by sentence (no change to a `.git` advised; the repair and the pin named as the user's).
 
 ### Corrected during review
 
