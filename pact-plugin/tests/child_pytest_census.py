@@ -83,7 +83,8 @@ refused whether or not it does:
   make's argument, not a program. The stop holds for one command only:
   `printf x; python -m pytest` is still judged.
 - [script] The program is an interpreter that runs pytest's program or
-  `__main__.py` as its script (`python /venv/bin/pytest`). Only the program
+  `__main__.py` as its script (`python /venv/bin/pytest`, and after a `--` that
+  ends the interpreter's options, `python -- /venv/bin/pytest`). Only the program
   position counts here: in `pip install python-dateutil pytest` or
   `echo python /venv/bin/pytest` no interpreter runs a script.
 - [wrapper] Any family above as the command of a program the census does not
@@ -160,7 +161,11 @@ programs like any other, so a pytest after them is refused as [wrapper].
 
 A shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) run with `-c` (alone, or bundled as
 in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
-has its command text opened, and so does one behind an assignment.
+has its command text opened, and so does one behind an assignment. Each `o` or
+`O` in an option word takes the next word as its value, bundled or not, so the
+text is the first word after those values: `-euo pipefail -c TEXT`,
+`-oc pipefail TEXT` and `-eO extglob -c TEXT` all open TEXT. These forms are
+checked against real bash only; the other shells are read the same way.
 The text is read by bash's rules for quoting, comments, separators,
 redirections, heredocs and substitutions, as listed here; bash's expansions are
 not performed (blind spot 9):
@@ -182,7 +187,9 @@ not performed (blind spot 9):
   the next newline to the line that is the delimiter (its leading tabs stripped
   for `<<-`), and several heredocs on one line take their bodies in turn. In a
   heredoc whose delimiter is unquoted, the body's command substitutions are
-  judged.
+  judged. A heredoc inside `$( )` is read the same way, so a `)` or quote in
+  its body does not end the substitution; a `<<` in arithmetic there is a
+  shift. A heredoc whose delimiter never comes takes the rest of the text.
 - The command text of a command substitution (`$( )` or backticks, also inside
   double quotes) and of a process substitution (`<( )` or `>( )`) is judged as
   its own shell text. Arithmetic (`$(( ))` and `(( ))`) runs no command. As in
@@ -359,8 +366,9 @@ _NUMBER = re.compile(r"[+-]?(?:\.?[0-9][0-9a-z.+-]*|inf(?:inity)?)\Z", re.IGNORE
 _SELECTOR = re.compile(r"[+-][A-Za-z_][A-Za-z0-9_.-]*=")
 # hatch names an environment before its command: `hatch run test:pytest`.
 _ENVIRONMENT_PREFIX = re.compile(r"[A-Za-z0-9_.-]+:")
-# Shell options that take a separate value, and the long ones that take a file.
-_SHELL_VALUE_OPTIONS = frozenset({"-o", "+o", "-O", "+O", "--rcfile", "--init-file"})
+# A shell's long options that take a file. A short o or O takes a value too,
+# alone or in a bundle (_shell_command).
+_SHELL_LONG_VALUE_OPTIONS = frozenset({"--rcfile", "--init-file"})
 # coverage run's options that take a separate value.
 _COVERAGE_VALUE_OPTIONS = frozenset({"--rcfile", "--source", "--include", "--omit",
                                      "--context", "--concurrency", "--data-file", "--debug"})
@@ -604,8 +612,12 @@ def _lex(text):
 
 def _closing(text, i, close):
     """Index after the `close` that ends a construct whose body starts at `i`,
-    skipping quotes, escapes and nested parentheses; len(text) when unclosed."""
+    skipping quotes, escapes, nested parentheses and, inside `$( )`, arithmetic
+    and heredoc bodies, so a `)` or quote in a heredoc body does not end it;
+    len(text) when unclosed. A backtick substitution ends at its first
+    unescaped backtick, heredoc or not, as bash's does."""
     depth = 1
+    heredocs = []
     while i < len(text):
         char = text[i]
         if char == "\\":
@@ -617,6 +629,22 @@ def _closing(text, i, close):
         if char in "'\"" and close == ")":
             end = text.find(char, i + 1) if char == "'" else _double_end(text, i + 1)
             i = len(text) if end < 0 else end + 1
+            continue
+        if close == ")" and text.startswith(("$((", "(("), i):
+            opened = 3 if char == "$" else 2
+            end = _arithmetic_end(text, i + opened)
+            if end is not None:  # arithmetic, where `<<` is a shift
+                i = end
+                continue
+        if close == ")" and text.startswith("<<<", i):
+            i += 3
+            continue
+        if close == ")" and text.startswith("<<", i):
+            i = _heredoc_operator(text, i + 2, heredocs)
+            continue
+        if close == ")" and char == "\n" and heredocs:
+            i = _heredoc_bodies(text, i + 1, heredocs, [])
+            heredocs.clear()
             continue
         if close == ")" and char == "(":
             depth += 1
@@ -919,7 +947,7 @@ def _shell_command(part, program):
     i = program + 1
     while i < len(part):
         word = part[i]
-        if word in _SHELL_VALUE_OPTIONS:
+        if word in _SHELL_LONG_VALUE_OPTIONS:
             i += 2
         elif word == "--":
             i += 1
@@ -928,7 +956,9 @@ def _shell_command(part, program):
             i += 1
         elif word[:1] in ("-", "+") and len(word) > 1:
             has_c = has_c or (word[0] == "-" and "c" in word[1:])
-            i += 1
+            # Each o or O in a bundle takes the next word as its value, in
+            # order, so `-euo pipefail` and `-oc pipefail TEXT` both work.
+            i += 1 + sum(letter in "oO" for letter in word[1:])
         else:
             break
     return part[i] if has_c and i < len(part) else None
@@ -1029,6 +1059,8 @@ def _launch(part, at):
         return after
     if module == "coverage":
         return _coverage_run(part, after)
+    if module is None and after < len(part) and part[after] == "--":
+        after += 1  # `--` ends the interpreter's options; the next word is its script
     if module is None and after < len(part) and _is_pytest_script(part[after]):
         return after + 1  # the interpreter runs pytest's script file
     return None

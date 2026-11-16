@@ -6,6 +6,7 @@ Summary: Pins the child-pytest census: which launches it refuses and accepts,
 Used by: the suite; the census itself is tests/child_pytest_census.py, wired in
          pact-plugin/conftest.py.
 """
+import ast
 import concurrent.futures
 import importlib.util
 import os
@@ -309,6 +310,43 @@ def test_an_unusual_interpreter_launch_is_refused(argv):
     assert census._miss(argv, None, {}) is not None, argv
 
 
+# `--` ends an interpreter's options, and the next word is the script it runs.
+@pytest.mark.parametrize("argv", [
+    ["python3", "--", "/venv/bin/pytest", "-q"],
+    [PY, "-I", "--", "/x/pytest/__main__.py"],
+])
+def test_a_pytest_script_after_double_dash_is_judged_as_the_script(argv):
+    line = census._miss(argv, None, {})
+    assert line is not None and line.endswith(census.REMEDY), (argv, line)
+    assert census._miss([*argv, *_BLOCK], None, {}) is None, argv
+
+
+def test_a_script_after_double_dash_that_is_not_pytest_is_accepted():
+    assert census._miss(["python3", "--", "script.py", "pytest"], None, {}) is None
+
+
+# Each o or O in a shell's option bundle takes the next word as its value, so
+# the -c text is read past it, by the [shell] family: blocking lifts the
+# refusal. zsh and dash are read as bash is; only bash is run for real.
+@pytest.mark.parametrize("argv", [
+    ["bash", "-euo", "pipefail", "-c", "pytest -q"],
+    ["bash", "-oc", "pipefail", "pytest -q"],
+    ["bash", "-co", "pipefail", "pytest -q"],
+    ["bash", "-eo", "pipefail", "-c", "pytest -q"],
+    ["bash", "+o", "history", "-c", "pytest -q"],
+    ["bash", "-eO", "extglob", "-c", "pytest"],
+    ["bash", "+O", "extglob", "-c", "pytest"],
+    ["bash", "-euxo", "pipefail", "-o", "nounset", "-c", "pytest"],
+    ["zsh", "-fo", "errexit", "-c", "pytest"],
+    ["dash", "-eo", "errexit", "-c", "pytest"],
+], ids=lambda argv: " ".join(argv[:4]))
+def test_a_bundled_option_value_does_not_hide_the_c_text(argv):
+    line = census._miss(argv, None, {})
+    assert line is not None and line.endswith(census.REMEDY), (argv, line)
+    blocked = [*argv[:-1], argv[-1] + " -p no:randomly"]
+    assert census._miss(blocked, None, {}) is None, blocked
+
+
 @pytest.mark.parametrize("argv", [
     ["bash", "-lc", "python -m pytest"],
     ["bash", "-ec", "pytest -q"],
@@ -430,6 +468,24 @@ _SHELL_REFUSED = [
     "((pytest -q); )",
     "((pytest -q)|cat)",
     "echo $((pytest -q) )",
+    # Each o or O in a shell's option bundle takes the next word as its value,
+    # so the -c text is the word after those values. A nested shell is named by
+    # its path, since the real-bash differential's PATH holds only stubs.
+    "/bin/bash -euo pipefail -c 'pytest -q'",
+    "/bin/bash -oc pipefail 'pytest -q'",
+    "/bin/bash -co pipefail 'pytest -q'",
+    "/bin/bash -eo pipefail -c 'pytest -q'",
+    "/bin/bash +o history -c 'pytest -q'",
+    "/bin/bash -eO extglob -c 'pytest -q'",
+    "/bin/bash +O extglob -c 'pytest -q'",
+    # A heredoc inside $( ) is read as one: a `)` or quote in its body does not
+    # end the substitution, and an unquoted body's substitutions run.
+    "echo $(cat <<E\n)'\nE\n); pytest -q #'",
+    "x=$(cat <<E\n$(pytest -q)\nE\n)",
+    # `<<` in arithmetic inside $( ) is a shift, not a heredoc.
+    "x=$(echo $((1<<2))); pytest -q",
+    "x=$( ((y=1<<2)); echo); pytest -q",
+    "x=$(cat <<<')'); pytest -q",
 ]
 
 
@@ -496,6 +552,16 @@ _SHELL_ACCEPTED = [
     "(( (pytest) + (1) ))",
     "echo $(( (pytest) + (1) ))",
     "echo $((1+(pytest*3)))",
+    # A bundled option's value does not hide a blocked -c text.
+    "/bin/bash -euo pipefail -c 'pytest -q -p no:randomly'",
+    "/bin/bash -oc pipefail 'pytest -q -p no:randomly'",
+    # A heredoc body inside $( ) is data unless it holds a substitution.
+    "x=$(cat <<'E'\npytest -q\nE\n)",
+    "echo $(cat <<E\n)'\nE\n); pytest -q -p no:randomly #'",
+    # A heredoc whose delimiter never comes takes the rest of the text, so the
+    # substitution never closes: bash rejects the text and runs nothing, and
+    # the census, reading it the same way, finds no command after it.
+    "x=$(cat <<E\n); pytest -q",
 ]
 
 
@@ -1339,7 +1405,12 @@ def test_a_worker_hands_its_misses_to_the_controller(census_state):
 
 # A rig session loads tests/conftest.py and registers the child-pytest census as
 # pact-plugin/conftest.py does, and refuses to run unless exactly one census is
-# installed, so no rig arm that expects no miss can pass with none.
+# installed, so no rig arm that expects no miss can pass with none. It copies
+# the root conftest's census registration rather than loading that conftest:
+# loading it would also install the seed gate, the HOME census and both CI
+# plugins, and in CI the environment binding would run inside the rig child,
+# so the rig would no longer isolate the census. The copy is pinned to the
+# real registration by test_the_rig_registers_the_census_as_the_root_conftest_does.
 _RIG_CONFTEST = '''
 import importlib.util
 
@@ -1382,6 +1453,34 @@ def test_swallows_the_census_error():
 def test_plain():
     pass
 '''
+
+
+def _census_registration(source):
+    """(whether `source` imports child_pytest_census, the census register calls
+    its pytest_configure makes, as source text)."""
+    tree = ast.parse(source)
+    imports = any(isinstance(node, ast.Import)
+                  and any(alias.name == "child_pytest_census" and alias.asname is None
+                          for alias in node.names)
+                  for node in ast.walk(tree))
+    calls = [ast.unparse(node)
+             for function in tree.body
+             if isinstance(function, ast.FunctionDef) and function.name == "pytest_configure"
+             for node in ast.walk(function)
+             if isinstance(node, ast.Call)
+             and ast.unparse(node.func) == "child_pytest_census.register"]
+    return imports, calls
+
+
+def test_the_rig_registers_the_census_as_the_root_conftest_does():
+    """The xdist rig copies the root conftest's census wiring (see _RIG_CONFTEST):
+    both import child_pytest_census and call its register(config) exactly once
+    from pytest_configure, so the rig exercises the real install path."""
+    root = (Path(__file__).resolve().parents[1] / "conftest.py").read_text(encoding="utf-8")
+    expected = (True, ["child_pytest_census.register(config)"])
+    assert _census_registration(root) == expected, _census_registration(root)
+    rig = _RIG_CONFTEST.format(conftest="conftest.py")
+    assert _census_registration(rig) == expected, _census_registration(rig)
 
 
 def _run_rig(tmp_path, flag):
