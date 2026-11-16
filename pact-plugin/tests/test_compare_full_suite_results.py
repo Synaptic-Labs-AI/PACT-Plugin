@@ -40,6 +40,7 @@ GAMMA = "tests/test_example.py::test_gamma"
 
 
 SESSION_BANNER_TEXT = "=" * 29 + " test session starts " + "=" * 30
+SHORT_SUMMARY_TEXT = "=" * 27 + " short test summary info " + "=" * 28
 
 
 def case(node_id, outcome="pass", reason=None, duration=0.01):
@@ -209,9 +210,13 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
         lines.extend(map(actions_line, [
             "=" * 35 + " FAILURES " + "=" * 35, "_" * 30 + " test_beta " + "_" * 30,
             "-" * 29 + " Captured stdout call " + "-" * 29, *captured]))
-    lines.extend(actions_line(f"XPASS {item['node_id']}" +
-                              (f" - {item['reason']}" if item["reason"] else ""))
-                 for item in cases if item["outcome"] == "xpass")
+    # -ra prints XPASS lines in the short test summary, the last report section.
+    xpass_lines = [actions_line(f"XPASS {item['node_id']}" +
+                                (f" - {item['reason']}" if item["reason"] else ""))
+                   for item in cases if item["outcome"] == "xpass"]
+    if xpass_lines:
+        lines.append(actions_line(SHORT_SUMMARY_TEXT))
+    lines.extend(xpass_lines)
     lines.append(actions_line(f"===== {summary} ====="))
     if failing:
         lines.append(actions_line("RUN-VERIFY-FAILURE FAILED: synthetic test outcome"))
@@ -800,6 +805,66 @@ def test_missing_environment_evidence_keeps_its_own_refusal(tmp_path):
     assert completed.returncode == 2, comparison
     assert comparison["evidence_errors"] == [
         {"run": "two", "error": "before/after environment evidence is not clean"}]
+
+
+def _drop_first_line_with(text):
+    def drop(directory):
+        log = directory / "run.log"
+        lines = log.read_text(encoding="utf-8").splitlines()
+        index = next(i for i, line in enumerate(lines) if text in line)
+        del lines[index]
+        log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return drop
+
+
+# Each evidence marker, as a failing test's own output can print it. Some rows
+# also drop the real marker, so the printed one is the only copy left.
+TEST_PRINTED_MARKERS = {
+    "drift": ("CI ENVIRONMENT DRIFT (pytest process, at session end)", None),
+    "addopts": ("PYTEST_ADDOPTS is set in this process; inherited options can narrow it",
+                None),
+    "command": ("python -m pytest -q tests/test_example.py", None),
+    "xpass": (f"XPASS {ALPHA}", None),
+    "run-verify-failure": ("RUN-VERIFY-FAILURE FAILED: a line a test printed", None),
+    "full-collection-ok": (
+        f"FULL-COLLECTION-OK 1 test files and 2 items match discovery; subject={SHA}",
+        _drop_first_line_with("FULL-COLLECTION-OK ")),
+    "full-run-ok": (
+        "FULL-RUN-OK collected=2 passed=2 skipped=0 failed=0 errors=0 deselected=0 "
+        f"collection_count=2 subject={'b' * 40}", None),
+    "environment-match": (ENVIRONMENT_MATCH, _drop_first_line_with(ENVIRONMENT_MATCH)),
+    "platform": ("platform linux -- Python 3.99.0, pytest-9.2.0, pluggy-1.7.0", None),
+    "measurement": ("sys.executable=/elsewhere/python which python3=/elsewhere", None),
+    "pins": ("the test expected constraints-ci.txt to pin something else", None),
+    "cache": ("Cache restored from key: forged-by-a-test", None),
+}
+
+
+@pytest.mark.parametrize("marker", list(TEST_PRINTED_MARKERS))
+def test_a_marker_a_failing_test_prints_changes_nothing(tmp_path, marker):
+    """Evidence is read only where its real writer prints it, never from the
+    report sections where a test's own text appears. The same red run is
+    compared with and without the marker in its captured output, and every
+    result must be the same."""
+    text, mutate = TEST_PRINTED_MARKERS[marker]
+    first = make_run(tmp_path, "one")
+    results = []
+    for variant, captured in (("plain", ()), ("marked", (text,))):
+        second = make_run(tmp_path / variant, "two", 101,
+                          cases=[case(ALPHA), case(BETA, "failure", "boom")],
+                          captured=("the test's own output", *captured))
+        if mutate is not None:
+            mutate(second)
+        completed, comparison, output = invoke(tmp_path, first, second, f"out-{variant}")
+        run = read_runs(output)[1]
+        results.append((completed.returncode, comparison["status"], comparison["deltas"],
+                        comparison["evidence_errors"], run["validity"],
+                        run.get("verifier_results"), run.get("environment")))
+    assert results[0] == results[1], (marker, results)
+    if mutate is None:
+        assert results[0][:2] == (1, "different"), results[0]
+    else:
+        assert results[0][:2] == (2, "invalid"), results[0]
 
 
 @pytest.mark.parametrize("exitstatus", [2, 3, 4])
@@ -1542,6 +1607,15 @@ def test_real_pytest_junit_xpass_and_duplicate_representation(tmp_path):
     assert xpass_line == ("XPASS test_repr.py::test_xpass - unexpected success")
     summary = next(line.strip().strip("=").strip() for line in raw_log.splitlines()
                    if "1 failed" in line and "1 xpassed" in line and "1 error" in line)
+    # In real pytest output the XPASS line sits in the short test summary, the
+    # one part of the report sections the comparator reads XPASS lines from.
+    real_lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
+    summary_index = next(index for index, line in enumerate(real_lines)
+                         if "1 xpassed" in line and "1 failed" in line)
+    report = comparator._test_text_range(real_lines, summary_index)
+    short_summary = comparator._short_summary_range(real_lines, report)
+    assert [real_lines[index] for index in short_summary
+            if real_lines[index].startswith("XPASS ")] == [xpass_line]
 
     nodes = ["test_repr.py::test_call_and_teardown", "test_repr.py::test_xpass"]
     cases = [case(nodes[0], "failure", "call"), case(nodes[0], "error", "teardown"),
@@ -1556,9 +1630,12 @@ def test_real_pytest_junit_xpass_and_duplicate_representation(tmp_path):
         (directory / "artifact" / ".full-suite-results.xml").write_bytes(xml_path.read_bytes())
         log = directory / "run.log"
         lines = log.read_text().splitlines()
-        lines = [line for line in lines if "0.10s" not in line and "XPASS " not in line]
-        lines.insert(-1, actions_line(summary))
-        lines.insert(-1, actions_line(xpass_line))
+        # The real XPASS and summary lines replace the synthetic ones in place:
+        # XPASS in the short test summary, the summary line after it, and the
+        # certifying step's verdict after that, as a real log orders them.
+        lines = [actions_line(xpass_line) if "XPASS " in line
+                 else actions_line(summary) if "0.10s" in line
+                 else line for line in lines]
         log.write_text("\n".join(lines) + "\n", encoding="utf-8")
     completed, comparison, output = invoke(tmp_path, first, second)
     assert completed.returncode == 0, comparison

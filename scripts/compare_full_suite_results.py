@@ -233,15 +233,78 @@ def _command_text(line: str) -> str | None:
     return stripped if stripped.startswith("python -m pytest ") else None
 
 
+def _step_bounds(lines: list[str]) -> tuple[list[int], int | None, int | None, int | None]:
+    """Where the full-suite step's parts sit in the log.
+
+    Returns the echoed run command's line indexes, the session-start banner's
+    index, and the end indexes of the report header and the session-finish
+    span. The command lines run from the first one up to the first banner
+    after it, so a command a test prints in its output cannot count, and a
+    banner from an earlier step cannot anchor the header. Without a banner the
+    last three are None.
+    """
+    first = next((index for index, line in enumerate(lines)
+                  if _command_text(line) is not None), None)
+    if first is None:
+        return [], None, None, None
+    banner = next((index for index in range(first + 1, len(lines))
+                   if SESSION_BANNER.fullmatch(lines[index])), None)
+    stop = len(lines) if banner is None else banner
+    commands = [index for index in range(first, stop)
+                if _command_text(lines[index]) is not None]
+    if banner is None:
+        return commands, None, None, None
+    end = banner + 1
+    while (end < len(lines) and lines[end].strip()
+           and not SECTION_SEPARATOR.fullmatch(lines[end])):
+        end += 1
+    finish = end
+    while finish < len(lines) and not SECTION_SEPARATOR.fullmatch(lines[finish]):
+        finish += 1
+    return commands, banner, end, finish
+
+
+def _test_text_range(lines: list[str], summary_index: int) -> range:
+    """pytest's report sections: from the first section separator after the
+    session-finish span through the final summary line.
+
+    Every text a test produces (captured output, assert messages, tracebacks,
+    warning text, skip and failure reasons) is printed here and nowhere else in
+    the log, so no evidence marker is read from this range. Empty when the
+    session banner cannot be located; that run is refused when its header is
+    read.
+    """
+    _commands, banner, _end, finish = _step_bounds(lines)
+    if banner is None or finish > summary_index:
+        return range(0)
+    return range(finish, summary_index + 1)
+
+
+def _short_summary_range(lines: list[str], report: range) -> range:
+    """The 'short test summary info' section, where -ra prints its XPASS lines.
+
+    It is the last section before the final summary line, and each of its lines
+    starts with the outcome pytest gave the test, so a line there that starts
+    with 'XPASS ' is pytest's own.
+    """
+    if not report:
+        return range(0)
+    summary_index = report[-1]
+    for index in range(summary_index - 1, report.start - 1, -1):
+        if SECTION_SEPARATOR.fullmatch(lines[index]):
+            if "short test summary info" in lines[index]:
+                return range(index + 1, summary_index)
+            break
+    return range(0)
+
+
 def _command_argv(lines: list[str]) -> list[str]:
     candidates = []
-    for line in lines:
-        command = _command_text(line)
-        if command is not None:
-            try:
-                candidates.append(shlex.split(command))
-            except ValueError as exc:
-                raise EvidenceError(f"unparseable pytest command: {exc}") from exc
+    for index in _step_bounds(lines)[0]:
+        try:
+            candidates.append(shlex.split(_command_text(lines[index])))
+        except ValueError as exc:
+            raise EvidenceError(f"unparseable pytest command: {exc}") from exc
     if (len(candidates) not in (1, 2)
             or len(candidates) == 2 and candidates[0] != candidates[1]):
         raise EvidenceError("expected one command, optionally repeated by the Actions group header")
@@ -275,21 +338,11 @@ def _session_spans(lines: list[str]) -> tuple[list[str], list[str]]:
     captured output, which pytest prints only inside a later section. A missing
     banner is refused: reading no seed would look like a valid ordered run.
     """
-    commands = [index for index, line in enumerate(lines)
-                if _command_text(line) is not None]
-    start = next((index for index in range(commands[-1] + 1, len(lines))
-                  if SESSION_BANNER.fullmatch(lines[index])), None)
+    _commands, start, end, finish = _step_bounds(lines)
     if start is None:
         raise EvidenceError(
             "no pytest session-start banner follows the full-suite run command; "
             "the run's seed header cannot be located")
-    end = start + 1
-    while (end < len(lines) and lines[end].strip()
-           and not SECTION_SEPARATOR.fullmatch(lines[end])):
-        end += 1
-    finish = end
-    while finish < len(lines) and not SECTION_SEPARATOR.fullmatch(lines[finish]):
-        finish += 1
     return lines[start + 1:end], lines[end:finish]
 
 
@@ -673,8 +726,9 @@ def _validate_records(metadata: dict, record: dict, collection: dict,
 
 
 def _validate_log(directory: Path, record: dict,
-                  expected_sha: str) -> tuple[list[str], list[str], str, int]:
-    """Validate the raw log against the record; return lines, argv, summary, checks."""
+                  expected_sha: str) -> tuple[list[str], list[str], str, int, range]:
+    """Validate the raw log against the record; return lines, argv, summary, checks
+    and the range of pytest's report sections, which no evidence read uses."""
     lines = _log_lines(directory / "run.log")
     argv = _command_argv(lines)
     summary = _summary_text(record["summary_line"])
@@ -687,11 +741,13 @@ def _validate_log(directory: Path, record: dict,
     if len(summary_indexes) != 1:
         raise EvidenceError("raw log does not contain exactly one matching summary")
     summary_index = summary_indexes[0]
+    report = _test_text_range(lines, summary_index)
+    evidence = [line for index, line in enumerate(lines) if index not in report]
     collection_marker = "FULL-COLLECTION-OK "
     if not any(line.startswith(collection_marker)
-               and line.endswith(f"subject={expected_sha}") for line in lines):
+               and line.endswith(f"subject={expected_sha}") for line in evidence):
         raise EvidenceError("FULL-COLLECTION-OK on the expected SHA is absent")
-    full_run_ok = [line for line in lines if line.startswith("FULL-RUN-OK ")]
+    full_run_ok = [line for line in evidence if line.startswith("FULL-RUN-OK ")]
     if any(not line.endswith(f"subject={expected_sha}") for line in full_run_ok):
         raise EvidenceError("FULL-RUN-OK names a different SHA")
     # Assumed, not measured here: run.log is the job log download, which carries
@@ -701,7 +757,7 @@ def _validate_log(directory: Path, record: dict,
     # before the match lines are counted: when the installed set changed during
     # the run, the after-tests verify step reports the drift too and prints no
     # match line, so a count-first check would hide the cause.
-    if any("CI ENVIRONMENT DRIFT" in line for line in lines):
+    if any("CI ENVIRONMENT DRIFT" in line for line in evidence):
         message = ("the CI environment binding reported environment drift (a CI "
                    "ENVIRONMENT DRIFT heading is in the log), so the run is invalid "
                    "infrastructure")
@@ -710,16 +766,17 @@ def _validate_log(directory: Path, record: dict,
             message += f", and it set exit status 3 over the {names} census failure"
         raise EvidenceError(message)
     environment_indexes = [index for index, line in enumerate(lines)
-                           if "CI environment matches constraints-ci.txt." in line]
+                           if index not in report
+                           and "CI environment matches constraints-ci.txt." in line]
     if (len(environment_indexes) < 2
             or min(environment_indexes) > summary_index
             or max(environment_indexes) < summary_index):
         raise EvidenceError("before/after environment evidence is not clean")
-    if any("PYTEST_ADDOPTS is set" in line for line in lines):
+    if any("PYTEST_ADDOPTS is set" in line for line in evidence):
         raise EvidenceError(
             "a check in the log reported PYTEST_ADDOPTS is set, so the run's "
             "options are not the reviewed command alone")
-    return lines, argv, summary, len(environment_indexes)
+    return lines, argv, summary, len(environment_indexes), report
 
 
 def _census_names(lines: list[str]) -> str:
@@ -901,8 +958,14 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     record = _json_object(artifact / ".full-run-record.json")
     collection = _json_object(artifact / ".full-collection-record.json")
     collected, terminal = _validate_records(metadata, record, collection, expected_sha)
-    lines, argv, summary, environment_passes = _validate_log(
+    lines, argv, summary, environment_passes, report = _validate_log(
         directory, record, expected_sha)
+    # Evidence is read outside pytest's report sections, where only a test's
+    # own text can be; XPASS lines also from the short summary pytest writes.
+    evidence = [line for index, line in enumerate(lines) if index not in report]
+    short_summary = _short_summary_range(lines, report)
+    xpass_source = [line for index, line in enumerate(lines)
+                    if index not in report or index in short_summary]
     header, finish_span = _session_spans(lines)
     shuffle_seed = _shuffle_seed(header)
     census_failures = _census_failures(finish_span)
@@ -912,9 +975,9 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
             "which has no seed option and cannot load pytest-randomly")
     overall_conclusion = _require_environment_step_success(metadata)
     cases, skip_sites, collection_skip_sites = _validate_junit(
-        record, lines, terminal, artifact)
+        record, xpass_source, terminal, artifact)
     verifier_state, verifier_failures, validity = _validate_run_outcomes(
-        record, metadata, lines, overall_conclusion, census_failures)
+        record, metadata, evidence, overall_conclusion, census_failures)
     return {
         "logical_name": logical, "raw_paths": RAW_PATHS, "evidence_errors": [],
         "validity": validity,
@@ -932,14 +995,14 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
         "environment": {
             "overall_conclusion": overall_conclusion,
             "passed_checks": environment_passes,
-            "platform": [line for line in lines if line.startswith("platform ")],
-            "measurements": [line for line in lines if "sys.executable=" in line],
+            "platform": [line for line in evidence if line.startswith("platform ")],
+            "measurements": [line for line in evidence if "sys.executable=" in line],
             # Job NAMES identify the workflow shape; the runner instance id is
             # a fresh value on every GitHub-hosted run and attributes nothing.
             "job_names": [job.get("name") for job in metadata.get("jobs", [])
                           if isinstance(job, dict)],
-            "pins": [line for line in lines if "constraints-ci.txt" in line],
-            "cache": [line for line in lines if line.startswith(CACHE_PREFIXES)],
+            "pins": [line for line in evidence if "constraints-ci.txt" in line],
+            "cache": [line for line in evidence if line.startswith(CACHE_PREFIXES)],
             "pytest_addopts_absent": True},
         "collection": {"collected": collected,
                        "collected_files": collection["collected_files"],
