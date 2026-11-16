@@ -1129,14 +1129,22 @@ def one_git_answer(result) -> Optional[str]:
 
 
 def gitfile_target(text: str) -> Optional[str]:
-    """The git dir a `.git` file names, read as git reads it: the trailing
-    newlines and carriage returns are dropped, and the rest after `gitdir:`
-    is the path, its leading spaces dropped. None when the file does not
-    start with `gitdir:` or names no path."""
-    text = text.rstrip("\r\n")
-    if not text.startswith("gitdir:"):
+    """The git dir a `.git` file names, read as git reads it
+    (`read_gitfile_gently`): the whole file must start with `gitdir: `,
+    exactly one space included; every trailing newline and carriage return
+    is dropped; the rest is the path, verbatim. None when the file does not
+    start with `gitdir: `, names no path, or is larger than the 1 MiB git
+    reads."""
+    if len(os.fsencode(text)) > 1 << 20 or not text.startswith("gitdir: "):
         return None
-    return text[len("gitdir:"):].lstrip(" ") or None
+    return text.rstrip("\r\n")[len("gitdir: "):] or None
+
+
+def worktree_admin_gitdir(text: str) -> str:
+    """The path a worktree admin dir's `gitdir` file names, read as git
+    reads it (`get_linked_worktree`): the whole file, trailing whitespace
+    trimmed."""
+    return text.rstrip(" \t\n\v\f\r")
 
 
 def git_dir_answer(start) -> Optional[str]:
@@ -1463,7 +1471,7 @@ def _marker_target(root: Path) -> Optional[Tuple[Path, Path]]:
         if not marker.is_file():
             # A real `.git` DIRECTORY: an ordinary checkout.
             return None
-        text = marker.read_text(encoding="utf-8", errors="replace")
+        text = os.fsdecode(marker.read_bytes())
     except (OSError, RuntimeError):
         return None
     target = gitfile_target(text)

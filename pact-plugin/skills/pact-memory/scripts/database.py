@@ -1394,16 +1394,16 @@ def _gate_root_paths(roots: Any) -> Tuple[str, ...]:
 
 
 def _gitfile_target(marker: str) -> Optional[str]:
-    """The real path a `gitdir: <path>` file names, or None. Never raises."""
+    """The real path a `gitdir: <path>` file names, read whole as git reads
+    it (`project_identity.gitfile_target`), or None. Never raises."""
+    from .project_identity import gitfile_target
+
     try:
-        with open(marker, encoding="utf-8") as handle:
-            first = handle.readline(4096).strip()
-    except (OSError, UnicodeDecodeError, ValueError):
+        with open(marker, "rb") as handle:
+            target = gitfile_target(os.fsdecode(handle.read()))
+    except (OSError, ValueError):
         return None
-    if not first.startswith("gitdir:"):
-        return None
-    target = first[len("gitdir:"):].strip()
-    if not target:
+    if target is None:
         return None
     if not os.path.isabs(target):
         target = os.path.join(os.path.dirname(marker), target)
@@ -1419,16 +1419,18 @@ def _worktree_admin_of(root: str, root_common: str, name: str) -> bool:
     Read from the COMMON DIR's side, never from the root's own `.git`: the
     admin dir's `gitdir` file must name `<root>/.git` back. Never raises.
     """
+    from .project_identity import worktree_admin_gitdir
+
     admin = os.path.join(root_common, "worktrees", name)
     try:
-        with open(os.path.join(admin, "gitdir"), encoding="utf-8") as handle:
-            back = handle.readline(4096).strip()
+        with open(os.path.join(admin, "gitdir"), "rb") as handle:
+            back = worktree_admin_gitdir(os.fsdecode(handle.read()))
         if not back:
             return False
         if not os.path.isabs(back):
             back = os.path.join(admin, back)
         return os.path.realpath(back) == os.path.realpath(os.path.join(root, ".git"))
-    except (OSError, UnicodeDecodeError, ValueError):
+    except (OSError, ValueError):
         return False
 
 

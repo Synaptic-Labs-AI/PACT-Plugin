@@ -11,6 +11,7 @@ Used by: pytest. Shares the real-git helpers in `fixtures/identity_git.py`.
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -1708,3 +1709,105 @@ class TestTheRedirectCheckRefusesWhatItCannotCheck:
         monkeypatch.setattr(memory_api, "_listed_worktree_toplevels", lambda *a, **k: set())
         assert memory_api._worktree_redirect_cause(worktree, common) == memory_api.REDIRECT_UNLISTED
 
+
+
+# `.git` file texts, each naming the store as git might or might not read it.
+_GITFILE_FORMS = {
+    "plain": "gitdir: {store}\n",
+    "no space": "gitdir:{store}\n",
+    "tab": "gitdir:\t{store}\n",
+    "two spaces": "gitdir:  {store}\n",
+    "crlf and blank lines": "gitdir: {store}\r\n\n\r\n",
+    "no newline": "gitdir: {store}",
+    "upper case": "GITDIR: {store}\n",
+    "nothing after the prefix": "gitdir: \n",
+}
+
+
+class TestAGitFileIsReadAsGitReadsIt:
+    """`gitfile_target` accepts exactly the `.git` files git accepts, and
+    names the git dir git names. git's own answer is the reference: each
+    form is written as a checkout's `.git` and git is asked for the git
+    dir."""
+
+    @pytest.mark.parametrize("form", sorted(_GITFILE_FORMS))
+    def test_each_form_agrees_with_git(self, tmp_path, form):
+        assert_outside_repository(tmp_path)
+        store = tmp_path / "store"
+        run_git("init", "-q", "--bare", str(store), cwd=tmp_path)
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        # Two spaces name " <store>", a path relative to the checkout: a
+        # store is made there too, so git's answer turns on the reading,
+        # not on a missing directory.
+        run_git("init", "-q", "--bare", str(checkout / f" {store}"), cwd=tmp_path)
+        text = _GITFILE_FORMS[form].format(store=store)
+        (checkout / ".git").write_text(text, encoding="utf-8", newline="")
+        answer = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "--absolute-git-dir"],
+            capture_output=True, text=True, env={**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)},
+        )
+        target = pi.gitfile_target(text)
+        if answer.returncode != 0:
+            assert target is None, (form, target, answer.stderr)
+        else:
+            assert target is not None, (form, answer.stdout)
+            resolved = Path(target) if Path(target).is_absolute() else checkout / target
+            assert os.path.realpath(resolved) == os.path.realpath(answer.stdout[:-1]), form
+
+    def test_a_path_holding_a_newline_is_read_whole(self):
+        assert pi.gitfile_target("gitdir: /a\nb/store\n") == "/a\nb/store"
+
+
+class TestTheStoreReadsTheGitFileWhole:
+    """database.py's own `.git` and admin `gitdir` readers take the whole
+    file, so a path holding a newline is not cut, and a `.git` file git
+    refuses names nothing."""
+
+    def test_a_gitfile_naming_a_path_with_a_newline(self, tmp_path):
+        from scripts import database
+
+        store = tmp_path / "st\nore"
+        store.mkdir()
+        marker = tmp_path / ".git"
+        marker.write_text(f"gitdir: {store}\n", encoding="utf-8")
+        assert database._gitfile_target(str(marker)) == os.path.realpath(store)
+
+    def test_a_gitfile_git_refuses_names_nothing(self, tmp_path):
+        from scripts import database
+
+        store = tmp_path / "store"
+        store.mkdir()
+        marker = tmp_path / ".git"
+        marker.write_text(f"gitdir:{store}\n", encoding="utf-8")
+        assert database._gitfile_target(str(marker)) is None
+
+    def test_an_admin_gitdir_naming_a_root_with_a_newline(self, tmp_path):
+        from scripts import database
+
+        root = tmp_path / "ro\not"
+        root.mkdir()
+        common = tmp_path / "common"
+        admin = common / "worktrees" / "wt"
+        admin.mkdir(parents=True)
+        (admin / "gitdir").write_text(f"{root}/.git\n", encoding="utf-8")
+        assert database._worktree_admin_of(str(root), str(common), "wt") is True
+
+    def test_a_gitfile_larger_than_git_reads_names_nothing(self, tmp_path):
+        """git refuses a `.git` file larger than 1 MiB."""
+        from scripts import database
+
+        assert_outside_repository(tmp_path)
+        store = tmp_path / "store"
+        run_git("init", "-q", "--bare", str(store), cwd=tmp_path)
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        marker = checkout / ".git"
+        marker.write_text(f"gitdir: {store}" + "\n" * (1 << 20), encoding="utf-8")
+        answer = subprocess.run(
+            ["git", "-C", str(checkout), "rev-parse", "--git-dir"],
+            capture_output=True, text=True, env={**os.environ, "GIT_CEILING_DIRECTORIES": str(tmp_path)},
+        )
+        assert answer.returncode != 0  # control: git refuses it
+        assert database._gitfile_target(str(marker)) is None
+        assert pi.gitfile_target(marker.read_text(encoding="utf-8")) is None
