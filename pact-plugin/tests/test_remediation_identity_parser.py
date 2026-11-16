@@ -1698,6 +1698,19 @@ class TestTheRedirectCheckRefusesWhatItCannotCheck:
         monkeypatch.setattr(memory_api, "_listed_worktree_toplevels", lambda *a, **k: None)
         assert memory_api._worktree_redirect_cause(worktree, common) == memory_api.REDIRECT_UNLISTABLE
 
+    def test_a_listing_that_cannot_be_read_whole_is_named(self, tmp_path, monkeypatch):
+        from scripts import memory_api
+
+        assert_outside_repository(tmp_path)
+        worktree, common = self._linked(tmp_path)
+        monkeypatch.setattr(
+            memory_api, "_listed_worktree_toplevels",
+            lambda *a, **k: memory_api.UNREADABLE_LISTING,
+        )
+        assert memory_api._worktree_redirect_cause(worktree, common) == (
+            memory_api.REDIRECT_UNREADABLE_LISTING
+        )
+
     def test_the_listed_worktree_passes_and_the_unlisted_one_is_named(self, tmp_path, monkeypatch):
         """Controls: the real worktree passes; the same worktree missing
         from the listing is unlisted, not unlistable."""

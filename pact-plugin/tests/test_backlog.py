@@ -6136,18 +6136,19 @@ fi
 cat "$CANNED_PLAIN"
 """
 
-# (name, -z listing or REJECT/FAIL, plain listing, readable)
+# (name, -z listing or REJECT/FAIL, plain listing, the answer: "records",
+# "unreadable" for a listing that cannot be read whole, or None for no listing)
 _LISTINGS = [
     ("nul", "worktree /a\0HEAD 1\0branch refs/heads/main\0\0worktree /b\nc\0HEAD 2\0detached\0\0",
-     "", True),
+     "", "records"),
     ("plain", "REJECT",
-     "worktree /a\nHEAD 1\nbranch refs/heads/main\n\nworktree /b\nHEAD 2\ndetached\n\n", True),
+     "worktree /a\nHEAD 1\nbranch refs/heads/main\n\nworktree /b\nHEAD 2\ndetached\n\n", "records"),
     ("plain, a path holding a newline", "REJECT",
-     "worktree /a\nHEAD 1\n\nworktree /b\nc\nHEAD 2\n\n", False),
-    ("plain, an unknown field", "REJECT", "worktree /a\nHEAD 1\nfoo bar\n\n", False),
-    ("plain, a repeated field", "REJECT", "worktree /a\nHEAD 1\nHEAD 2\n\n", False),
-    ("plain, a record not led by its path", "REJECT", "HEAD 1\nworktree /a\n\n", False),
-    ("no listing", "FAIL", "", False),
+     "worktree /a\nHEAD 1\n\nworktree /b\nc\nHEAD 2\n\n", "unreadable"),
+    ("plain, an unknown field", "REJECT", "worktree /a\nHEAD 1\nfoo bar\n\n", "unreadable"),
+    ("plain, a repeated field", "REJECT", "worktree /a\nHEAD 1\nHEAD 2\n\n", "unreadable"),
+    ("plain, a record not led by its path", "REJECT", "HEAD 1\nworktree /a\n\n", "unreadable"),
+    ("no listing", "FAIL", "", None),
 ]
 
 
@@ -6182,7 +6183,7 @@ def test_the_worktree_listing_is_read_as_the_memory_skill_reads_it(
     ours = backlog._worktree_records(["-C", str(tmp_path)])
     theirs = memory_api._worktree_records(["-C", str(tmp_path)])
     assert ours == theirs, (name, ours, theirs)
-    assert (ours is not None) == readable, (name, ours)
+    assert ("records" if isinstance(ours, list) else ours) == readable, (name, ours)
 
 
 def test_a_worktree_whose_path_holds_a_newline_is_recorded_whole(tmp_path, monkeypatch):

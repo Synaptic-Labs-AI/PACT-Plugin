@@ -378,9 +378,15 @@ _PORCELAIN_KEYS = ("worktree ", "HEAD ", "branch ", "locked ", "prunable ")
 _PORCELAIN_FLAGS = ("bare", "detached", "locked", "prunable")
 
 
-def _worktree_records(at: Sequence[str]) -> Optional[List[List[str]]]:
+# `_worktree_records`' answer for a listing git printed that cannot be read
+# whole (None is a listing git did not give).
+UNREADABLE_LISTING = "unreadable"
+
+
+def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
     """`git <at> worktree list --porcelain` as records, each the list of its
-    fields, or None when no listing can be had.
+    fields; `UNREADABLE_LISTING` when git printed a listing that cannot be
+    read whole; or None when no listing can be had.
 
     `-z` is asked first: every field then ends in NUL and an empty field ends
     a record, so a path holding a newline stays whole. A git older than 2.36
@@ -389,8 +395,9 @@ def _worktree_records(at: Sequence[str]) -> Optional[List[List[str]]]:
     record, and git prints a path there unquoted, so a path holding a newline
     cannot be read whole: any line that is not a porcelain field, a record
     that does not start with its `worktree` line, or a field repeated in one
-    record makes the listing unreadable (None). None also covers a failed or
-    timed-out git; a caller reads it as "no listing", never as an empty one.
+    record makes the listing unreadable: `UNREADABLE_LISTING`, not records.
+    None is a failed or timed-out git. A caller reads neither as an empty
+    listing.
 
     The same reading as the memory skill's `_worktree_records`, kept separate
     because this module imports nothing from the skill.
@@ -428,7 +435,7 @@ def _worktree_records(at: Sequence[str]) -> Optional[List[List[str]]]:
                 for field in record
             ]
             if None in keys or keys[0] != "worktree " or len(set(keys)) != len(keys):
-                return None
+                return UNREADABLE_LISTING
     return records
 
 
@@ -440,8 +447,9 @@ def checkout_roots() -> List[str]:
     another project's session. A missing entry costs that checkout a loud
     resolution failure UNLESS it sits inside a checkout that IS recorded, in
     which case the read path's enclosing-checkout rung still matches it. The
-    fallback when git cannot answer is the project root alone, which is
-    always right about at least itself.
+    fallback when git cannot answer, or prints a listing that cannot be
+    read whole, is the project root alone, which is always right about at
+    least itself.
 
     Deliberately NOT merged with _branch_and_worktree_names, which runs the
     same porcelain: that caller reduces each `worktree` line to a BASENAME for
@@ -452,7 +460,9 @@ def checkout_roots() -> List[str]:
     """
     # A listing that cannot be read whole (`_worktree_records` is None) adds
     # no root: a truncated path would name another directory.
-    records = _worktree_records(["-C", str(project_root())]) or []
+    records = _worktree_records(["-C", str(project_root())])
+    if not isinstance(records, list):
+        records = []
     roots = [
         str(Path(field[len("worktree "):]).resolve())
         for record in records
@@ -1905,6 +1915,8 @@ def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
         return None
     branches = _run_capture(["git", *at, "branch", "--format=%(refname:short)"])
     worktrees = _worktree_records(at)
+    if not isinstance(worktrees, list):
+        worktrees = None
     if branches is None and worktrees is None:
         return None
     # NAMES ONLY. The porcelain also carries `HEAD <sha>` — once PER WORKTREE —

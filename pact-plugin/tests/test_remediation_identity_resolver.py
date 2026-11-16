@@ -2755,16 +2755,17 @@ class TestTheWorktreeCheckRefusesWithoutAListing:
         """Without `-z` git prints a worktree path unquoted, one field per
         line, so a worktree whose folder holds a newline cannot be read
         whole: the listing is unreadable and the worktree declines on every
-        route, saying git could not list the worktrees."""
+        route, saying git listed the worktrees but a path could not be read
+        whole."""
         from scripts import memory_api
 
-        unlistable = memory_api._REDIRECT_CAUSE_DETAILS[memory_api.REDIRECT_UNLISTABLE]
+        unreadable = memory_api._REDIRECT_CAUSE_DETAILS[memory_api.REDIRECT_UNREADABLE_LISTING]
         assert_outside_repository(tmp_path)
         answers = _route_answers(tmp_path, "control_path_worktree_holding_a_newline", "REJECT_Z")
         wrong = {
             route: answer for route, answer in answers.items()
             if answer[0] is not None or answer[1] != "gitfile_redirect"
-            or answer[2] != unlistable
+            or answer[2] != unreadable
         }
         assert wrong == {}, f"a newline-holding worktree was read from a listing without NUL: {wrong}"
 
@@ -2924,6 +2925,20 @@ class TestARedirectRefusalNamesWhatWasObserved:
         assert refused, f"control: {shape} refused on some route ({answers})"
         wrong = {route: a for route, a in refused.items() if a[2] != self._detail(key)}
         assert wrong == {}, f"{shape} under {mode} named another cause: {wrong}"
+
+    def test_the_cause_docstring_names_every_redirect_cause(self):
+        from scripts import memory_api
+
+        causes = {
+            name for name in dir(memory_api)
+            if name.startswith("REDIRECT_") and name.isupper()
+        }
+        assert causes == {
+            f"REDIRECT_{key.upper()}" for key in memory_api._REDIRECT_CAUSE_DETAILS
+        }, causes
+        doc = memory_api._worktree_redirect_cause.__doc__
+        missing = sorted(name for name in causes if f"`{name}`" not in doc)
+        assert missing == [], missing
 
     def test_the_cause_sentence_claims_no_other_repository(self):
         from scripts import memory_api

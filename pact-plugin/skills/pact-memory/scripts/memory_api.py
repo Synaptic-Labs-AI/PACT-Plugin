@@ -1655,7 +1655,9 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
 
 
 
-def _listed_worktree_toplevels(start, *, git_dir: Optional[Path] = None) -> Optional[set]:
+def _listed_worktree_toplevels(
+    start, *, git_dir: Optional[Path] = None
+) -> "Optional[set | str]":
     """Every toplevel `git worktree list` reports for `start`'s repository.
 
     With `git_dir`, the listing is of THAT repository (`--git-dir`), which is
@@ -1664,6 +1666,8 @@ def _listed_worktree_toplevels(start, *, git_dir: Optional[Path] = None) -> Opti
 
     `None` when git cannot enumerate — a failed ANSWER, not a failed
     verification, so callers must not treat it as proof of a redirect.
+    `UNREADABLE_LISTING` when git printed a listing PACT could not read
+    whole (`_worktree_records`); that is no toplevel set either.
     """
     target = ("--git-dir", _where(git_dir)) if git_dir is not None else ("-C", _where(start))
     return _detection_answer(
@@ -1680,10 +1684,15 @@ _GIT_USAGE_ERROR = 129
 _PORCELAIN_KEYS = ("worktree ", "HEAD ", "branch ", "locked ", "prunable ")
 _PORCELAIN_FLAGS = ("bare", "detached", "locked", "prunable")
 
+# `_worktree_records`' answer for a listing git printed that cannot be read
+# whole (None is a listing git did not give).
+UNREADABLE_LISTING = "unreadable"
 
-def _worktree_records(prefix: list) -> Optional[List[List[str]]]:
+
+def _worktree_records(prefix: list) -> "Optional[List[List[str]] | str]":
     """`git <prefix> worktree list --porcelain` as records, each the list of
-    its fields, or None when no listing can be had.
+    its fields; `UNREADABLE_LISTING` when git printed a listing that cannot
+    be read whole; or None when no listing can be had.
 
     `-z` is asked first: every field then ends in NUL and an empty field ends
     a record, so a path holding a newline stays whole. A git older than 2.36
@@ -1692,9 +1701,9 @@ def _worktree_records(prefix: list) -> Optional[List[List[str]]]:
     record, and git prints a path there unquoted, so a path holding a newline
     cannot be read whole: any line that is not a porcelain field, a record
     that does not start with its `worktree` line, or a field repeated in one
-    record makes the listing unreadable (None). None also covers a failed or
-    timed-out git; a caller must read it as "no listing", never as an empty
-    one.
+    record makes the listing unreadable: `UNREADABLE_LISTING`, not records.
+    None is a failed or timed-out git. A caller reads neither as an empty
+    listing.
     """
     from shared.project_scope import git_env_without_location
 
@@ -1731,19 +1740,19 @@ def _worktree_records(prefix: list) -> Optional[List[List[str]]]:
                 for field in record
             ]
             if None in keys or keys[0] != "worktree " or len(set(keys)) != len(keys):
-                return None
+                return UNREADABLE_LISTING
     return records
 
 
-def _ask_worktree_toplevels(start, git_dir: Optional[Path]) -> Optional[set]:
+def _ask_worktree_toplevels(start, git_dir: Optional[Path]) -> "Optional[set | str]":
     prefix = (
         ["--git-dir", str(git_dir)] if git_dir is not None
         else ["-C", str(start)] if start is not None
         else []
     )
     records = _worktree_records(prefix)
-    if records is None:
-        return None
+    if records is None or records == UNREADABLE_LISTING:
+        return records
     listings = _DETECTION_LISTINGS.get()
     if listings is not None and git_dir is not None:
         listings[str(git_dir)] = records
@@ -1771,7 +1780,8 @@ def _verified_worktree_roots(
     kept only when (a) git does not call it prunable, (b) `W/.git` is a FILE
     whose `gitdir:` is `<common>/worktrees/<name>`, and (c) that admin dir's
     `gitdir` names `W/.git` back. Anything else is dropped, which can only
-    narrow the gate; a listing failure narrows it to the identity root.
+    narrow the gate; no listing, or one PACT cannot read whole
+    (`UNREADABLE_LISTING`), narrows it to the identity root.
 
     `listing`, the records (`_worktree_records`) the detection pass got for
     this same `common_dir`, is used instead of asking git again.
@@ -1780,7 +1790,7 @@ def _verified_worktree_roots(
     if common_dir is None:
         return roots
     records = listing if listing is not None else _worktree_records(["--git-dir", str(common_dir)])
-    if records is None:
+    if records is None or records == UNREADABLE_LISTING:
         return roots
     try:
         admin_parent = (Path(common_dir) / "worktrees").resolve()
@@ -1827,6 +1837,7 @@ REDIRECT_UNLISTED = "unlisted"
 REDIRECT_NO_GIT_DIR = "no_git_dir"
 REDIRECT_UNRESOLVABLE = "unresolvable"
 REDIRECT_UNLISTABLE = "unlistable"
+REDIRECT_UNREADABLE_LISTING = "unreadable_listing"
 
 # Each cause's `cause_detail`: what was observed, and nothing more.
 _REDIRECT_CAUSE_DETAILS = {
@@ -1837,6 +1848,10 @@ _REDIRECT_CAUSE_DETAILS = {
     REDIRECT_NO_GIT_DIR: "git gave no git directory for it",
     REDIRECT_UNRESOLVABLE: "a path git gave for it would not resolve",
     REDIRECT_UNLISTABLE: "git could not list that repository's worktrees",
+    REDIRECT_UNREADABLE_LISTING: (
+        "git listed that repository's worktrees, but PACT could not read a "
+        "path in the listing whole"
+    ),
 }
 
 
@@ -1876,10 +1891,12 @@ def _worktree_redirect_cause(
     MISSING EVIDENCE REFUSES, and the cause names what was missing:
     `REDIRECT_UNLISTED` (git's listing does not hold the checkout),
     `REDIRECT_NO_GIT_DIR` (git gave no git dir), `REDIRECT_UNRESOLVABLE` (a
-    path would not resolve) or `REDIRECT_UNLISTABLE` (no listing:
-    `_listed_worktree_toplevels` is None). A git that does not answer with
-    a toplevel is not refused here: that shape has no working tree, and
-    `_root_guard` declines it `no_working_tree`.
+    path would not resolve), `REDIRECT_UNLISTABLE` (no listing:
+    `_listed_worktree_toplevels` is None) or `REDIRECT_UNREADABLE_LISTING`
+    (git printed a listing PACT could not read whole:
+    `_listed_worktree_toplevels` is `UNREADABLE_LISTING`). A git that does
+    not answer with a toplevel is not refused here: that shape has no
+    working tree, and `_root_guard` declines it `no_working_tree`.
     """
     if asked_root is None or common_dir is None:
         return None
@@ -1903,6 +1920,8 @@ def _worktree_redirect_cause(
     listed = _listed_worktree_toplevels(None, git_dir=common_path)
     if listed is None:
         return REDIRECT_UNLISTABLE
+    if listed == UNREADABLE_LISTING:
+        return REDIRECT_UNREADABLE_LISTING
     if toplevel is None:
         toplevel_raw = _git_rev_parse(str(asked_root), "--show-toplevel")
         if toplevel_raw is None:
