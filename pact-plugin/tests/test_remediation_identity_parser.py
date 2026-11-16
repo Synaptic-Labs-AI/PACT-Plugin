@@ -1860,7 +1860,7 @@ class TestTheSubmoduleCheckRefusesWhatItCannotCheck:
         identity = pi.detect_id_for_root(submodule, common)
         assert identity.project_id is None and identity.decline_reason["reason"] == "submodule_checkout"
 
-    def test_a_dot_git_that_cannot_be_examined_declines(self, tmp_path, monkeypatch):
+    def test_a_dot_git_that_cannot_be_examined_counts_as_a_submodule(self, tmp_path, monkeypatch):
         submodule, common = self._submodule(tmp_path)
         real = Path.is_file
         marker = submodule / ".git"
@@ -1888,7 +1888,7 @@ class TestTheSubmoduleCheckRefusesWhatItCannotCheck:
         identity = pi.detect_id_for_root(submodule, common)
         assert identity.project_id is None and identity.decline_reason["reason"] == "submodule_checkout"
 
-    def test_a_common_dir_that_will_not_resolve_declines(self, tmp_path, monkeypatch):
+    def test_a_common_dir_that_will_not_resolve_counts_as_a_submodule(self, tmp_path, monkeypatch):
         submodule, _common = self._submodule(tmp_path)
         monkeypatch.setattr(pi, "_submodule_admin_dir", lambda path: True)
         monkeypatch.setattr(pi, "_resolved_git_dir", lambda asked: Path("/somewhere"))
@@ -1930,6 +1930,10 @@ class TestAnOversizedGitFileIsNotReadWhole:
     def test_the_marker_reader(self, tmp_path):
         assert_outside_repository(tmp_path)
         (tmp_path / "store").mkdir()
+        (tmp_path / ".git").write_text(f"gitdir: {tmp_path / 'store'}\n")
+        assert pi._marker_target(tmp_path) == (  # control: a normal file names it
+            (tmp_path / "store").resolve(), tmp_path,
+        )
         _sparse(tmp_path / ".git", f"gitdir: {tmp_path / 'store'}\n")
         answer, peak = _peak_bytes(lambda: pi._marker_target(tmp_path))
         assert answer is None and peak < self.LIMIT, (answer, peak)
@@ -1938,6 +1942,10 @@ class TestAnOversizedGitFileIsNotReadWhole:
         from scripts import database
 
         (tmp_path / "store").mkdir()
+        (tmp_path / ".git").write_text(f"gitdir: {tmp_path / 'store'}\n")
+        assert database._gitfile_target(str(tmp_path / ".git")) == os.path.realpath(
+            tmp_path / "store"
+        )  # control: a normal file names it
         marker = _sparse(tmp_path / ".git", f"gitdir: {tmp_path / 'store'}\n")
         answer, peak = _peak_bytes(lambda: database._gitfile_target(str(marker)))
         assert answer is None and peak < self.LIMIT, (answer, peak)
@@ -1949,6 +1957,10 @@ class TestAnOversizedGitFileIsNotReadWhole:
         root.mkdir()
         admin = tmp_path / "common" / "worktrees" / "wt"
         admin.mkdir(parents=True)
+        (admin / "gitdir").write_text(f"{root}/.git\n")
+        assert database._worktree_admin_of(  # control: a normal file names it back
+            str(root), str(tmp_path / "common"), "wt"
+        ) is True
         _sparse(admin / "gitdir", f"{root}/.git\n")
         answer, peak = _peak_bytes(
             lambda: database._worktree_admin_of(str(root), str(tmp_path / "common"), "wt")

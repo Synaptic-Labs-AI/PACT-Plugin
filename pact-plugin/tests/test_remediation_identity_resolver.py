@@ -2598,9 +2598,9 @@ class TestTheLegacyProbeLetsTheCallersErrorThrough:
 
 
 # A `git` that answers every command as the real one does, except `worktree
-# list`: with REJECT_Z it rejects `-z` exactly as git before 2.36 does (its
-# `list` options carry no 'z', so parse_options prints "unknown switch `z'"
-# and the usage and exits 129); with FAIL_LISTING every `worktree list`
+# list`: with REJECT_Z it rejects `-z` as git before 2.36 does (its `list`
+# options carry no 'z', so parse_options prints "unknown switch `z'", then
+# the usage, shortened here, and exits 129); with FAIL_LISTING every `worktree list`
 # fails as git does on a repository it cannot read; with
 # FAIL_ABSOLUTE_GIT_DIR every `rev-parse --absolute-git-dir` fails; with
 # FAIL_GIT_DIR every `rev-parse --git-dir` fails (the global `--git-dir <dir>`
@@ -2806,13 +2806,17 @@ class TestAnOldGitsEchoedOptionIsNoAnswer:
     `--git-common-dir` (2.5) prints the option back as if it were an
     argument. Such an answer is no answer: it is never read as a path."""
 
-    @pytest.mark.parametrize(
-        "shape", ["control_own_checkout", "control_own_linked_worktree", "control_own_submodule"]
-    )
+    @pytest.mark.parametrize("shape", [
+        "control_own_checkout",
+        pytest.param("control_own_linked_worktree", id="control-linked_worktree"),
+        pytest.param("control_own_submodule", id="control-submodule"),
+    ])
     def test_an_echoed_git_dir_binds_no_folder_name(self, tmp_path, shape):
         """Each route binds the repository's own origin or declines; the
         cwd-marker routes, the ones that ask for the absolute git dir, never
-        read the echo as a git dir that git looked past."""
+        read the echo as a git dir that git looked past. The checkout is the
+        case the echo broke; the linked worktree and the submodule bound
+        their own id even then, and are controls."""
         assert_outside_repository(tmp_path)
         answers = _route_answers(tmp_path, shape, "ECHO--absolute-git-dir")
         canonical = {
