@@ -1259,7 +1259,15 @@ def test_a_malformed_launch_that_names_no_pytest_is_left_to_its_launcher(census_
     ([PY, "-m", "pytest", 1], None),
     ([PY, "-mpytest", 1], None),
     ([PY, "-I", "-m", "pytest.__main__", 1], None),
+    # A short-option cluster ending in m is the interpreter's -m.
+    ([PY, "-Im", "pytest.__main__", 1], None),
+    ([PY, "-Impytest.__main__", 1], None),
     (["coverage", "run", "--module", "pytest", 1], None),
+    (["coverage", "run", "-m", "pytest.__main__", 1], None),
+    (["bash", "-c", "git status; python3 -Im pytest.__main__", 1], None),
+    # The word pytest is pytest's program name wherever it stands, so this
+    # fails closed although the -am is git's.
+    (["git", "commit", "-am", "pytest", 1], None),
     (["bash", "-c", b"cd x && pytest -q", 1], None),
     # Operators written against pytest's name, as the shell reader splits them.
     (["bash", "-c", "cd x&&pytest -q", 1], None),
@@ -1296,6 +1304,30 @@ def test_a_malformed_launch_that_only_contains_pytest_is_left_to_its_launcher(
         census_state, argv, env):
     before = list(census_state["misses"])
     census._audit("subprocess.Popen", (None, argv, None, env))
+    assert census_state["misses"] == before
+
+
+@pytest.mark.parametrize("argv", [
+    # Only an interpreter or coverage takes -m; here the -m, the cluster
+    # ending in m and --module are git's.
+    ["git", "commit", "-m", "pytest.__main__", 1],
+    ["git", "commit", "-am", "pytest.__main__", 1],
+    ["git", "commit", "-ampytest", 1],
+    ["git", "commit", "-ampytest.__main__", 1],
+    ["git", "commit", "--module", "pytest.__main__", 1],
+    # A shell operator ends the interpreter's command.
+    ["bash", "-c", "python3 -V; git commit -am pytest.__main__", 1],
+])
+def test_a_malformed_launch_whose_m_belongs_to_no_interpreter_is_left_to_its_launcher(
+        census_state, argv):
+    before = list(census_state["misses"])
+    census._audit("subprocess.Popen", (None, argv, None, None))
+    assert census_state["misses"] == before
+
+
+def test_a_well_formed_git_commit_am_pytest_is_not_a_pytest_launch(census_state):
+    before = list(census_state["misses"])
+    census._audit("subprocess.Popen", (None, ["git", "commit", "-am", "pytest"], None, None))
     assert census_state["misses"] == before
 
 

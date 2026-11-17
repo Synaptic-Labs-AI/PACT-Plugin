@@ -222,10 +222,13 @@ A launch the census cannot read (a word or env value that is not text) is
 recorded as a fault line naming PYTEST_CURRENT_TEST and the launch, and fails
 the session, when one of its words names pytest as a program or module:
 pytest's program (`pytest`, `py.test`, by path or not) or `pytest/__main__.py`,
-or `pytest` after `-m` or `--module`. A word that only contains `pytest`, such
-as a tmp_path under /tmp/pytest-of-<user>/, does not. A malformed launch that
-names pytest in neither way is left to the launcher's own error. The launch
-itself is never aborted for a fault.
+wherever the word stands, so the word `pytest` in `git commit -am pytest`
+counts; or `pytest` after `-m`, a short-option cluster ending in `m`, or
+`--module`, only in a command that names an interpreter or `coverage` before
+it (in `git commit -am pytest.__main__` the `-am` is git's). A word that only
+contains `pytest`, such as a tmp_path under /tmp/pytest-of-<user>/, does not.
+A malformed launch that names pytest in neither way is left to the launcher's
+own error. The launch itself is never aborted for a fault.
 
 Blind spots, examples of launches outside the census:
 1. A pytest started by a shell script file or another program the census does
@@ -483,8 +486,12 @@ def _shown(argv):
 
 def _names_pytest(argv):
     """True when a launch the census could not judge names pytest as a program or
-    module: a word that is pytest's program or `pytest/__main__.py`, or pytest's
-    module after `-m` (bundled or not) or `--module`. Each item is split into
+    module: a word that is pytest's program or `pytest/__main__.py`, wherever it
+    stands (so `git commit -am pytest` counts, the word `pytest` being the
+    program's name), or pytest's module after `-m` (bundled or not, alone or
+    ending a short-option cluster) or `--module` in a command whose earlier
+    words include an interpreter or `coverage`, the programs that take `-m`; a
+    shell operator word starts a new command. Each item is split into
     words as the shell reader splits them (_lex, which makes each run of
     operator characters its own word and falls back to a plain split on an
     unclosed quote), and each word again at backticks, so shell text counts
@@ -492,11 +499,19 @@ def _names_pytest(argv):
     /tmp/pytest-of-<user>/) does not."""
     words = [piece for item in _items(argv) for word in _lex(_text(item))
              for piece in word.split("`") if piece]
-    return any(
-        _is_pytest_script(word) or bool(_BUNDLED_MODULE.match(word))
-        or (word in _PYTEST_MODULES and at > 0
-            and (words[at - 1] == "--module" or re.fullmatch(r"-[A-Za-z]*m", words[at - 1])))
-        for at, word in enumerate(words))
+    takes_m = False
+    for at, word in enumerate(words):
+        if _is_pytest_script(word):
+            return True
+        if set(word) <= set(_OPERATOR_CHARS):
+            takes_m = False  # a new command starts after a shell operator
+        elif _is_interpreter(word) or _COVERAGE_PROGRAM.match(_command_name(word)):
+            takes_m = True
+        elif takes_m and (bool(_BUNDLED_MODULE.match(word)) or (
+                word in _PYTEST_MODULES and at > 0
+                and (words[at - 1] == "--module" or re.fullmatch(r"-[A-Za-z]*m", words[at - 1])))):
+            return True
+    return False
 
 
 def _miss(argv, cwd, env):
