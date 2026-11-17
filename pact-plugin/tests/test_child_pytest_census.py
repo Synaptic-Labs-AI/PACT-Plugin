@@ -32,16 +32,28 @@ def _child_env():
     return {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
 
 
+def _session_env():
+    """_child_env() without GITHUB_*, for a child session at the plugin root,
+    which loads pact-plugin/conftest.py: the CI environment binding and the
+    full-run recorder registered there act only under GITHUB_ACTIONS, and a
+    binding drift in the child would change its output and exit status. The
+    census reads no GITHUB_ name and is registered unconditionally."""
+    return {k: v for k, v in _child_env().items() if not k.startswith("GITHUB_")}
+
+
 @pytest.fixture
 def census_state():
     """Restore the census's recorded lines, so a deliberate miss here does not
     fail the session that runs this module."""
     saved = {key: list(census._state[key]) for key in ("misses", "forwarded")}
+    collected = set(census._state["collected"])
     try:
         yield census._state
     finally:
         for key, value in saved.items():
             census._state[key][:] = value
+        census._state["collected"].clear()
+        census._state["collected"].update(collected)
 
 
 @pytest.mark.parametrize("argv", [
@@ -1193,10 +1205,40 @@ def test_every_documented_family_has_a_refused_row_and_no_other_family_exists():
     assert not unrefused, f"family rows the census accepts: {unrefused}"
 
 
+# The family each row is refused by. Only a [wrapper] refusal names its route in
+# the line ("starts through <program>"); every other family's line says "does
+# not block pytest-randomly", so its family is read from the argv by the census
+# helpers that define it: [program] _is_pytest_script, [coverage]
+# _COVERAGE_PROGRAM, [module] and [script] _is_interpreter with _module,
+# [shell] _SHELLS, and [mention] a program none of them reads (_modelled false)
+# whose refusal a block lifts.
+def _refusing_family(argv):
+    line = census._miss(argv, None, {})
+    assert line is not None, argv
+    program = argv[0]
+    if "starts through %s, which the census does not read" % program in line:
+        assert census._miss([*argv, *_BLOCK], None, {}) is not None, argv
+        return "wrapper"
+    assert "does not block pytest-randomly" in line, line
+    name = census._command_name(program)
+    if name in census._SHELLS:
+        return "shell"
+    if census._is_pytest_script(program):
+        return "program"
+    if census._COVERAGE_PROGRAM.match(name):
+        return "coverage"
+    if census._is_interpreter(program):
+        module = census._module(argv, 1)[0]
+        return "module" if module in (*census._PYTEST_MODULES, "coverage") else "script"
+    if not census._modelled(program) and census._miss([*argv, *_BLOCK], None, {}) is None:
+        return "mention"
+    return "unknown"
+
+
 @pytest.mark.parametrize("family, argv", [
     (family, argv) for family, rows in sorted(_FAMILY_ROWS.items()) for argv in rows])
-def test_each_documented_family_is_refused(family, argv):
-    assert census._miss(argv, None, {}) is not None, (family, argv)
+def test_each_documented_family_is_refused_by_that_family(family, argv):
+    assert _refusing_family(argv) == family, (family, argv)
 
 
 def test_the_lock_pins_the_versions_the_census_replays():
@@ -1321,6 +1363,18 @@ def test_a_live_launch_from_a_deleted_cwd_is_refused(deleted_cwd, census_state):
 def test_a_blocked_launch_from_a_deleted_cwd_is_accepted(deleted_cwd, census_state):
     before = list(census_state["misses"])
     census._audit("subprocess.Popen", (None, [PY, "-m", "pytest", *_BLOCK], None, None))
+    assert census_state["misses"] == before
+
+
+@pytest.mark.parametrize("command", ["pytest -q", b"pytest -q", "cd x && python -m pytest"])
+def test_a_command_line_audited_as_one_string_is_judged(census_state, command):
+    """Windows audits subprocess.Popen with its command line as one string; the
+    census reads it as shell text, refused unblocked and accepted blocked."""
+    with pytest.raises(census.ChildPytestCensusError):
+        census._audit("subprocess.Popen", (None, command, None, None))
+    blocked = command + (b" -p no:randomly" if isinstance(command, bytes) else " -p no:randomly")
+    before = list(census_state["misses"])
+    census._audit("subprocess.Popen", (None, blocked, None, None))
     assert census_state["misses"] == before
 
 
@@ -1535,6 +1589,35 @@ def test_a_worker_hands_its_misses_to_the_controller(census_state):
     assert reporter.lines[1] == "  [gw3] " + line
 
 
+def test_a_worker_collected_twice_is_reported_once(census_state):
+    """xdist calls pytest_testnodedown twice for a worker that ends on a keyboard
+    interrupt (worker_workerfinished, then worker_errordown), with the same node.
+    Its lines are taken once; a second worker with its own gateway id, and a
+    second node with no gateway, are still taken."""
+    line = "t::b: pytest child [y] ...; " + census.REMEDY
+    census_state["misses"][:] = []
+    census_state["forwarded"][:] = []
+    census_state["collected"].clear()
+
+    def node(gateway_id):
+        gateway = type("Gateway", (), {"id": gateway_id})() if gateway_id else None
+        return type("Node", (), {"workeroutput": {census.WORKEROUTPUT_KEY: [line]},
+                                 "gateway": gateway})()
+
+    # Every node is held, so no id(node) key is reused by a freed object.
+    interrupted, second, first_bare, second_bare = node("gw3"), node("gw4"), node(None), node(None)
+    census.collect(interrupted)
+    census.collect(interrupted)
+    census.collect(second)
+    census.collect(first_bare)
+    census.collect(second_bare)
+    assert census_state["forwarded"] == [
+        "[gw3] " + line, "[gw4] " + line, "[worker] " + line, "[worker] " + line]
+    reporter = _Reporter()
+    census.finish(_Session(_Config(reporter)))
+    assert reporter.lines[0].startswith("CHILD PYTEST CENSUS: 4 "), reporter.lines
+
+
 # A rig session loads tests/conftest.py and registers the child-pytest census as
 # pact-plugin/conftest.py does, and refuses to run unless exactly one census is
 # installed, so no rig arm that expects no miss can pass with none. It copies
@@ -1690,17 +1773,20 @@ def pytest_sessionfinish(session):
                                    (_SKILLS_TEST, "tests/test_session_home_sandbox.py")],
                          ids=["skills-alone", "skills-and-tests"])
 def test_a_session_with_or_without_the_tests_conftest_refuses_an_unblocked_child(
-        tmp_path, paths):
+        tmp_path, paths, monkeypatch):
     """A real session over a skills/ test alone loads pact-plugin/conftest.py but
     not tests/conftest.py, and its twin loads both. Each installs one census:
     a pytest child that does not block pytest-randomly is refused before it
-    starts, and the session fails with one census report."""
+    starts, and the session fails with one census report. GITHUB_ACTIONS is set
+    here as on CI, and _session_env() must keep it from the child."""
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     plugin_root = Path(__file__).resolve().parents[1]
     if not (plugin_root / _SKILLS_TEST).is_file():
         pytest.skip("SKIPPED, NOT PASSED: %s is not in this tree" % _SKILLS_TEST)
     (tmp_path / "child_census_launch_probe.py").write_text(_UNBLOCKED_PROBE, encoding="utf-8")
     marker = tmp_path / "outcome"
-    env = _child_env()
+    env = _session_env()
+    assert not [name for name in env if name.startswith("GITHUB_")], sorted(env)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
     env["CHILD_CENSUS_PROBE_MARKER"] = str(marker)
     proc = subprocess.run(
@@ -1746,20 +1832,22 @@ def pytest_runtest_call(item):
 
 
 @pytest.mark.parametrize("blocked", [False, True], ids=["unblocked", "blocked"])
-def test_under_xdist_the_real_root_conftest_fails_a_swallowed_miss(tmp_path, blocked):
+def test_under_xdist_the_real_root_conftest_fails_a_swallowed_miss(tmp_path, blocked,
+                                                                   monkeypatch):
     """A real `-n 2` session at the plugin root loads pact-plugin/conftest.py and
     tests/conftest.py as the suite does. One named test launches an unblocked
     pytest child on its worker and swallows the refusal: the worker hands the
     miss to the controller, which fails the session with one census report
     naming that test. Blocked, the same child runs and the session passes.
-    GITHUB_* is removed so the CI environment binding and the full-run recorder,
-    both gated on GITHUB_ACTIONS, stay inert; the census reads no GITHUB_ name
-    and the root conftest registers it unconditionally."""
+    GITHUB_ACTIONS is set here as on CI, and _session_env() must keep it from
+    the child."""
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     pytest.importorskip("xdist")
     plugin_root = Path(__file__).resolve().parents[1]
     (tmp_path / "child_census_xdist_probe.py").write_text(_XDIST_PROBE, encoding="utf-8")
     marker = tmp_path / "outcome"
-    env = {key: value for key, value in _child_env().items() if not key.startswith("GITHUB_")}
+    env = _session_env()
+    assert not [name for name in env if name.startswith("GITHUB_")], sorted(env)
     env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
     env["CHILD_CENSUS_PROBE_MARKER"] = str(marker)
     env["CHILD_CENSUS_PROBE_TARGET"] = _XDIST_TARGET

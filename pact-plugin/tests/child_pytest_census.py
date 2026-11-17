@@ -401,7 +401,7 @@ _COVERAGE_VALUE_OPTIONS = frozenset({"--rcfile", "--source", "--include", "--omi
                                      "--save-signal", "--debug"})
 _MAX_DEPTH = 4
 
-_state = {"installed": False, "misses": [], "forwarded": []}
+_state = {"installed": False, "misses": [], "forwarded": [], "collected": set()}
 
 
 class ChildPytestCensusError(RuntimeError):
@@ -549,6 +549,8 @@ def _miss(argv, cwd, env):
     environment = (dict(os.environ) if env is None
                    else {os.fsdecode(k): os.fsdecode(v) for k, v in env.items()})
     if isinstance(argv, (str, bytes)):
+        # Windows audits subprocess.Popen with the command line as one string
+        # (list2cmdline runs before the audit); POSIX always audits a list.
         words = _lex(os.fsdecode(argv))
         commands = _shell_commands(os.fsdecode(argv), environment, 0)
     else:
@@ -1404,7 +1406,15 @@ def _record(line):
 
 
 def collect(node):
-    """Controller side: take the lines a finished xdist worker handed over."""
+    """Controller side: take the lines a finished xdist worker handed over, once
+    per worker. xdist calls pytest_testnodedown twice for a worker that ends on
+    a keyboard interrupt (from worker_workerfinished, then worker_errordown), so
+    a repeat for the same gateway id, or the same node without one, is skipped.
+    A restarted worker gets a fresh gateway id, so it is never skipped."""
+    key = getattr(getattr(node, "gateway", None), "id", None) or id(node)
+    if key in _state["collected"]:
+        return
+    _state["collected"].add(key)
     output = getattr(node, "workeroutput", None) or {}
     name = getattr(getattr(node, "gateway", None), "id", "worker")
     for line in output.get(WORKEROUTPUT_KEY) or ():
