@@ -1797,7 +1797,7 @@ JUNIT_REWRITTEN_REASONS = {
     "control-character": ("xfail", f"bell#x07here\nXPASS {ALPHA}",
                           f"bell\x07here\nXPASS {ALPHA}"),
     "vertical-tab": ("xfail", f"vt#x0BXPASS {ALPHA}", f"vt\x0bXPASS {ALPHA}"),
-    "line-separator": ("xfail", f"ls XPASS {ALPHA}", f"ls XPASS {ALPHA}"),
+    "line-separator": ("xfail", f"ls\u2028XPASS {ALPHA}", f"ls\u2028XPASS {ALPHA}"),
     "skip-form-feed": ("skip", f"ff#x0CXPASS {ALPHA}", f"ff\x0cXPASS {ALPHA}"),
 }
 
