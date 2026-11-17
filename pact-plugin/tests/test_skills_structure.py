@@ -9,6 +9,7 @@ Tests cover:
 5. SKILL.md body contains substantive content
 """
 import ast
+import re
 import subprocess
 from pathlib import Path
 
@@ -818,6 +819,14 @@ class TestWorktreeSetupVenvLinkReportPins:
         )
 
 
+# A forward pointer to an artifact the text defines later. The cold
+# prompt's order pin in test_peer_review_cold_lane_pin.py bans the same
+# phrasings in its clause.
+FORWARD_POINTER = re.compile(
+    r"\b(?:described|defined|given|built|explained|shown)\s+(?:below|next|later)\b|\bsee below\b",
+    re.IGNORECASE)
+
+
 class TestRunReceiptAttribution:
     """The pact-agent-teams Step 0 run receipt, branch by branch.
 
@@ -830,8 +839,12 @@ class TestRunReceiptAttribution:
     - The whole change, new files included, is staged by explicit path before
       each reported run; a run that starts with an unstaged or untracked path
       of the change does not count and is run again after staging.
-    - A moved HEAD is re-run once before the HANDOFF, in the isolated copy
-      that holds the change, never in the worktree. That copy's run is the
+    - The isolated copy that holds the change is defined in its own
+      sub-bullet before every re-run that uses it, with no forward pointer:
+      a remote-less clone at the pre-run HEAD with the saved staged change
+      applied.
+    - A moved HEAD is re-run once before the HANDOFF, in that copy, never
+      in the worktree. That copy's run is the
       result; its own staged files are never read as written by the run.
     - If the copy cannot be built or the command cannot be run in it, after
       a moved HEAD, a status-only change or a worktree run's failing tests
@@ -841,9 +854,8 @@ class TestRunReceiptAttribution:
       never takes paths the change copy reproduces: on any run, those follow
       the pre-existing and failure branches.
     - A status-only change is re-run with the same interpreter, by absolute
-      path, in the same copy: a remote-less clone at the pre-run HEAD with
-      the saved staged change applied, never the live index. That copy's run
-      is the result, stated once per branch.
+      path, in the same copy, never the live index. That copy's run is the
+      result, stated once per branch.
     - One baseline clone, defined in its own sub-bullet before every
       branch, serves both the reproduced-path check and the failing-test
       rule: a remote-less clone at the HEAD recorded before the run, with no
@@ -895,7 +907,7 @@ class TestRunReceiptAttribution:
          "a peer's staged change to another path stays out of the change copy"),
         ("A path you share with a peer carries the peer's staged hunks in that file too: name each such path in your HANDOFF, and a failure that a peer's hunk alone explains is reported, with the path, and is not a failure of your change.",
          "a shared path is named, and a failure a peer's hunk alone explains is not the teammate's"),
-        ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, in the isolated copy that holds your change described below, not in the worktree, and never report the moved run as a pass or a failure of your change.",
+        ("If `HEAD` differs, the worktree moved during the run: re-run it once before you write the HANDOFF, in the isolated copy that holds your change, not in the worktree, and never report the moved run as a pass or a failure of your change.",
          "the moved-HEAD branch: one re-run, in the change copy, never the worktree"),
         ("never report the moved run as a pass or a failure of your change. That copy's run is your result.",
          "the moved-HEAD copy run as the result"),
@@ -903,10 +915,10 @@ class TestRunReceiptAttribution:
          "the stop: unattributable only when the copy cannot be built or run, naming what moved, with the unmet precondition stated"),
         ("This exit never applies to paths the copy that holds your change reproduces; on any run, those follow the pre-existing and failure branches below.",
          "a reproduced write never reaches the unattributable exit"),
-        ("If only the status differs, re-run the same command with the same interpreter, by absolute path (for example the worktree's venv `python`), in an isolated copy that holds your staged change:",
+        ("If only the status differs, re-run the same command with the same interpreter, by absolute path (for example the worktree's venv `python`), in the isolated copy that holds your change. Compare its status before and after. That copy's run is your result.",
          "the isolated-copy re-run, with the same interpreter by absolute path"),
-        ("a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone. Compare its status before and after. That copy's run is your result.",
-         "the recipe: the pre-run HEAD plus the staged change saved before the run"),
+        ("Every re-run below uses one isolated copy that holds your change: a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone.",
+         "the recipe, defined once before every re-run: the pre-run HEAD plus the staged change saved before the run"),
         ("The reproduced-path check and the failing-test rule below both use one baseline clone: a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with no change applied.",
          "the one baseline clone both rules use: the recorded pre-run HEAD with no change applied"),
         ("After either re-run, every path that differs between the status of the copy that holds your change before and after its run is a reproduced path, and a path that changed in the worktree but does not change in that copy came from outside the run and is not a failure of your change.",
@@ -1116,6 +1128,30 @@ class TestRunReceiptAttribution:
         assert "is pre-existing only when" not in text, (
             f"the {self.REL_PATH} failing-test rule still decides a failure by the "
             "baseline clone alone, charging a peer's worktree edits to the teammate"
+        )
+
+    def test_change_copy_defined_before_first_use(self):
+        # An agent reads the receipt top-down: the copy's recipe must come
+        # before the first branch that re-runs in it, and no sentence may
+        # point forward to an artifact defined later.
+        bullet = self._bullet()
+        define = bullet.find("  - Every re-run below uses one isolated copy that holds your change: a clone of the repository")
+        baseline = bullet.find("  - The reproduced-path check and the failing-test rule below both use one baseline clone")
+        first_use = bullet.find("  - If `HEAD` differs")
+        assert -1 not in (define, baseline, first_use) and baseline < first_use and define < first_use, (
+            f"the {self.REL_PATH} run receipt must define the baseline clone and "
+            "the copy that holds your change before the moved-HEAD branch, the "
+            f"first that uses them (positions baseline={baseline}, copy={define}, "
+            f"first use={first_use})"
+        )
+        assert bullet.find("`git diff --cached --binary -- <your paths>`") < define, (
+            f"the {self.REL_PATH} run receipt must save the staged change before "
+            "the copy that applies it is defined"
+        )
+        pointer = FORWARD_POINTER.search(bullet)
+        assert pointer is None, (
+            f"the {self.REL_PATH} run receipt points forward to an artifact it "
+            f"has not defined yet: {pointer.group(0)!r}"
         )
 
     def test_receipt_names_no_archive_export(self):

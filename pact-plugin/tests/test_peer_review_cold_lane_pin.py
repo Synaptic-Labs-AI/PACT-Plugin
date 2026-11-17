@@ -853,8 +853,12 @@ class TestOperationalFactsClause:
             "the cold prompt must define the {head} clone before the moved-HEAD "
             "branch, the first branch that uses it"
         )
-        assert "described next" not in clause, (
-            "the cold prompt points forward to a clone it has not defined yet"
+        pointer = re.search(
+            r"\b(?:described|defined|given|built|explained|shown)\s+(?:below|next|later)\b|\bsee below\b",
+            clause, re.IGNORECASE)
+        assert pointer is None, (
+            "the cold prompt points forward to a clone it has not defined yet: "
+            f"{pointer.group(0)!r}"
         )
 
     @pytest.mark.parametrize("token, lost", [
