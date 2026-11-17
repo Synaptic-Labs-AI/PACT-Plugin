@@ -10,6 +10,7 @@ from __future__ import annotations
 import ast
 import logging
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -3087,6 +3088,96 @@ LOCAL_SHAPES = {
     "moved_linked_worktree": _moved_linked_worktree,
     "copied_linked_worktree": _copied_linked_worktree,
 }
+
+# How a linked worktree comes to carry each field git prints in its listing
+# record (`memory_api._PORCELAIN_ORDER`): the git commands run after `git
+# worktree add`, and whether the worktree is added detached.
+_RECORD_FIELD_SETUP = {
+    "branch ": ((), False),
+    "detached": ((), True),
+    "locked": ((("worktree", "lock"),), False),
+    "locked ": ((("worktree", "lock", "--reason", "on a drive"),), False),
+}
+# The fields no linked-worktree state sets: every record has `worktree` and
+# `HEAD`, `bare` is the main repository's alone, and `prunable` is git's own
+# mark on the entry this arm reads, not a state set up beforehand.
+_RECORD_FIELDS_NOT_SET_UP = {"worktree ", "HEAD ", "bare", "prunable "}
+
+
+def _relocated_worktree(field: str, how: str):
+    """A builder for a linked worktree carrying `field`, then moved with `mv`
+    or copied, and git's own answer to whether it marks the entry prunable."""
+    import shutil
+
+    commands, detached = _RECORD_FIELD_SETUP[field]
+    marked = {}
+
+    def build(base: Path) -> Path:
+        main = make_repo(base / "main", remote="https://github.com/me/relocated.git")
+        linked = base / "linked"
+        if detached:
+            run_git("worktree", "add", "-q", "--detach", str(linked), cwd=main)
+        else:
+            make_worktree(main, linked, "wt")
+        for command in commands:
+            run_git(*command, str(linked), cwd=main)
+        if how == "moved":
+            linked.rename(base / "target")
+        else:
+            shutil.copytree(linked, base / "target", symlinks=True)
+        listing = subprocess.run(
+            ["git", "-C", str(main), "worktree", "list", "--porcelain", "-z"],
+            capture_output=True, check=True,
+        ).stdout.decode()
+        records = [record.split("\0") for record in listing.split("\0\0") if record]
+        entry = [r for r in records if r[0] == f"worktree {linked.resolve()}"]
+        marked["prunable"] = bool(entry) and any(f.startswith("prunable ") for f in entry[0])
+        return base / "target"
+
+    return build, marked
+
+
+class TestARelocatedWorktreeIsMovedOnlyWhereGitSaysSo:
+    """A worktree whose `.git` names an entry git lists elsewhere is named
+    moved exactly when git's listing marks that entry prunable, on every
+    route. The layouts cover every field git prints for a linked worktree,
+    each moved with `mv` and copied, so neither a missing folder nor any
+    other field stands in for git's mark."""
+
+    def test_every_record_field_is_set_up_or_named(self):
+        from scripts import memory_api
+
+        fields = {key for key, _place in memory_api._PORCELAIN_ORDER}
+        assert fields == set(_RECORD_FIELD_SETUP) | _RECORD_FIELDS_NOT_SET_UP, fields
+
+    def test_control_git_marks_some_moved_entries_and_not_others(self, tmp_path):
+        """Control: among the moved layouts git marks some entries prunable
+        and leaves others unmarked, so the arm below checks both answers."""
+        marks = set()
+        for index, field in enumerate(sorted(_RECORD_FIELD_SETUP)):
+            build, marked = _relocated_worktree(field, "moved")
+            base = tmp_path / str(index)
+            base.mkdir()
+            build(base)
+            marks.add(marked["prunable"])
+        assert marks == {True, False}, marks
+
+    @pytest.mark.parametrize("how", ["moved", "copied"])
+    @pytest.mark.parametrize("field", sorted(_RECORD_FIELD_SETUP))
+    def test_moved_exactly_when_git_marks_it_prunable(self, tmp_path, monkeypatch, field, how):
+        from fixtures.identity_routes import SHAPES, _with_sub
+        from scripts import memory_api
+
+        assert_outside_repository(tmp_path)
+        build, marked = _relocated_worktree(field, how)
+        monkeypatch.setitem(SHAPES, "relocated_worktree", _with_sub(build))
+        answers = _route_answers(tmp_path / "cells", "relocated_worktree", "PASS")
+        expected = memory_api._REDIRECT_CAUSE_DETAILS[
+            memory_api.REDIRECT_MOVED if marked["prunable"] else memory_api.REDIRECT_UNLISTED
+        ]
+        assert answers, "control: the routes ran"
+        wrong = {route: answer for route, answer in answers.items() if answer[2] != expected}
+        assert wrong == {}, (field, how, marked, wrong)
 
 
 class TestARedirectRefusalNamesWhatWasObserved:
