@@ -7,6 +7,7 @@ Summary: Pins the HOME census: which launches it refuses and accepts, its one
 Used by: the suite; the census itself is tests/home_census.py, wired in
          pact-plugin/conftest.py.
 """
+import ast
 import asyncio
 import os
 import re
@@ -624,6 +625,102 @@ def test_under_xdist_a_child_with_home_passes_the_run(tmp_path):
     # the controller's information line.
     assert re.search(r"^HOME CENSUS: installed, [1-9][0-9]* launch(es)? checked, 0 refused$",
                      output, re.M), output
+
+
+def _home_census_registration(source):
+    """(whether `source` imports home_census, the census register calls its
+    pytest_configure makes, as source text)."""
+    tree = ast.parse(source)
+    imports = any(isinstance(node, ast.Import)
+                  and any(alias.name == "home_census" and alias.asname is None
+                          for alias in node.names)
+                  for node in ast.walk(tree))
+    calls = [ast.unparse(node)
+             for function in tree.body
+             if isinstance(function, ast.FunctionDef) and function.name == "pytest_configure"
+             for node in ast.walk(function)
+             if isinstance(node, ast.Call) and ast.unparse(node.func) == "home_census.register"]
+    return imports, calls
+
+
+def test_the_rig_registers_the_census_as_the_root_conftest_does():
+    """The xdist rig copies the root conftest's census wiring (see _RIG_CONFTEST):
+    both import home_census and call its register(config) exactly once from
+    pytest_configure, so the rig exercises the real install path."""
+    root = (Path(__file__).resolve().parents[1] / "conftest.py").read_text(encoding="utf-8")
+    expected = (True, ["home_census.register(config)"])
+    assert _home_census_registration(root) == expected, _home_census_registration(root)
+    rig = _RIG_CONFTEST.format(conftest="conftest.py")
+    assert _home_census_registration(rig) == expected, _home_census_registration(rig)
+
+
+# The xdist twin of the rig arms above, through the real pact-plugin/conftest.py
+# and tests/conftest.py rather than _RIG_CONFTEST. A plugin, not a test file, so
+# the session collects only real suite tests. It launches one child while one
+# named test runs, swallows whatever the census raises, and lets the test pass.
+_XDIST_TARGET = "tests/test_session_home_sandbox.py::test_the_session_home_is_not_the_real_home"
+_XDIST_PROBE = """
+import os
+import subprocess
+
+
+def pytest_runtest_call(item):
+    # The node id is relative to the rootdir, which may sit above the plugin root.
+    target = os.environ["HOME_CENSUS_PROBE_TARGET"]
+    if item.nodeid != target and not item.nodeid.endswith("/" + target):
+        return
+    env = {"PATH": os.defpath}
+    if os.environ.get("HOME_CENSUS_PROBE_HOME"):
+        env["HOME"] = os.environ["HOME"]
+    try:
+        subprocess.run(["true"], env=env, capture_output=True, timeout=60)
+        outcome = "ran"
+    except Exception as exc:
+        outcome = "refused: %r" % (exc,)
+    with open(os.environ["HOME_CENSUS_PROBE_MARKER"], "w", encoding="utf-8") as handle:
+        handle.write("%s %s" % (os.environ.get("PYTEST_XDIST_WORKER", "-"), outcome))
+"""
+
+
+@pytest.mark.parametrize("with_home", [False, True], ids=["without-home", "with-home"])
+def test_under_xdist_the_real_root_conftest_fails_a_swallowed_refusal(tmp_path, with_home):
+    """A real `-n 2` session at the plugin root loads pact-plugin/conftest.py and
+    tests/conftest.py as the suite does. One named test launches a child without
+    HOME on its worker and swallows the refusal: the worker hands it to the
+    controller, which fails the session with one HOME census report naming that
+    test and its worker. With HOME, the same child runs and the session passes.
+    GITHUB_* is removed so the CI environment binding and the full-run recorder,
+    both gated on GITHUB_ACTIONS, stay inert; the census reads no GITHUB_ name
+    and the root conftest registers it unconditionally."""
+    pytest.importorskip("xdist")
+    plugin_root = Path(__file__).resolve().parents[1]
+    (tmp_path / "home_census_xdist_probe.py").write_text(_XDIST_PROBE, encoding="utf-8")
+    marker = tmp_path / "outcome"
+    env = {key: value for key, value in _child_environ().items()
+           if not key.startswith("GITHUB_")}
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    env["HOME_CENSUS_PROBE_MARKER"] = str(marker)
+    env["HOME_CENSUS_PROBE_TARGET"] = _XDIST_TARGET
+    if with_home:
+        env["HOME_CENSUS_PROBE_HOME"] = "1"
+    proc = subprocess.run(
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly", "-n", "2",
+         "-p", "home_census_xdist_probe", _XDIST_TARGET.split("::")[0]],
+        cwd=plugin_root, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    worker, _, outcome = marker.read_text(encoding="utf-8").partition(" ")
+    assert worker.startswith("gw"), (worker, output)  # the launch ran on a worker
+    if with_home:
+        assert outcome == "ran", output
+        assert proc.returncode == 0, output
+        assert "started without HOME" not in output, output
+    else:
+        assert outcome.startswith("refused: HomeCensusError"), output
+        assert proc.returncode == 1, output
+        assert output.count("HOME CENSUS: 1 distinct child(ren) started without HOME") == 1, output
+        lines = [line for line in output.splitlines() if ": child [" in line]
+        assert len(lines) == 1 and _XDIST_TARGET in lines[0], lines
+        assert ("[%s] " % worker) in lines[0], lines
 
 
 _SKILLS_RIG_TESTS = '''

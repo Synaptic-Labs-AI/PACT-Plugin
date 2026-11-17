@@ -184,7 +184,8 @@ def _gateway_pid(node):
 def collect(node):
     """Controller side: take what a finished xdist worker handed over, and every
     worker's pid, a crashed one's included, so its own ledger lines never count
-    as a child's."""
+    as a child's. A finished worker's gateway pid and handed-over pid are
+    normally the same process and are recorded once; if they differ, both are."""
     found = (getattr(node, "workeroutput", None) or {}).get(WORKEROUTPUT_KEY)
     pid = _gateway_pid(node)
     if pid is not None:
@@ -192,7 +193,8 @@ def collect(node):
     if not found:
         return
     name = getattr(getattr(node, "gateway", None), "id", "worker")
-    _state["workers"].append(found["pid"])
+    if found["pid"] != pid:
+        _state["workers"].append(found["pid"])
     _state["worker_children"] += found["python_children"]
     for line in found["misses"]:
         _state["misses"].append("[%s] %s" % (name, line))

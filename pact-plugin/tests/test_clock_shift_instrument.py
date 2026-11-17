@@ -677,6 +677,22 @@ def test_a_crashed_workers_pid_comes_from_its_gateway(monkeypatch, tmp_path):
     assert any("the shim did not load in children: 1 " in line for line in reporter.lines)
 
 
+@pytest.mark.parametrize("gateway_pid, handed_pid, expected", [
+    (5353535, 5353535, [5353535]),
+    (5454545, 5555555, [5454545, 5555555]),
+], ids=["same-process", "differing-pids"])
+def test_a_finished_workers_pid_is_recorded_once(monkeypatch, tmp_path, gateway_pid,
+                                                 handed_pid, expected):
+    """MUTANT: collect() appends the handed-over pid even when it is the gateway's,
+    so a finished worker is listed twice. Differing pids are both kept, so the
+    controller's own-pid set is never narrower."""
+    census = _fresh_census(monkeypatch, tmp_path)
+    gateway = SimpleNamespace(id="gw0", _io=SimpleNamespace(popen=SimpleNamespace(pid=gateway_pid)))
+    census.collect(SimpleNamespace(gateway=gateway, workeroutput={census.WORKEROUTPUT_KEY: {
+        "misses": [], "python_children": 0, "pid": handed_pid}}))
+    assert census._state["workers"] == expected
+
+
 @pytest.mark.parametrize("prior, after", [(0, 1), (1, 1), (2, 2), (3, 3), (4, 4)])
 def test_a_problem_raises_only_a_clean_status(monkeypatch, tmp_path, prior, after):
     """MUTANT: finish() overwrites the session's status with 1, so an
