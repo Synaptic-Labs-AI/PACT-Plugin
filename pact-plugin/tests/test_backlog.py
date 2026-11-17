@@ -2181,6 +2181,55 @@ def _repo(path, branch=None):
     return path
 
 
+def _root_is(monkeypatch, root: Path, common: "Path | None" = None) -> None:
+    """Make `root` this backlog's project root, with the common dir git gives
+    for it (or `common`, where git is a stand-in), as `_root_and_common_dir`
+    answers both for `checkout_roots`."""
+    if common is None:
+        common = backlog._memory_api().main_repo_common_dir(str(root))
+    monkeypatch.setattr(backlog, "project_root", lambda: root)
+    monkeypatch.setattr(backlog, "_root_and_common_dir", lambda: (root, common))
+
+
+def test_the_roots_ignore_git_location_variables_in_the_environment(tmp_path, monkeypatch):
+    """GIT_DIR and GIT_COMMON_DIR in the session's environment name another
+    repository; the roots are still this project's checkouts, asked of git
+    with those variables removed, and git is asked for the common dir once.
+
+    Real repos, real git, a `git` that logs each command it runs."""
+    import os
+    import shutil
+    import stat
+
+    main = _repo(tmp_path / "main")
+    other = _repo(tmp_path / "other")
+    run = lambda repo, *a: subprocess.run(["git", "-C", str(repo), *a], check=True,
+                                          capture_output=True)
+    run(main, "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
+    run(other, "worktree", "add", "-q", str(tmp_path / "other-wt"), "-b", "ow")
+    log = tmp_path / "git.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+    monkeypatch.chdir(main)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(other / ".git"))
+
+    roots = backlog.checkout_roots()
+
+    calls = log.read_text().splitlines()
+    assert calls, "control: the logging git ran"
+    assert sorted(roots) == sorted([str(main.resolve()), str((tmp_path / "wt").resolve())]), roots
+    assert sum(" --git-common-dir" in f" {call}" for call in calls) == 1, calls
+
+
 def test_the_writer_records_every_checkout_not_just_the_main_root(tmp_path, monkeypatch):
     """`checkout_roots` records EVERY worktree the porcelain emits.
 
@@ -2196,7 +2245,7 @@ def test_the_writer_records_every_checkout_not_just_the_main_root(tmp_path, monk
     linked = tmp_path / "wt"
     subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(linked), "-b", "wt"],
                    check=True, capture_output=True)
-    monkeypatch.setattr(backlog, "project_root", lambda: main)
+    _root_is(monkeypatch, main)
 
     roots = backlog.checkout_roots()
 
@@ -2223,7 +2272,7 @@ def test_a_separate_git_dir_checkout_is_one_of_its_own_roots(tmp_path, monkeypat
         "--allow-empty", "-m", "c")
     if linked_worktree:
         run("worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
-    monkeypatch.setattr(backlog, "project_root", lambda: main.resolve())
+    _root_is(monkeypatch, main.resolve())
 
     listed = {
         str(Path(record[0][len("worktree "):]).resolve())
@@ -2281,7 +2330,7 @@ def test_a_listed_worktree_whose_git_does_not_name_it_back_is_not_a_root(
     (admin / "commondir").write_text("../..\n")
     if not nul:
         _git_rejecting_z(tmp_path, monkeypatch)
-    monkeypatch.setattr(backlog, "project_root", lambda: main.resolve())
+    _root_is(monkeypatch, main.resolve())
 
     listed = {
         str(Path(record[0][len("worktree "):]).resolve())
@@ -2316,7 +2365,7 @@ def test_a_worktree_whose_folder_is_absent_stays_a_root(tmp_path, monkeypatch, n
     (folder / ".git").unlink()
     if not nul:
         _git_rejecting_z(tmp_path, monkeypatch)
-    monkeypatch.setattr(backlog, "project_root", lambda: main.resolve())
+    _root_is(monkeypatch, main.resolve())
 
     roots = backlog.checkout_roots()
 
@@ -5001,7 +5050,11 @@ def test_an_unset_or_non_directory_project_dir_still_refuses(tmp_path, monkeypat
         PACTMemory = real.PACTMemory
 
         @staticmethod
-        def main_repo_root(start=None):
+        def main_repo_common_dir(start=None):
+            return None
+
+        @staticmethod
+        def main_repo_root(start=None, common=None):
             return None
 
         # The session-record channel, inert: under pytest the real discovery
@@ -5091,7 +5144,11 @@ def test_a_directory_inside_a_repository_git_cannot_read_still_refuses(tmp_path,
         PACTMemory = real.PACTMemory
 
         @staticmethod
-        def main_repo_root(start=None):
+        def main_repo_common_dir(start=None):
+            return None
+
+        @staticmethod
+        def main_repo_root(start=None, common=None):
             return None
 
         # The session-record channel, inert: under pytest the real discovery
@@ -6477,7 +6534,7 @@ def test_a_worktree_whose_path_holds_a_newline_is_recorded_whole(tmp_path, monke
     (tmp_path / "w").mkdir()
     subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(linked), "-b", "wt"],
                    check=True, capture_output=True)
-    monkeypatch.setattr(backlog, "project_root", lambda: main)
+    _root_is(monkeypatch, main)
 
     roots = backlog.checkout_roots()
     assert str(linked.resolve()) in roots, roots
@@ -6493,7 +6550,7 @@ def test_without_nul_a_path_holding_a_newline_records_no_worktree(tmp_path, monk
     )
     (tmp_path / "main").mkdir()
     (tmp_path / "w").mkdir()
-    monkeypatch.setattr(backlog, "project_root", lambda: tmp_path / "main")
+    _root_is(monkeypatch, tmp_path / "main", tmp_path / "main" / ".git")
     assert backlog.checkout_roots() == [str(tmp_path / "main")]
 
 

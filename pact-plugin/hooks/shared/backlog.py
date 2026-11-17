@@ -332,6 +332,14 @@ def project_root() -> Path:
       instead of refusing. The refusal itself is unchanged — it stays the
       guard for shells with no session behind them (cron, manual CLI).
     """
+    return _root_and_common_dir()[0]
+
+
+def _root_and_common_dir() -> Tuple[Path, Optional[Path]]:
+    """`project_root()` and the repository's common dir git gave for it, or
+    None for an umbrella directory that no repository holds. One
+    `--git-common-dir` answer serves both, so `checkout_roots()` lists the
+    same repository the root came from and asks git for it once."""
     memory_api = _memory_api()
     disagreement = memory_api.env_record_project_dir_disagreement()
     if disagreement is not None:
@@ -344,15 +352,16 @@ def project_root() -> Path:
     # attributes a recorded value to the (unset) variable, or vice versa.
     project_dir = env_dir or record_dir or None
     source = "CLAUDE_PROJECT_DIR" if env_dir else "the session record's project_dir"
-    root = memory_api.main_repo_root(project_dir)
+    common = memory_api.main_repo_common_dir(project_dir)
+    root = memory_api.main_repo_root(project_dir, common=common) if common is not None else None
     if root is not None:
-        return root
+        return root, common
     if project_dir and Path(project_dir).is_dir():
         # _resolved never raises: an unresolvable directory falls back to its
         # unresolved path, the same fallback the detector takes for the name.
         resolved = _resolved(Path(project_dir))
         if _enclosing_checkout(resolved) is None:
-            return resolved
+            return resolved, None
         why = (
             f"{source}={project_dir!r} sits inside a repository git "
             f"could not read"
@@ -566,9 +575,8 @@ def checkout_roots() -> List[str]:
     # session there after the drive returns matches before any write records
     # it again, and an absent folder names no other repository's checkout.
     memory_api = _memory_api()
-    root = project_root()
+    root, common = _root_and_common_dir()
     try:
-        common = _git_common_dir(str(root))
         records = (
             memory_api._worktree_records(["--git-dir", str(common)]) if common is not None else None
         )
@@ -582,24 +590,6 @@ def checkout_roots() -> List[str]:
     except (OSError, RuntimeError, ValueError):
         return [str(root)]
     return list(dict.fromkeys(roots))
-
-
-def _git_common_dir(root: str) -> Optional[Path]:
-    """`git rev-parse --git-common-dir` asked at `root`, as a path joined to
-    `root` (git answers relative to where it ran), or None when git gives no
-    answer. Only the final newline is git's; a path may hold others."""
-    try:
-        result = subprocess.run(
-            ["git", "-C", root, "rev-parse", "--git-common-dir"],
-            capture_output=True, timeout=_TRACKER_TIMEOUT_SECONDS,
-        )
-    except (subprocess.TimeoutExpired, OSError, ValueError):
-        return None
-    answer = os.fsdecode(result.stdout)
-    # A git older than 2.5 prints the option back: that is no answer.
-    if result.returncode != 0 or not answer.endswith("\n") or answer[:-1] in ("", "--git-common-dir"):
-        return None
-    return Path(root) / answer[:-1]
 
 
 # Key under which load_or_create stashes the bytes it read, so save() can

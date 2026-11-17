@@ -667,9 +667,13 @@ NO_IDENTITY_BOUND = {
     ("skills/pact-memory/scripts/cli.py", "cmd_project_id", "main_repo_root"): (
         1, "display only: the show envelope's process_repo_root",
     ),
-    ("hooks/shared/backlog.py", "project_root", "main_repo_root"): (
+    ("hooks/shared/backlog.py", "_root_and_common_dir", "main_repo_root"): (
         1, "the backlog file's directory; the file is keyed by the pre-change "
         "folder name by design",
+    ),
+    ("hooks/shared/backlog.py", "_root_and_common_dir", "main_repo_common_dir"): (
+        1, "the common dir that root came from, whose worktree listing gives "
+        "the backlog's roots; binds nothing",
     ),
     ("skills/pact-memory/scripts/memory_api.py", "_location_divergence_warning", "main_repo_root"): (
         1, "compares the process's repository with the id already bound; binds nothing",
