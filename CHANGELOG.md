@@ -110,6 +110,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: the genuine-submodule subdirectory control gives its git calls a long timeout, so a loaded machine cannot fail it through the production five-second limit (which is unchanged).
 - Tests: two identity test modules spell non-ASCII test data, including a byte order mark and a combining accent, as escapes, so the raw-invisible-character scan passes again.
 - Tests: the identity parser's platform-flag, include-header and core.worktree arms now cover every optional open flag, a header directly after another one, and every way the core.worktree read can fail.
+- Tests: the rung-parity census now reports a project_identity call nested inside another call's argument where a return or direct argument would read it, and refuses a detail constant bound by any second binding form.
 
 ### Corrected during review
 

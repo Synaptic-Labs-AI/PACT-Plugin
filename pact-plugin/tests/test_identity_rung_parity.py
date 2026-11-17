@@ -1097,26 +1097,43 @@ def _predicate_results(function, defined: dict, seen: frozenset) -> dict:
     return found
 
 
+def _bindings(tree, name: str) -> int:
+    """How many places in `tree` may bind `name`: every `Name` that is not
+    read (an assignment, unpacking, `for`, `with`, walrus, comprehension or
+    `del` target), and every identifier any other node carries that is
+    `name` or starts `name.` (an import, `global`, `nonlocal`, a def, a
+    class, an `except ... as`, a match capture, a parameter). An identifier
+    that binds nothing (an attribute or keyword named the same) is counted
+    too, so the count can only be too high, never too low."""
+    count = 0
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Constant):
+            continue
+        if isinstance(node, ast.Name):
+            count += node.id == name and not isinstance(node.ctx, ast.Load)
+            continue
+        for _, value in ast.iter_fields(node):
+            for item in value if isinstance(value, list) else [value]:
+                count += isinstance(item, str) and item.split(".")[0] == name
+    return count
+
+
 def _is_refusal(function, defined: dict, seen: frozenset) -> bool:
     """Whether `function` is annotated exactly `Optional[str]` and every
-    value it returns is None, a module-level name of project_identity bound
-    once to a string constant, a ternary of two such values, or a direct
+    value it returns is None, a module-level name of project_identity whose
+    only binding anywhere in the module is one plain assignment of a string
+    constant (`_bindings`), a ternary of two such values, or a direct
     call to a project_identity function that is itself a refusal: a check
     whose answer is None (it does not refuse) or the detail it refuses
     with."""
     if not (function.returns is not None and ast.unparse(function.returns) == "Optional[str]"):
         return False
     tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
-    bindings = collections.Counter(
-        target.id for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign))
-        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
-        if isinstance(target, ast.Name)
-    )
     details = {
         node.targets[0].id for node in tree.body
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
         and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
-        and bindings[node.targets[0].id] == 1
+        and _bindings(tree, node.targets[0].id) == 1
     }
     seen = seen | {function.name}
 
@@ -1245,6 +1262,11 @@ LAYOUT_CALL_PLACES = {
 # body of a def or lambda nested in the reached function: that body runs
 # whenever its caller runs it, not as the reached function's own code.
 NESTED_BODY_PLACE = "the body of a nested def or lambda"
+# The words for a call that stands inside an argument of a project_identity
+# call without being that argument itself (an operand, a ternary branch, a
+# display item, a starred expression): the walk follows the outer call, but
+# does not read what it is handed there.
+INSIDE_AN_ARGUMENT_PLACE = "inside an argument of a project_identity call"
 
 
 def _in_nested_body(node, parents) -> bool:
@@ -1277,11 +1299,15 @@ def _layout_call_place(node, parents, defined) -> str | None:
     project_identity is read, since that def is followed. Those two reads
     hold only for the reached function's own code: in the body of a nested
     def or lambda the call returns NESTED_BODY_PLACE instead, since the walk
-    does not follow when that body runs. Every other place returns its
-    words: the first `LAYOUT_CALL_PLACES` slot on the way up, or else the
-    statement's node type and field."""
+    does not follow when that body runs. A call inside an argument of a
+    project_identity def without being that argument is never covered by a
+    read on the way up: where a `return` or a direct argument would read it,
+    it returns the first `LAYOUT_CALL_PLACES` slot passed, or else
+    INSIDE_AN_ARGUMENT_PLACE. Every other place returns its words: the first
+    `LAYOUT_CALL_PLACES` slot on the way up, or else the statement's node
+    type and field."""
     nested = _in_nested_body(node, parents)
-    child, place = node, None
+    child, place, inside = node, None, False
     while id(child) in parents:
         parent, field = parents[id(child)]
         kind = type(parent).__name__
@@ -1290,7 +1316,11 @@ def _layout_call_place(node, parents, defined) -> str | None:
         if isinstance(parent, ast.Return):
             value = parent.value
             read = isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in defined
-            return NESTED_BODY_PLACE if read and nested else None
+            if read and nested:
+                return NESTED_BODY_PLACE
+            if read and inside:
+                return place if place is not None else INSIDE_AN_ARGUMENT_PLACE
+            return None
         if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)) and field == "value":
             return None
         if isinstance(parent, ast.withitem) and field == "context_expr":
@@ -1313,6 +1343,7 @@ def _layout_call_place(node, parents, defined) -> str | None:
                 return None
             if direct:
                 return NESTED_BODY_PLACE if nested else None
+            inside = True
         if isinstance(parent, ast.stmt):
             return place if place is not None else f"`{kind}.{field}`"
         child = parent
@@ -1348,8 +1379,11 @@ def _layout_predicate_forms() -> tuple:
     `while` or `assert`, a ternary, a comprehension `if` or a match guard, a
     match subject with no capture, a `raise` or its cause, a discarded
     expression statement, and any other place, at any depth inside it (a
-    display, a subscript, an f-string, an operator); and a call that only a
-    read form would cover, in the body of a nested def or lambda. The census arm
+    display, a subscript, an f-string, an operator); a call inside an
+    argument of a project_identity call without being that argument, where
+    the `return` or direct argument above it would otherwise read it; and a
+    call that only a read form would cover, in the body of a nested def or
+    lambda. The census arm
     compares the Counter with NAMED_LAYOUT_FORMS exactly, so a new form fails
     it."""
     import builtins
@@ -1782,6 +1816,13 @@ class TestTheDocumentedGitCallFloor:
             ("async def g(p):\n        return _p(p)\n    max([x], key=g)", NESTED_BODY_PLACE),
             ("def g(p):\n        return _q(_p(p))\n    list(map(g, [x]))", NESTED_BODY_PLACE),
             ("return _q(lambda p: _p(p))", NESTED_BODY_PLACE),
+            ("return _q(*(_p(x) or x))", INSIDE_AN_ARGUMENT_PLACE),
+            ("return _q(_p(x) or x)", INSIDE_AN_ARGUMENT_PLACE),
+            ("return _q(_p(x) if x else x)", "a ternary branch"),
+            ("return _q([_p(x)][0])", INSIDE_AN_ARGUMENT_PLACE),
+            ("return _q(value=not _p(x))", INSIDE_AN_ARGUMENT_PLACE),
+            ("return _q(f'{_p(x)}')", INSIDE_AN_ARGUMENT_PLACE),
+            ("return _q(_q(_p(x) or x))", INSIDE_AN_ARGUMENT_PLACE),
         ],
         ids=[
             "tuple in if", "list in elif", "dict in while", "tuple in assert", "f-string statement",
@@ -1790,6 +1831,9 @@ class TestTheDocumentedGitCallFloor:
             "nested in a project argument", "del target",
             "nested def returned through map", "nested def as a sorted key", "async nested def as a max key",
             "nested def passing it to a project def", "lambda passed to a project def",
+            "starred operand returned", "operand returned", "ternary branch returned",
+            "subscripted display returned", "negated keyword returned", "f-string returned",
+            "operand two calls deep",
         ],
     )
     def test_a_project_call_in_an_unread_place_is_reported(self, statement, place):
