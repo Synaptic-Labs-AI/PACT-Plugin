@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from fixtures.session_marker import embedding_marker, fresh_session_id
+from helpers import GIT_REDIRECTING_VARIABLES, is_git_redirecting_variable
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONFTEST = Path(__file__).resolve().with_name("conftest.py")
@@ -94,6 +95,111 @@ def test_git_ignores_the_machine_system_config(tmp_path, monkeypatch):
     assert probe(None) == ""
     control = {k: v for k, v in os.environ.items() if k != "GIT_CONFIG_NOSYSTEM"}
     assert probe(control) == "system"
+
+
+def test_the_variable_set_covers_gits_own_repository_local_list():
+    listed = subprocess.run(["git", "rev-parse", "--local-env-vars"], cwd=_REPO_ROOT,
+                            capture_output=True, text=True, timeout=30, check=True).stdout.split()
+    assert "GIT_DIR" in listed, listed
+    missing = sorted(set(listed) - set(GIT_REDIRECTING_VARIABLES))
+    assert not missing, ("this git clears these when it enters another repository; add them "
+                         "to helpers.GIT_REDIRECTING_VARIABLES: %s" % missing)
+
+
+# The real suite conftest, loaded by path, so its module-level environment setup
+# runs in the child session and nothing else of it is needed.
+_GIT_RIG_CONFTEST = '''
+import importlib.util
+
+_spec = importlib.util.spec_from_file_location("pact_suite_conftest", {conftest!r})
+_spec.loader.exec_module(importlib.util.module_from_spec(_spec))
+'''
+
+_GIT_RIG_TESTS = '''
+import os
+import subprocess
+
+from helpers import is_git_redirecting_variable
+
+
+def _git(*args, cwd):
+    return subprocess.run(["git", "-c", "user.name=rig", "-c", "user.email=rig@invalid", *args],
+                          cwd=cwd, check=True, capture_output=True, text=True, timeout=60).stdout
+
+
+def test_a_rig_commits_into_its_own_repository(tmp_path):
+    (tmp_path / "rig.txt").write_text("rig\\n", encoding="utf-8")
+    _git("init", "-q", cwd=tmp_path)
+    _git("add", "-A", cwd=tmp_path)
+    _git("commit", "-qm", "rig", cwd=tmp_path)
+    assert (tmp_path / ".git" / "HEAD").is_file()
+    assert _git("rev-list", "--count", "HEAD", cwd=tmp_path).strip() == "1"
+    assert [name for name in os.environ if is_git_redirecting_variable(name)] == []
+'''
+
+
+def _shell_exports(decoy):
+    """What a shell can export that points git at `decoy`, by row."""
+    hook = {"GIT_DIR": str(decoy / ".git"), "GIT_INDEX_FILE": str(decoy / ".git" / "index")}
+    every = {name: "1" for name in GIT_REDIRECTING_VARIABLES}
+    every.update({
+        "GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy),
+        "GIT_INDEX_FILE": str(decoy / ".git" / "index"), "GIT_COMMON_DIR": str(decoy / ".git"),
+        "GIT_OBJECT_DIRECTORY": str(decoy / ".git" / "objects"),
+        "GIT_CONFIG_GLOBAL": str(decoy / "gitconfig"), "GIT_CONFIG_SYSTEM": str(decoy / "gitconfig"),
+        "GIT_CONFIG": str(decoy / "gitconfig"), "GIT_CEILING_DIRECTORIES": str(decoy),
+        "GIT_CONFIG_PARAMETERS": "'core.worktree'='%s'" % decoy,
+        "GIT_CONFIG_KEY_0": "core.worktree", "GIT_CONFIG_VALUE_0": str(decoy),
+        "GIT_PREFIX": "", "GIT_NAMESPACE": "decoy",
+    })
+    return {"hook": hook, "work-tree": {**hook, "GIT_WORK_TREE": str(decoy)}, "every": every}
+
+
+@pytest.mark.parametrize("row", ["hook", "work-tree", "every"])
+def test_a_rig_ignores_a_repository_the_shell_points_git_at(tmp_path, row):
+    """A child session whose shell points git at a decoy repository: the git
+    variables a hook exports, those plus GIT_WORK_TREE, and every variable in the
+    set. Its rig test runs git init, add and commit with the inherited
+    environment. MUTANT: tests/conftest.py keeps the shell's git variables. The
+    rig then reinitialises the decoy, stages into its index and commits onto its
+    branch."""
+    clean = {key: value for key, value in os.environ.items()
+             if not is_git_redirecting_variable(key)}
+
+    def decoy_git(*args):
+        return subprocess.run(["git", "-c", "user.name=d", "-c", "user.email=d@invalid", *args],
+                              cwd=decoy, env=clean, check=True, capture_output=True,
+                              timeout=60).stdout
+
+    decoy = tmp_path / "decoy"
+    decoy.mkdir()
+    (decoy / "tracked.txt").write_text("decoy\n", encoding="utf-8")
+    decoy_git("init", "-q")
+    decoy_git("add", "tracked.txt")
+    decoy_git("commit", "-qm", "decoy")
+    # The shell's own unstaged work, which a misdirected `git add -A` would stage.
+    (decoy / "untracked.txt").write_text("work in progress\n", encoding="utf-8")
+    before = (decoy_git("rev-parse", "HEAD"), decoy_git("status", "--porcelain"),
+              (decoy / ".git" / "index").read_bytes())
+
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "conftest.py").write_text(
+        _GIT_RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
+    (rig / "test_git_rig.py").write_text(_GIT_RIG_TESTS, encoding="utf-8")
+    # No PYTEST_* name from the shell that runs the suite reaches the child.
+    env = {key: value for key, value in clean.items() if not key.startswith("PYTEST_")}
+    env.update(_shell_exports(decoy)[row])
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-rA", "-p", "no:cacheprovider",
+         "-p", "no:randomly", "test_git_rig.py"],
+        cwd=rig, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    after = (decoy_git("rev-parse", "HEAD"), decoy_git("status", "--porcelain"),
+             (decoy / ".git" / "index").read_bytes())
+    assert after == before, ("the child's rig changed the decoy repository", before, after, output)
+    assert _summary_counts(output) == {"passed": 1}, output
+    assert proc.returncode == 0, output
 
 
 def test_fresh_session_id_refuses_an_id_it_already_handed_out(monkeypatch):

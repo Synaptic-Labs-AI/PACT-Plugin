@@ -102,6 +102,16 @@ else:
 # Add tests directory to path for helpers + fixtures module imports
 sys.path.insert(0, str(Path(__file__).parent))
 
+# NO GIT VARIABLE FROM THE SHELL REACHES A TEST'S GIT. Removed here, before any
+# test or hook module runs git, so the process, every xdist worker and every
+# child that inherits this environment find the repository, index and config
+# from their own directory, never from the shell that started the run. A test
+# that sets one itself (monkeypatch.setenv, its own env dict) still does.
+from helpers import is_git_redirecting_variable  # noqa: E402
+
+for _name in [name for name in os.environ if is_git_redirecting_variable(name)]:
+    del os.environ[_name]
+
 # Add hooks directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
 

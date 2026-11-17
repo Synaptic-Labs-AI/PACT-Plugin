@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from helpers import is_git_redirecting_variable
 import home_census as census
 
 PY = sys.executable
@@ -900,16 +901,12 @@ def test_a_session_with_or_without_the_tests_conftest_has_one_census(tmp_path, p
     assert rc == 1, output
 
 
-# Variables that point git at another repository, index or object store. A
-# shell that exports one (a git hook, `git rebase --exec`, a developer's own
-# setup) would otherwise make the rig's commands act on that repository.
-_GIT_LOCATORS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY",
-                 "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
-                 "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_PREFIX")
-
-
+# tests/conftest.py removes these from the session's environment; the rig also
+# drops them per call, so a test that exports one itself (the decoy rows below)
+# cannot reach the rig either.
 def _git_rig_env():
-    env = {key: value for key, value in os.environ.items() if key not in _GIT_LOCATORS}
+    env = {key: value for key, value in os.environ.items()
+           if not is_git_redirecting_variable(key)}
     env["GIT_CONFIG_NOSYSTEM"] = "1"
     return env
 
@@ -935,7 +932,8 @@ def _select_after_changing(rig, base, changed):
         "_home_census_selection_probe", rig / "scripts" / "fast_suite_selection.py")
     core = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = core  # dataclass annotations resolve through sys.modules
-    saved = {name: os.environ.pop(name) for name in _GIT_LOCATORS if name in os.environ}
+    saved = {name: os.environ.pop(name) for name in list(os.environ)
+             if is_git_redirecting_variable(name)}
     try:
         spec.loader.exec_module(core)
         manifest = core.load_manifest(rig / "scripts" / "fast_suite_exclusions.json")

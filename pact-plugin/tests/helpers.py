@@ -13,8 +13,44 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
+
+
+# =============================================================================
+# Shared Utilities: Git Environment Isolation
+# =============================================================================
+
+# The git variables that choose which repository, index, object store, refs or
+# config sources a git command uses. A shell that exports one (a git hook,
+# which exports GIT_DIR and GIT_INDEX_FILE; `git rebase --exec`; a developer's
+# own setup) would otherwise make a test rig's git act on that repository or
+# read and write those config files. The set is git's own list of
+# repository-local variables, the ones git clears when it enters another
+# repository (`git rev-parse --local-env-vars`), plus GIT_NAMESPACE,
+# GIT_QUARANTINE_PATH, the discovery limits GIT_CEILING_DIRECTORIES and
+# GIT_DISCOVERY_ACROSS_FILESYSTEM, and the config files GIT_CONFIG_GLOBAL and
+# GIT_CONFIG_SYSTEM. GIT_CONFIG_NOSYSTEM is not in it: tests/conftest.py sets it.
+GIT_REDIRECTING_VARIABLES = (
+    # git rev-parse --local-env-vars (git 2.43)
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT", "GIT_OBJECT_DIRECTORY", "GIT_DIR", "GIT_WORK_TREE",
+    "GIT_IMPLICIT_WORK_TREE", "GIT_GRAFT_FILE", "GIT_INDEX_FILE", "GIT_NO_REPLACE_OBJECTS",
+    "GIT_REPLACE_REF_BASE", "GIT_PREFIX", "GIT_SHALLOW_FILE", "GIT_COMMON_DIR",
+    # additions
+    "GIT_NAMESPACE", "GIT_QUARANTINE_PATH", "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
+)
+
+# The numbered pairs GIT_CONFIG_COUNT counts: GIT_CONFIG_KEY_0, GIT_CONFIG_VALUE_0, ...
+_GIT_CONFIG_PAIR = re.compile(r"GIT_CONFIG_(?:KEY|VALUE)_[0-9]+\Z")
+
+
+def is_git_redirecting_variable(name):
+    """Whether `name` is one of GIT_REDIRECTING_VARIABLES or a numbered
+    GIT_CONFIG_KEY_<n> / GIT_CONFIG_VALUE_<n> pair."""
+    return name in GIT_REDIRECTING_VARIABLES or _GIT_CONFIG_PAIR.match(name) is not None
 
 
 # =============================================================================
