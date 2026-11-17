@@ -108,6 +108,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: each gitfile_redirect refusal is pinned by what its fake shows (no git directory, would not resolve, could not list, could not read a path in the listing whole, could not read core.worktree, and the two forgery causes) rather than by its own detail constant, the details are checked distinct, and the remedy is checked sentence by sentence (no change to a `.git` advised; the repair and the pin named as the user's).
 - Tests: each FIFO, link and directory `.git` arm first reads a regular file through the same reader and checks its content, so an arm cannot pass on a read that never ran; the legacy link case is labelled as the islink check's control.
 - Tests: the genuine-submodule subdirectory control gives its git calls a long timeout, so a loaded machine cannot fail it through the production five-second limit (which is unchanged).
+- Tests: two identity test modules spell non-ASCII test data, including a byte order mark and a combining accent, as escapes, so the raw-invisible-character scan passes again.
 
 ### Corrected during review
 

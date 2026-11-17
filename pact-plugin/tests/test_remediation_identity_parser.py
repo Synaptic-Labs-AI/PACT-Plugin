@@ -876,8 +876,8 @@ class TestGitDiscoveryHonoursACeilingAsGitDoes:
 # Percent-encoded and non-ASCII paths, `ssh+git`, Azure DevOps Services
 # ---------------------------------------------------------------------------
 
-NFC_CAFE = "café"
-NFD_CAFE = "café"
+NFC_CAFE = "caf\xe9"
+NFD_CAFE = "cafe\u0301"
 
 
 class TestPercentEncodingIsNormalisedNotDecoded:
@@ -893,7 +893,7 @@ class TestPercentEncodingIsNormalisedNotDecoded:
             ("https://host/o/re%2Fpo", "host/o/re%2Fpo"),
             ("https://host/o/a%21b", "host/o/a%21b"),
             ("https://host/o/a!b", "host/o/a!b"),
-            ("https://host/owner/répo", "host/owner/r%C3%A9po"),
+            ("https://host/owner/r\xe9po", "host/owner/r%C3%A9po"),
             # scp is sent literally, so its `%` is an ordinary character.
             ("git@host:o/My%20Project.git", "host/o/My%2520Project"),
             ("ssh://git@host/o/My%20Project.git", "host/o/My%20Project"),
@@ -2481,7 +2481,7 @@ class TestTheIncludeScanReadsAHeaderAsGitDoes:
         original = config.read_text()
         body = _HEADER_FORMS[form]
         if body is None:
-            config.write_bytes(("﻿[include]\n\tpath = inc\n" + original).encode())
+            config.write_bytes(("\ufeff[include]\n\tpath = inc\n" + original).encode())
         else:
             config.write_bytes((original + body.format(repo=repo.resolve())).encode())
         listed = subprocess.run(
@@ -2507,7 +2507,7 @@ class TestTheIncludeScanReadsAHeaderAsGitDoes:
         branch = run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo)
         config = git_dir / "config"
         config.write_bytes(
-            (f'﻿[includeIf "onbranch:{branch}"]\n\tpath = inc\n' + config.read_text()).encode()
+            (f'\ufeff[includeIf "onbranch:{branch}"]\n\tpath = inc\n' + config.read_text()).encode()
         )
         run_git("checkout", "-q", "-b", "elsewhere", cwd=repo)
         assert pi.read_origin(git_dir).state == pi.ORIGIN_INCLUDE_ONLY

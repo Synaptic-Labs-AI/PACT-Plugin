@@ -105,10 +105,10 @@ class TestExitCodeThreeCoversBothVerbs:
 
     def test_the_rekey_one_and_two_meanings_are_stated(self):
         assert (
-            "project-id rekey exits 1 when it refuses — --to is omitted and no "
+            "project-id rekey exits 1 when it refuses \u2014 --to is omitted and no "
             "canonical identity resolves, or --to is omitted and --from is not "
             "this checkout's own legacy candidate that is neither excluded nor "
-            "unproven, or --db-path names a store that is not present — and 2 "
+            "unproven, or --db-path names a store that is not present \u2014 and 2 "
             "for bad input"
         ) in _body(SKILL)
 
@@ -630,8 +630,8 @@ class TestUserSettingIsReadFromTheUserScope:
 
     def test_the_bullet_names_the_user_directory_and_not_the_store(self):
         assert (
-            "config.json → \"project_id\" in the user memory directory, the "
-            "directory that holds the default memory.db named under Storage — "
+            "config.json \u2192 \"project_id\" in the user memory directory, the "
+            "directory that holds the default memory.db named under Storage \u2014 "
             "a USER-scoped setting, read there whatever store a command names: "
             "--db-path does not move it."
         ) in _body(SKILL)
