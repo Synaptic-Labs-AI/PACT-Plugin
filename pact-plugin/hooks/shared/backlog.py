@@ -507,10 +507,12 @@ def _plain_records_kept(records: List[List[str]]) -> Optional[List[List[str]]]:
     directory, which holds no `.git`. If it says `bare`, its path must be a
     directory; `bare` in any other record is not git's. A linked worktree's
     record is dropped when its path holds no `.git`: git still lists a
-    worktree whose folder is gone or lost its `.git` (locked, or before git
-    2.31 with no `prunable` line), and a path cut at a newline names a folder
-    git did not list. A dropped record cannot be the asked checkout and adds
-    no root, so every reader of the records only narrows.
+    worktree whose folder is gone or lost its `.git` (before git 2.31 with no
+    `prunable` line), and a path cut at a newline names a folder git did not
+    list. A dropped record cannot be the asked checkout and adds no root.
+    One exception, as the `-z` listing keeps it: a record git marks `locked`
+    whose folder is absent is kept, a worktree on a drive not mounted now.
+    An absent folder names no other repository's checkout.
     """
     kept = []
     for index, record in enumerate(records):
@@ -519,7 +521,9 @@ def _plain_records_kept(records: List[List[str]]) -> Optional[List[List[str]]]:
             if index != 0 or not os.path.isdir(path):
                 return None
         elif index != 0 and not os.path.lexists(os.path.join(path, ".git")):
-            continue
+            locked = any(field == "locked" or field.startswith("locked ") for field in record)
+            if not locked or os.path.lexists(path):
+                continue
         kept.append(record)
     return kept
 

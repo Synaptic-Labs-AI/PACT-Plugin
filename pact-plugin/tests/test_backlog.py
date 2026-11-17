@@ -6321,9 +6321,16 @@ _LISTINGS = [
     ("plain, a stale worktree git marks prunable", "REJECT",
      "worktree {a}\nHEAD 1\n\nworktree {w}\nHEAD 2\nprunable gitdir file points to non-existent location\n\n",
      ("{a}",)),
+    # Except a worktree git marks `locked` whose folder is absent (a drive not
+    # mounted now): it is kept, as the `-z` listing keeps it.
     ("plain, a locked worktree whose folder is gone", "REJECT",
      "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 2\nbranch refs/heads/x\nlocked\n\n",
-     ("{a}",)),
+     ("{a}", "{w}")),
+    ("plain, a locked worktree with a reason whose folder is gone", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nHEAD 2\nbranch refs/heads/x\nlocked on a usb disk\n\n",
+     ("{a}", "{w}")),
+    ("plain, a locked folder that is present but holds no .git", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nHEAD 2\nbranch refs/heads/x\nlocked\n\n", ("{a}",)),
     ("plain, a deleted worktree, no prunable line (git before 2.31)", "REJECT",
      "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 2\nbranch refs/heads/x\n\n",
      ("{a}",)),
@@ -6459,9 +6466,10 @@ def test_every_layout_git_lists_reads_in_both_readers(tmp_path, monkeypatch, nul
     """Real listings of every layout git prints read in both readers, with
     `-z` and on a git that rejects it: a branch, a detached HEAD, a lock with
     and without a reason, a bare main repository and a `--separate-git-dir`
-    repository's main record (its git directory) are kept. A worktree moved
-    away, one locked with its folder gone and one whose `.git` was deleted
-    are kept with `-z`, where their paths are whole, and dropped without it."""
+    repository's main record (its git directory) are kept, and so is a
+    worktree locked with its folder gone. A worktree moved away and one whose
+    `.git` was deleted are kept with `-z`, where their paths are whole, and
+    dropped without it."""
     import os
     import shutil
     import stat
@@ -6508,7 +6516,7 @@ def test_every_layout_git_lists_reads_in_both_readers(tmp_path, monkeypatch, nul
 
     if not nul:
         monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    gone = ("moved", "locked-gone", "no-dotgit") if nul else ()
+    gone = ("moved", "locked-gone", "no-dotgit") if nul else ("locked-gone",)
     kept = {
         main: [main, *(tmp_path / name for name in ("branch", "detached", "locked", "locked-why", *gone))],
         bare: [bare, tmp_path / "bare-wt"],
