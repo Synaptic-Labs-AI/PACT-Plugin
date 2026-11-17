@@ -1406,11 +1406,13 @@ def test_a_worker_hands_its_misses_to_the_controller(census_state):
 # A rig session loads tests/conftest.py and registers the child-pytest census as
 # pact-plugin/conftest.py does, and refuses to run unless exactly one census is
 # installed, so no rig arm that expects no miss can pass with none. It copies
-# the root conftest's census registration rather than loading that conftest:
-# loading it would also install the seed gate, the HOME census and both CI
-# plugins, and in CI the environment binding would run inside the rig child,
-# so the rig would no longer isolate the census. The copy is pinned to the
-# real registration by test_the_rig_registers_the_census_as_the_root_conftest_does.
+# the root conftest's census registration rather than loading that conftest,
+# so its arms isolate the census from the seed gate, the HOME census and both
+# CI plugins. The copy is pinned to the real registration by
+# test_the_rig_registers_the_census_as_the_root_conftest_does, and the refusal
+# path under xdist through the real root conftest, with those plugins loaded
+# and the CI ones inert, is run by
+# test_under_xdist_the_real_root_conftest_fails_a_swallowed_miss.
 _RIG_CONFTEST = '''
 import importlib.util
 
@@ -1578,3 +1580,74 @@ def test_a_session_with_or_without_the_tests_conftest_refuses_an_unblocked_child
         "refused: ChildPytestCensusError"), output
     assert output.count("CHILD PYTEST CENSUS: 1 ") == 1, output
     assert proc.returncode == 1, output
+
+
+# The xdist twin of the arm above, through the real pact-plugin/conftest.py and
+# tests/conftest.py rather than _RIG_CONFTEST. A plugin, not a test file, for the
+# reason given at _UNBLOCKED_PROBE. It launches one pytest child while one named
+# test runs, swallows whatever the census raises, and lets the test pass.
+_XDIST_TARGET = "tests/test_session_home_sandbox.py::test_the_session_home_is_not_the_real_home"
+_XDIST_PROBE = """
+import os
+import subprocess
+import sys
+
+import pytest
+
+
+def pytest_runtest_call(item):
+    # The node id is relative to the rootdir, which may sit above the plugin root.
+    target = os.environ["CHILD_CENSUS_PROBE_TARGET"]
+    if item.nodeid != target and not item.nodeid.endswith("/" + target):
+        return
+    argv = [sys.executable, "-m", "pytest", "--version"]
+    if os.environ.get("CHILD_CENSUS_PROBE_BLOCK"):
+        argv += ["-p", "no:randomly"]
+    try:
+        subprocess.run(argv, capture_output=True, timeout=60)
+        outcome = "ran"
+    except Exception as exc:
+        outcome = "refused: %r" % (exc,)
+    with open(os.environ["CHILD_CENSUS_PROBE_MARKER"], "w", encoding="utf-8") as handle:
+        handle.write("%s %s" % (os.environ.get("PYTEST_XDIST_WORKER", "-"), outcome))
+"""
+
+
+@pytest.mark.parametrize("blocked", [False, True], ids=["unblocked", "blocked"])
+def test_under_xdist_the_real_root_conftest_fails_a_swallowed_miss(tmp_path, blocked):
+    """A real `-n 2` session at the plugin root loads pact-plugin/conftest.py and
+    tests/conftest.py as the suite does. One named test launches an unblocked
+    pytest child on its worker and swallows the refusal: the worker hands the
+    miss to the controller, which fails the session with one census report
+    naming that test. Blocked, the same child runs and the session passes.
+    GITHUB_* is removed so the CI environment binding and the full-run recorder,
+    both gated on GITHUB_ACTIONS, stay inert; the census reads no GITHUB_ name
+    and the root conftest registers it unconditionally."""
+    pytest.importorskip("xdist")
+    plugin_root = Path(__file__).resolve().parents[1]
+    (tmp_path / "child_census_xdist_probe.py").write_text(_XDIST_PROBE, encoding="utf-8")
+    marker = tmp_path / "outcome"
+    env = {key: value for key, value in _child_env().items() if not key.startswith("GITHUB_")}
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    env["CHILD_CENSUS_PROBE_MARKER"] = str(marker)
+    env["CHILD_CENSUS_PROBE_TARGET"] = _XDIST_TARGET
+    if blocked:
+        env["CHILD_CENSUS_PROBE_BLOCK"] = "1"
+    proc = subprocess.run(
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", *_BLOCK, "-n", "2",
+         "-p", "child_census_xdist_probe", _XDIST_TARGET.split("::")[0]],
+        cwd=plugin_root, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    worker, _, outcome = marker.read_text(encoding="utf-8").partition(" ")
+    assert worker.startswith("gw"), (worker, output)  # the launch ran on a worker
+    if blocked:
+        assert outcome == "ran", output
+        assert proc.returncode == 0, output
+        assert "CHILD PYTEST CENSUS" not in output, output
+    else:
+        assert outcome.startswith("refused: ChildPytestCensusError"), output
+        assert proc.returncode == 1, output
+        assert output.count("CHILD PYTEST CENSUS: 1 ") == 1, output
+        lines = [line for line in output.splitlines() if "pytest child [" in line]
+        assert len(lines) == 1 and _XDIST_TARGET in lines[0], lines
+        assert ("[%s] " % worker) in lines[0], lines
