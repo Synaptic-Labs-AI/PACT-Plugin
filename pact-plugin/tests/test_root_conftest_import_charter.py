@@ -14,7 +14,14 @@ root conftest puts on sys.path), and only then the standard library. So a
 module in one of those directories that shadows a tests/ or standard-library
 name is a violation. That over-refuses an import that runs while the root
 conftest loads, before tests/conftest.py has inserted anything. A relative
-import is a violation.
+import is a violation. A module there is a .py file or a directory with
+__init__.py. A directory without __init__.py is not one, since Python imports
+it only when no sys.path entry holds a regular module of that name, which
+depends on what is installed: a data directory named like an installed package
+or a standard-library module does not hide or shadow it. So an import of a
+tests/ directory with no __init__.py is judged like any other name, and refused
+unless it is the standard library or pytest, though no installed package of
+that name exists: an over-refusal.
 
 No file the walk reaches may name a dynamic import callable (DYNAMIC_IMPORTS),
 called or not, imported by name or reached as an attribute, or bind
@@ -270,9 +277,12 @@ def ahead_of_tests(plugin_root):
 
 
 def _in_dir(directory, dotted):
-    """Whether `dotted`'s top-level name is a module or package in `directory`."""
+    """Whether `dotted`'s top-level name is a module or a regular package (one
+    with __init__.py) in `directory`. A directory without __init__.py is not
+    one: Python imports such a directory only when no sys.path entry holds a
+    regular module of that name, which depends on what is installed."""
     top = dotted.split(".")[0]
-    return (directory / f"{top}.py").is_file() or (directory / top).is_dir()
+    return (directory / f"{top}.py").is_file() or (directory / top / "__init__.py").is_file()
 
 
 def _tests_files(tests, dotted, names):
@@ -529,6 +539,19 @@ INSERTS = ("import sys\nfrom pathlib import Path\n"
     ("import os\n", {"conftest.py": (
         "import sys\nfrom pathlib import Path\nd = Path(__file__).parent\nd = 'x'\n"
         "sys.path.insert(0, str(d))\n")}, None, 'tests/conftest.py:5: a sys.path insert this pin cannot read'),
+    # A directory with no __init__.py is not a module there: a data directory
+    # named like a package does not hide its import, and an import of a tests/
+    # namespace directory is judged like any other name (a stated over-refusal).
+    ("import yaml\n", {"yaml/data.txt": ""}, None,
+     'conftest.py:1: `yaml` is not the standard library or pytest'),
+    ("from yaml import x\n", {"yaml/x.py": ""}, None,
+     'conftest.py:1: `yaml` is not the standard library or pytest'),
+    ("import yaml\n", None, {"yaml/data.txt": ""},
+     'conftest.py:1: `yaml` is not the standard library or pytest'),
+    ("import zzns\n", {"zzns/mod.py": ""}, None,
+     'conftest.py:1: `zzns` is not the standard library or pytest'),
+    ("from zzns import mod\n", {"zzns/mod.py": ""}, None,
+     'conftest.py:1: `zzns` is not the standard library or pytest'),
 ])
 def test_a_planted_import_outside_the_charter_is_found(tmp_path, conftest, modules, scripts,
                                                        expected):
@@ -564,6 +587,30 @@ def test_imports_inside_the_charter_pass(tmp_path):
     violations, followed, _ = charter_violations(_rig(tmp_path, conftest, modules))
     assert violations == []
     assert {path.stem for path in followed} == {"helper", "loop_a", "loop_b"}
+
+
+# A data directory named like a standard-library module (no __init__.py) does
+# not shadow it: Python imports the standard library's regular package first.
+@pytest.mark.parametrize("modules, scripts", [
+    ({"json/data.txt": ""}, None),
+    (None, {"json/data.txt": ""}),
+    ({"conftest.py": "import sys\nfrom pathlib import Path\n"
+      "sys.path.insert(0, str(Path(__file__).parent.parent / 'hooks'))\n",
+      "../hooks/json/data.txt": ""}, None),
+], ids=["tests", "scripts", "ahead-of-tests"])
+def test_a_data_directory_named_like_the_standard_library_passes(tmp_path, modules, scripts):
+    root = _rig(tmp_path, "import json\n", modules, scripts)
+    violations, followed, _ = charter_violations(root)
+    assert violations == [], violations
+    assert followed == []
+
+
+def test_a_loaded_script_beside_a_standard_library_named_data_directory_passes(tmp_path):
+    target, root = _script_rig(tmp_path, "import packaging\nimport json\n",
+                               {"json/data.txt": ""})
+    (root / "tests" / "json").mkdir()
+    (root / "tests" / "json" / "data.txt").write_text("", encoding="utf-8")
+    assert verify_script_violations(target, root) == []
 
 
 def test_the_two_deviations_pass_exactly_as_named(tmp_path):
