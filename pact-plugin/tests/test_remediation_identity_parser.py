@@ -2399,9 +2399,11 @@ class _OpenFlagReads(ast.NodeVisitor):
     """Every read of an `os.O_*` flag in one module, as (scope, at_import,
     flag, form, line). A default argument, a decorator and a class body run
     in the scope around them, so at import time when that scope is the
-    module. `form` is "attribute" (`os.O_X`), "from-import" (`from os import
-    O_X`), "getattr-default" (`getattr(os, "O_X", d)`), "getattr" (no
-    default) or "getattr-computed" (a name built at run time)."""
+    module. `form` is "attribute" (`.O_X` on any object, `os` or not),
+    "subscript" (`[...]["O_X"]`), "from-import" (`from os import O_X`),
+    "getattr-default" (`getattr(..., "O_X", d)`), "getattr" (no default) or
+    "getattr-computed" (a name built at run time, on `os` or a name bound
+    to it)."""
 
     def __init__(self):
         self.scope = []
@@ -2426,23 +2428,45 @@ class _OpenFlagReads(ast.NodeVisitor):
                 if alias.name.startswith("O_") or alias.name == "*":
                     self._record(alias.name, "from-import", node)
 
+    def _bind(self, targets, value):
+        """A name bound to `os` (`_os = os`, `_os: Any = os`, `(_os := os)`)
+        reads flags as `os` does."""
+        if isinstance(value, ast.Name) and value.id in self.os_names:
+            self.os_names.update(t.id for t in targets if isinstance(t, ast.Name))
+
+    def visit_Assign(self, node):
+        self._bind(node.targets, node.value)
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node):
+        self._bind([node.target], node.value)
+        self.generic_visit(node)
+
+    def visit_NamedExpr(self, node):
+        self._bind([node.target], node.value)
+        self.generic_visit(node)
+
     def visit_Attribute(self, node):
-        if (
-            isinstance(node.value, ast.Name) and node.value.id in self.os_names
-            and node.attr.startswith("O_")
-        ):
+        # Any `.O_*` attribute, on whatever object: a flag read through a
+        # name this visitor does not know is `os` is still a flag read.
+        if node.attr.startswith("O_"):
             self._record(node.attr, "attribute", node)
         self.generic_visit(node)
 
+    def visit_Subscript(self, node):
+        # `vars(os)["O_X"]` and the like read a flag by its name.
+        key = node.slice
+        if isinstance(key, ast.Constant) and isinstance(key.value, str) and key.value.startswith("O_"):
+            self._record(key.value, "subscript", node)
+        self.generic_visit(node)
+
     def visit_Call(self, node):
-        if (
-            isinstance(node.func, ast.Name) and node.func.id == "getattr"
-            and len(node.args) >= 2
-            and isinstance(node.args[0], ast.Name) and node.args[0].id in self.os_names
-        ):
+        if isinstance(node.func, ast.Name) and node.func.id == "getattr" and len(node.args) >= 2:
             name = node.args[1]
+            on_os = isinstance(node.args[0], ast.Name) and node.args[0].id in self.os_names
             if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
-                self._record(None, "getattr-computed", node)
+                if on_os:
+                    self._record(None, "getattr-computed", node)
             elif name.value.startswith("O_"):
                 form = "getattr-default" if len(node.args) == 3 else "getattr"
                 self._record(name.value, form, node)
@@ -2846,10 +2870,20 @@ class TestTheSubmoduleWorktreeCheckNamesItsCause:
         """git answers the `core.worktree` read only by exiting 0 with the
         value, or 1 with no output (unset). Every other exit, a negative one
         for a git killed by a signal included, and an exit of 1 that printed
-        something, is named as unread."""
+        something, is named as unread. The exits are every return code
+        `subprocess` can report on this platform: `os.waitstatus_to_exitcode`
+        (which `subprocess` applies to the wait status) over every 16-bit
+        wait status."""
         admin, checkout = self._submodule(tmp_path)
         real = pi.subprocess.run
-        outcomes = [(code, b"") for code in range(-64, 256) if code not in (0, 1)]
+        codes = set()
+        for status in range(1 << 16):
+            try:
+                codes.add(os.waitstatus_to_exitcode(status))
+            except ValueError:
+                continue
+        assert {0, 1, 128, -9} <= codes, sorted(codes)  # control: exits and a signal
+        outcomes = [(code, b"") for code in sorted(codes) if code not in (0, 1)]
         outcomes.append((1, b"../../../x\n"))
         wrong = {}
         for code, output in outcomes:

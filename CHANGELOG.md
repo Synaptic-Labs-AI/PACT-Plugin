@@ -169,6 +169,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: every clause naming `.git` in a printed decline message must equal a described entry, so advice to change a marker fails however it is worded.
 - Tests: the binding-form census takes its expression contexts from the contexts the compiler accepts, and the listing-answer walk its expression classes from the classes the compiler module defines, not from a docstring.
 - Tests: the arm for a NUL-damaged worktree entry asserts the same answer from every cwd on each listing shape git prints (an empty path, the entry's admin directory), served by a stand-in git, instead of one git version's listing text.
+- Tests: the open-flag census counts a flag read through any name, not only through os, and the core.worktree exit test covers every exit code subprocess can report.
 
 ### Why
 
