@@ -641,7 +641,7 @@ _DECLINE_CAUSES = {
     "broken_git_marker": (
         "the directory carries a `.git` marker but git could not answer for it"
     ),
-    "no_working_tree": "the repository has no working tree to name",
+    "no_working_tree": "git gives no working tree for the repository",
     "submodule_checkout": (
         "the checkout is a submodule, so its folder name is chosen by the "
         "superproject's .gitmodules"
@@ -658,7 +658,9 @@ _UNPINNABLE_REMEDIES = {
         "`git rev-parse --git-dir` run here prints git's own reason."
     ),
     "no_working_tree": (
-        "Run from a checkout with a working tree; a bare repository has none."
+        "Run from a checkout with a working tree; a bare repository has none. "
+        "Otherwise, `git rev-parse --show-toplevel` run in the declined "
+        "directory prints git's own reason."
     ),
     "declaration_unresolved": (
         "Set CLAUDE_PROJECT_DIR to an existing project root."
@@ -2835,7 +2837,8 @@ class PACTMemory:
                 root=live_root if declared_common_dir is None else None,
                 toplevel=None,
                 no_working_tree_detail=(
-                    f"declared via {source}: {declared_dir!r} is a bare repository"
+                    f"declared via {source}: {declared_dir!r} is a bare repository, "
+                    "or git cannot describe its working tree"
                 ),
             )
             if guarded is not None:

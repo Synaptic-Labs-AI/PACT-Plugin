@@ -1495,6 +1495,65 @@ class TestTheRepairSentencePrintsOnlyForAMovedWorktree:
             assert "git worktree repair" not in text, text
 
 
+class TestADeclaredRepositoryWithNoWorkingTreeSaysOnlyWhatGitShowed:
+    """A declared directory git gives no toplevel for is refused with a
+    detail, cause and remedy that hold for a bare repository AND for a
+    checkout git cannot describe. Catches the declared route asserting "is a
+    bare repository" for a checkout whose only evidence is git's missing
+    toplevel."""
+
+    def _printed(self, declared, store, monkeypatch, capfd, caplog) -> list:
+        from scripts import memory_api
+
+        monkeypatch.chdir(declared)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+        with caplog.at_level("WARNING", logger=memory_api.__name__):
+            code, envelope = _cli(
+                ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+            )
+        assert code == 1, envelope
+        return [envelope["message"], " ".join(r.getMessage() for r in caplog.records)]
+
+    def _assert_hedged(self, texts, declared):
+        from scripts import memory_api
+
+        refusal, warning = texts
+        assert (
+            f"{str(declared)!r} is a bare repository, or git cannot describe "
+            "its working tree"
+        ) in " ".join(warning.split()), warning
+        for text in texts:
+            flat = " ".join(text.split())
+            assert "is a bare repository'" not in flat and "is a bare repository." not in flat, flat
+            # The cause states only that git gave no working tree, never that
+            # the repository has none: the checkout case has one.
+            assert "has no working tree" not in flat, flat
+            assert memory_api._DECLINE_CAUSES["no_working_tree"] in flat, flat
+            assert memory_api._UNPINNABLE_REMEDIES["no_working_tree"] in flat, flat
+            assert "git rev-parse --show-toplevel" in flat, flat
+
+    def test_a_declared_bare_repository(self, identity_env, store, monkeypatch, capfd, caplog):
+        from fixtures.identity_git import run_git
+
+        bare = identity_env / "bare.git"
+        bare.mkdir()
+        run_git("init", "-q", "--bare", cwd=bare)
+        self._assert_hedged(self._printed(bare, store, monkeypatch, capfd, caplog), bare)
+
+    def test_a_declared_checkout_git_gives_no_toplevel_for(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        from scripts import memory_api
+
+        repo = make_repo(identity_env / "repo")
+        real = memory_api._git_rev_parse
+        monkeypatch.setattr(
+            memory_api, "_git_rev_parse",
+            lambda start, *args: None if "--show-toplevel" in args else real(start, *args),
+        )
+        self._assert_hedged(self._printed(repo, store, monkeypatch, capfd, caplog), repo)
+
+
 class TestTheRekeyRefusalOffersOnlyAWorkablePin:
     """With no canonical identity, `rekey` names the remedy that works here.
 

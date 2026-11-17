@@ -398,8 +398,8 @@ Two operator surfaces answer, and they are deliberately ordered:
   without it. To move a copied store's folder-name bucket, use
   `project-id rekey --from=<old> --to=<canonical>`. It must be a regular file: a FIFO or a symlink in that position is refused, and an
   unusable file is reported as `override_ignored` and resolution continues
-  without it. The file is never read, so nothing is reported, when the
-  repository has no working tree, when the checkout's `.git` names a linked
+  without it. The file is never read, so nothing is reported, when git
+  gives no working tree for the repository, when the checkout's `.git` names a linked
   worktree's admin directory that does not link back to it, when the checkout
   the session is in is the user's home directory (a linked worktree
   included), or when no git directory is found (a broken `.git` marker or a declaration that cannot be

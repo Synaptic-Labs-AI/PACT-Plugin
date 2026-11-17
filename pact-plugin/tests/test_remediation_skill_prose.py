@@ -1386,7 +1386,7 @@ class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
 
     # Each measured property and the SKILL phrase that names its route.
     NEVER_READ = {
-        "bare": "when the repository has no working tree",
+        "bare": "when git gives no working tree for the repository",
         "unlinked_admin": (
             "when the checkout's .git names a linked worktree's admin directory "
             "that does not link back to it"
