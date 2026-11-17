@@ -10,8 +10,10 @@ Used by: pytest. Shares the real-git helpers in `fixtures/identity_git.py`.
 
 from __future__ import annotations
 
+import ast
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -2393,6 +2395,194 @@ class TestEveryReaderOpensWithoutAnOptionalFlag:
         )
 
 
+class _OpenFlagReads(ast.NodeVisitor):
+    """Every read of an `os.O_*` flag in one module, as (scope, at_import,
+    flag, form, line). A default argument, a decorator and a class body run
+    in the scope around them, so at import time when that scope is the
+    module. `form` is "attribute" (`os.O_X`), "from-import" (`from os import
+    O_X`), "getattr-default" (`getattr(os, "O_X", d)`), "getattr" (no
+    default) or "getattr-computed" (a name built at run time)."""
+
+    def __init__(self):
+        self.scope = []
+        self.os_names = {"os"}
+        self.reads = []
+
+    def _record(self, flag, form, node):
+        self.reads.append((
+            ".".join(name for _kind, name in self.scope) or "<module>",
+            all(kind == "class" for kind, _name in self.scope),
+            flag, form, node.lineno,
+        ))
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            if alias.name == "os" and alias.asname:
+                self.os_names.add(alias.asname)
+
+    def visit_ImportFrom(self, node):
+        if node.module == "os":
+            for alias in node.names:
+                if alias.name.startswith("O_") or alias.name == "*":
+                    self._record(alias.name, "from-import", node)
+
+    def visit_Attribute(self, node):
+        if (
+            isinstance(node.value, ast.Name) and node.value.id in self.os_names
+            and node.attr.startswith("O_")
+        ):
+            self._record(node.attr, "attribute", node)
+        self.generic_visit(node)
+
+    def visit_Call(self, node):
+        if (
+            isinstance(node.func, ast.Name) and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name) and node.args[0].id in self.os_names
+        ):
+            name = node.args[1]
+            if not (isinstance(name, ast.Constant) and isinstance(name.value, str)):
+                self._record(None, "getattr-computed", node)
+            elif name.value.startswith("O_"):
+                form = "getattr-default" if len(node.args) == 3 else "getattr"
+                self._record(name.value, form, node)
+        self.generic_visit(node)
+
+    def _enter(self, node, kind, name, body):
+        for decorator in getattr(node, "decorator_list", []):
+            self.visit(decorator)
+        self.visit(node.args)
+        if getattr(node, "returns", None) is not None:
+            self.visit(node.returns)
+        self.scope.append((kind, name))
+        for statement in body:
+            self.visit(statement)
+        self.scope.pop()
+
+    def visit_FunctionDef(self, node):
+        self._enter(node, "function", node.name, node.body)
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_Lambda(self, node):
+        self._enter(node, "function", "<lambda>", [node.body])
+
+    def visit_ClassDef(self, node):
+        for expression in [*node.decorator_list, *node.bases, *(k.value for k in node.keywords)]:
+            self.visit(expression)
+        self.scope.append(("class", node.name))
+        for statement in node.body:
+            self.visit(statement)
+        self.scope.pop()
+
+
+def _platform_claim_modules() -> dict:
+    """The importable name and file of each module whose open-flag readers
+    promise to run where an optional flag is missing."""
+    from scripts import memory_api
+    import session_end
+
+    return {
+        "scripts.project_identity": Path(pi.__file__),
+        "scripts.memory_api": Path(memory_api.__file__),
+        "session_end": Path(session_end.__file__),
+    }
+
+
+# Every function in those modules that reads an optional flag, and the test
+# above that runs it with every optional flag deleted.
+_RUN_WITHOUT_OPTIONAL_FLAGS = {
+    ("scripts.project_identity", "read_override"):
+        TestEveryReaderOpensWithoutAnOptionalFlag.test_the_override_reader,
+    ("scripts.project_identity", "read_git_file"):
+        TestEveryReaderOpensWithoutAnOptionalFlag.test_the_git_file_reader,
+    ("scripts.memory_api", "_pruned_session_records"):
+        TestEveryReaderOpensWithoutAnOptionalFlag.test_the_prune_ledger_reader,
+    ("session_end", "_append_ledger_line"):
+        TestEveryReaderOpensWithoutAnOptionalFlag.test_the_prune_ledger_writer,
+}
+
+# Run in a child: import the modules once with every flag, drop only those
+# modules, delete every optional flag, and import them again. Their own
+# import-time code then runs without the flags, and nothing else does.
+_IMPORT_WITHOUT_OPTIONAL_FLAGS = r"""
+import importlib, os, sys
+names = sys.argv[1].split(",")
+universal = set(sys.argv[2].split(","))
+files = {os.path.realpath(path) for path in sys.argv[3:]}
+for name in names:
+    importlib.import_module(name)
+for name, module in list(sys.modules.items()):
+    if os.path.realpath(getattr(module, "__file__", None) or "-") in files:
+        del sys.modules[name]
+optional = [flag for flag in dir(os) if flag.startswith("O_") and flag not in universal]
+assert optional, "no optional flag to delete"
+for flag in optional:
+    delattr(os, flag)
+for name in names:
+    importlib.import_module(name)
+print("imported without", len(optional), "flags")
+"""
+
+
+class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
+    """project_identity.py, memory_api.py and session_end.py promise that
+    their open-flag readers run on a platform lacking an optional flag. Their
+    every `os.O_*` read is found in the parse, module-level constants and
+    default arguments included, and checked three ways: no read names an
+    optional flag directly, each function reading one runs with every
+    optional flag deleted, and each module imports with them deleted.
+
+    The population is those three modules. state_file.py, working_memory.py,
+    session_resume.py, the merge_guard hooks and session_init.py read
+    optional flags directly, but they make no such promise and their readers
+    are not changed alongside these, so they sit outside this census, not
+    exempt from it."""
+
+    @staticmethod
+    def _reads() -> dict:
+        found = {}
+        for name, path in _platform_claim_modules().items():
+            visitor = _OpenFlagReads()
+            visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
+            found[name] = visitor.reads
+        return found
+
+    def test_no_read_names_an_optional_flag_directly(self):
+        reads = self._reads()
+        # control: each module's known guarded read is found
+        assert all(any(r[3] == "getattr-default" for r in rs) for rs in reads.values()), reads
+        direct = [
+            (name, *read) for name, rs in reads.items() for read in rs
+            if read[3] != "getattr-default"
+            and not (read[3] == "attribute" and read[2] in _UNIVERSAL_OPEN_FLAGS)
+        ]
+        assert direct == [], direct
+
+    def test_every_function_reading_an_optional_flag_runs_without_it(self):
+        readers = {
+            (name, read[0]) for name, rs in self._reads().items() for read in rs
+            if not read[1] and read[2] not in _UNIVERSAL_OPEN_FLAGS
+        }
+        assert readers == set(_RUN_WITHOUT_OPTIONAL_FLAGS), sorted(
+            readers ^ set(_RUN_WITHOUT_OPTIONAL_FLAGS)
+        )
+
+    def test_each_module_imports_without_an_optional_flag(self):
+        modules = _platform_claim_modules()
+        result = subprocess.run(
+            [
+                sys.executable, "-c", _IMPORT_WITHOUT_OPTIONAL_FLAGS,
+                ",".join(modules), ",".join(sorted(_UNIVERSAL_OPEN_FLAGS)),
+                *map(str, modules.values()),
+            ],
+            capture_output=True, text=True, timeout=120,
+            env=dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p)),
+        )
+        assert result.returncode == 0, result.stderr[-2000:]
+        assert result.stdout.startswith("imported without"), result.stdout
+
+
 class TestAnOverrideFileSwappedForALinkIsRefused:
     """The override open does not follow a link: a symlink put in place
     after the lstat, here by showing the lstat a regular file while the path
@@ -2472,6 +2662,18 @@ _HEADER_FORMS = {
     "a longer name": "[includes]\n\tpath = inc\n",
     "a value": "[core]\n\tx = [include]\n",
 }
+# Headers chained on one line: two to four of them, `include` last, joined
+# by each ASCII character in turn, so git decides which separators it reads
+# a chain across. Braces are doubled for the `format` the arm applies.
+_HEADER_FORMS.update({
+    f"{count} headers joined by {ord(separator):#04x}": (
+        separator.join(["[gc]", "[x]", "[y]"][: count - 1] + ["[include]"])
+        .replace("{", "{{").replace("}", "}}")
+        + "\n\tpath = inc\n"
+    )
+    for count in (2, 3, 4)
+    for separator in map(chr, range(1, 128))
+})
 
 
 class TestTheIncludeScanReadsAHeaderAsGitDoes:
@@ -2560,29 +2762,104 @@ class TestTheSubmoduleWorktreeCheckNamesItsCause:
         monkeypatch.setattr(pi.subprocess, "run", run)
         assert pi._admin_dir_refusal(admin, checkout) == pi.CORE_WORKTREE_UNREAD_DETAIL
 
-    @pytest.mark.parametrize(
-        "failure",
-        [
-            subprocess.TimeoutExpired(["git"], 5),
-            FileNotFoundError("git"),
-            OSError("git cannot run"),
-            subprocess.CompletedProcess(["git"], 1, b"../../../x\n", b""),
-        ],
-        ids=["timed out", "not found", "cannot run", "exit 1 with output"],
-    )
-    def test_a_git_that_cannot_answer_is_named_as_unread(self, tmp_path, monkeypatch, failure):
-        """Each way the `core.worktree` read can fail to answer, and an exit
-        of 1 that still printed something (not git's "unset"), is named as
-        unread, never as a recorded other checkout."""
+    @staticmethod
+    def _caught_exceptions() -> list:
+        """An instance of every exception class `_admin_dir_refusal` catches
+        around its git call, read from its own `except` clauses."""
+        import builtins
+        import inspect
+
+        tree = ast.parse(inspect.getsource(pi._admin_dir_refusal))
+        tries = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.Try) and any(
+                isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute)
+                and call.func.attr == "run"
+                for statement in node.body for call in ast.walk(statement)
+            )
+        ]
+        assert len(tries) == 1, tries  # control: the one try around the git call
+        caught = []
+        for handler in tries[0].handlers:
+            if handler.type is None:
+                continue
+            names = handler.type.elts if isinstance(handler.type, ast.Tuple) else [handler.type]
+            for name in names:
+                owner = vars(pi) if isinstance(name, ast.Attribute) else vars(builtins)
+                kind = (
+                    getattr(owner[name.value.id], name.attr)
+                    if isinstance(name, ast.Attribute) else owner[name.id]
+                )
+                caught.append(
+                    kind(["git"], 5) if issubclass(kind, subprocess.SubprocessError) else kind("git")
+                )
+        return caught
+
+    def test_every_exception_the_git_call_can_raise_is_named_as_unread(self, tmp_path, monkeypatch):
+        """Each exception the `core.worktree` read catches, taken from the
+        function's own `except` clauses, is named as unread, never as a
+        recorded other checkout."""
         admin, checkout = self._submodule(tmp_path)
         real = pi.subprocess.run
-
-        def run(command, *args, **kwargs):
-            if "core.worktree" in command:
-                if isinstance(failure, BaseException):
+        caught = self._caught_exceptions()
+        assert any(isinstance(error, OSError) for error in caught), caught  # control
+        wrong = {}
+        for failure in caught:
+            def run(command, *args, failure=failure, **kwargs):
+                if "core.worktree" in command:
                     raise failure
-                return failure
-            return real(command, *args, **kwargs)
+                return real(command, *args, **kwargs)
 
-        monkeypatch.setattr(pi.subprocess, "run", run)
-        assert pi._admin_dir_refusal(admin, checkout) == pi.CORE_WORKTREE_UNREAD_DETAIL
+            monkeypatch.setattr(pi.subprocess, "run", run)
+            answer = pi._admin_dir_refusal(admin, checkout)
+            if answer != pi.CORE_WORKTREE_UNREAD_DETAIL:
+                wrong[type(failure).__name__] = answer
+        assert wrong == {}, wrong
+
+    def test_the_caught_set_covers_what_a_real_git_call_raises(self, tmp_path):
+        """The arm above reads its population from the `except` clauses, so it
+        cannot see a class dropped from them. This one makes real
+        `subprocess.run` calls fail each way the git call can (an argument
+        holding NUL, as a NUL-filled admin path gives; no such program; a
+        program that cannot run; no answer in time) and requires every raised
+        exception to be one the function catches."""
+        caught = tuple(type(error) for error in self._caught_exceptions())
+        (tmp_path / "not-a-program").mkdir()
+        attempts = {
+            "argument holding NUL": (["git", "--git-dir", "a\0b", "config"], 5),
+            "no such program": ([str(tmp_path / "absent")], 5),
+            "program cannot run": ([str(tmp_path / "not-a-program")], 5),
+            "no answer in time": ([sys.executable, "-c", "import time; time.sleep(5)"], 0.05),
+        }
+        raised, uncaught = {}, {}
+        for cause, (command, timeout) in attempts.items():
+            try:
+                subprocess.run(command, capture_output=True, timeout=timeout)
+            except Exception as error:  # noqa: BLE001 - the raised class is the measurement
+                raised[cause] = type(error).__name__
+                if not isinstance(error, caught):
+                    uncaught[cause] = type(error).__name__
+        assert len(raised) == len(attempts), raised  # control: every attempt raised
+        assert uncaught == {}, uncaught
+
+    def test_every_exit_but_an_answer_is_named_as_unread(self, tmp_path, monkeypatch):
+        """git answers the `core.worktree` read only by exiting 0 with the
+        value, or 1 with no output (unset). Every other exit, a negative one
+        for a git killed by a signal included, and an exit of 1 that printed
+        something, is named as unread."""
+        admin, checkout = self._submodule(tmp_path)
+        real = pi.subprocess.run
+        outcomes = [(code, b"") for code in range(-64, 256) if code not in (0, 1)]
+        outcomes.append((1, b"../../../x\n"))
+        wrong = {}
+        for code, output in outcomes:
+            def run(command, *args, code=code, output=output, **kwargs):
+                if "core.worktree" in command:
+                    return subprocess.CompletedProcess(command, code, output, b"")
+                return real(command, *args, **kwargs)
+
+            monkeypatch.setattr(pi.subprocess, "run", run)
+            answer = pi._admin_dir_refusal(admin, checkout)
+            if answer != pi.CORE_WORKTREE_UNREAD_DETAIL:
+                wrong[(code, output)] = answer
+        assert wrong == {}, wrong
