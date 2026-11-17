@@ -2,11 +2,13 @@
 # Idempotent Cloud Agent bootstrap for the PACT plugin test harness.
 #
 # Mirrors the CI dependency set in .github/workflows/tests.yml. CI runs the
-# floor interpreter with the pins in constraints-ci.txt; this script installs
-# the same file with `-r` and refuses any interpreter below the floor. A local
-# green matches CI only on the floor version itself: a newer interpreter is
-# allowed but CI does not test it. Installs into a repo-local venv (.venv) to
-# keep the system interpreter clean. Safe to run repeatedly.
+# floor interpreter with the hashed lock in constraints-ci.txt; this script
+# installs the same lock with `--require-hashes -r` and refuses any
+# interpreter below the floor. A local green matches CI only on the floor
+# version itself: a newer interpreter is allowed but CI does not test it. The
+# lock is the same for Python 3.12, 3.13 and 3.14 (see constraints-ci.in).
+# Installs into a repo-local venv (.venv) to keep the system interpreter
+# clean. Safe to run repeatedly.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -52,11 +54,14 @@ require_floor .venv/bin/python "the existing .venv" \
 # shellcheck disable=SC1091
 . .venv/bin/activate
 
-# The same two commands as CI's install step (.github/workflows/tests.yml):
-# constraints-ci.txt is the requirement set, so the package list lives there
-# only. pip is not pinned; its upgrade keeps `-c` so a future pip pin applies.
-python -m pip install --upgrade -c constraints-ci.txt pip
-python -m pip install -r constraints-ci.txt
+# CI's install step (.github/workflows/tests.yml) without its
+# --only-binary=:all:. constraints-ci.txt is the hashed lock of the requirement
+# set, so the package list lives there only, and pip is pinned inside it. This
+# install accepts source builds because pysqlite3 has no wheel for aarch64
+# Linux or x86_64 macOS; pip installs a source build's own build dependencies
+# (setuptools and the like) WITHOUT hash checks, so on such a platform those
+# dependencies are not covered by the lock.
+python -m pip install --require-hashes -r constraints-ci.txt
 
 # Report how this venv differs from the pinned set. A warning only, never a
 # failure: a local venv may legitimately hold extra tools.

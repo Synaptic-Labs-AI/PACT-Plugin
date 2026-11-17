@@ -11,6 +11,7 @@ Tests cover:
 import os
 import re
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,7 @@ import yaml
 
 import ci_contract
 from fixtures.tracked_files import tracked_files as _tracked_files
+from helpers import env_without_pytest_vars
 
 
 class TestEnsureMemoryReady:
@@ -434,7 +436,7 @@ jobs:
         if: always() && (failure() || cancelled() || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
-          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.dist == 'load' && 'load' || 'loadfile' }}
+          name: full-suite-evidence-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.dist == 'load' && 'load' || 'loadfile' }}-${{ steps.order.outputs.order || 'unguarded' }}
           path: |
             .full-suite-results.xml
             .full-run-record.json
@@ -479,10 +481,9 @@ class TestDependencyDriftIsDetectable:
     Not covered:
     - isolated-environment tools started from Python code (the word check reads only workflow, action, `.cursor/install.sh` and tracked shell and Makefile text);
     - an unpinned package installed and then removed between two checks, by a route other than `pip uninstall` (removing a pinned package, or a package the pins require, is reported as MISSING);
-    - integrity and hashes: the same version from a different build or index is outside the honest-mistake threat;
+    - integrity: the hashes in constraints-ci.txt are checked by pip at install time (`--require-hashes`), not by the runtime check, which checks names and versions only;
     - `pip wheel`, `pip download` and package builds, which do not change the tested environment;
-    - vendored code without distribution metadata;
-    - transitive versions, which float by design (only pinned names are version-checked).
+    - vendored code without distribution metadata.
     """
 
     # The verify step's command as tests.yml runs it: ENFORCING (no
@@ -703,6 +704,84 @@ class TestDependencyDriftIsDetectable:
             f"NOWHERE (it is deliberately silent — the CLI's stderr is a JSON "
             f"contract). Pin them in constraints-ci.txt, or remove them here."
         )
+
+    def test_the_shipped_lock_is_hashed_and_follows_its_input(self):
+        """constraints-ci.txt is the hashed lock of constraints-ci.in.
+
+        Every lock pin carries a sha256 hash, so `--require-hashes` never
+        meets an unhashed line; every input pin, pip included, appears in the
+        lock at the same version; and the lock header names the refresh command.
+        uv copies the --custom-compile-command text into the header verbatim, so
+        the header alone repeats a string written in constraints-ci.in. Two
+        sources it does not copy are checked against it: the refresh command
+        constraints-ci.in actually runs must carry the same words as the header,
+        flag for flag, once its --custom-compile-command pair is removed; and
+        because every workflow job that installs the lock does so with
+        --require-hashes, that command must carry --generate-hashes. No arm runs
+        the refresh tool."""
+        root = self._require_root("the hashed CI lock")
+        verify = self._verify_script(self._real_repo_root())
+        lock = verify.read_lock(root / "constraints-ci.txt")
+        unhashed = sorted(name for name, (_, hashes) in lock.items() if not hashes)
+        assert not unhashed, f"constraints-ci.txt pins without a hash: {unhashed}"
+        wanted = verify.read_pins(root / "constraints-ci.in")
+        assert "pip" in wanted, "constraints-ci.in does not pin pip"
+        drift = sorted(
+            f"{name}: in {version}, lock {lock.get(name, ('absent',))[0]}"
+            for name, version in wanted.items()
+            if lock.get(name, (None,))[0] != version)
+        assert not drift, (
+            f"constraints-ci.txt does not follow constraints-ci.in: {drift}. "
+            "Refresh the lock with the command in constraints-ci.in.")
+        header = (root / "constraints-ci.txt").read_text(encoding="utf-8").splitlines()[:2]
+        recorded = header[-1].lstrip("#").strip()
+        ran, custom = self._refresh_command(
+            (root / "constraints-ci.in").read_text(encoding="utf-8"))
+        assert ran[:1] == ["uvx"] and re.fullmatch(r"uv@\d+(\.\d+)*", ran[1]), (
+            f"the refresh command does not run a pinned uv: {ran}")
+        assert recorded == custom, (
+            "the lock header is not the --custom-compile-command text uv copies "
+            f"into it: header {recorded!r}, text {custom!r}")
+        assert shlex.split(recorded) == ran, (
+            "the lock header records a command other than the one constraints-ci.in "
+            f"runs: header {shlex.split(recorded)}, run {ran}")
+        hash_installs = self._hash_checked_installs(root)
+        assert hash_installs, (
+            "no workflow job installs constraints-ci.txt with --require-hashes")
+        assert "--generate-hashes" in ran, (
+            f"{hash_installs} install the lock with --require-hashes, but its refresh "
+            f"command does not pass --generate-hashes: {ran}")
+
+    @staticmethod
+    def _refresh_command(in_text):
+        """(argv, custom text) of the refresh command constraints-ci.in documents:
+        the comment lines from `#   uvx` through the last backslash continuation,
+        split as a shell would, with the --custom-compile-command pair taken out."""
+        lines = in_text.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("#   uvx "))
+        words = []
+        for line in lines[start:]:
+            body = line.lstrip("#").strip()
+            words.append(body.removesuffix("\\").strip())
+            if not body.endswith("\\"):
+                break
+        argv = shlex.split(" ".join(words))
+        at = argv.index("--custom-compile-command")
+        return argv[:at] + argv[at + 2:], argv[at + 1]
+
+    def _hash_checked_installs(self, root):
+        """'workflow job' for every workflow job with a run step that installs
+        constraints-ci.txt with --require-hashes."""
+        found = []
+        for path in self._workflow_files(root):
+            doc = self._load_workflow_yaml(path)
+            for jid, job in ((doc or {}).get("jobs") or {}).items():
+                runs = [step.get("run") or "" for step in (job or {}).get("steps") or []
+                        if isinstance(step, dict)]
+                if any("--require-hashes" in run and "constraints-ci.txt" in run
+                       for run in runs):
+                    found.append(f"{path.name} {jid}")
+        return found
 
     def _diagnostic_upload_problems(self, rel, jid, steps):
         """Placement and fail-closed shape of the full-suite evidence upload."""
@@ -983,7 +1062,8 @@ class TestDependencyDriftIsDetectable:
     )
     # Exact line (stripped) -> the reason it is accepted. Empty today.
     _ACCEPTED_TRIPWIRE_LINES = {}
-    _CANONICAL_INSTALL_LINE = "python -m pip install -r constraints-ci.txt"
+    _CANONICAL_INSTALL_LINE = (
+        "python -m pip install --only-binary=:all: --require-hashes -r constraints-ci.txt")
 
     @staticmethod
     def _tracked_shell_and_make_files(root):
@@ -1576,12 +1656,14 @@ class TestDependencyDriftIsDetectable:
         """MUTATION ARM: a memory_init package missing from the pins reddens."""
         root = self._require_root("memory_init's pins")
         pins = (root / "constraints-ci.txt").read_text(encoding="utf-8")
-        line = next(ln for ln in pins.splitlines()
-                    if ln.lower().startswith("model2vec=="))
+        # The pin and its hash continuation lines, so the mutant stays a
+        # well-formed lock that merely lacks model2vec.
+        block = re.search(r"(?m)^model2vec==\S+ \\\n(?:    --hash=\S+(?: \\)?\n)+", pins)
+        assert block, "constraints-ci.txt has no hashed model2vec block"
         self._shape_reddens(
             tmp_path, monkeypatch, "model2vec-unpinned",
             "test_memory_init_packages_are_pinned", r"DEPENDENCY DRIFT: \['model2vec'\]",
-            extra_files={"constraints-ci.txt": pins.replace(line + "\n", "", 1)})
+            extra_files={"constraints-ci.txt": pins.replace(block.group(0), "", 1)})
 
     def test_verify_placement_mutations_redden(self, tmp_path, monkeypatch):
         """MUTATION ARM: every way the verify steps can stop
@@ -1755,7 +1837,8 @@ class TestDependencyDriftIsDetectable:
         # ruff's --target-version (the shipped lint legs use it too).
         self._shape_stays_green(
             tmp_path, monkeypatch, "faithful", arm, workflow_text=in_block(
-                "pip list; python -m pip install -r constraints-ci.txt; "
+                "pip list; python -m pip install --only-binary=:all: --require-hashes "
+                "-r constraints-ci.txt; "
                 "ruff check --target-version py312 pact-plugin/"))
 
     def test_unvetted_actions_redden(self, tmp_path, monkeypatch):
@@ -1924,9 +2007,10 @@ class TestVerifyCiEnvironmentScript:
         assert pins == {"foo-bar": "1.0"}
         assert self._check(verify, pins, tmp_path).ok
 
-    def test_pip_is_exempt_from_the_version_check(self, verify, tmp_path):
+    def test_pip_is_version_checked_like_any_pin(self, verify, tmp_path):
         self._dist(tmp_path, "pip", "99.0")
-        assert self._check(verify, {"pip": "1.0"}, tmp_path).ok
+        verdict = self._check(verify, {"pip": "1.0"}, tmp_path)
+        assert verdict.wrong_version == {"pip": ("99.0", "1.0")}
 
     @pytest.mark.parametrize("line", [
         "ruff==0.17.*",
@@ -1954,6 +2038,39 @@ class TestVerifyCiEnvironmentScript:
         constraints.write_text(
             "# header\n\nruff==0.17.3  # the linter\n", encoding="utf-8")
         assert verify.read_pins(constraints) == {"ruff": "0.17.3"}
+
+    _HASH_A = "--hash=sha256:" + "a" * 64
+    _HASH_B = "--hash=sha256:" + "b" * 64
+
+    def test_read_lock_reads_hash_continuations(self, verify, tmp_path):
+        constraints = tmp_path / "c.txt"
+        constraints.write_text(
+            f"# generated\nruff==0.17.3 \\\n    {self._HASH_A} \\\n"
+            f"    {self._HASH_B}\npytest==9.2.0 \\\n    {self._HASH_A}\n",
+            encoding="utf-8")
+        assert verify.read_lock(constraints) == {
+            "ruff": ("0.17.3", ("a" * 64, "b" * 64)),
+            "pytest": ("9.2.0", ("a" * 64,)),
+        }
+        assert verify.read_pins(constraints) == {"ruff": "0.17.3", "pytest": "9.2.0"}
+
+    @pytest.mark.parametrize("body, where", [
+        ("ruff==0.17.3\n    {a}\n", ":2: a hash line that no pin"),
+        ("ruff==0.17.3 \\\n", "ends inside a continued pin"),
+        ("ruff==0.17.3 \\\n    {a} \\\n", "ends inside a continued pin"),
+        ("ruff==0.17.3 \\\n\n    {a}\n", ":2: a continued pin"),
+        ("ruff==0.17.3 \\\n# note\n    {a}\n", ":2: a continued pin"),
+        ("ruff==0.17.3 \\\n    --hash=sha256:ABC\n", ":2: a continued pin"),
+        ("ruff==0.17.3 \\\n    --hash=md5:" + "a" * 32 + "\n", ":2: a continued pin"),
+        ("ruff==0.17.3 \\\n    {a} {a}\n", ":2: a continued pin"),
+        ("ruff==0.17.3 \\\n    {a}\nRuff==0.17.3\n", ":3: 'Ruff' is pinned twice"),
+        ("ruff==0.17.3 # c \\\n    {a}\n", ":1: not an exact"),
+    ])
+    def test_read_lock_refuses_a_malformed_continuation(self, verify, tmp_path, body, where):
+        constraints = tmp_path / "c.txt"
+        constraints.write_text(body.format(a=self._HASH_A), encoding="utf-8")
+        with pytest.raises(verify.ConstraintsError, match=re.escape(where)):
+            verify.read_lock(constraints)
 
     def test_interpreter_mismatch_reports_the_unresolved_pair(self, verify, tmp_path, monkeypatch):
         """A `python3` on PATH in another DIRECTORY than sys.executable
@@ -2115,7 +2232,8 @@ class TestCIEnvironmentBinding:
             encoding="utf-8")
         (rig / "suite" / "test_probe.py").write_text(
             "def test_probe():\n    pass\n", encoding="utf-8")
-        env = dict(os.environ, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
+        # No PYTEST_* name from the shell that runs the suite reaches the child.
+        env = dict(env_without_pytest_vars(), GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
         env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
 
         def run(pytest_pin):
@@ -2123,6 +2241,7 @@ class TestCIEnvironmentBinding:
                 f"pytest=={pytest_pin}\n", encoding="utf-8")
             return subprocess.run(
                 [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                 "-p", "no:randomly",
                  "suite"], cwd=rig, env=env, capture_output=True, text=True,
                 timeout=120)
 
@@ -2180,6 +2299,20 @@ class TestCIEnvironmentBinding:
         assert failed.exitstatus == 3
         assert "ALREADY ended with exit status 1" in capsys.readouterr().err
 
+    def test_session_end_note_names_a_status_an_earlier_hook_raised(
+            self, binding, monkeypatch, capsys):
+        """A census raised the session's status to 1 in its own sessionfinish,
+        after pytest had passed every sessionfinish hook the status as it stood
+        before any ran (0). With drift at session end the note names that 1,
+        read from session.exitstatus, not the 0 the hook was passed."""
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        monkeypatch.setattr(binding, "_load_verify_script",
+                            lambda script: self._stub(False))
+        raised = self._Session(1)
+        binding.CIEnvironmentBinding().pytest_sessionfinish(raised, 0)
+        assert raised.exitstatus == 3
+        assert "ALREADY ended with exit status 1" in capsys.readouterr().err
+
     def _real_rig(self, tmp_path, verify_patch=None):
         """A runnable copy: the binding, the verify script (optionally
         patched), a conftest registering the binding, and a constraints file
@@ -2216,13 +2349,15 @@ class TestCIEnvironmentBinding:
                     seen.add(key)
                     pins.append(f"{name}=={dist.version}")
         (rig / "constraints-ci.txt").write_text("\n".join(pins) + "\n", encoding="utf-8")
-        env = dict(os.environ, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
+        # No PYTEST_* name from the shell that runs the suite reaches the child.
+        env = dict(env_without_pytest_vars(), GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
         env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
         env.pop("PYTHONPATH", None)
 
         def run():
             return subprocess.run(
                 [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+                 "-p", "no:randomly",
                  "suite"], cwd=rig, env=env, capture_output=True, text=True,
                 timeout=180)
         return rig, run

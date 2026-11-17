@@ -1,0 +1,1529 @@
+"""
+Location: pact-plugin/tests/child_pytest_census.py
+Summary: Refuses a pytest child the suite starts without blocking pytest-randomly.
+Used by: pact-plugin/conftest.py, whose pytest_configure calls register(),
+         which installs it and registers the Plugin whose hooks collect each
+         xdist worker's misses and report at session finish, in every session
+         under pact-plugin/, a session of skills/ tests alone included;
+         tests/test_child_pytest_census.py.
+
+pytest-randomly is installed in CI, where constraints-ci.txt pins it, and may or
+may not be installed locally; the root pyproject.toml addopts blocks it, and
+`-p no:randomly` is a no-op where it is absent. A child session rooted outside
+the repo does not read that config, so where the plugin is installed it would
+shuffle. Every pytest child must therefore block the plugin itself; none may
+load it. The repo config is not consulted.
+
+A pytest child is deterministic when pytest, loading plugins as pytest 9.2
+does, registers pytest-randomly under none of the three names that run its
+hooks: its entry point `randomly`, its module `pytest_randomly`, and that module
+imported again as `pytest_randomly.__init__`. The census reads the words pytest
+reads, in pytest's order: the value of the last `-o addopts=...` (or
+`--override-ini addopts=...`) before any bare `--`, then PYTEST_ADDOPTS, then
+the argv. Each `-p VALUE` (or `-pVALUE`, the value stripped of spaces) applies
+in turn, and a bare `--` does not end them: pytest reads every `-p` before it
+parses options. `-p no:NAME` blocks NAME, and `pytest_NAME` unless NAME starts
+with `pytest_`, and unloads either if it was loaded; `-p NAME` loads NAME when
+it is one of the three, whatever came before. So `-p no:randomly` blocks the
+entry point and the module but not `pytest_randomly.__init__`, and
+`-p no:pytest_randomly` leaves the entry point to load. Next the entry point
+loads unless it is blocked, PYTEST_DISABLE_PLUGIN_AUTOLOAD is non-empty, or
+`--disable-plugin-autoload` comes before any bare `--`. Last, each
+comma-separated name in PYTEST_PLUGINS loads when it is one of the three and
+not blocked, with autoload disabled or not: pytest tries a PYTEST_PLUGINS name
+as an entry point before it imports it as a module, so `randomly` loads through
+pytest-randomly's entry point. Other PYTEST_PLUGINS names are not checked, so
+a child is refused for one of the three even when another name there is a
+module pytest cannot import, which stops pytest with a usage error before any
+test runs.
+
+The program judged is the one the launch runs: Popen's `executable=` when it is
+given (with `shell=True`, the shell), or posix_spawn's path, in place of argv[0],
+which is then only the name the child is shown. So
+`subprocess.run(["anything", "-q"], executable="/venv/bin/pytest")` is a pytest
+child.
+
+A child's environment starts as the explicit `env` passed to the launch, or this
+process's when none is passed, and the NAME=VALUE words before the program apply
+to it.
+
+THE CENSUS REFUSES THESE LAUNCH FAMILIES, AND ONLY THESE. A launch in one of
+them that does not block pytest-randomly is refused, and a [wrapper] launch is
+refused whether or not it does:
+- [program] The program is pytest's own: `pytest` or `py.test`, by path or not,
+  with a distro version suffix (`pytest-3`, `pytest3`, `py.test-3`), `.exe`, or a
+  tool runner's `@version` pin (`pytest@8.3.0`); or the package's
+  `pytest/__main__.py`. pytest's numbered temp root (`pytest-3` directly under
+  `pytest-of-<user>`) is a directory and never names the program, wherever it
+  appears.
+- [coverage] The program is `coverage run` (`coverage`, `coverage3`,
+  `coverage-3.12`) running `pytest` or `pytest.__main__` as a module, or
+  pytest's program or `__main__.py` as its script. coverage's `-m` and
+  `--module` are on/off flags, alone or in a bundle of its short flags (`-pm`):
+  the module or script is the first plain word after coverage's options, so
+  `coverage run -m -p pytest` runs the module pytest. `--rcfile`, `--source`,
+  `--include`, `--omit`, `--context`, `--concurrency`, `--data-file`,
+  `--save-signal` and `--debug` take the next word as their value unless
+  written with `=`.
+- [module] An interpreter runs `-m pytest`, `-m pytest.__main__`, or the same
+  `-m coverage run ...` forms. An interpreter is a word named `python`, `pypy`,
+  `ipython`, `graalpy` or `pyston`, each optionally with a version and one letter
+  (`python3`, `python3.12`, `python3.12t`, `pythonw`, `pypy3.10`, `ipython3`),
+  the Windows launcher `py` or `pyw`, any of these with `.exe`, or
+  sys.executable. Its short and long options before `-m` are stepped over,
+  including the values of `-W`, `-X` and `--check-hash-based-pycs`, and the
+  launcher's `-3`, `-3.12`, `-3.12-arm64` and `-V:<tag>` (`-V:3.12`,
+  `-V:Anaconda3/3.12`), each read as one option whose letters are not options.
+- [mention] Every word naming an interpreter in a command is read as the
+  [module] family, not only the first, up to the word in program position when
+  that word names a program that runs none of its words (listed under
+  [wrapper]). The word in program position is the program itself, or the
+  command a listed wrapper runs, or the subcommand of git, whose subcommand is
+  the program it runs, or the command of find's first `-exec`-family action,
+  each followed along a chain. A find with no such action runs nothing. So
+  `echo python -m pytest`, `printf '%s\\n' python -m pytest`,
+  `timeout 5 echo python -m pytest`, `git grep python -m pytest`,
+  `timeout 5 git grep python -m pytest`,
+  `find . -exec echo python -m pytest ;` and `find . -name x python -m pytest`
+  are mentions, while `make test python -m pytest` is refused: `test` there is
+  make's argument, not a program. The stop holds for one command only:
+  `printf x; python -m pytest` is still judged.
+- [script] The program is an interpreter that runs pytest's program or
+  `__main__.py` as its script (`python /venv/bin/pytest`, and after a `--` that
+  ends the interpreter's options, `python -- /venv/bin/pytest`). Only the program
+  position counts here: in `pip install python-dateutil pytest` or
+  `echo python /venv/bin/pytest` no interpreter runs a script.
+- [wrapper] Any family above as the command of a program the census does not
+  read (`timeout 60 pytest`, `sudo python -m pytest`, `uv run pytest`), refused
+  whether or not it blocks pytest-randomly, since the census cannot tell what
+  environment and argv that program passes on. An interpreter running such a
+  program as its module (`python3 -m uv run pytest`) is read as that program. The program is any program
+  except an interpreter, `coverage`, pytest's program, and the programs that
+  print, look up, read, list or ignore their words, or change to the directory
+  they name, and run none of them: `echo`, `printf`, `which`, `true`, `false`,
+  `:`, `grep`, `egrep`, `fgrep`, `rg`, `ag`, `ls`, `cat`, `head`, `tail`, `wc`,
+  `sed`, `awk`, `cut`, `sort`, `uniq`, `diff`, `file`, `stat`, `test`, `[`,
+  `[[`, `type`, `hash`, `chmod`, `chown`, `touch`, `mkdir`, `rm`, `cp`, `mv`,
+  `ln`, `cd`, `pushd` and `popd`. So `grep -c pytest log`,
+  `ls -la pytest`, `[[ -x /venv/bin/pytest ]]` and `chmod 755 /venv/bin/pytest`
+  are mentions, not launches.
+  Its command is the first word after it that is not an option (a word starting
+  with `-`), a NAME=VALUE word, a number or duration (`60`, `1.5m`, `inf`,
+  `0x5`), a hatch matrix selector (`+py=3.12`, `-py=3.11`) or the verb `run`
+  or `tool` (`uv tool run pytest`, `hatch -e test run pytest`, and
+  `npm run pytest`, whose package script may start pytest). A word right
+  after an option may be that option's value, so the word after it is tried
+  too (`sudo -u bob pytest`).
+  The command is also tried as a shell whose -c text runs a family above, or
+  runs such a program (`sudo bash -c 'timeout 5 pytest'`). When the command is
+  one of the process wrappers and tool runners `env`, `nice`, `nohup`, `sudo`,
+  `timeout`, `time`, `stdbuf`, `xvfb-run`, `exec`, `uv`, `uvx`, `pipx`, `poetry`,
+  `pdm`, `pipenv`, `hatch`, `rye`, `pixi`, `conda` or `micromamba`, its own
+  command is searched for the same way, so a chain of them is followed to the
+  program it starts (`timeout 60 nice -n 5 pytest`, `sudo env uv run pytest`).
+  find is in that list, and its commands are the words after `-exec`,
+  `-execdir`, `-ok` and `-okdir` (`find . -name x -exec pytest {} ;`). So are
+  the shell builtins `command` and `builtin`, whose command is the word after
+  them (`command -v` and `command -V` run nothing). git's command is its
+  subcommand, the first word past git's own options, where `-C`, `-c`,
+  `--git-dir`, `--work-tree`, `--namespace`, `--config-env` and
+  `--attr-source` take the next word as their value and every other option is
+  one word, so `git -C repo pytest` is refused and
+  `git --no-pager grep python -m pytest` is a mention. Three git subcommands
+  run a command, which is judged too: `git bisect run` the argv after `run`,
+  `git submodule foreach` its remaining words and `git rebase --exec` each
+  value, both as shell
+  text, so `git bisect run pytest` is refused and `git bisect run make test`
+  is not. The command bisect run and foreach run is in program position, so
+  `git submodule foreach echo python -m pytest` is a mention. A rebase value is
+  one word and the words after it are rebase's own arguments, so
+  `git rebase -x 'echo python -m pytest' main` is a mention while
+  `git rebase -x echo python -m pytest` is read as `make check python -m
+  pytest` is: there `python -m pytest` are arguments of git, which the census
+  does not read. rebase's --exec is read in every form git accepts: `--exec`
+  and its unambiguous prefixes `--ex` and `--exe`, with `=` or the next word,
+  and `-x` alone or ending a bundle of its short flags (`-ix`, `-ixpytest`).
+- [shell] Any family above inside the command text of a shell run with `-c`
+  (below).
+`-m py.test` and `-m _pytest` start no pytest session and are no family.
+
+EVERY OTHER LAUNCH FORM IS OUTSIDE THE CENSUS, whether or not it starts pytest:
+the census does not claim to see it, refuse it, or list it. The blind spots at
+the end are examples of that rule, not a complete list.
+
+A HARMLESS COMMAND THE CENSUS STILL REFUSES IS AN ACCEPTED, DOCUMENTED LIMIT,
+not a defect to fix. A program the census does not read is refused when a word
+that may be its command starts pytest (`make check python -m pytest`,
+`python-config -m pytest`), because telling a mention from a launch there would
+need that program's own argument grammar. Both refusals fail loudly with a
+remedy, but only one names the program. `python-config -m pytest`, where pytest
+may be the program's command, is refused as [wrapper]: the line names
+python-config, and blocking pytest-randomly does not lift it.
+`make check python -m pytest`, where pytest is a later word, is refused as
+[mention]: the line is the ordinary does-not-block line, which names no
+program, and adding `-p no:randomly` lifts it.
+
+The program is the first word past NAME=VALUE words, the shell's own
+`{ } ! if then elif else fi do done while until`, `function NAME`, `coproc`
+(and the NAME it takes before a compound command), `builtin` and `command` (and
+its `-p`; `command -v` and `command -V` run nothing). `exec` and `time` are
+programs like any other, so a pytest after them is refused as [wrapper].
+
+A shell (`sh`, `bash`, `zsh`, `dash`, `ksh`) run with `-c` (alone, or bundled as
+in `-lc` or `-ec`, after other options such as `-e`, `-o pipefail` or `--norc`)
+has its command text opened, and so does one behind an assignment. Each `o` or
+`O` in an option word takes the next word as its value, bundled or not, so the
+text is the first word after those values: `-euo pipefail -c TEXT`,
+`-oc pipefail TEXT` and `-eO extglob -c TEXT` all open TEXT. These forms are
+checked against real bash only; the other shells are read the same way.
+The text is read by bash's rules for quoting, comments, separators,
+redirections, heredocs and substitutions, as listed here; bash's expansions are
+not performed (blind spot 9):
+- Quotes and escapes are resolved, and a backslash-newline joins the lines.
+  bash's `$'...'` quoting is resolved to the word it builds, escapes included
+  (`$'py\x74est'` is `pytest`), and `$"..."` is read as a double-quoted string,
+  wherever quotes are read: inside substitutions and arithmetic too, and in a
+  heredoc delimiter (`<<$'EOF'` ends at a line `EOF` and is quoted).
+- A `#` that starts a word begins a comment to the end of the line, inside a
+  `$( )` too, so a quote or paren in a comment there does not move where the
+  substitution ends; a `#` inside a word or inside quotes is text
+  (`--base-url=http://x/#frag`).
+- Each command between `;`, `&`, `&&`, `||`, `|`, `|&`, a newline, `(` and `)`
+  is judged on its own, written with or without spaces, and so is a function
+  body, where it is defined, whether or not the function is called.
+- A redirection (`>`, `>>`, `<`, `2>&1`, `&>`, the here-string `<<<`) and its
+  target do not end a command, and neither does a file descriptor number or
+  `{name}` written against it (`2>/dev/null pytest`). An operator written
+  against another (`true;>log pytest`) is still read as each of them.
+- A heredoc's body (`<<WORD` or `<<-WORD`) is data, not commands: it runs from
+  the next newline to the line that is the delimiter (its leading tabs stripped
+  for `<<-`), and several heredocs on one line take their bodies in turn. In a
+  heredoc whose delimiter is unquoted, the body's command substitutions are
+  judged. A heredoc inside `$( )` is read the same way, so a `)` or quote in
+  its body does not end the substitution; a `<<` in arithmetic there is a
+  shift. A heredoc whose delimiter never comes takes the rest of the text.
+- The command text of a command substitution (`$( )` or backticks, also inside
+  double quotes) and of a process substitution (`<( )` or `>( )`) is judged as
+  its own shell text. Arithmetic (`$(( ))` and `(( ))`) runs no command. As in
+  bash, `((` and `$((` open arithmetic only when the paren they open closes on
+  `))`; `((cmd) )` is two subshells and `$((cmd) )` a command substitution of a
+  subshell, both judged.
+- A shell command inside a shell command is opened the same way. Shells and
+  substitutions together are opened up to four levels deep.
+- Every shell's `-c` text (`sh`, `dash`, `zsh`, `ksh`) is read by these bash
+  rules, so a construct another shell lacks or reads differently is judged as
+  bash reads it: dash rejects `<( )` and `<<<` as syntax errors, so
+  `dash -c 'cat <(pytest -q)'` is refused although dash runs nothing.
+- Text that bash rejects as a syntax error is still judged by these rules and
+  refused on purpose, although it starts no child: `echo \\$(pytest -q)`, and a
+  substitution nothing closes (`echo $(pytest`, an unclosed backtick), whose
+  whole body is judged.
+
+On a pytest child that is not deterministic, or that starts through a program
+the census does not read, the census records a line naming PYTEST_CURRENT_TEST,
+the argv, the cwd (`unavailable` when the process's own cwd has been deleted;
+the census resolves no path against it), the family that decided the refusal
+(`(family [module])`, or `(family [shell], then [module])` for a command in a
+shell's -c text; the first family to match, in the order [wrapper], then
+[program], [coverage], [module] and [script], then [mention]), for a [wrapper]
+refusal the word or shell text it took for the command the program runs
+(`tar -czf out.tgz pytest` names `pytest`), and the remedy, then raises
+ChildPytestCensusError, which aborts the launch before the child starts.
+finish() fails the session for every recorded line, so a test that swallows
+the error still fails the run.
+An identical line is recorded once, so finish()'s header counts distinct
+refusal lines, not launches. A refusal stops its launch at the first audit
+event, so the lines merged are those of repeated identical launches; a launch
+the census cannot inspect is not stopped and can raise both a subprocess.Popen
+and an os.posix_spawn audit event, whose identical lines are merged too.
+Under xdist a worker cannot fail the run itself (the controller ignores a
+worker's exit status), so a worker's finish() hands its lines to the controller
+through workeroutput, collect() gathers them as each worker goes down, and the
+controller's finish() reports and fails.
+
+A launch the census cannot read (a word or env value that is not text) is
+recorded as a fault line naming PYTEST_CURRENT_TEST and the launch, and fails
+the session, when one of its words names pytest as a program or module:
+pytest's program (`pytest`, `py.test`, by path or not) or `pytest/__main__.py`,
+wherever the word stands, so the word `pytest` in `git commit -am pytest`
+counts; or `pytest` after `-m`, a short-option cluster ending in `m`, or
+`--module`, only in a command that names an interpreter or `coverage` before
+it (in `git commit -am pytest.__main__` the `-am` is git's); or pytest's module
+as `coverage run` reads it, the first plain word after its options with `-m`
+among them (`coverage run -m -p pytest.__main__`). A word that only
+contains `pytest`, such as a tmp_path under /tmp/pytest-of-<user>/, does not.
+A malformed launch that names pytest in neither way is left to the launcher's
+own error. The launch itself is never aborted for a fault.
+
+Blind spots, examples of launches outside the census:
+1. A pytest started by a shell script file or another program the census does
+   not parse (`bash run.sh`, `make`). verify-gate-tree.sh is covered by the
+   args its tests pass.
+2. A pytest started by a Python intermediary that does not load this census (a
+   script run in a rig). verify_full_collection.py carries the flag itself.
+3. `python -c "...pytest.main(...)"` and in-process pytest.main.
+4. Launches through os.system, os.exec* or os.spawn*, which raise other events.
+5. Code no measured run reached: CI-only branches and skipped tests.
+6. A nested session inside a child rooted outside the repo, which does not
+   load this census.
+7. A worker that crashes before its finish() runs sends no lines; xdist reports
+   the crash itself.
+8. A chain through a program the [wrapper] family does not name as a wrapper
+   (`timeout 60 chrt -f 1 pytest`, `sudo taskset 1 pytest`): the census takes
+   that program for the command and judges no further. The list holds names
+   only, so a name missing from it can shorten a chain but cannot hide an
+   option's value. Of git's subcommands, only `bisect run`, `submodule
+   foreach` and `rebase --exec`/`-x` are searched for the command they run.
+   git's other ways of running a command are not: `difftool --extcmd`/`-x`,
+   `filter-branch`'s `--*-filter` options, the `--upload-pack`, `-u`,
+   `--receive-pack` and `--exec` transport options of `fetch`, `clone`,
+   `pull`, `ls-remote`, `push` and `archive`, and `send-email`'s `--*-cmd`
+   options, nor commands git runs from its configuration (blind spot 13).
+9. Shell text the census does not expand or track: variables (`$PYTEST`) and
+   what a substitution's output becomes (`$(echo pytest) -q`), `export`,
+   aliases, `eval`, `env -S`, a script fed to a shell's stdin (`bash <<EOF`,
+   `bash -s`), a command substitution inside arithmetic (`$(( $(pytest) ))`), and
+   a `case` pattern's `)` inside a `$( )` (it ends the substitution early),
+   brace expansion (`{pytest,-q}`, `py{,}test -q`) and pathname expansion
+   (`/venv/bin/py*test -q`). An operator written alone inside quotes (`";"`) is
+   read as an operator.
+10. pytest run from a file the census cannot name: a renamed or wrapper copy of
+    the console script, a zipapp (`python pytest.pyz`), or a module other than
+    `pytest` and `pytest.__main__` that starts a session (`python -m runpy`, a
+    plugin's own entry point). The census judges a launch by its words, not by
+    what the named file does, nor by what an environment file sets.
+11. An interpreter not named above: `jython` (which cannot run current
+    pytest), a custom-named or embedded interpreter, or one renamed on disk.
+12. Plugin loading the census does not read: a config file's `addopts` (the
+    child's own pytest.ini, pyproject.toml, tox.ini or setup.cfg; only an
+    `-o addopts=` override is read), an `-o addopts=` inside that value,
+    `pytest_plugins` in a conftest.py or test module, a plugin that imports
+    pytest_randomly itself, and a pytest whose loading order differs from 9.2.
+    A lock that pins another pytest or pytest-randomly than REPLAYED_VERSIONS
+    fails test_the_lock_pins_the_versions_the_census_replays, and the CI
+    environment binding fails a CI run whose installed versions differ from
+    the lock, so this drift is left only to a local run on another pytest.
+13. A command a program runs from text the census reads as a plain word: sed's
+    `e` command and awk's `system()` inside their script, a git alias
+    (`git -c alias.t='!pytest' t`), and an option of a read or list program
+    that runs one (`sort --compress-program`, `rg --pre`).
+14. Shell text nested deeper than the census opens it. Shells and substitutions
+    together are opened up to four levels deep, counting the text of the shell
+    the launch runs as the first, so `bash -c 'echo $(echo $(echo $(echo
+    $(pytest -q))))'` is accepted unread.
+15. coverage's long options abbreviated, as its option parser allows (`--mod`
+    for `--module`, `--sour src` for `--source src`): the census reads them by
+    their full names, so `coverage run --mod pytest.__main__` and `coverage run
+    --sour src -m pytest` are accepted.
+"""
+import os
+import re
+import shlex
+import sys
+
+import pytest
+
+REMEDY = 'add "-p", "no:randomly" to the child argv'
+# The major.minor versions whose plugin loading the census replays.
+REPLAYED_VERSIONS = {"pytest": "9.2", "pytest-randomly": "5.1"}
+WRAPPER_REMEDY = ("launch pytest directly, as in sys.executable -m pytest -p no:randomly, "
+                  "or teach the census this program")
+WORKEROUTPUT_KEY = "child_pytest_census_misses"
+AUTOLOAD_ENV = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
+ADDOPTS_ENV = "PYTEST_ADDOPTS"
+PLUGINS_ENV = "PYTEST_PLUGINS"
+NO_AUTOLOAD_FLAG = "--disable-plugin-autoload"
+_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh"})
+# pytest's program names: pytest and py.test, with a distro version suffix
+# (pytest-3, pytest3, py.test-3) and, after _command_name, without `.exe`.
+_PYTEST_PROGRAM = re.compile(r"py\.?test(-?[0-9]+(\.[0-9]+)*)?\Z")
+# The name of pytest's numbered temp root under `pytest-of-<user>`.
+_TEMP_ROOT = re.compile(r"pytest-[0-9]+\Z")
+# The modules `-m` can run pytest as.
+_PYTEST_MODULES = frozenset({"pytest", "pytest.__main__"})
+# The Windows launcher's names; any basename starting with python or pypy is an
+# interpreter too.
+_LAUNCHERS = frozenset({"py", "pyw"})
+# The Windows launcher's version option, with an optional architecture
+# (`-3`, `-3.12`, `-3.12-64`, `-3.12-arm64`); no CPython option starts with a digit.
+_LAUNCHER_VERSION = re.compile(r"-[0-9][0-9.]*(?:-[A-Za-z0-9]+)?\Z")
+# An interpreter's name, after _command_name: one of these, optionally with a
+# version and one letter (python3, python3.12t, pythonw, pypy3.10, graalpy-24.1).
+_INTERPRETER = re.compile(r"(?:python|pypy|ipython|graalpy|pyston)(?:-?[0-9]+(?:\.[0-9]+)*)?[a-z]?\Z")
+# A bundled `-m` option naming pytest's module (`-mpytest`, `-Impytest.__main__`).
+_BUNDLED_MODULE = re.compile(r"-[A-Za-z]*m(pytest|pytest\.__main__)\Z")
+_COVERAGE_PROGRAM = re.compile(r"coverage(-?\d+(\.\d+)*)?\Z")
+# The names under which pytest registers pytest-randomly's hooks: its entry
+# point, its module, and the module imported again as `pytest_randomly.__init__`
+# (pytest-randomly 5.1.0 has no other module).
+_RANDOMLY_NAMES = frozenset({"randomly", "pytest_randomly", "pytest_randomly.__init__"})
+# Characters a shell reads as operators; a run of them is one lexer token.
+_OPERATOR_CHARS = "();<>|&\n"
+# A file descriptor number or `{name}` written against a redirection.
+_FD_PREFIX = re.compile(r"(?:\d+|\{[A-Za-z_][A-Za-z0-9_]*\})(?=[<>])")
+# The operators a run of operator characters is made of, longest first.
+_OPERATOR_PIECE = re.compile(r"&>>?|[<>]&|>>|>\||<<<|<<|<>|[<>]|\|&|&&|\|\||[;&|()\n]")
+# Words a shell reads before a command without running them.
+_RESERVED = frozenset({"{", "}", "!", "if", "then", "elif", "else", "fi",
+                       "do", "done", "while", "until"})
+# Programs that run none of the words after them: they print, look up, read,
+# list or ignore them, or change to the directory they name (cd, pushd, popd).
+# Names only; a missing name refuses a mention loudly.
+_RUNS_NOTHING = frozenset({
+    "echo", "printf", "which", "true", "false", ":", "grep", "egrep", "fgrep", "rg",
+    "ag", "ls", "cat", "head", "tail", "wc", "sed", "awk", "cut", "sort", "uniq",
+    "diff", "file", "stat", "test", "[", "[[", "type", "hash", "chmod", "chown", "touch",
+    "mkdir", "rm", "cp", "mv", "ln", "cd", "pushd", "popd",
+})
+# find's actions that run the command after them.
+_FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+# Process wrappers, tool runners and the shell builtins that run the word after
+# them, whose command may itself be one of them: the command search runs again
+# from each, so a chain of them is followed to the program it starts. Names
+# only; a missing name shortens a chain.
+_CHAINED = frozenset({"env", "nice", "nohup", "sudo", "timeout", "time", "stdbuf",
+                      "xvfb-run", "exec", "uv", "uvx", "pipx", "poetry", "pdm", "pipenv",
+                      "hatch", "rye", "pixi", "conda", "micromamba", "find",
+                      "command", "builtin"})
+# Dispatchers whose first plain word is the program they run (`git grep` runs
+# git-grep), so that word is in program position for the [mention] stop.
+_DISPATCHERS = frozenset({"git"})
+# git's own options that take the next word as their value; every other word
+# starting with `-` before the subcommand is a flag or carries its value.
+_GIT_VALUE_OPTIONS = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                                "--config-env", "--attr-source"})
+# Subcommand verbs a program names before the command it runs (`uv run`,
+# `uv tool run`, `poetry run`, `hatch -e test run`).
+_RUN_VERBS = frozenset({"run", "tool"})
+# A number or duration a program takes before its command (`timeout 1.5m`,
+# `nice -n +5`, `timeout inf`, `timeout 0x5`).
+_NUMBER = re.compile(r"[+-]?(?:\.?[0-9][0-9a-z.+-]*|inf(?:inity)?)\Z", re.IGNORECASE)
+# A hatch matrix selector before its command: `hatch run +py=3.12 test:pytest`,
+# or an exclusion, `-py=3.11`.
+_SELECTOR = re.compile(r"[+-][A-Za-z_][A-Za-z0-9_.-]*=")
+# hatch names an environment before its command: `hatch run test:pytest`.
+_ENVIRONMENT_PREFIX = re.compile(r"[A-Za-z0-9_.-]+:")
+# A shell's long options that take a file. A short o or O takes a value too,
+# alone or in a bundle (_shell_command).
+_SHELL_LONG_VALUE_OPTIONS = frozenset({"--rcfile", "--init-file"})
+# coverage run's options that take a separate value, from `coverage run --help`
+# (coverage.readthedocs.io/en/latest/commands/cmd_run.html, coverage 7.17); its
+# short options (-a, -m, -L, -p, -h) take none.
+_COVERAGE_VALUE_OPTIONS = frozenset({"--rcfile", "--source", "--include", "--omit",
+                                     "--context", "--concurrency", "--data-file",
+                                     "--save-signal", "--debug"})
+_MAX_DEPTH = 4
+
+_state = {"installed": False, "misses": [], "forwarded": [], "collected": set()}
+
+
+class ChildPytestCensusError(RuntimeError):
+    """A pytest child would start with pytest-randomly unblocked."""
+
+
+def installed():
+    return _state["installed"]
+
+
+PLUGIN_NAME = "child-pytest-census"
+
+
+class Plugin:
+    """The census's session hooks: each xdist worker's misses, and the report
+    at session finish."""
+
+    @pytest.hookimpl(optionalhook=True)
+    def pytest_testnodedown(self, node, error):
+        collect(node)
+
+    def pytest_sessionfinish(self, session):
+        finish(session)
+
+
+def register(config):
+    """Install the census and register its Plugin, once per session."""
+    if config.pluginmanager.has_plugin(PLUGIN_NAME):
+        return
+    install()
+    config.pluginmanager.register(Plugin(), PLUGIN_NAME)
+
+
+def install():
+    """Install the launch audit hook once."""
+    if _state["installed"]:
+        return
+    # Python calls every audit hook on every audit event. Measured per event on
+    # Python 3.12.3, Neoverse-V1: no hooks 213 ns, one census about 445 ns, the
+    # ordinary session's two (HOME and child-pytest) about 550 ns, all three 636
+    # ns (the clock-shift census installs only when PACT_TEST_CLOCK_SHIFT_SECONDS
+    # is set); +1.4% to +1.8% wall-clock on test_session_init and test_merge_guard.
+    # A do-nothing hook alone adds about 214 ns, which no early return removes; one
+    # dispatcher shared by the censuses would save about 86 ns (about 0.4%), not taken.
+    sys.addaudithook(_audit)
+    _state["installed"] = True
+
+
+def _audit(event, args):
+    if event == "subprocess.Popen":
+        executable, argv, cwd, env = args
+    elif event == "os.posix_spawn":
+        (executable, argv, env), cwd = args, None
+    else:
+        return
+    argv = _launched(executable, argv)
+    try:
+        line = _miss(argv, cwd, env)
+    except Exception as exc:  # a census fault must not break the launch it watches
+        # Fail closed only where the launch could be a pytest child; a malformed
+        # launch of anything else is the launcher's own error to raise.
+        if _names_pytest(argv):
+            _record("%s: child pytest census could not inspect a pytest launch [%s]: %r" % (
+                _current_test(), _shown(argv), exc))
+        return
+    if line:
+        _record(line)
+        raise ChildPytestCensusError(line)
+
+
+def _launched(executable, argv):
+    """The argv as the program the launch runs sees it: the event's executable
+    (Popen's executable=, defaulting to argv[0], or posix_spawn's path), then
+    argv's arguments; argv[0] is only the name the child is shown."""
+    if executable is None or isinstance(argv, (str, bytes, os.PathLike)):
+        return argv
+    try:
+        return [executable, *list(argv)[1:]]
+    except TypeError:
+        return argv
+
+
+def _current_test():
+    return os.environ.get("PYTEST_CURRENT_TEST") or "<outside a test>"
+
+
+def _text(item):
+    try:
+        return os.fsdecode(item)
+    except Exception:
+        return repr(item)
+
+
+def _items(argv):
+    if isinstance(argv, (str, bytes, os.PathLike)):
+        return [argv]
+    try:
+        return list(argv or ())
+    except Exception:
+        return [argv]
+
+
+def _shown(argv):
+    return " ".join(" ".join(_text(item) for item in _items(argv)).split())[:200]
+
+
+def _names_pytest(argv):
+    """True when a launch the census could not judge names pytest as a program or
+    module: a word that is pytest's program or `pytest/__main__.py`, wherever it
+    stands (so `git commit -am pytest` counts, the word `pytest` being the
+    program's name), or pytest's module after `-m` (bundled or not, alone or
+    ending a short-option cluster) or `--module` in a command whose earlier
+    words include an interpreter or `coverage`, the programs that take `-m`, or
+    after coverage's options as _coverage_run reads them (`coverage run -m -p
+    pytest.__main__`); a shell operator word starts a new command. Each item
+    is split into
+    words as the shell reader splits them (_lex, which makes each run of
+    operator characters its own word and falls back to a plain split on an
+    unclosed quote), and each word again at backticks, so shell text counts
+    too; a word that only contains `pytest` (a tmp_path under
+    /tmp/pytest-of-<user>/) does not."""
+    words = [piece for item in _items(argv) for word in _lex(_text(item))
+             for piece in word.split("`") if piece]
+    takes_m = False
+    for at, word in enumerate(words):
+        if _is_pytest_script(word):
+            return True
+        if set(word) <= set(_OPERATOR_CHARS):
+            takes_m = False  # a new command starts after a shell operator
+        elif _COVERAGE_PROGRAM.match(_command_name(word)):
+            if _coverage_run(words, at + 1) is not None:
+                return True  # coverage's module after its options (`-m -p pytest`)
+            takes_m = True
+        elif _is_interpreter(word):
+            takes_m = True
+        elif takes_m and (bool(_BUNDLED_MODULE.match(word)) or (
+                word in _PYTEST_MODULES and at > 0
+                and (words[at - 1] == "--module" or re.fullmatch(r"-[A-Za-z]*m", words[at - 1])))):
+            return True
+    return False
+
+
+def _miss(argv, cwd, env):
+    """Return the refusal line for a non-deterministic pytest child, else None."""
+    environment = (dict(os.environ) if env is None
+                   else {os.fsdecode(k): os.fsdecode(v) for k, v in env.items()})
+    if isinstance(argv, (str, bytes)):
+        # Windows audits subprocess.Popen with the command line as one string
+        # (list2cmdline runs before the audit); POSIX always audits a list.
+        words = _lex(os.fsdecode(argv))
+        commands = _shell_commands(os.fsdecode(argv), environment, 0)
+    else:
+        words = [os.fsdecode(a) for a in (argv or [])]
+        commands = _commands(words, environment, False, 0)
+    for part, program, part_env, in_shell in commands:
+        wrapper = _wrapper(part, program, 0)
+        if wrapper is not None:
+            name, hit = wrapper
+            return ("%s: pytest child [%s] (cwd %s) starts through %s, which the census "
+                    "does not read, and `%s` may be the command it runs %s; %s" % (
+                        _current_test(), _shown(words), _where(cwd), name,
+                        _shown([hit]), _family_label("wrapper", in_shell), WRAPPER_REMEDY))
+        start, family = _pytest_args(part, program)
+        if start is not None and not _deterministic(part[start:], part_env):
+            return "%s: pytest child [%s] (cwd %s) does not block pytest-randomly %s; %s" % (
+                _current_test(), _shown(words), _where(cwd), _family_label(family, in_shell),
+                REMEDY)
+    return None
+
+
+def _family_label(family, in_shell):
+    """The refusal line's record of the family that decided it: `(family [X])`,
+    or `(family [shell], then [X])` for a command in a shell's -c text."""
+    return "(family [shell], then [%s])" % family if in_shell else "(family [%s])" % family
+
+
+def _where(cwd):
+    """The directory a refusal line names. The census judges a launch by its
+    words and resolves no path against this directory, so a cwd that cannot be
+    read (deleted under the process) changes only what the line shows, and the
+    launch is still judged and refused."""
+    if cwd is not None:
+        return os.fsdecode(cwd)
+    try:
+        return os.getcwd()
+    except OSError as exc:
+        return "unavailable (%s)" % (exc.strerror or type(exc).__name__)
+
+
+# bash's $'...' escapes: octal, \x{H...}, \xHH, \uHHHH, \UHHHHHHHH, \cX, or one
+# character, which _ANSI_C_SIMPLE maps or which keeps its backslash.
+_ANSI_C_ESCAPE = re.compile(r"\\(?:([0-7]{1,3})|x\{([0-9A-Fa-f]+)\}|x([0-9A-Fa-f]{1,2})"
+                            r"|u([0-9A-Fa-f]{1,4})|U([0-9A-Fa-f]{1,8})|c(\\\\|[^'])|(.))", re.S)
+_ANSI_C_SIMPLE = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n",
+                  "r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+
+
+def _ansi_c(text, i):
+    """(the word bash's $'...' quoting at text[i] builds, as a single-quoted word;
+    the index past its closing quote). A NUL ends the quoted string, as in bash."""
+    out, j = [], i + 2
+    while j < len(text) and text[j] != "'":
+        escape = _ANSI_C_ESCAPE.match(text, j)
+        if escape is None:  # a plain character, or a backslash that ends the text
+            out.append(text[j])
+            j += 1
+            continue
+        octal, braced, hex_, short, long_, control, other = escape.groups()
+        j = escape.end()
+        if octal or braced or hex_:
+            out.append(chr((int(octal, 8) if octal else int(braced or hex_, 16)) & 0xFF))
+        elif short or long_:
+            code = int(short or long_, 16)
+            # bash writes a surrogate or a code point past U+10FFFF as bytes no
+            # printable str holds; it is never a letter of a program name, so one
+            # placeholder stands in.
+            out.append(chr(code) if code <= 0x10FFFF and not 0xD800 <= code <= 0xDFFF
+                       else "\ufffd")
+        elif control:
+            out.append("\x1c" if control == "\\\\" else "\x7f" if control == "?"
+                       else chr(ord(control) & 0x1F))
+        else:
+            out.append(_ANSI_C_SIMPLE.get(other, "\\" + other))
+    word = "".join(out).split("\0", 1)[0]
+    return "'" + word.replace("'", "'\\''") + "'", min(j + 1, len(text))
+
+
+def _dollar_quotes(text):
+    """Shell text with bash's $'...' quoting resolved to the word it builds and
+    $"..." read as a plain double-quoted string, as bash does with no translation;
+    a $ inside other quotes is text."""
+    out, i = [], 0
+    while i < len(text):
+        if text.startswith("$'", i):
+            word, i = _ansi_c(text, i)
+            out.append(word)
+            continue
+        if text.startswith('$"', i):
+            i += 1
+        end = i + 2 if text[i] == "\\" else _quote_end(text, i)
+        out.append(text[i:end])
+        i = end
+    return "".join(out)
+
+
+def _quote_end(text, i):
+    """The index past a quoted string starting at text[i], else i + 1."""
+    if text[i] == "'":
+        end = text.find("'", i + 1)
+        return len(text) if end < 0 else end + 1
+    if text[i] == '"':
+        j = i + 1
+        while j < len(text) and text[j] != '"':
+            j += 2 if text[j] == "\\" else 1
+        return min(j + 1, len(text))
+    return i + 1
+
+
+def _lex(text):
+    """The words of shell text, with each run of operator characters its own word.
+    `#` is text here: _scan has already removed the comments a shell would.
+    $'...' and $"..." are resolved first (_dollar_quotes)."""
+    text = _dollar_quotes(text).replace("\\\n", " ")
+    lexer = shlex.shlex(text, posix=True, punctuation_chars=_OPERATOR_CHARS)
+    lexer.commenters = ""
+    lexer.whitespace = " \t\r"
+    lexer.whitespace_split = True
+    try:
+        return list(lexer)
+    except ValueError:  # an unclosed quote: fall back to a plain split
+        return re.findall(r"[();<>|&\n]+|[^\s();<>|&]+", text)
+
+
+def _closing(text, i, close):
+    """Index after the `close` that ends a construct whose body starts at `i`,
+    skipping quotes, escapes, nested parentheses and, inside `$( )`, comments,
+    arithmetic and heredoc bodies, so a `)` or quote in a comment or a heredoc
+    body does not end it; len(text) when unclosed. A backtick substitution ends
+    at its first unescaped backtick, heredoc or not, as bash's does."""
+    return _close(text, i, close)[0]
+
+
+def _close(text, i, close):
+    """(_closing's index, whether a `close` was found)."""
+    depth = 1
+    heredocs = []
+    start = i
+    while i < len(text):
+        char = text[i]
+        if char == "\\":
+            i += 2
+            continue
+        if (close == ")" and char == "#"
+                and (i == start or text[i - 1] in " \t\r\n" + _OPERATOR_CHARS)):
+            end = text.find("\n", i)  # a comment, as bash reads one inside $( )
+            i = len(text) if end < 0 else end
+            continue
+        if close == ")" and text.startswith("$'", i):
+            i = _ansi_c(text, i)[1]
+            continue
+        if char in "'\"" and close == ")":
+            end = text.find(char, i + 1) if char == "'" else _double_end(text, i + 1)
+            i = len(text) if end < 0 else end + 1
+            continue
+        if close == ")" and text.startswith(("$((", "(("), i):
+            opened = 3 if char == "$" else 2
+            end = _arithmetic_end(text, i + opened)
+            if end is not None:  # arithmetic, where `<<` is a shift
+                i = end
+                continue
+        if close == ")" and text.startswith("<<<", i):
+            i += 3
+            continue
+        if close == ")" and text.startswith("<<", i):
+            i = _heredoc_operator(text, i + 2, heredocs)
+            continue
+        if close == ")" and char == "\n" and heredocs:
+            i = _heredoc_bodies(text, i + 1, heredocs, [])
+            heredocs.clear()
+            continue
+        if close == ")" and char == "(":
+            depth += 1
+        elif char == close[0] and text.startswith(close, i):
+            depth -= 1
+            if depth == 0:
+                return i + len(close), True
+        i += 1
+    return len(text), False
+
+
+def _arithmetic_end(text, i):
+    """Index after the `))` that ends arithmetic opened by a `((` just before
+    `i`, or None when the inner paren closes on anything but `)`, as in
+    `((cmd) )`, which bash runs as two subshells. len(text) when unclosed."""
+    depth = 2
+    while i < len(text):
+        char = text[i]
+        if char == "\\":
+            i += 2
+            continue
+        if text.startswith("$'", i):
+            i = _ansi_c(text, i)[1]
+            continue
+        if char in "'\"":
+            end = text.find(char, i + 1) if char == "'" else _double_end(text, i + 1)
+            i = len(text) if end < 0 else end + 1
+            continue
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 1:
+                return i + 2 if text.startswith("))", i) else None
+        i += 1
+    return len(text)
+
+
+def _double_end(text, i):
+    """Index of the `"` that closes a double-quoted string whose body starts at
+    `i`, or -1."""
+    while i < len(text):
+        if text[i] == "\\":
+            i += 2
+        elif text[i] == '"':
+            return i
+        elif text.startswith("$(", i) or text[i] == "`":
+            i = _closing(text, i + 2, ")") if text[i] == "$" else _closing(text, i + 1, "`")
+        else:
+            i += 1
+    return -1
+
+
+def _substitution(text, i, bodies):
+    """When a command or process substitution, or arithmetic, starts at `i`,
+    record its command text in `bodies` and return (the word that stands for
+    it, the index after it); else None."""
+    if text.startswith("$((", i) and (end := _arithmetic_end(text, i + 3)) is not None:
+        return "0", end  # arithmetic runs no command
+    for opener, stands_for in (("$(", "_"), ("<(", "/dev/fd/63"), (">(", "/dev/fd/63")):
+        if text.startswith(opener, i):
+            # An unclosed body is judged whole: bash rejects the text, which is
+            # judged and refused on purpose like any text bash rejects.
+            end, closed = _close(text, i + 2, ")")
+            bodies.append(text[i + 2:end - 1 if closed else end])
+            return stands_for, end
+    if text[i] == "`":
+        end, closed = _close(text, i + 1, "`")
+        bodies.append(re.sub(r"\\([`$\\])", r"\1", text[i + 1:end - 1 if closed else end]))
+        return "_", end
+    return None
+
+
+def _scan(text):
+    """Shell text as a shell reads it, before its words are split: (the text with
+    comments, heredoc bodies and line continuations removed and each
+    substitution replaced by a word, the command texts of its substitutions)."""
+    out, bodies, heredocs = [], [], []
+    i = 0
+    while i < len(text):
+        char = text[i]
+        at_word_start = not out or out[-1][-1:] in " \t\r" + _OPERATOR_CHARS
+        if text.startswith("\\\n", i):
+            i += 2
+        elif at_word_start and (fd := _FD_PREFIX.match(text, i)):
+            i = fd.end()  # `2>x`, `{fd}>x`: the number or name belongs to the redirection
+        elif char == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+        elif text.startswith("$'", i):  # resolved here so an escaped quote stays inside
+            word, i = _ansi_c(text, i)
+            out.append(word)
+        elif char == "'":
+            end = text.find("'", i + 1)
+            end = len(text) if end < 0 else end + 1
+            out.append(text[i:end])
+            i = end
+        elif char == '"':
+            i = _scan_double(text, i, out, bodies)
+        elif text.startswith("((", i) and at_word_start:
+            end = _arithmetic_end(text, i + 2)
+            if end is None:  # `((cmd) )`: two subshells, not arithmetic
+                out.append("(")
+                i += 1
+            else:  # an arithmetic command
+                out.append("true")
+                i = end
+        elif (found := _substitution(text, i, bodies)) is not None:
+            out.append(found[0])
+            i = found[1]
+        elif char == "#" and at_word_start:
+            end = text.find("\n", i)
+            i = len(text) if end < 0 else end
+        elif text.startswith("<<<", i):
+            out.append("<<<")
+            i += 3
+        elif text.startswith("<<", i):
+            i = _heredoc_operator(text, i + 2, heredocs)
+            out.append("<< _")
+        elif char == "\n" and heredocs:
+            out.append("\n")
+            i = _heredoc_bodies(text, i + 1, heredocs, bodies)
+            heredocs.clear()
+        else:
+            out.append(char)
+            i += 1
+    return "".join(out), bodies
+
+
+def _scan_double(text, i, out, bodies):
+    """Copy the double-quoted string at `i` to `out`, replacing its substitutions;
+    return the index after it."""
+    out.append('"')
+    i += 1
+    while i < len(text) and text[i] != '"':
+        if text.startswith("\\\n", i):
+            i += 2
+        elif text[i] == "\\":
+            out.append(text[i:i + 2])
+            i += 2
+        elif text[i] in "$`" and (found := _substitution(text, i, bodies)) is not None:
+            out.append(found[0])
+            i = found[1]
+        else:
+            out.append(text[i])
+            i += 1
+    out.append('"')
+    return i + 1
+
+
+def _heredoc_operator(text, i, heredocs):
+    """Read a heredoc's `-` and delimiter word from `i`, queue the heredoc and
+    return the index after the word."""
+    strip_tabs = text.startswith("-", i)
+    i += strip_tabs
+    while i < len(text) and text[i] in " \t":
+        i += 1
+    start = i
+    while i < len(text) and text[i] not in " \t\r" + _OPERATOR_CHARS:
+        if text.startswith("$'", i):
+            i = _ansi_c(text, i)[1]
+        elif text[i] in "'\"":
+            end = text.find(text[i], i + 1)
+            i = len(text) if end < 0 else end + 1
+        else:
+            i += 2 if text[i] == "\\" else 1
+    word = _dollar_quotes(text[start:i])
+    quoted = any(char in word for char in "'\"\\")
+    heredocs.append((re.sub(r"""\\(.)|['"]""", r"\1", word), strip_tabs, quoted))
+    return i
+
+
+def _heredoc_bodies(text, i, heredocs, bodies):
+    """Skip the body of each queued heredoc, which starts at `i`, recording the
+    substitutions of an unquoted one; return the index after the last."""
+    for delimiter, strip_tabs, quoted in heredocs:
+        lines = []
+        while i < len(text):
+            end = text.find("\n", i)
+            end = len(text) if end < 0 else end
+            line, i = text[i:end], end + 1
+            if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                break
+            lines.append(line)
+        if not quoted:
+            _heredoc_substitutions("\n".join(lines), bodies)
+    return min(i, len(text))
+
+
+def _heredoc_substitutions(body, bodies):
+    """Record the command texts of the substitutions an unquoted heredoc body
+    expands: quotes are text there, and a backslash escapes `$`, a backtick or
+    itself."""
+    i = 0
+    while i < len(body):
+        if body[i] == "\\":
+            i += 2
+        elif body.startswith(("<(", ">("), i):
+            i += 1
+        elif (found := _substitution(body, i, bodies)) is not None:
+            i = found[1]
+        else:
+            i += 1
+
+
+def _shell_commands(text, env, depth, in_shell=False):
+    """Yield (command words, program index, environment, in_shell) for every
+    command in shell text and in each of its substitutions; in_shell is True
+    when the text is a shell program's -c text."""
+    main, bodies = _scan(text)
+    yield from _commands(_lex(main), env, True, depth, in_shell)
+    if depth < _MAX_DEPTH:
+        for body in bodies:
+            yield from _shell_commands(body, env, depth + 1, in_shell)
+
+
+def _is_operator(word):
+    return bool(word) and all(char in _OPERATOR_CHARS for char in word)
+
+
+def _split_commands(words):
+    """Split lexed shell words at their separators, dropping each redirection and
+    its target."""
+    part, skip = [], False
+    for word in words:
+        if skip:
+            skip = False
+            continue
+        if _is_operator(word):
+            for piece in _OPERATOR_PIECE.findall(word):
+                if "<" in piece or ">" in piece:
+                    skip = True
+                else:
+                    yield part
+                    part = []
+            continue
+        part.append(word)
+    yield part
+
+
+def _commands(words, env, shell_text, depth, in_shell=False):
+    """Yield (command words, program index, environment, in_shell) for every
+    command in `words`, with each shell -c command text opened; a command from
+    such a text has in_shell True."""
+    for part in (_split_commands(words) if shell_text else [words]):
+        if not part:
+            continue
+        program, part_env = _program(part, env)
+        text = _shell_command(part, program)
+        if text is not None and depth < _MAX_DEPTH:
+            yield from _shell_commands(text, part_env, depth + 1, True)
+        else:
+            yield part, program, part_env, in_shell
+
+
+def _is_assignment(word):
+    name, eq, _ = word.partition("=")
+    return bool(eq) and name.isidentifier()
+
+
+def _assign(env, word):
+    name, _, value = word.partition("=")
+    env[name] = value
+
+
+def _program(part, env):
+    """Index of the program word, past NAME=VALUE words, reserved words and the
+    builtins that run the command after them, and the environment the program
+    runs with."""
+    env = dict(env)
+    i = 0
+    while i < len(part):
+        word = part[i]
+        if _is_assignment(word):
+            _assign(env, word)
+            i += 1
+            continue
+        if word in _RESERVED or word == "builtin":
+            i += 1
+            continue
+        if word == "function":
+            i += 2  # `function NAME`, then its body
+            continue
+        if word == "coproc":
+            # A NAME is allowed only before a compound command.
+            i += 2 if i + 2 < len(part) and part[i + 2] in _RESERVED else 1
+            continue
+        if word == "command":
+            i += 1
+            while i < len(part) and part[i].startswith("-") and part[i] != "-":
+                if "v" in part[i] or "V" in part[i]:
+                    return len(part), env  # `command -v` and `-V` describe, never run
+                i += 1
+            continue
+        return i, env
+    return i, env
+
+
+def _shell_command(part, program):
+    """The command text of a shell run with -c at `program`, else None."""
+    if program >= len(part) or os.path.basename(part[program]) not in _SHELLS:
+        return None
+    has_c = False
+    i = program + 1
+    while i < len(part):
+        word = part[i]
+        if word in _SHELL_LONG_VALUE_OPTIONS:
+            i += 2
+        elif word == "--":
+            i += 1
+            break
+        elif word.startswith("--"):
+            i += 1
+        elif word[:1] in ("-", "+") and len(word) > 1:
+            has_c = has_c or (word[0] == "-" and "c" in word[1:])
+            # Each o or O in a bundle takes the next word as its value, in
+            # order, so `-euo pipefail` and `-oc pipefail TEXT` both work.
+            i += 1 + sum(letter in "oO" for letter in word[1:])
+        else:
+            break
+    return part[i] if has_c and i < len(part) else None
+
+
+def _command_name(word):
+    """A program word's name: its basename, lower-cased, without a tool runner's
+    `@version` pin (`pytest@8.3.0`), without `.exe` and without a hatch
+    environment prefix (`test:pytest`)."""
+    name = os.path.basename(word).lower().split("@", 1)[0]
+    if name.endswith(".exe"):
+        name = name[:-4]
+    prefix = _ENVIRONMENT_PREFIX.match(name)
+    return name[prefix.end():] if prefix else name
+
+
+def _is_pytest_script(word):
+    """True for a word naming pytest's program or console-script file, or its
+    package's __main__.py. pytest's numbered temp root (`pytest-N` directly
+    under `pytest-of-<user>`) is a directory, never the program."""
+    parts = word.replace("\\", "/").split("/")
+    if len(parts) > 1 and parts[-2].startswith("pytest-of-") and _TEMP_ROOT.match(parts[-1]):
+        return False
+    return bool(_PYTEST_PROGRAM.match(_command_name(word))) or parts[-2:] == ["pytest", "__main__.py"]
+
+
+def _is_interpreter(word):
+    name = _command_name(word)
+    return bool(_INTERPRETER.match(name)) or name in _LAUNCHERS or word == sys.executable
+
+
+def _module(words, i):
+    """The module an interpreter runs with -m, reading its options from `i`, and
+    the index after the module name; (None, i) when it runs no module."""
+    while i < len(words):
+        word = words[i]
+        if word in ("-W", "-X", "--check-hash-based-pycs"):
+            i += 2
+            continue
+        if word.startswith("--") and word != "--":
+            i += 1  # a long option without a value
+            continue
+        if not word.startswith("-") or word in ("-", "--"):
+            return None, i  # a script, stdin, or the end of options
+        if word.startswith("-V:") or _LAUNCHER_VERSION.match(word):
+            i += 1  # the launcher's `-V:<tag>` or `-3.12-arm64`, whose letters are no options
+            continue
+        letters = word[1:]
+        for at, letter in enumerate(letters):
+            if letter == "c":
+                return None, i
+            if letter == "m":
+                rest = letters[at + 1:]
+                if rest:
+                    return rest, i + 1
+                return (words[i + 1] if i + 1 < len(words) else None), i + 2
+            if letter in "WX":
+                if at == len(letters) - 1:
+                    i += 1  # its value is the next word
+                break  # otherwise its value is the rest of this word
+        i += 1
+    return None, i
+
+
+def _coverage_run(words, i):
+    """Index of pytest's first argument when `words[i:]` is `run`, coverage's
+    options, then pytest's module (with `-m` or `--module` among the options)
+    or pytest's script. `-m` is a flag, so the module is the first plain word
+    after the options, not the word after `-m`."""
+    if i >= len(words) or words[i] != "run":
+        return None
+    i += 1
+    module = False
+    while i < len(words):
+        word = words[i]
+        if word in _COVERAGE_VALUE_OPTIONS:
+            i += 2
+            continue
+        if not word.startswith("-") or word == "-":
+            found = word in _PYTEST_MODULES if module else _is_pytest_script(word)
+            return i + 1 if found else None
+        if word == "--module" or (not word.startswith("--") and "m" in word[1:]):
+            module = True  # `-m`, or a bundle of coverage's short flags holding it
+        i += 1
+    return None
+
+
+def _launch(part, at):
+    """Index of the first pytest argument when the command starting at `at` runs
+    pytest by the [program], [coverage], [module] or [script] family, else None."""
+    return _launch_family(part, at)[0]
+
+
+def _launch_family(part, at):
+    """(index of the first pytest argument, family) when the command starting at
+    `at` runs pytest by the [program], [coverage], [module] or [script] family,
+    else (None, None). `-m coverage run ...` is the [module] family."""
+    if at >= len(part):
+        return None, None
+    word = part[at]
+    if _is_pytest_script(word):
+        return at + 1, "program"
+    if _COVERAGE_PROGRAM.match(_command_name(word)):
+        return _found(_coverage_run(part, at + 1), "coverage")
+    if not _is_interpreter(word):
+        return None, None
+    module, after = _module(part, at + 1)
+    if module in _PYTEST_MODULES:
+        return after, "module"
+    if module == "coverage":
+        return _found(_coverage_run(part, after), "module")
+    if module is None and after < len(part) and part[after] == "--":
+        after += 1  # `--` ends the interpreter's options; the next word is its script
+    if module is None and after < len(part) and _is_pytest_script(part[after]):
+        return after + 1, "script"  # the interpreter runs pytest's script file
+    return None, None
+
+
+def _found(index, family):
+    return (index, family) if index is not None else (None, None)
+
+
+def _pytest_args(part, program):
+    """(index of the first pytest argument, deciding family) when `part` runs
+    pytest, else (None, None)."""
+    start, family = _launch_family(part, program)
+    if start is not None:
+        return start, family
+    # [mention]: every word naming an interpreter is read for its -m forms, up to
+    # a program in program position that runs none of its words.
+    stop = _command_position(part, program)
+    for at, word in enumerate(part):
+        if at == stop and _runs_nothing(part, at):
+            break
+        if not _is_interpreter(word):
+            continue
+        module, after = _module(part, at + 1)
+        if module in _PYTEST_MODULES:
+            return after, "mention"
+        if module == "coverage":
+            found = _coverage_run(part, after)
+            if found is not None:
+                return found, "mention"
+    return None, None
+
+
+def _command_position(part, program):
+    """Index of the word in program position: the command a listed wrapper or
+    dispatcher runs, followed along a chain, else the program word itself."""
+    if program < len(part) and _command_name(part[program]) in _CHAINED | _DISPATCHERS:
+        found = _command_search(part, program, 0)
+        if isinstance(found, int):
+            return found
+    return program
+
+
+def _runs_nothing(part, at):
+    """True for a program at `at` that runs none of its words: a listed one, or
+    a find with no action that runs a command."""
+    name = _command_name(part[at])
+    return name in _RUNS_NOTHING or (
+        name == "find" and not any(word in _FIND_EXEC for word in part[at + 1:]))
+
+
+def _modelled(word):
+    """True for a program the families read themselves."""
+    name = _command_name(word)
+    return (_is_pytest_script(word) or _is_interpreter(word) or name in _RUNS_NOTHING
+            or bool(_COVERAGE_PROGRAM.match(name)))
+
+
+def _wrapper(part, program, depth):
+    """(program word, the _Hit that matched) when the program is none the census
+    reads and a word that may be the command it runs starts pytest, else None."""
+    if program >= len(part):
+        return None
+    if _is_interpreter(part[program]):
+        # `python3 -m uv run pytest`: the interpreter runs a wrapper as its module.
+        module, after = _module(part, program + 1)
+        if module is None or _command_name(module) not in _CHAINED:
+            return None
+        inner = [module, *part[after:]]
+        hit = _command_starts_pytest(inner, 0, depth)
+        return ("%s -m %s" % (part[program], module), hit) if hit is not None else None
+    if _modelled(part[program]):
+        return None
+    hit = _command_starts_pytest(part, program, depth)
+    return (part[program], hit) if hit is not None else None
+
+
+class _Hit(str):
+    """The word, or shell text, that the command search took for a command that
+    starts pytest; a refusal line names it."""
+
+
+def _command_starts_pytest(part, program, depth):
+    """The _Hit when a word that may be the command of the program at `program`
+    starts pytest, else None."""
+    found = _command_search(part, program, depth)
+    return found if isinstance(found, _Hit) else None
+
+
+def _command_search(part, program, depth):
+    """A _Hit when a word that may be the command of the program at `program`
+    starts pytest, else the index of the word the search took for the command,
+    or None when it found none. That word is the first past options,
+    NAME=VALUE words, numbers and the verbs in _RUN_VERBS; while it follows an
+    option it may be that option's value, so the next one is tried too. A word
+    in _CHAINED is searched again as a program of its own. find's commands are
+    the words after its _FIND_EXEC actions. A dispatcher's command is its
+    subcommand, the first word past its options, where an option in
+    _GIT_VALUE_OPTIONS takes the next word as its value; _git_subcommand judges
+    it."""
+    name = _command_name(part[program])
+    if name == "find":
+        if depth >= _MAX_DEPTH:
+            return None
+        first = None
+        for at in range(program + 1, len(part)):
+            if part[at] in _FIND_EXEC:
+                found = _command_search(part, at, depth + 1)
+                if isinstance(found, _Hit):
+                    return found
+                # The first action's command is the one in program position; a
+                # later action that starts pytest returns True above instead.
+                first = found if first is None else first
+        return first
+    if name == "command" and any(
+            "v" in word or "V" in word for word in _leading_options(part, program)):
+        return None  # `command -v` and `-V` describe, never run
+    if name in _DISPATCHERS:
+        at = program + 1
+        while at < len(part) and part[at].startswith("-"):
+            at += 2 if part[at] in _GIT_VALUE_OPTIONS else 1
+        if at >= len(part):
+            return None
+        if _starts_pytest(part, at, depth):
+            return _Hit(part[at])
+        return at if depth >= _MAX_DEPTH else _git_subcommand(part, at, depth)
+    after_option = False
+    for at in range(program + 1, len(part)):
+        word = part[at]
+        if _is_assignment(word) or _NUMBER.match(word) or _SELECTOR.match(word):
+            after_option = False
+        elif word.startswith("-"):
+            after_option = True
+        elif _starts_pytest(part, at, depth):
+            return _Hit(word)
+        elif _command_name(word) in _CHAINED and depth < _MAX_DEPTH:
+            found = _command_search(part, at, depth + 1)
+            return at if found is None else found
+        elif after_option or word in _RUN_VERBS:
+            after_option = False
+        elif _command_name(word) in _DISPATCHERS and depth < _MAX_DEPTH:
+            found = _command_search(part, at, depth + 1)
+            return at if found is None else found
+        else:
+            return at
+    return None
+
+
+def _git_subcommand(part, at, depth):
+    """A _Hit when git's subcommand at `at` runs a command that starts pytest, else
+    the index of the word in program position: the command `bisect run` or
+    `submodule foreach` runs, followed along a chain, or the subcommand itself.
+    `bisect run` runs the argv after it; `submodule foreach` runs its remaining
+    words, and `rebase --exec`/`-x` each value, as shell text. A rebase value is
+    one word, so the words after it are rebase's own arguments and the
+    subcommand keeps the program position."""
+    subcommand = part[at]
+    if subcommand == "bisect" and part[at + 1:at + 2] == ["run"]:
+        found = _command_search(part, at + 1, depth + 1)
+        return at if found is None else found
+    if subcommand == "submodule":
+        i = at + 1
+        while i < len(part) and part[i] in ("-q", "--quiet"):
+            i += 1
+        if part[i:i + 1] == ["foreach"]:
+            i += 1
+            while i < len(part) and part[i] in ("--recursive", "-q", "--quiet"):
+                i += 1
+            if _text_starts_pytest(" ".join(part[i:]), depth):
+                return _Hit(" ".join(part[i:]))
+            if i >= len(part):
+                return at
+            if _command_name(part[i]) in _CHAINED | _DISPATCHERS and depth < _MAX_DEPTH:
+                found = _command_search(part, i, depth + 1)
+                return found if isinstance(found, int) else i
+            return i
+    if subcommand == "rebase":
+        for i in range(at + 1, len(part)):
+            text = _rebase_exec(part, i)
+            if text is not None and _text_starts_pytest(text, depth):
+                return _Hit(text)
+    return at
+
+
+def _rebase_exec(part, i):
+    """The command text `git rebase` takes from the option at `i` for --exec,
+    else None: `--exec`, or an unambiguous prefix of it (`--ex`, `--exe`), with
+    its value attached by `=` or in the next word; or `-x` alone or ending a
+    bundle of rebase's short flags (`-ix`), with its value the rest of the word
+    or the next word. -s, -X, -C, -S and -r take the rest of a bundle as their
+    own value, so an `x` after them is not -x. git 2.43 reads every one of
+    these forms, and refuses `--e` as ambiguous."""
+    word = part[i]
+    following = part[i + 1] if i + 1 < len(part) else ""
+    if word.startswith("--"):
+        name, eq, value = word[2:].partition("=")
+        if len(name) >= 2 and "exec".startswith(name):
+            return value if eq else following
+        return None
+    if not word.startswith("-") or len(word) < 2:
+        return None
+    for at, letter in enumerate(word[1:], 1):
+        if letter == "x":
+            return word[at + 1:] or following
+        if letter in "sXCSr":
+            return None
+    return None
+
+
+def _leading_options(part, program):
+    """The option words right after the program word."""
+    options = []
+    for word in part[program + 1:]:
+        if not word.startswith("-") or word == "-":
+            break
+        options.append(word)
+    return options
+
+
+def _starts_pytest(part, at, depth):
+    """True when the command starting at `at` runs pytest by a family above, or
+    is a shell whose -c text runs pytest by one or through a program the census
+    does not read."""
+    if _launch(part, at) is not None:
+        return True
+    text = _shell_command(part, at)
+    return text is not None and _text_starts_pytest(text, depth)
+
+
+def _text_starts_pytest(text, depth):
+    """True when shell text runs a command that starts pytest by a family above,
+    or through a program the census does not read."""
+    return depth < _MAX_DEPTH and any(
+        _launch(inner, start) is not None or _wrapper(inner, start, depth + 1) is not None
+        for inner, start, *_ in _shell_commands(text, {}, depth + 1))
+
+
+def _split(text):
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def _plugin_args(words):
+    """Each `-p` value in `words`, stripped, in order, as pytest's preparse reads
+    them: a bare `--` does not end them."""
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word == "-p":
+            if i + 1 < len(words):
+                yield words[i + 1].strip()
+            i += 2
+        else:
+            if word.startswith("-p") and len(word) > 2:
+                yield word[2:].strip()
+            i += 1
+
+
+def _options(words):
+    """The words argparse reads as options: those before the first bare `--`."""
+    return words[:words.index("--")] if "--" in words else words
+
+
+def _override_addopts(words):
+    """The words of the last `-o addopts=VALUE` override among the options,
+    which pytest places in front of PYTEST_ADDOPTS and the argv."""
+    words = _options(words)
+    value = None
+    i = 0
+    while i < len(words):
+        word = words[i]
+        if word in ("-o", "--override-ini") and i + 1 < len(words):
+            item, i = words[i + 1], i + 2
+        elif word.startswith("--override-ini="):
+            item, i = word.split("=", 1)[1], i + 1
+        elif word.startswith("-o") and len(word) > 2:
+            item, i = word[2:], i + 1
+        else:
+            i += 1
+            continue
+        key, separator, rest = item.partition("=")
+        if separator and key == "addopts":
+            value = rest
+    return _split(value) if value is not None else []
+
+
+def _plugin_names(name):
+    """The names `-p NAME` and `-p no:NAME` act on: NAME, and pytest_NAME unless
+    NAME already starts with pytest_."""
+    return {name} if name.startswith("pytest_") else {name, "pytest_" + name}
+
+
+def _deterministic(args, env):
+    """True when pytest run with `args` and `env` leaves pytest-randomly unloaded."""
+    words = _split(env.get(ADDOPTS_ENV, "")) + list(args)
+    words = _override_addopts(words) + words
+    blocked, loaded = set(), set()
+    for value in _plugin_args(words):
+        if value.startswith("no:"):
+            names = _plugin_names(value[3:])
+            blocked |= names
+            loaded -= names
+        elif value in _RANDOMLY_NAMES:
+            # pytest unblocks the name before loading it; only the load can
+            # change the verdict, since a later block blocks and unloads again.
+            loaded.add(value)
+    if (not env.get(AUTOLOAD_ENV) and NO_AUTOLOAD_FLAG not in _options(words)
+            and "randomly" not in blocked):
+        loaded.add("randomly")
+    # pytest tries each name as an entry point first, then as a module.
+    for name in (env.get(PLUGINS_ENV) or "").split(","):
+        if name in _RANDOMLY_NAMES and name not in blocked:
+            loaded.add(name)
+    return not loaded
+
+
+def _record(line):
+    if line not in _state["misses"]:
+        _state["misses"].append(line)
+
+
+def collect(node):
+    """Controller side: take the lines a finished xdist worker handed over, once
+    per worker. xdist calls pytest_testnodedown twice for a worker that ends on
+    a keyboard interrupt (from worker_workerfinished, then worker_errordown), so
+    a repeat for the same gateway id, or the same node without one, is skipped.
+    A restarted worker gets a fresh gateway id, so it is never skipped."""
+    key = getattr(getattr(node, "gateway", None), "id", None) or id(node)
+    if key in _state["collected"]:
+        return
+    _state["collected"].add(key)
+    output = getattr(node, "workeroutput", None) or {}
+    name = getattr(getattr(node, "gateway", None), "id", "worker")
+    for line in output.get(WORKEROUTPUT_KEY) or ():
+        _state["forwarded"].append("[%s] %s" % (name, line))
+
+
+def finish(session):
+    """Report every miss and fail the session; a worker hands them on instead."""
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        workeroutput[WORKEROUTPUT_KEY] = list(_state["misses"])
+        return
+    problems = list(_state["misses"]) + list(_state["forwarded"])
+    if not problems:
+        return
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    # xdist's progress can leave the terminal mid-line ("....[100%]"), which
+    # write_line does not break, so the report would join it. Start a new line.
+    if reporter is not None and getattr(getattr(reporter, "_tw", None), "width_of_current_line", 0):
+        reporter.write("\n")
+    write = reporter.write_line if reporter is not None else (lambda line: print(line, file=sys.stderr))
+    write("CHILD PYTEST CENSUS: %d distinct pytest child launch(es) refused or not inspected"
+          % len(problems))
+    for line in problems:
+        write("  " + line)
+    # Raise a clean status only: an interrupted, internal-error or usage-error
+    # session keeps the status that says so.
+    if int(session.exitstatus) == 0:
+        session.exitstatus = 1

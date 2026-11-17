@@ -43,13 +43,17 @@ def _load_embedding_catchup():
 
     Returns the module object with database functions mocked.
     """
-    # Clear cached
+    pkg_name = "_test_scripts_pkg"
+
+    # Clear only this loader's private names. The real scripts.embedding_catchup
+    # and scripts.embeddings stay in sys.modules: evicting them leaves two live
+    # module objects for one file, so a later patch("scripts.embeddings.X") in
+    # another test module misses the object the code under test resolves.
     for key in list(sys.modules.keys()):
-        if "embedding_catchup" in key:
+        if key.startswith(pkg_name):
             del sys.modules[key]
 
     # Create a fake package that embedding_catchup thinks it belongs to
-    pkg_name = "_test_scripts_pkg"
     pkg = ModuleType(pkg_name)
     pkg.__path__ = [_scripts_path]
     pkg.__package__ = pkg_name
@@ -57,8 +61,8 @@ def _load_embedding_catchup():
     # Mock submodules
     mock_db = _make_mock_database()
 
-    # The real embeddings module - import it to get the actual constant
-    sys.modules.pop("scripts.embeddings", None)
+    # The real embeddings module - import it to get the actual constant. This
+    # binds the module object already in sys.modules, never a second copy.
     from scripts.embeddings import MIN_CATCHUP_RAM_MB, generate_embedding, generate_embedding_text
     mock_emb_mod = ModuleType(f"{pkg_name}.embeddings")
     mock_emb_mod.generate_embedding = generate_embedding
@@ -94,6 +98,24 @@ def _load_embedding_catchup():
 def ec_module():
     """Provide a freshly-loaded embedding_catchup module with mocked DB deps."""
     return _load_embedding_catchup()
+
+
+def test_loader_keeps_the_real_scripts_module_identities():
+    """The loader must not replace the real scripts.* module objects.
+
+    Code imported before the loader runs resolves through the existing objects,
+    so a replacement splits one file into two live modules for the rest of the
+    worker's run.
+    """
+    import importlib
+
+    embeddings_before = importlib.import_module("scripts.embeddings")
+    catchup_before = importlib.import_module("scripts.embedding_catchup")
+
+    _load_embedding_catchup()
+
+    assert sys.modules.get("scripts.embeddings") is embeddings_before
+    assert sys.modules.get("scripts.embedding_catchup") is catchup_before
 
 
 class TestMinCatchupRamMbConstant:

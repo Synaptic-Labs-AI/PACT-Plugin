@@ -79,11 +79,13 @@ def _child_env() -> dict[str, str]:
 def _run(declared: str, capture: str | Path,
          cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
-        ["bash", str(_SCRIPT), declared, str(capture), "--collect-only", "-q"],
+        ["bash", str(_SCRIPT), declared, str(capture), "--collect-only", "-q",
+         "-p", "no:randomly"],
         cwd=str(cwd),
         capture_output=True,
         text=True,
         env=_child_env(),
+        timeout=300,
     )
 
 
@@ -140,7 +142,8 @@ def _run_with_mutation(repo: Path, tmp_path: Path, mutate,
     if child_fail:
         env["PACT_GATE_CHILD_FAIL"] = "1"
     proc = subprocess.Popen(
-        ["bash", str(_SCRIPT), str(repo), str(capture), "-q", "-p", "no:cacheprovider"],
+        ["bash", str(_SCRIPT), str(repo), str(capture), "-q", "-p", "no:cacheprovider",
+         "-p", "no:randomly"],
         cwd=str(repo), env=env,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
@@ -415,8 +418,8 @@ class TestAmbientPytestAddoptsCannotNarrowTheRun:
 
         result = subprocess.run(
             ["bash", str(_SCRIPT), str(repo), str(capture),
-             "-q", "-p", "no:cacheprovider"],
-            cwd=str(repo), env=env, capture_output=True, text=True)
+             "-q", "-p", "no:cacheprovider", "-p", "no:randomly"],
+            cwd=str(repo), env=env, capture_output=True, text=True, timeout=300)
 
         assert result.returncode == 1, result.stderr
         stamps = _stamps(capture)
@@ -486,8 +489,9 @@ class TestTempFileAllocationFailureIsARefusal:
         env["TMPDIR"] = str(tmp_path / "missing-tmpdir")
 
         result = subprocess.run(
-            ["bash", str(_SCRIPT), str(repo), str(capture), "-q"],
-            cwd=str(repo), env=env, capture_output=True, text=True)
+            ["bash", str(_SCRIPT), str(repo), str(capture), "-q",
+             "-p", "no:randomly"],
+            cwd=str(repo), env=env, capture_output=True, text=True, timeout=300)
 
         assert result.returncode == _REFUSED, result.stderr
         assert "cannot allocate the before-run porcelain capture" in result.stderr
@@ -514,8 +518,8 @@ class TestUnusableInterpreterIsRefused:
         env["PATH"] = os.pathsep.join([str(fake_bin), env["PATH"]])
         result = subprocess.run(
             ["bash", str(_SCRIPT), str(repo), str(capture),
-             "--collect-only", "-q"],
-            cwd=str(repo), env=env, capture_output=True, text=True)
+             "--collect-only", "-q", "-p", "no:randomly"],
+            cwd=str(repo), env=env, capture_output=True, text=True, timeout=300)
         return result, capture
 
     def test_a_failing_python3_refuses_with_exit_2_and_no_capture(self, tmp_path):

@@ -175,12 +175,13 @@ class TestCanonicalJoinInjectivity:
 
     def test_random_sequences_no_collision(self):
         # Belt-and-suspenders: distinct sequences -> distinct encodings (0 collisions).
-        random.seed(1136)
+        # A local generator, so the fixed seed never reaches the global one other tests use.
+        rng = random.Random(1136)
         alpha = "ab:0123#,@\x00"
         seen = {}
         for _ in range(5000):
-            seq = tuple("".join(random.choice(alpha) for _ in range(random.randint(0, 4)))
-                        for _ in range(random.randint(0, 4)))
+            seq = tuple("".join(rng.choice(alpha) for _ in range(rng.randint(0, 4)))
+                        for _ in range(rng.randint(0, 4)))
             enc = CJ(list(seq))
             assert enc not in seen or seen[enc] == seq, "collision: %r and %r" % (seen[enc], seq)
             seen[enc] = seq

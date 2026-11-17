@@ -12,15 +12,29 @@ not a guard.
 """
 
 import ast
+import os
 import re
 import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
+
+import pytest
 
 import ci_contract
 import ci_full_run_record
+from helpers import env_without_pytest_vars
+
+
+def _child_environ():
+    """This process's environment without any PYTEST_* name, so the pytest a
+    rig starts (directly, or through the full-collection guard) takes no
+    PYTEST_ADDOPTS, PYTEST_PLUGINS or PYTEST_DISABLE_PLUGIN_AUTOLOAD from the
+    shell that runs the suite."""
+    return env_without_pytest_vars()
+
 
 # The run record's file name comes from the recorder that writes it, so a
 # rename there that misses the workflow fails the step pins below.
@@ -166,6 +180,80 @@ def _fast_doc(root):
 
 def _full_doc(root):
     return ci_contract.load_workflow(root, ci_contract.FULL_WORKFLOW)
+
+
+def _render_lint_gate_remedy(root, scratch, venv, target="gone", readlink=True):
+    """The stderr the lint gate prints when ruff is missing, run from a scratch
+    root that holds a copy of the script and the lock and whose .venv is absent
+    ("absent"), a venv directory ("existing") or a link whose text is target,
+    as given, to a path that does not exist ("dangling"). PATH holds only
+    dirname and, unless readlink is false, readlink, so no ruff resolves."""
+    scratch.mkdir()
+    (scratch / "scripts").mkdir()
+    (scratch / "pact-plugin").mkdir()
+    shutil.copy(root / "scripts" / "verify-local-lint-gate.sh", scratch / "scripts")
+    shutil.copy(root / "constraints-ci.txt", scratch)
+    if venv == "existing":
+        (scratch / ".venv" / "bin").mkdir(parents=True)
+    elif venv == "dangling":
+        (scratch / ".venv").symlink_to(target)
+        assert not (scratch / ".venv").exists(), target
+    bin_dir = scratch / "bin"
+    bin_dir.mkdir()
+    for tool in ("dirname", "readlink") if readlink else ("dirname",):
+        (bin_dir / tool).symlink_to(shutil.which(tool))
+    proc = subprocess.run(
+        [shutil.which("bash"), str(scratch / "scripts" / "verify-local-lint-gate.sh")],
+        env={"PATH": str(bin_dir), "HOME": str(scratch)},
+        capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 2, (proc.returncode, proc.stderr)
+    return proc.stderr
+
+
+def _lint_gate_remedy_lines(root, scratch, venv="absent"):
+    """The lines the lint gate prints when ruff is missing, stripped, for one
+    .venv state (_render_lint_gate_remedy)."""
+    return [line.strip() for line in _render_lint_gate_remedy(root, scratch, venv).splitlines()]
+
+
+def _remedy_block(printed):
+    """The remedy's command lines as printed: the lines indented as commands
+    before the CI legs."""
+    lines = printed.splitlines()
+    end = next(i for i, line in enumerate(lines) if line.startswith("  To lint without this gate"))
+    return [line for line in lines[:end] if line.startswith("    ")]
+
+
+def _remedy_steps(block):
+    """The steps of the remedy's one command, its continuation lines joined and
+    split at each &&."""
+    return " ".join(line.strip().removesuffix("\\").strip() for line in block).split(" && ")
+
+
+def _remedy_floor_minor(check):
+    """The minor version of the floor the remedy's printed check enforces."""
+    found = re.findall(r"sys\.version_info >= \(3, (\d+)\)", check)
+    assert len(found) == 1, check
+    return int(found[0])
+
+
+def _install_floor_minor(root):
+    text = (root / ".cursor" / "install.sh").read_text(encoding="utf-8")
+    found = re.findall(r"(?m)^PYTHON_FLOOR_MINOR=(\d+)$", text)
+    assert len(found) == 1, found
+    return int(found[0])
+
+
+def _declared_floor_minor(root):
+    declared = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+    found = re.fullmatch(r">=3\.(\d+)", declared["project"]["requires-python"])
+    assert found, declared["project"]["requires-python"]
+    return int(found.group(1))
+
+
+# A number standing alone in prose (`40`, `1.2.3`), not one inside a word
+# (`py312`, `F401`, `python3`).
+_STANDALONE_NUMBER = re.compile(r"(?<![\w.-])\d+(?:\.\d+)*(?![\w.-])")
 
 
 class TestFastWorkflowShape:
@@ -382,6 +470,376 @@ class TestFastWorkflowHygiene:
             f"an upload step in the fast lane did not redden: {problems}")
 
 
+# The exact install line at each site. CI refuses a source build; the local
+# install accepts one, because pysqlite3 has no aarch64 Linux or x86_64 macOS
+# wheel, and pip then installs that build's own dependencies without hashes.
+_CI_LOCK_INSTALL = (
+    "python -m pip install --only-binary=:all: --require-hashes -r constraints-ci.txt")
+_LOCAL_LOCK_INSTALL = "python -m pip install --require-hashes -r constraints-ci.txt"
+
+
+class TestHashCheckedInstall:
+    """Every install of the CI set is the one hash-checked lock install for its site."""
+
+    @staticmethod
+    def _install_lines(text):
+        return [line.strip() for line in text.splitlines()
+                if "pip install" in line and not line.strip().startswith(("#", "printf"))]
+
+    @pytest.mark.parametrize("source, expected", [
+        ("tests.yml", _CI_LOCK_INSTALL),
+        ("fast-tests.yml", _CI_LOCK_INSTALL),
+        (".cursor/install.sh", _LOCAL_LOCK_INSTALL),
+    ])
+    def test_the_only_install_is_the_hash_checked_lock(self, source, expected):
+        root = ci_contract.require_root("the hash-checked install")
+        if source == ".cursor/install.sh":
+            text = (root / source).read_text(encoding="utf-8")
+        else:
+            doc = ci_contract.load_workflow(root, f".github/workflows/{source}")
+            text = "\n".join(
+                run for job in ci_contract.jobs_of(doc).values()
+                for run in ci_contract.run_texts(ci_contract.steps_of(job)))
+        assert self._install_lines(text) == [expected], (
+            f"{source} installs {self._install_lines(text)!r}; this site installs "
+            f"the CI set only by `{expected}`, which moves pip to its pinned "
+            "version too. A `-c constraints-ci.txt` install fails under hashes, "
+            "dropping --require-hashes lets a lock without hashes install "
+            "unchecked, and in CI dropping --only-binary=:all: lets a source "
+            "build install its build dependencies unchecked.")
+
+    # Ruff's one-entry lock goes to a temporary file, never into .venv: a
+    # worktree's .venv is a link to the main checkout's shared venv.
+    _REMEDY_LOCK = '"$lock"'
+    _REMEDY_INSTALL = (".venv/bin/python -m pip install --only-binary=:all: --require-hashes "
+                       '--no-deps -r "$lock"')
+
+    @pytest.mark.parametrize("venv", ["absent", "existing"])
+    def test_the_lint_gate_remedy_installs_ruff_alone(self, tmp_path, venv):
+        """The remedy runs on a developer's machine and the gate needs ruff only,
+        so it refuses an interpreter below the floor, copies ruff's own entry out
+        of the lock into a temporary file, installs that entry from a wheel with
+        its hashes and nothing else, removes the file, and activates the venv.
+
+        With no .venv it creates one with python3. With a .venv it never runs
+        `python3 -m venv`, which would re-initialise the venv with whatever
+        python3 is first on PATH, and it checks the floor with the venv's own
+        interpreter. The full environment, which compiles a
+        package on some platforms, stays .cursor/install.sh's. The steps are one
+        command, each continuation line starting with &&, so a failed step stops
+        the rest when the block is pasted."""
+        root = ci_contract.require_root("the lint gate remedy")
+        rendered = _render_lint_gate_remedy(root, tmp_path / "root", venv)
+        block = _remedy_block(rendered)
+        printed = [line.strip() for line in rendered.splitlines()]
+        assert all(line.endswith(" \\") for line in block[:-1]), block
+        assert not block[-1].endswith("\\"), block
+        assert all(line.strip().startswith("&& ") for line in block[1:]), block
+        steps = _remedy_steps(block)
+        commands = [line.strip() for line in block]
+        cursor = [line.strip() for line in
+                  (root / ".cursor" / "install.sh").read_text(encoding="utf-8").splitlines()]
+        check = steps[0]
+        if venv == "absent":
+            create, temp, extraction, *rest = steps[1:]
+            assert check.startswith("python3 -c "), check
+            assert create == "python3 -m venv .venv", steps
+            assert create in cursor, "the remedy's venv line is not .cursor/install.sh's"
+            assert "repository venv (.venv), install ruff alone" in " ".join(printed)
+        else:
+            temp, extraction, *rest = steps[1:]
+            assert check.startswith(".venv/bin/python -c "), check
+            assert not any("-m venv" in line for line in printed), printed
+            assert "venv (.venv) exists" in " ".join(printed), printed
+        assert temp == 'lock="$(mktemp)"', steps
+        extract, _, target = extraction.partition(" > ")
+        assert [target, *rest] == [
+            self._REMEDY_LOCK, self._REMEDY_INSTALL, 'rm "$lock"', ". .venv/bin/activate"], steps
+        assert not any(".venv/ruff-lock" in step for step in steps), steps
+        assert extract.startswith("sed "), extract
+        assert steps[-1] in cursor, "the remedy's activate line is not .cursor/install.sh's"
+        # The floor check is a third copy of the floor; it must equal the other two.
+        assert _remedy_floor_minor(check) == _install_floor_minor(root) \
+            == _declared_floor_minor(root), check
+        # Python drops an assert under -O or PYTHONOPTIMIZE, so the check exits instead.
+        assert "assert" not in check and "sys.exit(" in check, check
+        prose = " ".join(line for line in printed
+                         if line not in commands and not line.startswith("ruff "))
+        for phrase in ("repository venv (.venv)", "ruff alone",
+                       "from a wheel only", ".cursor/install.sh", "for a POSIX shell",
+                       "On Windows", ".venv\\Scripts\\python"):
+            assert phrase in prose, phrase
+        # A version or count here would go stale on a lock refresh; the printed
+        # commands carry none either, since the version comes from the lock.
+        assert not _STANDALONE_NUMBER.search(prose), prose
+        script = (root / "scripts" / "verify-local-lint-gate.sh").read_text(encoding="utf-8")
+        assert "-c constraints-ci.txt" not in script
+
+    @pytest.mark.parametrize("target, readlink", [
+        ("gone", True), ("gone%s\\n", True), ("gone", False),
+    ], ids=["plain", "percent-and-backslash", "no-readlink"])
+    def test_the_lint_gate_remedy_names_a_broken_venv_link(self, tmp_path, target, readlink):
+        """A .venv link to nothing still counts as a venv, so nothing is created
+        over it, and no command could install into it, so the remedy prints none.
+        It names the link's target as a printf argument, so a % or backslash in
+        the path prints as itself, says so when the target cannot be read, and
+        gives the two ways out: restore that venv, or remove the link and run the
+        gate again for the commands that create one."""
+        root = ci_contract.require_root("the lint gate remedy")
+        scratch = tmp_path / "root"
+        printed = [line.strip() for line in _render_lint_gate_remedy(
+            root, scratch, "dangling", target, readlink).splitlines()]
+        text = " ".join(printed)
+        assert "venv (.venv) is a link to a directory that does not exist" in text, printed
+        assert "Restore the venv it points at" in text, printed
+        named = (f".venv -> {target}" if readlink
+                 else ".venv -> (the link target could not be read)")
+        assert named in printed, printed
+        assert "rm .venv" in printed, printed
+        assert "venv (.venv) exists" not in text, printed
+        assert not [line for line in printed
+                    if line.startswith(("python3 ", ".venv/", ". ", "sed "))
+                    or "pip install" in line or "-m venv" in line], printed
+
+    def test_the_remedy_extracts_exactly_the_locks_ruff_entry(self, tmp_path):
+        """The printed extraction, run as printed against the real lock, yields
+        ruff's entry with every hash the lock lists for it and no other
+        requirement, so the remedy installs CI's ruff and cannot drift from it."""
+        root = ci_contract.require_root("the lint gate remedy")
+        steps = _remedy_steps(_remedy_block(_render_lint_gate_remedy(root, tmp_path / "root",
+                                                                     "absent")))
+        extract = next(step for step in steps if step.startswith("sed ")).partition(" > ")[0]
+        proc = subprocess.run(shlex.split(extract), cwd=root, capture_output=True,
+                              text=True, timeout=30)
+        assert proc.returncode == 0, proc
+        lines = (root / "constraints-ci.txt").read_text(encoding="utf-8").splitlines()
+        first = next(i for i, line in enumerate(lines) if line.startswith("ruff=="))
+        last = next(i for i in range(first, len(lines)) if not lines[i].endswith("\\"))
+        assert proc.stdout.splitlines() == lines[first:last + 1], proc.stdout
+        requirements = [line for line in proc.stdout.splitlines() if not line.startswith(" ")]
+        assert len(requirements) == 1 and requirements[0].startswith("ruff=="), requirements
+        assert proc.stdout.count("--hash=sha256:") == last - first, proc.stdout
+
+    @pytest.mark.parametrize("prose, has_number", [
+        ("every locked package, 40 of them", True),
+        ("all 40 locked packages", True),
+        ("every locked package (40)", True),
+        ("pinned at 1.2.3 in the lock", True),
+        ("40", True),
+        ("ruff check --select F401,F821 --target-version py312", False),
+        ("python3 -m venv .venv", False),
+        ("pact-plugin/ scripts/ constraints-ci.txt", False),
+    ])
+    def test_the_remedy_number_check_finds_a_standalone_number(self, prose, has_number):
+        assert bool(_STANDALONE_NUMBER.search(prose)) is has_number, prose
+
+    @pytest.mark.parametrize("venv", ["absent", "existing"])
+    @pytest.mark.parametrize("below_floor", [False, True], ids=["at-floor", "below-floor"])
+    def test_the_remedy_floor_check_refuses_under_pythonoptimize(self, tmp_path, below_floor,
+                                                                   venv):
+        """The printed floor check, run as printed under PYTHONOPTIMIZE=1, passes
+        this interpreter and refuses one below the floor, naming its version. A
+        floor above every real interpreter stands in for a below-floor python3."""
+        root = ci_contract.require_root("the lint gate remedy")
+        check = _remedy_steps(_remedy_block(_render_lint_gate_remedy(root, tmp_path / "root",
+                                                                     venv)))[0]
+        assert check.startswith(("python3 -c ", ".venv/bin/python -c ")), check
+        code = shlex.split(check)[2]
+        if below_floor:
+            code = re.sub(r"\(3, \d+\)", "(99, 0)", code)
+            assert "(99, 0)" in code, code
+        proc = subprocess.run([sys.executable, "-c", code],
+                              env=dict(os.environ, PYTHONOPTIMIZE="1"),
+                              capture_output=True, text=True, timeout=30)
+        if below_floor:
+            assert proc.returncode == 1 and proc.stderr.strip() == sys.version, proc
+        else:
+            assert proc.returncode == 0 and proc.stderr == "", proc
+
+    # An interpreter for the pasted-remedy rig: it logs each call, hands a -c
+    # program to the real interpreter, makes a venv holding a copy of itself
+    # and an activate that logs, and records a pip run, with the requirements
+    # file it was given, without installing.
+    _REMEDY_STUB = '''\
+import os, shutil, sys
+args = sys.argv[1:]
+with open(os.environ["REMEDY_LOG"], "a", encoding="utf-8") as log:
+    log.write(" ".join(args) + "\\n")
+if args[:1] == ["-c"]:
+    os.execv(os.environ["REMEDY_REAL_PYTHON"], [os.environ["REMEDY_REAL_PYTHON"], *args])
+if args[:2] == ["-m", "venv"]:
+    os.makedirs(os.path.join(args[2], "bin"))
+    shutil.copy(__file__, os.path.join(args[2], "bin", "python"))
+    with open(os.path.join(args[2], "bin", "activate"), "w", encoding="utf-8") as act:
+        act.write('echo activate >> "$REMEDY_LOG"\\n')
+    sys.exit(0)
+if args[:2] == ["-m", "pip"]:
+    shutil.copy(args[args.index("-r") + 1], os.environ["REMEDY_PIP_READ"])
+    sys.exit(0)
+sys.exit(2)
+'''
+
+    def _remedy_stub(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"#!{sys.executable}\n{self._REMEDY_STUB}", encoding="utf-8")
+        path.chmod(0o755)
+
+    @pytest.mark.parametrize("venv", ["absent", "existing"])
+    @pytest.mark.parametrize("below_floor", [False, True], ids=["at-floor", "below-floor"])
+    def test_the_pasted_remedy_installs_only_past_the_floor(self, tmp_path, venv, below_floor):
+        """The printed remedy, pasted as one block into bash, runs its real floor
+        check through a real interpreter. Below the floor (the check's floor
+        raised past every interpreter) nothing after it runs: no venv is made,
+        nothing is written and pip is never started. At the floor every step
+        runs: pip reads ruff's own hashed lock entry from a temporary file, the
+        file is removed, and nothing is left in .venv, which in a worktree is
+        the main checkout's shared venv."""
+        root = ci_contract.require_root("the lint gate remedy")
+        block = "\n".join(_remedy_block(_render_lint_gate_remedy(root, tmp_path / "render", venv)))
+        if below_floor:
+            block = re.sub(r"\(3, \d+\)", "(99, 0)", block)
+            assert "(99, 0)" in block, block
+        rig = tmp_path / "rig"
+        rig.mkdir()
+        shutil.copy(root / "constraints-ci.txt", rig)
+        self._remedy_stub(tmp_path / "bin" / "python3")
+        if venv == "existing":
+            self._remedy_stub(rig / ".venv" / "bin" / "python")
+            (rig / ".venv" / "bin" / "activate").write_text(
+                'echo activate >> "$REMEDY_LOG"\n', encoding="utf-8")
+        temp_dir = tmp_path / "tmp"
+        temp_dir.mkdir()
+        log = tmp_path / "calls.log"
+        log.touch()
+        pip_read = tmp_path / "pip-read.txt"
+        proc = subprocess.run(
+            [shutil.which("bash"), "-c", block], cwd=rig, capture_output=True, text=True,
+            env={"PATH": f"{tmp_path / 'bin'}{os.pathsep}/usr/bin{os.pathsep}/bin",
+                 "HOME": str(tmp_path), "TMPDIR": str(temp_dir), "REMEDY_LOG": str(log),
+                 "REMEDY_REAL_PYTHON": sys.executable, "REMEDY_PIP_READ": str(pip_read)},
+            timeout=60)
+        calls = log.read_text(encoding="utf-8").splitlines()
+        pip_calls = [call for call in calls if call.startswith("-m pip ")]
+        left = sorted(path.relative_to(rig).as_posix() for path in rig.rglob("*")
+                      if not path.is_dir())
+        venv_files = [".venv/bin/activate", ".venv/bin/python"]
+        assert list(temp_dir.iterdir()) == [], list(temp_dir.iterdir())
+        if below_floor:
+            assert pip_calls == [], calls
+            assert len(calls) == 1 and calls[0].startswith("-c "), calls
+            assert proc.returncode == 1 and proc.stderr.strip() == sys.version, proc
+            assert left == sorted(["constraints-ci.txt",
+                                   *(venv_files if venv == "existing" else [])]), left
+            assert not pip_read.exists()
+        else:
+            assert proc.returncode == 0 and proc.stderr == "", proc
+            # Nothing the remedy wrote is left in .venv or the root.
+            assert left == sorted(["constraints-ci.txt", *venv_files]), left
+            # The install as printed, less the interpreter that runs it, with
+            # the temporary file in place of "$lock".
+            install = self._REMEDY_INSTALL.split(" ", 1)[1].removesuffix(' "$lock"')
+            assert len(pip_calls) == 1, calls
+            given, _, read_from = pip_calls[0].rpartition(" ")
+            assert given == install and Path(read_from).parent == temp_dir, pip_calls
+            lines = (root / "constraints-ci.txt").read_text(encoding="utf-8").splitlines()
+            first = next(i for i, line in enumerate(lines) if line.startswith("ruff=="))
+            last = next(i for i in range(first, len(lines)) if not lines[i].endswith("\\"))
+            assert pip_read.read_text(encoding="utf-8").splitlines() == lines[first:last + 1]
+            assert "--hash=sha256:" in pip_read.read_text(encoding="utf-8")
+            assert calls[-1] == "activate", calls
+
+    def test_the_lint_gate_refuses_without_ruff_and_prints_its_remedy(self, tmp_path):
+        """With no ruff on PATH the real gate, run in the real root, exits 2 and
+        prints the ruff-missing remedy for that root's .venv state, line for line
+        as a copy of the script prints it in a scratch root in the same state."""
+        root = ci_contract.require_root("the lint gate remedy")
+        script = root / "scripts" / "verify-local-lint-gate.sh"
+        bin_dir = tmp_path / "bin"  # dirname and readlink only, so no ruff resolves
+        bin_dir.mkdir()
+        for tool in ("dirname", "readlink"):
+            (bin_dir / tool).symlink_to(shutil.which(tool))
+        proc = subprocess.run(
+            [shutil.which("bash"), str(script)],
+            env={"PATH": str(bin_dir), "HOME": str(tmp_path / "home")},
+            capture_output=True, text=True, timeout=30)
+        assert proc.returncode == 2, (proc.returncode, proc.stderr)
+        venv = root / ".venv"
+        if venv.is_symlink() and not venv.exists():
+            # The copy's link must name the same target, so it prints the same line.
+            expected = _render_lint_gate_remedy(root, tmp_path / "copy", "dangling",
+                                                os.readlink(venv))
+        else:
+            state = "existing" if venv.exists() else "absent"
+            expected = _render_lint_gate_remedy(root, tmp_path / "copy", state)
+        assert proc.stderr == expected, proc.stderr
+        assert proc.stderr.startswith("GATE REFUSED: ruff is not available"), proc.stderr
+
+    def test_the_environment_check_remedy_is_one_install_per_host(self):
+        """The verifier's MISSING remedy has exactly two spellings: the CI
+        install and the local one."""
+        root = ci_contract.require_root("the environment check remedy")
+        text = (root / "scripts" / "verify_ci_environment.py").read_text(encoding="utf-8")
+        printed = re.findall(r"install the pinned set: (python[^\"]*)\"", text)
+        assert printed == [_CI_LOCK_INSTALL, _LOCAL_LOCK_INSTALL], printed
+
+    @pytest.mark.parametrize("github_actions, expected, other", [
+        ("true", _CI_LOCK_INSTALL, _LOCAL_LOCK_INSTALL),
+        (None, _LOCAL_LOCK_INSTALL, _CI_LOCK_INSTALL),
+        ("false", _LOCAL_LOCK_INSTALL, _CI_LOCK_INSTALL),
+    ])
+    def test_the_environment_check_remedy_names_the_install_for_its_host(
+            self, monkeypatch, github_actions, expected, other):
+        """In a GitHub Actions run the remedy is the CI install, which refuses
+        a source build; anywhere else it is the local install, with the
+        source-build risk stated beside it."""
+        import importlib.util
+
+        root = ci_contract.require_root("the environment check remedy")
+        spec = importlib.util.spec_from_file_location(
+            "_remedy_verify_ci_environment",
+            root / "scripts" / "verify_ci_environment.py")
+        verify = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = verify
+        try:
+            spec.loader.exec_module(verify)
+            if github_actions is None:
+                monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+            else:
+                monkeypatch.setenv("GITHUB_ACTIONS", github_actions)
+            rendered = verify.Verdict(
+                wrong_version={}, missing=("alpha",), unexpected=(),
+                shadowed={}, interpreter_mismatch=None).render()
+        finally:
+            sys.modules.pop(spec.name, None)
+        remedy = [line for line in rendered.splitlines()
+                  if "install the pinned set:" in line]
+        assert len(remedy) == 1, rendered
+        assert f"install the pinned set: {expected}" in remedy[0], rendered
+        assert f"install the pinned set: {other}" not in remedy[0], rendered
+        assert ("builds it from source" in remedy[0]) is (
+            expected == _LOCAL_LOCK_INSTALL), rendered
+
+    def test_the_tripwire_names_the_ci_install(self):
+        """test_memory_init's tripwire tells a workflow author which install to
+        use, so its canonical line is the CI one."""
+        root = ci_contract.require_root("the tripwire's canonical install")
+        tree = ast.parse((root / "pact-plugin" / "tests" / "test_memory_init.py")
+                         .read_text(encoding="utf-8"))
+        values = [ast.literal_eval(node.value) for node in ast.walk(tree)
+                  if isinstance(node, ast.Assign) and len(node.targets) == 1
+                  and getattr(node.targets[0], "id", "") == "_CANONICAL_INSTALL_LINE"]
+        assert values == [_CI_LOCK_INSTALL], values
+
+    def test_the_lock_input_documents_the_ci_install(self):
+        root = ci_contract.require_root("the lock input header")
+        header = " ".join(
+            line.lstrip("#").strip() for line in
+            (root / "constraints-ci.in").read_text(encoding="utf-8").splitlines()
+            if line.startswith("#"))
+        assert f"`{_CI_LOCK_INSTALL}`" in header, (
+            "constraints-ci.in no longer documents CI's install line verbatim")
+
+
 class TestWorkflowHardening:
     """Minimal permissions and no pull_request_target.
 
@@ -436,9 +894,10 @@ def _assert_full_workflow_contract(root):
         "constrained dist input"
     )
     inputs = dispatch.get("inputs")
-    assert isinstance(inputs, dict) and set(inputs) == {"dist"}, (
+    assert isinstance(inputs, dict) and set(inputs) == {"dist", "shuffle_seed"}, (
         f"workflow_dispatch inputs are {inputs!r}; only the constrained dist "
-        "choice is admitted, never arbitrary pytest arguments"
+        "choice and the guarded shuffle seed are admitted, never arbitrary "
+        "pytest arguments"
     )
     dist = inputs["dist"]
     assert dist.get("required") is False
@@ -448,6 +907,12 @@ def _assert_full_workflow_contract(root):
         f"dist options are {dist.get('options')!r}; loadfile stays the default "
         "and load is the only diagnostic alternative"
     )
+    # The seed is free text, so it is only ever admitted through the job-level
+    # PACT_SHUFFLE_SEED key and the seed guard below; empty, the default, is file order.
+    seed = inputs["shuffle_seed"]
+    assert seed.get("type") == "string", seed
+    assert seed.get("required") is False, seed
+    assert seed.get("default") == "", seed
     assert "merge_group" in triggers, "tests.yml has no merge_group trigger"
     merge = triggers.get("merge_group") or {}
     assert merge.get("types") == ["checks_requested"]
@@ -472,6 +937,13 @@ def _assert_full_workflow_contract(root):
     assert (job.get("env") or {}).get("DIST") == "${{ inputs.dist || 'loadfile' }}", (
         f"the job-level DIST env is {(job.get('env') or {}).get('DIST')!r}; it "
         "must evaluate from inputs.dist and default to loadfile outside a dispatch"
+    )
+    # Empty outside a dispatch, so the merge gate's run line expands the seed
+    # to no words and the root config keeps pytest-randomly blocked.
+    assert "SEED" not in (job.get("env") or {}), "the seed's earlier, generic name is back"
+    assert (job.get("env") or {}).get("PACT_SHUFFLE_SEED") == "${{ inputs.shuffle_seed || '' }}", (
+        f"the job-level PACT_SHUFFLE_SEED env is {(job.get('env') or {}).get('PACT_SHUFFLE_SEED')!r}; it "
+        "must evaluate from inputs.shuffle_seed and be empty outside a dispatch"
     )
 
     steps = ci_contract.steps_of(job)
@@ -526,6 +998,40 @@ def _assert_full_workflow_contract(root):
     assert verify_positions and guard_position < verify_positions[0], (
         "the DIST guard must run before the before-tests environment check, "
         "so an out-of-enum value refuses before setup work"
+    )
+
+    # The seed is word-split into the run line, so its guard is the DIST
+    # guard's twin: exactly one step, unconditional, in the job's own env and
+    # default shell, and it publishes the only seed text the artifact name
+    # uses (`steps.order.outputs.order`).
+    seed_guards = [step for step in steps
+                   if isinstance(step.get("run"), str)
+                   and "SEED GUARD" in step["run"]]
+    assert len(seed_guards) == 1, (
+        f"expected exactly one SEED guard step; found {seed_guards!r}")
+    seed_guard = seed_guards[0]
+    assert seed_guard.get("id") == "order", (
+        f"the SEED guard's id is {seed_guard.get('id')!r}; the artifact name "
+        "reads steps.order.outputs.order")
+    for key in ("if", "continue-on-error", "env", "shell"):
+        assert key not in seed_guard, (
+            f"the SEED guard carries `{key}:` ({seed_guard[key]!r}); it must "
+            "run unconditionally in the default shell with the job-level PACT_SHUFFLE_SEED"
+        )
+    seed_run = seed_guard["run"]
+    assert "$PACT_SHUFFLE_SEED" in seed_run, seed_run
+    assert "^(0|[123456789][0123456789]{0,8})$" in seed_run, seed_run
+    assert ">> \"$GITHUB_OUTPUT\"" in seed_run, seed_run
+    assert not re.search(r"\bpytest\b", seed_run), (
+        "the SEED guard's run text names pytest; test_ci_collection_scope "
+        "permits exactly one pytest invocation in this file"
+    )
+    seed_position = runs.index(seed_run)
+    warm_positions = [index for index, run in enumerate(runs)
+                      if "StaticModel.from_pretrained" in run]
+    assert warm_positions and guard_position < seed_position < warm_positions[0], (
+        "the SEED guard must run after the DIST guard and before the "
+        "model warm, so an invalid seed refuses before setup work"
     )
 
     lint_lines = [
@@ -660,6 +1166,182 @@ class TestFullWorkflowContract:
         _assert_full_workflow_contract(root)
 
 
+def _seed_guard_run(root):
+    """The seed guard step's `run:` body, as tests.yml ships it."""
+    job = ci_contract.jobs_of(_full_doc(root))["full-suite"]
+    guards = [text for text in ci_contract.run_texts(ci_contract.steps_of(job))
+              if "SEED GUARD" in text]
+    assert len(guards) == 1, f"expected exactly one SEED guard step, found {len(guards)}"
+    return guards[0]
+
+
+# Which locale legs the seed-guard rows run under, decided by PLATFORM, never
+# by tool availability: on Linux (glibc, where CI runs) the range-widening leg
+# is generated, and a missing localedef or en_US source fails it in CI
+# (GITHUB_ACTIONS=true) and skips it elsewhere; on other platforms glibc's
+# locales do not exist, so only the ASCII leg applies.
+_GLIBC_LOCALES = sys.platform.startswith("linux")
+_LOCALE_LEGS = ("ascii", "range-widening") if _GLIBC_LOCALES else ("ascii",)
+
+
+def _range_widening_locale(tmp_path_factory, localedef):
+    """An en_US.UTF-8 locale built into a tmp LOCPATH by `localedef`. In CI
+    (GITHUB_ACTIONS=true) a missing localedef or a failed build fails, because
+    the runner ships glibc's en_US source and the seed guard's digit classes must
+    be proven there. Elsewhere either skips, since a host without the `locales`
+    package cannot build it; the static no-range arm still runs."""
+    def unavailable(reason):
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail(f"{reason}, so the seed guard's digit classes go unproven")
+        pytest.skip(f"{reason}; outside CI the static no-range arm still runs")
+
+    if not localedef:
+        unavailable("localedef is not on PATH, so the range-widening locale cannot be built")
+    locpath = tmp_path_factory.mktemp("locpath")
+    home = tmp_path_factory.mktemp("localedef-home")
+    proc = subprocess.run(
+        [localedef, "-i", "en_US", "-f", "UTF-8", str(locpath / "en_US.UTF-8")],
+        env={"PATH": "/usr/bin:/bin", "HOME": str(home)},
+        capture_output=True, text=True, timeout=120)
+    if not (locpath / "en_US.UTF-8" / "LC_COLLATE").is_file():
+        unavailable(f"localedef did not build en_US.UTF-8 (rc {proc.returncode}): "
+                    f"{proc.stderr.strip()}")
+    return {"LC_ALL": "en_US.UTF-8", "LOCPATH": str(locpath)}
+
+
+@pytest.fixture(scope="module")
+def range_widening_locale(tmp_path_factory):
+    """An en_US.UTF-8 locale built into a tmp LOCPATH, independent of which
+    locales the runner generated. Under it, bash's `[0-9]` matches non-ASCII
+    digits such as U+0663; under C.UTF-8 it does not. Building it needs only
+    localedef and glibc's en_US source, which the `locales` package ships."""
+    return _range_widening_locale(tmp_path_factory, shutil.which("localedef"))
+
+
+class TestRangeWideningLocaleUnavailable:
+    """Without localedef or glibc's en_US source the locale fails in CI and
+    skips elsewhere."""
+
+    @staticmethod
+    def _failing_localedef(tmp_path):
+        script = tmp_path / "localedef"
+        script.write_text("#!/bin/sh\necho 'cannot open locale definition file' >&2\nexit 4\n",
+                          encoding="utf-8")
+        script.chmod(0o755)
+        return str(script)
+
+    def _outcome(self, tmp_path, tmp_path_factory, missing):
+        """The exception the helper ends with. A skip or a fail escapes
+        pytest.raises for the other kind, so catch both and compare."""
+        localedef = None if missing == "binary" else self._failing_localedef(tmp_path)
+        try:
+            _range_widening_locale(tmp_path_factory, localedef)
+        except (pytest.fail.Exception, pytest.skip.Exception) as exc:
+            return type(exc)
+        return None
+
+    @pytest.mark.parametrize("missing", ["binary", "source"])
+    def test_it_fails_in_ci(self, monkeypatch, tmp_path, tmp_path_factory, missing):
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+        assert self._outcome(tmp_path, tmp_path_factory, missing) is pytest.fail.Exception
+
+    @pytest.mark.parametrize("missing", ["binary", "source"])
+    def test_it_skips_outside_ci(self, monkeypatch, tmp_path, tmp_path_factory, missing):
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+        assert self._outcome(tmp_path, tmp_path_factory, missing) is pytest.skip.Exception
+
+
+class TestSeedGuardBehaviour:
+    """The seed guard's verdicts, EXECUTED under `bash -e` as the runner does,
+    in an ASCII locale and in one where bracket ranges match non-ASCII digits."""
+
+    @staticmethod
+    def _run_guard(tmp_path, seed, locale):
+        root = ci_contract.require_root("the seed guard's behaviour")
+        bash = shutil.which("bash")
+        assert bash, "bash is not on PATH; the seed guard is bash"
+        script = tmp_path / "guard.sh"
+        script.write_text(_seed_guard_run(root), encoding="utf-8")
+        output = tmp_path / "github_output"
+        output.write_text("", encoding="utf-8")
+        home = tmp_path / "home"
+        home.mkdir(exist_ok=True)
+        proc = subprocess.run(
+            [bash, "-e", str(script)],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(home),
+                 "LC_ALL": locale["LC_ALL"], "LOCPATH": locale["LOCPATH"],
+                 "PACT_SHUFFLE_SEED": seed, "GITHUB_OUTPUT": str(output)},
+            capture_output=True, text=True, timeout=30)
+        return proc, output.read_text(encoding="utf-8")
+
+    @pytest.fixture(params=_LOCALE_LEGS)
+    def locale(self, request, tmp_path_factory):
+        """C.UTF-8 is built into glibc, so an empty LOCPATH leaves it intact."""
+        if request.param == "ascii":
+            return {"LC_ALL": "C.UTF-8", "LOCPATH": str(tmp_path_factory.mktemp("no-locales"))}
+        return request.getfixturevalue("range_widening_locale")
+
+    def test_the_locale_legs_match_the_platform(self, tmp_path, request):
+        """CONTROL. On Linux the non-ASCII digit rows run under a built
+        en_US.UTF-8 and can only catch a `[0-9]` guard if `[0-9]` matches
+        U+0663 there, so prove it does. A missing localedef or en_US source
+        fails here and in every widening row in CI, and skips them elsewhere.
+        Off Linux glibc's locales do not exist, the widening leg is not
+        generated, and the static no-range arm is the only check of the digit
+        classes."""
+        if not sys.platform.startswith("linux"):
+            assert _LOCALE_LEGS == ("ascii",), _LOCALE_LEGS
+            return
+        assert _LOCALE_LEGS == ("ascii", "range-widening"), _LOCALE_LEGS
+        range_widening_locale = request.getfixturevalue("range_widening_locale")
+        home = tmp_path / "home"
+        home.mkdir()
+        probe = subprocess.run(
+            [shutil.which("bash"), "-c", '[[ "\u0663" =~ ^[0-9]$ ]]'],
+            env={"PATH": "/usr/bin:/bin", "HOME": str(home),
+                 "LC_ALL": range_widening_locale["LC_ALL"],
+                 "LOCPATH": range_widening_locale["LOCPATH"]},
+            capture_output=True, text=True, timeout=30)
+        assert probe.returncode == 0, (
+            "under the built en_US.UTF-8, bash's [0-9] no longer matches U+0663, "
+            f"so the non-ASCII digit rows cannot tell a range from the spelled-out "
+            f"class: {probe.stderr}")
+
+    @pytest.mark.parametrize("seed, order", [
+        ("", "ordered"),
+        ("0", "seed-0"),
+        ("7", "seed-7"),
+        ("123456789", "seed-123456789"),
+    ])
+    def test_an_accepted_seed_writes_one_order_line(self, tmp_path, locale, seed, order):
+        proc, written = self._run_guard(tmp_path, seed, locale)
+        assert proc.returncode == 0, proc.stderr
+        assert written == f"order={order}\n"
+
+    @pytest.mark.parametrize("seed", [
+        "007", "1234567890", "1 2", "$(id)", "-1", "abc", "5\n", "5\nx=y",
+        "\u0663", "1\u0663", "\u0969", "\uff13",
+    ])
+    def test_a_refused_seed_exits_before_writing(self, tmp_path, locale, seed):
+        proc, written = self._run_guard(tmp_path, seed, locale)
+        assert proc.returncode == 1, (proc.returncode, proc.stderr)
+        assert "SEED GUARD:" in proc.stderr
+        assert seed not in proc.stdout + proc.stderr, "the guard echoed the value"
+        assert written == ""
+
+    def test_the_guard_regex_spells_out_its_classes(self):
+        """A bracket range such as `[0-9]` is collation-dependent. The
+        range-widening rows catch it under the built locale; this pins it
+        without running anything."""
+        root = ci_contract.require_root("the seed guard's digit classes")
+        patterns = re.findall(r"=~\s+(\S+)\s+\]\]", _seed_guard_run(root))
+        assert len(patterns) == 1, patterns
+        classes = re.findall(r"\[([^\]]*)\]", patterns[0])
+        assert classes, patterns[0]
+        ranged = [c for c in classes if re.search(r".-.", c)]
+        assert not ranged, f"the seed guard's regex uses bracket ranges: {ranged}"
+
+
 class TestRemovability:
     """Deleting the fast lane must leave the full gate green — EXECUTED.
 
@@ -689,10 +1371,11 @@ class TestRemovability:
             Path("pact-plugin") / "tests" / "test_ci_collection_scope.py",
             Path("pact-plugin") / "tests" / "test_memory_init.py",
             Path("pact-plugin") / "tests" / "ci_contract.py",
-            # The converted modules import this fixture at module scope, so a
-            # rig that collects them without it fails collection instead of
-            # exercising the arm.
+            # The converted modules import these at module scope, so a rig that
+            # collects them without one fails collection instead of exercising
+            # the arm.
             Path("pact-plugin") / "tests" / "fixtures" / "tracked_files.py",
+            Path("pact-plugin") / "tests" / "helpers.py",
         ):
             target = rig / relative
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -730,7 +1413,7 @@ class TestRemovability:
             )
         proc = subprocess.run(
             [sys.executable, str(guard)], cwd=str(rig),
-            capture_output=True, text=True, timeout=300)
+            capture_output=True, text=True, timeout=300, env=_child_environ())
         assert proc.returncode == 0, (
             f"the full-collection guard failed in a rig with no fast files "
             f"(rc={proc.returncode}).\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
@@ -738,9 +1421,10 @@ class TestRemovability:
         # EXECUTE the fast-dependent arms; they must skip loudly.
         arms = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-rA",
-             "-p", "no:cacheprovider", *self._FAST_DEPENDENT_NODE_IDS],
+             "-p", "no:cacheprovider", "-p", "no:randomly",
+             *self._FAST_DEPENDENT_NODE_IDS],
             cwd=str(rig / "pact-plugin"), capture_output=True, text=True,
-            timeout=300)
+            timeout=300, env=_child_environ())
         assert arms.returncode == 0, (
             f"the fast-dependent arms did not skip cleanly in a rig with no "
             f"fast lane (rc={arms.returncode}).\nstdout:\n{arms.stdout}\n"
@@ -761,9 +1445,10 @@ class TestRemovability:
             "name: fast-tests\non: [pull_request]\n", encoding="utf-8")
         arms = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-rA",
-             "-p", "no:cacheprovider", *self._FAST_DEPENDENT_NODE_IDS],
+             "-p", "no:cacheprovider", "-p", "no:randomly",
+             *self._FAST_DEPENDENT_NODE_IDS],
             cwd=str(rig / "pact-plugin"), capture_output=True, text=True,
-            timeout=300)
+            timeout=300, env=_child_environ())
         assert arms.returncode != 0, (
             f"a partially deleted fast lane did not fail; output:\n"
             f"{arms.stdout}")

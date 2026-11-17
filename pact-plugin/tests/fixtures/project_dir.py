@@ -154,6 +154,8 @@ def child_env(
     - PATH (the child must find git/python)
     - HOME=home — Path.home monkeypatching does NOT cross the process
       boundary, so the child's home fallback must come from the real variable
+    - GIT_CONFIG_NOSYSTEM=1, so git in the child ignores the machine's
+      system config file
     - CLAUDE_CONFIG_DIR=config_root (the fixture's tmp config root)
     - CLAUDE_CODE_SESSION_ID=session_id when given (the discovery glob key)
     - CLAUDE_PROJECT_DIR=project_dir when given; ABSENT when DELETE (the
@@ -165,6 +167,9 @@ def child_env(
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         "HOME": str(home),
         "CLAUDE_CONFIG_DIR": str(config_root),
+        # HOME drops the operator's global git config; this drops the machine's
+        # system file, so a hook's git in the child reads neither.
+        "GIT_CONFIG_NOSYSTEM": "1",
     }
     # HOME above relocates the HuggingFace cache with it, because the child
     # derives that cache root from HOME at import time. Without this a child

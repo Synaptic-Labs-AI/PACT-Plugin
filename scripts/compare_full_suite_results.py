@@ -46,6 +46,10 @@ if _SCRIPTS_DIR not in sys.path:
 from verify_full_run import SCHEMA_VERSION as RUN_RECORD_SCHEMA_VERSION  # noqa: E402
 
 COLLECTION_RECORD_SCHEMA_VERSION = 1
+# The shape of this tool's own outputs: comparison.json and every runs.jsonl
+# record. 2 added shuffle_seed, census_failures, the census and census_tests
+# delta types and the census_outcome validity.
+OUTPUT_SCHEMA_VERSION = 2
 
 # The `tests.yml` workflow's immutable database id, read with
 # `gh api repos/{owner}/{repo}/actions/workflows/tests.yml --jq .id`. There is
@@ -57,12 +61,75 @@ WORKFLOW_DATABASE_ID = 291463576
 SUMMARY_OUTCOME = re.compile(
     r"\b(?:passed|failed|errors?|skipped|xfailed|xpassed|deselected|no tests ran)\b")
 SUMMARY_TIME = re.compile(r"\bin \d+(?:\.\d+)?s\b")
+# Actions writes every log line as a timestamp and one space before the text, an
+# empty output line included, so an empty line strips to "" and ends the report
+# header. Measured 2026-11-16 on runs 43861607028 (ordered) and 43861611679
+# (seed 103): every empty line in both the `gh run view --log` form and the
+# job-logs API form was the timestamp, "Z " and nothing after it, with no bare
+# "Z" and no carriage return.
 TIMESTAMP_TEXT = r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z "
 OPTIONAL_BOM = re.escape(chr(0xFEFF)) + "?"
 TIMESTAMP = re.compile("^" + OPTIONAL_BOM + TIMESTAMP_TEXT)
 ACTIONS_ENVELOPE = re.compile(
     r"^[^\t\r\n]*\t[^\t\r\n]*\t" + OPTIONAL_BOM + TIMESTAMP_TEXT)
 SHA = re.compile(r"[0-9a-fA-F]{40}")
+# The run line's unexpanded
+# `${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}`,
+# as shlex splits it, and pytest-randomly's own report-header line. SEED_LINE is
+# the only accepted spelling: 1 to 10 ASCII digits holds every 32-bit seed, and
+# every seed the seed guard in .github/workflows/tests.yml admits (at most 9).
+# SEED_LIKE_LINE is any line that names a pytest-randomly seed (a sign, Unicode
+# digits, 'last' or nothing after the '='); a header line that matches it but
+# not SEED_LINE is refused rather than read, so a seeded run is never read as
+# ordered.
+_SEED_ARGV = ["${PACT_SHUFFLE_SEED:+-p", "randomly", "--randomly-seed=$PACT_SHUFFLE_SEED",
+              "--randomly-dont-reset-seed}"]
+SEED_LINE = re.compile(r"Using --randomly-seed=([0-9]{1,10})")
+SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=.*")
+# The test step's environment as the Actions runner echoes it, between the
+# step's run command and its ##[endgroup] line, before the step's process
+# starts: an ordered run shows the variable empty, a seeded run its seed.
+STEP_ENV_SEED = re.compile(r"  PACT_SHUFFLE_SEED:(?: (.*))?")
+# A census problem line names the test it came from: PYTEST_CURRENT_TEST, or
+# '<outside a test>', after an xdist worker's '[gwN] ' prefix.
+CENSUS_LINE_TEST = re.compile(
+    r"(?:\[gw[0-9]+\] )?(.*? \((?:setup|call|teardown)\)|<outside a test>): ")
+SESSION_BANNER = re.compile(r"=+ test session starts =+")
+# A top-level section line pytest itself writes (write_sep("=", title)): the
+# report sections and the final summary line. Only these end the report
+# header and the session-finish span. "_" and "-" separators appear only
+# inside those sections, and a stray line of dashes on stderr, such as the
+# logging module's "--- Logging error ---", must not end either part.
+PYTEST_SECTION = re.compile(r"=+ \S(?:.*\S)? =+")
+SHORT_SUMMARY_HEADER = re.compile(r"=+ short test summary info =+")
+# The header line each census's finish() writes when it fails the session.
+# Each finish() (child_pytest_census, clock_shift_census, home_census) starts
+# the header on a new line when the terminal reporter's writer says its line is
+# open, as xdist's last progress line ("....[100%]") leaves it. The optional
+# progress prefix stays so a header that still follows a progress marker on one
+# line is read: the new-line check reads pytest's private _tw.width_of_current_line
+# and quietly skips the break if a release renames it, and logs recorded before
+# the censuses started the new line carry the joined form. A finish() with no
+# terminal reporter prints to stderr instead; with no reporter nothing writes
+# progress, so that header starts its own line (measured on pytest 9.2 for the
+# HOME census with -p no:terminal, serial and -n 2; the other censuses share
+# the same fallback line).
+_PROGRESS_PREFIX = r"(?:[^\[]*\[ *[0-9]{1,3}%\])?"
+CENSUS_HEADERS = {
+    "child_pytest": re.compile(
+        _PROGRESS_PREFIX + r"CHILD PYTEST CENSUS: ([0-9]{1,9}) distinct pytest child "
+        r"launch\(es\) refused or not inspected"),
+    "clock_shift": re.compile(
+        _PROGRESS_PREFIX + r"clock-shift census: ([0-9]{1,9}) problem\(s\); "
+        r"this run did not shift every clock"),
+    "home": re.compile(
+        _PROGRESS_PREFIX + r"HOME CENSUS: ([0-9]{1,9}) distinct child launch\(es\) without "
+        r"HOME refused"),
+    # The HOME census writes launches it could not inspect in their own block,
+    # after its refusal block when both occur; a fault alone fails the session.
+    "home_uninspected": re.compile(
+        _PROGRESS_PREFIX + r"HOME CENSUS: ([0-9]{1,9}) launch\(es\) the census could not inspect"),
+}
 COUNT_KEYS = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
 # A wide-encoding document hides an ASCII token behind interleaved NUL bytes, so
 # the DOCTYPE/ENTITY byte scan cannot see it; the UTF-16 LE mark also opens
@@ -181,31 +248,282 @@ def _junit_key(node_id: str) -> tuple[str, str]:
     return ".".join(parts[:-1]), parts[-1]
 
 
+def _command_text(line: str) -> str | None:
+    """The echoed pytest command on this line, or None when it carries none."""
+    stripped = line.strip()
+    if stripped.startswith("##[group]Run "):
+        stripped = stripped[len("##[group]Run "):]
+    return stripped if stripped.startswith("python -m pytest ") else None
+
+
+def _step_bounds(lines: list[str]) -> tuple[list[int], int | None, int | None, int | None]:
+    """Where the full-suite step's parts sit in the log.
+
+    Returns the echoed run command's line indexes, the session-start banner's
+    index, and the end indexes of the report header and the session-finish
+    span. The command lines run from the first one up to the first banner
+    after it, so a command a test prints in its output cannot count, and a
+    banner from an earlier step cannot anchor the header. Without a banner the
+    last three are None.
+    """
+    first = next((index for index, line in enumerate(lines)
+                  if _command_text(line) is not None), None)
+    if first is None:
+        return [], None, None, None
+    banner = next((index for index in range(first + 1, len(lines))
+                   if SESSION_BANNER.fullmatch(lines[index])), None)
+    stop = len(lines) if banner is None else banner
+    commands = [index for index in range(first, stop)
+                if _command_text(lines[index]) is not None]
+    if banner is None:
+        return commands, None, None, None
+    end = banner + 1
+    while (end < len(lines) and lines[end].strip()
+           and not PYTEST_SECTION.fullmatch(lines[end])):
+        end += 1
+    finish = end
+    while finish < len(lines) and not PYTEST_SECTION.fullmatch(lines[finish]):
+        finish += 1
+    return commands, banner, end, finish
+
+
+def _test_text_range(lines: list[str], summary_index: int) -> range:
+    """pytest's report sections: from the first pytest section line after the
+    session-finish span through the final summary line.
+
+    Every text a test produces (captured output, assert messages, tracebacks,
+    warning text, skip and failure reasons) is printed here and nowhere else in
+    the log, so no evidence marker is read from this range. Empty when the
+    session banner cannot be located; that run is refused when its header is
+    read. A log whose session-finish span ends after the final summary line
+    has no report sections to locate, and is refused here rather than read
+    whole.
+    """
+    _commands, banner, _end, finish = _step_bounds(lines)
+    if banner is None:
+        return range(0)
+    if finish > summary_index:
+        raise EvidenceError(
+            "the final summary line comes before the end of the session-finish "
+            "span, so pytest's report sections cannot be located")
+    return range(finish, summary_index + 1)
+
+
+def _short_summary_ranges(lines: list[str], report: range) -> list[range]:
+    """Where the 'short test summary info' section may start, latest first.
+
+    It is the last section before the final summary line, and -ra prints its
+    XPASS lines there. On CI pytest prints each failure's whole message in it,
+    untrimmed and over several lines, and a message can hold a child pytest's
+    whole report, that report's own header line included, as can a failing
+    test's captured output in an earlier section. So every line that is exactly
+    a short-summary header is returned, and _apply_xpass refuses a log with more
+    than one. Separator-shaped lines that are not the header are passed over.
+    """
+    if not report:
+        return []
+    summary_index = report[-1]
+    return [range(index + 1, summary_index)
+            for index in range(summary_index - 1, report.start - 1, -1)
+            if SHORT_SUMMARY_HEADER.fullmatch(lines[index])]
+
+
 def _command_argv(lines: list[str]) -> list[str]:
     candidates = []
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("##[group]Run "):
-            stripped = stripped[len("##[group]Run "):]
-        if stripped.startswith("python -m pytest "):
-            try:
-                candidates.append(shlex.split(stripped))
-            except ValueError as exc:
-                raise EvidenceError(f"unparseable pytest command: {exc}") from exc
+    for index in _step_bounds(lines)[0]:
+        try:
+            candidates.append(shlex.split(_command_text(lines[index])))
+        except ValueError as exc:
+            raise EvidenceError(f"unparseable pytest command: {exc}") from exc
     if (len(candidates) not in (1, 2)
             or len(candidates) == 2 and candidates[0] != candidates[1]):
         raise EvidenceError("expected one command, optionally repeated by the Actions group header")
     argv = candidates[0]
-    # `$DIST` is the shipped workflow's own text: Actions echoes the `run:` body
-    # unexpanded, so a real log carries the variable, not the resolved value.
-    # The fixed tokens and the literal JUnit argument still pin the command
-    # shape, so this widens the accepted VALUE, never the command.
-    if (len(argv) != 9 or argv[:7] != [
+    # `$DIST` and `${PACT_SHUFFLE_SEED:+…}` are the shipped workflow's own text:
+    # Actions echoes the `run:` body unexpanded, so a real log carries the
+    # variables, not the resolved values. The argv text is therefore the same
+    # for every seed and cannot tell a shuffled run from an ordered one; the
+    # seed comes from pytest-randomly's header line instead. Exactly two shapes
+    # are accepted: the 9-token ordered line, and the same with the four seed
+    # tokens before the literal JUnit argument. This widens the accepted VALUE
+    # and adds one reviewed shape, never an open-ended command.
+    seeded_length = 9 + len(_SEED_ARGV)
+    if (len(argv) not in (9, seeded_length) or argv[:7] != [
             "python", "-m", "pytest", "-ra", "-n", "4", "--dist"]
             or argv[7] not in ("loadfile", "load", "$DIST")
-            or argv[8] != "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"):
+            or len(argv) == seeded_length and argv[8:-1] != _SEED_ARGV
+            or argv[-1] != "--junitxml=$GITHUB_WORKSPACE/.full-suite-results.xml"):
         raise EvidenceError(f"unexpected full-suite pytest argv: {argv!r}")
     return argv
+
+
+def _session_spans(lines: list[str]) -> tuple[list[str], list[str]]:
+    """The full-suite step's pytest report header and its session-finish span.
+
+    The header starts after the first session-start banner that follows the
+    step's echoed run command, so a banner from an earlier step cannot anchor
+    it, and ends at the first blank line or pytest section line. The
+    session-finish span runs from there to the next pytest section line: it holds
+    the progress lines and what pytest_sessionfinish writes, and no test's
+    captured output, which pytest prints only inside a later section. A missing
+    banner is refused: reading no seed would look like a valid ordered run.
+    """
+    _commands, start, end, finish = _step_bounds(lines)
+    if start is None:
+        raise EvidenceError(
+            "no pytest session-start banner follows the full-suite run command; "
+            "the run's seed header cannot be located")
+    return lines[start + 1:end], lines[end:finish]
+
+
+def _census_failures(finish_span: list[str]) -> list[dict]:
+    """Every census that failed the session, with its problem lines.
+
+    Read from the session-finish span only, so a census-shaped line in a test's
+    captured output is never counted. A census writes one indented line per
+    problem straight after its header, so a block with fewer or more lines than
+    its header counts (a log cut short, or another line written in between) is
+    refused. Each census's finish() prints its header once per session, from the
+    controller only, so a header that appears twice is refused too.
+    """
+    failures = []
+    for name, count, block in _census_blocks(finish_span):
+        if any(failure["census"] == name for failure in failures):
+            raise EvidenceError(
+                f"the {name} census header appears more than once in the "
+                f"session-finish span")
+        problems = [finish_span[index].strip() for index in block[1:]]
+        if len(problems) != count:
+            raise EvidenceError(
+                f"the {name} census header counts {count} "
+                f"problem(s) but {len(problems)} problem line(s) follow it")
+        failures.append({"census": name, "problems": count, "lines": problems})
+    return sorted(failures, key=lambda failure: failure["census"])
+
+
+def _census_blocks(finish_span: list[str]) -> list[tuple[str, int, range]]:
+    """Each census block in the session-finish span: the census name, the
+    count its header gives, and the span offsets of its header and of the
+    indented problem lines that follow it."""
+    blocks = []
+    for index, line in enumerate(finish_span):
+        for name, pattern in CENSUS_HEADERS.items():
+            match = pattern.fullmatch(line)
+            if match is None:
+                continue
+            stop = index + 1
+            while stop < len(finish_span) and finish_span[stop].startswith("  "):
+                stop += 1
+            blocks.append((name, int(match.group(1)), range(index, stop)))
+    return blocks
+
+
+def _shuffle_seed(header: list[str]) -> int | None:
+    """The pytest-randomly seed from the report header, or None for an ordered run.
+
+    Only header lines count, so a seed line a test prints in its captured output
+    is ignored. Each line is matched as-is. A seed-like line that is not 1 to 10
+    ASCII digits, or a second seed line, is refused.
+    """
+    seeds = []
+    for line in header:
+        match = SEED_LINE.fullmatch(line)
+        if match is None and SEED_LIKE_LINE.fullmatch(line):
+            raise EvidenceError(
+                "pytest-randomly seed line is not 1 to 10 ASCII digits")
+        if match is not None:
+            seeds.append(match.group(1))
+    if len(seeds) > 1:
+        raise EvidenceError("more than one pytest-randomly seed line")
+    return int(seeds[0]) if seeds else None
+
+
+def _step_env_seed(lines: list[str]) -> str | None:
+    """The seed the test step's environment echo names: '' for an ordered run,
+    its text for a seeded one, or None when the log carries no echo for it."""
+    commands, banner, _end, _finish = _step_bounds(lines)
+    if not commands or banner is None:
+        return None
+    for index in range(commands[0], banner):
+        if lines[index] == "##[endgroup]":
+            break
+        match = STEP_ENV_SEED.fullmatch(lines[index])
+        if match is not None:
+            return match.group(1) or ""
+    return None
+
+
+def _run_seed(lines: list[str], report: range) -> int | None:
+    """The run's pytest-randomly seed, or None for an ordered run.
+
+    The seed is read from the report header. A pytest-randomly seed line
+    anywhere else in the test step's log, outside pytest's report sections, is
+    refused (earlier steps are not read, as for the header itself): a stray line
+    (worker output merged in) that ends the header before the seed line would
+    otherwise make a seeded run read as ordered. Where the log carries the
+    test step's environment echo, which the runner writes before pytest
+    starts, the header must agree with it.
+    """
+    commands, banner, end, _finish = _step_bounds(lines)
+    header, _finish_span = _session_spans(lines)
+    seed = _shuffle_seed(header)
+    displaced = [index for index in range(commands[0], len(lines))
+                 if "Using --randomly-seed=" in lines[index] and index not in report
+                 and not banner < index < end]
+    if displaced:
+        raise EvidenceError(
+            f"a pytest-randomly seed line sits outside the report header (log line "
+            f"{displaced[0] + 1}), so the run's order cannot be read from the header")
+    named = _step_env_seed(lines)
+    if named is None:
+        return seed
+    if named == "" and seed is not None:
+        raise EvidenceError(
+            f"the test step's environment names no seed, but the report header "
+            f"reads seed {seed}")
+    if named != "" and (not named.isascii() or not named.isdigit()
+                        or seed != int(named)):
+        raise EvidenceError(
+            f"the test step's environment names seed {named!r}, but the report "
+            f"header reads {'no seed' if seed is None else f'seed {seed}'}")
+    return seed
+
+
+_LAUNCH_TEXT = re.compile(r"\[[^\]]*\]")
+_CWD_TEXT = re.compile(r"\(cwd [^)]*\)")
+
+
+def _census_tests(failure: dict) -> list[str]:
+    """Each test a census's problem lines name, with its problem, without the
+    worker prefix.
+
+    A line's launch text and working directory hold temporary paths that
+    differ from run to run. So in the problem the first bracketed span, the
+    launch, becomes '[...]' and each '(cwd ...)' loses its path; a later
+    bracket, such as a child-pytest family label, is kept. A clock-shift line
+    keeps only the problem after its last ' -- ', since the argv before it is
+    launch text too. The same test failing for a different problem is then a
+    different key. A launch whose shown text holds ']' keeps the rest of it in
+    the key, and so does any other run-varying text a line carries outside
+    those spans, such as a wrapper program named by a temporary path; such a
+    line can report a difference between runs that is only that text. A line
+    that names no test is keyed by its problem, the text before its first
+    ': ', because the rest (counts, ledger paths, exception text) also differs
+    by run.
+    """
+    keys = set()
+    for line in failure["lines"]:
+        line = re.sub(r"^\[gw[0-9]+\] ", "", line)
+        match = CENSUS_LINE_TEST.match(line)
+        if match is None:
+            keys.add(line.partition(": ")[0])
+            continue
+        problem = line[match.end():]
+        if failure["census"] == "clock_shift":
+            problem = problem.rpartition(" -- ")[2]
+        problem = _CWD_TEXT.sub("(cwd ...)", _LAUNCH_TEXT.sub("[...]", problem, count=1))
+        keys.add(f"{match.group(1)}: {problem}")
+    return sorted(keys)
 
 
 def _junit_bytes(path: Path) -> bytes:
@@ -330,8 +648,111 @@ def _parse_junit(path: Path) -> list[dict]:
     return cases
 
 
-def _xpass_lines(lines: list[str]) -> list[str]:
-    return [line[len("XPASS "):] for line in lines if line.startswith("XPASS ")]
+# The log is read with str.splitlines, which breaks a line at each of these.
+_LINE_BREAK = re.compile("\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+# pytest's junitxml.bin_xml_escape (9.2), which rewrites each character XML
+# cannot hold as the literal text '#xNN'; a test compares this copy with it.
+_JUNIT_ILLEGAL = re.compile(
+    "[^\u0009\u000a\u000d\u0020-\u007e\u0080-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+# A JUnit xfail message split where the log reader splits: separators XML
+# keeps stay as they are, the others are written as their '#xNN' escape.
+_JUNIT_LINE_BREAK = re.compile("\r\n|[\n\r\x85\u2028\u2029]|#x0B|#x0C|#x1C|#x1D|#x1E")
+
+
+def _junit_escape(text: str) -> str:
+    return _JUNIT_ILLEGAL.sub(
+        lambda match: (f"#x{ord(match.group()):02X}" if ord(match.group()) <= 0xFF
+                       else f"#x{ord(match.group()):04X}"), text)
+
+
+def _one_extra_count(counts: set[int], entry: str, kind: str) -> int:
+    if not counts:
+        raise EvidenceError(f"a {kind} summary entry has no reason in the run's evidence: "
+                            f"{entry!r}")
+    if len(counts) > 1:
+        raise EvidenceError(f"a {kind} summary entry matches reasons of different "
+                            f"lengths: {entry!r}")
+    return counts.pop()
+
+
+# A -ra SKIPPED entry: count, location and the reason's first line, which is
+# compared whole so a reason that ends another reason's first line cannot match.
+SKIP_ENTRY = re.compile(r"SKIPPED \[[0-9]+\] .*?:[0-9]+:(?: (.*))?")
+
+
+def _skip_extra_lines(entry: str, skip_reasons: list[str]) -> int:
+    """How many log lines after a SKIPPED entry its reason continues over.
+
+    The run record holds each skip reason as pytest prints it, and pytest
+    prints a reason whole and unindented, so it continues over one log line
+    per line break the log reader splits at (measured on 9.2 under CI=true,
+    serial and xdist). A continuation line can therefore start like an entry.
+    """
+    match = SKIP_ENTRY.fullmatch(entry)
+    shown = match.group(1) or "" if match else None
+    return _one_extra_count(
+        {len(_LINE_BREAK.findall(reason)) for reason in skip_reasons
+         if _LINE_BREAK.split(reason, maxsplit=1)[0] == shown}, entry, "SKIPPED")
+
+
+def _xfail_extra_lines(entry: str, following: list[str],
+                       xfail_reasons: dict[str, list[str]]) -> int:
+    """How many log lines after an XFAIL entry its reason continues over.
+
+    The terminal prints the xfail reason raw; junitxml writes it with a
+    leading 'reason: ' removed and every character XML cannot hold escaped
+    (measured on 9.2). So the terminal lines are put in junitxml's form and
+    compared with the JUnit message, split where the log reader splits.
+    """
+    rest = re.sub(r"^at (?:setup|call|teardown) of ", "", entry[len("XFAIL "):])
+    counts = set()
+    for node_id, reasons in xfail_reasons.items():
+        for reason in reasons:
+            if rest == node_id:
+                if not reason:
+                    counts.add(0)
+                continue
+            if not rest.startswith(node_id + " - "):
+                continue
+            segments = _JUNIT_LINE_BREAK.split(reason)
+            lines = [rest[len(node_id) + 3:], *following[:len(segments) - 1]]
+            if len(lines) != len(segments):
+                continue
+            lines[0] = lines[0].removeprefix("reason: ")
+            if [_junit_escape(line) for line in lines] == segments:
+                counts.add(len(segments) - 1)
+    return _one_extra_count(counts, entry, "XFAIL")
+
+
+def _xpass_lines(summary: list[str], skip_reasons: list[str],
+                 xfail_reasons: dict[str, list[str]]) -> list[str]:
+    """The XPASS entries of the short test summary.
+
+    -ra prints its entries in a fixed order: skips, xfails, xpasses, errors,
+    failures (measured on 9.2, serial and xdist; test_real_ra_entry_order
+    re-measures it). Every error and failure
+    message therefore follows the last XPASS entry, so lines are read only up
+    to the first ERROR or FAILED entry. Each SKIPPED and XFAIL entry passes
+    over the lines its reason continues on, read from the run record's skip
+    sites and the JUnit xfail reasons, so a reason line that starts with
+    'XPASS ', 'ERROR ' or 'FAILED ' is never read as an entry. An XPASS
+    entry's own reason is not in that evidence: a continuation line of it that
+    starts with 'XPASS ' is counted, and the count check then refuses the run.
+    """
+    payloads = []
+    index = 0
+    while index < len(summary):
+        line = summary[index]
+        index += 1
+        if line.startswith(("ERROR ", "FAILED ")):
+            break
+        if line.startswith("XPASS "):
+            payloads.append(line[len("XPASS "):])
+        elif line.startswith("SKIPPED "):
+            index += _skip_extra_lines(line, skip_reasons)
+        elif line.startswith("XFAIL "):
+            index += _xfail_extra_lines(line, summary[index:], xfail_reasons)
+    return payloads
 
 
 def _resolve_xpass(payload: str, terminal: list[str]) -> tuple[str, str | None]:
@@ -349,19 +770,42 @@ def _resolve_xpass(payload: str, terminal: list[str]) -> tuple[str, str | None]:
     return node_id, payload[len(node_id) + 3:]
 
 
-def _apply_xpass(cases: list[dict], lines: list[str], terminal: list[str],
-                 expected_count: int) -> None:
-    payloads = _xpass_lines(lines)
+def _apply_xpass(cases: list[dict], summaries: list[list[str]], terminal: list[str],
+                 record: dict) -> None:
+    """Read the XPASS entries from the short test summary and mark them.
+
+    A log with more than one 'short test summary info' header is refused: a
+    child pytest's report printed in a test's output, whether in its captured
+    output or inside a failure message in the summary itself, carries the same
+    header, and the log alone cannot tell it from pytest's own. That refuses a
+    valid red run whose failure message holds a child pytest's report. With one
+    header, its summary is read, and a summary that does not read cleanly
+    against the run's evidence refuses the run.
+    """
+    expected_count = record["xpassed"]
+    sites = record.get("skip_sites")
+    skip_reasons = [site["reason"] for site in sites if isinstance(site, dict)
+                    and isinstance(site.get("reason"), str)] if isinstance(sites, list) else []
+    xfail_reasons = {}
+    for case in cases:
+        if case["outcome"] == "xfail":
+            xfail_reasons.setdefault(case["node_id"], []).append(case["reason"] or "")
+    if len(summaries) > 1:
+        raise EvidenceError(
+            f"the log holds {len(summaries)} short test summary headers, so a child "
+            f"pytest's report printed in a test's output cannot be told from "
+            f"pytest's own summary")
+    payloads = _xpass_lines(summaries[0] if summaries else [], skip_reasons, xfail_reasons)
     if len(payloads) != expected_count or len(set(payloads)) != len(payloads):
         raise EvidenceError(
-            f"raw XPASS evidence count/uniqueness mismatch: {len(payloads)} lines, "
-            f"record xpassed={expected_count}")
+            f"raw XPASS evidence count/uniqueness mismatch: {len(payloads)} "
+            f"lines, record xpassed={expected_count}")
+    entries = [_resolve_xpass(payload, terminal) for payload in payloads]
     by_key = {}
     for case in cases:
         by_key.setdefault((case["classname"], case["name"]), []).append(case)
     resolved = set()
-    for payload in payloads:
-        node_id, reason = _resolve_xpass(payload, terminal)
+    for node_id, reason in entries:
         if node_id in resolved:
             raise EvidenceError(f"duplicate XPASS node ID: {node_id}")
         resolved.add(node_id)
@@ -399,7 +843,9 @@ def _validate_skip_sites(record: dict, cases: list[dict],
                 or not isinstance(site.get("reason"), str)):
             raise EvidenceError("invalid skip site")
         count = _integer(site, "count", minimum=1)
-        recorded[(site["file"], site["reason"])] += count
+        # The record holds the reason as pytest printed it; JUnit holds it as
+        # junitxml escaped it, so the record side is escaped to compare.
+        recorded[(site["file"], _junit_escape(site["reason"]))] += count
     if sum(recorded.values()) != record["skipped"]:
         raise EvidenceError("skip_sites do not account for the record's skips")
     emitted = Counter()
@@ -539,8 +985,9 @@ def _validate_records(metadata: dict, record: dict, collection: dict,
 
 
 def _validate_log(directory: Path, record: dict,
-                  expected_sha: str) -> tuple[list[str], list[str], str, int]:
-    """Validate the raw log against the record; return lines, argv, summary, checks."""
+                  expected_sha: str) -> tuple[list[str], list[str], str, int, range]:
+    """Validate the raw log against the record; return lines, argv, summary, checks
+    and the range of pytest's report sections, which no evidence read uses."""
     lines = _log_lines(directory / "run.log")
     argv = _command_argv(lines)
     summary = _summary_text(record["summary_line"])
@@ -553,22 +1000,55 @@ def _validate_log(directory: Path, record: dict,
     if len(summary_indexes) != 1:
         raise EvidenceError("raw log does not contain exactly one matching summary")
     summary_index = summary_indexes[0]
+    report = _test_text_range(lines, summary_index)
+    evidence = [line for index, line in enumerate(lines) if index not in report]
     collection_marker = "FULL-COLLECTION-OK "
     if not any(line.startswith(collection_marker)
-               and line.endswith(f"subject={expected_sha}") for line in lines):
+               and line.endswith(f"subject={expected_sha}") for line in evidence):
         raise EvidenceError("FULL-COLLECTION-OK on the expected SHA is absent")
-    full_run_ok = [line for line in lines if line.startswith("FULL-RUN-OK ")]
+    full_run_ok = [line for line in evidence if line.startswith("FULL-RUN-OK ")]
     if any(not line.endswith(f"subject={expected_sha}") for line in full_run_ok):
         raise EvidenceError("FULL-RUN-OK names a different SHA")
+    # run.log is the job log download. A step's stderr reaches it: measured on
+    # run 42830046567, whose job log carries the RUN-VERIFY-FAILURE line that
+    # verify_full_run.py prints to stderr. No real drift run has been seen, so
+    # that the binding's stderr heading is in a real drift log is inferred from
+    # that measurement, not observed. The binding's session-end check runs after
+    # the censuses and sets 3 even over a run a census raised to 1. Drift is
+    # named before the match lines are counted: when the installed set changed
+    # during the run, the after-tests verify step reports the drift too and
+    # prints no match line, so a count-first check would hide the cause.
+    if any("CI ENVIRONMENT DRIFT" in line for line in evidence):
+        message = ("the CI environment binding reported environment drift (a CI "
+                   "ENVIRONMENT DRIFT heading is in the log), so the run is invalid "
+                   "infrastructure")
+        names = _census_names(lines)
+        if names and record["exitstatus"] == 3:
+            message += f", and it set exit status 3 over the {names} census failure"
+        raise EvidenceError(message)
     environment_indexes = [index for index, line in enumerate(lines)
-                           if "CI environment matches constraints-ci.txt." in line]
+                           if index not in report
+                           and "CI environment matches constraints-ci.txt." in line]
     if (len(environment_indexes) < 2
             or min(environment_indexes) > summary_index
-            or max(environment_indexes) < summary_index
-            or any("CI ENVIRONMENT DRIFT" in line or "PYTEST_ADDOPTS is set" in line
-                   for line in lines)):
+            or max(environment_indexes) < summary_index):
         raise EvidenceError("before/after environment evidence is not clean")
-    return lines, argv, summary, len(environment_indexes)
+    if any("PYTEST_ADDOPTS is set" in line for line in evidence):
+        raise EvidenceError(
+            "a check in the log reported PYTEST_ADDOPTS is set, so the run's "
+            "options are not the reviewed command alone")
+    return lines, argv, summary, len(environment_indexes), report
+
+
+def _census_names(lines: list[str]) -> str:
+    """The censuses that failed the session, joined for a message; empty when the
+    session-finish span holds none or cannot be read, so a malformed census block
+    never replaces the drift refusal."""
+    try:
+        failures = _census_failures(_session_spans(lines)[1])
+    except EvidenceError:
+        return ""
+    return " and ".join(failure["census"] for failure in failures)
 
 
 def _require_one_outcome_kind_per_node(cases: list[dict]) -> None:
@@ -640,7 +1120,7 @@ def _terminal_cases(cases: list[dict], record: dict) -> list[dict]:
             if case["outcome"] not in ("collection_skip", "collection_error")]
 
 
-def _validate_junit(record: dict, lines: list[str], terminal: list[str],
+def _validate_junit(record: dict, summaries: list[list[str]], terminal: list[str],
                     artifact: Path) -> tuple[list[dict], list, list]:
     """Map every JUnit case to a terminal node and reconcile the aggregates."""
     cases = _terminal_cases(
@@ -666,7 +1146,7 @@ def _validate_junit(record: dict, lines: list[str], terminal: list[str],
                 raise EvidenceError(f"JUnit file disagrees for {case['node_id']}")
     if seen_keys != set(node_for_key):
         raise EvidenceError("one or more terminal IDs have no JUnit case")
-    _apply_xpass(cases, lines, terminal, record["xpassed"])
+    _apply_xpass(cases, summaries, terminal, record)
     _require_one_outcome_kind_per_node(cases)
     outcome_counts = Counter(case["outcome"] for case in cases)
     teardown_after_pass = _teardown_after_pass_count(cases)
@@ -689,24 +1169,54 @@ def _validate_junit(record: dict, lines: list[str], terminal: list[str],
 
 
 def _validate_run_outcomes(record: dict, metadata: dict, lines: list[str],
-                           overall_conclusion: str) -> tuple[str, list[str], bool]:
-    """Reconcile exit status, verifier disposition, and the workflow conclusion."""
+                           overall_conclusion: str,
+                           census_failures: list[dict]) -> tuple[str, list[str], str]:
+    """Reconcile exit status, verifier disposition, and the workflow conclusion.
+
+    A green run that a census failed is a census outcome, checked like a red
+    run: the censuses raise only a clean status, so its exit status must be 1.
+    """
     full_run_ok = [line for line in lines if line.startswith("FULL-RUN-OK ")]
     verifier_state, verifier_failures = _full_run_verifier(
         metadata, lines, bool(full_run_ok))
     red = record["failed"] > 0 or record["errors"] > 0
-    if red and overall_conclusion != "failure":
-        raise EvidenceError("red test outcomes have an inconsistent overall conclusion")
-    if not red and overall_conclusion != "success":
+    if census_failures and not red and record["exitstatus"] != 1:
+        names = " and ".join(failure["census"] for failure in census_failures)
+        if record["exitstatus"] == 0:
+            raise EvidenceError(
+                f"the {names} census reported a failure beside exit status 0; a "
+                "census raises a clean exit status to 1, so the run record and "
+                "the log disagree")
+        raise EvidenceError(
+            f"the {names} census reported a failure beside exit status "
+            f"{record['exitstatus']}, which a census does not produce, so another "
+            "cause set the exit status")
+    if red and record["exitstatus"] not in (1, 2):
+        # pytest ends a session with failures or errors at 1, or at 2 when it
+        # was interrupted (collection errors). 3 is pytest's internal error or
+        # the CI binding's drift status, and 4 and 5 carry no test outcome.
+        raise EvidenceError(
+            f"red test outcomes beside exit status {record['exitstatus']}, which "
+            "a test failure does not produce, so another cause set the exit status")
+    census = not red and bool(census_failures)
+    failing = red or census
+    if failing and overall_conclusion != "failure":
+        raise EvidenceError(
+            "red test outcomes have an inconsistent overall conclusion" if red
+            else "a census failure has an inconsistent overall conclusion")
+    if not failing and overall_conclusion != "success":
         raise EvidenceError("green test outcomes have an inconsistent overall conclusion")
-    if red and (record["exitstatus"] == 0 or full_run_ok or verifier_state == "missing"):
-        raise EvidenceError("red outcomes lack consistent exit and verifier evidence")
-    if not red and record["exitstatus"] != 0:
+    if failing and (record["exitstatus"] == 0 or full_run_ok or verifier_state == "missing"):
+        raise EvidenceError(
+            "red outcomes lack consistent exit and verifier evidence" if red
+            else "a census failure lacks consistent exit and verifier evidence")
+    if not failing and record["exitstatus"] != 0:
         raise EvidenceError("nonzero exit without a test outcome is invalid infrastructure")
-    clean = not red and record["exitstatus"] == 0
+    clean = not failing and record["exitstatus"] == 0
     if clean and (len(full_run_ok) != 1 or record["passed"] <= 0 or verifier_failures):
         raise EvidenceError("a clean run needs positive passes and one FULL-RUN-OK")
-    return verifier_state, verifier_failures, clean
+    validity = "clean" if clean else "census_outcome" if census else "test_outcome"
+    return verifier_state, verifier_failures, validity
 
 
 def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
@@ -716,33 +1226,64 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     record = _json_object(artifact / ".full-run-record.json")
     collection = _json_object(artifact / ".full-collection-record.json")
     collected, terminal = _validate_records(metadata, record, collection, expected_sha)
-    lines, argv, summary, environment_passes = _validate_log(
+    lines, argv, summary, environment_passes, report = _validate_log(
         directory, record, expected_sha)
+    # Evidence is read outside pytest's report sections, where only a test's
+    # own text can be; XPASS lines only from the short summary, the one place
+    # -ra prints them.
+    evidence = [line for index, line in enumerate(lines) if index not in report]
+    summaries = [[lines[index] for index in summary]
+                 for summary in _short_summary_ranges(lines, report)]
+    _header, finish_span = _session_spans(lines)
+    # The environment axes read the same evidence less each census block: a
+    # census problem line quotes a test's launch, which can name the pins file
+    # or sys.executable, and is census outcome evidence, read by the census
+    # and census_tests deltas only. Any other line in the session-finish span,
+    # such as the CI binding's session-end measurement, stays in.
+    finish_start = _step_bounds(lines)[2]
+    census_lines = {finish_start + offset for _name, _count, block
+                    in _census_blocks(finish_span) for offset in block}
+    environment_evidence = [line for index, line in enumerate(lines)
+                            if index not in report and index not in census_lines]
+    shuffle_seed = _run_seed(lines, report)
+    census_failures = _census_failures(finish_span)
+    if shuffle_seed is not None and len(argv) == 9:
+        raise EvidenceError(
+            "a pytest-randomly seed line sits beside the 9-token run line, "
+            "which has no seed option and cannot load pytest-randomly")
     overall_conclusion = _require_environment_step_success(metadata)
     cases, skip_sites, collection_skip_sites = _validate_junit(
-        record, lines, terminal, artifact)
-    verifier_state, verifier_failures, clean = _validate_run_outcomes(
-        record, metadata, lines, overall_conclusion)
+        record, summaries, terminal, artifact)
+    verifier_state, verifier_failures, validity = _validate_run_outcomes(
+        record, metadata, evidence, overall_conclusion, census_failures)
     return {
         "logical_name": logical, "raw_paths": RAW_PATHS, "evidence_errors": [],
-        "validity": "clean" if clean else "test_outcome",
+        "validity": validity,
         "identity": {"database_id": metadata["databaseId"],
                      "workflow_database_id": metadata["workflowDatabaseId"],
                      "attempt": 1, "head_sha": expected_sha,
                      "head_branch": metadata.get("headBranch"),
                      "url": metadata.get("url")},
+        # Beside identity, never in environment: a seed is the variable under
+        # test, so it must not make a delta unattributable.
+        "shuffle_seed": shuffle_seed,
+        # Outcome evidence, not environment: a census failure is a suite failure.
+        "census_failures": census_failures,
         "argv": argv,
         "environment": {
             "overall_conclusion": overall_conclusion,
             "passed_checks": environment_passes,
-            "platform": [line for line in lines if line.startswith("platform ")],
-            "measurements": [line for line in lines if "sys.executable=" in line],
+            "platform": [line for line in environment_evidence
+                         if line.startswith("platform ")],
+            "measurements": [line for line in environment_evidence
+                             if "sys.executable=" in line],
             # Job NAMES identify the workflow shape; the runner instance id is
             # a fresh value on every GitHub-hosted run and attributes nothing.
             "job_names": [job.get("name") for job in metadata.get("jobs", [])
                           if isinstance(job, dict)],
-            "pins": [line for line in lines if "constraints-ci.txt" in line],
-            "cache": [line for line in lines if line.startswith(CACHE_PREFIXES)],
+            "pins": [line for line in environment_evidence if "constraints-ci.txt" in line],
+            "cache": [line for line in environment_evidence
+                      if line.startswith(CACHE_PREFIXES)],
             "pytest_addopts_absent": True},
         "collection": {"collected": collected,
                        "collected_files": collection["collected_files"],
@@ -875,11 +1416,17 @@ def _classify_environment(comparison: dict, reference: dict,
     comparison["status"] = "invalid"
 
 
+def _input_runs(runs: list[dict]) -> list[dict]:
+    """One summary per input run; a run refused during normalization has no
+    identity or seed, so both read None."""
+    return [{"logical_name": run["logical_name"], "identity": run.get("identity"),
+             "shuffle_seed": run.get("shuffle_seed"), "validity": run["validity"]}
+            for run in runs]
+
+
 def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
-    comparison = {"schema_version": 1, "expected_sha": expected_sha,
-                  "input_runs": [{"logical_name": run["logical_name"],
-                                  "identity": run.get("identity"),
-                                  "validity": run["validity"]} for run in runs],
+    comparison = {"schema_version": OUTPUT_SCHEMA_VERSION, "expected_sha": expected_sha,
+                  "input_runs": _input_runs(runs),
                   "status": "invalid" if errors else "identical",
                   "deltas": [], "observations": [], "evidence_errors": errors}
     if errors:
@@ -902,6 +1449,21 @@ def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
             comparison["deltas"].append({"type": "skip_sites", "run": label,
                                          "before": reference["collection_skip_sites"],
                                          "after": run["collection_skip_sites"]})
+        census_before = sorted({failure["census"] for failure in reference["census_failures"]})
+        census_after = sorted({failure["census"] for failure in run["census_failures"]})
+        if census_after != census_before:
+            comparison["deltas"].append({"type": "census", "run": label,
+                                         "before": census_before, "after": census_after})
+        # A census that failed both runs is compared by the tests it refused
+        # in, so the same census failing on different launches is a delta too.
+        tests_before = {failure["census"]: _census_tests(failure)
+                        for failure in reference["census_failures"]}
+        for failure in run["census_failures"]:
+            name = failure["census"]
+            if name in tests_before and _census_tests(failure) != tests_before[name]:
+                comparison["deltas"].append(
+                    {"type": "census_tests", "run": label, "census": name,
+                     "before": tests_before[name], "after": _census_tests(failure)})
         if run["argv"] != reference["argv"]:
             comparison["observations"].append({"type": "argv", "run": label})
         duration_changes = _material_duration_changes(reference_durations, run)
@@ -988,10 +1550,8 @@ def _reject_repeated_identities(runs: list[dict], errors: list[dict]) -> None:
 
 def _invalid_comparison(expected_sha: str, runs: list[dict],
                         errors: list[dict]) -> dict:
-    return {"schema_version": 1, "expected_sha": expected_sha,
-            "input_runs": [{"logical_name": run["logical_name"],
-                            "identity": run.get("identity"),
-                            "validity": run["validity"]} for run in runs],
+    return {"schema_version": OUTPUT_SCHEMA_VERSION, "expected_sha": expected_sha,
+            "input_runs": _input_runs(runs),
             "status": "invalid", "deltas": [], "observations": [],
             "evidence_errors": errors}
 
@@ -1059,7 +1619,8 @@ def main(argv: list[str] | None = None) -> int:
         comparison["status"] = "invalid"
     try:
         _atomic_write(args.output_dir / "runs.jsonl", "".join(
-            json.dumps(run, sort_keys=True) + "\n" for run in runs))
+            json.dumps({"schema_version": OUTPUT_SCHEMA_VERSION, **run}, sort_keys=True)
+            + "\n" for run in runs))
         _atomic_write(args.output_dir / "comparison.json",
                       json.dumps(comparison, indent=2, sort_keys=True) + "\n")
     except OSError as exc:

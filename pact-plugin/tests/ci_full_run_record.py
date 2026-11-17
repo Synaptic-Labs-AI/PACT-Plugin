@@ -72,6 +72,20 @@ also counted in ``skipped_at_collection`` for the verifier's accounting.
 WRITTEN EVEN WHEN THE SESSION FAILED. A record that exists only on success
 cannot evidence a failure. The write is atomic (temp + ``os.replace``) so the
 verifier never reads a partial JSON document.
+
+THE EXIT STATUS IS THE ONE THE PROCESS RETURNS. pytest passes every
+sessionfinish hook the status as it stood before any of them ran, and other
+hooks raise the session's status inside their own sessionfinish: today the
+clock-shift census (through tests/conftest.py's hook), the HOME and
+child-pytest censuses (their Plugins, registered by pact-plugin/conftest.py)
+and the CI environment binding, whose hook also runs trylast so that it sees
+the censuses' status. So the recorder's hook runs trylast, after every other
+sessionfinish hook the suite registers (any plugin loaded from under
+pact-plugin/), and reads ``session.exitstatus``.
+tests/test_ci_full_run_record.py checks that order, on the controller and on
+an xdist worker, for whatever sessionfinish hooks the suite registers, so a
+hook added later is checked without this list changing. It does not check an
+installed plugin's hook: that order depends on what a machine has installed.
 """
 
 import datetime
@@ -346,7 +360,13 @@ class FullRunRecord:
         elapsed = terminalreporter._session_start.elapsed().seconds
         return f"{text} in {_format_duration(elapsed)}"
 
+    @pytest.hookimpl(trylast=True)
     def pytest_sessionfinish(self, session, exitstatus):
+        # TRYLAST, AND THE STATUS IS session.exitstatus, NOT THE ARGUMENT. pytest
+        # passes the status as it stood before any sessionfinish ran, and the
+        # suite's censuses and the environment binding raise it inside their own
+        # sessionfinish. Running after them and reading the session keeps the
+        # record equal to the exit code the process returns.
         # A worker's _root is None (the controller claimed ownership), so this
         # branch must precede the guard below or no worker ever publishes.
         if getattr(session.config, "workerinput", None) is not None:
@@ -421,7 +441,7 @@ class FullRunRecord:
             "deselected": deselected,
             "xfailed": len(stats.get("xfailed", [])),
             "xpassed": len(stats.get("xpassed", [])),
-            "exitstatus": int(exitstatus),
+            "exitstatus": int(session.exitstatus),
             "summary_line": summary_line,
             "terminal_node_ids": list(self._terminal_node_ids),
             "items_before_modifyitems": items_before,

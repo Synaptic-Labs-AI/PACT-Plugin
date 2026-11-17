@@ -30,6 +30,7 @@ from ci_full_run_record import (
     FullRunRecord,
     aggregate_worker_collection_counts,
 )
+from helpers import env_without_pytest_vars
 
 PLUGIN = Path(__file__).with_name("ci_full_run_record.py")
 COLLECTION_RECORD_NAME = ".full-collection-record.json"
@@ -91,6 +92,7 @@ def test_a_nested_session_runs_while_the_outer_one_is_open():
         env.pop("{owner}", None)
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "no:randomly",
          str(plugin_root / "inner_case.py")],
         cwd=str(plugin_root), capture_output=True, text=True, env=env,
         timeout=120)
@@ -133,16 +135,21 @@ def _rig(tmp_path, suite_text, extra_conftest=""):
     return root, plugin_root, workspace
 
 
+def _child_environ():
+    """This process's environment without any PYTEST_* name, so a child pytest
+    takes no PYTEST_ADDOPTS, PYTEST_PLUGINS or PYTEST_DISABLE_PLUGIN_AUTOLOAD
+    (nor this session's xdist or current-test names) from the shell that runs
+    the suite. A rig adds back what it sets on purpose."""
+    return env_without_pytest_vars()
+
+
 def _run(plugin_root, workspace=None, args=(), gated=True, extra_env=None):
-    env = os.environ.copy()
+    env = _child_environ()
     env.pop("GITHUB_ACTIONS", None)
     env.pop("GITHUB_WORKSPACE", None)
-    for name in [name for name in env if name.startswith("PYTEST_XDIST_")]:
-        env.pop(name)
     # The certifying session that runs THIS module has claimed ownership;
     # the rig session is a fresh outermost session and must claim its own.
     env.pop(OWNER_ENV, None)
-    env.pop("PYTEST_ADDOPTS", None)
     if gated:
         env["GITHUB_ACTIONS"] = "true"
     if workspace is not None:
@@ -150,6 +157,7 @@ def _run(plugin_root, workspace=None, args=(), gated=True, extra_env=None):
     env.update(extra_env or {})
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "no:randomly",
          *args],
         cwd=str(plugin_root), capture_output=True, text=True, env=env,
         timeout=180)
@@ -254,6 +262,67 @@ def test_a_failing_session_still_writes_the_record(tmp_path):
     verdict = _verify(root, workspace / RECORD_NAME)
     assert verdict.returncode == 1
     assert "RUN-VERIFY-FAILURE FAILED:" in verdict.stderr
+
+
+CENSUS = Path(__file__).with_name("child_pytest_census.py")
+
+# The child-pytest census behind a plain conftest sessionfinish, as its Plugin
+# runs it in the suite: a sessionfinish that raises the session's status after
+# pytest has passed the old one to every sessionfinish hook.
+CENSUS_CONFTEST = '''
+
+import importlib.util as _util
+
+_spec = _util.spec_from_file_location("child_pytest_census", {census!r})
+_census = _util.module_from_spec(_spec)
+_spec.loader.exec_module(_census)
+_census.install()
+
+
+def pytest_sessionfinish(session):
+    _census.finish(session)
+'''.format(census=str(CENSUS))
+
+SWALLOWED_MISS_SUITE = '''\
+import subprocess
+import sys
+
+
+def test_swallows_a_census_refusal():
+    try:
+        subprocess.run([sys.executable, "-m", "pytest", "--version"],
+                       capture_output=True, timeout=60)
+    except Exception:
+        pass
+{tail}
+'''
+
+
+def test_the_record_carries_the_status_a_census_raised(tmp_path):
+    """MUTANT: the recorder writes the status pytest passed to sessionfinish, or
+    runs before the census. Every test passed, the census raised the session to
+    1, and the record must say 1 where the process exits 1."""
+    root, plugin_root, workspace = _rig(
+        tmp_path, SWALLOWED_MISS_SUITE.format(tail=""), CENSUS_CONFTEST)
+    proc = _run(plugin_root, workspace)
+    output = proc.stdout + proc.stderr
+    assert "CHILD PYTEST CENSUS: 1 " in output and "1 passed" in output, output
+    assert proc.returncode == 1, output
+    record = _record(workspace)
+    assert (record["failed"], record["errors"], record["exitstatus"]) == (0, 0, 1), record
+
+
+def test_an_interrupted_session_keeps_its_status_in_the_record(tmp_path):
+    """MUTANT: the census overwrites the session's status with 1. An interrupted
+    session exits 2 and its record must say 2, census miss or not."""
+    tail = "\n\ndef test_interrupts():\n    raise KeyboardInterrupt\n"
+    root, plugin_root, workspace = _rig(
+        tmp_path, SWALLOWED_MISS_SUITE.format(tail=tail), CENSUS_CONFTEST)
+    proc = _run(plugin_root, workspace)
+    output = proc.stdout + proc.stderr
+    assert "CHILD PYTEST CENSUS: 1 " in output, output
+    assert proc.returncode == 2, output
+    assert _record(workspace)["exitstatus"] == 2
 
 
 def test_deselection_is_read_from_terminal_stats_not_the_item_list(tmp_path):
@@ -501,6 +570,7 @@ def _fake_session(tmp_path, *, testscollected, options=None,
 
     class _Session:
         config = _Config()
+        exitstatus = 0
 
     _Session.testscollected = testscollected
     return _Session()
@@ -978,3 +1048,221 @@ def test_the_gitignore_lists_the_record_file():
     assert RECORD_NAME in lines, (
         f".gitignore has no line {RECORD_NAME!r}; a renamed record would be "
         f"committable")
+
+
+_PLUGIN_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _plugin_file(plugin):
+    """The file a hook's plugin was loaded from: a module's own, or the module
+    that defines a plugin object's class."""
+    name = getattr(plugin, "__file__", None) or getattr(
+        sys.modules.get(type(plugin).__module__), "__file__", None)
+    return Path(name).resolve() if name else None
+
+
+def _sessionfinish_order_problems(config):
+    """Why the recorder would not read the final exit status in this process:
+    a sessionfinish hook of the suite's own (any plugin loaded from under
+    pact-plugin/) that pytest calls after the recorder, the CI environment
+    binding's hook called before another of the suite's (its note names the
+    status they left), or a missing member of the hooks known to raise the
+    status today."""
+    manager = config.pluginmanager
+    recorder = manager.get_plugin("full-run-record")
+    if recorder is None:
+        return ["the full-run-record plugin is not registered"]
+    # pluggy calls a hook's implementations last-listed first; wrappers wrap
+    # the calls rather than taking a turn among them.
+    calls = [impl for impl in reversed(config.hook.pytest_sessionfinish.get_hookimpls())
+             if not (impl.hookwrapper or getattr(impl, "wrapper", False))]
+    last = [impl.plugin for impl in calls].index(recorder)
+    suite = {}
+    for position, impl in enumerate(calls):
+        where = _plugin_file(impl.plugin)
+        if impl.plugin is recorder or where is None or _PLUGIN_ROOT not in where.parents:
+            continue
+        suite[where.relative_to(_PLUGIN_ROOT).as_posix()] = position
+    problems = ["%s's sessionfinish runs after the recorder's" % name
+                for name, position in sorted(suite.items()) if position > last]
+    binding = suite.get("tests/ci_environment_binding.py")
+    if binding is not None:
+        problems += ["%s's sessionfinish runs after the CI binding's" % name
+                     for name, position in sorted(suite.items())
+                     if position > binding and name != "tests/ci_environment_binding.py"]
+    for member in ("tests/conftest.py", "tests/home_census.py",
+                   "tests/child_pytest_census.py", "tests/ci_environment_binding.py"):
+        if member not in suite:
+            problems.append("%s registers no sessionfinish hook in this process" % member)
+    return problems
+
+
+def test_the_recorder_reads_the_status_after_every_suite_sessionfinish_hook(request):
+    """In this process (an xdist worker under the suite's own -n runs, else the
+    only process), every sessionfinish hook loaded from under pact-plugin/ is
+    ordered before the recorder's, and before the CI binding's, so the status
+    the censuses raise is the one both read. This row COMPUTES the order from
+    the registrations of the suite's own running session, which the probe below
+    cannot see; the probe below is the one that OBSERVES pytest's call order."""
+    assert _sessionfinish_order_problems(request.config) == []
+
+
+# A plugin for a real child session. Once every sessionfinish implementation is
+# registered it wraps each one (not the wrappers, which take no turn) with a spy
+# that records the implementation's file as it is called, so the order is the
+# one pytest really calls them in, never one worked out from the registrations.
+# The spy replaces pluggy's HookImpl.function, the attribute pluggy 1.x's
+# _multicall reads at call time (`hook_impl.function(*args)`); a pluggy that
+# stopped reading it would record no call, and the test's member check fails.
+_ORDER_PROBE = """
+import json
+import os
+import sys
+from pathlib import Path
+
+import pytest
+
+_CALLS = []
+_ROOT = Path(os.environ["PACT_ORDER_PROBE_ROOT"]).resolve()
+
+
+def _where(plugin):
+    name = getattr(plugin, "__file__", None) or getattr(
+        sys.modules.get(type(plugin).__module__), "__file__", None)
+    if not name:
+        return "<unknown>"
+    path = Path(name).resolve()
+    return path.relative_to(_ROOT).as_posix() if _ROOT in path.parents else "<outside>"
+
+
+def _spy(function, where):
+    def spy(*args, **kwargs):
+        _CALLS.append(where)
+        return function(*args, **kwargs)
+    return spy
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionstart(session):
+    for impl in session.config.hook.pytest_sessionfinish.get_hookimpls():
+        if not (impl.hookwrapper or getattr(impl, "wrapper", False)):
+            impl.function = _spy(impl.function, _where(impl.plugin))
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_sessionfinish(session):
+    yield
+    where = getattr(session.config, "workerinput", {}).get("workerid", "controller")
+    path = os.path.join(os.environ["PACT_ORDER_PROBE_DIR"], where + ".json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(_CALLS, handle)
+"""
+
+# The sessionfinish implementations that raise the exit status (the clock-shift
+# census through tests/conftest.py, the HOME and child-pytest censuses through
+# their Plugins), the CI binding that names the status they left, and the
+# recorder that must read it last.
+_STATUS_RAISERS = ("tests/conftest.py", "tests/home_census.py", "tests/child_pytest_census.py")
+_BINDING = "tests/ci_environment_binding.py"
+_RECORDER = "tests/ci_full_run_record.py"
+
+
+def _observed_order_problems(calls):
+    """Why an observed sessionfinish call sequence would not let the recorder
+    read the final status, or the CI binding name it. Reads only the calls."""
+    suite = [where for where in calls if not where.startswith("<")]
+    problems = ["%s was called %d time(s), not once" % (member, suite.count(member))
+                for member in (*_STATUS_RAISERS, _BINDING, _RECORDER)
+                if suite.count(member) != 1]
+    if problems:
+        return problems
+    if suite[-1] != _RECORDER:
+        problems.append("the recorder was not the suite's last sessionfinish call: %s" % suite)
+    binding = suite.index(_BINDING)
+    problems += ["%s was called after the CI binding" % member
+                 for member in _STATUS_RAISERS if suite.index(member) > binding]
+    return problems
+
+
+def test_the_recorder_reads_the_status_last_on_the_controller_and_a_worker(tmp_path):
+    """A real `-n 1` session rooted at the plugin. On the controller and on its
+    worker, the observed sessionfinish calls put every status-raising census
+    before the CI binding and the recorder last among the suite's calls. The
+    order is watched as pytest calls the implementations, not computed."""
+    pytest.importorskip("xdist")
+    (tmp_path / "pact_order_probe.py").write_text(_ORDER_PROBE, encoding="utf-8")
+    results = tmp_path / "results"
+    results.mkdir()
+    env = {key: value for key, value in _child_environ().items()
+           if not key.startswith("GITHUB_")}
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(tmp_path), env.get("PYTHONPATH")]))
+    env["PACT_ORDER_PROBE_DIR"] = str(results)
+    env["PACT_ORDER_PROBE_ROOT"] = str(_PLUGIN_ROOT)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
+         "-n", "1", "-p", "pact_order_probe", "tests/test_session_home_sandbox.py"],
+        cwd=_PLUGIN_ROOT, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    assert proc.returncode == 0, output
+    found = {path.stem: json.loads(path.read_text(encoding="utf-8"))
+             for path in results.glob("*.json")}
+    assert sorted(found) == ["controller", "gw0"], (found, output)
+    problems = {where: _observed_order_problems(calls) for where, calls in found.items()}
+    assert problems == {"controller": [], "gw0": []}, (problems, found)
+
+
+def test_the_observed_order_check_refuses_a_wrong_order():
+    """The observed-order check fails a sequence with the recorder before a
+    census, the binding before a census, or a member missing."""
+    good = ["<outside>", "conftest.py", *_STATUS_RAISERS, _BINDING, _RECORDER]
+    assert _observed_order_problems(good) == []
+    assert _observed_order_problems([*_STATUS_RAISERS[:2], _BINDING, _RECORDER,
+                                     _STATUS_RAISERS[2]])
+    assert _observed_order_problems([_STATUS_RAISERS[0], _BINDING, *_STATUS_RAISERS[1:],
+                                     _RECORDER])
+    assert _observed_order_problems([*_STATUS_RAISERS, _RECORDER])
+
+
+def test_the_observed_order_check_refuses_a_recorder_that_is_not_last_on_its_own():
+    """MUTANT: the 'not the last call' check is dropped. Every census is before
+    the binding here, so that check alone refuses the sequence."""
+    calls = [*_STATUS_RAISERS, _RECORDER, _BINDING]
+    assert _observed_order_problems(calls) == [
+        "the recorder was not the suite's last sessionfinish call: %s" % calls]
+
+
+def _computed_order_config(called, recorder=True):
+    """A config whose sessionfinish implementations pytest would call in the
+    order `called` (plugin-relative files), the recorder among them as the
+    'full-run-record' plugin when `recorder` is true."""
+    plugins = {where: SimpleNamespace(__file__=str(_PLUGIN_ROOT / where)) for where in called}
+    impls = [SimpleNamespace(plugin=plugins[where], hookwrapper=False, wrapper=False)
+             for where in called]
+    hook = SimpleNamespace(pytest_sessionfinish=SimpleNamespace(
+        get_hookimpls=lambda: list(reversed(impls))))  # pluggy lists last-called first
+    manager = SimpleNamespace(get_plugin=lambda name: (
+        plugins.get(_RECORDER) if name == "full-run-record" and recorder else None))
+    return SimpleNamespace(pluginmanager=manager, hook=hook)
+
+
+@pytest.mark.parametrize("called, expected", [
+    ([*_STATUS_RAISERS, _BINDING, _RECORDER], []),
+    ([*_STATUS_RAISERS, _RECORDER, _BINDING],
+     ["%s's sessionfinish runs after the recorder's" % _BINDING]),
+    ([_STATUS_RAISERS[0], _BINDING, *_STATUS_RAISERS[1:], _RECORDER],
+     ["%s's sessionfinish runs after the CI binding's" % member
+      for member in sorted(_STATUS_RAISERS[1:])]),
+    ([*_STATUS_RAISERS[:2], _BINDING, _RECORDER],
+     ["%s registers no sessionfinish hook in this process" % _STATUS_RAISERS[2]]),
+], ids=["in-order", "binding-after-recorder", "census-after-binding", "census-missing"])
+def test_the_computed_order_check_refuses_each_wrong_order(called, expected):
+    """MUTANTS: each of the computed check's three refusals is dropped in turn
+    (after the recorder, after the binding, a missing member); each row names
+    exactly one of them."""
+    assert _sessionfinish_order_problems(_computed_order_config(called)) == expected
+
+
+def test_the_computed_order_check_refuses_a_missing_recorder():
+    config = _computed_order_config([*_STATUS_RAISERS, _BINDING, _RECORDER], recorder=False)
+    assert _sessionfinish_order_problems(config) == [
+        "the full-run-record plugin is not registered"]

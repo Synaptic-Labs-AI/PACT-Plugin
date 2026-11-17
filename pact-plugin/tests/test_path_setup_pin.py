@@ -100,11 +100,12 @@ _KEEP_SET = _MODULE_ALLOWLIST | {
     "tests/test_sync_result_contract.py",
     # classifier input data: path-mutation sources it parses, never runs
     "tests/test_fast_suite_selection.py",
+    "tests/test_root_conftest_import_charter.py",
 }
 
 # Keep-set files whose mutation tokens are DATA only: they may carry the
 # tokens in strings, but no real mutation node at any level.
-_DATA_ONLY = {"tests/test_fast_suite_selection.py"}
+_DATA_ONLY = {"tests/test_fast_suite_selection.py", "tests/test_root_conftest_import_charter.py"}
 
 # Sanctioned path roots, mirroring the two conftests: tests/conftest.py owns
 # tests/, hooks/, skills/pact-memory/, skills/pact-memory/scripts/,

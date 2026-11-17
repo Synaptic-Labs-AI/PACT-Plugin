@@ -19,7 +19,6 @@ whole design leans on is observable, not assumed.
 """
 
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -29,6 +28,7 @@ from pathlib import Path
 import pytest
 
 import ci_contract
+from helpers import env_without_pytest_vars
 
 GUARD = Path("scripts") / "verify_full_collection.py"
 ANCHOR = Path("pact-plugin") / "tests" / "test_ci_collection_scope.py"
@@ -93,10 +93,10 @@ def _base_rig(tmp_path, name="rig", corpus=True):
         anchor = rig / ANCHOR
         anchor.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(root / ANCHOR, anchor)
-        # The anchor module imports the shared test helper; a rig without it
-        # produces a COLLECTION ERROR that masks the behaviour under test.
-        shutil.copy2(root / "pact-plugin" / "tests" / "ci_contract.py",
-                     anchor.parent / "ci_contract.py")
+        # The anchor module imports the shared test helpers; a rig without
+        # them produces a COLLECTION ERROR that masks the behaviour under test.
+        for helper in ("ci_contract.py", "helpers.py"):
+            shutil.copy2(root / "pact-plugin" / "tests" / helper, anchor.parent / helper)
         _write(rig / "pact-plugin" / "tests" / "test_alpha.py",
                "def test_alpha():\n    assert True\n")
         _write(rig / SKILL_TEST, "def test_skill():\n    assert True\n")
@@ -113,11 +113,10 @@ def _install_fake_pytest(rig, body):
 
 
 def _run_guard(rig, args=(), env_overrides=None):
-    env = None
-    if env_overrides is not None:
-        env = os.environ.copy()
-        env.pop("PYTEST_ADDOPTS", None)
-        env.update(env_overrides)
+    # No PYTEST_* name from the shell that runs the suite reaches the guard or
+    # the pytest it starts; a test adds back what it sets on purpose.
+    env = env_without_pytest_vars()
+    env.update(env_overrides or {})
     proc = subprocess.run(
         [sys.executable, str(rig / GUARD), *args], cwd=str(rig),
         capture_output=True, text=True, timeout=300, env=env)
