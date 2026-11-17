@@ -16,6 +16,7 @@ import pytest
 from fixtures.identity_git import (
     assert_outside_repository,
     make_repo,
+    make_separate_git_dir_repo,
     write_common_dir_override,
 )
 from helpers import create_test_schema
@@ -1641,8 +1642,15 @@ class TestADeclineCausePrintsOneRemedyOnEveryVerb:
         warning = " ".join(
             r.getMessage() for r in caplog.records if "no project id was derived" in r.getMessage()
         )
-        refusal = _refusing_instance(record)._unresolved_identity_message()
-        return warning, refusal
+        instance = _refusing_instance(record)
+        refusal = instance._unresolved_identity_message()
+        instance._project_scope = lambda: None
+        conn = sqlite3.connect(":memory:")
+        create_test_schema(conn)
+        with pytest.raises(memory_api.ProjectIdentityUnresolvedError) as refused:
+            instance._resolve_id_or_full(conn, "abc1234")
+        conn.close()
+        return warning, refusal, str(refused.value)
 
     def test_every_cause_prints_its_own_remedy_on_both_surfaces(
         self, identity_env, monkeypatch, caplog
@@ -1655,7 +1663,12 @@ class TestADeclineCausePrintsOneRemedyOnEveryVerb:
         for token in sorted(memory_api._DECLINE_CAUSES):
             for override in (None, str(pin)):
                 record = {"source": "probe", "reason": token, "override_path": override}
-                warning, refusal = self._surfaces(record, monkeypatch, caplog)
+                warning, refusal, prefix = self._surfaces(record, monkeypatch, caplog)
+                # The prefix refusal says what it refused, then prints what
+                # the write refusal prints after its own opening.
+                assert prefix.split("still resolves. ", 1)[1] == refusal.split(
+                    "Nothing was written. ", 1
+                )[1], (token, override, prefix, refusal)
                 printed = _remedy_after(warning, "so no project id was derived.")
                 if token == "gitfile_redirect":
                     assert printed == memory_api._REDIRECT_REMEDY, (token, override, warning)
@@ -1705,4 +1718,47 @@ class TestADeclineCausePrintsOneRemedyOnEveryVerb:
         assert message.rsplit(" Run the `project-id show`", 1)[0].endswith(remedy), message
         assert fallback not in message, message
         assert prefix_code != 0, prefix
-        assert prefix["message"].endswith(remedy), prefix
+        assert prefix["message"].split("still resolves. ", 1)[1] == message.split(
+            "Nothing was written. ", 1
+        )[1], (prefix, message)
+
+    def test_an_unreadable_origin_with_no_pin_path_prints_a_remedy_on_every_verb(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        """A separate git dir withholds the pin path, so the unreadable
+        origin's own table remedy is all three surfaces have to print."""
+        from scripts import memory_api
+        from scripts import project_identity as pi
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        repo = make_separate_git_dir_repo(
+            identity_env / "sep", identity_env / "stores" / "sep.git"
+        )
+        monkeypatch.setattr(
+            pi, "read_origin", lambda git_dir: pi.OriginRead(pi.ORIGIN_UNAVAILABLE, None)
+        )
+        monkeypatch.chdir(repo)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+        caplog.clear()
+        _, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        warning = " ".join(
+            r.getMessage() for r in caplog.records
+            if "no project id was derived" in r.getMessage()
+        )
+        code, refusal = _cli(
+            ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+        )
+        prefix_code, prefix = _cli(["get", "abc1234", "--db-path", str(store)], capfd)
+        assert show["result"]["decline_reason"] == {
+            "source": show["result"]["decline_reason"]["source"],
+            "reason": "origin_unreadable",
+            "override_path": None,
+        }, show
+        remedy = memory_api._UNPINNABLE_REMEDIES["origin_unreadable"]
+        assert _remedy_after(warning, "so no project id was derived.") == remedy, warning
+        assert code == 1 and prefix_code != 0, (refusal, prefix)
+        message = refusal["message"]
+        assert message.rsplit(" Run the `project-id show`", 1)[0].endswith(remedy), message
+        assert prefix["message"].split("still resolves. ", 1)[1] == message.split(
+            "Nothing was written. ", 1
+        )[1], (prefix, message)

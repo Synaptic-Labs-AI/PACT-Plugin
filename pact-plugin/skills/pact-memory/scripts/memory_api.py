@@ -653,6 +653,10 @@ _DECLINE_CAUSES = {
 # decline names the override file that would fix it; every other cause names
 # its own remedy, so an unworkable `<git-common-dir>` pin is never printed.
 _UNPINNABLE_REMEDIES = {
+    "origin_unreadable": (
+        "Check that git can read the repository's config here: "
+        "`git config --get remote.origin.url` run here prints git's own reason."
+    ),
     "broken_git_marker": (
         "Check that git is installed and can read the repository here: "
         "`git rev-parse --git-dir` run here prints git's own reason."
@@ -4042,8 +4046,17 @@ class PACTMemory:
             f"correct directory, produces no warning and is still misfiled."
         )
 
-    def _unresolved_identity_message(self) -> str:
+    def _unresolved_identity_message(
+        self,
+        refused: str = (
+            "the write was refused rather than filed under an unknown "
+            "project. Nothing was written."
+        ),
+    ) -> str:
         """Explain a refusal caused by NO project identity resolving.
+
+        `refused` says what was refused; every refusal (a write, a memory-id
+        prefix) then prints the same cause, detail, remedy and pointer.
 
         THE CAUSE IS THE RESOLVER'S OWN DECISION, carried from this instance's
         detection pass (`_decline_reason`, `_override_ignored`), never
@@ -4091,8 +4104,7 @@ class PACTMemory:
             )
         remedy = self._unresolved_identity_remedy()
         return (
-            "no project identity could be resolved, so the write was refused "
-            "rather than filed under an unknown project. Nothing was written. "
+            f"no project identity could be resolved, so {refused} "
             + " ".join(parts)
             + (f" {remedy}" if remedy else "")
             + " Run the `project-id show` verb to inspect the detected identity."
@@ -4983,12 +4995,12 @@ class PACTMemory:
         # name (the Bugbot finding this closes).
         project_scope = self._project_scope()
         if project_scope is None:
-            remedy = self._unresolved_identity_remedy()
             raise ProjectIdentityUnresolvedError(
-                "no project identity could be resolved, so a memory-id "
-                "prefix was refused rather than listing matches from every "
-                "project. A full 32-character id still resolves."
-                + (f" {remedy}" if remedy else "")
+                self._unresolved_identity_message(
+                    "a memory-id prefix was refused rather than listing "
+                    "matches from every project. A full 32-character id "
+                    "still resolves."
+                )
             )
         return resolve_memory_id_prefix(
             conn, memory_id, project_id=self._read_project_scopes(conn)
