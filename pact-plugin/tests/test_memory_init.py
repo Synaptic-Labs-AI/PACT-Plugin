@@ -11,6 +11,7 @@ Tests cover:
 import os
 import re
 import json
+import shlex
 import shutil
 import subprocess
 import sys
@@ -708,13 +709,15 @@ class TestDependencyDriftIsDetectable:
 
         Every lock pin carries a sha256 hash, so `--require-hashes` never
         meets an unhashed line; every input pin, pip included, appears in the
-        lock at the same version; and the lock header names the same pinned
-        refresh command the input documents. uv copies the
-        --custom-compile-command text into the header verbatim and writes no
-        version of its own, so the header records the documented command, not
-        the uv that ran it: a refresh by another uv version that passes the
-        documented command leaves the header unchanged. No arm runs the
-        refresh tool."""
+        lock at the same version; and the lock header names the refresh command.
+        uv copies the --custom-compile-command text into the header verbatim, so
+        the header alone repeats a string written in constraints-ci.in. Two
+        sources it does not copy are checked against it: the refresh command
+        constraints-ci.in actually runs must carry the same words as the header,
+        flag for flag, once its --custom-compile-command pair is removed; and
+        because every workflow job that installs the lock does so with
+        --require-hashes, that command must carry --generate-hashes. No arm runs
+        the refresh tool."""
         root = self._require_root("the hashed CI lock")
         verify = self._verify_script(self._real_repo_root())
         lock = verify.read_lock(root / "constraints-ci.txt")
@@ -730,12 +733,54 @@ class TestDependencyDriftIsDetectable:
             f"constraints-ci.txt does not follow constraints-ci.in: {drift}. "
             "Refresh the lock with the command in constraints-ci.in.")
         header = (root / "constraints-ci.txt").read_text(encoding="utf-8").splitlines()[:2]
-        command = re.search(r"uvx uv@\S+ pip compile constraints-ci\.in\b.*", header[-1])
-        assert command, f"the lock header names no pinned refresh command: {header}"
-        assert command.group(0) in " ".join(
-            (root / "constraints-ci.in").read_text(encoding="utf-8").split()), (
-            "the lock header's refresh command is not the one constraints-ci.in "
-            f"documents: {command.group(0)!r}")
+        recorded = header[-1].lstrip("#").strip()
+        ran, custom = self._refresh_command(
+            (root / "constraints-ci.in").read_text(encoding="utf-8"))
+        assert ran[:1] == ["uvx"] and re.fullmatch(r"uv@\d+(\.\d+)*", ran[1]), (
+            f"the refresh command does not run a pinned uv: {ran}")
+        assert recorded == custom, (
+            "the lock header is not the --custom-compile-command text uv copies "
+            f"into it: header {recorded!r}, text {custom!r}")
+        assert shlex.split(recorded) == ran, (
+            "the lock header records a command other than the one constraints-ci.in "
+            f"runs: header {shlex.split(recorded)}, run {ran}")
+        hash_installs = self._hash_checked_installs(root)
+        assert hash_installs, (
+            "no workflow job installs constraints-ci.txt with --require-hashes")
+        assert "--generate-hashes" in ran, (
+            f"{hash_installs} install the lock with --require-hashes, but its refresh "
+            f"command does not pass --generate-hashes: {ran}")
+
+    @staticmethod
+    def _refresh_command(in_text):
+        """(argv, custom text) of the refresh command constraints-ci.in documents:
+        the comment lines from `#   uvx` through the last backslash continuation,
+        split as a shell would, with the --custom-compile-command pair taken out."""
+        lines = in_text.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("#   uvx "))
+        words = []
+        for line in lines[start:]:
+            body = line.lstrip("#").strip()
+            words.append(body.removesuffix("\\").strip())
+            if not body.endswith("\\"):
+                break
+        argv = shlex.split(" ".join(words))
+        at = argv.index("--custom-compile-command")
+        return argv[:at] + argv[at + 2:], argv[at + 1]
+
+    def _hash_checked_installs(self, root):
+        """'workflow job' for every workflow job with a run step that installs
+        constraints-ci.txt with --require-hashes."""
+        found = []
+        for path in self._workflow_files(root):
+            doc = self._load_workflow_yaml(path)
+            for jid, job in ((doc or {}).get("jobs") or {}).items():
+                runs = [step.get("run") or "" for step in (job or {}).get("steps") or []
+                        if isinstance(step, dict)]
+                if any("--require-hashes" in run and "constraints-ci.txt" in run
+                       for run in runs):
+                    found.append(f"{path.name} {jid}")
+        return found
 
     def _diagnostic_upload_problems(self, rel, jid, steps):
         """Placement and fail-closed shape of the full-suite evidence upload."""

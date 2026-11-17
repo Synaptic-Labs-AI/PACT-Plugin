@@ -10,9 +10,12 @@ sequence uses a local generator instead (`random.Random(seed)`).
 What it detects: a reference, called or not, to a global random-state setter
 (SETTERS), in any tracked .py under tests/, the plugin-root conftest.py, and any
 tracked test_*.py or conftest.py under skills/; an untracked file is not read. A
-name resolves through the file's own
-imports at any scope (`import random as r`, `from random import seed`, `import
-numpy as np`), and a from-import of a setter counts too. After `from random
+name resolves through the imports of the scope that reads it (`import random as
+r`, `from random import seed`, `import numpy as np`): the reading function's
+own, then each enclosing function's, then the module's, with a class body's
+imports seen only in that class body, as Python resolves names. A name one
+scope imports more than once counts when any of those imports is a setter. A
+from-import of a setter counts too. After `from random
 import *` or `from numpy.random import *`, a bare setter name (`seed(1)`)
 counts when the star import is the module-level binding of that name in force
 where it is read: the last one above the read for a read at module level, and
@@ -26,7 +29,8 @@ rebinding the rule does not read (one inside a class body, an `except ... as`
 clause, a `global` statement in a function, an assignment expression inside a
 comprehension, or a star import from another module) leave the name read as
 the setter. A comprehension's own loop variable is not a rebinding, and a read
-of it inside the comprehension is not a read of the setter.
+of it inside the comprehension is not a read of the setter; the comprehension's
+first iterable is read in the enclosing scope, before the variable exists.
 
 What it cannot see: a setter reached through getattr or a computed name; one
 whose module is bound other than by an import (an assignment such as
@@ -58,27 +62,56 @@ def _test_files(plugin_root, known_member=None):
     return sorted(set(files))
 
 
-def _aliases(tree):
-    """{bound name: dotted module or object} for every import in `tree`."""
-    aliases = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                top = alias.name.split(".")[0]
-                aliases[alias.asname or top] = alias.name if alias.asname else top
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            for alias in node.names:
-                aliases[alias.asname or alias.name] = f"{node.module}.{alias.name}"
-    return aliases
+SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
 
 
-def _dotted(node, aliases):
-    if isinstance(node, ast.Name):
-        return aliases.get(node.id)
-    if isinstance(node, ast.Attribute):
-        base = _dotted(node.value, aliases)
-        return f"{base}.{node.attr}" if base else None
-    return None
+def _scoped_reads(tree):
+    """{id of a Name or Attribute read: dotted names it can stand for}, each name
+    resolved through the imports of the scope that reads it."""
+    imports = {}
+
+    def collect(node, scope):
+        for child in ast.iter_child_nodes(node):
+            bound = imports.setdefault(id(scope), {})
+            if isinstance(child, ast.Import):
+                for alias in child.names:
+                    top = alias.name.split(".")[0]
+                    bound.setdefault(alias.asname or top, set()).add(
+                        alias.name if alias.asname else top)
+            elif isinstance(child, ast.ImportFrom) and child.module and not child.level:
+                for alias in child.names:
+                    if alias.name != "*":
+                        bound.setdefault(alias.asname or alias.name, set()).add(
+                            f"{child.module}.{alias.name}")
+            collect(child, child if isinstance(child, SCOPES) else scope)
+
+    collect(tree, tree)
+
+    def lookup(name, chain):
+        for depth, scope in enumerate(reversed(chain)):
+            if depth and isinstance(scope, ast.ClassDef):
+                continue
+            if name in imports.get(id(scope), {}):
+                return imports[id(scope)][name]
+        return set()
+
+    def dotted(node, chain):
+        if isinstance(node, ast.Name):
+            return lookup(node.id, chain)
+        if isinstance(node, ast.Attribute):
+            return {f"{base}.{node.attr}" for base in dotted(node.value, chain)}
+        return set()
+
+    reads = {}
+
+    def visit(node, chain):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.Name, ast.Attribute)) and not isinstance(child.ctx, ast.Store):
+                reads[id(child)] = dotted(child, chain)
+            visit(child, [*chain, child] if isinstance(child, SCOPES) else chain)
+
+    visit(tree, [tree])
+    return reads
 
 
 COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
@@ -93,33 +126,44 @@ def _star_setters(tree):
         bindings.setdefault(name, []).append((line, setter))
 
     def visit(node, deferred, own_scope, local):
+        module_scope = not deferred and not own_scope
+        if module_scope and isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    dotted = f"{node.module}.{alias.name}"
+                    bind(alias.asname or alias.name, node.lineno, dotted if dotted in SETTERS else None)
+                elif not node.level:
+                    for setter in SETTERS:
+                        module, _, name = setter.rpartition(".")
+                        if module == node.module:
+                            bind(name, node.lineno, setter)
+        elif module_scope and isinstance(node, ast.Import):
+            for alias in node.names:
+                bind(alias.asname or alias.name.split(".")[0], node.lineno)
+        elif module_scope and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name, node.lineno)
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load) and node.id not in local:
+                reads.append((node, deferred))
+            elif module_scope:
+                bind(node.id, node.lineno)
+        inner_deferred = deferred or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+        inner_scope = own_scope or isinstance(node, (ast.ClassDef, *COMPREHENSIONS))
+        if not isinstance(node, COMPREHENSIONS):
+            for child in ast.iter_child_nodes(node):
+                visit(child, inner_deferred, inner_scope, local)
+            return
+        # The first iterable runs in the enclosing scope, before any loop
+        # variable exists; everything else runs inside the comprehension.
+        first = node.generators[0].iter
+        visit(first, deferred, own_scope, local)
+        inner = local | {name.id for loop in node.generators
+                         for name in ast.walk(loop.target) if isinstance(name, ast.Name)}
         for child in ast.iter_child_nodes(node):
-            module_scope = not deferred and not own_scope
-            if module_scope and isinstance(child, ast.ImportFrom):
-                for alias in child.names:
-                    if alias.name != "*":
-                        dotted = f"{child.module}.{alias.name}"
-                        bind(alias.asname or alias.name, child.lineno, dotted if dotted in SETTERS else None)
-                    elif not child.level:
-                        for setter in SETTERS:
-                            module, _, name = setter.rpartition(".")
-                            if module == child.module:
-                                bind(name, child.lineno, setter)
-            elif module_scope and isinstance(child, ast.Import):
-                for alias in child.names:
-                    bind(alias.asname or alias.name.split(".")[0], child.lineno)
-            elif module_scope and isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                bind(child.name, child.lineno)
-            elif isinstance(child, ast.Name):
-                if isinstance(child.ctx, ast.Load) and child.id not in local:
-                    reads.append((child, deferred))
-                elif module_scope:
-                    bind(child.id, child.lineno)
-            inner = local | ({name.id for loop in child.generators
-                              for name in ast.walk(loop.target) if isinstance(name, ast.Name)}
-                             if isinstance(child, COMPREHENSIONS) else set())
-            visit(child, deferred or isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)),
-                  own_scope or isinstance(child, (ast.ClassDef, *COMPREHENSIONS)), inner)
+            parts = ast.iter_child_nodes(child) if isinstance(child, ast.comprehension) else [child]
+            for part in parts:
+                if part is not first:
+                    visit(part, inner_deferred, inner_scope, inner)
 
     visit(tree, False, False, frozenset())
     found = {}
@@ -134,7 +178,7 @@ def _star_setters(tree):
 def global_reseeds(source, where="<rig>"):
     """'where:line: setter' for every global random-state setter `source` refers to."""
     tree = ast.parse(source)
-    aliases = _aliases(tree)
+    scoped = _scoped_reads(tree)
     starred = _star_setters(tree)
     found = []
     for node in ast.walk(tree):
@@ -142,9 +186,8 @@ def global_reseeds(source, where="<rig>"):
             found += [f"{where}:{node.lineno}: imports {node.module}.{alias.name}"
                       for alias in node.names if f"{node.module}.{alias.name}" in SETTERS]
         elif isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Store):
-            dotted = starred.get(id(node)) or _dotted(node, aliases)
-            if dotted in SETTERS:
-                found.append(f"{where}:{node.lineno}: {dotted}")
+            setters = {starred[id(node)]} if id(node) in starred else scoped.get(id(node), set()) & SETTERS
+            found += [f"{where}:{node.lineno}: {setter}" for setter in sorted(setters)]
     return found
 
 
@@ -211,6 +254,10 @@ def test_an_untracked_file_is_not_read(tmp_path):
     "from random import *\n[(seed := print) for _ in 'a']\nseed(1)\n",
     "from random import *\n[seed for seed in range(2)]\nseed(1)\n",
     "from random import *\nprint([0 for seed in range(2)], seed(1))\n",
+    "from random import *\nprint([0 for seed in seed(1)])\n",
+    "import random\ndef f():\n    import os as random\n    return random\nrandom.seed(1)\n",
+    "import random\nclass C:\n    import os as random\nrandom.seed(1)\n",
+    "import random\nclass C:\n    import os as random\n    def f(self):\n        random.seed(1)\n",
 ])
 def test_a_global_reseed_is_refused(source):
     assert global_reseeds(source), source
@@ -232,6 +279,8 @@ def test_a_global_reseed_is_refused(source):
     "from random import *\nfor seed in range(2):\n    seed\n",
     "from mylib import *\nseed(1)\n",
     "from random import *\nprint([seed for seed in range(2)])\n",
+    "import os as random\ndef f():\n    import random\n    return random\nrandom.seed(1)\n",
+    "import random\ndef f():\n    import os as random\n    random.seed(1)\n",
 ])
 def test_a_local_generator_or_a_same_named_helper_is_not_refused(source):
     assert global_reseeds(source) == [], source

@@ -33,6 +33,20 @@ _REPO_ROOT = _PLUGIN_ROOT.parent
 _ROOT_PYPROJECT = _REPO_ROOT / "pyproject.toml"
 
 
+def _inifile(directory):
+    """The config file pytest's own search picks for a run started in `directory`
+    with `directory` as its path argument, or None.
+
+    locate_config is pytest-internal: no public pytest API returns the chosen
+    file without building a Config, which is internal too. Its return tuple is
+    not a stable interface (pytest 9.2 returns four items), so this takes the one
+    returned item that is an existing file, never an index."""
+    files = [item for item in locate_config(directory, [directory])
+             if isinstance(item, Path) and item.is_file()]
+    assert len(files) <= 1, f"locate_config returned more than one file: {files}"
+    return files[0] if files else None
+
+
 def _addopts_words(pyproject):
     """The addopts of a pyproject's [tool.pytest.ini_options], as argv words."""
     data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
@@ -106,7 +120,7 @@ class TestNoNearerConfigShadowsTheRoot:
         assert _PLUGIN_ROOT / "tests" in directories
         shadowed = []
         for directory in directories:
-            _rootdir, inifile, _cfg, _ignored = locate_config(directory, [directory])
+            inifile = _inifile(directory)
             if inifile != _ROOT_PYPROJECT:
                 shadowed.append(f"{directory.relative_to(_REPO_ROOT)} -> {inifile}")
         assert not shadowed, (
@@ -127,9 +141,26 @@ class TestNoNearerConfigShadowsTheRoot:
             encoding="utf-8")
         plugin = tmp_path / "pact-plugin" / "tests"
         plugin.mkdir(parents=True)
-        assert locate_config(plugin, [plugin])[1] == tmp_path / "pyproject.toml"
+        assert _inifile(plugin) == tmp_path / "pyproject.toml"
         (tmp_path / "pact-plugin" / name).write_text(text, encoding="utf-8")
-        assert locate_config(plugin, [plugin])[1] == tmp_path / "pact-plugin" / name
+        assert _inifile(plugin) == tmp_path / "pact-plugin" / name
+
+    @pytest.mark.parametrize("shape", ["rootdir, inifile, cfg", "rootdir, inifile, cfg, ignored"])
+    def test_the_config_reader_takes_the_file_whatever_the_tuple_shape(
+            self, tmp_path, monkeypatch, shape):
+        """A three-item return and the four-item return of pytest 9.2 both give
+        the file, and a search that finds none gives None."""
+        inifile = tmp_path / "pyproject.toml"
+        inifile.write_text("[tool.pytest.ini_options]\n", encoding="utf-8")
+        items = {"rootdir": tmp_path, "cfg": {}, "ignored": []}
+        names = shape.split(", ")
+        module = sys.modules[__name__]
+        monkeypatch.setattr(module, "locate_config", lambda *_: tuple(
+            {**items, "inifile": inifile}[name] for name in names))
+        assert _inifile(tmp_path) == inifile
+        monkeypatch.setattr(module, "locate_config", lambda *_: tuple(
+            {**items, "inifile": None}[name] for name in names))
+        assert _inifile(tmp_path) is None
 
 
 def _configure_calls_the_gate(source):
