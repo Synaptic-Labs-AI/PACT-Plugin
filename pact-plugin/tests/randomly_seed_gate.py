@@ -18,13 +18,23 @@ run re-enables it with `-p randomly --randomly-seed=N`. A session that has it
 loaded and names no seed shuffles in a fresh order every run. That happens when
 the addopts line is lost, or when a nearer pytest config file shadows the root
 one. It also happens when the plugin is loaded by its module name
-(`-p pytest_randomly`), which the `-p no:randomly` block does not stop. xdist
-workers inherit the controller's verdict, so they are skipped.
+(`-p pytest_randomly`), which the `-p no:randomly` block does not stop.
+
+Every process that loads the conftest judges, xdist workers included. A run
+from the repository root that collects under pact-plugin/ only in its workers
+never loads the conftest in the controller, so a worker may be the only
+process that judges. Each worker reads the controller's own invocation args,
+so a seeded run passes in every process and an unseeded one is refused in
+whichever process judges first.
 
 The seed must appear in the invocation args. A seed supplied only through
 PYTEST_ADDOPTS or a config file is refused: the CI run line is the record of how
-a run was ordered.
+a run was ordered. An `@file` argument is read as pytest reads it, one argument
+per line, so a seed named inside such a file counts and a later one there wins.
 """
+
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -46,6 +56,28 @@ def _is_seed(value):
     except ValueError:
         return False
     return True
+
+
+def expand_argsfiles(args, cwd):
+    """The args with each `@file` word replaced by the file's lines, as
+    pytest's parser (argparse with fromfile_prefix_chars="@") reads them: one
+    argument per line, `@` words inside a file expanded in turn, and a relative
+    path read from the invocation directory. A word whose file cannot be read
+    is kept as it is; pytest itself stops on it."""
+    expanded = []
+    for word in args:
+        if not word.startswith("@"):
+            expanded.append(word)
+            continue
+        try:
+            lines = (Path(cwd) / word[1:]).read_text(
+                encoding=sys.getfilesystemencoding(),
+                errors=sys.getfilesystemencodeerrors()).splitlines()
+        except OSError:
+            expanded.append(word)
+            continue
+        expanded.extend(expand_argsfiles(lines, cwd))
+    return expanded
 
 
 def explicit_seed(args):
@@ -85,11 +117,10 @@ def randomly_loaded(pluginmanager):
 
 def refuse_unseeded(config):
     """Raise pytest.UsageError when pytest-randomly is loaded unseeded."""
-    if hasattr(config, "workerinput"):
-        return
     if not randomly_loaded(config.pluginmanager):
         return
-    if explicit_seed(list(config.invocation_params.args)):
+    params = config.invocation_params
+    if explicit_seed(expand_argsfiles(list(params.args), params.dir)):
         return
     raise pytest.UsageError(
         "pytest-randomly is loaded but this invocation names no integer "

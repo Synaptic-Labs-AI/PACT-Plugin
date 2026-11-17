@@ -13,6 +13,8 @@ seed-gate arms pin the runtime refusal wherever the plugin is loaded.
 """
 
 import ast
+import importlib.util
+import os
 import shlex
 import subprocess
 import sys
@@ -185,19 +187,155 @@ def _configure_calls_the_gate(source):
     return False
 
 
-def _config(args, loaded=True, worker=False, modules=()):
+def _config(args, loaded=True, worker=False, modules=(), cwd=None):
     """A config stub. `loaded` registers the plugin under its entry-point name;
     `modules` registers plugin objects under those module names, as
-    `-p pytest_randomly` does."""
+    `-p pytest_randomly` does; `cwd` is the invocation directory an `@file`
+    argument is read from."""
     plugins = [SimpleNamespace(__name__=name) for name in ("conftest", *modules)]
     config = SimpleNamespace(
         pluginmanager=SimpleNamespace(
             hasplugin=lambda name: loaded and name == "randomly",
             get_plugins=lambda: list(plugins)),
-        invocation_params=SimpleNamespace(args=tuple(args)))
+        invocation_params=SimpleNamespace(args=tuple(args), dir=Path(cwd or Path.cwd())))
     if worker:
         config.workerinput = {}
     return config
+
+
+def _with_pythonpath(env, directory):
+    """The env with `directory` put first on PYTHONPATH, keeping every entry
+    the env already has: the clock-shift census delivers its shim through the
+    parent's PYTHONPATH, so a child that replaced it would be recorded as a
+    miss."""
+    env = dict(env)
+    env["PYTHONPATH"] = os.pathsep.join(filter(None, [str(directory), env.get("PYTHONPATH")]))
+    return env
+
+
+# A stand-in whose module name is pytest-randomly's, so the gate sees the plugin
+# loaded whether or not the real one is installed; it takes the seed option so a
+# seeded run parses. The real plugin, where installed, stays blocked by
+# `-p no:randomly`.
+_STAND_IN = """__name__ = "pytest_randomly.stand_in"
+
+
+def pytest_addoption(parser):
+    parser.addoption("--randomly-seed")
+"""
+
+
+def _gate_run(tmp_path, cwd, args, plugin_args, launch=("-m", "pytest")):
+    (tmp_path / "zz_fake_randomly.py").write_text(_STAND_IN, encoding="utf-8")
+    env = _with_pythonpath(env_without_pytest_vars(), tmp_path)
+    env.update(PYTHONDONTWRITEBYTECODE="1")
+    run = subprocess.run(
+        [sys.executable, *launch, "-p", "no:cacheprovider", *plugin_args, "-q", *args],
+        cwd=cwd, env=env, capture_output=True, text=True, timeout=300)
+    return run.returncode, run.stdout + run.stderr
+
+
+_SKILLS_TEST = sorted(_PLUGIN_ROOT.glob("skills/*/test_*.py"))[0]
+# Each shape collects only the skills-adjacent tests. From the repository root
+# with no path, pytest loads no conftest under pact-plugin/ in the controller,
+# so under xdist only the workers load the plugin-root conftest.
+_SESSION_SHAPES = {
+    "serial-from-plugin-root": (_PLUGIN_ROOT, [str(_SKILLS_TEST.relative_to(_PLUGIN_ROOT))]),
+    "xdist-from-repo-root": (_REPO_ROOT, ["-n", "2", "--ignore=pact-plugin/tests"]),
+    "xdist-from-a-subdirectory": (_SKILLS_TEST.parent.parent,
+                                  ["-n", "2", str(_SKILLS_TEST.relative_to(_SKILLS_TEST.parent.parent))]),
+}
+
+
+class TestSeedGateInRealSessions:
+
+    @pytest.mark.parametrize("shape", sorted(_SESSION_SHAPES))
+    def test_an_unseeded_session_is_refused(self, tmp_path, shape):
+        if "xdist" in shape:
+            pytest.importorskip("xdist")
+        cwd, args = _SESSION_SHAPES[shape]
+        returncode, output = _gate_run(
+            tmp_path, cwd, args, ["-p", "no:randomly", "-p", "zz_fake_randomly"])
+        assert returncode != 0 and "names no integer --randomly-seed" in output, output
+
+    @pytest.mark.parametrize("shape", sorted(_SESSION_SHAPES))
+    def test_a_seeded_session_passes(self, tmp_path, shape):
+        if "xdist" in shape:
+            pytest.importorskip("xdist")
+        cwd, args = _SESSION_SHAPES[shape]
+        returncode, output = _gate_run(
+            tmp_path, cwd, [*args, "--randomly-seed=5"],
+            ["-p", "no:randomly", "-p", "zz_fake_randomly"])
+        assert returncode == 0 and "names no integer" not in output, output
+
+    def test_the_real_plugin_is_refused_from_the_repo_root_under_xdist(self, tmp_path):
+        # The real pytest-randomly autoloads in every worker; with the root
+        # block undone on the command line and no seed, the workers refuse.
+        # The child must load the plugin, which the child-pytest census refuses
+        # for a `-m pytest` launch, so it starts through pytest.main() under
+        # `python -c`, the form the census leaves unjudged (its blind spot 3).
+        if importlib.util.find_spec("pytest_randomly") is None:
+            if os.environ.get("GITHUB_ACTIONS") == "true":
+                pytest.fail("pytest-randomly is not importable on CI, which installs the lock")
+            pytest.skip("pytest-randomly is not installed in this environment")
+        pytest.importorskip("xdist")
+        cwd, args = _SESSION_SHAPES["xdist-from-repo-root"]
+        returncode, output = _gate_run(
+            tmp_path, cwd, args, ["-p", "randomly"],
+            launch=("-c", "import sys, pytest; sys.exit(pytest.main(sys.argv[1:]))"))
+        assert returncode != 0 and "names no integer --randomly-seed" in output, output
+
+
+def _pythonpath_writes(source):
+    """Lines that set PYTHONPATH outside `_with_pythonpath` and the test that
+    checks it: a keyword, a dict key, a subscript store, or a call whose first
+    argument is the name (setenv, putenv, setdefault)."""
+    def is_name(node):
+        return isinstance(node, ast.Constant) and node.value == "PYTHONPATH"
+
+    def walk(node, inside):
+        if isinstance(node, ast.FunctionDef) and node.name in (
+                "_with_pythonpath", "test_no_child_env_replaces_pythonpath"):
+            inside = True
+        if not inside:
+            if isinstance(node, ast.keyword) and node.arg == "PYTHONPATH":
+                yield node.value.lineno
+            elif isinstance(node, ast.Dict) and any(is_name(k) for k in node.keys):
+                yield node.lineno
+            elif (isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store)
+                    and is_name(node.slice)):
+                yield node.lineno
+            elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and node.func.attr in ("setenv", "putenv", "setdefault")
+                    and node.args and is_name(node.args[0])):
+                yield node.lineno
+        for child in ast.iter_child_nodes(node):
+            yield from walk(child, inside)
+
+    return sorted(set(walk(ast.parse(source), False)))
+
+
+@pytest.mark.parametrize("line", [
+    'env.update(PYTHONPATH="x")',
+    'env = {"PYTHONPATH": "x"}',
+    'env["PYTHONPATH"] = "x"',
+    'monkeypatch.setenv("PYTHONPATH", "x")',
+    'os.putenv("PYTHONPATH", "x")',
+    'env.setdefault("PYTHONPATH", "x")',
+])
+def test_the_pythonpath_scan_sees_each_write_form(line):
+    assert _pythonpath_writes(line) == [1]
+
+
+def test_no_child_env_replaces_pythonpath():
+    # Replacing PYTHONPATH drops the clock-shift shim the parent carries, so
+    # every child env in this module goes through _with_pythonpath.
+    source = Path(__file__).read_text(encoding="utf-8")
+    assert _pythonpath_writes(source) == []
+    assert _pythonpath_writes('env.get("PYTHONPATH")') == []
+    env = _with_pythonpath({"PYTHONPATH": "shim"}, Path("probe"))
+    assert env["PYTHONPATH"] == os.pathsep.join(["probe", "shim"])
+    assert _with_pythonpath({}, Path("probe"))["PYTHONPATH"] == "probe"
 
 
 class TestSeedGate:
@@ -271,8 +409,43 @@ class TestSeedGate:
     def test_a_blocked_session_passes(self):
         randomly_seed_gate.refuse_unseeded(_config([], loaded=False))
 
-    def test_a_worker_defers_to_the_controller(self):
-        randomly_seed_gate.refuse_unseeded(_config([], worker=True))
+    def test_a_worker_judges_like_the_controller(self):
+        # From the repository root under xdist only the workers load the
+        # plugin-root conftest, so a worker must judge the args it shares with
+        # the controller instead of deferring to a controller that never ran.
+        with pytest.raises(pytest.UsageError):
+            randomly_seed_gate.refuse_unseeded(_config([], worker=True))
+        randomly_seed_gate.refuse_unseeded(
+            _config(["-p", "randomly", "--randomly-seed=5"], worker=True))
+
+    @pytest.mark.parametrize("files, args, expanded", [
+        ({"f": "--randomly-seed=last\n"}, ["-q", "@f"], ["-q", "--randomly-seed=last"]),
+        ({"f": "-p\nrandomly\n"}, ["@f", "tests"], ["-p", "randomly", "tests"]),
+        # One argument per line, as argparse reads it: a space stays in the word.
+        ({"f": "--randomly-seed 5\n"}, ["@f"], ["--randomly-seed 5"]),
+        ({"f": "@g\n", "g": "--randomly-seed=7\n"}, ["@f"], ["--randomly-seed=7"]),
+        ({}, ["@missing"], ["@missing"]),
+    ])
+    def test_argsfiles_expand_as_pytest_reads_them(self, tmp_path, files, args, expanded):
+        for name, text in files.items():
+            (tmp_path / name).write_text(text, encoding="utf-8")
+        assert randomly_seed_gate.expand_argsfiles(args, tmp_path) == expanded
+
+    @pytest.mark.parametrize("text, refused", [
+        ("--randomly-seed=last\n", True),
+        ("--randomly-seed=default\n", True),
+        ("--randomly-seed=7\n", False),
+        ("-q\n", False),
+    ])
+    def test_a_seed_inside_an_argsfile_counts(self, tmp_path, text, refused):
+        # `--randomly-seed=5 @f` with f naming a later seed runs with f's seed.
+        (tmp_path / "f").write_text(text, encoding="utf-8")
+        config = _config(["-p", "randomly", "--randomly-seed=5", "@f"], cwd=tmp_path)
+        if refused:
+            with pytest.raises(pytest.UsageError):
+                randomly_seed_gate.refuse_unseeded(config)
+        else:
+            randomly_seed_gate.refuse_unseeded(config)
 
     def test_the_plugin_root_conftest_calls_the_gate(self):
         """The gate only works if pytest_configure calls it, and only the
@@ -307,8 +480,8 @@ class TestSeedGate:
         skills_test = sorted(_PLUGIN_ROOT.glob("skills/*/test_*.py"))[0]
         plugin = ["-p", "zz_fake_randomly"] if fake_loaded else []
         # No PYTEST_* name from the shell that runs the suite reaches the child.
-        env = env_without_pytest_vars()
-        env.update(PYTHONPATH=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
+        env = _with_pythonpath(env_without_pytest_vars(), tmp_path)
+        env.update(PYTHONDONTWRITEBYTECODE="1")
         run = subprocess.run(
             [sys.executable, "-m", "pytest", "-p", "no:randomly", "-p", "no:cacheprovider",
              *plugin, "--co", "-q", str(skills_test)],
