@@ -1617,15 +1617,100 @@ class TestJoinPieces:
         assert files == []
         assert len(sites) == 1 and why in sites[0], sites
 
+    # Each form that builds a container or hands one on, with the text it
+    # unpacks (`*` into read(*roots), `**` into read(root)).
+    _CONTAINER_FORMS = {
+        "list-comprehension": "*[r for r in (SHARED,)]",
+        "set-comprehension": "*{r for r in (SHARED,)}",
+        "generator-expression": "*(r for r in (SHARED,))",
+        "comprehension-element-joined": '*[SHARED / n for n in ("a",)]',
+        "dict-comprehension-value": '**{k: SHARED for k in ("root",)}',
+        "dict-comprehension-key": "*{r: 1 for r in (SHARED,)}",
+        "dict-display-key": "*{SHARED: 1}",
+        "copy": "*[SHARED].copy()",
+        "keys": "*dict([(SHARED, 1)]).keys()",
+        "values": "*dict(root=SHARED).values()",
+        "items": "*dict(root=SHARED).items()",
+        "get": '*dict(root=[SHARED]).get("root")',
+        "pop": '*dict(root=[SHARED]).pop("root")',
+        "iter": "*iter([SHARED])",
+        "next": "*next(iter([[SHARED]]))",
+        "filter": "*filter(None, [SHARED])",
+        "zip": "*zip([SHARED])",
+        "enumerate": "*enumerate([SHARED])",
+        "chain": "*itertools.chain([SHARED])",
+        "chain-from-iterable": "*itertools.chain.from_iterable([[SHARED]])",
+        "fromkeys": "*dict.fromkeys([SHARED])",
+        "deque": "*collections.deque([SHARED])",
+        "ordered-dict": "**collections.OrderedDict(root=SHARED)",
+        "chain-map": '**collections.ChainMap({"root": SHARED})',
+    }
+    # Each method that puts its arguments into the container it is called on.
+    _MUTATIONS = {
+        "append": "ROOTS = []\nROOTS.append(SHARED)\n",
+        "extend": "ROOTS = []\nROOTS.extend([SHARED])\n",
+        "insert": "ROOTS = []\nROOTS.insert(0, SHARED)\n",
+        "add": "ROOTS = set()\nROOTS.add(SHARED)\n",
+        "update": "ROOTS = set()\nROOTS.update([SHARED])\n",
+        "setdefault": "ROOTS = {}\nROOTS.setdefault(SHARED, 1)\n",
+        "appendleft": "ROOTS = collections.deque()\nROOTS.appendleft(SHARED)\n",
+        "extendleft": "ROOTS = collections.deque()\nROOTS.extendleft([SHARED])\n",
+        "through-a-subscript": ('ROOTS = {"a": []}\nROOTS["a"].append(SHARED)\n'
+                                'ROOTS = ROOTS["a"]\n'),
+    }
+
+    @pytest.mark.parametrize("form", list(_CONTAINER_FORMS), ids=list(_CONTAINER_FORMS))
+    def test_a_container_built_or_handed_on_with_an_anchor_records_an_unproven_site(
+            self, core, tmp_path, form):
+        """MUTANT: the form is not read as holding what it builds from, so its
+        unpack records nothing and a joined file goes unseen."""
+        unpacked = self._CONTAINER_FORMS[form]
+        reader = self._READ_ONE if unpacked.startswith("**") else self._READ_ALL
+        body = "import collections\nimport itertools\n" + reader + f"read({unpacked})\n"
+        files, sites = self._join(core, tmp_path, body)
+        assert files == []
+        why = "unpacked by **" if unpacked.startswith("**") else "unpacked by *"
+        assert len(sites) == 1 and why in sites[0], sites
+
+    @pytest.mark.parametrize("form", list(_MUTATIONS), ids=list(_MUTATIONS))
+    def test_a_container_filled_by_a_method_records_an_unproven_site(
+            self, core, tmp_path, form):
+        """MUTANT: the method call is not read as binding its receiver to its
+        arguments, so the filled container unpacks with no note."""
+        body = ("import collections\n" + self._READ_ALL + self._MUTATIONS[form]
+                + "read(*ROOTS)\n")
+        files, sites = self._join(core, tmp_path, body)
+        assert files == []
+        assert len(sites) == 1 and "unpacked by *" in sites[0], sites
+
+    @pytest.mark.parametrize("unpacked", [
+        "*[*(SHARED,)]", "*([] + [SHARED])", "*([SHARED] * 2)", "*([] or [SHARED])",
+        "*(x := [SHARED])", "*([SHARED] if x else [])",
+    ], ids=["starred-item", "concatenation", "repetition", "boolean-operator", "walrus",
+            "conditional"])
+    def test_an_operator_over_a_container_with_an_anchor_records_an_unproven_site(
+            self, core, tmp_path, unpacked):
+        """These forms were counted before comprehensions were; the rows keep
+        each one counted. MUTANT: drop the operand branch and they record
+        nothing."""
+        body = "x = 1\n" + self._READ_ALL + f"read({unpacked})\n"
+        files, sites = self._join(core, tmp_path, body)
+        assert files == []
+        assert len(sites) == 1 and "unpacked by *" in sites[0], sites
+
     @pytest.mark.parametrize("body", [
         _READ_ALL + 'read(*["/elsewhere"])\n',
         _READ_ONE + 'ARGS = ("/elsewhere",)\nread(*ARGS)\n',
         _READ_ONE + 'read(**{"root": "/elsewhere"})\n',
         'print(*[SHARED])\n',
         _READ_ONE + 'TEXT = (SHARED / "direct.py").read_text()\nread(*[TEXT])\n',
+        _READ_ALL + 'read(*[1 for r in (SHARED,)])\n',
+        _READ_ALL + 'read(*map(str, [SHARED]))\n',
+        'import sys\n' + _READ_ALL + 'sys.path.append(str(SHARED))\nread(*sys.path)\n',
     ], ids=["display-without-an-anchor", "name-without-an-anchor",
             "dict-without-an-anchor", "into-a-function-from-elsewhere",
-            "a-file-read-result"])
+            "a-file-read-result", "comprehension-whose-element-holds-none",
+            "map-is-left-out", "a-container-of-an-imported-module"])
     def test_an_unpacked_argument_that_holds_no_anchor_records_nothing(
             self, core, tmp_path, body):
         files, sites = self._join(core, tmp_path, body)

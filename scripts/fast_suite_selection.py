@@ -1532,18 +1532,37 @@ def _anchor_holder(tree: ast.Module, anchored: set[str]):
     follow. An expression holds one when it is `__file__`, a name some scope
     anchors, or a name or attribute name any binding of which, anywhere in
     the module, holds one (a plain, annotated, augmented or walrus
-    assignment, or a loop or with target, which holds what it iterates or
-    enters); a parameter in a slot where a bare-name call of its def or
-    lambda passes an argument that holds one (_slots); a bare-name call of a
-    def or lambda some return or yield of which holds one; an attribute,
-    subscript or operand of one that does; a list, tuple, set, dict value,
-    conditional or boolean expression with an item that does; an f-string
-    that formats one; or a call in _PATH_PASSING_CALLS whose argument or
-    receiver does. Any other call result and a literal hold none."""
+    assignment; a loop, comprehension or with target, which holds what it
+    iterates or enters; and a call of a _CONTAINER_MUTATORS method, which
+    binds its receiver's base name to its arguments, unless the receiver is
+    reached through an imported name such as `sys.path`); a parameter in a slot
+    where a bare-name call of its def or lambda passes an argument that
+    holds one (_slots); a bare-name call of a def or lambda some return or
+    yield of which holds one; an attribute, subscript, `+` or `*` operand
+    of one that does; a list, tuple or set with an item that does (a starred
+    item included); a dict with a key or value that does (`*` unpacks the
+    keys, `**` the values); a list, set or generator comprehension whose
+    element does, or a dict comprehension whose key or value does (its
+    loop target holds what it iterates, so an element that is the target
+    holds when the iterable does); a conditional, boolean or walrus
+    expression with a part that does; an f-string that formats one; or a
+    call in _PATH_PASSING_CALLS whose argument or receiver does, which
+    covers path rebuilds and conversions and the calls that hand a
+    container's items on (copy, keys, values, items, get, pop, iter, next,
+    filter, zip, enumerate, chain, fromkeys and the container constructors).
+    Left out, and holding none: `map(...)` and any other call result, since
+    its items are what an arbitrary function returns; a method or attribute
+    call's result unless its name is in _PATH_PASSING_CALLS; a value
+    imported from another module; and a literal."""
     bindings: dict[str, list[ast.AST]] = {}
     returns: dict[str, list[ast.AST]] = {}
     params: dict[str, ast.arguments] = {}
     passed: list[tuple[str, int | str | None, ast.AST]] = []
+    # Names an import binds: a container reached through one (`sys.path`) is
+    # another module's, which the resolver does not read.
+    imported = {(alias.asname or alias.name).split(".")[0]
+                for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
+                for alias in node.names}
 
     def bind(target: ast.AST, value: ast.AST) -> None:
         for inner in ast.walk(target):
@@ -1574,6 +1593,21 @@ def _anchor_holder(tree: ast.Module, anchored: set[str]):
             bind(node.target, node.iter)
         elif isinstance(node, ast.withitem) and node.optional_vars is not None:
             bind(node.optional_vars, node.context_expr)
+        elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+              and node.func.attr in _CONTAINER_MUTATORS):
+            receiver = node.func.value
+            while isinstance(receiver, ast.Subscript):
+                receiver = receiver.value
+            name = (receiver.id if isinstance(receiver, ast.Name)
+                    else receiver.attr if isinstance(receiver, ast.Attribute) else None)
+            root = receiver
+            while isinstance(root, (ast.Attribute, ast.Subscript)):
+                root = root.value
+            if name and not (isinstance(root, ast.Name) and root.id in imported):
+                for argument in [*node.args, *(keyword.value for keyword in node.keywords)]:
+                    bindings.setdefault(name, []).append(getattr(argument, "value", argument)
+                                                         if isinstance(argument, ast.Starred)
+                                                         else argument)
         elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             own(node, node.name)
         elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
@@ -1604,7 +1638,11 @@ def _anchor_holder(tree: ast.Module, anchored: set[str]):
                 parts.append(value.func.value)
             return any(holds(part) for part in parts)
         if isinstance(value, ast.Dict):
-            return any(holds(item) for item in value.values)
+            return any(holds(item) for item in (*value.keys, *value.values) if item)
+        if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            return holds(value.elt)
+        if isinstance(value, ast.DictComp):
+            return holds(value.key) or holds(value.value)
         if isinstance(value, ast.JoinedStr):
             return any(holds(part.value) for part in value.values
                        if isinstance(part, ast.FormattedValue))
@@ -1677,7 +1715,13 @@ _PATH_CONSTRUCTORS = ("Path", "PurePath", "PosixPath", "PurePosixPath", "Windows
 # path rebuilt or converted, or a container built from them.
 _PATH_PASSING_CALLS = frozenset({
     *_PATH_CONSTRUCTORS, "str", "fspath", "join", "joinpath", "resolve", "absolute",
-    "expanduser", "dict", "list", "tuple", "set", "frozenset", "sorted", "reversed"})
+    "expanduser", "dict", "list", "tuple", "set", "frozenset", "sorted", "reversed",
+    "copy", "keys", "values", "items", "get", "pop", "iter", "next", "filter", "zip",
+    "enumerate", "chain", "from_iterable", "fromkeys", "deque", "OrderedDict", "ChainMap"})
+
+# Methods that put their arguments into the container they are called on.
+_CONTAINER_MUTATORS = frozenset({
+    "append", "extend", "insert", "add", "update", "setdefault", "appendleft", "extendleft"})
 
 
 def _rebuilt_from(node: ast.AST) -> ast.AST | None:
@@ -1755,12 +1799,14 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     anchored argument that lands in a def's *args or **kwargs is not followed
     and records an unproven site. So does an argument a call unpacks
     (`*value`, `**value`) into a def of the module, whenever the value may
-    hold an anchored path (_anchor_holder): a display holding one, a name bound to
-    one, a parameter some call fills with one, or a def's result that
-    returns one. An assignment through `global` or `nonlocal`, and a
-    comprehension's walrus, carries its value's paths to the scope that owns
-    the name. A call through an attribute, any other name or another module
-    binds nothing.
+    hold an anchored path (_anchor_holder): a display or comprehension
+    holding one, a container a method such as `.append` fills with one, a
+    call that hands a container's items on, a name bound to one, a
+    parameter some call fills with one, or a def's result that returns one.
+    An assignment through `global` or `nonlocal`, and a comprehension's
+    walrus, carries its value's paths to the scope that owns the name. A
+    call through an attribute, any other name or another module binds
+    nothing.
 
     Over-approximates the anchored paths a name carries, and never cuts a
     reading short: carrying paths into
