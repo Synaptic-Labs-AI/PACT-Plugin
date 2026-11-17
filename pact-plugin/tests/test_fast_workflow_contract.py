@@ -518,10 +518,12 @@ class TestHashCheckedInstall:
         """The remedy runs on a developer's machine and the gate needs ruff only,
         so it refuses an interpreter below the floor, copies ruff's own entry out
         of the lock into a temporary file, installs that entry from a wheel with
-        its hashes and nothing else, removes the file, and activates the venv. With no .venv it creates one with python3;
-        with a .venv it never runs `python3 -m venv`, which would re-initialise
-        the venv with whatever python3 is first on PATH, and it checks the floor
-        with the venv's own interpreter. The full environment, which compiles a
+        its hashes and nothing else, removes the file, and activates the venv.
+
+        With no .venv it creates one with python3. With a .venv it never runs
+        `python3 -m venv`, which would re-initialise the venv with whatever
+        python3 is first on PATH, and it checks the floor with the venv's own
+        interpreter. The full environment, which compiles a
         package on some platforms, stays .cursor/install.sh's. The steps are one
         command, each continuation line starting with &&, so a failed step stops
         the rest when the block is pasted."""

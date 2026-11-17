@@ -57,8 +57,14 @@ refused whether or not it does:
   `pytest-of-<user>`) is a directory and never names the program, wherever it
   appears.
 - [coverage] The program is `coverage run` (`coverage`, `coverage3`,
-  `coverage-3.12`) given `-m pytest`, `-m pytest.__main__`, `--module pytest`, or
-  pytest's program or `__main__.py` as its script.
+  `coverage-3.12`) running `pytest` or `pytest.__main__` as a module, or
+  pytest's program or `__main__.py` as its script. coverage's `-m` and
+  `--module` are on/off flags, alone or in a bundle of its short flags (`-pm`):
+  the module or script is the first plain word after coverage's options, so
+  `coverage run -m -p pytest` runs the module pytest. `--rcfile`, `--source`,
+  `--include`, `--omit`, `--context`, `--concurrency`, `--data-file`,
+  `--save-signal` and `--debug` take the next word as their value unless
+  written with `=`.
 - [module] An interpreter runs `-m pytest`, `-m pytest.__main__`, or the same
   `-m coverage run ...` forms. An interpreter is a word named `python`, `pypy`,
   `ipython`, `graalpy` or `pyston`, each optionally with a version and one letter
@@ -211,8 +217,10 @@ the argv, the cwd and the remedy, then raises ChildPytestCensusError,
 which aborts the launch before the child starts. finish() fails the session for
 every recorded line, so a test that swallows the error still fails the run.
 An identical line is recorded once, so finish()'s header counts distinct
-refusal lines, not launches: one launch can raise both a subprocess.Popen and
-an os.posix_spawn audit event.
+refusal lines, not launches. A refusal stops its launch at the first audit
+event, so the lines merged are those of repeated identical launches; a launch
+the census cannot inspect is not stopped and can raise both a subprocess.Popen
+and an os.posix_spawn audit event, whose identical lines are merged too.
 Under xdist a worker cannot fail the run itself (the controller ignores a
 worker's exit status), so a worker's finish() hands its lines to the controller
 through workeroutput, collect() gathers them as each worker goes down, and the
@@ -225,7 +233,9 @@ pytest's program (`pytest`, `py.test`, by path or not) or `pytest/__main__.py`,
 wherever the word stands, so the word `pytest` in `git commit -am pytest`
 counts; or `pytest` after `-m`, a short-option cluster ending in `m`, or
 `--module`, only in a command that names an interpreter or `coverage` before
-it (in `git commit -am pytest.__main__` the `-am` is git's). A word that only
+it (in `git commit -am pytest.__main__` the `-am` is git's); or pytest's module
+as `coverage run` reads it, the first plain word after its options with `-m`
+among them (`coverage run -m -p pytest.__main__`). A word that only
 contains `pytest`, such as a tmp_path under /tmp/pytest-of-<user>/, does not.
 A malformed launch that names pytest in neither way is left to the launcher's
 own error. The launch itself is never aborted for a fault.
@@ -282,6 +292,14 @@ Blind spots, examples of launches outside the census:
     `e` command and awk's `system()` inside their script, a git alias
     (`git -c alias.t='!pytest' t`), and an option of a read or list program
     that runs one (`sort --compress-program`, `rg --pre`).
+14. Shell text nested deeper than the census opens it. Shells and substitutions
+    together are opened up to four levels deep, counting the text of the shell
+    the launch runs as the first, so `bash -c 'echo $(echo $(echo $(echo
+    $(pytest -q))))'` is accepted unread.
+15. coverage's long options abbreviated, as its option parser allows (`--mod`
+    for `--module`, `--sour src` for `--source src`): the census reads them by
+    their full names, so `coverage run --mod pytest.__main__` and `coverage run
+    --sour src -m pytest` are accepted.
 """
 import os
 import re
@@ -334,12 +352,13 @@ _OPERATOR_PIECE = re.compile(r"&>>?|[<>]&|>>|>\||<<<|<<|<>|[<>]|\|&|&&|\|\||[;&|
 _RESERVED = frozenset({"{", "}", "!", "if", "then", "elif", "else", "fi",
                        "do", "done", "while", "until"})
 # Programs that run none of the words after them: they print, look up, read,
-# list or ignore them. Names only; a missing name refuses a mention loudly.
+# list or ignore them, or change to the directory they name (cd, pushd, popd).
+# Names only; a missing name refuses a mention loudly.
 _RUNS_NOTHING = frozenset({
     "echo", "printf", "which", "true", "false", ":", "grep", "egrep", "fgrep", "rg",
     "ag", "ls", "cat", "head", "tail", "wc", "sed", "awk", "cut", "sort", "uniq",
     "diff", "file", "stat", "test", "[", "[[", "type", "hash", "chmod", "chown", "touch",
-    "mkdir", "rm", "cp", "mv", "ln",
+    "mkdir", "rm", "cp", "mv", "ln", "cd", "pushd", "popd",
 })
 # find's actions that run the command after them.
 _FIND_EXEC = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
@@ -372,9 +391,12 @@ _ENVIRONMENT_PREFIX = re.compile(r"[A-Za-z0-9_.-]+:")
 # A shell's long options that take a file. A short o or O takes a value too,
 # alone or in a bundle (_shell_command).
 _SHELL_LONG_VALUE_OPTIONS = frozenset({"--rcfile", "--init-file"})
-# coverage run's options that take a separate value.
+# coverage run's options that take a separate value, from `coverage run --help`
+# (coverage.readthedocs.io/en/latest/commands/cmd_run.html, coverage 7.17); its
+# short options (-a, -m, -L, -p, -h) take none.
 _COVERAGE_VALUE_OPTIONS = frozenset({"--rcfile", "--source", "--include", "--omit",
-                                     "--context", "--concurrency", "--data-file", "--debug"})
+                                     "--context", "--concurrency", "--data-file",
+                                     "--save-signal", "--debug"})
 _MAX_DEPTH = 4
 
 _state = {"installed": False, "misses": [], "forwarded": []}
@@ -490,8 +512,10 @@ def _names_pytest(argv):
     stands (so `git commit -am pytest` counts, the word `pytest` being the
     program's name), or pytest's module after `-m` (bundled or not, alone or
     ending a short-option cluster) or `--module` in a command whose earlier
-    words include an interpreter or `coverage`, the programs that take `-m`; a
-    shell operator word starts a new command. Each item is split into
+    words include an interpreter or `coverage`, the programs that take `-m`, or
+    after coverage's options as _coverage_run reads them (`coverage run -m -p
+    pytest.__main__`); a shell operator word starts a new command. Each item
+    is split into
     words as the shell reader splits them (_lex, which makes each run of
     operator characters its own word and falls back to a plain split on an
     unclosed quote), and each word again at backticks, so shell text counts
@@ -505,7 +529,11 @@ def _names_pytest(argv):
             return True
         if set(word) <= set(_OPERATOR_CHARS):
             takes_m = False  # a new command starts after a shell operator
-        elif _is_interpreter(word) or _COVERAGE_PROGRAM.match(_command_name(word)):
+        elif _COVERAGE_PROGRAM.match(_command_name(word)):
+            if _coverage_run(words, at + 1) is not None:
+                return True  # coverage's module after its options (`-m -p pytest`)
+            takes_m = True
+        elif _is_interpreter(word):
             takes_m = True
         elif takes_m and (bool(_BUNDLED_MODULE.match(word)) or (
                 word in _PYTEST_MODULES and at > 0
@@ -1039,21 +1067,25 @@ def _module(words, i):
 
 
 def _coverage_run(words, i):
-    """Index of pytest's first argument when `words[i:]` is `run ... -m pytest`
-    or `run ... <pytest's script>`."""
+    """Index of pytest's first argument when `words[i:]` is `run`, coverage's
+    options, then pytest's module (with `-m` or `--module` among the options)
+    or pytest's script. `-m` is a flag, so the module is the first plain word
+    after the options, not the word after `-m`."""
     if i >= len(words) or words[i] != "run":
         return None
     i += 1
+    module = False
     while i < len(words):
         word = words[i]
-        if word in ("-m", "--module"):
-            return i + 2 if i + 1 < len(words) and words[i + 1] in _PYTEST_MODULES else None
         if word in _COVERAGE_VALUE_OPTIONS:
             i += 2
-        elif word.startswith("-") and word != "-":
-            i += 1
-        else:
-            return i + 1 if _is_pytest_script(word) else None
+            continue
+        if not word.startswith("-") or word == "-":
+            found = word in _PYTEST_MODULES if module else _is_pytest_script(word)
+            return i + 1 if found else None
+        if word == "--module" or (not word.startswith("--") and "m" in word[1:]):
+            module = True  # `-m`, or a bundle of coverage's short flags holding it
+        i += 1
     return None
 
 

@@ -321,6 +321,47 @@ def test_a_pytest_script_after_double_dash_is_judged_as_the_script(argv):
     assert census._miss([*argv, *_BLOCK], None, {}) is None, argv
 
 
+# coverage's -m and --module are flags, alone or in a bundle of its short flags:
+# the module is the first plain word after coverage's options, by the [coverage]
+# family, so blocking lifts the refusal.
+@pytest.mark.parametrize("argv", [
+    ["coverage", "run", "-m", "-p", "pytest"],
+    ["coverage", "run", "--module", "--branch", "pytest", "-q"],
+    ["bash", "-c", "coverage run -m --parallel-mode pytest"],
+    ["coverage", "run", "-pm", "pytest.__main__"],
+    ["coverage", "run", "-m", "--source", "src", "pytest"],
+    ["coverage", "run", "-m", "--save-signal", "USR1", "pytest.__main__"],
+    ["coverage", "run", "-m", "--data-file=x", "pytest"],
+    [PY, "-m", "coverage", "run", "-m", "-p", "pytest"],
+], ids=" ".join)
+def test_coverage_runs_the_first_plain_word_after_its_options_as_the_module(argv):
+    line = census._miss(argv, None, {})
+    assert line is not None and line.endswith(census.REMEDY), (argv, line)
+    blocked = ([*argv[:-1], argv[-1] + " -p no:randomly"] if argv[0] == "bash"
+               else [*argv, *_BLOCK])
+    assert census._miss(blocked, None, {}) is None, blocked
+
+
+@pytest.mark.parametrize("argv", [
+    # With -m the first plain word is a module, here not pytest's.
+    ["coverage", "run", "-m", "-p", "pip", "pytest"],
+    # A value option's value is not the module.
+    ["coverage", "run", "-m", "--source", "pytest", "pip"],
+], ids=" ".join)
+def test_coverage_judges_only_the_first_plain_word_after_its_options(argv):
+    assert census._miss(argv, None, {}) is None, argv
+
+
+# Blind spot 15, pinned as listed: an abbreviated long option is read as an
+# unknown flag, so its value, or the module it marks, is not seen.
+@pytest.mark.parametrize("argv", [
+    ["coverage", "run", "--mod", "pytest.__main__"],
+    ["coverage", "run", "--sour", "src", "-m", "pytest"],
+], ids=" ".join)
+def test_a_listed_coverage_abbreviation_blind_spot_is_accepted(argv):
+    assert census._miss(argv, None, {}) is None, argv
+
+
 def test_a_script_after_double_dash_that_is_not_pytest_is_accepted():
     assert census._miss(["python3", "--", "script.py", "pytest"], None, {}) is None
 
@@ -410,6 +451,10 @@ def test_a_blocked_pytest_child_inside_a_shell_command_is_accepted(argv):
 _SHELL_REFUSED = [
     # Process substitution runs its command.
     "cat <(pytest -q)",
+    # cd runs nothing, and the command after it is still judged.
+    "cd tests/pytest; pytest -q",
+    # Nested to the fourth level, counting this text as the first, and read.
+    "echo $(echo $(echo $(pytest -q)))",
     "tee >(pytest -q) < /dev/null",
     "diff <(python -m pytest --co -q) expected.txt",
     "cat < <(pytest -q)",
@@ -562,6 +607,11 @@ _SHELL_ACCEPTED = [
     # substitution never closes: bash rejects the text and runs nothing, and
     # the census, reading it the same way, finds no command after it.
     "x=$(cat <<E\n); pytest -q",
+    # cd, pushd and popd change directory and run no word after them.
+    "cd tests/pytest && make",
+    "pushd tests/pytest && make; popd",
+    # Nested to the fourth level, counting this text as the first, and read.
+    "echo $(echo $(echo $(pytest -q -p no:randomly)))",
 ]
 
 
@@ -570,14 +620,16 @@ def test_shell_text_that_runs_no_unblocked_pytest_is_accepted(text):
     assert census._miss(["bash", "-c", text], None, {}) is None, text
 
 
-# Blind spot 9, pinned as listed: bash runs pytest in each, and the census does
-# not see it.
+# Blind spots 9 and 14, pinned as listed: bash runs pytest in each, and the
+# census does not see it.
 _SHELL_BLIND_SPOTS = [
     "$(echo pytest) -q",
     "echo $(( $(pytest -q) ))",
     "echo $(case x in x) pytest -q;; esac)",
     "{pytest,-q}",
     "py{,}test -q",
+    # Nested past the fourth level, counting this text as the first.
+    "echo $(echo $(echo $(echo $(pytest -q))))",
 ]
 # Also in blind spot 9, but bash runs it only where the path exists, so the
 # real-bash differential, whose sandbox has no /venv, does not run it.
@@ -1264,6 +1316,9 @@ def test_a_malformed_launch_that_names_no_pytest_is_left_to_its_launcher(census_
     ([PY, "-Impytest.__main__", 1], None),
     (["coverage", "run", "--module", "pytest", 1], None),
     (["coverage", "run", "-m", "pytest.__main__", 1], None),
+    # coverage's module is the first plain word after its options.
+    (["coverage", "run", "-m", "-p", "pytest.__main__", 1], None),
+    ([PY, "-m", "coverage", "run", "--module", "--branch", "pytest.__main__", 1], None),
     (["bash", "-c", "git status; python3 -Im pytest.__main__", 1], None),
     # The word pytest is pytest's program name wherever it stands, so this
     # fails closed although the -am is git's.
@@ -1315,6 +1370,8 @@ def test_a_malformed_launch_that_only_contains_pytest_is_left_to_its_launcher(
     ["git", "commit", "-ampytest", 1],
     ["git", "commit", "-ampytest.__main__", 1],
     ["git", "commit", "--module", "pytest.__main__", 1],
+    # coverage's module here is pip; pytest.__main__ is pip's argument.
+    ["coverage", "run", "-m", "-p", "pip", "pytest.__main__", 1],
     # A shell operator ends the interpreter's command.
     ["bash", "-c", "python3 -V; git commit -am pytest.__main__", 1],
 ])
