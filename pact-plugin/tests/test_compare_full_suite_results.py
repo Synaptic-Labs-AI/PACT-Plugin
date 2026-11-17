@@ -607,8 +607,6 @@ def test_shuffled_run_with_a_real_delta_is_different_not_invalid(tmp_path):
 @pytest.mark.parametrize("decoy", [
     "    Using --randomly-seed=9",       # indented, as inside a traceback
     "E   Using --randomly-seed=9",       # an assertion-detail line
-    "Using --randomly-seed=9 (echo)",    # trailing text
-    "Using --randomly-seed=nine",
 ])
 def test_only_a_whole_seed_header_line_is_a_seed(tmp_path, decoy):
     first = make_run(tmp_path, "one", header_lines=(decoy,))
@@ -624,7 +622,13 @@ def test_only_a_whole_seed_header_line_is_a_seed(tmp_path, decoy):
     ("1" * 5000, "refused"),             # past int()'s default digit limit
     ("١٢٣", "refused"),   # Arabic-Indic digits
     ("７", "refused"),               # a fullwidth digit
-], ids=["10-digits", "11-digits", "5000-digits", "arabic-indic", "fullwidth"])
+    ("-5", "refused"),                   # a negative seed
+    ("last", "refused"),                 # pytest-randomly's 'reuse the last seed'
+    ("", "refused"),                     # no value
+    ("9 (echo)", "refused"),             # trailing text
+    ("nine", "refused"),
+], ids=["10-digits", "11-digits", "5000-digits", "arabic-indic", "fullwidth", "negative",
+        "last", "empty", "trailing-text", "word"])
 def test_seed_line_must_be_one_to_ten_ascii_digits(tmp_path, seed_text, expected):
     first = make_run(tmp_path, "one",
                      header_lines=(f"Using --randomly-seed={seed_text}",))
@@ -882,6 +886,26 @@ def test_the_same_test_failing_a_census_for_a_different_problem_is_a_delta(
     assert delta["type"] == "census_tests" and delta["census"] == census, delta
     assert delta["before"] != delta["after"], delta
     assert all("/tmp/" not in key for key in delta["before"] + delta["after"]), delta
+
+
+def test_a_census_line_naming_environment_text_is_a_census_delta(tmp_path):
+    """A census problem line whose launch text names constraints-ci.txt or
+    sys.executable= is census evidence, not environment: two runs failing the
+    HOME census in different tests give a census_tests delta, and their
+    environments still compare equal."""
+    first = make_run(tmp_path, "one", census_failed=True, finish_lines=(
+        HOME_CENSUS_HEADER,
+        "  [gw0] tests/test_a.py::test_x (call): child [pip install -r constraints-ci.txt] "
+        "is given an environment without HOME"))
+    second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=(
+        HOME_CENSUS_HEADER,
+        "  [gw1] tests/test_b.py::test_y (call): child [python -c print(sys.executable=1)] "
+        "is given an environment without HOME"))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["evidence_errors"] == [], comparison
+    [delta] = comparison["deltas"]
+    assert delta["type"] == "census_tests" and delta["census"] == "home", delta
 
 
 def test_a_census_header_printed_twice_is_refused(tmp_path):
@@ -1302,27 +1326,46 @@ def test_the_census_comparison_is_by_name_not_by_count(tmp_path):
     assert comparison["deltas"] == []
 
 
-@pytest.mark.parametrize("module_name", ["child_pytest_census", "clock_shift_census",
-                                         "home_census"])
-def test_each_census_header_written_by_finish_is_recognised(monkeypatch, module_name):
-    """The comparator's census patterns match the line each real finish() writes."""
+def _reset_census_state(monkeypatch, census, **values):
+    """Give every key of a census's state its empty value, then `values`, so a
+    row reads only what it sets, whatever an earlier test on this worker left."""
+    for key, value in census._state.items():
+        monkeypatch.setitem(census._state, key, None if value is None else type(value)())
+    for key, value in values.items():
+        monkeypatch.setitem(census._state, key, value)
+
+
+def _load_census(module_name):
     if module_name == "child_pytest_census":
         import child_pytest_census as census
-        name = "child_pytest"
-        monkeypatch.setitem(census._state, "misses", ["a miss"])
-        monkeypatch.setitem(census._state, "forwarded", [])
-    elif module_name == "home_census":
+        return census, "child_pytest"
+    if module_name == "home_census":
         import home_census as census
-        name = "home"
-        monkeypatch.setitem(census._state, "misses", ["a miss"])
-        monkeypatch.setitem(census._state, "forwarded", [])
-    else:
-        from clock_shift import clock_shift_census as census
-        name = "clock_shift"
-        monkeypatch.setitem(census._state, "installed", True)
-        monkeypatch.setitem(census._state, "misses", ["a miss"])
-        monkeypatch.setitem(census._state, "workers", [])
-        monkeypatch.setitem(census._state, "python_children", 0)
+        return census, "home"
+    from clock_shift import clock_shift_census as census
+    return census, "clock_shift"
+
+
+# What an earlier test on the same worker can leave in a census's state.
+LEFTOVER_STATE = {"faults": ["t.py::f (call): an earlier fault"],
+                  "forwarded_faults": ["[gw1] t.py::f (call): an earlier fault"],
+                  "forwarded": ["[gw1] t.py::g (call): an earlier miss"],
+                  "collected": {"gw1"}}
+
+
+@pytest.mark.parametrize("leftover", [False, True], ids=["fresh", "after-an-earlier-test"])
+@pytest.mark.parametrize("module_name", ["child_pytest_census", "clock_shift_census",
+                                         "home_census"])
+def test_each_census_header_written_by_finish_is_recognised(monkeypatch, module_name,
+                                                            leftover):
+    """The comparator's census patterns match the line each real finish() writes,
+    however much census state an earlier test on this worker left behind."""
+    census, name = _load_census(module_name)
+    if leftover:
+        for key, value in LEFTOVER_STATE.items():
+            if key in census._state:
+                monkeypatch.setitem(census._state, key, value)
+    _reset_census_state(monkeypatch, census, installed=True, misses=["a miss"])
     written = []
     reporter = types.SimpleNamespace(write_line=written.append)
     session = types.SimpleNamespace(
@@ -1331,7 +1374,7 @@ def test_each_census_header_written_by_finish_is_recognised(monkeypatch, module_
     census.finish(session)
     assert session.exitstatus == 1
     assert comparator._census_failures(written) == [
-        {"census": name, "problems": 1, "lines": ["a miss"]}]
+        {"census": name, "problems": 1, "lines": ["a miss"]}], written
 
 
 def test_the_information_line_the_real_home_census_writes_is_no_census_failure(monkeypatch):
@@ -1546,8 +1589,8 @@ def test_a_real_seeded_session_is_read_by_the_comparator_and_the_seed_gate(tmp_p
         cwd=rig, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
-    header, _finish = comparator._session_spans(lines)
-    assert comparator._shuffle_seed(header) == 4242, completed.stdout
+    report = comparator._test_text_range(lines, len(lines) - 1)
+    assert comparator._run_seed(lines, report) == 4242, completed.stdout
     assert loaded.read_text(encoding="utf-8") == "True", completed.stdout
 
 
@@ -1630,8 +1673,9 @@ def test_the_ci_shuffle_shape_runs_shuffled_with_its_seed(tmp_path, parallel):
         return completed.stdout, loaded.read_text(encoding="utf-8"), list(orders.pop())
 
     stdout, loaded, order = run("seeded", flags)
-    header, _finish = comparator._session_spans([ci_contract.WORKFLOW_TEST_CMD, *stdout.splitlines()])
-    assert comparator._shuffle_seed(header) == seed, stdout
+    lines = [ci_contract.WORKFLOW_TEST_CMD, *stdout.splitlines()]
+    report = comparator._test_text_range(lines, len(lines) - 1)
+    assert comparator._run_seed(lines, report) == seed, stdout
     assert loaded == "True", stdout
     assert sorted(order) == CI_SHAPE_TESTS and order != CI_SHAPE_TESTS, (order, stdout)
     _stdout, control_loaded, control_order = run("control", [])
@@ -2051,6 +2095,30 @@ def test_a_multiline_skip_or_xfail_reason_adds_no_xpass_entry(tmp_path, reason):
     assert [run["totals"]["xpassed"] for run in read_runs(output)] == [1, 1]
 
 
+def _suffix_reason_run(root, name, run_id):
+    passing = "tests/test_example.py::test_delta"
+    nodes = [ALPHA, BETA, GAMMA, passing]
+    directory = make_run(root, name, run_id, nodes=nodes,
+                         cases=[case(ALPHA, "xpass", "unexpected"),
+                                case(BETA, "skip", "x: y\nsecond line"), case(GAMMA, "skip", "y"),
+                                case(passing)])
+    _add_summary_entries(directory, ("SKIPPED [1] tests/test_example.py:7: x: y", "second line",
+                                     "SKIPPED [1] tests/test_example.py:9: y"))
+    return directory
+
+
+def test_a_skip_reason_that_ends_another_reasons_first_line_is_read_whole(tmp_path):
+    """One skip reason is 'y', another's first line is 'x: y'. Each SKIPPED
+    entry is matched to the reason it prints whole, so the two-line reason
+    passes over its second line and the good run is compared as good."""
+    first = _suffix_reason_run(tmp_path, "one", 100)
+    second = _suffix_reason_run(tmp_path, "two", 101)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["evidence_errors"] == [], comparison
+    assert [run["totals"]["xpassed"] for run in read_runs(output)] == [1, 1]
+
+
 @pytest.mark.parametrize("entry, error", [
     ("SKIPPED [1] tests/test_example.py:7: a reason the record does not hold",
      "a SKIPPED summary entry has no reason in the run's evidence: "
@@ -2202,6 +2270,27 @@ def test_xpass():
 JUNIT_REWRITE_SKIP_REASON = "ff\x0cXPASS test_rig.py::test_xpass"
 
 
+def _read_real_xpass(junit, stdout, skip_reasons, xpassed):
+    """Read a real session's XPASS entries the way the comparator does: its
+    short summary from _short_summary_ranges, its JUnit cases mapped to
+    terminal ids by _junit_key, and _apply_xpass with the run record's skip
+    reasons. Returns the summary and the xpassed node ids."""
+    lines = [ci_contract.WORKFLOW_TEST_CMD, *stdout.splitlines()]
+    report = comparator._test_text_range(lines, len(lines) - 1)
+    summaries = [[lines[index] for index in summary]
+                 for summary in comparator._short_summary_ranges(lines, report)]
+    assert len(summaries) == 1, summaries
+    cases = comparator._parse_junit(junit)
+    terminal = sorted({f"test_rig.py::{item['name']}" for item in cases})
+    node_for_key = {comparator._junit_key(node_id): node_id for node_id in terminal}
+    for item in cases:
+        item["node_id"] = node_for_key[(item["classname"], item["name"])]
+    comparator._apply_xpass(cases, summaries, terminal, {
+        "xpassed": xpassed, "skip_sites": [{"reason": reason} for reason in skip_reasons]})
+    return summaries[0], cases, sorted(item["node_id"] for item in cases
+                                        if item["outcome"] == "xpass")
+
+
 @pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
 def test_real_reasons_junitxml_rewrites_are_matched(tmp_path, parallel):
     """Real pytest under CI=true: xfail reasons with a 'reason: ' prefix, a
@@ -2220,17 +2309,13 @@ def test_real_reasons_junitxml_rewrites_are_matched(tmp_path, parallel):
         cwd=rig, env={**child_env(), "CI": "true"}, capture_output=True, text=True,
         timeout=300, check=False)
     assert completed.returncode == 0, completed.stdout + completed.stderr
-    lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
-    report = comparator._test_text_range(lines, len(lines) - 1)
-    summary = [lines[index] for index in comparator._short_summary_range(lines, report)]
-    cases = comparator._parse_junit(junit)
-    xfail_reasons = {f"test_rig.py::{case['name']}": [case["reason"]]
-                     for case in cases if case["outcome"] == "xfail"}
-    assert xfail_reasons["test_rig.py::test_prefixed"] == ["legacy wording"], xfail_reasons
-    assert "#x07" in xfail_reasons["test_rig.py::test_control"][0], xfail_reasons
+    summary, cases, xpassed = _read_real_xpass(
+        junit, completed.stdout, [JUNIT_REWRITE_SKIP_REASON], 1)
+    reasons = {item["name"]: item["reason"] for item in cases if item["outcome"] == "xfail"}
+    assert reasons["test_prefixed"] == "legacy wording", reasons
+    assert "#x07" in reasons["test_control"], reasons
     assert sum(line.startswith("XPASS ") for line in summary) == 5, summary
-    assert comparator._xpass_lines(summary, [JUNIT_REWRITE_SKIP_REASON], xfail_reasons) == [
-        "test_rig.py::test_xpass - unexpected"], summary
+    assert xpassed == ["test_rig.py::test_xpass"], summary
 
 
 CI_SHAPE_RIG = """\
@@ -2297,20 +2382,15 @@ def test_real_ci_short_summary_shape(tmp_path, parallel):
          "-p", "no:randomly", f"--junitxml={junit}", *parallel],
         cwd=rig, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert completed.returncode == 1, completed.stdout + completed.stderr
-    lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
-    report = comparator._test_text_range(lines, len(lines) - 1)
-    summary = [lines[index] for index in comparator._short_summary_range(lines, report)]
+    cases = comparator._parse_junit(junit)
+    skip_reasons = [item["reason"] for item in cases if item["outcome"] == "skip"]
+    assert sum(reason.count("\n") for reason in skip_reasons) == 3, skip_reasons
+    summary, _cases, xpassed = _read_real_xpass(junit, completed.stdout, skip_reasons, 1)
+    assert xpassed == ["test_rig.py::test_xpass"], summary
     words = [line.split(" ", 1)[0] for line in summary]
     first_xpass = summary.index("XPASS test_rig.py::test_xpass - unexpected")
     assert set(words[:first_xpass]) == {"SKIPPED", "XFAIL", "XPASS", "FAILED", "ERROR"}, summary
     assert words[first_xpass + 1:] == ["ERROR", "XPASS", "FAILED", "XPASS", "-----"], summary
-    cases = comparator._parse_junit(junit)
-    skip_reasons = [case["reason"] for case in cases if case["outcome"] == "skip"]
-    xfail_reasons = {f"test_rig.py::{case['name']}": [case["reason"]]
-                     for case in cases if case["outcome"] == "xfail"}
-    assert sum(reason.count("\n") for reason in skip_reasons) == 3, skip_reasons
-    assert comparator._xpass_lines(summary, skip_reasons, xfail_reasons) == [
-        "test_rig.py::test_xpass - unexpected"], summary
 
 
 RA_ORDER_RIG = """\
@@ -2608,7 +2688,7 @@ def test_real_pytest_junit_xpass_and_duplicate_representation(tmp_path):
     summary_index = next(index for index, line in enumerate(real_lines)
                          if "1 xpassed" in line and "1 failed" in line)
     report = comparator._test_text_range(real_lines, summary_index)
-    short_summary = comparator._short_summary_range(real_lines, report)
+    [short_summary] = comparator._short_summary_ranges(real_lines, report)
     assert [real_lines[index] for index in short_summary
             if real_lines[index].startswith("XPASS ")] == [xpass_line]
 

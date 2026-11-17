@@ -78,12 +78,14 @@ SHA = re.compile(r"[0-9a-fA-F]{40}")
 # as shlex splits it, and pytest-randomly's own report-header line. SEED_LINE is
 # the only accepted spelling: 1 to 10 ASCII digits holds every 32-bit seed, and
 # every seed the seed guard in .github/workflows/tests.yml admits (at most 9).
-# SEED_LIKE_LINE is the same line with any run of Unicode digits; a header line
-# that matches it but not SEED_LINE is refused rather than read.
+# SEED_LIKE_LINE is any line that names a pytest-randomly seed (a sign, Unicode
+# digits, 'last' or nothing after the '='); a header line that matches it but
+# not SEED_LINE is refused rather than read, so a seeded run is never read as
+# ordered.
 _SEED_ARGV = ["${PACT_SHUFFLE_SEED:+-p", "randomly", "--randomly-seed=$PACT_SHUFFLE_SEED",
               "--randomly-dont-reset-seed}"]
 SEED_LINE = re.compile(r"Using --randomly-seed=([0-9]{1,10})")
-SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=\d+")
+SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=.*")
 # The test step's environment as the Actions runner echoes it, between the
 # step's run command and its ##[endgroup] line, before the step's process
 # starts: an ordered run shows the variable empty, a seeded run its seed.
@@ -326,12 +328,6 @@ def _short_summary_ranges(lines: list[str], report: range) -> list[range]:
             if SHORT_SUMMARY_HEADER.fullmatch(lines[index])]
 
 
-def _short_summary_range(lines: list[str], report: range) -> range:
-    """The latest candidate short-summary section, or an empty range."""
-    ranges = _short_summary_ranges(lines, report)
-    return ranges[0] if ranges else range(0)
-
-
 def _command_argv(lines: list[str]) -> list[str]:
     candidates = []
     for index in _step_bounds(lines)[0]:
@@ -391,27 +387,35 @@ def _census_failures(finish_span: list[str]) -> list[dict]:
     controller only, so a header that appears twice is refused too.
     """
     failures = []
+    for name, count, block in _census_blocks(finish_span):
+        if any(failure["census"] == name for failure in failures):
+            raise EvidenceError(
+                f"the {name} census header appears more than once in the "
+                f"session-finish span")
+        problems = [finish_span[index].strip() for index in block[1:]]
+        if len(problems) != count:
+            raise EvidenceError(
+                f"the {name} census header counts {count} "
+                f"problem(s) but {len(problems)} problem line(s) follow it")
+        failures.append({"census": name, "problems": count, "lines": problems})
+    return sorted(failures, key=lambda failure: failure["census"])
+
+
+def _census_blocks(finish_span: list[str]) -> list[tuple[str, int, range]]:
+    """Each census block in the session-finish span: the census name, the
+    count its header gives, and the span offsets of its header and of the
+    indented problem lines that follow it."""
+    blocks = []
     for index, line in enumerate(finish_span):
         for name, pattern in CENSUS_HEADERS.items():
             match = pattern.fullmatch(line)
             if match is None:
                 continue
-            if any(failure["census"] == name for failure in failures):
-                raise EvidenceError(
-                    f"the {name} census header appears more than once in the "
-                    f"session-finish span")
-            problems = []
-            for detail in finish_span[index + 1:]:
-                if not detail.startswith("  "):
-                    break
-                problems.append(detail.strip())
-            if len(problems) != int(match.group(1)):
-                raise EvidenceError(
-                    f"the {name} census header counts {int(match.group(1))} "
-                    f"problem(s) but {len(problems)} problem line(s) follow it")
-            failures.append({"census": name, "problems": int(match.group(1)),
-                             "lines": problems})
-    return sorted(failures, key=lambda failure: failure["census"])
+            stop = index + 1
+            while stop < len(finish_span) and finish_span[stop].startswith("  "):
+                stop += 1
+            blocks.append((name, int(match.group(1)), range(index, stop)))
+    return blocks
 
 
 def _shuffle_seed(header: list[str]) -> int | None:
@@ -671,6 +675,11 @@ def _one_extra_count(counts: set[int], entry: str, kind: str) -> int:
     return counts.pop()
 
 
+# A -ra SKIPPED entry: count, location and the reason's first line, which is
+# compared whole so a reason that ends another reason's first line cannot match.
+SKIP_ENTRY = re.compile(r"SKIPPED \[[0-9]+\] .*?:[0-9]+:(?: (.*))?")
+
+
 def _skip_extra_lines(entry: str, skip_reasons: list[str]) -> int:
     """How many log lines after a SKIPPED entry its reason continues over.
 
@@ -679,10 +688,11 @@ def _skip_extra_lines(entry: str, skip_reasons: list[str]) -> int:
     per line break the log reader splits at (measured on 9.2 under CI=true,
     serial and xdist). A continuation line can therefore start like an entry.
     """
+    match = SKIP_ENTRY.fullmatch(entry)
+    shown = match.group(1) or "" if match else None
     return _one_extra_count(
         {len(_LINE_BREAK.findall(reason)) for reason in skip_reasons
-         if entry.endswith(": " + _LINE_BREAK.split(reason, maxsplit=1)[0])
-         or not reason and entry.endswith(":")}, entry, "SKIPPED")
+         if _LINE_BREAK.split(reason, maxsplit=1)[0] == shown}, entry, "SKIPPED")
 
 
 def _xfail_extra_lines(entry: str, following: list[str],
@@ -1225,6 +1235,16 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     summaries = [[lines[index] for index in summary]
                  for summary in _short_summary_ranges(lines, report)]
     _header, finish_span = _session_spans(lines)
+    # The environment axes read the same evidence less each census block: a
+    # census problem line quotes a test's launch, which can name the pins file
+    # or sys.executable, and is census outcome evidence, read by the census
+    # and census_tests deltas only. Any other line in the session-finish span,
+    # such as the CI binding's session-end measurement, stays in.
+    finish_start = _step_bounds(lines)[2]
+    census_lines = {finish_start + offset for _name, _count, block
+                    in _census_blocks(finish_span) for offset in block}
+    environment_evidence = [line for index, line in enumerate(lines)
+                            if index not in report and index not in census_lines]
     shuffle_seed = _run_seed(lines, report)
     census_failures = _census_failures(finish_span)
     if shuffle_seed is not None and len(argv) == 9:
@@ -1253,14 +1273,17 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
         "environment": {
             "overall_conclusion": overall_conclusion,
             "passed_checks": environment_passes,
-            "platform": [line for line in evidence if line.startswith("platform ")],
-            "measurements": [line for line in evidence if "sys.executable=" in line],
+            "platform": [line for line in environment_evidence
+                         if line.startswith("platform ")],
+            "measurements": [line for line in environment_evidence
+                             if "sys.executable=" in line],
             # Job NAMES identify the workflow shape; the runner instance id is
             # a fresh value on every GitHub-hosted run and attributes nothing.
             "job_names": [job.get("name") for job in metadata.get("jobs", [])
                           if isinstance(job, dict)],
-            "pins": [line for line in evidence if "constraints-ci.txt" in line],
-            "cache": [line for line in evidence if line.startswith(CACHE_PREFIXES)],
+            "pins": [line for line in environment_evidence if "constraints-ci.txt" in line],
+            "cache": [line for line in environment_evidence
+                      if line.startswith(CACHE_PREFIXES)],
             "pytest_addopts_absent": True},
         "collection": {"collected": collected,
                        "collected_files": collection["collected_files"],
