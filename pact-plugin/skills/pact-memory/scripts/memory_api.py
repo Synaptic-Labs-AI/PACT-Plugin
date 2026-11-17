@@ -847,10 +847,10 @@ def _root_guard(
        forged `.git` file naming another repository's worktree admin dir),
        or one git gave no evidence for (`_worktree_redirect_cause`)
        -> `gitfile_redirect`, with the detail of that one cause.
-    3. A common dir git answers for, but no working tree: a bare repository,
-       or a `.git` file naming one -> `no_working_tree`. Every rung reaches
-       this shape (the cwd-marker rung through a `GIT_CEILING_DIRECTORIES`
-       entry at the checkout root), so it is checked here, not per rung.
+    3. A common dir git answers for, but git gives no toplevel for the root
+       -> `no_working_tree`. Every rung reaches this shape (the cwd-marker
+       rung through a `GIT_CEILING_DIRECTORIES` entry at the checkout root),
+       so it is checked here, not per rung.
 
     `toplevel` is the caller's `--show-toplevel` answer for `asked_root`,
     when it holds one (None: git gave none); left out, the guard asks git
@@ -3054,11 +3054,12 @@ class PACTMemory:
             cwd_toplevel = _git_rev_parse(None, "--show-toplevel")
             repo_root = main_repo_root(common=cwd_common_dir, toplevel=cwd_toplevel)
             if repo_root is None:
-                # NO ROOT: a forged worktree pointer, or a bare repository.
-                # The guard tells them apart, so a redirect is reported as a
-                # redirect and only a real bare repository as having no
-                # working tree. With a common dir and `toplevel=None` the
-                # guard always declines, so the result is never None here.
+                # NO ROOT: a forged worktree pointer, or git gave no toplevel
+                # (a bare repository gives none). The guard tells them apart,
+                # so a redirect is reported as a redirect and only a root git
+                # gave no toplevel for as having no working tree. With a
+                # common dir and `toplevel=None` the guard always declines,
+                # so the result is never None here.
                 guarded = cast("_DetectedIdentity", _root_guard(
                     _cwd_or_none(), cwd_common_dir, "git root",
                     toplevel=None,
