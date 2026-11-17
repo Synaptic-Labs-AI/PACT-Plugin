@@ -3068,6 +3068,60 @@ class TestTheListingAnswerWalkFollowsEveryForm:
         assert set(_answer_passers(ast.parse(source))) == {"reader"}
 
 
+def _listing_readers() -> dict:
+    """{module name: reader} for every module that reads the worktree
+    listing itself (has a `_worktree_records`)."""
+    return {
+        module.__name__: module._worktree_records
+        for module in (memory_api, backlog) if hasattr(module, "_worktree_records")
+    }
+
+
+class TestAnUnknownZFieldIsMatchedByItsWholeKey:
+    """With `-z`, a field whose key is not one of `_PORCELAIN_ORDER`'s is
+    skipped, and the key is compared whole and as written: a key that only
+    starts with a known one (`HEADx`, `lockedx`) or differs from one only in
+    case (`head`, `LOCKED`) is unknown too. Each such key is built from the
+    table itself, and the listing must read exactly as it does without that
+    field."""
+
+    @staticmethod
+    def _keys():
+        known = {key.rstrip() for key, _rank in memory_api._PORCELAIN_ORDER}
+        built = {f"{key}x" for key in known} | {key.swapcase() for key in known}
+        return sorted(built), known
+
+    def _read(self, monkeypatch, reader, listing):
+        monkeypatch.setattr(
+            subprocess, "run",
+            lambda command, *a, **k: subprocess.CompletedProcess(command, 0, listing, b""),
+        )
+        return reader(["-C", "/nowhere"])
+
+    def test_control_the_built_keys_extend_known_keys_only(self):
+        extended, known = self._keys()
+        assert known and extended and not set(extended) & known, extended
+        assert all(key[:-1] in known or key.swapcase() in known for key in extended), extended
+
+    @pytest.mark.parametrize("position", ["after HEAD", "last"])
+    def test_a_key_extending_a_known_one_is_skipped(self, monkeypatch, position):
+        readers = _listing_readers()
+        assert readers, "control: some module reads the listing"
+        extended, _known = self._keys()
+        base = [b"worktree /p", b"HEAD 0123", b"branch refs/heads/m"]
+        wrong = {}
+        for name, reader in readers.items():
+            expected = self._read(monkeypatch, reader, b"\0".join(base) + b"\0\0")
+            assert isinstance(expected, list) and expected, (name, expected)  # control
+            for key in extended:
+                field = f"{key} v".encode()
+                fields = base[:2] + [field] + base[2:] if position == "after HEAD" else base + [field]
+                answer = self._read(monkeypatch, reader, b"\0".join(fields) + b"\0\0")
+                if answer != expected:
+                    wrong[(name, key)] = answer
+        assert wrong == {}, wrong
+
+
 def _union_admits_str(annotation) -> bool:
     """Whether the return annotation `annotation` admits `str` as one of its
     union members (`str`, `X | str`, `Optional[X | str]`, `Union[X, str]`,
