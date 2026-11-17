@@ -469,6 +469,66 @@ def test_ordered_run_line_has_no_seed(tmp_path):
     assert len(read_runs(output)[0]["argv"]) == 9
 
 
+def _with_step_env(directory, seed):
+    """Add the test step's environment echo, as the Actions runner writes it
+    between the step's run command and its ##[endgroup] (measured on the
+    round-42 runs: '  PACT_SHUFFLE_SEED: ' empty for an ordered run)."""
+    log = directory / "run.log"
+    lines = log.read_text(encoding="utf-8").split("\n")
+    lines[2:2] = [actions_line(text) for text in (
+        "shell: /usr/bin/bash -e {0}", "env:", "  DIST: loadfile",
+        f"  PACT_SHUFFLE_SEED: {seed}", "##[endgroup]")]
+    log.write_text("\n".join(lines), encoding="utf-8")
+    return directory
+
+
+@pytest.mark.parametrize("named, seeds, expected", [
+    ("7", (7,), 7), ("", (), None),
+], ids=["seeded", "ordered"])
+def test_a_step_environment_that_agrees_with_the_header_is_read(
+        tmp_path, named, seeds, expected):
+    first = _with_step_env(make_run(tmp_path, "one", seeds=seeds), named)
+    second = _with_step_env(make_run(tmp_path, "two", 101, seeds=seeds), named)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [expected, expected]
+
+
+@pytest.mark.parametrize("named, seeds, error", [
+    ("7", (8,), "the test step's environment names seed '7', but the report header "
+                "reads seed 8"),
+    ("7", (), "the test step's environment names seed '7', but the report header "
+              "reads no seed"),
+    ("", (7,), "the test step's environment names no seed, but the report header "
+               "reads seed 7"),
+], ids=["different-seed", "seed-missing-from-header", "seed-in-an-ordered-run"])
+def test_a_step_environment_that_disagrees_with_the_header_is_refused(
+        tmp_path, named, seeds, error):
+    first = make_run(tmp_path, "one")
+    second = _with_step_env(make_run(tmp_path, "two", 101, seeds=seeds), named)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [{"run": "two", "error": error}], comparison
+
+
+@pytest.mark.parametrize("named", ["7", None], ids=["with-step-env", "without-step-env"])
+def test_a_seed_line_a_blank_line_pushed_out_of_the_header_is_refused(tmp_path, named):
+    """A blank line between the session banner and the seed line ends the
+    header before the seed. The run is refused, never read as ordered: the
+    displaced seed line is refused on its own, so the refusal holds whether or
+    not the log carries the test step's environment echo."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, header_lines=("", "Using --randomly-seed=7"))
+    if named is not None:
+        _with_step_env(second, named)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    [refusal] = comparison["evidence_errors"]
+    assert refusal["run"] == "two"
+    assert refusal["error"].startswith(
+        "a pytest-randomly seed line sits outside the report header"), refusal
+
+
 @pytest.mark.parametrize("command, seeds, expected", [
     (ORDERED_COMMAND, (), None),
     (ORDERED_COMMAND, (4,), "refused"),
@@ -708,6 +768,37 @@ def test_a_home_fault_block_shorter_than_its_header_is_refused(tmp_path):
     assert comparison["evidence_errors"] == [
         {"run": "two", "error": "the home_uninspected census header counts 2 "
                                 "problem(s) but 1 problem line(s) follow it"}]
+
+
+def test_a_census_failing_in_different_tests_is_a_delta(tmp_path):
+    """The same census failing both runs, but in different tests, is reported:
+    the name-level census delta is empty, so a census_tests delta names them."""
+    first = make_run(tmp_path, "one", census_failed=True, finish_lines=(
+        CHILD_CENSUS_HEADER, "  [gw0] tests/test_a.py::test_x (call): pytest child [pytest]"))
+    second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=(
+        CHILD_CENSUS_HEADER, "  [gw2] tests/test_b.py::test_y (call): pytest child [pytest]"))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["deltas"] == [
+        {"type": "census_tests", "run": "two", "census": "child_pytest",
+         "before": ["tests/test_a.py::test_x (call)"],
+         "after": ["tests/test_b.py::test_y (call)"]}], comparison
+
+
+def test_a_census_failing_in_the_same_tests_on_other_launch_text_is_no_delta(tmp_path):
+    """Launch text carries temporary paths, and xdist puts a test on any worker;
+    neither is a difference between runs, so only the tests a census names count."""
+    first = make_run(tmp_path, "one", census_failed=True, finish_lines=(
+        CHILD_CENSUS_HEADER.replace(": 1 ", ": 2 "),
+        "  [gw0] tests/test_a.py::test_x (call): pytest child [pytest /tmp/pytest-of-u/pytest-1]",
+        "  <outside a test>: pytest child [pytest /tmp/a]"))
+    second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=(
+        CHILD_CENSUS_HEADER.replace(": 1 ", ": 2 "),
+        "  [gw3] tests/test_a.py::test_x (call): pytest child [pytest /tmp/pytest-of-u/pytest-9]",
+        "  <outside a test>: pytest child [pytest /tmp/b]"))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["deltas"] == [], comparison
 
 
 @pytest.mark.parametrize("finish, found", [

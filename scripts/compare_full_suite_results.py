@@ -47,8 +47,8 @@ from verify_full_run import SCHEMA_VERSION as RUN_RECORD_SCHEMA_VERSION  # noqa:
 
 COLLECTION_RECORD_SCHEMA_VERSION = 1
 # The shape of this tool's own outputs: comparison.json and every runs.jsonl
-# record. 2 added shuffle_seed, census_failures, the census delta type and the
-# census_outcome validity.
+# record. 2 added shuffle_seed, census_failures, the census and census_tests
+# delta types and the census_outcome validity.
 OUTPUT_SCHEMA_VERSION = 2
 
 # The `tests.yml` workflow's immutable database id, read with
@@ -84,6 +84,14 @@ _SEED_ARGV = ["${PACT_SHUFFLE_SEED:+-p", "randomly", "--randomly-seed=$PACT_SHUF
               "--randomly-dont-reset-seed}"]
 SEED_LINE = re.compile(r"Using --randomly-seed=([0-9]{1,10})")
 SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=\d+")
+# The test step's environment as the Actions runner echoes it, between the
+# step's run command and its ##[endgroup] line, before the step's process
+# starts: an ordered run shows the variable empty, a seeded run its seed.
+STEP_ENV_SEED = re.compile(r"  PACT_SHUFFLE_SEED: (.*)")
+# A census problem line names the test it came from: PYTEST_CURRENT_TEST, or
+# '<outside a test>', after an xdist worker's '[gwN] ' prefix.
+CENSUS_LINE_TEST = re.compile(
+    r"(?:\[gw[0-9]+\] )?(.*? \((?:setup|call|teardown)\)|<outside a test>): ")
 SESSION_BANNER = re.compile(r"=+ test session starts =+")
 # A top-level section line pytest itself writes (write_sep("=", title)): the
 # report sections and the final summary line. Only these end the report
@@ -405,6 +413,71 @@ def _shuffle_seed(header: list[str]) -> int | None:
     if len(seeds) > 1:
         raise EvidenceError("more than one pytest-randomly seed line")
     return int(seeds[0]) if seeds else None
+
+
+def _step_env_seed(lines: list[str]) -> str | None:
+    """The seed the test step's environment echo names: '' for an ordered run,
+    its text for a seeded one, or None when the log carries no echo for it."""
+    commands, banner, _end, _finish = _step_bounds(lines)
+    if not commands or banner is None:
+        return None
+    for index in range(commands[0], banner):
+        if lines[index] == "##[endgroup]":
+            break
+        match = STEP_ENV_SEED.fullmatch(lines[index])
+        if match is not None:
+            return match.group(1)
+    return None
+
+
+def _run_seed(lines: list[str], report: range) -> int | None:
+    """The run's pytest-randomly seed, or None for an ordered run.
+
+    The seed is read from the report header. A pytest-randomly seed line
+    anywhere else in the test step's log, outside pytest's report sections, is
+    refused (earlier steps are not read, as for the header itself): a stray line
+    (worker output merged in) that ends the header before the seed line would
+    otherwise make a seeded run read as ordered. Where the log carries the
+    test step's environment echo, which the runner writes before pytest
+    starts, the header must agree with it.
+    """
+    commands, banner, end, _finish = _step_bounds(lines)
+    header, _finish_span = _session_spans(lines)
+    seed = _shuffle_seed(header)
+    displaced = [index for index in range(commands[0], len(lines))
+                 if "Using --randomly-seed=" in lines[index] and index not in report
+                 and not banner < index < end]
+    if displaced:
+        raise EvidenceError(
+            f"a pytest-randomly seed line sits outside the report header (log line "
+            f"{displaced[0] + 1}), so the run's order cannot be read from the header")
+    named = _step_env_seed(lines)
+    if named is None:
+        return seed
+    if named == "" and seed is not None:
+        raise EvidenceError(
+            f"the test step's environment names no seed, but the report header "
+            f"reads seed {seed}")
+    if named != "" and (not named.isascii() or not named.isdigit()
+                        or seed != int(named)):
+        raise EvidenceError(
+            f"the test step's environment names seed {named!r}, but the report "
+            f"header reads {'no seed' if seed is None else f'seed {seed}'}")
+    return seed
+
+
+def _census_tests(failure: dict) -> list[str]:
+    """The tests a census's problem lines name, without the worker prefix.
+
+    A line's launch text holds temporary paths that differ from run to run, so
+    two runs are compared by the tests a census refused in; a line that names
+    no test is kept whole.
+    """
+    keys = set()
+    for line in failure["lines"]:
+        match = CENSUS_LINE_TEST.match(line)
+        keys.add(match.group(1) if match else line)
+    return sorted(keys)
 
 
 def _junit_bytes(path: Path) -> bytes:
@@ -1090,8 +1163,8 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     # -ra prints them.
     evidence = [line for index, line in enumerate(lines) if index not in report]
     xpass_source = [lines[index] for index in _short_summary_range(lines, report)]
-    header, finish_span = _session_spans(lines)
-    shuffle_seed = _shuffle_seed(header)
+    _header, finish_span = _session_spans(lines)
+    shuffle_seed = _run_seed(lines, report)
     census_failures = _census_failures(finish_span)
     if shuffle_seed is not None and len(argv) == 9:
         raise EvidenceError(
@@ -1297,6 +1370,16 @@ def _compare(runs: list[dict], expected_sha: str, errors: list[dict]) -> dict:
         if census_after != census_before:
             comparison["deltas"].append({"type": "census", "run": label,
                                          "before": census_before, "after": census_after})
+        # A census that failed both runs is compared by the tests it refused
+        # in, so the same census failing on different launches is a delta too.
+        tests_before = {failure["census"]: _census_tests(failure)
+                        for failure in reference["census_failures"]}
+        for failure in run["census_failures"]:
+            name = failure["census"]
+            if name in tests_before and _census_tests(failure) != tests_before[name]:
+                comparison["deltas"].append(
+                    {"type": "census_tests", "run": label, "census": name,
+                     "before": tests_before[name], "after": _census_tests(failure)})
         if run["argv"] != reference["argv"]:
             comparison["observations"].append({"type": "argv", "run": label})
         duration_changes = _material_duration_changes(reference_durations, run)
