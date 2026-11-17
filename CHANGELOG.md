@@ -172,6 +172,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: the open-flag census counts a flag read through any name, not only through os, and the core.worktree exit test covers every exit code subprocess can report.
 - Tests: the include-scan test asks git about runs of separators, every character before a quoted subsection, and chains of up to sixty-four headers.
 - Tests: every clause a declined identity prints, on every print path including the withheld-override refusal, must equal a described entry, so advice fails in any wording or spelling.
+- Tests: the clause census now reads every detail a declined identity can print from the code, origin details included, so advice added to any of them fails.
 
 ### Why
 

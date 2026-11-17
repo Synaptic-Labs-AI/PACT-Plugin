@@ -3182,6 +3182,22 @@ _DESCRIBED_PRINTED_CLAUSES = {
     "represented as a project id": _OBSERVED,
     "the user runs that, not an agent": "says who runs the repair",
     "the write was refused rather than filed under an unknown project": _OBSERVED,
+    # The clauses of the details a resolved identity carries
+    # (`_printer_details`).
+    "its remote.origin.url list holds an empty value": _OBSERVED,
+    "the url git uses depends on the git version": "says why the origin is not read",
+    "remove the empty value":
+        "asks the user to remove the empty value from their own origin url list; "
+        "it changes no `.git` file or directory",
+    "no remote.origin.url comes from the repository's own config file, and a url from an "
+    "included file can differ between worktrees and branches": _OBSERVED,
+    "the repository's own config file sets no remote.origin.url but holds an include "
+    "section, and an included file can set the origin on one branch or worktree and not "
+    "on another": _OBSERVED,
+    "the repository's own config file could not be read to check it for include sections":
+        _OBSERVED,
+    "this checkout's git directory lies outside it": _OBSERVED,
+    "pinning it is a user decision": "names the decision as the user's",
 }
 
 
@@ -3272,6 +3288,146 @@ _PASSED_THROUGH_DETAILS = {
 }
 
 
+def _detail_values(expression, function, module_tree, seen=frozenset()) -> tuple:
+    """(texts, unresolved) for a detail expression in `function` of
+    `module_tree`: every string it can hold, followed through module
+    constants, local assignments, conditional expressions, f-strings,
+    module dict lookups and calls to the module's own functions (their
+    returns). Any other form is returned in `unresolved` as source text."""
+    constants = {
+        target.id: node.value for node in module_tree.body
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None
+        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+        if isinstance(target, ast.Name)
+    }
+    functions = {
+        node.name: node for node in module_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    def values(node, scope, seen):
+        if isinstance(node, ast.Constant):
+            return ({node.value} - {None}, []) if node.value is None or isinstance(node.value, str) else (set(), [ast.unparse(node)])
+        if isinstance(node, ast.IfExp):
+            parts = [values(node.body, scope, seen), values(node.orelse, scope, seen)]
+            return set().union(*(p[0] for p in parts)), [u for p in parts for u in p[1]]
+        if isinstance(node, ast.JoinedStr):
+            texts, unresolved = {""}, []
+            for part in node.values:
+                if isinstance(part, ast.Constant):
+                    texts = {text + part.value for text in texts}
+                    continue
+                inner, more = values(part.value, scope, seen)
+                unresolved += more
+                texts = {text + value for text in texts for value in inner}
+            return texts, unresolved
+        if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
+            table = constants.get(node.value.id)
+            if isinstance(table, ast.Dict):
+                parts = [values(value, scope, seen) for value in table.values]
+                return set().union(*(p[0] for p in parts)), [u for p in parts for u in p[1]]
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
+            if node.func.id in seen:
+                return set(), []
+            called = functions[node.func.id]
+            parts = [
+                values(ret.value, called, seen | {node.func.id})
+                for ret in ast.walk(called) if isinstance(ret, ast.Return) and ret.value is not None
+            ]
+            return set().union(set(), *(p[0] for p in parts)), [u for p in parts for u in p[1]]
+        if isinstance(node, ast.Name):
+            local = [
+                assign.value for assign in ast.walk(scope)
+                if isinstance(assign, (ast.Assign, ast.AnnAssign)) and assign.value is not None
+                and any(isinstance(t, ast.Name) and t.id == node.id
+                        for t in (assign.targets if isinstance(assign, ast.Assign) else [assign.target]))
+            ] if scope is not None else []
+            if local and (scope.name, node.id) not in seen:
+                parts = [values(value, scope, seen | {(scope.name, node.id)}) for value in local]
+                return set().union(*(p[0] for p in parts)), [u for p in parts for u in p[1]]
+            if node.id in constants and node.id not in seen:
+                return values(constants[node.id], None, seen | {node.id})
+        return set(), [ast.unparse(node)]
+
+    return values(expression, function, seen)
+
+
+# The fields and parameters that carry a decline's detail to the warning and
+# refusal printers.
+_DETAIL_CARRIERS = {"cause_detail", "decline_detail", "_decline_detail"}
+
+
+def _printer_details() -> tuple:
+    """(texts, unresolved) for every detail the decline printers can append,
+    read from the code. In memory_api, every value bound to a carrier (a
+    `cause_detail` or `decline_detail` argument, by keyword or position, and
+    every `_decline_detail` assignment) is followed with `_detail_values`;
+    a carrier passed on from a carrier is skipped, and a value read from a
+    resolved identity's `detail` is every `detail` a `RootIdentity` is built
+    with in project_identity, followed the same way. Every form left over
+    is in `unresolved` as (module, source)."""
+    from scripts import project_identity as pi
+
+    trees = {
+        name: ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        for name, module in (("memory_api", memory_api), ("project_identity", pi))
+    }
+    texts, unresolved = set(), []
+
+    def take(module, expression, function):
+        found, more = _detail_values(expression, function, trees[module])
+        texts.update(found)
+        unresolved.extend((module, source) for source in more)
+
+    for function in ast.walk(trees["project_identity"]):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for call in ast.walk(function):
+            if isinstance(call, ast.Call) and getattr(call.func, "id", None) == "RootIdentity":
+                bound = [k.value for k in call.keywords if k.arg == "detail"] + call.args[5:6]
+                for expression in bound:
+                    take("project_identity", expression, function)
+
+    tree = trees["memory_api"]
+    signatures = {
+        node.name: [a.arg for a in [*node.args.posonlyargs, *node.args.args]]
+        for node in ast.walk(tree) if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        own = {a.arg for a in [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]}
+        bound = []
+        for node in ast.walk(function):
+            if isinstance(node, ast.Call):
+                callee = node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", None)
+                bound += [k.value for k in node.keywords if k.arg in _DETAIL_CARRIERS]
+                names = signatures.get(callee, [])
+                offset = 1 if names[:1] in (["self"], ["cls"]) and isinstance(node.func, ast.Attribute) else 0
+                bound += [
+                    arg for index, arg in enumerate(node.args)
+                    if index + offset < len(names) and names[index + offset] in _DETAIL_CARRIERS
+                ]
+            elif isinstance(node, ast.Assign):
+                if any(isinstance(t, ast.Attribute) and t.attr in _DETAIL_CARRIERS for t in node.targets):
+                    bound.append(node.value)
+        for expression in bound:
+            if isinstance(expression, ast.Name) and expression.id in own and expression.id in _DETAIL_CARRIERS:
+                continue  # passed on: read where the caller binds it
+            field = (
+                expression.attr if isinstance(expression, ast.Attribute)
+                else expression.args[1].value
+                if isinstance(expression, ast.Call) and getattr(expression.func, "id", None) == "getattr"
+                and len(expression.args) >= 2 and isinstance(expression.args[1], ast.Constant)
+                else None
+            )
+            if field in _DETAIL_CARRIERS:
+                continue  # a carrier field: read where it is bound
+            if field == "detail":
+                continue  # a resolved identity's detail: every RootIdentity detail, read above
+            take("memory_api", expression, function)
+    return texts, unresolved
+
+
 def _override_reasons() -> set:
     """Every reason an override read can give, read from project_identity's
     source: the third argument of each `OverrideRead(...)` that is a
@@ -3311,7 +3467,8 @@ def _printed_identity_messages(monkeypatch, caplog) -> list:
       refused write and each other opening the module passes), for every
       decline cause the module names and for none, each with no override
       path and with one inside a `.git` directory, and with no refusal
-      detail and with each detail a redirect can carry;
+      detail and with each detail the printers can append
+      (`_printer_details`, read from the code);
     - the decline warning with each rung's own detail, for that rung's
       cause;
     - the ignored-override warning and every refusal that names the
@@ -3319,8 +3476,6 @@ def _printed_identity_messages(monkeypatch, caplog) -> list:
       path and with the path withheld."""
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.setattr(memory_api, "get_project_dir_from_session_record", lambda: None)
-    from scripts import project_identity as pi
-
     openings = _refusal_openings()
     messages = []
 
@@ -3351,10 +3506,7 @@ def _printed_identity_messages(monkeypatch, caplog) -> list:
                 record = {"reason": token, "source": "cwd", "override_path": None} if token else None
                 messages += refusals(record, ignored, None)
 
-    details = [
-        None, *memory_api._REDIRECT_CAUSE_DETAILS.values(),
-        pi.FOREIGN_GIT_DIR_DETAIL, pi.CORE_WORKTREE_UNREAD_DETAIL,
-    ]
+    details = [None, *sorted(_printer_details()[0])]
     for token in [*sorted(memory_api._DECLINE_CAUSES), None]:
         for override_path in (None, "/home/u/repo/.git/pact-project-id"):
             for detail in details:
@@ -3640,9 +3792,16 @@ class TestARedirectRefusalNamesWhatWasObserved:
         refused write, may advise any change to a `.git`. Every printed
         clause, on every print path, must equal one
         `_DESCRIBED_PRINTED_CLAUSES` entry, and every entry must still be
-        printed. Controls: every remedy the module defines (each
-        module-level name holding REMEDY) appears in a message read, and
-        every rung detail that is not a string is a named pass-through."""
+        printed. Controls: every detail source the printers read is followed
+        to its text (`_printer_details`), the origin details among them;
+        every remedy the module defines (each module-level name holding
+        REMEDY) appears in a message read; and every rung detail that is not
+        a string is a named pass-through."""
+        from scripts import project_identity as pi
+
+        details, unresolved = _printer_details()
+        assert unresolved == [], unresolved  # every detail source is followed to its text
+        assert pi.EMPTY_URL_ENTRY_DETAIL in details, sorted(details)  # control: origin details are read
         messages = [" ".join(message.split()) for message in _printed_identity_messages(monkeypatch, caplog)]
         remedies = [
             text
