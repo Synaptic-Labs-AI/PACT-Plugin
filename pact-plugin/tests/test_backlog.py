@@ -6293,8 +6293,9 @@ cat "$CANNED_PLAIN"
 """
 
 # (name, -z listing or REJECT/FAIL, plain listing, the answer: the paths of
-# the records read, in order, "unreadable" for a listing that cannot be read
-# whole, or None for no listing). `{a}` and `{b}` are checkouts holding a
+# the records read, in order, "empty" for a listing with no record or an
+# empty one, "unreadable" for records that are not git's fields in git's
+# order, or None for no listing). `{a}` and `{b}` are checkouts holding a
 # `.git`, `{w}` a path that does not exist, `{d}` a directory with no `.git`.
 _LISTINGS = [
     ("nul", "worktree {a}\0HEAD 1\0branch refs/heads/main\0\0worktree {b}\nc\0HEAD 2\0detached\0\0",
@@ -6328,16 +6329,17 @@ _LISTINGS = [
     ("plain, a worktree whose listed path is empty", "REJECT",
      "worktree {a}\nHEAD 1\n\nworktree \nHEAD 2\ndetached\n\n", ("{a}",)),
     # git always lists the main worktree first, so a listing with no record,
-    # or with an empty record anywhere, is not git's.
-    ("nul, an empty listing", "", "", "unreadable"),
-    ("nul, a lone terminator", "\0", "", "unreadable"),
-    ("nul, an empty record first", "\0worktree {a}\0HEAD 1\0\0", "", "unreadable"),
+    # or with an empty record anywhere, is not git's, and is told apart from
+    # records that are not git's fields in git's order.
+    ("nul, an empty listing", "", "", "empty"),
+    ("nul, a lone terminator", "\0", "", "empty"),
+    ("nul, an empty record first", "\0worktree {a}\0HEAD 1\0\0", "", "empty"),
     ("nul, an empty record between two", "worktree {a}\0HEAD 1\0\0\0worktree {b}\0HEAD 2\0\0", "",
-     "unreadable"),
-    ("nul, an empty record last", "worktree {a}\0HEAD 1\0\0\0", "", "unreadable"),
-    ("plain, an empty listing", "REJECT", "", "unreadable"),
+     "empty"),
+    ("nul, an empty record last", "worktree {a}\0HEAD 1\0\0\0", "", "empty"),
+    ("plain, an empty listing", "REJECT", "", "empty"),
     ("plain, an empty record between two", "REJECT",
-     "worktree {a}\nHEAD 1\n\n\nworktree {b}\nHEAD 2\n\n", "unreadable"),
+     "worktree {a}\nHEAD 1\n\n\nworktree {b}\nHEAD 2\n\n", "empty"),
     ("plain", "REJECT",
      "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {b}\nHEAD 2\ndetached\n\n", ("{a}", "{b}")),
     ("plain, a path holding a newline", "REJECT",

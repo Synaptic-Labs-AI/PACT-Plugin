@@ -1692,8 +1692,8 @@ def _listed_worktree_records(
 
     `None` when git cannot enumerate — a failed ANSWER, not a failed
     verification, so callers must not treat it as proof of a redirect.
-    `UNREADABLE_LISTING` when git printed a listing PACT could not read
-    whole (`_worktree_records`); that is no record list either.
+    `EMPTY_LISTING` or `UNREADABLE_LISTING` when git printed a listing that
+    is no record list (`_worktree_records`).
     """
     target = ("--git-dir", _where(git_dir)) if git_dir is not None else ("-C", _where(start))
     return _detection_answer(
@@ -1702,9 +1702,10 @@ def _listed_worktree_records(
 
 
 def _worktree_toplevels(records) -> "Optional[set | str]":
-    """The resolved path of every record; `None` and `UNREADABLE_LISTING`
-    are returned as they are. A path that will not resolve is skipped."""
-    if records is None or records == UNREADABLE_LISTING:
+    """The resolved path of every record; an answer that is no record list
+    (`None`, `EMPTY_LISTING`, `UNREADABLE_LISTING`) is returned as it is. A
+    path that will not resolve is skipped."""
+    if not isinstance(records, list):
         return records
     toplevels = set()
     for record in records:
@@ -1733,15 +1734,18 @@ _PORCELAIN_ORDER = (
     ("branch ", 2), ("locked", 3), ("locked ", 3), ("prunable ", 4),
 )
 
-# `_worktree_records`' answer for a listing git printed that cannot be read
-# whole (None is a listing git did not give).
+# `_worktree_records`' answers for a listing git printed that is no record
+# list (None is a listing git did not give): one holding no record or an
+# empty record, and one whose records are not git's fields in git's order.
+EMPTY_LISTING = "empty"
 UNREADABLE_LISTING = "unreadable"
 
 
 def _worktree_records(prefix: list) -> "Optional[List[List[str]] | str]":
     """`git <prefix> worktree list --porcelain` as records, each the list of
-    its fields; `UNREADABLE_LISTING` when git printed a listing that cannot
-    be read whole; or None when no listing can be had.
+    its fields; `EMPTY_LISTING` when git printed no record or an empty one;
+    `UNREADABLE_LISTING` when git printed records that are not git's fields
+    in git's order; or None when no listing can be had.
 
     `-z` is asked first: every field then ends in NUL and an empty field ends
     a record, so a path holding a newline stays whole. A git older than 2.36
@@ -1753,9 +1757,9 @@ def _worktree_records(prefix: list) -> "Optional[List[List[str]] | str]":
     With `-z`, a field whose key git did not print when this reader was
     written is skipped (`_porcelain_key_known`). Either way, a record whose
     fields are not git's, in git's order (`_record_fields_in_order`), makes
-    the listing unreadable:
-    `UNREADABLE_LISTING`, not records. So do an empty record and a listing
-    with no record: git always lists the main worktree first. Without `-z`,
+    the listing `UNREADABLE_LISTING`, not records. An empty record or a
+    listing with no record is `EMPTY_LISTING`: git always lists the main
+    worktree first. Without `-z`,
     a `bare` record that is not the main repository's directory does too,
     and a linked worktree's record whose path holds no `.git` is dropped
     (`_plain_records_kept`). None is a failed or timed-out git. A caller
@@ -1790,12 +1794,14 @@ def _worktree_records(prefix: list) -> "Optional[List[List[str]] | str]":
             records.append(current)
             current = []
         else:
-            return UNREADABLE_LISTING
+            return EMPTY_LISTING
     if current:
         records.append(current)
+    if not records:
+        return EMPTY_LISTING
     if nul:
         records = [[f for f in record if _porcelain_key_known(f)] for record in records]
-    if not records or not all(_record_fields_in_order(record) for record in records):
+    if not all(_record_fields_in_order(record) for record in records):
         return UNREADABLE_LISTING
     if not nul:
         kept = _plain_records_kept(records)
@@ -1886,7 +1892,7 @@ def _ask_worktree_records(start, git_dir: Optional[Path]) -> "Optional[List[List
         else []
     )
     records = _worktree_records(prefix)
-    if records is None or records == UNREADABLE_LISTING:
+    if not isinstance(records, list):
         return records
     listings = _DETECTION_LISTINGS.get()
     if listings is not None and git_dir is not None:
@@ -1906,8 +1912,8 @@ def _verified_worktree_roots(
     kept only when (a) git does not call it prunable, (b) `W/.git` is a FILE
     whose `gitdir:` is `<common>/worktrees/<name>`, and (c) that admin dir's
     `gitdir` names `W/.git` back. Anything else is dropped, which can only
-    narrow the gate; no listing, or one PACT cannot read whole
-    (`UNREADABLE_LISTING`), narrows it to the identity root.
+    narrow the gate; no listing, or a listing that is no record list
+    (`EMPTY_LISTING`, `UNREADABLE_LISTING`), narrows it to the identity root.
 
     `listing`, the records (`_worktree_records`) the detection pass got for
     this same `common_dir`, is used instead of asking git again.
@@ -1916,7 +1922,7 @@ def _verified_worktree_roots(
     if common_dir is None:
         return roots
     records = listing if listing is not None else _worktree_records(["--git-dir", str(common_dir)])
-    if records is None or records == UNREADABLE_LISTING:
+    if not isinstance(records, list):
         return roots
     try:
         admin_parent = (Path(common_dir) / "worktrees").resolve()
@@ -1964,6 +1970,7 @@ REDIRECT_NO_GIT_DIR = "no_git_dir"
 REDIRECT_UNRESOLVABLE = "unresolvable"
 REDIRECT_UNLISTABLE = "unlistable"
 REDIRECT_UNREADABLE_LISTING = "unreadable_listing"
+REDIRECT_EMPTY_LISTING = "empty_listing"
 REDIRECT_MOVED = "moved"
 
 # Each cause's `cause_detail`: what was observed, and nothing more.
@@ -1976,8 +1983,12 @@ _REDIRECT_CAUSE_DETAILS = {
     REDIRECT_UNRESOLVABLE: "a path git gave for it would not resolve",
     REDIRECT_UNLISTABLE: "git could not list that repository's worktrees",
     REDIRECT_UNREADABLE_LISTING: (
-        "git listed that repository's worktrees, but PACT could not read a "
-        "path in the listing whole"
+        "git listed that repository's worktrees, but the listing's records are "
+        "not git's fields in git's order"
+    ),
+    REDIRECT_EMPTY_LISTING: (
+        "git listed that repository's worktrees, but the listing holds no "
+        "record, or an empty one"
     ),
     REDIRECT_MOVED: (
         "git lists the worktree entry its `.git` names at another path, which "
@@ -2023,9 +2034,10 @@ def _worktree_redirect_cause(
     `REDIRECT_UNLISTED` (git's listing does not hold the checkout),
     `REDIRECT_NO_GIT_DIR` (git gave no git dir), `REDIRECT_UNRESOLVABLE` (a
     path would not resolve), `REDIRECT_UNLISTABLE` (no listing:
-    `_listed_worktree_records` is None) or `REDIRECT_UNREADABLE_LISTING`
-    (git printed a listing PACT could not read whole:
-    `_listed_worktree_records` is `UNREADABLE_LISTING`). An unlisted
+    `_listed_worktree_records` is None), `REDIRECT_EMPTY_LISTING` (git
+    printed a listing with no record or an empty one: `EMPTY_LISTING`) or
+    `REDIRECT_UNREADABLE_LISTING` (git printed records that are not git's
+    fields in git's order: `UNREADABLE_LISTING`). An unlisted
     checkout whose worktree entry the same listing holds at another path
     marked prunable is `REDIRECT_MOVED` instead (`_entry_listed_as_moved`),
     the one cause whose remedy names `git worktree repair`. A git that does
@@ -2054,6 +2066,8 @@ def _worktree_redirect_cause(
     records = _listed_worktree_records(None, git_dir=common_path)
     if records is None:
         return REDIRECT_UNLISTABLE
+    if records == EMPTY_LISTING:
+        return REDIRECT_EMPTY_LISTING
     if records == UNREADABLE_LISTING:
         return REDIRECT_UNREADABLE_LISTING
     if toplevel is None:

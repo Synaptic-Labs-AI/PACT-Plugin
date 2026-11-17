@@ -384,15 +384,18 @@ _PORCELAIN_ORDER = (
 )
 
 
-# `_worktree_records`' answer for a listing git printed that cannot be read
-# whole (None is a listing git did not give).
+# `_worktree_records`' answers for a listing git printed that is no record
+# list (None is a listing git did not give): one holding no record or an
+# empty record, and one whose records are not git's fields in git's order.
+EMPTY_LISTING = "empty"
 UNREADABLE_LISTING = "unreadable"
 
 
 def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
     """`git <at> worktree list --porcelain` as records, each the list of its
-    fields; `UNREADABLE_LISTING` when git printed a listing that cannot be
-    read whole; or None when no listing can be had.
+    fields; `EMPTY_LISTING` when git printed no record or an empty one;
+    `UNREADABLE_LISTING` when git printed records that are not git's fields
+    in git's order; or None when no listing can be had.
 
     `-z` is asked first: every field then ends in NUL and an empty field ends
     a record, so a path holding a newline stays whole. A git older than 2.36
@@ -404,9 +407,9 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
     With `-z`, a field whose key git did not print when this reader was
     written is skipped (`_porcelain_key_known`). Either way, a record whose
     fields are not git's, in git's order (`_record_fields_in_order`), makes
-    the listing unreadable:
-    `UNREADABLE_LISTING`, not records. So do an empty record and a listing
-    with no record: git always lists the main worktree first. Without `-z`,
+    the listing `UNREADABLE_LISTING`, not records. An empty record or a
+    listing with no record is `EMPTY_LISTING`: git always lists the main
+    worktree first. Without `-z`,
     a `bare` record that is not the main repository's directory does too,
     and a linked worktree's record whose path holds no `.git` is dropped
     (`_plain_records_kept`). None is a failed or timed-out git. A caller
@@ -442,12 +445,14 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
             records.append(current)
             current = []
         else:
-            return UNREADABLE_LISTING
+            return EMPTY_LISTING
     if current:
         records.append(current)
+    if not records:
+        return EMPTY_LISTING
     if nul:
         records = [[f for f in record if _porcelain_key_known(f)] for record in records]
-    if not records or not all(_record_fields_in_order(record) for record in records):
+    if not all(_record_fields_in_order(record) for record in records):
         return UNREADABLE_LISTING
     if not nul:
         kept = _plain_records_kept(records)

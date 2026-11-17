@@ -2603,7 +2603,8 @@ class TestTheLegacyProbeLetsTheCallersErrorThrough:
 # list`: with REJECT_Z it rejects `-z` as git before 2.36 does (its `list`
 # options carry no 'z', so parse_options prints "unknown switch `z'", then
 # the usage, shortened here, and exits 129); with FAIL_LISTING every `worktree list`
-# fails as git does on a repository it cannot read; with
+# fails as git does on a repository it cannot read; with EMPTY_LISTING every
+# `worktree list` prints nothing and exits 0; with
 # FAIL_ABSOLUTE_GIT_DIR every `rev-parse --absolute-git-dir` fails; with
 # FAIL_GIT_DIR every `rev-parse --git-dir` fails (the global `--git-dir <dir>`
 # option before a command is answered); with FAIL_CORE_WORKTREE every read of
@@ -2663,6 +2664,9 @@ fi
 if [ "$listing" = 1 ] && [ "{mode}" = FAIL_LISTING ]; then
   echo "fatal: not a git repository: '.'" >&2
   exit 128
+fi
+if [ "$listing" = 1 ] && [ "{mode}" = EMPTY_LISTING ]; then
+  exit 0
 fi
 if [ "$nul" = 1 ] && [ "{mode}" = REJECT_Z ]; then
   echo "error: unknown switch \\`z'" >&2
@@ -3142,8 +3146,10 @@ _DESCRIBED_PRINTED_CLAUSES = {
     "git gives no working tree for the repository (declared via X": _OBSERVED,
     "git gives no working tree for the repository (the process's repository is bare, or "
     "git cannot describe its working tree)": _OBSERVED,
-    "git listed that repository's worktrees, but PACT could not read a path in the "
-    "listing whole": _OBSERVED,
+    "git listed that repository's worktrees, but the listing holds no record, or an "
+    "empty one": _OBSERVED,
+    "git listed that repository's worktrees, but the listing's records are not git's "
+    "fields in git's order": _OBSERVED,
     "git lists the worktree entry its `.git` names at another path, which git marks "
     "prunable, and not at this checkout": "reports what git's worktree listing shows",
     "git reports a git directory for it other than the repository's common directory, "
@@ -3511,7 +3517,8 @@ class TestARedirectRefusalNamesWhatWasObserved:
         "unlistable": "could not list",
         "no_git_dir": "no git directory",
         "unresolvable": "would not resolve",
-        "unreadable_listing": "could not read a path in the listing whole",
+        "unreadable_listing": "not git's fields in git's order",
+        "empty_listing": "holds no record, or an empty one",
         "core_worktree_unread": "could not read that directory's core.worktree",
         "moved": "which git marks prunable",
     }
@@ -3527,6 +3534,7 @@ class TestARedirectRefusalNamesWhatWasObserved:
             "forged_worktree_config_dotgit",
         )],
         ("control_own_linked_worktree", "FAIL_LISTING", "unlistable"),
+        ("control_own_linked_worktree", "EMPTY_LISTING", "empty_listing"),
         ("control_own_checkout", "FAIL_GIT_DIR", "no_git_dir"),
         ("control_own_linked_worktree", "LOOP_GIT_DIR", "unresolvable"),
         ("control_path_worktree_holding_a_newline", "REJECT_Z", "unreadable_listing"),
