@@ -1499,6 +1499,30 @@ class TestJoinPieces:
         hook files by a computed name, so a reach review stops clearing it."""
         assert self._join(core, tmp_path, body) == ([], [])
 
+    @pytest.mark.parametrize("body,named,why", [
+        ('T = Path(SHARED, "direct.py").read_text()\n', [], "Path() of an anchored path"),
+        ('T = (SHARED / "eager.py").with_name("direct.py").read_text()\n',
+         ["hooks/shared/eager.py"], "with_name() of an anchored path"),
+        ('T = (SHARED / "direct.txt").with_suffix(".py").read_text()\n', [],
+         "with_suffix() of an anchored path"),
+    ], ids=["path-call-with-parts", "with-name", "with-suffix"])
+    def test_a_path_rebuilt_from_an_anchored_one_records_an_unproven_site(
+            self, core, tmp_path, body, named, why):
+        """MUTANT: these calls are left as forms that name nothing. Each would
+        read a file the resolver cannot name (or names the wrong one), so the
+        module is unproven instead of silently under-selected."""
+        files, sites = self._join(core, tmp_path, body)
+        assert files == named
+        assert len(sites) == 1 and why in sites[0], sites
+
+    @pytest.mark.parametrize("body", [
+        'T = Path(SHARED).read_text()\n',
+        'T = Path("/elsewhere", "direct.py").with_name("x.py").read_text()\n',
+        'def test_x(tmp_path):\n    (tmp_path / "a.txt").with_suffix(".py").read_text()\n',
+    ], ids=["path-call-one-argument", "unanchored-path-call", "unanchored-with-suffix"])
+    def test_a_rebuilt_path_that_is_not_anchored_records_nothing(self, core, tmp_path, body):
+        assert self._join(core, tmp_path, body) == ([], [])
+
     def test_string_names_outside_an_anchored_expression_do_not_count_as_readings(
             self, core, tmp_path):
         """9 x 9 string readings exceed the readings limit only if counted."""
@@ -1520,9 +1544,10 @@ def _over_the_join_limits(core, kind, over=True):
     over=False, stops one short of it), and the unproven site it records."""
     head = ('from pathlib import Path\n'
             'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n')
-    if kind == "readings":
+    if kind in ("readings", "readings-no-py"):
         calls = core._JOIN_READINGS + (1 if over else 0)
-        return (head + 'def read(root):\n    return root / "x.py"\n'
+        leaf = "x.py" if kind == "readings" else "x.json"
+        return (head + f'def read(root):\n    return root / "{leaf}"\n'
                 + "".join(f'read(HOOKS / "d{n}")\n' for n in range(calls)),
                 "join readings over")
     if kind == "passes":
@@ -1540,13 +1565,13 @@ class TestJoinLimits:
     """A module whose joined-path reads reach the resolver's limits is
     unproven, so every exclusion that loads it comes back on any change."""
 
-    @pytest.mark.parametrize("kind", ["readings", "passes", "bindings"])
+    @pytest.mark.parametrize("kind", ["readings", "readings-no-py", "passes", "bindings"])
     def test_a_module_at_a_limit_records_an_unproven_site(self, core, tmp_path, kind):
         source, why = _over_the_join_limits(core, kind)
         sites = _classify(core, tmp_path, source)
         assert any(why in site for site in sites), sites
 
-    @pytest.mark.parametrize("kind", ["readings", "passes", "bindings"])
+    @pytest.mark.parametrize("kind", ["readings", "readings-no-py", "passes", "bindings"])
     def test_a_module_short_of_a_limit_records_none(self, core, tmp_path, kind):
         source, why = _over_the_join_limits(core, kind, over=False)
         sites = _classify(core, tmp_path, source)

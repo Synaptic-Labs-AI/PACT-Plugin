@@ -109,7 +109,8 @@ WORKEROUTPUT_FAULTS_KEY = "home_census_faults"
 
 _state = {"installed": False, "misses": [], "forwarded": [], "faults": [],
           "forwarded_faults": [], "exempt": None, "unreasoned": False, "checked": 0,
-          "forwarded_checked": 0, "shared": 0, "wider_teardown": False}
+          "forwarded_checked": 0, "shared": 0, "wider_teardown": False,
+          "collected": set()}
 
 
 class HomeCensusError(RuntimeError):
@@ -293,7 +294,14 @@ def _record(line, kind="misses"):
 
 
 def collect(node):
-    """Controller side: take the lines a finished xdist worker handed over."""
+    """Controller side: take the lines a finished xdist worker handed over,
+    once per worker. xdist reports a worker stopped by a keyboard interrupt
+    down twice (worker_workerfinished, then worker_errordown); a worker it
+    restarts after a crash is a new node with a new gateway id."""
+    key = getattr(getattr(node, "gateway", None), "id", None) or id(node)
+    if key in _state["collected"]:
+        return
+    _state["collected"].add(key)
     output = getattr(node, "workeroutput", None) or {}
     name = getattr(getattr(node, "gateway", None), "id", "worker")
     for line in output.get(WORKEROUTPUT_KEY) or ():

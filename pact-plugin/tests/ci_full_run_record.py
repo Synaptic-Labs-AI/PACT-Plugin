@@ -80,10 +80,12 @@ clock-shift census (through tests/conftest.py's hook), the HOME and
 child-pytest censuses (their Plugins, registered by pact-plugin/conftest.py)
 and the CI environment binding, whose hook also runs trylast so that it sees
 the censuses' status. So the recorder's hook runs trylast, after every other
-sessionfinish hook the suite registers, and reads ``session.exitstatus``.
+sessionfinish hook the suite registers (any plugin loaded from under
+pact-plugin/), and reads ``session.exitstatus``.
 tests/test_ci_full_run_record.py checks that order, on the controller and on
 an xdist worker, for whatever sessionfinish hooks the suite registers, so a
-hook added later is checked without this list changing.
+hook added later is checked without this list changing. It does not check an
+installed plugin's hook: that order depends on what a machine has installed.
 """
 
 import datetime

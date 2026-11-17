@@ -311,11 +311,11 @@ def _short_summary_ranges(lines: list[str], report: range) -> list[range]:
     It is the last section before the final summary line, and -ra prints its
     XPASS lines there. On CI pytest prints each failure's whole message in it,
     untrimmed and over several lines, and a message can hold a child pytest's
-    whole report, that report's own header line included. So every line that is
-    exactly a short-summary header is a candidate start; _apply_xpass reads
-    them latest first and keeps the first whose entries read cleanly against
-    the run's own evidence. Separator-shaped lines that are not the header are
-    passed over.
+    whole report, that report's own header line included, as can a failing
+    test's captured output in an earlier section. So every line that is exactly
+    a short-summary header is a candidate start, and _own_summary picks pytest's
+    own among them. Separator-shaped lines that are not the header are passed
+    over.
     """
     if not report:
         return []
@@ -691,7 +691,14 @@ def _xfail_extra_lines(entry: str, following: list[str],
 
 def _xpass_lines(summary: list[str], skip_reasons: list[str],
                  xfail_reasons: dict[str, list[str]]) -> list[str]:
-    """The XPASS entries of the short test summary.
+    """The XPASS entries of the short test summary (see _read_entries)."""
+    return _read_entries(summary, skip_reasons, xfail_reasons)[0]
+
+
+def _read_entries(summary: list[str], skip_reasons: list[str],
+                  xfail_reasons: dict[str, list[str]]) -> tuple[list[str], str | None]:
+    """The XPASS entries of the short test summary, and its first ERROR or
+    FAILED entry (None when it has none).
 
     -ra prints its entries in a fixed order: skips, xfails, xpasses, errors,
     failures (measured on 9.2, serial and xdist). Every error and failure
@@ -709,14 +716,50 @@ def _xpass_lines(summary: list[str], skip_reasons: list[str],
         line = summary[index]
         index += 1
         if line.startswith(("ERROR ", "FAILED ")):
-            break
+            return payloads, line
         if line.startswith("XPASS "):
             payloads.append(line[len("XPASS "):])
         elif line.startswith("SKIPPED "):
             index += _skip_extra_lines(line, skip_reasons)
         elif line.startswith("XFAIL "):
             index += _xfail_extra_lines(line, summary[index:], xfail_reasons)
-    return payloads
+    return payloads, None
+
+
+def _own_summary(summaries: list[list[str]], skip_reasons: list[str],
+                 xfail_reasons: dict[str, list[str]], failed: set[str]) -> list[str]:
+    """pytest's own short summary among the candidates (latest first).
+
+    -ra prints errors and failures after every other entry (measured on 9.2,
+    serial and xdist; test_real_ra_entry_order re-measures it), so a child
+    report inside pytest's own summary sits in the message of an ERROR or
+    FAILED entry that names a test this run failed or errored. The walk starts
+    at the latest candidate and steps back to the one before only while that
+    earlier section's first ERROR or FAILED entry, read before the later
+    header, names such a test; where it stops is pytest's own summary, and only
+    it is read. A child report in a failing test's captured output, before
+    pytest's own summary, is therefore never read in its place, so a refused
+    summary is never replaced. Bound: a captured report is taken as pytest's
+    own only if its first FAILED or ERROR entry names a test this run records
+    as failed or errored.
+    """
+    if not summaries:
+        return []
+    own = 0
+    while own + 1 < len(summaries):
+        earlier, later = summaries[own + 1], summaries[own]
+        try:
+            _payloads, failure = _read_entries(
+                earlier[:len(earlier) - len(later) - 1], skip_reasons, xfail_reasons)
+        except EvidenceError:
+            break
+        if failure is None:
+            break
+        named = failure.split(" ", 1)[1]
+        if not any(named == node or named.startswith(node + " - ") for node in failed):
+            break
+        own += 1
+    return summaries[own]
 
 
 def _resolve_xpass(payload: str, terminal: list[str]) -> tuple[str, str | None]:
@@ -736,16 +779,9 @@ def _resolve_xpass(payload: str, terminal: list[str]) -> tuple[str, str | None]:
 
 def _apply_xpass(cases: list[dict], summaries: list[list[str]], terminal: list[str],
                  record: dict) -> None:
-    """Read the XPASS entries from pytest's own short summary and mark them.
-
-    Each candidate summary (latest first, see _short_summary_ranges) is read in
-    turn, and the first is kept whose skip and xfail reasons are all in the
-    run's evidence, whose XPASS count equals the record's and whose every XPASS
-    names a collected node. A child report inside a failure message fails
-    those checks unless it names this suite's own tests as XPASS, in the
-    record's number. When no candidate reads cleanly, the latest one's reason
-    is the refusal.
-    """
+    """Read the XPASS entries from pytest's own short summary (see
+    _own_summary) and mark them; a summary that does not read cleanly against
+    the run's evidence refuses the run."""
     expected_count = record["xpassed"]
     sites = record.get("skip_sites")
     skip_reasons = [site["reason"] for site in sites if isinstance(site, dict)
@@ -754,21 +790,14 @@ def _apply_xpass(cases: list[dict], summaries: list[list[str]], terminal: list[s
     for case in cases:
         if case["outcome"] == "xfail":
             xfail_reasons.setdefault(case["node_id"], []).append(case["reason"] or "")
-    refusals = []
-    for summary in summaries or [[]]:
-        try:
-            payloads = _xpass_lines(summary, skip_reasons, xfail_reasons)
-            if len(payloads) != expected_count or len(set(payloads)) != len(payloads):
-                raise EvidenceError(
-                    f"raw XPASS evidence count/uniqueness mismatch: {len(payloads)} "
-                    f"lines, record xpassed={expected_count}")
-            entries = [_resolve_xpass(payload, terminal) for payload in payloads]
-        except EvidenceError as exc:
-            refusals.append(exc)
-            continue
-        break
-    else:
-        raise refusals[0]
+    failed = {case["node_id"] for case in cases if case["outcome"] in ("failure", "error")}
+    summary = _own_summary(summaries, skip_reasons, xfail_reasons, failed)
+    payloads = _xpass_lines(summary, skip_reasons, xfail_reasons)
+    if len(payloads) != expected_count or len(set(payloads)) != len(payloads):
+        raise EvidenceError(
+            f"raw XPASS evidence count/uniqueness mismatch: {len(payloads)} "
+            f"lines, record xpassed={expected_count}")
+    entries = [_resolve_xpass(payload, terminal) for payload in payloads]
     by_key = {}
     for case in cases:
         by_key.setdefault((case["classname"], case["name"]), []).append(case)

@@ -1312,7 +1312,8 @@ def test_the_home_census_fault_block_finish_writes_is_recognised(monkeypatch, wi
     import home_census as census
     for key, value in (("misses", ["a miss"] if with_refusal else []), ("forwarded", []),
                        ("faults", []), ("forwarded_faults", []), ("exempt", None),
-                       ("shared", 0), ("checked", 0), ("forwarded_checked", 0)):
+                       ("shared", 0), ("checked", 0), ("forwarded_checked", 0),
+                       ("collected", set())):
         monkeypatch.setitem(census._state, key, value)
     monkeypatch.setenv("PYTEST_CURRENT_TEST", "t.py::f (call)")
     census._audit("os.posix_spawn", ("/bin/true", ["true"], _UnreadableEnvironment()))
@@ -1819,14 +1820,14 @@ CI_FAILURE_MESSAGES = {
 }
 
 
-def _add_ci_failure_message(directory, message):
-    """Add BETA's FAILED entry and its message lines after the XPASS entries,
-    where -ra prints failures."""
+def _add_ci_failure_message(directory, message, entry=f"FAILED {BETA}"):
+    """Add BETA's FAILED entry (or `entry`) and its message lines after the
+    XPASS entries, where -ra prints errors and failures."""
     log = directory / "run.log"
     lines = log.read_text(encoding="utf-8").splitlines()
     index = max(index for index, line in enumerate(lines) if "XPASS " in line) + 1
     lines[index:index] = [actions_line(text) for text in
-                          (f"FAILED {BETA} - RuntimeError: boom", *message)]
+                          (f"{entry} - RuntimeError: boom", *message)]
     log.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -1879,23 +1880,95 @@ def test_a_child_report_in_a_ci_failure_message_keeps_the_red_run(tmp_path, chil
     assert run["totals"]["xpassed"] == 1, run
 
 
-def test_a_short_summary_no_candidate_reads_is_refused_with_the_latest_reason(tmp_path):
-    """When neither the real header nor a child's reads cleanly, the refusal
-    names the latest candidate's problem."""
+def test_a_child_report_in_an_error_message_keeps_the_red_run(tmp_path):
+    """An ERROR entry naming a test this run errored encloses a child report
+    the same way a FAILED entry does."""
     xpass = case(ALPHA, "xpass", "unexpected")
     first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
-    # The record counts two xpasses where pytest's own summary prints one, so
-    # the real header does not read cleanly either.
-    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "failure", "boom")],
-                      record_updates={"xpassed": 2})
+    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "error", "boom")])
     _add_ci_failure_message(
-        second, ("=" * 3 + " short test summary info " + "=" * 3,
-                 "SKIPPED [1] test_probe.py:3: a reason only the child knows"))
+        second, ("=" * 3 + " short test summary info " + "=" * 3, *CHILD_REPORTS["skipped"]),
+        entry=f"ERROR {BETA}")
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["evidence_errors"] == [], comparison
+    run = read_runs(output)[1]
+    assert run["validity"] == "test_outcome", run
+    assert run["totals"]["xpassed"] == 1, run
+
+
+def test_a_child_report_after_an_entry_naming_no_failed_test_is_read_as_the_summary(
+        tmp_path):
+    """Only an ERROR or FAILED entry naming a test this run failed or errored
+    encloses a later header; after any other, the later header is taken as
+    pytest's own, and here its child entries refuse the run."""
+    xpass = case(ALPHA, "xpass", "unexpected")
+    first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
+    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "failure", "boom")])
+    _add_ci_failure_message(
+        second, ("=" * 3 + " short test summary info " + "=" * 3, *CHILD_REPORTS["skipped"]),
+        entry="FAILED tests/test_example.py::test_never_run")
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, comparison
     assert comparison["evidence_errors"] == [
         {"run": "two", "error": "a SKIPPED summary entry has no reason in the run's evidence: "
                                 "'SKIPPED [1] test_probe.py:3: a reason only the child knows'"}]
+
+
+def test_pytests_own_summary_that_does_not_read_is_refused_with_its_own_reason(tmp_path):
+    """A child report inside pytest's own summary never stands in for it: when
+    the real summary does not read cleanly, the run is refused for that."""
+    xpass = case(ALPHA, "xpass", "unexpected")
+    first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
+    # The record counts two xpasses where pytest's own summary prints one.
+    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "failure", "boom")],
+                      record_updates={"xpassed": 2})
+    _add_ci_failure_message(
+        second, ("=" * 3 + " short test summary info " + "=" * 3,
+                 f"XPASS {ALPHA}", f"XPASS {BETA}"))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two", "error": "raw XPASS evidence count/uniqueness mismatch: 1 lines, "
+                                "record xpassed=2"}]
+
+
+def _add_own_summary(directory, entries):
+    """Put pytest's own short summary, holding `entries`, before the final
+    summary line of a run that printed none."""
+    log = directory / "run.log"
+    lines = log.read_text(encoding="utf-8").splitlines()
+    index = next(index for index, line in enumerate(lines) if line.endswith(" in 0.10s ====="))
+    lines[index:index] = [actions_line(text) for text in (SHORT_SUMMARY_TEXT, *entries)]
+    log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize("own_entries, error", [
+    (("SKIPPED [1] tests/test_example.py:7: a reason the record does not hold",
+      f"FAILED {BETA} - RuntimeError: boom"),
+     "a SKIPPED summary entry has no reason in the run's evidence: "
+     "'SKIPPED [1] tests/test_example.py:7: a reason the record does not hold'"),
+    ((f"FAILED {BETA} - RuntimeError: boom",), None),
+], ids=["own-summary-refused", "own-summary-reads"])
+def test_a_child_report_in_captured_output_never_replaces_pytests_own_summary(
+        tmp_path, own_entries, error):
+    """A child report a failing test printed sits in the FAILURES section,
+    before pytest's own summary. Its header is never read in place of pytest's
+    own: a run whose own summary is refused stays refused, and one whose own
+    summary reads is compared as red."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, cases=[case(ALPHA), case(BETA, "failure", "boom")],
+                      captured=("=" * 3 + " short test summary info " + "=" * 3,
+                                "FAILED test_child.py::test_t - x"))
+    _add_own_summary(second, own_entries)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    if error is None:
+        assert completed.returncode == 1, comparison
+        assert comparison["evidence_errors"] == [], comparison
+        assert read_runs(output)[1]["validity"] == "test_outcome"
+    else:
+        assert completed.returncode == 2, comparison
+        assert comparison["evidence_errors"] == [{"run": "two", "error": error}], comparison
 
 
 def _add_summary_entries(directory, entries):
@@ -2208,6 +2281,103 @@ def test_real_ci_short_summary_shape(tmp_path, parallel):
         "test_rig.py::test_xpass - unexpected"], summary
 
 
+RA_ORDER_RIG = """\
+import pytest
+
+
+def test_a_fails():
+    raise RuntimeError("boom")
+
+
+@pytest.fixture
+def broken():
+    raise RuntimeError("setup broke")
+
+
+def test_b_errors(broken):
+    pass
+
+
+@pytest.mark.xfail(reason="unexpected")
+def test_c_xpass():
+    pass
+
+
+@pytest.mark.xfail(reason="expected")
+def test_d_xfail():
+    assert False
+
+
+def test_e_skip():
+    pytest.skip("skipped here")
+"""
+
+
+@pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
+def test_real_ra_entry_order(tmp_path, parallel):
+    """Real pytest under CI=true prints -ra entries as skips, xfails, xpasses,
+    errors, failures, whatever order the tests ran in. _own_summary rests on
+    errors and failures coming last; a pytest that changes the order fails
+    here."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "test_order.py").write_text(RA_ORDER_RIG, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
+         "-p", "no:randomly", *parallel],
+        cwd=rig, env={**child_env(), "CI": "true"}, capture_output=True, text=True,
+        timeout=300, check=False)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    lines = completed.stdout.splitlines()
+    header = lines.index(next(line for line in lines if SHORT_SUMMARY_TEXT in line))
+    assert [line.split(" ", 1)[0] for line in lines[header + 1:-1]] == [
+        "SKIPPED", "XFAIL", "XPASS", "ERROR", "FAILED"], completed.stdout
+
+
+CHILD_REPORT_RIG = """\
+CHILD = ("=" * 3 + " short test summary info " + "=" * 3 + "\\n"
+         "SKIPPED [1] child.py:3: a reason only the child knows\\n"
+         "FAILED child.py::test_t - x")
+
+
+def test_carries():
+    raise RuntimeError("child failed:\\n" + CHILD)
+
+
+def test_prints():
+    print(CHILD)
+    raise RuntimeError("printed")
+"""
+
+
+@pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
+def test_real_child_reports_land_around_pytests_own_summary(tmp_path, parallel):
+    """Real pytest under CI=true: a child report a failing test printed lands
+    in the FAILURES section, before pytest's own summary, and one a failure
+    message carries lands inside it, after a FAILED entry for that test.
+    _own_summary picks the middle header, pytest's own."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "test_rig.py").write_text(CHILD_REPORT_RIG, encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
+         "-p", "no:randomly", *parallel],
+        cwd=rig, env={**child_env(), "CI": "true"}, capture_output=True, text=True,
+        timeout=300, check=False)
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
+    report = comparator._test_text_range(lines, len(lines) - 1)
+    summaries = [[lines[index] for index in summary]
+                 for summary in comparator._short_summary_ranges(lines, report)]
+    assert len(summaries) == 3, completed.stdout
+    failed = {"test_rig.py::test_carries", "test_rig.py::test_prints"}
+    own = comparator._own_summary(summaries, [], {}, failed)
+    assert own is summaries[1], completed.stdout
+    assert sorted(line.split(" - ", 1)[0] for line in own
+                  if line.startswith("FAILED test_rig.py::")) == [
+        "FAILED test_rig.py::test_carries", "FAILED test_rig.py::test_prints"], own
+
+
 @pytest.mark.parametrize("mutation", [
     "summary", "xml", "json", "malformed_xml", "identity", "duplicate_terminal",
     "aggregate", "worker", "collection", "deselection", "full_run"])
@@ -2386,7 +2556,7 @@ def test_real_pytest_junit_xpass_and_duplicate_representation(tmp_path):
         env.pop(key, None)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", f"--junitxml={xml_path}"],
-        cwd=child, env=env, capture_output=True, text=True, check=False)
+        cwd=child, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert completed.returncode == 1, completed.stdout + completed.stderr
     raw_log = completed.stdout + completed.stderr
     root = ET.parse(xml_path).getroot()
@@ -2469,7 +2639,7 @@ def test_real_pytest_xfail_teardown_shape_needs_no_pass_accounting(tmp_path):
         env.pop(key, None)
     completed = subprocess.run(
         [sys.executable, "-m", "pytest", "-ra", f"--junitxml={xml_path}"],
-        cwd=child, env=env, capture_output=True, text=True, check=False)
+        cwd=child, env=env, capture_output=True, text=True, timeout=300, check=False)
     assert completed.returncode == 0, completed.stdout + completed.stderr
     root = ET.parse(xml_path).getroot()
     emitted = list(root.iter("testcase"))

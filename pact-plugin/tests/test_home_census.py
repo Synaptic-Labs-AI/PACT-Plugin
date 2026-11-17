@@ -32,12 +32,14 @@ def census_state():
     saved = {key: list(census._state[key])
              for key in ("misses", "forwarded", "faults", "forwarded_faults")}
     counts = {key: census._state[key] for key in ("checked", "forwarded_checked")}
+    collected = set(census._state["collected"])
     try:
         yield census._state
     finally:
         for key, value in saved.items():
             census._state[key][:] = value
         census._state.update(counts)
+        census._state["collected"] = collected
 
 
 def _refused(launch, census_state):
@@ -531,6 +533,27 @@ def test_the_controller_sums_every_workers_launch_count(census_state):
     assert reporter.lines == ["HOME CENSUS: installed, 11 launches checked, 0 refused"]
 
 
+def test_a_worker_reported_down_twice_is_collected_once(census_state):
+    """MUTANT: collect() takes a worker's handover each time xdist reports it
+    down. A worker stopped by a keyboard interrupt is reported twice
+    (worker_workerfinished, then worker_errordown), so its refusal line would
+    repeat and its launch count double. Another worker is still collected."""
+    census_state["misses"][:], census_state["forwarded"][:] = [], []
+    census_state["checked"], census_state["forwarded_checked"] = 0, 0
+
+    def node(name, count):
+        return type("Node", (), {
+            "workeroutput": {census.WORKEROUTPUT_KEY: [_LINE], census.WORKEROUTPUT_COUNT_KEY: count},
+            "gateway": type("Gateway", (), {"id": name})()})()
+
+    interrupted = node("gw0", 3)
+    census.collect(interrupted)
+    census.collect(interrupted)
+    census.collect(node("gw1", 4))
+    assert census_state["forwarded"] == ["[gw0] " + _LINE, "[gw1] " + _LINE]
+    assert census_state["forwarded_checked"] == 7
+
+
 def test_a_repeated_refusal_is_recorded_once(census_state):
     before = len(census_state["misses"])
     for _ in range(2):
@@ -594,6 +617,7 @@ def _child_environ():
 
 
 def _run_rig(tmp_path, env_literal):
+    pytest.importorskip("xdist")
     (tmp_path / "conftest.py").write_text(
         _RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
     (tmp_path / "test_swallow.py").write_text(
@@ -1283,23 +1307,6 @@ def test_a_gated_test_is_judged_where_it_runs_and_stopped_before_its_child(tmp_p
         assert proc.returncode == 1, output
         assert "HOME CENSUS: 1 distinct child launch(es) without HOME refused" in output, output
         assert "test_gated_launch_without_home" in output, output
-
-
-def _not_seen_item(start):
-    """The NOT SEEN bullet of the census docstring that begins with `start`,
-    with its wrapped lines joined."""
-    section = census.__doc__.split("NOT SEEN, AND OUTSIDE THE CENSUS:", 1)[1]
-    items = [" ".join(item.split()) for item in section.split("\n- ")]
-    return next(item for item in items if item.startswith(start))
-
-
-def test_the_docstring_says_a_test_that_does_not_run_is_judged_where_it_runs():
-    item = _not_seen_item("a test that does not run")
-    assert ("Such a test is judged on the machine where it does run, in any session "
-            "that loads pact-plugin/conftest.py") in item, item
-    assert ("a launch it makes there that the census refuses is stopped before the "
-            "child starts.") in item, item
-    assert " not judged" not in item and " never " not in item, item
 
 
 def test_the_terminal_writer_attribute_the_censuses_read_counts_the_open_line(request):

@@ -1460,6 +1460,21 @@ def _resolve_scope(bindings, outer: _Env, module_env: _Env, declared_global: set
     return env
 
 
+def _rebuilt_from(node: ast.AST) -> ast.AST | None:
+    """The path a call builds a new path from, when the resolver does not
+    follow that call: the receiver of `.with_name(...)` or `.with_suffix(...)`,
+    and the first argument of `Path(...)` (or `pathlib.Path(...)`) given more
+    than one. None for any other node."""
+    if not isinstance(node, ast.Call):
+        return None
+    if isinstance(node.func, ast.Attribute) and node.func.attr in ("with_name", "with_suffix"):
+        return node.func.value
+    if _call_name(node) == "Path" and len(node.args) > 1 and not isinstance(
+            node.args[0], ast.Starred):
+        return node.args[0]
+    return None
+
+
 def _anchored_join_files(tree: ast.Module, rel: str,
                          module_files: dict[str, str],
                          plugin_root: Path) -> tuple[list[Path], list[str]]:
@@ -1476,7 +1491,12 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     other way) names no file and records no unproven site: a test that reads
     a production file that way is not re-selected when that file changes.
     A join onto a base that is not anchored (tmp_path, an absolute path,
-    `self.root`) names nothing and records nothing.
+    `self.root`) names nothing and records nothing. Three forms that build a
+    path from an anchored one are not followed and record an unproven site
+    instead: `Path(ANCHORED, ...)` with more than one argument, and
+    `.with_name(...)` or `.with_suffix(...)` called on an anchored path
+    (otherwise the first names nothing, and the other two would name the path
+    before the call rather than the file read).
 
     Names are resolved per scope, as Python resolves them: the module body,
     each def, async def and lambda, each class body, and each comprehension.
@@ -1510,9 +1530,12 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     reading short: carrying paths into
     parameters and across scopes repeats until nothing changes, at most
     _JOIN_PASSES times; a scope's own names settle within one more pass than
-    it binds names (only a cycle that keeps growing takes longer); and an
-    expression is read under at most _JOIN_READINGS combinations of its
-    names' paths. A module that reaches any of these limits is unproven.
+    it binds names (only a cycle that keeps growing takes longer); and every
+    expression holding an anchored name that the resolver reads (a join, a
+    binding's value, a default value or a call's argument), whether or not it
+    names a .py file, is read under at most _JOIN_READINGS combinations of the
+    anchored paths and strings of the names in it. A module that reaches any
+    of these limits is unproven.
 
     The joined path must name a file ending in .py; as for a whole literal,
     test-tree files and conftests are not edges. A path that is no file in this
@@ -1652,6 +1675,11 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     found: list[Path] = []
     for index, scope in enumerate(scopes):
         for node in scope["nodes"]:
+            rebuilt = _rebuilt_from(node)
+            if rebuilt is not None and _anchors_of(rebuilt, envs[index], notes, strings):
+                notes.append(f"{node.lineno}:{_call_name(node)}() of an anchored path "
+                             "is not followed")
+                continue
             joined = (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div)) or (
                 isinstance(node, ast.Call) and _call_name(node) in ("joinpath", "join"))
             if not joined:
