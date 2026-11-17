@@ -2899,31 +2899,90 @@ class TestTheCwdMarkerDeclinesAMarkerGitCannotAnswerFor:
         assert answers and {answer[1] for answer in answers.values()} == {"no_working_tree"}, answers
 
 
-def _listing_answer_passers(path) -> dict:
-    """{name: def} for every function in the module at `path` that can return
-    a worktree-listing reader's answer unchanged: one that returns
-    `UNREADABLE_LISTING`, a direct call to such a function, a name bound to
-    one, a ternary branch holding one, or a call handed a lambda returning
-    one. Followed to a fixed point, so every wrapper of a reader is found."""
-    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+# Every expression class in Python's grammar, by how a reader's answer held
+# in it reaches the expression's own value. The census test compares the
+# union of the three tables with the grammar, so a class the grammar gains
+# must be placed in one.
+#
+# The expression's value can be one of these children, unchanged:
+_ANSWER_CHILDREN = {
+    "BoolOp": lambda node: node.values,  # `a or b` and `a and b` give an operand
+    "NamedExpr": lambda node: [node.value],  # `(x := a)` gives `a`
+    "IfExp": lambda node: [node.body, node.orelse],  # either branch
+    "Await": lambda node: [node.value],  # awaiting a reader's call gives its answer
+}
+# Read by the walk itself:
+_ANSWER_BASES = {
+    "Name": "`UNREADABLE_LISTING`, or a name bound to an answer",
+    "Call": "a call to a reader, or a call handed a lambda (by position or keyword) whose body passes one",
+}
+# Never the answer unchanged:
+_ANSWER_TRANSFORMED = {
+    "BinOp": "computes a new value from its operands",
+    "UnaryOp": "computes a new value from its operand",
+    "Compare": "gives a bool",
+    "Lambda": "is a function; its body counts where a call is handed it",
+    "Dict": "a new container holding it",
+    "Set": "a new container holding it",
+    "List": "a new container holding it",
+    "Tuple": "a new container holding it",
+    "ListComp": "a new container built from it",
+    "SetComp": "a new container built from it",
+    "DictComp": "a new container built from it",
+    "GeneratorExp": "a generator, not the value",
+    "Yield": "gives what the caller sends in",
+    "YieldFrom": "gives the inner generator's return",
+    "FormattedValue": "formats a new string",
+    "JoinedStr": "formats a new string",
+    "Constant": "holds no expression",
+    "Attribute": "reads a part of it",
+    "Subscript": "reads a part of it",
+    "Starred": "unpacks it into a container or call",
+    "Slice": "is an index, not a value",
+}
+
+
+def _grammar_expression_classes() -> set:
+    """Every expression class Python's grammar defines, read from the
+    `ast.expr` signature."""
+    return set(re.findall(r"\b([A-Z]\w*)\(", ast.expr.__doc__))
+
+
+def _answer_passers(tree) -> dict:
+    """{name: def} for every function in `tree` that can return a
+    worktree-listing reader's answer unchanged. An expression passes one when
+    it is `UNREADABLE_LISTING`, a call to such a function, a name bound to a
+    passing value (by assignment or `:=`, followed through other names), a
+    call handed a lambda whose body passes one, or holds one in a child the
+    `_ANSWER_CHILDREN` table names. Followed to a fixed point, so every
+    wrapper of a reader is found."""
     functions = {
         node.name: node for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     found = set()
 
-    def reader_call(value):
-        return isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in found
-
     def passes(value, bound):
-        return (
-            (isinstance(value, ast.Name) and (value.id == "UNREADABLE_LISTING" or value.id in bound))
-            or reader_call(value)
-            or (isinstance(value, ast.Call) and any(
-                isinstance(argument, ast.Lambda) and reader_call(argument.body) for argument in value.args
-            ))
-            or (isinstance(value, ast.IfExp) and (passes(value.body, bound) or passes(value.orelse, bound)))
-        )
+        if isinstance(value, ast.Name):
+            return value.id == "UNREADABLE_LISTING" or value.id in bound
+        if isinstance(value, ast.Call):
+            if isinstance(value.func, ast.Name) and value.func.id in found:
+                return True
+            handed = [*value.args, *(keyword.value for keyword in value.keywords)]
+            return any(isinstance(arg, ast.Lambda) and passes(arg.body, bound) for arg in handed)
+        children = _ANSWER_CHILDREN.get(type(value).__name__)
+        return children is not None and any(passes(child, bound) for child in children(value))
+
+    def bindings(function, bound):
+        for node in ast.walk(function):
+            if isinstance(node, ast.Assign):
+                targets, value = node.targets, node.value
+            elif isinstance(node, (ast.AnnAssign, ast.NamedExpr)):
+                targets, value = [node.target], node.value
+            else:
+                continue
+            if value is not None and passes(value, bound):
+                yield from (t.id for t in targets if isinstance(t, ast.Name))
 
     changed = True
     while changed:
@@ -2931,12 +2990,12 @@ def _listing_answer_passers(path) -> dict:
         for name, function in functions.items():
             if name in found:
                 continue
-            bound = {
-                target.id for node in ast.walk(function)
-                if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None and reader_call(node.value)
-                for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
-                if isinstance(target, ast.Name)
-            }
+            bound = set()
+            while True:
+                more = set(bindings(function, bound)) - bound
+                if not more:
+                    break
+                bound |= more
             if any(
                 isinstance(node, ast.Return) and node.value is not None and passes(node.value, bound)
                 for node in ast.walk(function)
@@ -2944,6 +3003,58 @@ def _listing_answer_passers(path) -> dict:
                 found.add(name)
                 changed = True
     return {name: functions[name] for name in found}
+
+
+def _listing_answer_passers(path) -> dict:
+    """`_answer_passers` over the module at `path`."""
+    return _answer_passers(ast.parse(Path(path).read_text(encoding="utf-8")))
+
+
+# One function body per way an answer reaches a return: each child the
+# `_ANSWER_CHILDREN` table names, each base, and each binding route.
+_PASSING_FORMS = {
+    "BoolOp": "return reader() or None",
+    "BoolOp, a later operand": "return cached or reader()",
+    "NamedExpr": "return (records := reader())",
+    "IfExp": "return None if cached else reader()",
+    "Await": "return await reader()",
+    "Name": "return UNREADABLE_LISTING",
+    "Call": "return reader()",
+    "Call, a lambda by position": "return retry(lambda: reader())",
+    "Call, a lambda by keyword": "return retry(task=lambda: reader() or None)",
+    "bound by assignment": "records = reader()\n    return records",
+    "bound by :=": "if (records := reader()) is None:\n        pass\n    return records",
+    "bound through another name": "first = reader()\n    second = first\n    return second",
+}
+
+
+class TestTheListingAnswerWalkFollowsEveryForm:
+    """The walk that finds the functions passing a listing reader's answer
+    places every expression class of the grammar, and finds a wrapper
+    written in each form that passes the answer."""
+
+    def test_every_expression_class_is_placed_once(self):
+        tables = [set(_ANSWER_CHILDREN), set(_ANSWER_BASES), set(_ANSWER_TRANSFORMED)]
+        assert sum(map(len, tables)) == len(set().union(*tables)), tables  # no class twice
+        assert set().union(*tables) == _grammar_expression_classes()
+
+    def test_every_passing_child_has_a_form(self):
+        assert set(_ANSWER_CHILDREN) | set(_ANSWER_BASES) <= set(_PASSING_FORMS)
+
+    @pytest.mark.parametrize("form", sorted(_PASSING_FORMS))
+    def test_a_wrapper_in_each_form_is_found(self, form):
+        source = (
+            "def reader():\n    return UNREADABLE_LISTING\n\n\n"
+            f"async def wrapper(cached):\n    {_PASSING_FORMS[form]}\n"
+        )
+        assert set(_answer_passers(ast.parse(source))) == {"reader", "wrapper"}, source
+
+    def test_control_a_transformed_answer_is_not_passed(self):
+        source = (
+            "def reader():\n    return UNREADABLE_LISTING\n\n\n"
+            "def wrapper(cached):\n    records = len(reader())\n    return [records, reader()]\n"
+        )
+        assert set(_answer_passers(ast.parse(source))) == {"reader"}
 
 
 def _union_admits_str(annotation) -> bool:
