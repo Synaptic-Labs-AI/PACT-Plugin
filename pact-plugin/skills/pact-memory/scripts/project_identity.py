@@ -287,11 +287,32 @@ def _holds_include_section(text: str) -> bool:
                 break
             if rest[1:name_end].lower().split(".")[0] in ("include", "includeif"):
                 return True
-            close = rest.find("]", name_end)
-            if close < 0:
+            close = _header_end(rest, name_end)
+            if close is None:
                 break
             rest = rest[close + 1:]
     return False
+
+
+def _header_end(header: str, name_end: int) -> Optional[int]:
+    """The index of the `]` that closes `header`, whose name ends at
+    `name_end`, read as git reads a header (`get_extended_base_var`): after
+    the name and git's whitespace, a `"`-quoted subsection in which a
+    backslash takes the next character as it is, then `]` at once. None when
+    git would refuse the header, which refuses the whole file."""
+    if header[name_end] == "]":
+        return name_end
+    index = name_end
+    while index < len(header) and header[index] in " \t\r":
+        index += 1
+    if index == len(header) or header[index] != '"':
+        return None
+    index += 1
+    while index < len(header) and header[index] != '"':
+        index += 2 if header[index] == "\\" else 1
+    if index + 1 >= len(header) or header[index + 1] != "]":
+        return None
+    return index + 1
 
 
 def _absent_origin(git_dir) -> "OriginRead":

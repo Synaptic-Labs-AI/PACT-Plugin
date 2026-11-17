@@ -1562,3 +1562,51 @@ def test_a_newline_in_a_repo_path_does_not_forge_a_warning_line(
         for r in records
     ), records
     assert all("\n" not in r for r in records), records
+
+
+# ---------------------------------------------------------------------------
+# Include scan: a quoted subsection is read as git reads it
+# ---------------------------------------------------------------------------
+
+_BS = chr(92)
+_QUOTE = chr(34)
+
+# Header lines whose quoted subsection holds a `]`, a `[`, a backslash or a
+# quote, or sits after whitespace. git's own parse is the oracle for each.
+_QUOTED_SUBSECTION_FORMS = {
+    "close bracket inside": '[remote "a]b"][include]\n\tpath = inc\n',
+    "close bracket inside, includeIf after": '[remote "a]b"][includeIf "gitdir:x/"]\n\tpath = inc\n',
+    "escaped quote then bracket": f'[remote "a{_BS}{_QUOTE}]"][include]\n\tpath = inc\n',
+    "escaped backslash ends it": f'[remote "a{_BS}{_BS}"][include]\n\tpath = inc\n',
+    "escaped bracket": f'[remote "a{_BS}]"][include]\n\tpath = inc\n',
+    "include text inside only": '[remote "[include]"]\n\turl = x\n',
+    "include text after an escaped quote only": f'[remote "a{_BS}{_QUOTE}][include]"]\n\turl = x\n',
+    "spaces before the quote": '[remote   "a]b"][include]\n\tpath = inc\n',
+    "tab before the quote": '[remote\t"a]b"] [include]\n\tpath = inc\n',
+    "bracket inside, nothing after": '[remote "a]b"]\n\turl = x\n',
+    "no quote after the space": "[remote a][include]\n\tpath = inc\n",
+    "unterminated quote": '[remote "a][include]\n\tpath = inc\n',
+}
+
+
+@pytest.mark.parametrize("form", list(_QUOTED_SUBSECTION_FORMS))
+def test_the_include_scan_reads_a_quoted_subsection_as_git_does(tmp_path, form):
+    """Where git reads the file, the scan finds an include section exactly
+    when git lists a key in an `include` or `includeIf` section; where git
+    refuses it, the origin read is unavailable whatever the scan says."""
+    repo = tmp_path / "proj"
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    git_dir = (repo / ".git").resolve()
+    config = git_dir / "config"
+    config.write_bytes(config.read_bytes() + _QUOTED_SUBSECTION_FORMS[form].encode())
+    listed = subprocess.run(
+        ["git", "config", "--file", str(config), "--list", "--name-only"],
+        capture_output=True, text=True,
+    )
+    if listed.returncode != 0:
+        assert pi.read_origin(git_dir).state == pi.ORIGIN_UNAVAILABLE
+        return
+    git_says = any(
+        name.split(".")[0] in ("include", "includeif") for name in listed.stdout.split()
+    )
+    assert pi._holds_include_section(pi.read_git_file(config)) == git_says, form
