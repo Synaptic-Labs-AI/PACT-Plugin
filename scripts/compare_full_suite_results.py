@@ -529,15 +529,24 @@ def _parse_junit(path: Path) -> list[dict]:
     return cases
 
 
-def _reason_extra_lines(reasons: list[str], entry: str, kind: str) -> int:
-    """How many lines after an entry its reason continues over.
+# The log is read with str.splitlines, which breaks a line at each of these.
+_LINE_BREAK = re.compile("\r\n|[\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]")
+# pytest's junitxml.bin_xml_escape (9.2), which rewrites each character XML
+# cannot hold as the literal text '#xNN'; a test compares this copy with it.
+_JUNIT_ILLEGAL = re.compile(
+    "[^\u0009\u000a\u000d\u0020-\u007e\u0080-\ud7ff\ue000-\ufffd\U00010000-\U0010ffff]")
+# A JUnit xfail message split where the log reader splits: separators XML
+# keeps stay as they are, the others are written as their '#xNN' escape.
+_JUNIT_LINE_BREAK = re.compile("\r\n|[\n\r\x85\u2028\u2029]|#x0B|#x0C|#x1C|#x1D|#x1E")
 
-    pytest prints a skip or xfail reason whole, one log line per reason line,
-    with no indentation (measured on 9.2 under CI=true, serial and xdist). A
-    continuation line can therefore start like a new entry; the reason, known
-    from the run's own evidence, says how many lines to pass over.
-    """
-    counts = {reason.count("\n") for reason in reasons}
+
+def _junit_escape(text: str) -> str:
+    return _JUNIT_ILLEGAL.sub(
+        lambda match: (f"#x{ord(match.group()):02X}" if ord(match.group()) <= 0xFF
+                       else f"#x{ord(match.group()):04X}"), text)
+
+
+def _one_extra_count(counts: set[int], entry: str, kind: str) -> int:
     if not counts:
         raise EvidenceError(f"a {kind} summary entry has no reason in the run's evidence: "
                             f"{entry!r}")
@@ -545,6 +554,49 @@ def _reason_extra_lines(reasons: list[str], entry: str, kind: str) -> int:
         raise EvidenceError(f"a {kind} summary entry matches reasons of different "
                             f"lengths: {entry!r}")
     return counts.pop()
+
+
+def _skip_extra_lines(entry: str, skip_reasons: list[str]) -> int:
+    """How many log lines after a SKIPPED entry its reason continues over.
+
+    The run record holds each skip reason as pytest prints it, and pytest
+    prints a reason whole and unindented, so it continues over one log line
+    per line break the log reader splits at (measured on 9.2 under CI=true,
+    serial and xdist). A continuation line can therefore start like an entry.
+    """
+    return _one_extra_count(
+        {len(_LINE_BREAK.findall(reason)) for reason in skip_reasons
+         if entry.endswith(": " + _LINE_BREAK.split(reason, maxsplit=1)[0])
+         or not reason and entry.endswith(":")}, entry, "SKIPPED")
+
+
+def _xfail_extra_lines(entry: str, following: list[str],
+                       xfail_reasons: dict[str, list[str]]) -> int:
+    """How many log lines after an XFAIL entry its reason continues over.
+
+    The terminal prints the xfail reason raw; junitxml writes it with a
+    leading 'reason: ' removed and every character XML cannot hold escaped
+    (measured on 9.2). So the terminal lines are put in junitxml's form and
+    compared with the JUnit message, split where the log reader splits.
+    """
+    rest = re.sub(r"^at (?:setup|call|teardown) of ", "", entry[len("XFAIL "):])
+    counts = set()
+    for node_id, reasons in xfail_reasons.items():
+        for reason in reasons:
+            if rest == node_id:
+                if not reason:
+                    counts.add(0)
+                continue
+            if not rest.startswith(node_id + " - "):
+                continue
+            segments = _JUNIT_LINE_BREAK.split(reason)
+            lines = [rest[len(node_id) + 3:], *following[:len(segments) - 1]]
+            if len(lines) != len(segments):
+                continue
+            lines[0] = lines[0].removeprefix("reason: ")
+            if [_junit_escape(line) for line in lines] == segments:
+                counts.add(len(segments) - 1)
+    return _one_extra_count(counts, entry, "XFAIL")
 
 
 def _xpass_lines(summary: list[str], skip_reasons: list[str],
@@ -571,17 +623,9 @@ def _xpass_lines(summary: list[str], skip_reasons: list[str],
         if line.startswith("XPASS "):
             payloads.append(line[len("XPASS "):])
         elif line.startswith("SKIPPED "):
-            index += _reason_extra_lines(
-                [reason for reason in skip_reasons
-                 if line.endswith(": " + reason.partition("\n")[0])
-                 or not reason and line.endswith(":")], line, "SKIPPED")
+            index += _skip_extra_lines(line, skip_reasons)
         elif line.startswith("XFAIL "):
-            rest = re.sub(r"^at (?:setup|call|teardown) of ", "", line[len("XFAIL "):])
-            index += _reason_extra_lines(
-                [reason for node_id, reasons in xfail_reasons.items()
-                 for reason in reasons
-                 if rest == (node_id + " - " + reason.partition("\n")[0]
-                             if reason else node_id)], line, "XFAIL")
+            index += _xfail_extra_lines(line, summary[index:], xfail_reasons)
     return payloads
 
 
@@ -658,7 +702,9 @@ def _validate_skip_sites(record: dict, cases: list[dict],
                 or not isinstance(site.get("reason"), str)):
             raise EvidenceError("invalid skip site")
         count = _integer(site, "count", minimum=1)
-        recorded[(site["file"], site["reason"])] += count
+        # The record holds the reason as pytest printed it; JUnit holds it as
+        # junitxml escaped it, so the record side is escaped to compare.
+        recorded[(site["file"], _junit_escape(site["reason"]))] += count
     if sum(recorded.values()) != record["skipped"]:
         raise EvidenceError("skip_sites do not account for the record's skips")
     emitted = Counter()

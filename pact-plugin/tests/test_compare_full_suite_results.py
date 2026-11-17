@@ -1774,6 +1774,154 @@ def test_an_xpass_reason_continuing_with_an_xpass_line_is_refused(tmp_path):
                                 "record xpassed=1"}], comparison
 
 
+def test_the_copied_junit_escape_matches_pytests_own():
+    """The comparator rewrites a terminal reason the way junitxml rewrites it
+    before matching; every code point must come out as pytest writes it."""
+    from _pytest.junitxml import bin_xml_escape
+    text = "".join(map(chr, range(0x110000)))
+    assert comparator._junit_escape(text) == bin_xml_escape(text)
+
+
+def test_the_log_line_breaks_are_the_ones_splitlines_uses():
+    """A reason continues over one log line per break the log reader splits at."""
+    text = "".join(map(chr, range(0x110000))) + "\r\nend"
+    assert comparator._LINE_BREAK.split(text) == text.splitlines()
+
+
+# Each reason as the terminal prints it (raw), as junitxml writes it (the
+# leading 'reason: ' removed, characters XML cannot hold escaped), and the
+# log text the entry occupies (measured on pytest 9.2, CI=true, serial and
+# -n 2). The log reader splits that text where str.splitlines does.
+JUNIT_REWRITTEN_REASONS = {
+    "reason-prefix": ("xfail", "legacy wording", "reason: legacy wording"),
+    "control-character": ("xfail", f"bell#x07here\nXPASS {ALPHA}",
+                          f"bell\x07here\nXPASS {ALPHA}"),
+    "vertical-tab": ("xfail", f"vt#x0BXPASS {ALPHA}", f"vt\x0bXPASS {ALPHA}"),
+    "line-separator": ("xfail", f"ls XPASS {ALPHA}", f"ls XPASS {ALPHA}"),
+    "skip-form-feed": ("skip", f"ff#x0CXPASS {ALPHA}", f"ff\x0cXPASS {ALPHA}"),
+}
+
+
+def _junit_rewritten_run(root, name, run_id, kind, junit_text, terminal_text):
+    """A good run with one real xpass whose skip or xfail reason junitxml
+    rewrote: the record and the log carry the reason raw, JUnit its form."""
+    directory = make_run(root, name, run_id, nodes=[ALPHA, BETA, GAMMA],
+                         cases=[case(ALPHA, "xpass", "unexpected"),
+                                case(BETA, kind, "JUNIT-PLACEHOLDER"), case(GAMMA)])
+    junit = directory / "artifact" / ".full-suite-results.xml"
+    junit.write_text(junit.read_text(encoding="utf-8").replace(
+        "JUNIT-PLACEHOLDER", junit_text.replace("\n", "&#10;")), encoding="utf-8")
+    record_path = directory / "artifact" / ".full-run-record.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    for site in record["skip_sites"]:
+        if site["reason"] == "JUNIT-PLACEHOLDER":
+            site["reason"] = terminal_text
+    write_json(record_path, record)
+    entry = (f"SKIPPED [1] tests/test_example.py:7: {terminal_text}" if kind == "skip"
+             else f"XFAIL {BETA} - {terminal_text}")
+    log = directory / "run.log"
+    lines = log.read_text(encoding="utf-8").split("\n")
+    index = next(index for index, line in enumerate(lines)
+                 if line.endswith(SHORT_SUMMARY_TEXT)) + 1
+    # One physical log line per '\n' the terminal wrote; any other break stays
+    # inside the line, where the log reader splits it.
+    lines[index:index] = [actions_line(part) for part in entry.split("\n")]
+    log.write_text("\n".join(lines), encoding="utf-8")
+    return directory
+
+
+@pytest.mark.parametrize("shape", list(JUNIT_REWRITTEN_REASONS))
+def test_a_reason_junitxml_rewrote_is_still_matched(tmp_path, shape):
+    """A reason junitxml stripped or escaped is put in junitxml's form on the
+    terminal side, so the run is compared as good with its one real xpass."""
+    kind, junit_text, terminal_text = JUNIT_REWRITTEN_REASONS[shape]
+    first = _junit_rewritten_run(tmp_path, "one", 100, kind, junit_text, terminal_text)
+    second = _junit_rewritten_run(tmp_path, "two", 101, kind, junit_text, terminal_text)
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert comparison["status"] == "identical", comparison
+    assert [run["totals"]["xpassed"] for run in read_runs(output)] == [1, 1]
+
+
+def test_an_xfail_reason_its_junit_form_does_not_hold_is_refused(tmp_path):
+    first = _junit_rewritten_run(tmp_path, "one", 100, "xfail", "legacy wording",
+                                 "reason: legacy wording")
+    second = _junit_rewritten_run(tmp_path, "two", 101, "xfail", "legacy wording",
+                                  "other wording")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two", "error": "a XFAIL summary entry has no reason in the run's "
+                                f"evidence: 'XFAIL {BETA} - other wording'"}], comparison
+
+
+JUNIT_REWRITE_RIG = """\
+import pytest
+
+
+@pytest.mark.xfail(reason="reason: legacy wording")
+def test_prefixed():
+    assert False
+
+
+@pytest.mark.xfail(reason="bell\\x07here\\nXPASS test_rig.py::test_xpass")
+def test_control():
+    assert False
+
+
+@pytest.mark.xfail(reason="vt\\x0bXPASS test_rig.py::test_xpass")
+def test_vertical_tab():
+    assert False
+
+
+@pytest.mark.xfail(reason="ls\\u2028XPASS test_rig.py::test_xpass")
+def test_line_separator():
+    assert False
+
+
+@pytest.mark.skip(reason=SKIP_REASON)
+def test_skip():
+    pass
+
+
+@pytest.mark.xfail(reason="unexpected")
+def test_xpass():
+    pass
+"""
+JUNIT_REWRITE_SKIP_REASON = "ff\x0cXPASS test_rig.py::test_xpass"
+
+
+@pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
+def test_real_reasons_junitxml_rewrites_are_matched(tmp_path, parallel):
+    """Real pytest under CI=true: xfail reasons with a 'reason: ' prefix, a
+    control character and line breaks splitlines honours, and a skip reason
+    with a form feed. The comparator reads the JUnit xfail reasons, the skip
+    reason as the run record holds it, and only the one real XPASS entry."""
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "test_rig.py").write_text(
+        f"SKIP_REASON = {JUNIT_REWRITE_SKIP_REASON!r}\n\n" + JUNIT_REWRITE_RIG,
+        encoding="utf-8")
+    junit = tmp_path / "junit.xml"
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-ra", "-p", "no:cacheprovider",
+         "-p", "no:randomly", f"--junitxml={junit}", *parallel],
+        cwd=rig, env={**child_env(), "CI": "true"}, capture_output=True, text=True,
+        timeout=300, check=False)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    lines = [ci_contract.WORKFLOW_TEST_CMD, *completed.stdout.splitlines()]
+    report = comparator._test_text_range(lines, len(lines) - 1)
+    summary = [lines[index] for index in comparator._short_summary_range(lines, report)]
+    cases = comparator._parse_junit(junit)
+    xfail_reasons = {f"test_rig.py::{case['name']}": [case["reason"]]
+                     for case in cases if case["outcome"] == "xfail"}
+    assert xfail_reasons["test_rig.py::test_prefixed"] == ["legacy wording"], xfail_reasons
+    assert "#x07" in xfail_reasons["test_rig.py::test_control"][0], xfail_reasons
+    assert sum(line.startswith("XPASS ") for line in summary) == 5, summary
+    assert comparator._xpass_lines(summary, [JUNIT_REWRITE_SKIP_REASON], xfail_reasons) == [
+        "test_rig.py::test_xpass - unexpected"], summary
+
+
 CI_SHAPE_RIG = """\
 import pytest
 

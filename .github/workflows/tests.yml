@@ -613,12 +613,17 @@ jobs:
       # them from N when each process starts its session, and again when a
       # process shuffles the tests it collected (each xdist worker; the
       # controller collects none), so a seeded run's random draws also depend
-      # on N. The flag is there so the seed varies the order and not the
-      # reseeding: without it the plugin would also reseed before every test's
-      # setup, call and teardown, which an ordered run (plugin blocked) never
-      # does, so a shuffled-versus-ordered difference could come from that
-      # reseeding instead of from the order. Carried-over random state is a
-      # side effect, not the aim.
+      # on N. Every process gets the same N, so every xdist worker starts from
+      # the same random state and makes the same first draws from the global
+      # generator, which an ordered run's workers never do. A test that picks a
+      # port or a temporary name from that generator could therefore collide
+      # across workers only in a seeded run, and the comparator would report
+      # the collision as an order effect. The flag is there so the seed varies
+      # the order and not the reseeding: without it the plugin would also
+      # reseed before every test's setup, call and teardown, which an ordered
+      # run (plugin blocked) never does, so a shuffled-versus-ordered
+      # difference could come from that reseeding instead of from the order.
+      # Carried-over random state is a side effect, not the aim.
       - name: Run test suite
         working-directory: pact-plugin
         run: python -m pytest -ra -n 4 --dist "$DIST" ${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed} --junitxml="$GITHUB_WORKSPACE/.full-suite-results.xml"
