@@ -676,23 +676,36 @@ _UNPINNABLE_REMEDIES = {
 _REDIRECT_REMEDY = (
     "Check that git can answer for this checkout (`git rev-parse --git-dir`, "
     "`git worktree list`), or run from the repository the `.git` points at. "
-    "A linked worktree you moved is re-registered by running `git worktree "
-    "repair` in it; the user runs that, not an agent. A `git init "
-    "--separate-git-dir` layout of your own is a user decision: see the "
-    "pact-memory skill."
+    "A `git init --separate-git-dir` layout of your own is a user decision: "
+    "see the pact-memory skill."
+)
+
+# The repair sentence prints only when git's listing shows the move
+# (REDIRECT_MOVED): `git worktree repair` run in a COPY of a worktree, or in
+# a forged pointer at a live one, re-registers that directory and
+# unregisters the honest checkout.
+_REDIRECT_MOVED_REMEDY = (
+    _REDIRECT_REMEDY + " A linked worktree you moved is re-registered by "
+    "running `git worktree repair` in it; the user runs that, not an agent."
 )
 
 
-def _decline_remedy(record: Optional[dict]) -> Optional[str]:
+def _decline_remedy(
+    record: Optional[dict], cause_detail: Optional[str] = None
+) -> Optional[str]:
     """The remedy a decline cause prints, or None when the cause has none:
     one cause, one remedy, on every verb and route that reports it.
 
-    A redirect names its marker (`_REDIRECT_REMEDY`); a decline that names
-    the override file that would fix it offers that file; any other cause
-    takes its own `_UNPINNABLE_REMEDIES` entry.
+    A redirect names its marker (`_REDIRECT_REMEDY`), and adds the repair
+    sentence only when its detail is the moved worktree's
+    (`_REDIRECT_MOVED_REMEDY`); a decline that names the override file that
+    would fix it offers that file; any other cause takes its own
+    `_UNPINNABLE_REMEDIES` entry.
     """
     token = (record or {}).get("reason")
     if token == "gitfile_redirect":
+        if cause_detail == _REDIRECT_CAUSE_DETAILS[REDIRECT_MOVED]:
+            return _REDIRECT_MOVED_REMEDY
         return _REDIRECT_REMEDY
     override_path = (record or {}).get("override_path")
     if override_path is not None:
@@ -735,7 +748,7 @@ def _warn_declined(
         cause = f"{cause}; {cause_detail}"
     if detail:
         cause = f"{cause} ({detail})"
-    remedy = _decline_remedy(record)
+    remedy = _decline_remedy(record, cause_detail)
     logger.warning(
         "%s, so no project id was derived.%s Run the `project-id show` verb "
         "to inspect the detected identity.",
@@ -1662,10 +1675,10 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
 
 
 
-def _listed_worktree_toplevels(
+def _listed_worktree_records(
     start, *, git_dir: Optional[Path] = None
-) -> "Optional[set | str]":
-    """Every toplevel `git worktree list` reports for `start`'s repository.
+) -> "Optional[List[List[str]] | str]":
+    """Every record `git worktree list` reports for `start`'s repository.
 
     With `git_dir`, the listing is of THAT repository (`--git-dir`), which is
     the only form that reaches a submodule's own worktrees: run from a
@@ -1674,12 +1687,29 @@ def _listed_worktree_toplevels(
     `None` when git cannot enumerate — a failed ANSWER, not a failed
     verification, so callers must not treat it as proof of a redirect.
     `UNREADABLE_LISTING` when git printed a listing PACT could not read
-    whole (`_worktree_records`); that is no toplevel set either.
+    whole (`_worktree_records`); that is no record list either.
     """
     target = ("--git-dir", _where(git_dir)) if git_dir is not None else ("-C", _where(start))
     return _detection_answer(
-        ("worktree list", target), lambda: _ask_worktree_toplevels(start, git_dir)
+        ("worktree list", target), lambda: _ask_worktree_records(start, git_dir)
     )
+
+
+def _worktree_toplevels(records) -> "Optional[set | str]":
+    """The resolved path of every record; `None` and `UNREADABLE_LISTING`
+    are returned as they are. A path that will not resolve is skipped."""
+    if records is None or records == UNREADABLE_LISTING:
+        return records
+    toplevels = set()
+    for record in records:
+        for field in record:
+            if not field.startswith("worktree "):
+                continue
+            try:
+                toplevels.add(Path(field[len("worktree "):]).resolve())
+            except (OSError, RuntimeError):
+                continue
+    return toplevels
 
 
 # git's exit status for a usage error (parse-options), which is how a git
@@ -1811,7 +1841,7 @@ def _plain_records_kept(records: List[List[str]]) -> Optional[List[List[str]]]:
     return kept
 
 
-def _ask_worktree_toplevels(start, git_dir: Optional[Path]) -> "Optional[set | str]":
+def _ask_worktree_records(start, git_dir: Optional[Path]) -> "Optional[List[List[str]] | str]":
     prefix = (
         ["--git-dir", str(git_dir)] if git_dir is not None
         else ["-C", str(start)] if start is not None
@@ -1823,16 +1853,7 @@ def _ask_worktree_toplevels(start, git_dir: Optional[Path]) -> "Optional[set | s
     listings = _DETECTION_LISTINGS.get()
     if listings is not None and git_dir is not None:
         listings[str(git_dir)] = records
-    toplevels = set()
-    for record in records:
-        for field in record:
-            if not field.startswith("worktree "):
-                continue
-            try:
-                toplevels.add(Path(field[len("worktree "):]).resolve())
-            except (OSError, RuntimeError):
-                continue
-    return toplevels
+    return records
 
 
 def _verified_worktree_roots(
@@ -1905,6 +1926,7 @@ REDIRECT_NO_GIT_DIR = "no_git_dir"
 REDIRECT_UNRESOLVABLE = "unresolvable"
 REDIRECT_UNLISTABLE = "unlistable"
 REDIRECT_UNREADABLE_LISTING = "unreadable_listing"
+REDIRECT_MOVED = "moved"
 
 # Each cause's `cause_detail`: what was observed, and nothing more.
 _REDIRECT_CAUSE_DETAILS = {
@@ -1918,6 +1940,10 @@ _REDIRECT_CAUSE_DETAILS = {
     REDIRECT_UNREADABLE_LISTING: (
         "git listed that repository's worktrees, but PACT could not read a "
         "path in the listing whole"
+    ),
+    REDIRECT_MOVED: (
+        "git lists the worktree entry its `.git` names at another path, which "
+        "git marks prunable, and not at this checkout"
     ),
 }
 
@@ -1959,11 +1985,14 @@ def _worktree_redirect_cause(
     `REDIRECT_UNLISTED` (git's listing does not hold the checkout),
     `REDIRECT_NO_GIT_DIR` (git gave no git dir), `REDIRECT_UNRESOLVABLE` (a
     path would not resolve), `REDIRECT_UNLISTABLE` (no listing:
-    `_listed_worktree_toplevels` is None) or `REDIRECT_UNREADABLE_LISTING`
+    `_listed_worktree_records` is None) or `REDIRECT_UNREADABLE_LISTING`
     (git printed a listing PACT could not read whole:
-    `_listed_worktree_toplevels` is `UNREADABLE_LISTING`). A git that does
-    not answer with a toplevel is not refused here: that shape has no
-    working tree, and `_root_guard` declines it `no_working_tree`.
+    `_listed_worktree_records` is `UNREADABLE_LISTING`). An unlisted
+    checkout whose worktree entry the same listing holds at another path
+    marked prunable is `REDIRECT_MOVED` instead (`_entry_listed_as_moved`),
+    the one cause whose remedy names `git worktree repair`. A git that does
+    not answer with a toplevel is not refused here: that shape has no working
+    tree, and `_root_guard` declines it `no_working_tree`.
     """
     if asked_root is None or common_dir is None:
         return None
@@ -1984,10 +2013,10 @@ def _worktree_redirect_cause(
     # LISTED BY THE REPOSITORY THE COMMON DIR BELONGS TO: a submodule's
     # admin dir sits inside the superproject's `.git`, so a listing run from
     # a directory would report the SUPERPROJECT's worktrees.
-    listed = _listed_worktree_toplevels(None, git_dir=common_path)
-    if listed is None:
+    records = _listed_worktree_records(None, git_dir=common_path)
+    if records is None:
         return REDIRECT_UNLISTABLE
-    if listed == UNREADABLE_LISTING:
+    if records == UNREADABLE_LISTING:
         return REDIRECT_UNREADABLE_LISTING
     if toplevel is None:
         toplevel_raw = _git_rev_parse(str(asked_root), "--show-toplevel")
@@ -1998,7 +2027,36 @@ def _worktree_redirect_cause(
         toplevel = Path(toplevel).resolve()
     except (OSError, RuntimeError, ValueError):
         return REDIRECT_UNRESOLVABLE
-    return REDIRECT_UNLISTED if toplevel not in listed else None
+    if toplevel in _worktree_toplevels(records):
+        return None
+    return REDIRECT_MOVED if _entry_listed_as_moved(git_dir, records) else REDIRECT_UNLISTED
+
+
+def _entry_listed_as_moved(git_dir: Path, records: List[List[str]]) -> bool:
+    """Whether `records`, git's listing of the repository, mark `prunable`
+    the path that the worktree entry at `git_dir` records: git lists a
+    worktree moved with `mv` at its old path and marks it prunable.
+
+    Evidence git does not give shows no move: a git that prints no
+    `prunable` line, a listing read without `-z` (a gone path is dropped
+    there), and an entry whose `gitdir` file cannot be read or whose path
+    will not resolve all answer False, so the repair sentence is not
+    printed.
+    """
+    try:
+        text = project_identity.read_git_file(Path(git_dir) / "gitdir")
+        if text is None:
+            return False
+        # A relative `gitdir` is relative to the entry; joining an absolute
+        # one leaves it as it is.
+        recorded = (Path(git_dir) / project_identity.worktree_admin_gitdir(text)).parent.resolve()
+        return any(
+            Path(record[0][len("worktree "):]).resolve() == recorded
+            and any(field.startswith("prunable ") for field in record)
+            for record in records
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 def _cwd_or_none() -> Optional[Path]:
@@ -4047,7 +4105,7 @@ class PACTMemory:
         reason = self._decline_reason or {}
         ignored = self._override_ignored or {}
         if reason.get("reason"):
-            return _decline_remedy(reason)
+            return _decline_remedy(reason, getattr(self, "_decline_detail", None))
         if ignored.get("path"):
             return _pin_remedy(ignored["path"])
         return (

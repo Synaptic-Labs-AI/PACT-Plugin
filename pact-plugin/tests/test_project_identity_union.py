@@ -1293,7 +1293,7 @@ class TestReviewDbGateWorktreeRoots:
     worktree verified against the main root alone would be EXCLUDED — reads
     collapse to the canonical id and the operator is told to rekey their own
     rows. The caller builds the set from `git worktree list` run AT the
-    identity root (`_listed_worktree_toplevels`), deliberately NOT from
+    identity root (`_verified_worktree_roots`), deliberately NOT from
     `backlog.checkout_roots()`: that helper resolves against the PROCESS, so
     a declared session would append another repository's checkouts.
     """

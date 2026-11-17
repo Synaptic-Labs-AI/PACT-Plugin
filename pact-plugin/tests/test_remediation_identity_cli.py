@@ -1441,6 +1441,60 @@ class TestARedirectsRemedyIsItsMarker:
         assert not (admin_root / "pact-project-id").exists()
 
 
+class TestTheRepairSentencePrintsOnlyForAMovedWorktree:
+    """The redirect remedy names `git worktree repair` only when git lists
+    the checkout's worktree entry at another path and marks it prunable, as
+    for a worktree moved with `mv`. Catches the sentence printing for a
+    copied worktree, where running the repair would unregister the honest
+    original, and the save refusal, its warning and the `show` warning
+    disagreeing about one cause."""
+
+    def _printed(self, checkout, store, monkeypatch, capfd, caplog) -> list:
+        from scripts import memory_api
+
+        monkeypatch.chdir(checkout)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(checkout))
+        texts = []
+        with caplog.at_level("WARNING", logger=memory_api.__name__):
+            code, envelope = _cli(
+                ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+            )
+            assert code == 1, envelope
+            texts += [envelope["message"], " ".join(r.getMessage() for r in caplog.records)]
+            caplog.clear()
+            code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+            assert code == 0, show
+            assert show["result"]["decline_reason"]["reason"] == "gitfile_redirect", show
+            texts.append(" ".join(r.getMessage() for r in caplog.records))
+        return texts
+
+    def test_a_moved_worktree_prints_the_repair_sentence(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        from fixtures.identity_git import make_worktree
+        from scripts import memory_api
+
+        main = make_repo(identity_env / "main")
+        moved = identity_env / "moved"
+        make_worktree(main, identity_env / "wt").rename(moved)
+        for text in self._printed(moved, store, monkeypatch, capfd, caplog):
+            assert memory_api._REDIRECT_MOVED_REMEDY in " ".join(text.split()), text
+
+    def test_a_copied_worktree_does_not(self, identity_env, store, monkeypatch, capfd, caplog):
+        import shutil
+
+        from fixtures.identity_git import make_worktree
+        from scripts import memory_api
+
+        main = make_repo(identity_env / "main")
+        original = make_worktree(main, identity_env / "wt")
+        copy = identity_env / "copy"
+        shutil.copytree(original, copy, symlinks=True)
+        for text in self._printed(copy, store, monkeypatch, capfd, caplog):
+            assert memory_api._REDIRECT_REMEDY in " ".join(text.split()), text
+            assert "git worktree repair" not in text, text
+
+
 class TestTheRekeyRefusalOffersOnlyAWorkablePin:
     """With no canonical identity, `rekey` names the remedy that works here.
 

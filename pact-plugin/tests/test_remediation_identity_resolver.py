@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import logging
+import re
 from pathlib import Path
 
 import pytest
@@ -2897,6 +2898,197 @@ class TestTheCwdMarkerDeclinesAMarkerGitCannotAnswerFor:
         assert answers and {answer[1] for answer in answers.values()} == {"no_working_tree"}, answers
 
 
+def _listing_answer_passers(path) -> dict:
+    """{name: def} for every function in the module at `path` that can return
+    a worktree-listing reader's answer unchanged: one that returns
+    `UNREADABLE_LISTING`, a direct call to such a function, a name bound to
+    one, a ternary branch holding one, or a call handed a lambda returning
+    one. Followed to a fixed point, so every wrapper of a reader is found."""
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    functions = {
+        node.name: node for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    found = set()
+
+    def reader_call(value):
+        return isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id in found
+
+    def passes(value, bound):
+        return (
+            (isinstance(value, ast.Name) and (value.id == "UNREADABLE_LISTING" or value.id in bound))
+            or reader_call(value)
+            or (isinstance(value, ast.Call) and any(
+                isinstance(argument, ast.Lambda) and reader_call(argument.body) for argument in value.args
+            ))
+            or (isinstance(value, ast.IfExp) and (passes(value.body, bound) or passes(value.orelse, bound)))
+        )
+
+    changed = True
+    while changed:
+        changed = False
+        for name, function in functions.items():
+            if name in found:
+                continue
+            bound = {
+                target.id for node in ast.walk(function)
+                if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None and reader_call(node.value)
+                for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
+                if isinstance(target, ast.Name)
+            }
+            if any(
+                isinstance(node, ast.Return) and node.value is not None and passes(node.value, bound)
+                for node in ast.walk(function)
+            ):
+                found.add(name)
+                changed = True
+    return {name: functions[name] for name in found}
+
+
+def _union_admits_str(annotation) -> bool:
+    """Whether the return annotation `annotation` admits `str` as one of its
+    union members (`str`, `X | str`, `Optional[X | str]`, `Union[X, str]`,
+    a string holding any of them). A member nested inside another type
+    (`List[str]`) is not one."""
+    if isinstance(annotation, ast.Constant) and isinstance(annotation.value, str):
+        annotation = ast.parse(annotation.value, mode="eval").body
+    if isinstance(annotation, ast.Name):
+        return annotation.id == "str"
+    if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+        return _union_admits_str(annotation.left) or _union_admits_str(annotation.right)
+    if isinstance(annotation, ast.Subscript) and isinstance(annotation.value, ast.Name):
+        members = annotation.slice.elts if isinstance(annotation.slice, ast.Tuple) else [annotation.slice]
+        if annotation.value.id in ("Optional", "Union"):
+            return any(_union_admits_str(member) for member in members)
+    return False
+
+
+# Words that, as advice, change a `.git` marker.
+_GIT_CHANGING_VERBS = frozenset(
+    {"remove", "delete", "rm", "rename", "mv", "move", "rewrite", "replace", "edit", "point", "unlink"}
+)
+# Words that may stand before the verb of an instruction without changing it.
+_INSTRUCTION_LEAD_WORDS = frozenset(
+    {"and", "or", "then", "either", "just", "please", "simply", "first", "instead", "you", "also"}
+)
+# Words after which a verb is advice: `to rename`, `can be removed`.
+_MODAL_WORDS = frozenset({"to", "can", "could", "should", "must", "may", "might", "please"})
+_GIT_MARKER = re.compile(r"(?<![\w-])\.git(?![\w-])")
+
+
+def _verb_forms(verb: str) -> set:
+    """The base form and the past participle of `verb`."""
+    participle = {"rewrite": "rewritten", "rm": "rmed", "mv": "mved"}.get(
+        verb, verb + "d" if verb.endswith("e") else verb + "ed"
+    )
+    return {verb, participle}
+
+
+_GIT_CHANGING_FORMS = {form for verb in _GIT_CHANGING_VERBS for form in _verb_forms(verb)}
+
+
+def _sentences(text: str) -> list:
+    """`text` split after every `.`, `!` or `?` followed by a space or the
+    end, outside backticks. No capital letter is required after the stop,
+    so a sentence opening with a backtick or a lower-case word, and an
+    abbreviation such as `e.g.`, only split more finely."""
+    text = " ".join(text.split())
+    sentences, start, quoted = [], 0, False
+    for index, char in enumerate(text):
+        if char == "`":
+            quoted = not quoted
+        elif char in ".!?" and not quoted and (index + 1 == len(text) or text[index + 1] == " "):
+            sentences.append(text[start:index + 1].strip())
+            start = index + 1
+    if text[start:].strip():
+        sentences.append(text[start:].strip())
+    return sentences
+
+
+def _advises_changing_a_git_marker(sentence: str) -> bool:
+    """Whether `sentence` advises an action on a `.git` marker: a clause
+    that names `.git` and opens with a verb that changes it (after `and`,
+    `or`, `then`, `you` and the like), or carries such a verb after `to`, a
+    modal or `be`, or a backticked command naming `.git` that holds such a
+    verb. A clause that only says what the `.git` names (`the repository
+    the `.git` points at`) advises nothing."""
+    for command in re.findall(r"`([^`]*)`", sentence):
+        if _GIT_MARKER.search(command) and set(command.lower().split()) & _GIT_CHANGING_FORMS:
+            return True
+    prose = re.sub(r"`[^`]*`", lambda match: " CODE " if _GIT_MARKER.search(match.group()) else " code ", sentence)
+    for clause in re.split(r"[;:,()]| and | or | then | but ", prose):
+        if not ("CODE" in clause or _GIT_MARKER.search(clause)):
+            continue
+        words = [word.strip(".!?'\"").lower() for word in clause.split()]
+        words = [word for word in words if word]
+        while words and words[0] in _INSTRUCTION_LEAD_WORDS:
+            words.pop(0)
+        if words and words[0] in _GIT_CHANGING_FORMS:
+            return True
+        for before, after in zip(words, words[1:]):
+            if before in _MODAL_WORDS | {"be"} and after in _GIT_CHANGING_FORMS:
+                return True
+    return False
+
+
+def _printed_identity_messages(monkeypatch, caplog) -> list:
+    """Every message a declined identity prints: the decline warning and
+    the refused write's message, for every decline cause the module names
+    and for none, each with no override path and with one inside a `.git`
+    directory, and with no refusal detail and with each detail a redirect
+    can carry."""
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.setattr(memory_api, "get_project_dir_from_session_record", lambda: None)
+    from scripts import project_identity as pi
+
+    details = [
+        None, *memory_api._REDIRECT_CAUSE_DETAILS.values(),
+        pi.FOREIGN_GIT_DIR_DETAIL, pi.CORE_WORKTREE_UNREAD_DETAIL,
+    ]
+    messages = []
+    for token in [*sorted(memory_api._DECLINE_CAUSES), None]:
+        for override_path in (None, "/home/u/repo/.git/pact-project-id"):
+            for detail in details:
+                record = {"reason": token, "source": "cwd", "override_path": override_path}
+                caplog.clear()
+                with caplog.at_level(logging.WARNING):
+                    memory_api._warn_declined(record if token else None, root="/home/u/repo", cause_detail=detail)
+                messages += [entry.getMessage() for entry in caplog.records]
+                instance = PACTMemory.__new__(PACTMemory)
+                instance._decline_reason = record if token else None
+                instance._override_ignored = None
+                instance._decline_detail = detail
+                messages.append(instance._unresolved_identity_message())
+    return messages
+
+
+def _moved_linked_worktree(base: Path) -> Path:
+    """A linked worktree moved with `mv`: git still lists its entry at the
+    old path, which git marks prunable, and its `.git` names that entry."""
+    main = make_repo(base / "main", remote="https://github.com/me/moved.git")
+    make_worktree(main, base / "linked", "wt")
+    (base / "linked").rename(base / "target")
+    return base / "target"
+
+
+def _copied_linked_worktree(base: Path) -> Path:
+    """A copy of a live linked worktree: git lists the original, not
+    prunable, and the copy's `.git` names the original's entry."""
+    import shutil
+
+    main = make_repo(base / "main", remote="https://github.com/me/copied.git")
+    original = make_worktree(main, base / "linked", "wt")
+    shutil.copytree(original, base / "target", symlinks=True)
+    return base / "target"
+
+
+# Layouts only this module's refusal arms build: {shape name: builder}.
+LOCAL_SHAPES = {
+    "moved_linked_worktree": _moved_linked_worktree,
+    "copied_linked_worktree": _copied_linked_worktree,
+}
+
+
 class TestARedirectRefusalNamesWhatWasObserved:
     """Every `gitfile_redirect` refusal carries the detail of the one cause
     that reached it, and no sentence of the refusal claims more: the cause
@@ -2915,6 +3107,7 @@ class TestARedirectRefusalNamesWhatWasObserved:
         "unresolvable": "would not resolve",
         "unreadable_listing": "could not read a path in the listing whole",
         "core_worktree_unread": "could not read that directory's core.worktree",
+        "moved": "which git marks prunable",
     }
 
     # (shape, fake, what was observed): every route that refuses must name it.
@@ -2932,6 +3125,8 @@ class TestARedirectRefusalNamesWhatWasObserved:
         ("control_own_linked_worktree", "LOOP_GIT_DIR", "unresolvable"),
         ("control_path_worktree_holding_a_newline", "REJECT_Z", "unreadable_listing"),
         ("control_own_submodule", "FAIL_CORE_WORKTREE", "core_worktree_unread"),
+        ("moved_linked_worktree", "PASS", "moved"),
+        ("copied_linked_worktree", "PASS", "unlisted"),
     ]
 
     @staticmethod
@@ -2947,9 +3142,12 @@ class TestARedirectRefusalNamesWhatWasObserved:
 
     @pytest.mark.parametrize("shape,fake,key", CASES)
     def test_each_refusal_names_its_own_cause(self, tmp_path, monkeypatch, shape, fake, key):
+        from fixtures.identity_routes import SHAPES, _with_sub
         from scripts import memory_api
 
         assert_outside_repository(tmp_path)
+        if shape not in SHAPES:
+            monkeypatch.setitem(SHAPES, shape, _with_sub(LOCAL_SHAPES[shape]))
         mode = fake
         if fake == "LOOP_GIT_DIR":
             # git's `--git-dir` answer names a symlink loop, so it will not resolve.
@@ -2994,6 +3192,25 @@ class TestARedirectRefusalNamesWhatWasObserved:
         missing = sorted(name for name in causes if f"`{name}`" not in doc)
         assert missing == [], missing
 
+    def test_every_function_passing_a_listing_answer_names_the_unreadable_one(self):
+        """Every function in either listing module that can return a
+        reader's answer unchanged (`_listing_answer_passers`, derived from
+        the code) admits a string in its return annotation and, where it has
+        a docstring, names `UNREADABLE_LISTING` there."""
+        passers = {
+            (Path(module.__file__).name, name): function
+            for module in (memory_api, backlog)
+            for name, function in _listing_answer_passers(module.__file__).items()
+        }
+        assert {("memory_api.py", "_worktree_records"), ("backlog.py", "_worktree_records")} <= set(passers)  # control
+        wrong = {
+            key: (ast.unparse(function.returns) if function.returns else None, ast.get_docstring(function))
+            for key, function in passers.items()
+            if function.returns is None or not _union_admits_str(function.returns)
+            or "`UNREADABLE_LISTING`" not in (ast.get_docstring(function) or "`UNREADABLE_LISTING`")
+        }
+        assert wrong == {}, wrong
+
     def test_the_cause_sentence_claims_no_other_repository(self):
         from scripts import memory_api
 
@@ -3002,35 +3219,74 @@ class TestARedirectRefusalNamesWhatWasObserved:
         details = list(memory_api._REDIRECT_CAUSE_DETAILS.values())
         assert not [d for d in details if "another repository" in d], details
 
-    def test_no_remedy_advises_removing_a_git_marker(self):
+    def test_no_printed_remedy_advises_changing_a_git_marker(self, monkeypatch, caplog):
         """A moved worktree and a separate-git-dir checkout are layouts git
-        made, and an unreadable repository is not a broken one, so neither
-        remedy tells the reader to remove or delete a `.git`."""
-        from scripts import memory_api
+        made, and an unreadable repository is not a broken one, so no
+        sentence a declined identity prints, on either the warning or the
+        refused write, advises removing, renaming, moving, rewriting or
+        repointing a `.git`. Control: every remedy the module defines (each
+        module-level name holding REMEDY) appears in a message read."""
+        messages = [" ".join(message.split()) for message in _printed_identity_messages(monkeypatch, caplog)]
+        remedies = [
+            text
+            for name, value in vars(memory_api).items() if "REMEDY" in name or "REMEDIES" in name
+            for text in (value.values() if isinstance(value, dict) else [value])
+        ]
+        assert len(remedies) >= 2, remedies  # control: the module still names its remedies
+        unprinted = [r for r in remedies if not any(" ".join(r.split()) in m for m in messages)]
+        assert unprinted == [], unprinted  # control: each remedy is in the population read
+        advising = [s for m in messages for s in _sentences(m) if _advises_changing_a_git_marker(s)]
+        assert advising == [], advising
 
-        for remedy in (
-            memory_api._REDIRECT_REMEDY,
-            memory_api._UNPINNABLE_REMEDIES["broken_git_marker"],
-        ):
-            lowered = remedy.lower()
-            assert "remove" not in lowered and "delete" not in lowered, remedy
+    @pytest.mark.parametrize(
+        "sentence",
+        [
+            "Rename its .git file to .git.bak.",
+            "Or point the `.git` at this checkout's own git dir.",
+            "Then run `mv .git .git.old` here.",
+            "Rewrite the `.git` file.",
+            "Run `rm .git` and re-clone.",
+            "The `.git` file can be deleted.",
+            "You may want to move the .git aside, e.g. into a backup folder.",
+        ],
+    )
+    def test_advice_changing_a_git_marker_is_recognised(self, sentence):
+        """Each way a sentence can advise changing a `.git` marker is
+        recognised, whatever its first letter."""
+        assert [s for s in _sentences(sentence) if _advises_changing_a_git_marker(s)], sentence
+
+    @pytest.mark.parametrize(
+        "sentence",
+        [
+            "Check that git can answer, or run from the repository the `.git` points at.",
+            "Its `.git` names a submodule's git directory.",
+            "Write an operator-chosen canonical id to '/home/u/repo/.git/pact-project-id'.",
+            "A linked worktree you moved is re-registered by running `git worktree repair` in it.",
+        ],
+    )
+    def test_a_sentence_only_describing_a_git_marker_is_not_advice(self, sentence):
+        """A sentence that says what a `.git` names or holds, or advises an
+        action on something else, is not advice to change the marker."""
+        assert not [s for s in _sentences(sentence) if _advises_changing_a_git_marker(s)], sentence
 
     def test_the_redirect_remedy_names_the_users_own_layouts_as_theirs(self):
         """The remedy's sentences: the first asks only for read-only git
-        answers or a run elsewhere; the one naming `git worktree repair`
-        says the user runs it, not an agent; the one naming a separate git
-        dir calls it the user's decision; and no sentence advises any change
-        to a `.git` file or directory."""
-        import re
-
+        answers or a run elsewhere; the one naming `git worktree repair`,
+        printed only in the moved worktree's remedy, says the user runs it,
+        not an agent; the one naming a separate git dir calls it the user's
+        decision; and no sentence advises any change to a `.git` file or
+        directory."""
         from scripts import memory_api
 
-        remedy = " ".join(memory_api._REDIRECT_REMEDY.split())
-        sentences = [s for s in re.split(r"(?<=\.) (?=[A-Z])", remedy) if s]
+        base = _sentences(memory_api._REDIRECT_REMEDY)
+        moved = _sentences(memory_api._REDIRECT_MOVED_REMEDY)
+        assert moved[:len(base)] == base, (base, moved)  # the moved remedy adds to the base
+        sentences = moved
         commands = [re.findall(r"`(git [^`]*)`", sentence) for sentence in sentences]
         assert commands[0] == ["git rev-parse --git-dir", "git worktree list"], sentences[0]
         repair = [s for s, found in zip(sentences, commands) if "git worktree repair" in found]
         assert len(repair) == 1 and "the user runs that, not an agent" in repair[0], sentences
+        assert repair[0] not in base, base  # repair is advised only where git shows the move
         separate = [s for s in sentences if "--separate-git-dir" in s]
         assert len(separate) == 1 and "user decision" in separate[0], sentences
         for sentence, found in zip(sentences, commands):
