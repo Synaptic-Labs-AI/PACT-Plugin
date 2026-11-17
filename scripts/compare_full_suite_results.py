@@ -106,10 +106,12 @@ SHORT_SUMMARY_HEADER = re.compile(r"=+ short test summary info =+")
 # open, as xdist's last progress line ("....[100%]") leaves it. The optional
 # progress prefix stays so a header that still follows a progress marker on one
 # line is read: the new-line check reads pytest's private _tw.width_of_current_line
-# and quietly skips the break if a release renames it; logs recorded before the
-# censuses started the new line carry the joined form; and, not measured, the
-# stderr print a finish() falls back to without a reporter might land after an
-# open progress line in the merged job log.
+# and quietly skips the break if a release renames it, and logs recorded before
+# the censuses started the new line carry the joined form. A finish() with no
+# terminal reporter prints to stderr instead; with no reporter nothing writes
+# progress, so that header starts its own line (measured on pytest 9.2 for the
+# HOME census with -p no:terminal, serial and -n 2; the other censuses share
+# the same fallback line).
 _PROGRESS_PREFIX = r"(?:[^\[]*\[ *[0-9]{1,3}%\])?"
 CENSUS_HEADERS = {
     "child_pytest": re.compile(
@@ -313,9 +315,8 @@ def _short_summary_ranges(lines: list[str], report: range) -> list[range]:
     untrimmed and over several lines, and a message can hold a child pytest's
     whole report, that report's own header line included, as can a failing
     test's captured output in an earlier section. So every line that is exactly
-    a short-summary header is a candidate start, and _own_summary picks pytest's
-    own among them. Separator-shaped lines that are not the header are passed
-    over.
+    a short-summary header is returned, and _apply_xpass refuses a log with more
+    than one. Separator-shaped lines that are not the header are passed over.
     """
     if not report:
         return []
@@ -386,7 +387,8 @@ def _census_failures(finish_span: list[str]) -> list[dict]:
     captured output is never counted. A census writes one indented line per
     problem straight after its header, so a block with fewer or more lines than
     its header counts (a log cut short, or another line written in between) is
-    refused.
+    refused. Each census's finish() prints its header once per session, from the
+    controller only, so a header that appears twice is refused too.
     """
     failures = []
     for index, line in enumerate(finish_span):
@@ -394,6 +396,10 @@ def _census_failures(finish_span: list[str]) -> list[dict]:
             match = pattern.fullmatch(line)
             if match is None:
                 continue
+            if any(failure["census"] == name for failure in failures):
+                raise EvidenceError(
+                    f"the {name} census header appears more than once in the "
+                    f"session-finish span")
             problems = []
             for detail in finish_span[index + 1:]:
                 if not detail.startswith("  "):
@@ -479,21 +485,40 @@ def _run_seed(lines: list[str], report: range) -> int | None:
     return seed
 
 
-def _census_tests(failure: dict) -> list[str]:
-    """The tests a census's problem lines name, without the worker prefix.
+_LAUNCH_TEXT = re.compile(r"\[[^\]]*\]")
+_CWD_TEXT = re.compile(r"\(cwd [^)]*\)")
 
-    A line's launch text holds temporary paths that differ from run to run, so
-    two runs are compared by the tests a census refused in. A line that names
-    no test is keyed by its problem, the text before its first ': ', because
-    the rest (counts, ledger paths, exception text) also differs by run.
+
+def _census_tests(failure: dict) -> list[str]:
+    """Each test a census's problem lines name, with its problem, without the
+    worker prefix.
+
+    A line's launch text and working directory hold temporary paths that
+    differ from run to run. So in the problem the first bracketed span, the
+    launch, becomes '[...]' and each '(cwd ...)' loses its path; a later
+    bracket, such as a child-pytest family label, is kept. A clock-shift line
+    keeps only the problem after its last ' -- ', since the argv before it is
+    launch text too. The same test failing for a different problem is then a
+    different key. A launch whose shown text holds ']' keeps the rest of it in
+    the key, and so does any other run-varying text a line carries outside
+    those spans, such as a wrapper program named by a temporary path; such a
+    line can report a difference between runs that is only that text. A line
+    that names no test is keyed by its problem, the text before its first
+    ': ', because the rest (counts, ledger paths, exception text) also differs
+    by run.
     """
     keys = set()
     for line in failure["lines"]:
+        line = re.sub(r"^\[gw[0-9]+\] ", "", line)
         match = CENSUS_LINE_TEST.match(line)
-        if match:
-            keys.add(match.group(1))
-        else:
-            keys.add(re.sub(r"^\[gw[0-9]+\] ", "", line).partition(": ")[0])
+        if match is None:
+            keys.add(line.partition(": ")[0])
+            continue
+        problem = line[match.end():]
+        if failure["census"] == "clock_shift":
+            problem = problem.rpartition(" -- ")[2]
+        problem = _CWD_TEXT.sub("(cwd ...)", _LAUNCH_TEXT.sub("[...]", problem, count=1))
+        keys.add(f"{match.group(1)}: {problem}")
     return sorted(keys)
 
 
@@ -691,17 +716,11 @@ def _xfail_extra_lines(entry: str, following: list[str],
 
 def _xpass_lines(summary: list[str], skip_reasons: list[str],
                  xfail_reasons: dict[str, list[str]]) -> list[str]:
-    """The XPASS entries of the short test summary (see _read_entries)."""
-    return _read_entries(summary, skip_reasons, xfail_reasons)[0]
-
-
-def _read_entries(summary: list[str], skip_reasons: list[str],
-                  xfail_reasons: dict[str, list[str]]) -> tuple[list[str], str | None]:
-    """The XPASS entries of the short test summary, and its first ERROR or
-    FAILED entry (None when it has none).
+    """The XPASS entries of the short test summary.
 
     -ra prints its entries in a fixed order: skips, xfails, xpasses, errors,
-    failures (measured on 9.2, serial and xdist). Every error and failure
+    failures (measured on 9.2, serial and xdist; test_real_ra_entry_order
+    re-measures it). Every error and failure
     message therefore follows the last XPASS entry, so lines are read only up
     to the first ERROR or FAILED entry. Each SKIPPED and XFAIL entry passes
     over the lines its reason continues on, read from the run record's skip
@@ -716,50 +735,14 @@ def _read_entries(summary: list[str], skip_reasons: list[str],
         line = summary[index]
         index += 1
         if line.startswith(("ERROR ", "FAILED ")):
-            return payloads, line
+            break
         if line.startswith("XPASS "):
             payloads.append(line[len("XPASS "):])
         elif line.startswith("SKIPPED "):
             index += _skip_extra_lines(line, skip_reasons)
         elif line.startswith("XFAIL "):
             index += _xfail_extra_lines(line, summary[index:], xfail_reasons)
-    return payloads, None
-
-
-def _own_summary(summaries: list[list[str]], skip_reasons: list[str],
-                 xfail_reasons: dict[str, list[str]], failed: set[str]) -> list[str]:
-    """pytest's own short summary among the candidates (latest first).
-
-    -ra prints errors and failures after every other entry (measured on 9.2,
-    serial and xdist; test_real_ra_entry_order re-measures it), so a child
-    report inside pytest's own summary sits in the message of an ERROR or
-    FAILED entry that names a test this run failed or errored. The walk starts
-    at the latest candidate and steps back to the one before only while that
-    earlier section's first ERROR or FAILED entry, read before the later
-    header, names such a test; where it stops is pytest's own summary, and only
-    it is read. A child report in a failing test's captured output, before
-    pytest's own summary, is therefore never read in its place, so a refused
-    summary is never replaced. Bound: a captured report is taken as pytest's
-    own only if its first FAILED or ERROR entry names a test this run records
-    as failed or errored.
-    """
-    if not summaries:
-        return []
-    own = 0
-    while own + 1 < len(summaries):
-        earlier, later = summaries[own + 1], summaries[own]
-        try:
-            _payloads, failure = _read_entries(
-                earlier[:len(earlier) - len(later) - 1], skip_reasons, xfail_reasons)
-        except EvidenceError:
-            break
-        if failure is None:
-            break
-        named = failure.split(" ", 1)[1]
-        if not any(named == node or named.startswith(node + " - ") for node in failed):
-            break
-        own += 1
-    return summaries[own]
+    return payloads
 
 
 def _resolve_xpass(payload: str, terminal: list[str]) -> tuple[str, str | None]:
@@ -779,9 +762,16 @@ def _resolve_xpass(payload: str, terminal: list[str]) -> tuple[str, str | None]:
 
 def _apply_xpass(cases: list[dict], summaries: list[list[str]], terminal: list[str],
                  record: dict) -> None:
-    """Read the XPASS entries from pytest's own short summary (see
-    _own_summary) and mark them; a summary that does not read cleanly against
-    the run's evidence refuses the run."""
+    """Read the XPASS entries from the short test summary and mark them.
+
+    A log with more than one 'short test summary info' header is refused: a
+    child pytest's report printed in a test's output, whether in its captured
+    output or inside a failure message in the summary itself, carries the same
+    header, and the log alone cannot tell it from pytest's own. That refuses a
+    valid red run whose failure message holds a child pytest's report. With one
+    header, its summary is read, and a summary that does not read cleanly
+    against the run's evidence refuses the run.
+    """
     expected_count = record["xpassed"]
     sites = record.get("skip_sites")
     skip_reasons = [site["reason"] for site in sites if isinstance(site, dict)
@@ -790,9 +780,12 @@ def _apply_xpass(cases: list[dict], summaries: list[list[str]], terminal: list[s
     for case in cases:
         if case["outcome"] == "xfail":
             xfail_reasons.setdefault(case["node_id"], []).append(case["reason"] or "")
-    failed = {case["node_id"] for case in cases if case["outcome"] in ("failure", "error")}
-    summary = _own_summary(summaries, skip_reasons, xfail_reasons, failed)
-    payloads = _xpass_lines(summary, skip_reasons, xfail_reasons)
+    if len(summaries) > 1:
+        raise EvidenceError(
+            f"the log holds {len(summaries)} short test summary headers, so a child "
+            f"pytest's report printed in a test's output cannot be told from "
+            f"pytest's own summary")
+    payloads = _xpass_lines(summaries[0] if summaries else [], skip_reasons, xfail_reasons)
     if len(payloads) != expected_count or len(set(payloads)) != len(payloads):
         raise EvidenceError(
             f"raw XPASS evidence count/uniqueness mismatch: {len(payloads)} "
@@ -1006,13 +999,15 @@ def _validate_log(directory: Path, record: dict,
     full_run_ok = [line for line in evidence if line.startswith("FULL-RUN-OK ")]
     if any(not line.endswith(f"subject={expected_sha}") for line in full_run_ok):
         raise EvidenceError("FULL-RUN-OK names a different SHA")
-    # Assumed, not measured here: run.log is the job log download, which carries
-    # each step's stdout and stderr together, so the binding's stderr heading is
-    # in it on a real drift run. The binding's session-end check runs after the
-    # censuses and sets 3 even over a run a census raised to 1. Drift is named
-    # before the match lines are counted: when the installed set changed during
-    # the run, the after-tests verify step reports the drift too and prints no
-    # match line, so a count-first check would hide the cause.
+    # run.log is the job log download. A step's stderr reaches it: measured on
+    # run 42830046567, whose job log carries the RUN-VERIFY-FAILURE line that
+    # verify_full_run.py prints to stderr. No real drift run has been seen, so
+    # that the binding's stderr heading is in a real drift log is inferred from
+    # that measurement, not observed. The binding's session-end check runs after
+    # the censuses and sets 3 even over a run a census raised to 1. Drift is
+    # named before the match lines are counted: when the installed set changed
+    # during the run, the after-tests verify step reports the drift too and
+    # prints no match line, so a count-first check would hide the cause.
     if any("CI ENVIRONMENT DRIFT" in line for line in evidence):
         message = ("the CI environment binding reported environment drift (a CI "
                    "ENVIRONMENT DRIFT heading is in the log), so the run is invalid "

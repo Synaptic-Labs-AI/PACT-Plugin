@@ -827,19 +827,75 @@ def test_a_home_fault_block_shorter_than_its_header_is_refused(tmp_path):
                                 "problem(s) but 1 problem line(s) follow it"}]
 
 
+# The child-pytest census's refusal text after the launch, as finish() prints
+# it, and the same text as its census_tests key reads it (cwd path dropped).
+CHILD_REFUSAL = (' (cwd /rig) does not block pytest-randomly (family [program]); add "-p", '
+                 '"no:randomly" to the child argv')
+CHILD_REFUSAL_KEY = CHILD_REFUSAL.replace("(cwd /rig)", "(cwd ...)")
+
+
 def test_a_census_failing_in_different_tests_is_a_delta(tmp_path):
     """The same census failing both runs, but in different tests, is reported:
     the name-level census delta is empty, so a census_tests delta names them."""
     first = make_run(tmp_path, "one", census_failed=True, finish_lines=(
-        CHILD_CENSUS_HEADER, "  [gw0] tests/test_a.py::test_x (call): pytest child [pytest]"))
+        CHILD_CENSUS_HEADER,
+        "  [gw0] tests/test_a.py::test_x (call): pytest child [pytest]" + CHILD_REFUSAL))
     second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=(
-        CHILD_CENSUS_HEADER, "  [gw2] tests/test_b.py::test_y (call): pytest child [pytest]"))
+        CHILD_CENSUS_HEADER,
+        "  [gw2] tests/test_b.py::test_y (call): pytest child [pytest]" + CHILD_REFUSAL))
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 1, comparison
     assert comparison["deltas"] == [
         {"type": "census_tests", "run": "two", "census": "child_pytest",
-         "before": ["tests/test_a.py::test_x (call)"],
-         "after": ["tests/test_b.py::test_y (call)"]}], comparison
+         "before": ["tests/test_a.py::test_x (call): pytest child [...]"
+                    + CHILD_REFUSAL_KEY],
+         "after": ["tests/test_b.py::test_y (call): pytest child [...]"
+                   + CHILD_REFUSAL_KEY]}], comparison
+
+
+@pytest.mark.parametrize("census, header, before, after", [
+    ("child_pytest", CHILD_CENSUS_HEADER,
+     "  [gw0] tests/test_a.py::test_x (call): pytest child [pytest /tmp/a] (cwd /tmp/a) "
+     "does not block pytest-randomly (family [program]); add \"-p\", \"no:randomly\" to "
+     "the child argv",
+     "  [gw1] tests/test_a.py::test_x (call): pytest child [bash -c pytest /tmp/b] "
+     "(cwd /tmp/b) does not block pytest-randomly (family [shell], then [program]); add "
+     "\"-p\", \"no:randomly\" to the child argv"),
+    ("home", HOME_CENSUS_HEADER,
+     "  [gw0] tests/test_a.py::test_x (call): child [git status /tmp/a] is given an "
+     "environment without HOME",
+     "  [gw0] tests/test_a.py::test_x (call): child [git status /tmp/b] inherits an "
+     "environment without HOME"),
+    ("clock_shift", CLOCK_CENSUS_HEADER,
+     "  tests/test_a.py::test_x (call): python /tmp/a/run.py -- the shim did not load",
+     "  tests/test_a.py::test_x (call): python /tmp/b/run.py -- the clock was not shifted"),
+], ids=["child", "home", "clock"])
+def test_the_same_test_failing_a_census_for_a_different_problem_is_a_delta(
+        tmp_path, census, header, before, after):
+    """A census failing both runs in the same test, but for a different problem,
+    is a census_tests delta; the launch text and paths in each line are not."""
+    first = make_run(tmp_path, "one", census_failed=True, finish_lines=(header, before))
+    second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=(header, after))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    [delta] = comparison["deltas"]
+    assert delta["type"] == "census_tests" and delta["census"] == census, delta
+    assert delta["before"] != delta["after"], delta
+    assert all("/tmp/" not in key for key in delta["before"] + delta["after"]), delta
+
+
+def test_a_census_header_printed_twice_is_refused(tmp_path):
+    """Each census prints its header once per session, so a second block for
+    the same census is refused rather than read over the first."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=(
+        CHILD_CENSUS_HEADER, "  [gw0] tests/test_a.py::test_x (call): pytest child [pytest]",
+        CHILD_CENSUS_HEADER, "  [gw1] tests/test_b.py::test_y (call): pytest child [pytest]"))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two", "error": "the child_pytest census header appears more than once "
+                                "in the session-finish span"}], comparison
 
 
 def test_a_census_failing_in_the_same_tests_on_other_launch_text_is_no_delta(tmp_path):
@@ -847,12 +903,14 @@ def test_a_census_failing_in_the_same_tests_on_other_launch_text_is_no_delta(tmp
     neither is a difference between runs, so only the tests a census names count."""
     first = make_run(tmp_path, "one", census_failed=True, finish_lines=(
         CHILD_CENSUS_HEADER.replace(": 1 ", ": 2 "),
-        "  [gw0] tests/test_a.py::test_x (call): pytest child [pytest /tmp/pytest-of-u/pytest-1]",
-        "  <outside a test>: pytest child [pytest /tmp/a]"))
+        "  [gw0] tests/test_a.py::test_x (call): pytest child [pytest /tmp/pytest-of-u/pytest-1]"
+        + CHILD_REFUSAL.replace("/rig", "/tmp/pytest-of-u/pytest-1"),
+        "  <outside a test>: pytest child [pytest /tmp/a]" + CHILD_REFUSAL))
     second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=(
         CHILD_CENSUS_HEADER.replace(": 1 ", ": 2 "),
-        "  [gw3] tests/test_a.py::test_x (call): pytest child [pytest /tmp/pytest-of-u/pytest-9]",
-        "  <outside a test>: pytest child [pytest /tmp/b]"))
+        "  [gw3] tests/test_a.py::test_x (call): pytest child [pytest /tmp/pytest-of-u/pytest-9]"
+        + CHILD_REFUSAL.replace("/rig", "/tmp/pytest-of-u/pytest-9"),
+        "  <outside a test>: pytest child [pytest /tmp/b]" + CHILD_REFUSAL))
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 0, comparison
     assert comparison["deltas"] == [], comparison
@@ -1860,77 +1918,26 @@ CHILD_REPORTS = {
 }
 
 
+TWO_HEADERS = ("the log holds 2 short test summary headers, so a child pytest's report "
+               "printed in a test's output cannot be told from pytest's own summary")
+CHILD_HEADER = "=" * 3 + " short test summary info " + "=" * 3
+
+
 @pytest.mark.parametrize("child", list(CHILD_REPORTS))
-def test_a_child_report_in_a_ci_failure_message_keeps_the_red_run(tmp_path, child):
-    """A failure message holding a child pytest's whole -ra report, its header
-    line included, is not pytest's own short summary: the child's entries name
-    reasons and tests the run's evidence does not hold, so the earlier, real
-    header is read and the run is compared as red with its one real xpass."""
+@pytest.mark.parametrize("word, outcome", [("FAILED", "failure"), ("ERROR", "error")])
+def test_a_child_report_in_a_failure_message_refuses_the_run(tmp_path, child, word, outcome):
+    """A failure or error message holding a child pytest's whole -ra report
+    carries a second short-summary header, after pytest's own. The log cannot
+    tell which is pytest's, so even this valid red run is refused, for that
+    cause."""
     xpass = case(ALPHA, "xpass", "unexpected")
     first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
-    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "failure", "boom")])
-    _add_ci_failure_message(
-        second, ("=" * 3 + " short test summary info " + "=" * 3, *CHILD_REPORTS[child]))
-    completed, comparison, output = invoke(tmp_path, first, second)
-    assert completed.returncode == 1, comparison
-    assert comparison["status"] == "different", comparison
-    assert comparison["evidence_errors"] == [], comparison
-    run = read_runs(output)[1]
-    assert run["validity"] == "test_outcome", run
-    assert run["totals"]["xpassed"] == 1, run
-
-
-def test_a_child_report_in_an_error_message_keeps_the_red_run(tmp_path):
-    """An ERROR entry naming a test this run errored encloses a child report
-    the same way a FAILED entry does."""
-    xpass = case(ALPHA, "xpass", "unexpected")
-    first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
-    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "error", "boom")])
-    _add_ci_failure_message(
-        second, ("=" * 3 + " short test summary info " + "=" * 3, *CHILD_REPORTS["skipped"]),
-        entry=f"ERROR {BETA}")
-    completed, comparison, output = invoke(tmp_path, first, second)
-    assert completed.returncode == 1, comparison
-    assert comparison["evidence_errors"] == [], comparison
-    run = read_runs(output)[1]
-    assert run["validity"] == "test_outcome", run
-    assert run["totals"]["xpassed"] == 1, run
-
-
-def test_a_child_report_after_an_entry_naming_no_failed_test_is_read_as_the_summary(
-        tmp_path):
-    """Only an ERROR or FAILED entry naming a test this run failed or errored
-    encloses a later header; after any other, the later header is taken as
-    pytest's own, and here its child entries refuse the run."""
-    xpass = case(ALPHA, "xpass", "unexpected")
-    first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
-    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "failure", "boom")])
-    _add_ci_failure_message(
-        second, ("=" * 3 + " short test summary info " + "=" * 3, *CHILD_REPORTS["skipped"]),
-        entry="FAILED tests/test_example.py::test_never_run")
+    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, outcome, "boom")])
+    _add_ci_failure_message(second, (CHILD_HEADER, *CHILD_REPORTS[child]),
+                            entry=f"{word} {BETA}")
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, comparison
-    assert comparison["evidence_errors"] == [
-        {"run": "two", "error": "a SKIPPED summary entry has no reason in the run's evidence: "
-                                "'SKIPPED [1] test_probe.py:3: a reason only the child knows'"}]
-
-
-def test_pytests_own_summary_that_does_not_read_is_refused_with_its_own_reason(tmp_path):
-    """A child report inside pytest's own summary never stands in for it: when
-    the real summary does not read cleanly, the run is refused for that."""
-    xpass = case(ALPHA, "xpass", "unexpected")
-    first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
-    # The record counts two xpasses where pytest's own summary prints one.
-    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "failure", "boom")],
-                      record_updates={"xpassed": 2})
-    _add_ci_failure_message(
-        second, ("=" * 3 + " short test summary info " + "=" * 3,
-                 f"XPASS {ALPHA}", f"XPASS {BETA}"))
-    completed, comparison, _ = invoke(tmp_path, first, second)
-    assert completed.returncode == 2, comparison
-    assert comparison["evidence_errors"] == [
-        {"run": "two", "error": "raw XPASS evidence count/uniqueness mismatch: 1 lines, "
-                                "record xpassed=2"}]
+    assert comparison["evidence_errors"] == [{"run": "two", "error": TWO_HEADERS}], comparison
 
 
 def _add_own_summary(directory, entries):
@@ -1943,23 +1950,48 @@ def _add_own_summary(directory, entries):
     log.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def test_a_child_report_in_captured_output_refuses_the_run(tmp_path):
+    """A child report a failing test printed sits in the FAILURES section,
+    before pytest's own summary, and its header makes two: the run is refused
+    even though pytest's own summary reads cleanly."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, cases=[case(ALPHA), case(BETA, "failure", "boom")],
+                      captured=(CHILD_HEADER, "FAILED test_child.py::test_t - x"))
+    _add_own_summary(second, (f"FAILED {BETA} - RuntimeError: boom",))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [{"run": "two", "error": TWO_HEADERS}], comparison
+
+
+def test_an_unreadable_summary_with_a_child_report_in_a_failure_message_is_refused(tmp_path):
+    """pytest's own summary names a skip reason the evidence lacks, and a
+    failure message after it carries a child report with a clean FAILED line.
+    The child's header is never read in its place: the run is refused for the
+    two headers."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101, cases=[case(ALPHA), case(BETA, "failure", "boom")])
+    _add_own_summary(second, (
+        "SKIPPED [1] tests/test_example.py:7: a reason the record does not hold",
+        f"FAILED {BETA} - RuntimeError: child failed:", CHILD_HEADER,
+        "FAILED test_child.py::test_t - x"))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [{"run": "two", "error": TWO_HEADERS}], comparison
+
+
 @pytest.mark.parametrize("own_entries, error", [
+    ((f"FAILED {BETA} - RuntimeError: boom",), None),
     (("SKIPPED [1] tests/test_example.py:7: a reason the record does not hold",
       f"FAILED {BETA} - RuntimeError: boom"),
      "a SKIPPED summary entry has no reason in the run's evidence: "
      "'SKIPPED [1] tests/test_example.py:7: a reason the record does not hold'"),
-    ((f"FAILED {BETA} - RuntimeError: boom",), None),
-], ids=["own-summary-refused", "own-summary-reads"])
-def test_a_child_report_in_captured_output_never_replaces_pytests_own_summary(
+], ids=["reads", "unreadable"])
+def test_a_single_short_summary_is_read_or_refused_for_its_own_reason(
         tmp_path, own_entries, error):
-    """A child report a failing test printed sits in the FAILURES section,
-    before pytest's own summary. Its header is never read in place of pytest's
-    own: a run whose own summary is refused stays refused, and one whose own
-    summary reads is compared as red."""
+    """With one short-summary header, its summary is read: a clean one gives a
+    compared red run, and one that does not read refuses the run for that."""
     first = make_run(tmp_path, "one")
-    second = make_run(tmp_path, "two", 101, cases=[case(ALPHA), case(BETA, "failure", "boom")],
-                      captured=("=" * 3 + " short test summary info " + "=" * 3,
-                                "FAILED test_child.py::test_t - x"))
+    second = make_run(tmp_path, "two", 101, cases=[case(ALPHA), case(BETA, "failure", "boom")])
     _add_own_summary(second, own_entries)
     completed, comparison, output = invoke(tmp_path, first, second)
     if error is None:
@@ -2316,9 +2348,9 @@ def test_e_skip():
 @pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
 def test_real_ra_entry_order(tmp_path, parallel):
     """Real pytest under CI=true prints -ra entries as skips, xfails, xpasses,
-    errors, failures, whatever order the tests ran in. _own_summary rests on
-    errors and failures coming last; a pytest that changes the order fails
-    here."""
+    errors, failures, whatever order the tests ran in. _xpass_lines reads only
+    up to the first ERROR or FAILED entry, which rests on errors and failures
+    coming last; a pytest that changes the order fails here."""
     rig = tmp_path / "rig"
     rig.mkdir()
     (rig / "test_order.py").write_text(RA_ORDER_RIG, encoding="utf-8")
@@ -2351,11 +2383,12 @@ def test_prints():
 
 
 @pytest.mark.parametrize("parallel", [(), ("-n", "2")], ids=["serial", "xdist"])
-def test_real_child_reports_land_around_pytests_own_summary(tmp_path, parallel):
+def test_real_child_reports_refuse_the_run(tmp_path, parallel):
     """Real pytest under CI=true: a child report a failing test printed lands
     in the FAILURES section, before pytest's own summary, and one a failure
-    message carries lands inside it, after a FAILED entry for that test.
-    _own_summary picks the middle header, pytest's own."""
+    message carries lands inside it, after a FAILED entry for that test. Each
+    adds a short-summary header the log cannot tell from pytest's own, so the
+    run is refused for its three headers."""
     rig = tmp_path / "rig"
     rig.mkdir()
     (rig / "test_rig.py").write_text(CHILD_REPORT_RIG, encoding="utf-8")
@@ -2370,12 +2403,11 @@ def test_real_child_reports_land_around_pytests_own_summary(tmp_path, parallel):
     summaries = [[lines[index] for index in summary]
                  for summary in comparator._short_summary_ranges(lines, report)]
     assert len(summaries) == 3, completed.stdout
-    failed = {"test_rig.py::test_carries", "test_rig.py::test_prints"}
-    own = comparator._own_summary(summaries, [], {}, failed)
-    assert own is summaries[1], completed.stdout
-    assert sorted(line.split(" - ", 1)[0] for line in own
+    assert sorted(line.split(" - ", 1)[0] for line in summaries[1]
                   if line.startswith("FAILED test_rig.py::")) == [
-        "FAILED test_rig.py::test_carries", "FAILED test_rig.py::test_prints"], own
+        "FAILED test_rig.py::test_carries", "FAILED test_rig.py::test_prints"], summaries[1]
+    with pytest.raises(comparator.EvidenceError, match="the log holds 3 short test summary"):
+        comparator._apply_xpass([], summaries, [], {"xpassed": 0, "skip_sites": []})
 
 
 @pytest.mark.parametrize("mutation", [
