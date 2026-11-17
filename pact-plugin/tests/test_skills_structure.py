@@ -9,7 +9,6 @@ Tests cover:
 5. SKILL.md body contains substantive content
 """
 import ast
-import re
 import subprocess
 from pathlib import Path
 
@@ -17,6 +16,7 @@ import pytest
 
 from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from helpers import parse_frontmatter
+from test_peer_review_cold_lane_pin import FORWARD_POINTER
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = PLUGIN_ROOT / "skills"
@@ -819,16 +819,6 @@ class TestWorktreeSetupVenvLinkReportPins:
         )
 
 
-# A pointer that defers an artifact's definition: one of six verbs
-# (described, defined, given, built, explained, shown) followed by below,
-# next or later, or "see below". It does not ban a forward reference to a
-# rule ("the failing-test rule below", "the branches below", "at the end of
-# this bullet"): a rule may be named before it is stated, an artifact may not
-# be used before it is defined. The cold prompt's order pin in
-# test_peer_review_cold_lane_pin.py bans the same phrasings in its clause.
-FORWARD_POINTER = re.compile(
-    r"\b(?:described|defined|given|built|explained|shown)\s+(?:below|next|later)\b|\bsee below\b",
-    re.IGNORECASE)
 
 
 @pytest.mark.parametrize("text, banned", [
@@ -847,6 +837,21 @@ def test_forward_pointer_scope(text, banned):
     assert bool(FORWARD_POINTER.search(text)) is banned, (
         f"FORWARD_POINTER {'missed' if banned else 'banned'} {text!r}; "
         "update the comment's list with the pattern"
+    )
+
+
+def test_forward_pointer_has_one_definition():
+    # The pattern is defined once, in the cold-lane pin, so the two receipts
+    # cannot drift apart; this module keeps no copy of its own.
+    import test_peer_review_cold_lane_pin as cold
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    local = [node for node in ast.walk(tree)
+             if isinstance(node, (ast.Assign, ast.AnnAssign))
+             and any(isinstance(target, ast.Name) and target.id == "FORWARD_POINTER"
+                     for target in (node.targets if isinstance(node, ast.Assign) else [node.target]))]
+    assert not local, "test_skills_structure.py defines its own FORWARD_POINTER"
+    assert FORWARD_POINTER is cold.FORWARD_POINTER, (
+        "test_skills_structure.py's FORWARD_POINTER is not the cold-lane pin's"
     )
 
 

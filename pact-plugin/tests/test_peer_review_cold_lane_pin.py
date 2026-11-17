@@ -397,8 +397,8 @@ RECHECK_VALIDITY = "A re-check report is valid only with"
 # next or later, or "see below". It does not ban a forward reference to a
 # rule or a check ("the merge-base check below", "the rules below"): a rule
 # may be named before it is stated, an artifact may not be used before it
-# is defined. test_skills_structure.py bans the same phrasings in the
-# teammate run receipt.
+# is defined. This is the one definition: test_skills_structure.py imports
+# it for the teammate run receipt and pins that it keeps no copy.
 FORWARD_POINTER = re.compile(
     r"\b(?:described|defined|given|built|explained|shown)\s+(?:below|next|later)\b|\bsee below\b",
     re.IGNORECASE)
@@ -779,12 +779,12 @@ class TestOperationalFactsClause:
          "the instruction to build the {head} clone, once, before both branches that use it")),
         ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone, never in the worktree, and do not report the worktree run: report that clone's run in its place", (
          "the moved-HEAD branch: one re-run in the {head} clone, never the worktree")),
-        ("If the {head} clone cannot be built or the command cannot be run in it, after a moved HEAD or a status-only change alike, report the result as unattributable because the worktree changed, naming HEAD or the paths that changed, not as a finding about the diff", (
-         "unattributable only when the {head} clone cannot be built or run, after either re-run")),
+        ("If the {head} clone cannot be built or the command cannot be run in it, on any run that needs it, report the result as unattributable because the worktree is not the {head} tree, naming HEAD or the paths that differ, not as a finding about the diff", (
+         "unattributable only when the {head} clone cannot be built or run, on any run that needs it")),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path, in the {head} clone. Compare its status before and after", (
          "the status-only re-run in the {head} clone, same interpreter by absolute path")),
-        ("After either re-run, every path that differs between the {head} clone's status before and after its run is a reproduced path, and a path that changed in the worktree but does not change in the {head} clone came from outside the run and is not a finding about the diff", (
-         "one reproduced-path rule for both re-runs: every path the clone's run changes")),
+        ("After any run in the {head} clone, every path that differs between the {head} clone's status before and after its run is a reproduced path, and a path that changed in the worktree but does not change in the {head} clone came from outside the run and is not a finding about the diff", (
+         "one reproduced-path rule for every run in the {head} clone: every path the clone's run changes")),
         ("If there is no reproduced path, the {head} clone's run stands for the diff. If there is any, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
          "the base-control run at the merge base, and no reproduced path leaves the clone's run standing")),
         ("Decide each reproduced path on its own. A reproduced path that also changes between that second clone's status before and after its run is a pre-existing defect: name it as pre-existing under the open questions, with the path and the command that wrote it, not as a finding about the diff", (
@@ -864,13 +864,14 @@ class TestOperationalFactsClause:
         )
 
     def test_one_reproduced_path_rule_follows_both_branches(self):
-        # Both re-runs share one rule for which paths are reproduced, placed
+        # Every run in the {head} clone (a re-run or an up-front clone run)
+        # shares one rule for which paths are reproduced, placed
         # after both branches and the exit, so neither branch carries its own
         # rule that the other can override.
         clause = _clause("OPERATIONAL FACTS")
         moved = clause.find("If HEAD differs")
         exit_ = clause.find("If the {head} clone cannot be built")
-        shared = clause.find("After either re-run, every path that differs")
+        shared = clause.find("After any run in the {head} clone, every path that differs")
         decide = clause.find("Decide each reproduced path on its own")
         assert -1 not in (moved, exit_, shared, decide) and moved < exit_ < shared < decide, (
             "the cold prompt's reproduced-path rule must follow both branches "
@@ -887,6 +888,22 @@ class TestOperationalFactsClause:
             "the cold prompt must say once, in the shared rule, which paths "
             "came from outside the run"
         )
+
+    def test_clone_rules_cover_every_run_in_the_clone(self):
+        # The up-front check sends runs to the {head} clone that are not
+        # re-runs, so the exit and the reproduced-path rule must name every
+        # run in the clone, not the two re-run branches only.
+        clause = _clause("OPERATIONAL FACTS")
+        for phrase in ("cannot be run in it, on any run that needs it, report the result as unattributable because the worktree is not the {head} tree",
+                       "After any run in the {head} clone, every path that differs"):
+            assert phrase in clause, (
+                f"the cold prompt's clone rules lost {phrase!r}"
+            )
+        for narrow in ("After either re-run", "after a moved HEAD or a status-only change alike"):
+            assert narrow not in clause, (
+                f"the cold prompt scopes a clone rule to re-runs only ({narrow!r}), "
+                "so a run the up-front check sends to the clone is not covered"
+            )
 
     def test_pre_existing_decision_reads_the_merge_base_run(self):
         # "Appears there" reads as "exists in that clone", and every tracked
