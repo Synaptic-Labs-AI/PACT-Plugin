@@ -1118,17 +1118,18 @@ def _bindings(tree, name: str) -> int:
     return count
 
 
-def _is_refusal(function, defined: dict, seen: frozenset) -> bool:
+def _is_refusal(function, defined: dict, seen: frozenset, tree=None) -> bool:
     """Whether `function` is annotated exactly `Optional[str]` and every
     value it returns is None, a module-level name of project_identity whose
     only binding anywhere in the module is one plain assignment of a string
     constant (`_bindings`), a ternary of two such values, or a direct
     call to a project_identity function that is itself a refusal: a check
     whose answer is None (it does not refuse) or the detail it refuses
-    with."""
+    with. `tree` is the module read, project_identity's when not given."""
     if not (function.returns is not None and ast.unparse(function.returns) == "Optional[str]"):
         return False
-    tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
+    if tree is None:
+        tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
     details = {
         node.targets[0].id for node in tree.body
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
@@ -1148,7 +1149,7 @@ def _is_refusal(function, defined: dict, seen: frozenset) -> bool:
             isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
             and value.func.id in defined and value.func.id not in seen
         ):
-            return _is_refusal(defined[value.func.id], defined, seen)
+            return _is_refusal(defined[value.func.id], defined, seen, tree)
         return False
 
     returns = [node for node in ast.walk(function) if isinstance(node, ast.Return)]
@@ -2382,3 +2383,96 @@ class TestAGitPathAnswerIsNeverStripped:
         checkout.mkdir()
         run_git("--git-dir", str(admin), "config", "core.worktree", str(checkout), cwd=tmp_path)
         assert pi._admin_dir_names_another_checkout(admin, checkout) is False
+
+
+def _grammar_identifier_fields() -> set:
+    """Every (node class, field) in Python's own grammar that holds an
+    identifier, read from each ast class's signature (`Name(identifier id,
+    ...)`), so a form the grammar gains is a form the arms below must cover."""
+    import re
+
+    fields = set()
+    for name in dir(ast):
+        node = getattr(ast, name)
+        signature = (getattr(node, "__doc__", None) or "").split("\n")[0]
+        if isinstance(node, type) and issubclass(node, ast.AST) and re.match(r"\w+\(", signature):
+            for kind, field in re.findall(r"(\w+)[?*]? (\w+)", signature[signature.index("(") :]):
+                if kind == "identifier":
+                    fields.add((node.__name__, field))
+    return fields
+
+
+# One statement per identifier field of the grammar, holding the name `X`
+# in that field and nowhere else, and in a Name only in the given context.
+_IDENTIFIER_FORMS = {
+    ("AsyncFunctionDef", "name"): "async def X():\n    pass",
+    ("Attribute", "attr"): "y.X = 1",
+    ("ClassDef", "name"): "class X:\n    pass",
+    ("ExceptHandler", "name"): "try:\n    pass\nexcept E as X:\n    pass",
+    ("FunctionDef", "name"): "def X():\n    pass",
+    ("Global", "names"): "def f():\n    global X",
+    ("ImportFrom", "module"): "from X import y",
+    ("MatchAs", "name"): "match v:\n    case X:\n        pass",
+    ("MatchClass", "kwd_attrs"): "match v:\n    case C(X=1):\n        pass",
+    ("MatchMapping", "rest"): "match v:\n    case {**X}:\n        pass",
+    ("MatchStar", "name"): "match v:\n    case [*X]:\n        pass",
+    ("Name", "id"): "X = 1",
+    ("Nonlocal", "names"): "def f():\n    def g():\n        nonlocal X",
+    ("ParamSpec", "name"): "def f[**X]():\n    pass",
+    ("TypeVar", "name"): "def f[X]():\n    pass",
+    ("TypeVarTuple", "name"): "def f[*X]():\n    pass",
+    ("alias", "name"): "import X",
+    ("arg", "arg"): "def f(X):\n    pass",
+    ("keyword", "arg"): "f(X=1)",
+}
+# A Name in each context the grammar names (`expr_context`): stored and
+# deleted names bind, a loaded one does not.
+_NAME_CONTEXT_FORMS = {"Store": ("X = 1", 1), "Del": ("del X", 1), "Load": ("print(X)", 0)}
+# A dotted name binds its first part.
+_DOTTED_FORMS = ["import X.y", "from X.y import z"]
+
+
+class TestEveryBindingFormOfADetailIsCounted:
+    """`_bindings` counts every place the grammar lets a name be bound, and
+    a detail constant bound anywhere a second time is not admitted as a
+    refusal's detail. The forms are the grammar's own identifier fields."""
+
+    def test_every_identifier_field_of_the_grammar_has_a_form(self):
+        fields = _grammar_identifier_fields()
+        assert ("Name", "id") in fields and ("alias", "asname") in fields  # control
+        assert fields == set(_IDENTIFIER_FORMS) | {("alias", "asname")}, (
+            fields ^ (set(_IDENTIFIER_FORMS) | {("alias", "asname")})
+        )
+
+    def test_every_expression_context_has_a_form(self):
+        """The contexts are the grammar's (`expr_context = Load | Store |
+        Del`), not every subclass: the deprecated ones are never parsed."""
+        signature = ast.expr_context.__doc__.split("=", 1)[1]
+        contexts = {part.strip() for part in signature.split("|")}
+        assert "Store" in contexts, signature  # control
+        assert contexts == set(_NAME_CONTEXT_FORMS), contexts
+
+    @pytest.mark.parametrize(
+        "source",
+        [*_IDENTIFIER_FORMS.values(), "import y as X", *_DOTTED_FORMS],
+    )
+    def test_each_form_counts_once(self, source):
+        assert _bindings(ast.parse(source), "X") == 1, source
+
+    @pytest.mark.parametrize("context", sorted(_NAME_CONTEXT_FORMS))
+    def test_a_name_counts_in_a_binding_context_only(self, context):
+        source, count = _NAME_CONTEXT_FORMS[context]
+        assert _bindings(ast.parse(source), "X") == count, source
+
+    @pytest.mark.parametrize(
+        "source",
+        [*_IDENTIFIER_FORMS.values(), "import y as X", *_DOTTED_FORMS, "del X"],
+    )
+    def test_a_detail_bound_again_is_not_a_refusal_detail(self, source):
+        """A module whose refusal returns `X`, bound once as a string and
+        again by `source`, has no refusal; bound once only, it has one."""
+        once = 'X = "detail"\n\ndef refusal() -> Optional[str]:\n    return X\n'
+        for module, expected in ((once, True), (once + "\n" + source + "\n", False)):
+            tree = ast.parse(module)
+            defined = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+            assert _is_refusal(defined["refusal"], defined, frozenset(), tree) is expected, module
