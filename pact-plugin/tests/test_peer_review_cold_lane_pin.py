@@ -1843,3 +1843,39 @@ def _verify_only_claims(text: str) -> list[tuple[str, bool]]:
                               or _WARM_BEFORE.search(sentence[:m.start("vo")]))
                 claims.append((sentence.strip(), scoped))
     return claims
+
+
+class TestDuplicateColdFindingsMerge:
+    """A still-open cold finding that a later first-round report raises again
+    is synthesized as one finding: one merge line, one disposition, one
+    merge-readiness question and one re-check item carrying both texts,
+    resolved only when no report of its round raises it, with both verbatim
+    reports kept. The rule is lead-side; the cold prompt never sees it."""
+
+    SYNTHESIS_PHRASES = (
+        "raises a finding that shares a class with an earlier finding still without a disposition",
+        "one sentence names the behaviour that fails in both, as in **Failed cycle**",
+        "record one merge line, labelled as yours, naming both by report and file:line and stating that they are one finding",
+        "one disposition line covers both, the merge-readiness question asks about it once",
+        "the re-check lists it as one item carrying both findings' text, severity and file:line verbatim",
+        "It is resolved only when no report of the round that resolves it still raises either.",
+        "Leave both verbatim reports as they are.",
+    )
+
+    @pytest.mark.parametrize("phrase", SYNTHESIS_PHRASES)
+    def test_synthesis_merges_a_repeated_finding(self, phrase):
+        assert phrase in _paragraph("**Synthesis.**"), (
+            f"the cold lane's Synthesis rule lost the duplicate-finding merge ({phrase!r})"
+        )
+
+    def test_recheck_lists_a_merged_finding_as_one_item(self):
+        assert "List two findings a merge line joins as one item, marked as one finding, with both texts." in _paragraph("**Re-check.**"), (
+            "the cold lane's Re-check rule no longer lists two merged findings as one item with both texts"
+        )
+
+    def test_merge_rule_stays_out_of_the_cold_prompt(self):
+        for name, text in (("cold prompt", _prompt()),
+                           ("re-check message", _paragraph('"RE-REVIEW CHECKLIST:'))):
+            assert "merge line" not in text, (
+                f"the {name} names the lead's merge line; the cold reviewer must not see the synthesis rule"
+            )
