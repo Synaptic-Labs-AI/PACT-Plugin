@@ -98,11 +98,12 @@ refused whether or not it does:
   whether or not it blocks pytest-randomly, since the census cannot tell what
   environment and argv that program passes on. The program is any program
   except an interpreter, `coverage`, pytest's program, and the programs that
-  print, look up, read, list or ignore their words and run none of them:
-  `echo`, `printf`, `which`, `true`, `false`, `:`, `grep`, `egrep`, `fgrep`,
-  `rg`, `ag`, `ls`, `cat`, `head`, `tail`, `wc`, `sed`, `awk`, `cut`, `sort`,
-  `uniq`, `diff`, `file`, `stat`, `test`, `[`, `[[`, `type`, `hash`, `chmod`,
-  `chown`, `touch`, `mkdir`, `rm`, `cp`, `mv` and `ln`. So `grep -c pytest log`,
+  print, look up, read, list or ignore their words, or change to the directory
+  they name, and run none of them: `echo`, `printf`, `which`, `true`, `false`,
+  `:`, `grep`, `egrep`, `fgrep`, `rg`, `ag`, `ls`, `cat`, `head`, `tail`, `wc`,
+  `sed`, `awk`, `cut`, `sort`, `uniq`, `diff`, `file`, `stat`, `test`, `[`,
+  `[[`, `type`, `hash`, `chmod`, `chown`, `touch`, `mkdir`, `rm`, `cp`, `mv`,
+  `ln`, `cd`, `pushd` and `popd`. So `grep -c pytest log`,
   `ls -la pytest`, `[[ -x /venv/bin/pytest ]]` and `chmod 755 /venv/bin/pytest`
   are mentions, not launches.
   Its command is the first word after it that is not an option (a word starting
@@ -213,8 +214,9 @@ not performed (blind spot 9):
 
 On a pytest child that is not deterministic, or that starts through a program
 the census does not read, the census records a line naming PYTEST_CURRENT_TEST,
-the argv, the cwd and the remedy, then raises ChildPytestCensusError,
-which aborts the launch before the child starts. finish() fails the session for
+the argv, the cwd (`unavailable` when the process's own cwd has been deleted;
+the census resolves no path against it) and the remedy, then raises
+ChildPytestCensusError, which aborts the launch before the child starts. finish() fails the session for
 every recorded line, so a test that swallows the error still fails the run.
 An identical line is recorded once, so finish()'s header counts distinct
 refusal lines, not launches. A refusal stops its launch at the first audit
@@ -566,7 +568,16 @@ def _miss(argv, cwd, env):
 
 
 def _where(cwd):
-    return os.fsdecode(cwd) if cwd is not None else os.getcwd()
+    """The directory a refusal line names. The census judges a launch by its
+    words and resolves no path against this directory, so a cwd that cannot be
+    read (deleted under the process) changes only what the line shows, and the
+    launch is still judged and refused."""
+    if cwd is not None:
+        return os.fsdecode(cwd)
+    try:
+        return os.getcwd()
+    except OSError as exc:
+        return "unavailable (%s)" % (exc.strerror or type(exc).__name__)
 
 
 # bash's $'...' escapes: octal, \x{H...}, \xHH, \uHHHH, \UHHHHHHHH, \cX, or one
@@ -1415,7 +1426,7 @@ def finish(session):
     if reporter is not None and getattr(getattr(reporter, "_tw", None), "width_of_current_line", 0):
         reporter.write("\n")
     write = reporter.write_line if reporter is not None else (lambda line: print(line, file=sys.stderr))
-    write("CHILD PYTEST CENSUS: %d distinct pytest child(ren) started without blocking pytest-randomly"
+    write("CHILD PYTEST CENSUS: %d distinct pytest child launch(es) refused or not inspected"
           % len(problems))
     for line in problems:
         write("  " + line)

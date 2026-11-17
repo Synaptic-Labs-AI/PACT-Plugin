@@ -36,7 +36,8 @@ clean exit status (0) to 1. An environment the census cannot inspect (a key
 test that raises) is recorded as a fault line and fails the session; that
 launch is not aborted. Fault lines are reported under their own header,
 `HOME CENSUS: M launch(es) the census could not inspect`, after the refusal
-block, so the refusal header counts only children started without HOME.
+block, so the refusal header counts only child launches refused for lacking
+HOME.
 
 A run with no refusal ends with one information line from the controller (or a
 session without xdist), `HOME CENSUS: installed, N launches checked, 0 refused`
@@ -51,8 +52,11 @@ from the start to the end of that test's runtest protocol: its setup, call and
 teardown, its function-scoped fixtures, and any hook that runs during them (a
 conftest's pytest_runtest_setup or pytest_runtest_makereport, for example). A
 launch made while a wider-scoped (class, module, package or session) fixture
-sets up or tears down is never exempt, whichever test triggered it, so a shared
-fixture's verdict does not depend on test order. A
+sets up or tears down is never exempt, whichever test triggered it, and neither
+is one a finalizer makes that was registered on a wider node (request.node or
+request.session .addfinalizer in a wider-scoped fixture): such a finalizer runs
+in the teardown of whichever test is last in its node, after that test's own
+finalizers. So a shared fixture's verdict does not depend on test order. A
 marker without such a reason exempts nothing; the refusal line says the reason
 is missing.
 
@@ -78,6 +82,8 @@ NOT SEEN, AND OUTSIDE THE CENSUS:
   is judged on the machine where it does run, in any session that loads
   pact-plugin/conftest.py, and a launch it makes there that the census
   refuses is stopped before the child starts.
+- a branch that no run takes: the census judges launches as they happen, so a
+  child env= on a code path no test reaches on any machine is never judged.
 - a worker that crashes before its finish() runs: it hands over no refusals and
   no launch count, so a refusal that a test there swallowed is not reported,
   and that worker's launches are missing from "N launches checked". A refusal
@@ -103,7 +109,7 @@ WORKEROUTPUT_FAULTS_KEY = "home_census_faults"
 
 _state = {"installed": False, "misses": [], "forwarded": [], "faults": [],
           "forwarded_faults": [], "exempt": None, "unreasoned": False, "checked": 0,
-          "forwarded_checked": 0, "shared": 0}
+          "forwarded_checked": 0, "shared": 0, "wider_teardown": False}
 
 
 class HomeCensusError(RuntimeError):
@@ -143,6 +149,24 @@ class Plugin:
             yield
         finally:
             leave()
+
+    @pytest.hookimpl(hookwrapper=True)
+    def pytest_runtest_teardown(self, item, nextitem):
+        """Before this teardown runs, give the innermost node it tears down
+        beyond the test a finalizer that marks the rest of the teardown as
+        wider. Each node's finalizers run last-in, first-out and nodes are torn
+        down innermost first, so it runs after every finalizer of the test and
+        before every finalizer of the nodes around it."""
+        kept = set(nextitem.listchain()) if nextitem is not None else set()
+        for node in reversed(item.listchain()[:-1]):
+            if node in kept:
+                break
+            try:
+                node.addfinalizer(wider_teardown_begins)
+            except AssertionError:  # never set up, so it has nothing to tear down
+                continue
+            break
+        yield
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_fixture_setup(self, fixturedef, request):
@@ -191,6 +215,7 @@ def enter(item):
 def leave():
     _state["exempt"] = None
     _state["unreasoned"] = False
+    _state["wider_teardown"] = False
 
 
 def shared_fixture_begins():
@@ -201,6 +226,12 @@ def shared_fixture_begins():
 def shared_fixture_ends():
     """That fixture's setup or teardown is over."""
     _state["shared"] = max(0, _state["shared"] - 1)
+
+
+def wider_teardown_begins():
+    """The running test's own finalizers are done; what follows tears down a
+    wider node."""
+    _state["wider_teardown"] = True
 
 
 def _has_home(env):
@@ -216,7 +247,7 @@ def _audit(event, args):
         argv, env = args[1], args[2]
     else:
         return
-    if _state["exempt"] is not None and not _state["shared"]:
+    if _state["exempt"] is not None and not _state["shared"] and not _state["wider_teardown"]:
         return
     _state["checked"] += 1
     try:
@@ -233,7 +264,8 @@ def _audit(event, args):
         return
     unreasoned = (" (its %s marker has no reason, so it exempts nothing)" % MARKER
                   if _state["unreasoned"] else
-                  " (in a wider-scoped fixture, which its %s marker does not cover)" % MARKER
+                  " (in a wider-scoped fixture or node finalizer, which its %s marker does "
+                  "not cover)" % MARKER
                   if _state["exempt"] is not None else "")
     line = "%s: child [%s] %s%s; %s" % (_current_test(), _shown(argv), lacking, unreasoned,
                                          REMEDY)
@@ -296,7 +328,7 @@ def finish(session):
                   % (checked, "launch" if checked == 1 else "launches"))
         return
     if problems:
-        write("HOME CENSUS: %d distinct child(ren) started without HOME" % len(problems))
+        write("HOME CENSUS: %d distinct child launch(es) without HOME refused" % len(problems))
         for line in problems:
             write("  " + line)
     if faults:

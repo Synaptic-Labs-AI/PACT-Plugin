@@ -1256,12 +1256,15 @@ class TestImportClosure:
         + 'class Rig:\n'
           '    base = HOOKS / "shared"\n'
           '    FILES = [(base / "__init__.py") for _ in (1,)]\n',
+        _BASE + 'class Rig:\n'
+                '    base = None\n'
+                '    TEXT = (base / "__init__.py").read_text()\n',
     ], ids=["other-functions-local", "unanchored-assignment", "with", "except",
             "import", "del", "walrus", "match-capture", "match-star", "match-rest",
             "nested-def", "nested-class", "type-alias", "unpacking", "loop-target",
             "bare-annotation", "other-augmented-operator", "lambda-parameter",
             "comprehension-target", "class-name-in-method",
-            "class-name-in-comprehension"])
+            "class-name-in-comprehension", "class-read-after-rebinding"])
     def test_a_name_not_anchored_in_the_scope_of_its_read_names_nothing(
             self, core, tmp_path, source):
         plugin = self._rig(tmp_path)
@@ -1372,6 +1375,15 @@ class TestImportClosure:
         _HOOKS
         + 'READ = lambda root: (root / "shared" / "__init__.py").read_text()\n'
           'READ(HOOKS)\n',
+        _BASE + 'class Rig:\n'
+                '    TEXT = (base / "__init__.py").read_text()\n'
+                '    base = None\n',
+        _BASE + 'class Rig:\n'
+                '    base = base / "__init__.py"\n',
+        _HOOKS + 'base = HOOKS\n'
+                 'class Rig:\n'
+                 '    base /= "shared"\n'
+                 '    TEXT = (base / "__init__.py").read_text()\n',
     ], ids=["enclosing-functions-local", "global-read", "class-body-read",
             "class-comprehension-first-iterable", "conflicting-anchors",
             "anchored-then-unanchored", "augmented-join", "self-reference",
@@ -1379,7 +1391,8 @@ class TestImportClosure:
             "nonlocal-assignment", "attribute-target-binds-nothing",
             "rebound-parameter", "starred-argument", "two-hop-parameter",
             "redefined-function", "default-value", "keyword-default",
-            "lambda-call"])
+            "lambda-call", "class-read-before-rebinding", "class-first-binding-reads-it",
+            "class-augmented-first-binding"])
     def test_a_name_anchored_in_the_scope_of_its_read_names_the_file(
             self, core, tmp_path, source):
         plugin = self._rig(tmp_path)

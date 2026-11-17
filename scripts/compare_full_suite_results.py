@@ -87,7 +87,7 @@ SEED_LIKE_LINE = re.compile(r"Using --randomly-seed=\d+")
 # The test step's environment as the Actions runner echoes it, between the
 # step's run command and its ##[endgroup] line, before the step's process
 # starts: an ordered run shows the variable empty, a seeded run its seed.
-STEP_ENV_SEED = re.compile(r"  PACT_SHUFFLE_SEED: (.*)")
+STEP_ENV_SEED = re.compile(r"  PACT_SHUFFLE_SEED:(?: (.*))?")
 # A census problem line names the test it came from: PYTEST_CURRENT_TEST, or
 # '<outside a test>', after an xdist worker's '[gwN] ' prefix.
 CENSUS_LINE_TEST = re.compile(
@@ -113,13 +113,14 @@ SHORT_SUMMARY_HEADER = re.compile(r"=+ short test summary info =+")
 _PROGRESS_PREFIX = r"(?:[^\[]*\[ *[0-9]{1,3}%\])?"
 CENSUS_HEADERS = {
     "child_pytest": re.compile(
-        _PROGRESS_PREFIX + r"CHILD PYTEST CENSUS: ([0-9]{1,9}) distinct pytest child\(ren\) "
-        r"started without blocking pytest-randomly"),
+        _PROGRESS_PREFIX + r"CHILD PYTEST CENSUS: ([0-9]{1,9}) distinct pytest child "
+        r"launch\(es\) refused or not inspected"),
     "clock_shift": re.compile(
         _PROGRESS_PREFIX + r"clock-shift census: ([0-9]{1,9}) problem\(s\); "
         r"this run did not shift every clock"),
     "home": re.compile(
-        _PROGRESS_PREFIX + r"HOME CENSUS: ([0-9]{1,9}) distinct child\(ren\) started without HOME"),
+        _PROGRESS_PREFIX + r"HOME CENSUS: ([0-9]{1,9}) distinct child launch\(es\) without "
+        r"HOME refused"),
     # The HOME census writes launches it could not inspect in their own block,
     # after its refusal block when both occur; a fault alone fails the session.
     "home_uninspected": re.compile(
@@ -290,32 +291,44 @@ def _test_text_range(lines: list[str], summary_index: int) -> range:
     warning text, skip and failure reasons) is printed here and nowhere else in
     the log, so no evidence marker is read from this range. Empty when the
     session banner cannot be located; that run is refused when its header is
-    read.
+    read. A log whose session-finish span ends after the final summary line
+    has no report sections to locate, and is refused here rather than read
+    whole.
     """
     _commands, banner, _end, finish = _step_bounds(lines)
-    if banner is None or finish > summary_index:
+    if banner is None:
         return range(0)
+    if finish > summary_index:
+        raise EvidenceError(
+            "the final summary line comes before the end of the session-finish "
+            "span, so pytest's report sections cannot be located")
     return range(finish, summary_index + 1)
 
 
-def _short_summary_range(lines: list[str], report: range) -> range:
-    """The 'short test summary info' section, where -ra prints its XPASS lines.
+def _short_summary_ranges(lines: list[str], report: range) -> list[range]:
+    """Where the 'short test summary info' section may start, latest first.
 
-    It is the last section before the final summary line. On CI pytest prints
-    each failure's whole message there, untrimmed and over several lines, so
-    the walk back from the summary line stops only at the section's own
-    header and passes over any other separator-shaped line a message holds.
-    A message that itself holds a whole child report, header line included,
-    moves the start inside that message; the XPASS count against the run
-    record then fails, so the run is refused, never miscounted.
+    It is the last section before the final summary line, and -ra prints its
+    XPASS lines there. On CI pytest prints each failure's whole message in it,
+    untrimmed and over several lines, and a message can hold a child pytest's
+    whole report, that report's own header line included. So every line that is
+    exactly a short-summary header is a candidate start; _apply_xpass reads
+    them latest first and keeps the first whose entries read cleanly against
+    the run's own evidence. Separator-shaped lines that are not the header are
+    passed over.
     """
     if not report:
-        return range(0)
+        return []
     summary_index = report[-1]
-    for index in range(summary_index - 1, report.start - 1, -1):
-        if SHORT_SUMMARY_HEADER.fullmatch(lines[index]):
-            return range(index + 1, summary_index)
-    return range(0)
+    return [range(index + 1, summary_index)
+            for index in range(summary_index - 1, report.start - 1, -1)
+            if SHORT_SUMMARY_HEADER.fullmatch(lines[index])]
+
+
+def _short_summary_range(lines: list[str], report: range) -> range:
+    """The latest candidate short-summary section, or an empty range."""
+    ranges = _short_summary_ranges(lines, report)
+    return ranges[0] if ranges else range(0)
 
 
 def _command_argv(lines: list[str]) -> list[str]:
@@ -426,7 +439,7 @@ def _step_env_seed(lines: list[str]) -> str | None:
             break
         match = STEP_ENV_SEED.fullmatch(lines[index])
         if match is not None:
-            return match.group(1)
+            return match.group(1) or ""
     return None
 
 
@@ -470,13 +483,17 @@ def _census_tests(failure: dict) -> list[str]:
     """The tests a census's problem lines name, without the worker prefix.
 
     A line's launch text holds temporary paths that differ from run to run, so
-    two runs are compared by the tests a census refused in; a line that names
-    no test is kept whole.
+    two runs are compared by the tests a census refused in. A line that names
+    no test is keyed by its problem, the text before its first ': ', because
+    the rest (counts, ledger paths, exception text) also differs by run.
     """
     keys = set()
     for line in failure["lines"]:
         match = CENSUS_LINE_TEST.match(line)
-        keys.add(match.group(1) if match else line)
+        if match:
+            keys.add(match.group(1))
+        else:
+            keys.add(re.sub(r"^\[gw[0-9]+\] ", "", line).partition(": ")[0])
     return sorted(keys)
 
 
@@ -717,8 +734,18 @@ def _resolve_xpass(payload: str, terminal: list[str]) -> tuple[str, str | None]:
     return node_id, payload[len(node_id) + 3:]
 
 
-def _apply_xpass(cases: list[dict], lines: list[str], terminal: list[str],
+def _apply_xpass(cases: list[dict], summaries: list[list[str]], terminal: list[str],
                  record: dict) -> None:
+    """Read the XPASS entries from pytest's own short summary and mark them.
+
+    Each candidate summary (latest first, see _short_summary_ranges) is read in
+    turn, and the first is kept whose skip and xfail reasons are all in the
+    run's evidence, whose XPASS count equals the record's and whose every XPASS
+    names a collected node. A child report inside a failure message fails
+    those checks unless it names this suite's own tests as XPASS, in the
+    record's number. When no candidate reads cleanly, the latest one's reason
+    is the refusal.
+    """
     expected_count = record["xpassed"]
     sites = record.get("skip_sites")
     skip_reasons = [site["reason"] for site in sites if isinstance(site, dict)
@@ -727,17 +754,26 @@ def _apply_xpass(cases: list[dict], lines: list[str], terminal: list[str],
     for case in cases:
         if case["outcome"] == "xfail":
             xfail_reasons.setdefault(case["node_id"], []).append(case["reason"] or "")
-    payloads = _xpass_lines(lines, skip_reasons, xfail_reasons)
-    if len(payloads) != expected_count or len(set(payloads)) != len(payloads):
-        raise EvidenceError(
-            f"raw XPASS evidence count/uniqueness mismatch: {len(payloads)} lines, "
-            f"record xpassed={expected_count}")
+    refusals = []
+    for summary in summaries or [[]]:
+        try:
+            payloads = _xpass_lines(summary, skip_reasons, xfail_reasons)
+            if len(payloads) != expected_count or len(set(payloads)) != len(payloads):
+                raise EvidenceError(
+                    f"raw XPASS evidence count/uniqueness mismatch: {len(payloads)} "
+                    f"lines, record xpassed={expected_count}")
+            entries = [_resolve_xpass(payload, terminal) for payload in payloads]
+        except EvidenceError as exc:
+            refusals.append(exc)
+            continue
+        break
+    else:
+        raise refusals[0]
     by_key = {}
     for case in cases:
         by_key.setdefault((case["classname"], case["name"]), []).append(case)
     resolved = set()
-    for payload in payloads:
-        node_id, reason = _resolve_xpass(payload, terminal)
+    for node_id, reason in entries:
         if node_id in resolved:
             raise EvidenceError(f"duplicate XPASS node ID: {node_id}")
         resolved.add(node_id)
@@ -1050,7 +1086,7 @@ def _terminal_cases(cases: list[dict], record: dict) -> list[dict]:
             if case["outcome"] not in ("collection_skip", "collection_error")]
 
 
-def _validate_junit(record: dict, lines: list[str], terminal: list[str],
+def _validate_junit(record: dict, summaries: list[list[str]], terminal: list[str],
                     artifact: Path) -> tuple[list[dict], list, list]:
     """Map every JUnit case to a terminal node and reconcile the aggregates."""
     cases = _terminal_cases(
@@ -1076,7 +1112,7 @@ def _validate_junit(record: dict, lines: list[str], terminal: list[str],
                 raise EvidenceError(f"JUnit file disagrees for {case['node_id']}")
     if seen_keys != set(node_for_key):
         raise EvidenceError("one or more terminal IDs have no JUnit case")
-    _apply_xpass(cases, lines, terminal, record)
+    _apply_xpass(cases, summaries, terminal, record)
     _require_one_outcome_kind_per_node(cases)
     outcome_counts = Counter(case["outcome"] for case in cases)
     teardown_after_pass = _teardown_after_pass_count(cases)
@@ -1162,7 +1198,8 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
     # own text can be; XPASS lines only from the short summary, the one place
     # -ra prints them.
     evidence = [line for index, line in enumerate(lines) if index not in report]
-    xpass_source = [lines[index] for index in _short_summary_range(lines, report)]
+    summaries = [[lines[index] for index in summary]
+                 for summary in _short_summary_ranges(lines, report)]
     _header, finish_span = _session_spans(lines)
     shuffle_seed = _run_seed(lines, report)
     census_failures = _census_failures(finish_span)
@@ -1172,7 +1209,7 @@ def _normalize_run(logical: str, directory: Path, expected_sha: str) -> dict:
             "which has no seed option and cannot load pytest-randomly")
     overall_conclusion = _require_environment_step_success(metadata)
     cases, skip_sites, collection_skip_sites = _validate_junit(
-        record, xpass_source, terminal, artifact)
+        record, summaries, terminal, artifact)
     verifier_state, verifier_failures, validity = _validate_run_outcomes(
         record, metadata, evidence, overall_conclusion, census_failures)
     return {

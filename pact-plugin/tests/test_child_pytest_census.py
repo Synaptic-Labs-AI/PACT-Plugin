@@ -1290,6 +1290,49 @@ def test_a_live_blocked_launch_through_an_executable_runs(tmp_path, census_state
     assert census_state["misses"] == before
 
 
+@pytest.fixture
+def deleted_cwd(tmp_path, monkeypatch):
+    """Run the test from a directory that has been deleted under the process."""
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    shutil.rmtree(gone)
+    with pytest.raises(FileNotFoundError):
+        os.getcwd()
+
+
+def test_a_launch_from_a_deleted_cwd_is_judged_and_refused(deleted_cwd, census_state):
+    before = len(census_state["misses"])
+    with pytest.raises(census.ChildPytestCensusError) as caught:
+        census._audit("subprocess.Popen", (None, [PY, "-m", "pytest", "-q"], None, None))
+    assert census_state["misses"][before:] == [str(caught.value)]
+    assert "does not block pytest-randomly" in str(caught.value), caught.value
+    assert "(cwd unavailable (" in str(caught.value), caught.value
+
+
+def test_a_live_launch_from_a_deleted_cwd_is_refused(deleted_cwd, census_state):
+    before = len(census_state["misses"])
+    with pytest.raises(census.ChildPytestCensusError) as caught:
+        subprocess.run([PY, "-m", "pytest", "-q"], capture_output=True, timeout=60)
+    assert census_state["misses"][before:] == [str(caught.value)]
+    assert "could not inspect" not in str(caught.value), caught.value
+
+
+def test_a_blocked_launch_from_a_deleted_cwd_is_accepted(deleted_cwd, census_state):
+    before = list(census_state["misses"])
+    census._audit("subprocess.Popen", (None, [PY, "-m", "pytest", *_BLOCK], None, None))
+    assert census_state["misses"] == before
+
+
+def test_the_docstring_lists_exactly_the_programs_that_run_nothing():
+    """The [wrapper] paragraph names the programs whose words are mentions; the
+    list must be _RUNS_NOTHING, so a name added to one is added to the other."""
+    doc = census.__doc__
+    start = doc.index("and run none of them:")
+    listed = doc[start:doc.index(". So `grep -c pytest log`", start)]
+    assert set(re.findall(r"`([^`]+)`", listed)) == census._RUNS_NOTHING
+
+
 def test_a_non_pytest_launch_is_untouched(census_state):
     before = list(census_state["misses"])
     proc = subprocess.run([PY, "-c", "print('ok')"], capture_output=True, text=True,
@@ -1435,8 +1478,8 @@ def test_an_identical_refusal_is_counted_once(census_state):
     reporter = _Reporter()
     census.finish(_Session(_Config(reporter)))
     assert reporter.lines == [
-        "CHILD PYTEST CENSUS: 1 distinct pytest child(ren) started without blocking "
-        "pytest-randomly", "  " + line], reporter.lines
+        "CHILD PYTEST CENSUS: 1 distinct pytest child launch(es) refused or not inspected",
+        "  " + line], reporter.lines
 
 
 def test_finish_fails_the_session_and_reports_each_miss(census_state):
@@ -1593,8 +1636,8 @@ def test_under_xdist_a_swallowed_miss_still_fails_the_run(tmp_path):
     assert rc == 1, output
     assert "CHILD PYTEST CENSUS: 1 " in output, output
     # The report starts its own line, not glued onto xdist's progress line.
-    assert re.search(r"^CHILD PYTEST CENSUS: 1 distinct pytest child\(ren\) started without blocking "
-                     r"pytest-randomly$", output, re.M), output
+    assert re.search(r"^CHILD PYTEST CENSUS: 1 distinct pytest child launch\(es\) refused or not "
+                     r"inspected$", output, re.M), output
     assert "test_swallows_the_census_error" in output and census.REMEDY in output, output
 
 

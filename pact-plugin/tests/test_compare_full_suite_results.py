@@ -205,13 +205,15 @@ def make_run(root, name, run_id=100, nodes=None, cases=None, dist=None,
                "rootdir: /home/runner/work/PACT-Plugin/PACT-Plugin",
                "configfile: pyproject.toml", "plugins: xdist-3.8.0",
                "created: 4/4 workers", f"4 workers [{len(nodes)} items]", ""]
+    # A real log carries the before-tests environment check and the collection
+    # check in their own earlier steps, before the test step's run command.
     lines = [
+        actions_line("CI environment matches constraints-ci.txt."),
+        actions_line(f"FULL-COLLECTION-OK 1 test files and {len(nodes)} items match discovery; subject={SHA}"),
         actions_line(f"##[group]Run {command}", bom=True),
         actions_line(command),
         *map(actions_line, header),
         *map(actions_line, finish_lines),
-        actions_line("CI environment matches constraints-ci.txt."),
-        actions_line(f"FULL-COLLECTION-OK 1 test files and {len(nodes)} items match discovery; subject={SHA}"),
     ]
     if captured:
         lines.extend(map(actions_line, [
@@ -469,17 +471,54 @@ def test_ordered_run_line_has_no_seed(tmp_path):
     assert len(read_runs(output)[0]["argv"]) == 9
 
 
-def _with_step_env(directory, seed):
+# The test step's seed echo exactly as two real full-suite job logs carry it
+# after the step-name columns (runs 43997065717, ordered, and 43997069304,
+# seed 159): the runner writes "name: value", so an empty value keeps its
+# trailing space.
+MEASURED_ORDERED_ECHO = "2026-11-17T01:39:12.7703570Z   PACT_SHUFFLE_SEED: "
+MEASURED_SEEDED_ECHO = "2026-11-17T01:39:20.1671713Z   PACT_SHUFFLE_SEED: 159"
+
+
+def _with_step_env(directory, seed, echo=None):
     """Add the test step's environment echo, as the Actions runner writes it
-    between the step's run command and its ##[endgroup] (measured on the
-    round-42 runs: '  PACT_SHUFFLE_SEED: ' empty for an ordered run)."""
+    between the step's run command and its ##[endgroup]. `echo` replaces the
+    seed line with a raw measured line, timestamp included."""
     log = directory / "run.log"
     lines = log.read_text(encoding="utf-8").split("\n")
-    lines[2:2] = [actions_line(text) for text in (
+    command = next(index for index, line in enumerate(lines) if "##[group]Run " in line) + 2
+    block = [actions_line(text) for text in (
         "shell: /usr/bin/bash -e {0}", "env:", "  DIST: loadfile",
         f"  PACT_SHUFFLE_SEED: {seed}", "##[endgroup]")]
+    if echo is not None:
+        block[3] = f"full-suite\tRun test suite\t{echo}"
+    lines[command:command] = block
     log.write_text("\n".join(lines), encoding="utf-8")
     return directory
+
+
+@pytest.mark.parametrize("echo, seeds, expected", [
+    (MEASURED_ORDERED_ECHO, (), None),
+    (MEASURED_SEEDED_ECHO, (159,), 159),
+    (MEASURED_ORDERED_ECHO.rstrip(" "), (), None),
+], ids=["ordered", "seeded", "ordered-without-trailing-space"])
+def test_the_measured_step_environment_echo_is_read(tmp_path, echo, seeds, expected):
+    first = _with_step_env(make_run(tmp_path, "one", seeds=seeds), "", echo=echo)
+    second = _with_step_env(make_run(tmp_path, "two", 101, seeds=seeds), "", echo=echo)
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 0, comparison
+    assert [run["shuffle_seed"] for run in comparison["input_runs"]] == [expected, expected]
+
+
+def test_an_empty_echo_without_its_trailing_space_still_disagrees_with_a_header_seed(
+        tmp_path):
+    first = make_run(tmp_path, "one")
+    second = _with_step_env(make_run(tmp_path, "two", 101, seeds=(159,)), "",
+                            echo=MEASURED_ORDERED_ECHO.rstrip(" "))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [{"run": "two", "error": (
+        "the test step's environment names no seed, but the report header reads "
+        "seed 159")}], comparison
 
 
 @pytest.mark.parametrize("named, seeds, expected", [
@@ -628,6 +667,24 @@ def test_a_banner_from_an_earlier_step_does_not_anchor_the_header(tmp_path):
     assert comparison["input_runs"][0]["shuffle_seed"] == 6
 
 
+def test_a_summary_line_before_the_session_finish_span_is_refused(tmp_path):
+    """The run's only summary line sits before the test step's run command, so
+    the report sections cannot be located. The run is refused, never read with
+    the whole log as evidence."""
+    first = make_run(tmp_path, "one")
+    second = make_run(tmp_path, "two", 101)
+    log = second / "run.log"
+    lines = log.read_text(encoding="utf-8").split("\n")
+    [summary] = [index for index, line in enumerate(lines) if line.endswith(" in 0.10s =====")]
+    lines.insert(0, lines.pop(summary))
+    log.write_text("\n".join(lines), encoding="utf-8")
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == 2, comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two", "error": "the final summary line comes before the end of the "
+         "session-finish span, so pytest's report sections cannot be located"}]
+
+
 def test_a_missing_session_banner_is_refused_not_read_as_ordered(tmp_path):
     first = make_run(tmp_path, "one", banner=False)
     second = make_run(tmp_path, "two", 101)
@@ -638,10 +695,10 @@ def test_a_missing_session_banner_is_refused_not_read_as_ordered(tmp_path):
          "full-suite run command; the run's seed header cannot be located"}]
 
 
-CHILD_CENSUS_HEADER = ("CHILD PYTEST CENSUS: 1 distinct pytest child(ren) started without "
-                       "blocking pytest-randomly")
+CHILD_CENSUS_HEADER = ("CHILD PYTEST CENSUS: 1 distinct pytest child launch(es) refused "
+                       "or not inspected")
 CLOCK_CENSUS_HEADER = "clock-shift census: 1 problem(s); this run did not shift every clock"
-HOME_CENSUS_HEADER = "HOME CENSUS: 1 distinct child(ren) started without HOME"
+HOME_CENSUS_HEADER = "HOME CENSUS: 1 distinct child launch(es) without HOME refused"
 HOME_FAULT_HEADER = "HOME CENSUS: 1 launch(es) the census could not inspect"
 HOME_FAULT_LINE = ("  [gw2] t::f (call): HOME census could not inspect the environment of "
                    "[true]: LookupError()")
@@ -801,12 +858,40 @@ def test_a_census_failing_in_the_same_tests_on_other_launch_text_is_no_delta(tmp
     assert comparison["deltas"] == [], comparison
 
 
+def _shim_line(launches, ledger, worker=""):
+    return (f"  {worker}the shim did not load in children: {launches} Python launch(es) "
+            f"writing this run's ledger seen, and no child process wrote to "
+            f"PACT_TEST_CLOCK_SHIFT_LEDGER ({ledger})")
+
+
+@pytest.mark.parametrize("second_line, deltas", [
+    (_shim_line(5, "/tmp/pytest-of-u/b/ledger"), []),
+    (_shim_line(5, "/tmp/pytest-of-u/b/ledger", worker="[gw1] "), []),
+    ("  the ledger could not be read: PermissionError(13)",
+     [{"type": "census_tests", "run": "two", "census": "clock_shift",
+       "before": ["the shim did not load in children"],
+       "after": ["the ledger could not be read"]}]),
+], ids=["count-and-ledger-differ", "forwarded-from-a-worker", "a-different-problem"])
+def test_a_census_line_naming_no_test_is_compared_by_its_problem(
+        tmp_path, second_line, deltas):
+    """A problem line naming no test carries counts and paths that differ by
+    run; only the problem it names is compared."""
+    first = make_run(tmp_path, "one", census_failed=True, finish_lines=(
+        CLOCK_CENSUS_HEADER, _shim_line(2, "/tmp/pytest-of-u/a/ledger")))
+    second = make_run(tmp_path, "two", 101, census_failed=True, finish_lines=(
+        CLOCK_CENSUS_HEADER, second_line))
+    completed, comparison, _ = invoke(tmp_path, first, second)
+    assert completed.returncode == (1 if deltas else 0), comparison
+    assert comparison["evidence_errors"] == [], comparison
+    assert comparison["deltas"] == deltas, comparison
+
+
 @pytest.mark.parametrize("finish, found", [
-    (("HOME CENSUS: 2 distinct child(ren) started without HOME", "  [gw0] test_z (call): child"),
+    (("HOME CENSUS: 2 distinct child launch(es) without HOME refused", "  [gw0] test_z (call): child"),
      1),
     ((HOME_CENSUS_HEADER, "  [gw0] test_z (call): child", "  [gw1] test_y (call): child"),
      2),
-    (("HOME CENSUS: 2 distinct child(ren) started without HOME", "  [gw0] test_z (call): child",
+    (("HOME CENSUS: 2 distinct child launch(es) without HOME refused", "  [gw0] test_z (call): child",
       "[gw3] PASSED tests/test_other.py::test_ok", "  [gw1] test_y (call): child"), 1),
 ], ids=["truncated", "extra-line", "interleaved"])
 def test_a_census_block_whose_lines_disagree_with_its_header_is_refused(
@@ -1762,25 +1847,55 @@ def test_a_ci_failure_message_in_the_short_summary_keeps_the_red_run(tmp_path, m
     assert not any(delta["type"] == "xpass" for delta in comparison["deltas"]), comparison
 
 
-@pytest.mark.parametrize("child_lines, error", [
-    (("FAILED test_probe.py::test_child - x",),
-     "raw XPASS evidence count/uniqueness mismatch: 0 lines, record xpassed=1"),
-    (("XPASS test_probe.py::test_child", "FAILED test_probe.py::test_child - x"),
-     "unmapped XPASS payload: 'test_probe.py::test_child'"),
-], ids=["no-xpass", "child-xpass"])
-def test_a_child_report_in_a_ci_failure_message_can_only_refuse(
-        tmp_path, child_lines, error):
-    """A failure message holding a whole child report, its own summary header
-    included, moves the short summary's start inside the message. The run is
-    then refused, never miscounted."""
+# A child pytest's -ra report as a failing test's CI message carries it,
+# its own short-summary header included (each row a different entry mix).
+CHILD_REPORTS = {
+    "failed-only": ("FAILED test_probe.py::test_child - x",),
+    "skipped": ("SKIPPED [1] test_probe.py:3: a reason only the child knows",
+                "FAILED test_probe.py::test_child - x"),
+    "xfail-and-xpass": ("XFAIL test_probe.py::test_xfail - expected",
+                        "XPASS test_probe.py::test_child",
+                        "FAILED test_probe.py::test_other - x"),
+}
+
+
+@pytest.mark.parametrize("child", list(CHILD_REPORTS))
+def test_a_child_report_in_a_ci_failure_message_keeps_the_red_run(tmp_path, child):
+    """A failure message holding a child pytest's whole -ra report, its header
+    line included, is not pytest's own short summary: the child's entries name
+    reasons and tests the run's evidence does not hold, so the earlier, real
+    header is read and the run is compared as red with its one real xpass."""
     xpass = case(ALPHA, "xpass", "unexpected")
     first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
     second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "failure", "boom")])
     _add_ci_failure_message(
-        second, ("=" * 3 + " short test summary info " + "=" * 3, *child_lines))
+        second, ("=" * 3 + " short test summary info " + "=" * 3, *CHILD_REPORTS[child]))
+    completed, comparison, output = invoke(tmp_path, first, second)
+    assert completed.returncode == 1, comparison
+    assert comparison["status"] == "different", comparison
+    assert comparison["evidence_errors"] == [], comparison
+    run = read_runs(output)[1]
+    assert run["validity"] == "test_outcome", run
+    assert run["totals"]["xpassed"] == 1, run
+
+
+def test_a_short_summary_no_candidate_reads_is_refused_with_the_latest_reason(tmp_path):
+    """When neither the real header nor a child's reads cleanly, the refusal
+    names the latest candidate's problem."""
+    xpass = case(ALPHA, "xpass", "unexpected")
+    first = make_run(tmp_path, "one", cases=[xpass, case(BETA)])
+    # The record counts two xpasses where pytest's own summary prints one, so
+    # the real header does not read cleanly either.
+    second = make_run(tmp_path, "two", 101, cases=[xpass, case(BETA, "failure", "boom")],
+                      record_updates={"xpassed": 2})
+    _add_ci_failure_message(
+        second, ("=" * 3 + " short test summary info " + "=" * 3,
+                 "SKIPPED [1] test_probe.py:3: a reason only the child knows"))
     completed, comparison, _ = invoke(tmp_path, first, second)
     assert completed.returncode == 2, comparison
-    assert comparison["evidence_errors"] == [{"run": "two", "error": error}], comparison
+    assert comparison["evidence_errors"] == [
+        {"run": "two", "error": "a SKIPPED summary entry has no reason in the run's evidence: "
+                                "'SKIPPED [1] test_probe.py:3: a reason only the child knows'"}]
 
 
 def _add_summary_entries(directory, entries):

@@ -277,7 +277,7 @@ def test_finish_without_a_terminal_reporter_writes_to_stderr(census_state, capsy
     census.finish(session)
     assert session.exitstatus == 1
     assert capsys.readouterr().err.splitlines() == [
-        "HOME CENSUS: 1 distinct child(ren) started without HOME", "  " + _LINE]
+        "HOME CENSUS: 1 distinct child launch(es) without HOME refused", "  " + _LINE]
 
 
 def test_other_audit_events_are_ignored(census_state):
@@ -299,7 +299,7 @@ def test_an_env_whose_keys_cannot_be_read_is_a_fault_that_fails_the_run(census_s
     assert len(added) == 1 and "could not inspect the environment" in added[0], added
     assert "LookupError('these keys cannot be read')" in added[0], added
     assert "test_an_env_whose_keys_cannot_be_read" in added[0], added
-    assert census_state["misses"] == misses, "a fault is not a child started without HOME"
+    assert census_state["misses"] == misses, "a fault is not a launch refused for lacking HOME"
 
 
 _FAULT = "t::f (call): HOME census could not inspect the environment of [true]: LookupError()"
@@ -308,12 +308,12 @@ _FAULT = "t::f (call): HOME census could not inspect the environment of [true]: 
 @pytest.mark.parametrize("refusals, faults, expected", [
     ([], [_FAULT], ["HOME CENSUS: 1 launch(es) the census could not inspect", "  " + _FAULT]),
     (["t::r (call): child [true] is given an environment without HOME"], [_FAULT],
-     ["HOME CENSUS: 1 distinct child(ren) started without HOME",
+     ["HOME CENSUS: 1 distinct child launch(es) without HOME refused",
       "  t::r (call): child [true] is given an environment without HOME",
       "HOME CENSUS: 1 launch(es) the census could not inspect", "  " + _FAULT]),
 ], ids=["fault-only", "refusal-and-fault"])
 def test_a_fault_is_counted_under_its_own_header(census_state, refusals, faults, expected):
-    """MUTANT: a fault line is counted with the children started without HOME.
+    """MUTANT: a fault line is counted with the launches refused for lacking HOME.
     The refusal header then counts a launch that was never judged, and a run
     with only a fault reads as a run with a HOME-less child."""
     census_state["misses"][:], census_state["forwarded"][:] = refusals, []
@@ -418,7 +418,7 @@ def test_finish_fails_the_session_and_reports_each_refusal(census_state):
     session = _Session(_Config(reporter))
     census.finish(session)
     assert session.exitstatus == 1
-    assert reporter.lines == ["HOME CENSUS: 1 distinct child(ren) started without HOME", "  " + _LINE]
+    assert reporter.lines == ["HOME CENSUS: 1 distinct child launch(es) without HOME refused", "  " + _LINE]
 
 
 def test_an_identical_refusal_is_counted_once(census_state):
@@ -429,7 +429,7 @@ def test_an_identical_refusal_is_counted_once(census_state):
     census._record(_LINE)
     reporter = _Reporter()
     census.finish(_Session(_Config(reporter)))
-    assert reporter.lines == ["HOME CENSUS: 1 distinct child(ren) started without HOME", "  " + _LINE]
+    assert reporter.lines == ["HOME CENSUS: 1 distinct child launch(es) without HOME refused", "  " + _LINE]
 
 
 @pytest.mark.parametrize("prior, after", [(0, 1), (1, 1), (2, 2), (3, 3), (4, 4)])
@@ -612,7 +612,7 @@ def test_under_xdist_a_swallowed_refusal_still_fails_the_run(tmp_path):
     assert rc == 1, output
     assert "HOME CENSUS: 1 " in output, output
     # The report starts its own line, not glued onto xdist's progress line.
-    assert re.search(r"^HOME CENSUS: 1 distinct child\(ren\) started without HOME$", output, re.M), output
+    assert re.search(r"^HOME CENSUS: 1 distinct child launch\(es\) without HOME refused$", output, re.M), output
     assert "test_swallows_the_census_error" in output and census.REMEDY in output, output
 
 
@@ -620,11 +620,97 @@ def test_under_xdist_a_child_with_home_passes_the_run(tmp_path):
     rc, output = _run_rig(tmp_path, '{"PATH": os.defpath, "HOME": os.environ["HOME"]}')
     assert "2 passed" in output, output
     assert rc == 0, output
-    assert "started without HOME" not in output, output
+    assert "without HOME refused" not in output, output
     # The workers' launches (the test's own and any its session makes) reach
     # the controller's information line.
     assert re.search(r"^HOME CENSUS: installed, [1-9][0-9]* launch(es)? checked, 0 refused$",
                      output, re.M), output
+
+
+# A wider-scoped fixture whose finalizer, registered on a wider node, launches a
+# child without HOME. It runs in the teardown of whichever test is last in that
+# node, so the order rows put the marked test first and last.
+_NODE_FINALIZER_RIG = '''
+import os
+import subprocess
+
+import pytest
+
+
+def _launch():
+    try:
+        subprocess.run(["true"], env={{"PATH": os.defpath}})
+    except Exception:
+        pass
+
+
+@pytest.fixture(scope="{scope}")
+def shared(request):
+    request.{owner}.addfinalizer(_launch)
+'''
+_MARKED_TEST = '''
+@pytest.mark.child_env_without_home(reason="rig: marked")
+def test_marked(shared):
+    pass
+'''
+_PLAIN_TEST = '''
+def test_plain(shared):
+    pass
+'''
+
+
+def _run_order_rig(tmp_path, owner, scope, marked_first, xdist=False):
+    (tmp_path / "conftest.py").write_text(
+        _RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
+    tests = (_MARKED_TEST + _PLAIN_TEST) if marked_first else (_PLAIN_TEST + _MARKED_TEST)
+    (tmp_path / "test_order.py").write_text(
+        _NODE_FINALIZER_RIG.format(owner=owner, scope=scope) + tests, encoding="utf-8")
+    proc = subprocess.run(
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly",
+         *(["-n", "1"] if xdist else []), "test_order.py"],
+        cwd=tmp_path, env=_child_environ(), capture_output=True, text=True, timeout=300)
+    return proc.returncode, proc.stdout + proc.stderr
+
+
+@pytest.mark.parametrize("owner, scope", [("node", "module"), ("session", "session")])
+@pytest.mark.parametrize("marked_first", [True, False], ids=["marked-first", "marked-last"])
+def test_a_wider_node_finalizer_is_never_exempt_whatever_the_order(tmp_path, owner, scope,
+                                                                   marked_first):
+    """MUTANT: the census lets the exemption of the test running at the time cover
+    a finalizer registered on a wider node. With the marked test last, that
+    finalizer runs in the marked test's teardown and passes; first, it is refused."""
+    rc, output = _run_order_rig(tmp_path, owner, scope, marked_first)
+    assert "2 passed" in output, output
+    assert rc == 1, output
+    assert output.count("HOME CENSUS: 1 distinct child launch(es) without HOME refused") == 1, output
+    lines = [line for line in output.splitlines() if ": child [" in line]
+    assert len(lines) == 1, lines
+    if marked_first:  # the finalizer runs in the unmarked test's teardown
+        assert "test_plain (teardown)" in lines[0], lines
+    else:
+        assert "test_marked (teardown)" in lines[0], lines
+        assert "wider-scoped fixture or node finalizer" in lines[0], lines
+
+
+def test_under_xdist_a_wider_node_finalizer_after_the_last_test_is_refused(tmp_path):
+    """The worker's last test has no next test, so its teardown tears down every
+    node; the marked test is last, and the module finalizer is still refused."""
+    pytest.importorskip("xdist")
+    rc, output = _run_order_rig(tmp_path, "node", "module", marked_first=False, xdist=True)
+    assert "2 passed" in output, output
+    assert rc == 1, output
+    assert output.count("HOME CENSUS: 1 distinct child launch(es) without HOME refused") == 1, output
+
+
+def test_a_marked_tests_own_finalizer_stays_exempt(tmp_path):
+    """The control: a function-scoped fixture's request.node is the test itself,
+    so its finalizer runs before the wider teardown and the marker covers it."""
+    rc, output = _run_order_rig(tmp_path, "node", "function", marked_first=False)
+    assert "2 passed" in output, output
+    assert rc == 1, output  # the unmarked test's own finalizer is refused
+    assert output.count("HOME CENSUS: 1 distinct child launch(es) without HOME refused") == 1, output
+    lines = [line for line in output.splitlines() if ": child [" in line]
+    assert len(lines) == 1 and "test_plain" in lines[0], lines
 
 
 def _home_census_registration(source):
@@ -713,11 +799,11 @@ def test_under_xdist_the_real_root_conftest_fails_a_swallowed_refusal(tmp_path, 
     if with_home:
         assert outcome == "ran", output
         assert proc.returncode == 0, output
-        assert "started without HOME" not in output, output
+        assert "without HOME refused" not in output, output
     else:
         assert outcome.startswith("refused: HomeCensusError"), output
         assert proc.returncode == 1, output
-        assert output.count("HOME CENSUS: 1 distinct child(ren) started without HOME") == 1, output
+        assert output.count("HOME CENSUS: 1 distinct child launch(es) without HOME refused") == 1, output
         lines = [line for line in output.splitlines() if ": child [" in line]
         assert len(lines) == 1 and _XDIST_TARGET in lines[0], lines
         assert ("[%s] " % worker) in lines[0], lines
@@ -767,7 +853,7 @@ def test_the_marker_exempts_a_skills_test_in_a_session_that_loads_the_conftest(t
     output = proc.stdout + proc.stderr
     assert "3 passed" in output, output
     assert proc.returncode == 1, output
-    assert "HOME CENSUS: 1 distinct child(ren) started without HOME" in output, output
+    assert "HOME CENSUS: 1 distinct child launch(es) without HOME refused" in output, output
     assert "test_unmarked_in_skills" in output and "test_marked_in_skills" not in output, output
 
 
@@ -840,7 +926,7 @@ def test_the_marker_never_covers_a_wider_scoped_fixture(tmp_path):
     assert log.read_text(encoding="utf-8").splitlines() == [
         "module setup: refused", "function setup: ran", "call: ran",
         "function teardown: ran", "module teardown: refused", "later call: ran"], output
-    assert "HOME CENSUS: 2 distinct child(ren) started without HOME" in output, output
+    assert "HOME CENSUS: 2 distinct child launch(es) without HOME refused" in output, output
     assert "in a wider-scoped fixture" in output, output
     assert proc.returncode == 1, output
 
@@ -993,7 +1079,7 @@ def test_a_session_with_or_without_the_tests_conftest_has_one_census(tmp_path, p
     marker = tmp_path / "outcome"
     rc, output = _real_session(*paths, plugin_dir=tmp_path, marker=marker)
     assert marker.read_text(encoding="utf-8").startswith("refused: HomeCensusError"), output
-    assert "HOME CENSUS: 1 distinct child(ren) started without HOME" in output, output
+    assert "HOME CENSUS: 1 distinct child launch(es) without HOME refused" in output, output
     assert output.count("HOME CENSUS") == 1, output
     assert rc == 1, output
 
@@ -1192,10 +1278,10 @@ def test_a_gated_test_is_judged_where_it_runs_and_stopped_before_its_child(tmp_p
     if gate == "closed":
         assert "1 passed, 1 skipped" in output, output
         assert proc.returncode == 0, output
-        assert "started without HOME" not in output, output
+        assert "without HOME refused" not in output, output
     else:
         assert proc.returncode == 1, output
-        assert "HOME CENSUS: 1 distinct child(ren) started without HOME" in output, output
+        assert "HOME CENSUS: 1 distinct child launch(es) without HOME refused" in output, output
         assert "test_gated_launch_without_home" in output, output
 
 

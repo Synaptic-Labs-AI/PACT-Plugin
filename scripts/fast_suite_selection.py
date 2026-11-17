@@ -752,9 +752,10 @@ class ExclusionView:
     scan_roots: frozenset[str] = frozenset()
     # Production climbs out of the plugin ('module:line:why').
     repo_reach: tuple[str, ...] = ()
-    # (module, reasons) for each unproven test-side module or requested
-    # conftest fixture ('tests/conftest.py::name'). An exclusion with any
-    # entry not covered by a matching review is BROAD.
+    # (module, reasons) for each unproven module in the closure, test-side or
+    # production, and each requested conftest fixture
+    # ('tests/conftest.py::name'). An exclusion with any entry not covered by a
+    # matching review is BROAD.
     unproven: tuple[tuple[str, tuple[str, ...]], ...] = ()
     # Whether any string in the closure contains a bump-trio stem; if so the
     # trio is not carved out for this exclusion.
@@ -1401,6 +1402,27 @@ def _anchors_of(node: ast.AST, env: _Env, notes: list[str],
     return frozenset(found)
 
 
+def _read_before_bound(bindings, nodes: list[ast.AST]) -> set[str]:
+    """The names a class body reads, in its own namespace, before it first binds
+    them: a read placed earlier than the first binding, or one inside that
+    binding's own value (`base = base / "x"`, `base /= "x"`). Python looks such
+    a read up in the scope around the class, since the class namespace does not
+    hold the name yet."""
+    first = {name: min(entries, key=lambda entry: entry[0])
+             for name, entries in bindings.items() if entries}
+    early: set[str] = set()
+    for name, (_, value) in first.items():
+        if value is not None and any(isinstance(inner, ast.Name) and inner.id == name
+                                     and isinstance(inner.ctx, ast.Load)
+                                     for inner in ast.walk(value)):
+            early.add(name)
+    for node in nodes:
+        if (isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in first
+                and (node.lineno, node.col_offset) < first[node.id][0]):
+            early.add(node.id)
+    return early
+
+
 def _resolve_scope(bindings, outer: _Env, module_env: _Env, declared_global: set[str],
                    injected: dict[str, frozenset[_Anchor]], notes: list[str],
                    strings: dict[str, frozenset[str]] | None = None) -> _Env:
@@ -1411,7 +1433,8 @@ def _resolve_scope(bindings, outer: _Env, module_env: _Env, declared_global: set
     nothing when none does. Bindings are read in source order, so a binding
     that reads its own name sees the paths of the bindings before it. A
     `global` name reads the module's; any other free name reads the scope
-    around it."""
+    around it. A class body's name that the class reads before binding it
+    arrives through `injected` with the paths of the scope around."""
     env = {name: paths for name, paths in outer.items() if name not in bindings}
     for name in declared_global:
         if name in module_env:
@@ -1459,7 +1482,11 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     each def, async def and lambda, each class body, and each comprehension.
     A name a scope binds is local to it and hides the same name outside,
     unless declared `global` or `nonlocal`; a free name reads the scopes
-    around it, out to the module. A class body's names are seen neither by
+    around it, out to the module. A class body differs: it looks a name up in
+    its own namespace and then in the scope around it, so a read before the
+    class first binds the name, or inside that first binding's own value,
+    reads the name around; such a name carries the paths around as well as its
+    own. A class body's names are seen neither by
     its methods nor by its comprehensions, except a comprehension's first
     iterable. A comprehension's loop targets are its own; its walrus binds in
     the function or module around it.
@@ -1554,9 +1581,13 @@ def _anchored_join_files(tree: ast.Module, rel: str,
         envs: list[_Env] = []
         for index, scope in enumerate(scopes):
             outer = file_anchors if index == 0 else envs[scope["around"]]
+            own = dict(injected.get(index, {}))
+            if isinstance(scope["node"], ast.ClassDef):
+                for name in _read_before_bound(scope["bindings"], scope["nodes"]):
+                    if name in outer:
+                        own[name] = own.get(name, frozenset()) | outer[name]
             envs.append(_resolve_scope(scope["bindings"], outer, envs[0] if envs else {},
-                                       scope["global"], injected.get(index, {}), notes,
-                                       strings))
+                                       scope["global"], own, notes, strings))
         return envs
 
     def contributions(envs: list[_Env]) -> dict[int, dict[str, set[_Anchor]]]:
