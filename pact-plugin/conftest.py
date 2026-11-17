@@ -45,7 +45,9 @@ charter:
   and plugin-root packages included.
 Add no other deviation. tests/test_root_conftest_import_charter.py enforces
 this charter. It cannot see a callable reached through getattr or a computed
-name. It cannot see a helper it matches by dotted path when that helper's
+name. Nor can it see a deviation's function, or a function that leads to it,
+reached that way or through a module bound other than by an import. It cannot
+see a helper it matches by dotted path when that helper's
 module is bound other than by an import (a parameter, an assignment, a star
 import), and it may not see one whose import name is reused for another module
 elsewhere in the file. It cannot see pytest_plugins bound through setattr or

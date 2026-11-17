@@ -30,6 +30,22 @@ DEVIATIONS allows it: one (file, enclosing function) site, with an exact count
 for each callable. A deviation the real tree no longer uses is reported too, so
 the charter cannot keep naming a deviation that is gone.
 
+Each deviation runs only behind its gate, checked in two halves. This pin
+proves nothing else reaches the deviation: GATED_CHAINS names the function each
+deviation sits in and every function that leads to it, up to the hook that
+checks the gate, with the only functions that may name each one. A reference
+anywhere else is refused: at module scope (a default, a decorator, a class body
+or a lambda there included), in another function, or as an alias. It is read
+by name in the deviation's own file, and in any other file the walk reaches
+when it resolves through that file's imports to the deviation's module. A link
+the real tree no longer uses is reported, like an unused deviation. The
+behavioural tests prove the other half: each hook checks its gate before it
+calls the chain. A gated function named by a string (getattr, globals()) or
+reached through a module bound other than by an import is not seen, and a
+local in a deviation's own file that shares a chain name is refused: an
+over-refusal. A def or class statement's decorators, defaults, annotations and
+bases are read in the scope that defines it, since they run there.
+
 A standard-library helper that imports a module it is given by name is matched
 by what it is, not by its spelling:
 - IMPORTING_HELPERS by their dotted path, resolved through the file's own import
@@ -131,6 +147,20 @@ DEVIATIONS = {
         Counter({"spec_from_file_location": 1, "module_from_spec": 1, "exec_module": 1}),
     ("tests/import_identity_map.py", "resolve_origins"): Counter({"find_spec": 1}),
 }
+# Each deviation's file -> the deviation's function and every function that
+# leads to it -> the only functions that may name it. Each chain ends in a hook
+# that checks its gate first.
+GATED_CHAINS = {
+    "tests/ci_environment_binding.py": {
+        "_load_verify_script": {"_check"},
+        "_check": {"CIEnvironmentBinding.pytest_sessionstart",
+                   "CIEnvironmentBinding.pytest_sessionfinish"},
+    },
+    "tests/import_identity_map.py": {
+        "resolve_origins": {"capture_map"},
+        "capture_map": {"pytest_sessionfinish"},
+    },
+}
 
 
 def _imports(tree):
@@ -195,45 +225,91 @@ def _names_a_literal_module(call, aliases):
     return dotted if literal else None
 
 
+def _header(node):
+    """The parts of a def or class statement that run where it is defined: its
+    decorators, a function's defaults and annotations, a class's bases and
+    keywords, and type parameters."""
+    parts = [*node.decorator_list, *getattr(node, "type_params", [])]
+    if isinstance(node, ast.ClassDef):
+        return parts + [*node.bases, *node.keywords]
+    args = node.args
+    every = [*args.posonlyargs, *args.args, *args.kwonlyargs,
+             *(arg for arg in (args.vararg, args.kwarg) if arg)]
+    return parts + [*args.defaults, *(d for d in args.kw_defaults if d),
+                    *(arg.annotation for arg in every if arg.annotation),
+                    *([node.returns] if node.returns else [])]
+
+
+def _scoped_nodes(tree):
+    """(enclosing function or class, dotted; node) for every node in `tree`, a
+    node before the nodes inside it. A def or class statement's header is in
+    the scope that defines it, its body in its own."""
+    def visit(node, scope):
+        yield scope, node
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            inner = f"{scope}.{node.name}" if scope else node.name
+            for part in _header(node):
+                yield from visit(part, scope)
+            for part in node.body:
+                yield from visit(part, inner)
+        else:
+            for child in ast.iter_child_nodes(node):
+                yield from visit(child, scope)
+
+    for child in ast.iter_child_nodes(tree):
+        yield from visit(child, "")
+
+
 def _dynamic_references(tree):
     """(enclosing function or class, dotted; callable, line) for every dynamic
     import callable `tree` refers to or imports by name, and for every binding
     of pytest_plugins, as a name or an attribute."""
     aliases = _import_aliases(tree)
     harmless = set()  # timeit runners given only lambdas
+    for scope, child in _scoped_nodes(tree):
+        if isinstance(child, ast.Call) and _dotted(child.func, aliases) in TIMEIT_RUNNERS \
+                and _times_only_lambdas(child):
+            harmless.add(id(child.func))
+        if isinstance(child, ast.Call):
+            literal = _names_a_literal_module(child, aliases)
+            if literal:
+                yield scope, literal, child.lineno
+        names = []
+        if isinstance(child, ast.Name):
+            names.append(child.id)
+        elif isinstance(child, ast.Attribute):
+            names.append(child.attr)
+        elif isinstance(child, ast.ImportFrom):
+            names.extend(alias.name for alias in child.names)
+        if isinstance(getattr(child, "ctx", None), ast.Store) and PLUGIN_LIST in names:
+            yield scope, PLUGIN_LIST, child.lineno
+        for name in names:
+            if name in DYNAMIC_IMPORTS or (
+                    name in IMPORTING_METHODS and isinstance(child, ast.Attribute)):
+                yield scope, name, child.lineno
+        dotted = _dotted(child, aliases)
+        if dotted in IMPORTING_HELPERS or (
+                dotted in TIMEIT_RUNNERS and id(child) not in harmless):
+            yield scope, dotted, child.lineno
 
-    def walk(node, scope):
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.Call) and _dotted(child.func, aliases) in TIMEIT_RUNNERS \
-                    and _times_only_lambdas(child):
-                harmless.add(id(child.func))
-            if isinstance(child, ast.Call):
-                literal = _names_a_literal_module(child, aliases)
-                if literal:
-                    yield scope, literal, child.lineno
-            names = []
-            if isinstance(child, ast.Name):
-                names.append(child.id)
-            elif isinstance(child, ast.Attribute):
-                names.append(child.attr)
-            elif isinstance(child, ast.ImportFrom):
-                names.extend(alias.name for alias in child.names)
-            if isinstance(getattr(child, "ctx", None), ast.Store) and PLUGIN_LIST in names:
-                yield scope, PLUGIN_LIST, child.lineno
-            for name in names:
-                if name in DYNAMIC_IMPORTS or (
-                        name in IMPORTING_METHODS and isinstance(child, ast.Attribute)):
-                    yield scope, name, child.lineno
-            dotted = _dotted(child, aliases)
-            if dotted in IMPORTING_HELPERS or (
-                    dotted in TIMEIT_RUNNERS and id(child) not in harmless):
-                yield scope, dotted, child.lineno
-            inner = scope
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                inner = f"{scope}.{child.name}" if scope else child.name
-            yield from walk(child, inner)
 
-    yield from walk(tree, "")
+def _gate_references(where, tree):
+    """(name, scope, line) for every reference in `tree`, the file at `where`,
+    to a function GATED_CHAINS names: by name in that function's own file, and
+    in any other file when it resolves through that file's imports to the
+    function's module."""
+    own = GATED_CHAINS.get(where.as_posix(), {})
+    other = {f"{Path(file).stem}.{name}": name
+             for file, chain in GATED_CHAINS.items() if file != where.as_posix()
+             for name in chain}
+    aliases = _import_aliases(tree)
+    for scope, node in _scoped_nodes(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and node.id in own:
+            yield node.id, scope, node.lineno
+        elif isinstance(node, (ast.Name, ast.Attribute)) \
+                and isinstance(getattr(node, "ctx", None), ast.Load) \
+                and _dotted(node, aliases) in other:
+            yield other[_dotted(node, aliases)], scope, node.lineno
 
 
 def _path_value(node, here, names):
@@ -342,6 +418,7 @@ def charter_violations(plugin_root):
                   for line in unread]
     followed = []
     used = {key: Counter() for key in DEVIATIONS}
+    gated = set()
     pending, seen = [plugin_root / "conftest.py"], set()
     while pending:
         path = pending.pop()
@@ -351,6 +428,12 @@ def charter_violations(plugin_root):
         where = path.relative_to(plugin_root)
         tree = ast.parse(path.read_text(encoding="utf-8"), str(path))
         violations += _dynamic_violations(where, tree, used)
+        for name, scope, line in _gate_references(where, tree):
+            if scope in GATED_CHAINS.get(where.as_posix(), {}).get(name, ()):
+                gated.add((where.as_posix(), name, scope))
+            else:
+                violations.append(f"{where}:{line}: `{name}` is named in "
+                                  f"`{scope or '<module>'}`, outside its gated caller")
         for dotted, names, line in _imports(tree):
             if dotted is None:
                 violations.append(f"{where}:{line}: a relative import")
@@ -369,6 +452,9 @@ def charter_violations(plugin_root):
     unused = [f"{file}:{function}: `{name}`"
               for (file, function), allowed in DEVIATIONS.items()
               for name in allowed if used[file, function][name] < allowed[name]]
+    unused += [f"{file}:{caller}: gated call of `{name}`"
+               for file, chain in GATED_CHAINS.items() for name, callers in chain.items()
+               for caller in sorted(callers) if (file, name, caller) not in gated]
     return violations, sorted(set(followed)), unused
 
 
@@ -429,6 +515,8 @@ def test_the_conftest_states_the_charter_and_names_this_pin():
                    "PACT_IDENTITY_MAP_OUT is set",
                    "tests/test_root_conftest_import_charter.py enforces",
                    "It cannot see a callable reached through getattr or a computed name.",
+                   ("Nor can it see a deviation's function, or a function that leads to it, "
+                    "reached that way or through a module bound other than by an import."),
                    "It cannot see a helper it matches by dotted path when that helper's "
                    "module is bound other than by an import (a parameter, an assignment, "
                    "a star import)",
@@ -491,6 +579,21 @@ BINDING = ("import importlib.util\n\ndef _load_verify_script(script):\n"
 IDENTITY = ("import importlib.util\n\ndef resolve_origins(names):\n"
             "    return {n: importlib.util.find_spec(n) for n in names}\n")
 DEVIATION_CONFTEST = "import ci_environment_binding\nimport import_identity_map\n"
+# The two deviations with their gated chains, shaped as the real files call them.
+GATED_BINDING = BINDING + (
+    "\nimport os\n\ndef _gated_root():\n"
+    "    return os.environ.get('GITHUB_ACTIONS') == 'true' or None\n\n"
+    "def _check(root, label):\n    verify = _load_verify_script(root)\n    return verify\n\n"
+    "class CIEnvironmentBinding:\n"
+    "    def pytest_sessionstart(self, session):\n        root = _gated_root()\n"
+    "        if root is None:\n            return\n        _check(root, 'start')\n\n"
+    "    def pytest_sessionfinish(self, session, exitstatus):\n        root = _gated_root()\n"
+    "        if root is None:\n            return\n        _check(root, 'end')\n")
+GATED_IDENTITY = IDENTITY + (
+    "\nimport os\n\ndef capture_map(paths):\n"
+    "    return {p: resolve_origins([p]) for p in paths}\n\n"
+    "def pytest_sessionfinish(session, exitstatus):\n"
+    "    if os.environ.get('PACT_IDENTITY_MAP_OUT'):\n        capture_map([])\n")
 # A tests/conftest.py that puts tests/ and then hooks/ on sys.path, as the real one does.
 INSERTS = ("import sys\nfrom pathlib import Path\n"
            "sys.path.insert(0, str(Path(__file__).parent))\n"
@@ -517,6 +620,7 @@ INSERTS = ("import sys\nfrom pathlib import Path\n"
     ("from importlib import import_module as load\n", None, None, 'conftest.py:1: dynamic import `import_module` in `<module>` is not a charter deviation'),
     ("import importlib\nimportlib.reload(importlib)\n", None, None, 'conftest.py:2: dynamic import `reload` in `<module>` is not a charter deviation'),
     ("def f():\n    exec('import yaml')\n", None, None, 'conftest.py:2: dynamic import `exec` in `f` is not a charter deviation'),
+    ("def f(v=__import__('yaml')):\n    return v\n", None, None, 'conftest.py:1: dynamic import `__import__` in `<module>` is not a charter deviation'),
     ("import helper\n", {"helper.py": "import runpy\n\ndef g():\n    runpy.run_path('x.py')\n"},
      None, 'tests/helper.py:4: dynamic import `run_path` in `g` is not a charter deviation'),
     ("import helper\n", {"helper.py": "from importlib.util import find_spec\n"}, None, 'tests/helper.py:1: dynamic import `find_spec` in `<module>` is not a charter deviation'),
@@ -626,18 +730,92 @@ def test_a_loaded_script_beside_a_standard_library_named_data_directory_passes(t
 
 
 def test_the_two_deviations_pass_exactly_as_named(tmp_path):
-    root = _rig(tmp_path, DEVIATION_CONFTEST,
-                {"ci_environment_binding.py": BINDING, "import_identity_map.py": IDENTITY})
+    root = _rig(tmp_path, DEVIATION_CONFTEST, {"ci_environment_binding.py": GATED_BINDING,
+                                               "import_identity_map.py": GATED_IDENTITY})
     violations, _, unused = charter_violations(root)
     assert violations == []
     assert unused == []
 
 
 def test_a_deviation_no_longer_in_use_is_reported(tmp_path):
-    root = _rig(tmp_path, DEVIATION_CONFTEST, {"ci_environment_binding.py": BINDING,
+    root = _rig(tmp_path, DEVIATION_CONFTEST, {"ci_environment_binding.py": GATED_BINDING,
                                                "import_identity_map.py": "import os\n"})
     _, _, unused = charter_violations(root)
-    assert unused == ["tests/import_identity_map.py:resolve_origins: `find_spec`"]
+    assert unused == ["tests/import_identity_map.py:resolve_origins: `find_spec`",
+                      "tests/import_identity_map.py:capture_map: gated call of `resolve_origins`",
+                      ("tests/import_identity_map.py:pytest_sessionfinish: gated call of "
+                       "`capture_map`")]
+
+
+# A deviation runs only behind its gate: its function, and each function that
+# leads to it, is named only in the next function of its chain. The hook at the
+# chain's end checks its gate first, which the behavioural tests below prove.
+@pytest.mark.parametrize("binding, identity, others, expected", [
+    # The cold probe's shape: an eager module-scope call.
+    (GATED_BINDING + "_EAGER = _load_verify_script('x')\n", GATED_IDENTITY, None,
+     'tests/ci_environment_binding.py:30: `_load_verify_script` is named in `<module>`, outside its gated caller'),
+    # An assigned alias, a lambda, a default, a decorator and a class body, all
+    # at module scope.
+    (GATED_BINDING + "_load = _load_verify_script\n", GATED_IDENTITY, None,
+     'tests/ci_environment_binding.py:30: `_load_verify_script` is named in `<module>`, outside its gated caller'),
+    (GATED_BINDING + "_lazy = lambda: _check('r', 'l')\n", GATED_IDENTITY, None,
+     'tests/ci_environment_binding.py:30: `_check` is named in `<module>`, outside its gated caller'),
+    (GATED_BINDING + "def f(v=_load_verify_script('x')):\n    return v\n", GATED_IDENTITY,
+     None, 'tests/ci_environment_binding.py:30: `_load_verify_script` is named in `<module>`, outside its gated caller'),
+    (GATED_BINDING + "@_check\ndef g():\n    pass\n", GATED_IDENTITY, None,
+     'tests/ci_environment_binding.py:30: `_check` is named in `<module>`, outside its gated caller'),
+    (GATED_BINDING + "class Eager:\n    v = _load_verify_script('x')\n", GATED_IDENTITY,
+     None, 'tests/ci_environment_binding.py:31: `_load_verify_script` is named in `Eager`, outside its gated caller'),
+    # Another function, and an ungated hook, in the deviation's own file.
+    (GATED_BINDING + "def other():\n    return _load_verify_script('x')\n", GATED_IDENTITY,
+     None, 'tests/ci_environment_binding.py:31: `_load_verify_script` is named in `other`, outside its gated caller'),
+    (GATED_BINDING + "def pytest_configure(config):\n    _check('r', 'l')\n",
+     GATED_IDENTITY, None, 'tests/ci_environment_binding.py:31: `_check` is named in `pytest_configure`, outside its gated caller'),
+    (GATED_BINDING, GATED_IDENTITY + "capture_map(['x'])\n", None,
+     'tests/import_identity_map.py:14: `capture_map` is named in `<module>`, outside its gated caller'),
+    (GATED_BINDING, GATED_IDENTITY + "def nested():\n    return resolve_origins(['x'])\n",
+     None, 'tests/import_identity_map.py:15: `resolve_origins` is named in `nested`, outside its gated caller'),
+    # Another file the walk reaches, through any import form.
+    (GATED_BINDING, GATED_IDENTITY, {"conftest.py": DEVIATION_CONFTEST +
+                                     "ci_environment_binding._load_verify_script('x')\n"},
+     'conftest.py:3: `_load_verify_script` is named in `<module>`, outside its gated caller'),
+    (GATED_BINDING, GATED_IDENTITY, {"conftest.py": DEVIATION_CONFTEST + "import helper\n",
+                                     "helper.py": ("from import_identity_map import "
+                                                   "resolve_origins as r\n\ndef f():\n"
+                                                   "    return r(['x'])\n")},
+     'tests/helper.py:4: `resolve_origins` is named in `f`, outside its gated caller'),
+    (GATED_BINDING, GATED_IDENTITY, {"conftest.py": DEVIATION_CONFTEST + "import helper\n",
+                                     "helper.py": ("import ci_environment_binding as b\n"
+                                                   "CHECK = b._check\n")},
+     'tests/helper.py:2: `_check` is named in `<module>`, outside its gated caller'),
+])
+def test_a_deviation_named_outside_its_gated_caller_is_refused(
+        tmp_path, binding, identity, others, expected):
+    others = dict(others or {})
+    conftest = others.pop("conftest.py", DEVIATION_CONFTEST)
+    root = _rig(tmp_path, conftest, {"ci_environment_binding.py": binding,
+                                     "import_identity_map.py": identity, **others})
+    violations, _, _ = charter_violations(root)
+    assert expected in violations, (expected, violations)
+
+
+# A name a gated function shares, in a file that does not import its module, is
+# not refused; the blind spots, pinned as listed: a gated function reached by a
+# string or through a module bound other than by an import is not seen.
+@pytest.mark.parametrize("binding, others", [
+    (GATED_BINDING, {"helper.py": "def _check():\n    return 1\n\n_check()\n"}),
+    (GATED_BINDING + "_E = globals()['_load_verify_script']\n", None),
+    (GATED_BINDING, {"helper.py": ("import ci_environment_binding\n"
+                                   "_E = getattr(ci_environment_binding, '_check')\n")}),
+    (GATED_BINDING, {"helper.py": "def f(module):\n    return module._load_verify_script('x')\n"}),
+], ids=["unrelated-local", "globals", "getattr", "parameter-module"])
+def test_a_gated_function_reached_unresolved_is_not_seen(tmp_path, binding, others):
+    conftest = DEVIATION_CONFTEST + ("import helper\n" if others else "")
+    root = _rig(tmp_path, conftest, {"ci_environment_binding.py": binding,
+                                     "import_identity_map.py": GATED_IDENTITY, **(others or {})})
+    violations, _, unused = charter_violations(root)
+    assert violations == [], violations
+    assert unused == [], unused
 
 
 def _script_rig(tmp_path, script, scripts=None):
@@ -874,7 +1052,8 @@ def test_a_callable_matched_by_name_is_seen_whatever_binds_it(tmp_path, conftest
     assert violations, conftest
 
 
-# The deviations' gates, as the charter states them.
+# The deviations' gates, as the charter states them: each hook at the end of a
+# GATED_CHAINS chain checks its gate before it calls the chain.
 @pytest.mark.parametrize("value", [None, "", "false", "1"])
 def test_the_ci_binding_loads_no_script_unless_github_actions_is_true(monkeypatch, value):
     import ci_environment_binding as binding
