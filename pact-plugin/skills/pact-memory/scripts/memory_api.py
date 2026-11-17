@@ -1752,11 +1752,12 @@ def _worktree_records(prefix: list) -> "Optional[List[List[str]] | str]":
 
     Either way, a record whose fields are not git's, in git's order
     (`_record_fields_in_order`), makes the listing unreadable:
-    `UNREADABLE_LISTING`, not records. Without `-z`, a `bare` record that is
-    not the main repository's directory does too, and a linked worktree's
-    record whose path holds no `.git` is dropped (`_plain_records_kept`).
-    None is a failed or timed-out git. A caller reads neither as an empty
-    listing.
+    `UNREADABLE_LISTING`, not records. So do an empty record and a listing
+    with no record: git always lists the main worktree first. Without `-z`,
+    a `bare` record that is not the main repository's directory does too,
+    and a linked worktree's record whose path holds no `.git` is dropped
+    (`_plain_records_kept`). None is a failed or timed-out git. A caller
+    reads neither as an empty listing.
     """
     from shared.project_scope import git_env_without_location
 
@@ -1776,16 +1777,21 @@ def _worktree_records(prefix: list) -> "Optional[List[List[str]] | str]":
         return None
     if result.returncode != 0:
         return None
+    # The text after the last terminator is "" when git ended the listing
+    # with one; it is not an empty field.
+    *fields, tail = os.fsdecode(result.stdout).split("\0" if nul else "\n")
     records, current = [], []
-    for field in os.fsdecode(result.stdout).split("\0" if nul else "\n"):
+    for field in fields + ([tail] if tail else []):
         if field:
             current.append(field)
         elif current:
             records.append(current)
             current = []
+        else:
+            return UNREADABLE_LISTING
     if current:
         records.append(current)
-    if not all(_record_fields_in_order(record) for record in records):
+    if not records or not all(_record_fields_in_order(record) for record in records):
         return UNREADABLE_LISTING
     if not nul:
         records = _plain_records_kept(records)
