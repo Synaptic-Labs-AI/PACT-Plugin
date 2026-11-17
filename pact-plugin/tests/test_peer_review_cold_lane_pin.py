@@ -1756,9 +1756,31 @@ class TestVerifyOnlyScopedToWarm:
     """The two sentences that call a re-review verify-only and not a fresh
     review must name the warm lane and point to the Cold Reviewer Lane, so
     neither can be read as excusing the cold first-round review that every
-    verify-only round runs. Any other sentence, diagram or fenced line that
-    says re-review is verify-only, in any wording or case, must be scoped to
-    the warm lane too."""
+    verify-only round runs.
+
+    Any other sentence, diagram or fenced line of peer-review.md that makes
+    a verify-only claim about re-review must be scoped to the warm lane too.
+    The matcher judges these shapes only: ticks and bold are stripped, the
+    text is split on sentence ends, ";", newlines and table pipes, and a
+    sentence is a claim when it holds a re-review word (re-review, re-reviews,
+    re-reviewing, re-reviewed, rereview) and one claim token in either order,
+    case-insensitive. The claim tokens are: verify-only or verify only,
+    only verif..., verif... only, limited to verif..., restricted to verif...,
+    nothing but or nothing more than verif..., just verif..., merely verif...,
+    and not a fresh or full review. A token directly followed by a re-review
+    word is the noun phrase ("verify-only re-review") and is not a claim. A
+    claim is scoped when "warm" sits directly before its re-review word, or
+    when "warm" appears earlier in the sentence than its claim token with no
+    "cold" between them.
+
+    What it does not see, each pinned by a row below, so that a matcher
+    change must update this list: a claim that never says re-review ("the
+    follow-up review is verify-only", "re-run review to verify fixes only"); a
+    claim worded outside the token list ("re-review checks only the fixes");
+    and a contrast that names warm without scoping to it ("Unlike the warm
+    lane, re-review is verify-only." passes). It also refuses two scoped
+    forms: a scope in another sentence, and "cold" between the scope and the
+    claim ("In the warm lane, unlike the cold one, re-review is verify-only.")."""
 
     SITES = (
         ("**Key rules**:", "warm re-review is verify-only (minimal scope), and the cold lane runs a full first-round review every round, per the Cold Reviewer Lane"),
@@ -1794,6 +1816,13 @@ class TestVerifyOnlyScopedToWarm:
         "All re-review rounds stay verify-only.",
         "├─ Cycle N: remediation tasks → re-review (verify-only) → check",
         "Verify-only applies to every re-review.",
+        "Re-review is limited to verification.",
+        "Re-reviews only verify the fixes.",
+        "Re-review just verifies each finding.",
+        "Re-review is not a fresh review.",
+        "re-review is VERIFY ONLY.",
+        "Re-review is verify-only for warm and cold lanes.",
+        "In the warm and cold lanes, re-review is verify-only.",
     ])
     def test_matcher_flags_an_unscoped_claim(self, text):
         claims = _verify_only_claims(text)
@@ -1807,6 +1836,8 @@ class TestVerifyOnlyScopedToWarm:
         "├─ Cycle N: remediation tasks → re-review (warm: verify-only; cold: first-round) → check",
         'This blocking finding has no disposition. Decline it, or run one more verify-only re-review round?", with the literal options "Decline it", described as "Record it as declined by you; it no longer holds merge readiness.", and "Run one more verify-only re-review round", described as "Run one verify-only re-review round in which the cold re-check checks it."',
         "a remediation cycle fails when its verify-only re-review leaves a blocking finding open",
+        "In the warm lane, re-review is verify-only.",
+        "For warm reviewers, a re-review is limited to verification.",
     ])
     def test_matcher_passes_a_scoped_claim_or_a_noun_use(self, text):
         claims = _verify_only_claims(text)
@@ -1814,12 +1845,45 @@ class TestVerifyOnlyScopedToWarm:
             f"the verify-only claim matcher flagged {text!r}: {claims!r}"
         )
 
+    @pytest.mark.parametrize("text", [
+        "The follow-up review is verify-only.",
+        "Re-run review to verify fixes only.",
+        "Re-review checks only the fixes.",
+        "Unlike the warm lane, re-review is verify-only.",
+    ])
+    def test_matcher_blind_spot_is_not_flagged(self, text):
+        # Each row is a claim the matcher does not see, as the class
+        # docstring lists; a matcher that starts flagging one must update it.
+        claims = _verify_only_claims(text)
+        assert all(scoped for _, scoped in claims), (
+            f"the verify-only claim matcher now flags the listed blind spot "
+            f"{text!r}; update the class docstring's list: {claims!r}"
+        )
+
+    @pytest.mark.parametrize("text", [
+        "Warm reviewers only. Re-review is verify-only.",
+        "In the warm lane, unlike the cold one, re-review is verify-only.",
+    ])
+    def test_matcher_refuses_a_listed_scoped_form(self, text):
+        # Each row is scoped prose the matcher refuses, as the class
+        # docstring lists; a matcher that starts passing one must update it.
+        claims = _verify_only_claims(text)
+        assert claims and not all(scoped for _, scoped in claims), (
+            f"the verify-only claim matcher now passes the listed refused "
+            f"form {text!r}; update the class docstring's list"
+        )
+
 
 _RE_REVIEW = r"\bre-?review(?:s|ing|ed)?\b"
-_VERIFY_ONLY = r"\bverify[- ]only\b"
-# A claim names re-review and calls it verify-only, in either order; a
-# verify-only directly followed by re-review is the noun phrase "verify-only
-# re-review", not a claim, and is skipped in both orders.
+_VERIFY_ONLY = (
+    r"(?:\bverify[- ]only\b|\bonly verif\w*|\bverif\w* only\b"
+    r"|\blimited to verif\w*|\brestricted to verif\w*"
+    r"|\bnothing (?:but|more than) verif\w*|\bjust verif\w*|\bmerely verif\w*"
+    r"|\bnot a (?:fresh|full) review\b)"
+)
+# A claim names re-review and one claim token, in either order; a token
+# directly followed by re-review is a noun phrase ("verify-only re-review"),
+# not a claim, and is skipped in both orders.
 _CLAIM_FORWARD = re.compile(
     rf"(?P<rr>{_RE_REVIEW})(?:(?!{_VERIFY_ONLY}).)*?(?P<vo>{_VERIFY_ONLY})(?!\s+re-?review)",
     re.IGNORECASE)
@@ -1828,19 +1892,28 @@ _CLAIM_BACKWARD = re.compile(
     re.IGNORECASE)
 _SENTENCE_SPLIT = re.compile(r"(?<=[.;!?])\s+|\n|\|")
 _WARM_BEFORE = re.compile(r"\bwarm:?\s+$", re.IGNORECASE)
+_WARM = re.compile(r"\bwarm\b", re.IGNORECASE)
+_COLD = re.compile(r"\bcold\b", re.IGNORECASE)
+
+
+def _warm_scopes(sentence: str, claim_at: int) -> bool:
+    """Whether "warm" appears before `claim_at` with no "cold" after it and
+    before the claim."""
+    warms = [m.end() for m in _WARM.finditer(sentence, 0, claim_at)]
+    return bool(warms) and not _COLD.search(sentence, warms[-1], claim_at)
 
 
 def _verify_only_claims(text: str) -> list[tuple[str, bool]]:
-    """Each sentence that says re-review is verify-only, with whether it is
-    scoped to the warm lane: "warm" directly before its re-review word, or
-    "warm" (optionally with a colon) directly before its verify-only word.
-    Case-insensitive; fenced and diagram lines are read like prose."""
+    """Each sentence that makes a verify-only claim about re-review, with
+    whether it is scoped to the warm lane, by the shapes and scope rule the
+    TestVerifyOnlyScopedToWarm docstring lists. Fenced and diagram lines are
+    read like prose."""
     claims = []
     for sentence in _SENTENCE_SPLIT.split(_strip_ticks(text).replace("**", "")):
         for pattern in (_CLAIM_FORWARD, _CLAIM_BACKWARD):
             for m in pattern.finditer(sentence):
                 scoped = bool(_WARM_BEFORE.search(sentence[:m.start("rr")])
-                              or _WARM_BEFORE.search(sentence[:m.start("vo")]))
+                              or _warm_scopes(sentence, m.start("vo")))
                 claims.append((sentence.strip(), scoped))
     return claims
 
