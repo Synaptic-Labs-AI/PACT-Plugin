@@ -67,9 +67,11 @@ from helpers import known_root  # noqa: E402
 # suite-wide redirect would remove. See tests/conftest.py.
 pytestmark = pytest.mark.claude_md_ambient
 
-# Importers (test_project_dir_resolution, test_memory_project_scope_disclosure)
-# use this value through the helpers below and must never reach a memory save's
-# embedding marker under it; conftest fails a test that does. Inside this module
+# test_project_dir_resolution imports this value as RECORD_SID and also uses the
+# helpers below; test_memory_project_scope_disclosure imports only helpers, of
+# which _enable_record_reading and _identity_for read SID at call time. No
+# importer may reach a memory save's embedding marker under this value;
+# conftest fails a test that does. Inside this module
 # _per_test_session_id rebinds SID for each test, because several saves here
 # reach /tmp/pact_embedding_attempted_<SID>. Read SID at call time only.
 SID = importer_session_id()

@@ -1111,30 +1111,29 @@ class TestR5EnvFileSeam:
     covered by the rung-2 resolution-equality rows (R1/R2), and the
     distinction is recorded, not erased."""
 
-    def test_r5_session_init_writes_record_and_export_and_a_bash_child_inherits(
-        self, tmp_path
+    def test_r5_writes_record_and_export_a_bash_child_inherits_and_its_marker_is_removed(
+        self, tmp_path, monkeypatch
     ):
-        sid5 = f"r5-env-file-{uuid.uuid4().hex}"
-        try:
-            self._r5_body(tmp_path, sid5)
-        finally:
-            embedding_marker(sid5).unlink(missing_ok=True)
-
-    def test_r5_reaches_its_marker_and_the_test_removes_it(self, tmp_path):
-        """The R5 flow reaches the embedding marker for this test's own session
-        id (its save under the exported value does), and the test removes that
-        marker, so no later run inherits it."""
-        sid5 = f"r5-marker-{uuid.uuid4().hex}"
-        marker = embedding_marker(sid5)
-        try:
+        """The R5 flow runs once, under a session id from fresh_session_id, the
+        helper this module's autouse fixture uses. Its save under the exported
+        value reaches the embedding marker for that id: the marker is checked
+        absent before the flow and present after it, before any cleanup. The
+        helper's scope then ends and the marker must be gone, so this pins the
+        helper's cleanup; the autouse fixture's own teardown runs after the test
+        body, where no test can observe it."""
+        with fresh_session_id(monkeypatch, sys.modules[__name__], "SID",
+                              lambda: f"r5-env-file-{uuid.uuid4().hex}",
+                              _SEEN_SIDS) as sid5:
+            marker = embedding_marker(sid5)
+            assert not marker.exists(), f"a marker for a new session id already exists: {marker}"
             self._r5_body(tmp_path, sid5)
             assert marker.exists(), (
-                "the R5 flow did not reach the embedding marker for this "
-                "test's session id, so the cleanup below is not exercised"
+                "the R5 flow did not reach the embedding marker for its session "
+                "id, so the cleanup checked below is not exercised"
             )
-        finally:
-            marker.unlink(missing_ok=True)
-        assert not marker.exists(), f"the test left its marker behind: {marker}"
+        assert not marker.exists(), (
+            f"fresh_session_id's scope ended without removing the marker the R5 save left: {marker}"
+        )
 
     def _r5_body(self, tmp_path, sid5):
         umbrella = make_umbrella(tmp_path)
