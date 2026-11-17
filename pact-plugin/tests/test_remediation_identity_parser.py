@@ -2698,6 +2698,34 @@ _HEADER_FORMS.update({
     for count in (2, 3, 4)
     for separator in map(chr, range(1, 128))
 })
+# A run of two and of three of each ASCII character between two headers,
+# so a scan that steps over only one character before the next header is
+# tried wherever git reads on.
+_HEADER_FORMS.update({
+    f"{length} of {ord(separator):#04x} between headers": (
+        "[gc]" + separator * length + "[include]"
+    ).replace("{", "{{").replace("}", "}}") + "\n\tpath = inc\n"
+    for length in (2, 3)
+    for separator in map(chr, range(1, 128))
+})
+# Each ASCII character between a section name and its quoted subsection,
+# whose `]` inside the quotes hides the end of the header from a naive
+# scan, then an include header.
+_HEADER_FORMS.update({
+    f"{ord(separator):#04x} before a quoted subsection": (
+        "[remote" + separator + '"a]b"][include]'
+    ).replace("{", "{{").replace("}", "}}") + "\n\tpath = inc\n"
+    for separator in map(chr, range(1, 128))
+})
+# Chains of every length from two to sixty-four headers, joined directly,
+# so a scan that stops after any fixed number of headers short of that
+# misses the include git reads at the end.
+_HEADER_FORMS.update({
+    f"{count} headers joined directly": "".join(
+        [f"[s{index}]" for index in range(count - 1)] + ["[include]"]
+    ) + "\n\tpath = inc\n"
+    for count in range(2, 65)
+})
 
 
 class TestTheIncludeScanReadsAHeaderAsGitDoes:

@@ -170,6 +170,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: the binding-form census takes its expression contexts from the contexts the compiler accepts, and the listing-answer walk its expression classes from the classes the compiler module defines, not from a docstring.
 - Tests: the arm for a NUL-damaged worktree entry asserts the same answer from every cwd on each listing shape git prints (an empty path, the entry's admin directory), served by a stand-in git, instead of one git version's listing text.
 - Tests: the open-flag census counts a flag read through any name, not only through os, and the core.worktree exit test covers every exit code subprocess can report.
+- Tests: the include-scan test asks git about runs of separators, every character before a quoted subsection, and chains of up to sixty-four headers.
 
 ### Why
 
