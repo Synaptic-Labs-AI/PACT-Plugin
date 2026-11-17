@@ -2286,6 +2286,95 @@ def test_a_separate_git_dir_checkout_is_one_of_its_own_roots(tmp_path, monkeypat
     assert set(roots) == expected, (roots, listed)
 
 
+def _separate_git_dir_repo(tmp_path):
+    """A `--separate-git-dir` repository: its main checkout, its git dir,
+    and one linked worktree, all real."""
+    main = tmp_path / "main"
+    main.mkdir()
+    store = tmp_path / "store.git"
+    run = lambda *a: subprocess.run(["git", "-C", str(main), *a], check=True,
+                                    capture_output=True)
+    run("init", "-q", f"--separate-git-dir={store}")
+    run("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q",
+        "--allow-empty", "-m", "c")
+    run("worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
+    return main.resolve(), store.resolve(), (tmp_path / "wt").resolve()
+
+
+def test_a_write_from_a_worktree_keeps_the_recorded_separate_git_dir_checkout(tmp_path, monkeypatch):
+    """git lists a `--separate-git-dir` repository's git dir where its main
+    checkout would be, so a write from a linked worktree has no other
+    evidence of that checkout. A root the backlog already holds is kept
+    while its `.git` names this repository's git dir, checked on this
+    write; the control shows git alone gives the worktree only.
+
+    Real repo, real git."""
+    main, store, wt = _separate_git_dir_repo(tmp_path)
+    _root_is(monkeypatch, wt)
+
+    assert backlog.checkout_roots() == [str(wt)], "control: git alone names the main checkout"
+    roots = backlog.checkout_roots([str(main), str(wt)])
+
+    assert set(roots) == {str(main), str(wt)}, roots
+    assert roots[0] == str(wt), roots
+
+
+@pytest.mark.parametrize("change", [
+    "the checkout's .git names another git dir",
+    "the checkout is gone",
+    "the checkout's .git is a directory",
+    "the recorded path is another repository's checkout",
+    "the recorded path is relative",
+])
+def test_a_recorded_root_is_dropped_once_its_git_names_another_repository(tmp_path, monkeypatch, change):
+    """A recorded root is carried only while its `.git` file names this
+    repository's git dir, on every write: once it names another one, or
+    nothing, the next write drops it. The control carries the same root
+    before the change."""
+    import shutil
+
+    main, store, wt = _separate_git_dir_repo(tmp_path)
+    other = _repo(tmp_path / "other")
+    _root_is(monkeypatch, wt)
+    recorded = str(main)
+    assert str(main) in backlog.checkout_roots([recorded, str(wt)]), "control: carried before the change"
+
+    if change == "the checkout's .git names another git dir":
+        (main / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    elif change == "the checkout is gone":
+        shutil.rmtree(main)
+    elif change == "the checkout's .git is a directory":
+        (main / ".git").unlink()
+        (main / ".git").mkdir()
+    elif change == "the recorded path is another repository's checkout":
+        recorded = str(other.resolve())
+    else:
+        recorded = "main"
+        monkeypatch.chdir(tmp_path)
+
+    assert backlog.checkout_roots([recorded, str(wt)]) == [str(wt)]
+
+
+def test_save_carries_the_separate_git_dir_checkout_it_read(tmp_path, monkeypatch):
+    """`save` hands the roots the file already holds to `checkout_roots`, so
+    a write from a linked worktree keeps the main checkout an earlier write
+    from there recorded."""
+    main, store, wt = _separate_git_dir_repo(tmp_path)
+    path = tmp_path / "backlog" / "p.json"
+    path.parent.mkdir()
+    monkeypatch.setattr(backlog, "store_path", lambda backlog_dir=None: path)
+
+    _root_is(monkeypatch, main)
+    data = backlog.load_or_create(path)
+    assert backlog.save(data, path) == []
+    assert str(main) in json.loads(path.read_text())["roots"], "control: the first write records main"
+
+    _root_is(monkeypatch, wt)
+    data = backlog.load_or_create(path)
+    assert backlog.save(data, path) == []
+    assert set(json.loads(path.read_text())["roots"]) == {str(main), str(wt)}
+
+
 def _git_rejecting_z(tmp_path, monkeypatch) -> None:
     """Put first on PATH a `git` that rejects `-z`, as git before 2.36 does,
     and otherwise runs the real git."""
@@ -2558,7 +2647,7 @@ def test_add_refuses_a_non_list_items_and_leaves_the_file_UNCHANGED(tmp_path, mo
     before = path.read_bytes()
     monkeypatch.setattr(backlog, "store_path", lambda backlog_dir=None: path)
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
 
     code = backlog.main(["add", "a new item"])
 
@@ -2593,7 +2682,7 @@ def test_an_ABSENT_item_list_is_still_allowed_while_an_explicit_null_refuses(tmp
     RED WHEN membership is simplified back to a `.get()` lookup.
     """
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
 
     absent = _backlog(tmp_path)
     absent.pop("items")
@@ -5348,7 +5437,7 @@ def _backlog_file(tmp_path, monkeypatch, items, archive=None):
     _write(tmp_path, "b.json", payload)
     monkeypatch.setattr(backlog, "store_path", lambda backlog_dir=None: path)
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
     return path
 
 
@@ -5753,7 +5842,7 @@ def test_an_old_shape_file_round_trips_without_gaining_the_archive_key(tmp_path,
     path = tmp_path / "b.json"
     _write(tmp_path, "b.json", _backlog(tmp_path, items=[_item()]))
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
 
     data = backlog.load_or_create(path)
     assert backlog.save(data, path) == []
@@ -5785,7 +5874,7 @@ def test_a_two_list_file_keeps_its_archive_through_a_save(tmp_path, monkeypatch)
     path = tmp_path / "b.json"
     _write(tmp_path, "b.json", payload)
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
 
     data = backlog.load_or_create(path)
     assert backlog.save(data, path) == []
@@ -6125,7 +6214,7 @@ def test_archive_on_a_non_list_archive_key_refuses_cleanly(tmp_path, monkeypatch
     _write(tmp_path, "b.json", payload)
     monkeypatch.setattr(backlog, "store_path", lambda backlog_dir=None: path)
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
     before = path.read_bytes()
 
     code = backlog.main(["archive", "d001"])
@@ -6161,7 +6250,7 @@ def test_archive_with_a_non_dict_items_entry_refuses_cleanly(tmp_path, monkeypat
     _write(tmp_path, "b.json", payload)
     monkeypatch.setattr(backlog, "store_path", lambda backlog_dir=None: path)
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
     before = path.read_bytes()
 
     code = backlog.main(["archive", "d001"])

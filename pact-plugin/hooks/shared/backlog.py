@@ -378,7 +378,7 @@ def _root_and_common_dir() -> Tuple[Path, Optional[Path]]:
     )
 
 
-def checkout_roots() -> List[str]:
+def checkout_roots(recorded: Any = None) -> List[str]:
     """Every checkout of this project — the main one and each worktree — as
     absolute resolved paths. NEVER empty and never absent.
 
@@ -388,7 +388,14 @@ def checkout_roots() -> List[str]:
     which case the read path's enclosing-checkout rung still matches it. The
     project root is always one of them, and the only one when git cannot
     answer or prints a listing that cannot be read whole: it is always right
-    about at least itself.
+    about at least itself, plus any carried root below.
+
+    `recorded`, the roots the backlog file already holds, carries forward
+    each one whose `.git` file names this repository's common dir. That is
+    the main checkout of a `--separate-git-dir` repository: git lists its
+    git dir in its place, so a write from one of its linked worktrees finds
+    no other evidence of it. Each is checked again on every write; any other
+    recorded root is dropped.
 
     Deliberately NOT merged with _branch_and_worktree_names, which runs the
     same porcelain: that caller reduces each `worktree` line to a BASENAME for
@@ -414,15 +421,34 @@ def checkout_roots() -> List[str]:
             memory_api._worktree_records(["--git-dir", str(common)]) if common is not None else None
         )
         if not isinstance(records, list):
-            return [str(Path(root).resolve())]
-        roots = [str(path) for path in memory_api._verified_worktree_roots(root, common, records)]
-        for record in records[1:]:
-            path = record[0][len("worktree "):]
-            if not os.path.lexists(path):
-                roots.append(str(Path(path).resolve()))
+            roots = [str(Path(root).resolve())]
+        else:
+            roots = [str(path) for path in memory_api._verified_worktree_roots(root, common, records)]
+            for record in records[1:]:
+                path = record[0][len("worktree "):]
+                if not os.path.lexists(path):
+                    roots.append(str(Path(path).resolve()))
     except (OSError, RuntimeError, ValueError):
         return [str(root)]
+    if common is not None and isinstance(recorded, list):
+        roots += [r for r in recorded if _names_common_dir(r, common)]
     return list(dict.fromkeys(roots))
+
+
+def _names_common_dir(checkout: Any, common: Path) -> bool:
+    """Whether `checkout`, an absolute path, holds a `.git` file whose
+    `gitdir:` resolves to `common`. Never raises."""
+    if not isinstance(checkout, str) or not os.path.isabs(checkout):
+        return False
+    identity = _memory_api().project_identity
+    try:
+        text = identity.read_git_file(Path(checkout) / ".git")
+        target = identity.gitfile_target(text) if text is not None else None
+        if target is None:
+            return False
+        return (Path(checkout) / target).resolve() == Path(common).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 # Key under which load_or_create stashes the bytes it read, so save() can
@@ -497,7 +523,7 @@ def save(data: Dict[str, Any], path: Path) -> List[str]:
     # since the last write is recorded by the next one. That is what makes the
     # read path's exact-membership rule self-healing: its loud message names
     # /PACT:next, and /PACT:next writes.
-    data["roots"] = checkout_roots()
+    data["roots"] = checkout_roots(data.get("roots"))
     problems = validate(data)
     if problems:
         return problems
