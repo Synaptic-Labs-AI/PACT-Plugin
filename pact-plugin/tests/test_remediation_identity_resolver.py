@@ -3759,8 +3759,8 @@ class TestARedirectRefusalNamesWhatWasObserved:
         assert missing == [], missing
 
     def test_every_function_passing_a_listing_answer_names_the_unreadable_one(self):
-        """Every function in either listing module that can return a
-        reader's answer unchanged (`_listing_answer_passers`, derived from
+        """Every function in the memory skill or the backlog that can return
+        the listing reader's answer unchanged (`_listing_answer_passers`, derived from
         the code) admits a string in its return annotation and, where it has
         a docstring, names `UNREADABLE_LISTING` there."""
         passers = {
@@ -3768,7 +3768,7 @@ class TestARedirectRefusalNamesWhatWasObserved:
             for module in (memory_api, backlog)
             for name, function in _listing_answer_passers(module.__file__).items()
         }
-        assert {("memory_api.py", "_worktree_records"), ("backlog.py", "_worktree_records")} <= set(passers)  # control
+        assert ("memory_api.py", "_worktree_records") in passers  # control
         wrong = {
             key: (ast.unparse(function.returns) if function.returns else None, ast.get_docstring(function))
             for key, function in passers.items()

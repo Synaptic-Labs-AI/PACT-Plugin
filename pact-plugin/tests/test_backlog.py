@@ -2276,7 +2276,7 @@ def test_a_separate_git_dir_checkout_is_one_of_its_own_roots(tmp_path, monkeypat
 
     listed = {
         str(Path(record[0][len("worktree "):]).resolve())
-        for record in backlog._worktree_records(["-C", str(main)])
+        for record in backlog._memory_api()._worktree_records(["-C", str(main)])
     }
     roots = backlog.checkout_roots()
 
@@ -2334,7 +2334,7 @@ def test_a_listed_worktree_whose_git_does_not_name_it_back_is_not_a_root(
 
     listed = {
         str(Path(record[0][len("worktree "):]).resolve())
-        for record in backlog._worktree_records(["-C", str(main)])
+        for record in backlog._memory_api()._worktree_records(["-C", str(main)])
     }
     roots = backlog.checkout_roots()
 
@@ -2485,14 +2485,38 @@ def test_an_unreadable_listing_with_no_branches_flags_nothing(tmp_path, monkeypa
         "the silence asserted below proves nothing"
     )
 
+    memory_api = backlog._memory_api()
     monkeypatch.setattr(
-        backlog, "_worktree_records", lambda at: backlog.UNREADABLE_LISTING
+        memory_api, "_worktree_records", lambda at: memory_api.UNREADABLE_LISTING
     )
     assert backlog._branch_and_worktree_names(str(repo)) is None
     assert backlog._abandoned_flags(stale, str(repo)) == [], (
         "an unreadable listing was read as an empty one, so every stale item "
         "was reported abandoned"
     )
+
+
+def test_the_worktree_names_are_this_projects_whatever_git_dir_says(tmp_path, monkeypatch):
+    """GIT_DIR and GIT_COMMON_DIR in the session's environment name another
+    repository; the worktree folders the abandoned-work check reads are
+    still this project's, read by the memory skill's listing reader.
+
+    Real repos, real git."""
+    repo = _repo(tmp_path / "repo")
+    other = _repo(tmp_path / "other")
+    run = lambda at, *a: subprocess.run(["git", "-C", str(at), *a], check=True,
+                                        capture_output=True)
+    run(repo, "worktree", "add", "-q", str(tmp_path / "ours-7"), "-b", "b-ours")
+    run(other, "worktree", "add", "-q", str(tmp_path / "theirs-8"), "-b", "b-theirs")
+    names = backlog._branch_and_worktree_names(str(repo))
+    assert "ours-7" in names and "theirs-8" not in names, f"control: {names}"
+
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(other / ".git"))
+    names = backlog._branch_and_worktree_names(str(repo))
+
+    assert "ours-7" in names, names
+    assert "theirs-8" not in names, names
 
 
 def test_staleness_flags_at_the_threshold_not_before(monkeypatch):
@@ -6500,23 +6524,19 @@ def _canned_git(tmp_path, monkeypatch, nul: str, plain: str) -> None:
 
 
 @pytest.mark.parametrize("name,nul,plain,readable", _LISTINGS, ids=[row[0] for row in _LISTINGS])
-def test_the_worktree_listing_is_read_as_the_memory_skill_reads_it(
+def test_each_worktree_listing_reads_to_its_answer(
     tmp_path, monkeypatch, name, nul, plain, readable
 ):
-    """Two readers of `git worktree list --porcelain` (this module's and the
-    memory skill's) give the same records for the same listing, and refuse
-    the same listings: one a reader could not hold whole is no listing."""
-    from scripts import memory_api
-
+    """The memory skill's reader of `git worktree list --porcelain`, the one
+    this module's roots and branch names read, gives each listing its
+    records, or refuses it: one it could not hold whole is no listing."""
     paths = {name: tmp_path / name for name in "abwd"}
     for name in "ab":
         (paths[name] / ".git").mkdir(parents=True)
     paths["d"].mkdir()
     nul, plain = (text.format(**paths) for text in (nul, plain))
     _canned_git(tmp_path, monkeypatch, nul, plain)
-    ours = backlog._worktree_records(["-C", str(tmp_path)])
-    theirs = memory_api._worktree_records(["-C", str(tmp_path)])
-    assert ours == theirs, (name, ours, theirs)
+    ours = backlog._memory_api()._worktree_records(["-C", str(tmp_path)])
     if isinstance(readable, tuple):
         assert isinstance(ours, list), (name, ours)
         read = [record[0] for record in ours]
@@ -6555,9 +6575,10 @@ def test_without_nul_a_path_holding_a_newline_records_no_worktree(tmp_path, monk
 
 
 @pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
-def test_every_layout_git_lists_reads_in_both_readers(tmp_path, monkeypatch, nul):
-    """Real listings of every layout git prints read in both readers, with
-    `-z` and on a git that rejects it: a branch, a detached HEAD, a lock with
+def test_every_layout_git_lists_reads_whole(tmp_path, monkeypatch, nul):
+    """Real listings of every layout git prints read in the memory skill's
+    reader, the one this module uses, with `-z` and on a git that rejects
+    it: a branch, a detached HEAD, a lock with
     and without a reason, a bare main repository and a `--separate-git-dir`
     repository's main record (its git directory) are kept, and so is a
     worktree whose folder is absent (moved away, or locked with its folder
@@ -6605,9 +6626,7 @@ def test_every_layout_git_lists_reads_in_both_readers(tmp_path, monkeypatch, nul
         separate: [tmp_path / "store", tmp_path / "separate-wt"],
     }
     for where, paths in kept.items():
-        ours = backlog._worktree_records(["-C", str(where)])
-        theirs = memory_api._worktree_records(["-C", str(where)])
-        assert ours == theirs, (where, ours, theirs)
+        ours = memory_api._worktree_records(["-C", str(where)])
         assert isinstance(ours, list), (where, ours)
         read = [Path(record[0][len("worktree "):]).resolve() for record in ours]
         assert sorted(read) == sorted(path.resolve() for path in paths), (where, read)
