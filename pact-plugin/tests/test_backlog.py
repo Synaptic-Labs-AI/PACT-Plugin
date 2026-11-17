@@ -2648,6 +2648,87 @@ def test_the_worktree_names_are_this_projects_whatever_git_dir_says(tmp_path, mo
     assert "theirs-8" not in names, names
 
 
+def test_the_branch_names_are_this_projects_whatever_git_dir_says(tmp_path, monkeypatch):
+    """`git branch` runs without GIT_DIR and GIT_COMMON_DIR, so with both
+    naming another repository the branch names are still this project's.
+
+    Real repos, real git."""
+    repo = _repo(tmp_path / "repo", branch="feat/7-ours")
+    other = _repo(tmp_path / "other", branch="feat/8-theirs")
+    names = backlog._branch_and_worktree_names(str(repo))
+    assert "feat/7-ours" in names and "feat/8-theirs" not in names, f"control: {names}"
+
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(other / ".git"))
+    names = backlog._branch_and_worktree_names(str(repo))
+
+    assert "feat/7-ours" in names, names
+    assert "feat/8-theirs" not in names, names
+
+
+def test_the_origin_slug_is_this_projects_whatever_git_dir_says(tmp_path, monkeypatch):
+    """The `origin` URL is read without GIT_DIR and GIT_COMMON_DIR, so with
+    both naming another repository the slug is still this project's.
+
+    Real repos, real git; the remotes are config values only."""
+    repo = _repo(tmp_path / "repo")
+    other = _repo(tmp_path / "other")
+    for path, name in ((repo, "ours"), (other, "theirs")):
+        subprocess.run(["git", "-C", str(path), "remote", "add", "origin",
+                        f"https://github.com/o/{name}.git"], check=True, capture_output=True)
+    assert backlog._origin_repo_slug(str(repo)) == ("o", "ours"), "control"
+
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(other / ".git"))
+
+    assert backlog._origin_repo_slug(str(repo)) == ("o", "ours")
+
+
+def test_gh_repo_view_runs_without_the_sessions_git_location(tmp_path, monkeypatch):
+    """`gh repo view` reads the git remotes of the folder it runs in, so it
+    runs without GIT_DIR and GIT_COMMON_DIR too. A stand-in for the `gh`
+    process records the environment it is given; nothing is contacted."""
+    repo = _repo(tmp_path / "repo")
+    seen = []
+    real = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[0] != "gh":
+            return real(command, *args, **kwargs)
+        seen.append(kwargs.get("env"))
+        return subprocess.CompletedProcess(
+            command, 0, '{"nameWithOwner": "o/ours", "url": "https://github.com/o/ours"}', "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "other" / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(tmp_path / "other" / ".git"))
+
+    assert backlog._gh_repo_view_slug(str(repo)) == ("o", "ours"), "control: the stand-in ran"
+    assert len(seen) == 1 and seen[0] is not None, seen
+    assert {"GIT_DIR", "GIT_COMMON_DIR"} & set(seen[0]) == set(), sorted(seen[0])
+
+
+def test_a_folder_naming_another_repositorys_git_dir_reads_none_of_its_worktree_names(tmp_path):
+    """A folder whose `.git` file names another repository's `.git`
+    directory reads that repository's worktree listing, and the worktree
+    folder names are not this project's, as its roots are not. The control
+    shows git lists the worktree.
+
+    Real repos, real git."""
+    other = _repo(tmp_path / "other")
+    subprocess.run(["git", "-C", str(other), "worktree", "add", "-q", str(tmp_path / "theirs-8"),
+                    "-b", "b-theirs"], check=True, capture_output=True)
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    listed = [record[0] for record in backlog._memory_api()._worktree_records(["-C", str(folder)])]
+    assert f"worktree {(tmp_path / 'theirs-8').resolve()}" in listed, f"control: {listed}"
+
+    names = backlog._branch_and_worktree_names(str(folder))
+
+    assert "theirs-8" not in (names or []), names
+
+
 def test_staleness_flags_at_the_threshold_not_before(monkeypatch):
     """Exactly `_STALE_AFTER` days is quiet; a day older flags.
 

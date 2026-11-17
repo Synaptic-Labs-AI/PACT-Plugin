@@ -3161,6 +3161,7 @@ _ANSWER_TAKING_CALLS = {
     "_entry_listed_as_moved": "its caller has returned on both sentinels first; it answers a bool",
     "isinstance": "tests the answer's type; only a list is read as records",
     "_verified_worktree_roots": "reached only with a list; it answers the gate roots",
+    "_lists_first": "reached only with a list; it answers a bool",
 }
 
 

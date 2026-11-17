@@ -433,8 +433,7 @@ def checkout_roots(recorded: Any = None) -> List[str]:
         records = (
             memory_api._worktree_records(["--git-dir", str(common)]) if common is not None else None
         )
-        own = (Path(root).resolve(), Path(common).resolve()) if common is not None else ()
-        if not isinstance(records, list) or Path(records[0][0][len("worktree "):]).resolve() not in own:
+        if not isinstance(records, list) or not _lists_first(records, root, common):
             roots = [str(Path(root).resolve())]
         else:
             roots = [str(path) for path in memory_api._verified_worktree_roots(root, common, records)]
@@ -447,6 +446,16 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     if common is not None and isinstance(recorded, list):
         roots += [r for r in recorded if _names_common_dir(r, common)]
     return list(dict.fromkeys(roots))
+
+
+def _lists_first(records: List[List[str]], root: Any, common: Optional[Path]) -> bool:
+    """Whether git's listing `records` puts `root` first, or the git dir
+    `common` first because it cannot name the main checkout: only then are
+    the listed worktrees `root`'s. Raises what `Path.resolve` raises."""
+    if common is None:
+        return False
+    first = Path(records[0][0][len("worktree "):]).resolve()
+    return first in (Path(root).resolve(), Path(common).resolve())
 
 
 def _names_common_dir(checkout: Any, common: Path) -> bool:
@@ -1577,14 +1586,21 @@ def _run_capture(
     Output is decoded with `errors="replace"`, so a non-UTF-8 byte (say in a
     remote URL) cannot raise UnicodeDecodeError out of `show`. `GH_HOST` is
     removed from the child's environment: the tracker is github.com, and
-    `gh repo view` would otherwise resolve against another host.
+    `gh repo view` would otherwise resolve against another host. Every
+    command also runs without GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR, as
+    the roots' git calls do, so `git` and `gh repo view` (which reads the
+    git remotes) answer for the repository they are anchored on, not one
+    the session's environment names.
 
     `timeout` exists for the per-ref REST calls, which share ONE deadline and
     so each get what is left of it. Every other caller takes the default.
     `cwd` anchors a command that reads the repository it runs in
     (`gh repo view`) on the project instead of the process CWD.
     """
-    env = {key: value for key, value in os.environ.items() if key != "GH_HOST"}
+    from shared.project_scope import git_env_without_location
+
+    env = git_env_without_location()
+    env.pop("GH_HOST", None)
     try:
         result = subprocess.run(
             list(command),
@@ -1907,8 +1923,18 @@ def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
     if not at:
         return None
     branches = _run_capture(["git", *at, "branch", "--format=%(refname:short)"])
-    worktrees = _memory_api()._worktree_records(at)
-    if not isinstance(worktrees, list):
+    memory_api = _memory_api()
+    worktrees = memory_api._worktree_records(at)
+    # The worktrees are this project's only by the roots' rule: a folder
+    # whose `.git` names another repository's `.git` directory reads that
+    # repository's listing, and its worktree folders are not this project's.
+    try:
+        ours = isinstance(worktrees, list) and _lists_first(
+            worktrees, project_path, memory_api.main_repo_common_dir(project_path)
+        )
+    except (OSError, RuntimeError, ValueError):
+        ours = False
+    if not ours:
         worktrees = None
     if branches is None and worktrees is None:
         return None
