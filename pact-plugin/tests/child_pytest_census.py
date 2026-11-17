@@ -215,9 +215,15 @@ not performed (blind spot 9):
 On a pytest child that is not deterministic, or that starts through a program
 the census does not read, the census records a line naming PYTEST_CURRENT_TEST,
 the argv, the cwd (`unavailable` when the process's own cwd has been deleted;
-the census resolves no path against it) and the remedy, then raises
-ChildPytestCensusError, which aborts the launch before the child starts. finish() fails the session for
-every recorded line, so a test that swallows the error still fails the run.
+the census resolves no path against it), the family that decided the refusal
+(`(family [module])`, or `(family [shell], then [module])` for a command in a
+shell's -c text; the first family to match, in the order [wrapper], then
+[program], [coverage], [module] and [script], then [mention]), for a [wrapper]
+refusal the word or shell text it took for the command the program runs
+(`tar -czf out.tgz pytest` names `pytest`), and the remedy, then raises
+ChildPytestCensusError, which aborts the launch before the child starts.
+finish() fails the session for every recorded line, so a test that swallows
+the error still fails the run.
 An identical line is recorded once, so finish()'s header counts distinct
 refusal lines, not launches. A refusal stops its launch at the first audit
 event, so the lines merged are those of repeated identical launches; a launch
@@ -556,17 +562,26 @@ def _miss(argv, cwd, env):
     else:
         words = [os.fsdecode(a) for a in (argv or [])]
         commands = _commands(words, environment, False, 0)
-    for part, program, part_env in commands:
+    for part, program, part_env, in_shell in commands:
         wrapper = _wrapper(part, program, 0)
         if wrapper is not None:
+            name, hit = wrapper
             return ("%s: pytest child [%s] (cwd %s) starts through %s, which the census "
-                    "does not read; %s" % (_current_test(), _shown(words), _where(cwd),
-                                           wrapper, WRAPPER_REMEDY))
-        start = _pytest_args(part, program)
+                    "does not read, and `%s` may be the command it runs %s; %s" % (
+                        _current_test(), _shown(words), _where(cwd), name,
+                        _shown([hit]), _family_label("wrapper", in_shell), WRAPPER_REMEDY))
+        start, family = _pytest_args(part, program)
         if start is not None and not _deterministic(part[start:], part_env):
-            return "%s: pytest child [%s] (cwd %s) does not block pytest-randomly; %s" % (
-                _current_test(), _shown(words), _where(cwd), REMEDY)
+            return "%s: pytest child [%s] (cwd %s) does not block pytest-randomly %s; %s" % (
+                _current_test(), _shown(words), _where(cwd), _family_label(family, in_shell),
+                REMEDY)
     return None
+
+
+def _family_label(family, in_shell):
+    """The refusal line's record of the family that decided it: `(family [X])`,
+    or `(family [shell], then [X])` for a command in a shell's -c text."""
+    return "(family [shell], then [%s])" % family if in_shell else "(family [%s])" % family
 
 
 def _where(cwd):
@@ -904,14 +919,15 @@ def _heredoc_substitutions(body, bodies):
             i += 1
 
 
-def _shell_commands(text, env, depth):
-    """Yield (command words, program index, environment) for every command in
-    shell text and in each of its substitutions."""
+def _shell_commands(text, env, depth, in_shell=False):
+    """Yield (command words, program index, environment, in_shell) for every
+    command in shell text and in each of its substitutions; in_shell is True
+    when the text is a shell program's -c text."""
     main, bodies = _scan(text)
-    yield from _commands(_lex(main), env, True, depth)
+    yield from _commands(_lex(main), env, True, depth, in_shell)
     if depth < _MAX_DEPTH:
         for body in bodies:
-            yield from _shell_commands(body, env, depth + 1)
+            yield from _shell_commands(body, env, depth + 1, in_shell)
 
 
 def _is_operator(word):
@@ -938,18 +954,19 @@ def _split_commands(words):
     yield part
 
 
-def _commands(words, env, shell_text, depth):
-    """Yield (command words, program index, environment) for every command in
-    `words`, with each shell -c command text opened."""
+def _commands(words, env, shell_text, depth, in_shell=False):
+    """Yield (command words, program index, environment, in_shell) for every
+    command in `words`, with each shell -c command text opened; a command from
+    such a text has in_shell True."""
     for part in (_split_commands(words) if shell_text else [words]):
         if not part:
             continue
         program, part_env = _program(part, env)
         text = _shell_command(part, program)
         if text is not None and depth < _MAX_DEPTH:
-            yield from _shell_commands(text, part_env, depth + 1)
+            yield from _shell_commands(text, part_env, depth + 1, True)
         else:
-            yield part, program, part_env
+            yield part, program, part_env, in_shell
 
 
 def _is_assignment(word):
@@ -1105,32 +1122,44 @@ def _coverage_run(words, i):
 def _launch(part, at):
     """Index of the first pytest argument when the command starting at `at` runs
     pytest by the [program], [coverage], [module] or [script] family, else None."""
+    return _launch_family(part, at)[0]
+
+
+def _launch_family(part, at):
+    """(index of the first pytest argument, family) when the command starting at
+    `at` runs pytest by the [program], [coverage], [module] or [script] family,
+    else (None, None). `-m coverage run ...` is the [module] family."""
     if at >= len(part):
-        return None
+        return None, None
     word = part[at]
     if _is_pytest_script(word):
-        return at + 1
+        return at + 1, "program"
     if _COVERAGE_PROGRAM.match(_command_name(word)):
-        return _coverage_run(part, at + 1)
+        return _found(_coverage_run(part, at + 1), "coverage")
     if not _is_interpreter(word):
-        return None
+        return None, None
     module, after = _module(part, at + 1)
     if module in _PYTEST_MODULES:
-        return after
+        return after, "module"
     if module == "coverage":
-        return _coverage_run(part, after)
+        return _found(_coverage_run(part, after), "module")
     if module is None and after < len(part) and part[after] == "--":
         after += 1  # `--` ends the interpreter's options; the next word is its script
     if module is None and after < len(part) and _is_pytest_script(part[after]):
-        return after + 1  # the interpreter runs pytest's script file
-    return None
+        return after + 1, "script"  # the interpreter runs pytest's script file
+    return None, None
+
+
+def _found(index, family):
+    return (index, family) if index is not None else (None, None)
 
 
 def _pytest_args(part, program):
-    """Index of the first pytest argument when `part` runs pytest, else None."""
-    start = _launch(part, program)
+    """(index of the first pytest argument, deciding family) when `part` runs
+    pytest, else (None, None)."""
+    start, family = _launch_family(part, program)
     if start is not None:
-        return start
+        return start, family
     # [mention]: every word naming an interpreter is read for its -m forms, up to
     # a program in program position that runs none of its words.
     stop = _command_position(part, program)
@@ -1141,12 +1170,12 @@ def _pytest_args(part, program):
             continue
         module, after = _module(part, at + 1)
         if module in _PYTEST_MODULES:
-            return after
+            return after, "mention"
         if module == "coverage":
             found = _coverage_run(part, after)
             if found is not None:
-                return found
-    return None
+                return found, "mention"
+    return None, None
 
 
 def _command_position(part, program):
@@ -1154,7 +1183,7 @@ def _command_position(part, program):
     dispatcher runs, followed along a chain, else the program word itself."""
     if program < len(part) and _command_name(part[program]) in _CHAINED | _DISPATCHERS:
         found = _command_search(part, program, 0)
-        if found is not None and found is not True:
+        if isinstance(found, int):
             return found
     return program
 
@@ -1175,21 +1204,28 @@ def _modelled(word):
 
 
 def _wrapper(part, program, depth):
-    """The program word when the program is none the census reads and a word
-    that may be the command it runs starts pytest, else None."""
+    """(program word, the _Hit that matched) when the program is none the census
+    reads and a word that may be the command it runs starts pytest, else None."""
     if program >= len(part) or _modelled(part[program]):
         return None
-    return part[program] if _command_starts_pytest(part, program, depth) else None
+    hit = _command_starts_pytest(part, program, depth)
+    return (part[program], hit) if hit is not None else None
+
+
+class _Hit(str):
+    """The word, or shell text, that the command search took for a command that
+    starts pytest; a refusal line names it."""
 
 
 def _command_starts_pytest(part, program, depth):
-    """True when a word that may be the command of the program at `program`
-    starts pytest."""
-    return _command_search(part, program, depth) is True
+    """The _Hit when a word that may be the command of the program at `program`
+    starts pytest, else None."""
+    found = _command_search(part, program, depth)
+    return found if isinstance(found, _Hit) else None
 
 
 def _command_search(part, program, depth):
-    """True when a word that may be the command of the program at `program`
+    """A _Hit when a word that may be the command of the program at `program`
     starts pytest, else the index of the word the search took for the command,
     or None when it found none. That word is the first past options,
     NAME=VALUE words, numbers and the verbs in _RUN_VERBS; while it follows an
@@ -1207,8 +1243,8 @@ def _command_search(part, program, depth):
         for at in range(program + 1, len(part)):
             if part[at] in _FIND_EXEC:
                 found = _command_search(part, at, depth + 1)
-                if found is True:
-                    return True
+                if isinstance(found, _Hit):
+                    return found
                 # The first action's command is the one in program position; a
                 # later action that starts pytest returns True above instead.
                 first = found if first is None else first
@@ -1223,7 +1259,7 @@ def _command_search(part, program, depth):
         if at >= len(part):
             return None
         if _starts_pytest(part, at, depth):
-            return True
+            return _Hit(part[at])
         return at if depth >= _MAX_DEPTH else _git_subcommand(part, at, depth)
     after_option = False
     for at in range(program + 1, len(part)):
@@ -1233,7 +1269,7 @@ def _command_search(part, program, depth):
         elif word.startswith("-"):
             after_option = True
         elif _starts_pytest(part, at, depth):
-            return True
+            return _Hit(word)
         elif _command_name(word) in _CHAINED and depth < _MAX_DEPTH:
             found = _command_search(part, at, depth + 1)
             return at if found is None else found
@@ -1248,7 +1284,7 @@ def _command_search(part, program, depth):
 
 
 def _git_subcommand(part, at, depth):
-    """True when git's subcommand at `at` runs a command that starts pytest, else
+    """A _Hit when git's subcommand at `at` runs a command that starts pytest, else
     the index of the word in program position: the command `bisect run` or
     `submodule foreach` runs, followed along a chain, or the subcommand itself.
     `bisect run` runs the argv after it; `submodule foreach` runs its remaining
@@ -1258,7 +1294,7 @@ def _git_subcommand(part, at, depth):
     subcommand = part[at]
     if subcommand == "bisect" and part[at + 1:at + 2] == ["run"]:
         found = _command_search(part, at + 1, depth + 1)
-        return True if found is True else (at if found is None else found)
+        return at if found is None else found
     if subcommand == "submodule":
         i = at + 1
         while i < len(part) and part[i] in ("-q", "--quiet"):
@@ -1268,12 +1304,12 @@ def _git_subcommand(part, at, depth):
             while i < len(part) and part[i] in ("--recursive", "-q", "--quiet"):
                 i += 1
             if _text_starts_pytest(" ".join(part[i:]), depth):
-                return True
+                return _Hit(" ".join(part[i:]))
             if i >= len(part):
                 return at
             if _command_name(part[i]) in _CHAINED | _DISPATCHERS and depth < _MAX_DEPTH:
                 found = _command_search(part, i, depth + 1)
-                return found if isinstance(found, int) and found is not True else i
+                return found if isinstance(found, int) else i
             return i
     if subcommand == "rebase":
         for i in range(at + 1, len(part)):
@@ -1287,7 +1323,7 @@ def _git_subcommand(part, at, depth):
             else:
                 continue
             if _text_starts_pytest(text, depth):
-                return True
+                return _Hit(text)
     return at
 
 
@@ -1316,7 +1352,7 @@ def _text_starts_pytest(text, depth):
     or through a program the census does not read."""
     return depth < _MAX_DEPTH and any(
         _launch(inner, start) is not None or _wrapper(inner, start, depth + 1) is not None
-        for inner, start, _ in _shell_commands(text, {}, depth + 1))
+        for inner, start, *_ in _shell_commands(text, {}, depth + 1))
 
 
 def _split(text):

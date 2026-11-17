@@ -1158,7 +1158,8 @@ def test_the_wrapper_refusal_names_the_program_and_the_remedy(monkeypatch):
                         "/rig", {})
     assert line == (
         "t.py::x (call): pytest child [/usr/bin/timeout 60 python3 -m pytest -p no:randomly]"
-        " (cwd /rig) starts through /usr/bin/timeout, which the census does not read;"
+        " (cwd /rig) starts through /usr/bin/timeout, which the census does not read,"
+        " and `python3` may be the command it runs (family [wrapper]);"
         " launch pytest directly, as in sys.executable -m pytest -p no:randomly,"
         " or teach the census this program"), line
 
@@ -1205,40 +1206,48 @@ def test_every_documented_family_has_a_refused_row_and_no_other_family_exists():
     assert not unrefused, f"family rows the census accepts: {unrefused}"
 
 
-# The family each row is refused by. Only a [wrapper] refusal names its route in
-# the line ("starts through <program>"); every other family's line says "does
-# not block pytest-randomly", so its family is read from the argv by the census
-# helpers that define it: [program] _is_pytest_script, [coverage]
-# _COVERAGE_PROGRAM, [module] and [script] _is_interpreter with _module,
-# [shell] _SHELLS, and [mention] a program none of them reads (_modelled false)
-# whose refusal a block lifts.
+# The family each row is refused by, as the census records it in the refusal
+# line: `(family [X])`, or `(family [shell], then [X])` for a command in a
+# shell's -c text. Deleting any family's deciding branch makes its rows name
+# another family or none, so each row pins its own branch.
+_FAMILY_LABEL = re.compile(r"\(family \[([a-z]+)\](?:, then \[([a-z]+)\])?\)")
+
+
 def _refusing_family(argv):
     line = census._miss(argv, None, {})
     assert line is not None, argv
-    program = argv[0]
-    if "starts through %s, which the census does not read" % program in line:
-        assert census._miss([*argv, *_BLOCK], None, {}) is not None, argv
-        return "wrapper"
-    assert "does not block pytest-randomly" in line, line
-    name = census._command_name(program)
-    if name in census._SHELLS:
-        return "shell"
-    if census._is_pytest_script(program):
-        return "program"
-    if census._COVERAGE_PROGRAM.match(name):
-        return "coverage"
-    if census._is_interpreter(program):
-        module = census._module(argv, 1)[0]
-        return "module" if module in (*census._PYTEST_MODULES, "coverage") else "script"
-    if not census._modelled(program) and census._miss([*argv, *_BLOCK], None, {}) is None:
-        return "mention"
-    return "unknown"
+    labels = _FAMILY_LABEL.findall(line)
+    assert len(labels) == 1, line
+    return labels[0][0]
 
 
 @pytest.mark.parametrize("family, argv", [
     (family, argv) for family, rows in sorted(_FAMILY_ROWS.items()) for argv in rows])
 def test_each_documented_family_is_refused_by_that_family(family, argv):
-    assert _refusing_family(argv) == family, (family, argv)
+    assert _refusing_family(argv) == family, (family, argv, census._miss(argv, None, {}))
+
+
+@pytest.mark.parametrize("text, inner", [
+    ("cd x && pytest", "program"), ("python3 -m pytest", "module"),
+    ("timeout 5 pytest", "wrapper"), ("make check python -m pytest", "mention"),
+    ("coverage run -m pytest", "coverage"), ("python3 /venv/bin/pytest", "script")])
+def test_a_shell_refusal_names_the_family_inside_the_shell_text(text, inner):
+    line = census._miss(["bash", "-c", text], None, {})
+    assert "(family [shell], then [%s])" % inner in line, line
+
+
+@pytest.mark.parametrize("argv, program, word", [
+    # The word taken for the command a program runs is named, so a refusal of a
+    # harmless command shows what it matched.
+    (["tar", "-czf", "out.tgz", "pytest"], "tar", "pytest"),
+    (["tar", "-czf", "out.tgz", "build/pytest0"], "tar", "build/pytest0"),
+    (["timeout", "60", "python3", "-m", "pytest"], "timeout", "python3"),
+    (["git", "submodule", "foreach", "pytest", "-q"], "git", "pytest -q"),
+], ids=lambda value: value if isinstance(value, str) else " ".join(value))
+def test_a_wrapper_refusal_names_the_word_it_took_for_the_command(argv, program, word):
+    line = census._miss(argv, None, {})
+    assert ("starts through %s, which the census does not read, and `%s` may be the "
+            "command it runs (family [wrapper])" % (program, word)) in line, line
 
 
 def test_the_lock_pins_the_versions_the_census_replays():
