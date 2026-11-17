@@ -86,7 +86,9 @@ def _per_test_session_id(monkeypatch):
     with fresh_session_id(monkeypatch, sys.modules[__name__], "SID",
                           lambda: str(uuid.uuid4()), _SEEN_SIDS) as session_id:
         yield session_id
-SEED = "# Project Memory\n\n## Retrieved Context\n\n## Working Memory\n"
+
+
+SEED ="# Project Memory\n\n## Retrieved Context\n\n## Working Memory\n"
 
 
 def _git(*args, cwd):

@@ -13,9 +13,17 @@ tracked test_*.py or conftest.py under skills/; an untracked file is not read. A
 name resolves through the imports of the scope that reads it (`import random as
 r`, `from random import seed`, `import numpy as np`): the reading function's
 own, then each enclosing function's, then the module's, with a class body's
-imports seen only in that class body, as Python resolves names. A parameter of
-the reading function or lambda, or of an enclosing one, shadows a module of the
-same name (`def f(random): random.seed(1)` is not refused). A name one scope
+imports seen only in that class body, as Python resolves names. A def's
+decorators, default values and annotations, and a class's decorators, bases and
+keyword values, are read in the enclosing scope, where Python evaluates them; the
+star rule below treats them the same way. So are a type parameter's bound and
+default and a type alias's value (`def f[T: random.seed(1)](random)`, `type X =
+random.seed`), with the node's type parameter names shadowing a module of the
+same name; the star rule reads these as evaluated on first use, like a read
+inside a function. A parameter of the reading function or
+lambda, or of an enclosing one, shadows a module of the same name
+(`def f(random): random.seed(1)` is not refused, `def f(random=random.seed(1))`
+is). A name one scope
 imports more than once, or both imports and takes as a parameter, counts when
 any of those imports is a setter. A from-import of a setter counts too. The
 shared instances the module-level setters delegate to count as setters
@@ -48,6 +56,7 @@ import.
 import ast
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -76,6 +85,40 @@ def _test_files(plugin_root, known_member=None):
 
 
 SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _type_params(node):
+    """The PEP 695 type parameters of a def, class or type alias."""
+    return getattr(node, "type_params", None) or []
+
+
+def _type_param_parts(node):
+    """The bounds and defaults of a node's type parameters."""
+    return [part for param in _type_params(node)
+            for part in (getattr(param, "bound", None), getattr(param, "default_value", None))
+            if part is not None]
+
+
+def _evaluated_outside(node):
+    """(plain, typed, lazy): the parts of a def, lambda or class that Python
+    evaluates outside its body. Plain parts (decorators, default values) run in
+    the enclosing scope. Typed parts (annotations, a class's bases and keyword
+    values) and lazy parts (type parameter bounds and defaults, evaluated on
+    first use) run in the enclosing scope with the node's type parameters also
+    visible."""
+    if isinstance(node, ast.ClassDef):
+        return (list(node.decorator_list),
+                [*node.bases, *(word.value for word in node.keywords)],
+                _type_param_parts(node))
+    args = node.args
+    defaults = [*args.defaults, *(value for value in args.kw_defaults if value is not None)]
+    if isinstance(node, ast.Lambda):
+        return defaults, [], []
+    params = (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg)
+    annotations = [arg.annotation for arg in params if arg is not None and arg.annotation is not None]
+    return ([*node.decorator_list, *defaults],
+            [*annotations, *([node.returns] if node.returns is not None else [])],
+            _type_param_parts(node))
 
 
 def _scoped_reads(tree):
@@ -123,14 +166,43 @@ def _scoped_reads(tree):
         return set()
 
     reads = {}
+    holders = []
 
-    def visit(node, chain):
+    def with_type_params(node, chain):
+        """`chain` plus a scope binding the node's type parameter names, where
+        a def, class or type alias has them."""
+        params = _type_params(node)
+        if not params:
+            return chain
+        holder = ast.Module(body=[], type_ignores=[])
+        holders.append(holder)
+        imports[id(holder)] = {param.name: set() for param in params}
+        return [*chain, holder]
+
+    def visit(node, chain, skip):
+        if isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Store):
+            reads[id(node)] = dotted(node, chain)
+        inner = chain
+        if isinstance(node, SCOPES):
+            plain, typed, lazy = _evaluated_outside(node)
+            typed_chain = with_type_params(node, chain)
+            for part in plain:
+                visit(part, chain, skip)
+            for part in (*typed, *lazy):
+                visit(part, typed_chain, skip)
+            skip = skip | {id(part) for part in (*plain, *typed, *lazy)}
+            inner = [*typed_chain, node]
+        elif isinstance(node, ast.TypeAlias):
+            typed_chain = with_type_params(node, chain)
+            parts = (node.value, *_type_param_parts(node))
+            for part in parts:
+                visit(part, typed_chain, skip)
+            skip = skip | {id(part) for part in parts}
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.Name, ast.Attribute)) and not isinstance(child.ctx, ast.Store):
-                reads[id(child)] = dotted(child, chain)
-            visit(child, [*chain, child] if isinstance(child, SCOPES) else chain)
+            if id(child) not in skip:
+                visit(child, inner, skip)
 
-    visit(tree, [tree])
+    visit(tree, [tree], frozenset())
     return reads
 
 
@@ -145,7 +217,7 @@ def _star_setters(tree):
     def bind(name, line, setter=None):
         bindings.setdefault(name, []).append((line, setter))
 
-    def visit(node, deferred, own_scope, local):
+    def visit(node, deferred, own_scope, local, skip=frozenset()):
         module_scope = not deferred and not own_scope
         if module_scope and isinstance(node, ast.ImportFrom):
             for alias in node.names:
@@ -169,21 +241,44 @@ def _star_setters(tree):
                 bind(node.id, node.lineno)
         inner_deferred = deferred or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
         inner_scope = own_scope or isinstance(node, (ast.ClassDef, *COMPREHENSIONS))
+        if isinstance(node, SCOPES):
+            # Decorators, defaults, annotations and class bases run where the
+            # def or class statement runs, not inside it; type parameter bounds
+            # and defaults run there too, but only when first used.
+            plain, typed, lazy = _evaluated_outside(node)
+            names = {param.name for param in _type_params(node)}
+            for part in plain:
+                visit(part, deferred, own_scope, local, skip)
+            for part in typed:
+                visit(part, deferred, own_scope, local | names, skip)
+            for part in lazy:
+                visit(part, True, own_scope, local | names, skip)
+            skip = skip | {id(part) for part in (*plain, *typed, *lazy)}
+            local = local | names
+        elif isinstance(node, ast.TypeAlias):
+            # A type alias's value and its parameters' bounds are evaluated on
+            # first use, with the alias's type parameters visible.
+            names = {param.name for param in _type_params(node)}
+            parts = (node.value, *_type_param_parts(node))
+            for part in parts:
+                visit(part, True, own_scope, local | names, skip)
+            skip = skip | {id(part) for part in parts}
         if not isinstance(node, COMPREHENSIONS):
             for child in ast.iter_child_nodes(node):
-                visit(child, inner_deferred, inner_scope, local)
+                if id(child) not in skip:
+                    visit(child, inner_deferred, inner_scope, local, skip)
             return
         # The first iterable runs in the enclosing scope, before any loop
         # variable exists; everything else runs inside the comprehension.
         first = node.generators[0].iter
-        visit(first, deferred, own_scope, local)
+        visit(first, deferred, own_scope, local, skip)
         inner = local | {name.id for loop in node.generators
                          for name in ast.walk(loop.target) if isinstance(name, ast.Name)}
         for child in ast.iter_child_nodes(node):
             parts = ast.iter_child_nodes(child) if isinstance(child, ast.comprehension) else [child]
             for part in parts:
-                if part is not first:
-                    visit(part, inner_deferred, inner_scope, inner)
+                if part is not first and id(part) not in skip:
+                    visit(part, inner_deferred, inner_scope, inner, skip)
 
     visit(tree, False, False, frozenset())
     found = {}
@@ -284,6 +379,17 @@ def test_an_untracked_file_is_not_read(tmp_path):
     "import numpy as np\nnp.random.mtrand._rand.seed(0)\n",
     "from numpy.random import mtrand\nmtrand.set_state(None)\n",
     "import random\ndef f(random):\n    pass\nrandom.seed(1)\n",
+    "import random\ndef f(random=random.seed(1)):\n    pass\n",
+    "import random\ndef f(*, random=random.seed(1)):\n    pass\n",
+    "import random\nreseed = lambda random=random.seed(1): random\n",
+    "import random\n@deco(random.seed(1))\ndef f(random):\n    pass\n",
+    "import random\ndef f(random) -> random.seed(1):\n    pass\n",
+    "import random\nclass C(base(random.seed(1))):\n    import os as random\n",
+    "from random import *\ndef f(x=seed(1)):\n    pass\ndef seed(x):\n    return x\n",
+    "import random\ndef f[T: random.seed(1)](random):\n    pass\n",
+    "import random\nclass C[T: random.seed(1)]:\n    import os as random\n",
+    "import random\ntype X[T: random.seed(1)] = int\n",
+    "import random\ntype X = random.seed\n",
 ])
 def test_a_global_reseed_is_refused(source):
     assert global_reseeds(source), source
@@ -310,6 +416,20 @@ def test_a_global_reseed_is_refused(source):
     "import random\ndef f(random):\n    random.seed(1)\n",
     "import random\nreseed = lambda random: random.seed(1)\n",
     "import random\ndef f(*, random):\n    def g():\n        random.seed(1)\n",
+    "import os as random\nclass C(random.seed):\n    import random\n",
+    "import random\ntype X[random] = random.seed\n",
+    "import random\ndef f[random](x: random.seed):\n    pass\n",
+    "from random import *\ntype X = seed(1)\ndef seed(x):\n    return x\n",
 ])
 def test_a_local_generator_or_a_same_named_helper_is_not_refused(source):
     assert global_reseeds(source) == [], source
+
+
+@pytest.mark.skipif(sys.version_info < (3, 13), reason="type parameter defaults need Python 3.13")
+@pytest.mark.parametrize("source", [
+    "import random\ndef f[T = random.seed(1)](random):\n    pass\n",
+    "import random\nclass C[T = random.seed(1)]:\n    import os as random\n",
+    "import random\ntype X[T = random.seed(1)] = int\n",
+])
+def test_a_reseed_in_a_type_parameter_default_is_refused(source):
+    assert global_reseeds(source), source
