@@ -173,6 +173,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: the include-scan test asks git about runs of separators, every character before a quoted subsection, and chains of up to sixty-four headers.
 - Tests: every clause a declined identity prints, on every print path including the withheld-override refusal, must equal a described entry, so advice fails in any wording or spelling.
 - Tests: the clause census now reads every detail a declined identity can print from the code, origin details included, so advice added to any of them fails.
+- Tests: the walk that finds functions passing a worktree-listing answer follows every binding and call form, to a fixed point, reads the non-record answers from the reader, and names every other call handed an answer.
 - Tests: an unknown -z listing field must match a known key whole; a key extending a known one, or differing only in case, is skipped like any unknown field.
 
 ### Why
