@@ -6212,13 +6212,21 @@ _LISTINGS = [
     ("nul, a lock with a reason and a stale worktree", "worktree {a}\0HEAD 1\0branch refs/heads/main\0\0"
      "worktree {b}\0HEAD 2\0detached\0locked on a usb disk\0\0worktree {w}\0HEAD 3\0branch refs/heads/x\0"
      "prunable gitdir file points to non-existent location\0\0", "", ("{a}", "{b}", "{w}")),
-    # With `-z`, a record that is not git's fields in git's order is refused
-    # as it is without: a listing cut short, one read with newlines in place
-    # of NULs, and one with a field git never prints.
+    # With `-z`, a record that is not git's known fields in git's order is
+    # refused as it is without: a listing cut short, one read with newlines
+    # in place of NULs, a known field out of order or in the wrong shape.
     ("nul, a listing cut short after a path", "worktree {a}\0HEAD 1\0\0worktree {b}", "", "unreadable"),
     ("nul, newlines in place of NULs", "worktree {a}\nHEAD 1\n\n", "", "unreadable"),
-    ("nul, an unknown field", "worktree {a}\0HEAD 1\0foo bar\0\0", "", "unreadable"),
     ("nul, a field out of order", "worktree {a}\0locked\0HEAD 1\0\0", "", "unreadable"),
+    ("nul, a known flag with a value", "worktree {a}\0bare x\0\0", "", "unreadable"),
+    # With `-z` no path is cut, so a field git added later (as 2.31 added
+    # `locked` and `prunable`) is skipped, keyed or bare, wherever it sits.
+    ("nul, an unknown field", "worktree {a}\0HEAD 1\0foo bar\0\0", "", ("{a}",)),
+    ("nul, an unknown flag between known fields",
+     "worktree {a}\0HEAD 1\0newflag\0branch refs/heads/main\0\0worktree {b}\0HEAD 2\0detached\0\0", "",
+     ("{a}", "{b}")),
+    ("nul, an unknown field leading a record", "foo bar\0worktree {a}\0HEAD 1\0\0", "", ("{a}",)),
+    ("nul, only unknown fields", "foo bar\0newflag\0\0", "", "unreadable"),
     # git always lists the main worktree first, so a listing with no record,
     # or with an empty record anywhere, is not git's.
     ("nul, an empty listing", "", "", "unreadable"),

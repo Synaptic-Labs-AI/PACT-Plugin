@@ -401,8 +401,10 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
     record, and git prints a path there unquoted, so a path holding a newline
     is cut into lines.
 
-    Either way, a record whose fields are not git's, in git's order
-    (`_record_fields_in_order`), makes the listing unreadable:
+    With `-z`, a field whose key git did not print when this reader was
+    written is skipped (`_porcelain_key_known`). Either way, a record whose
+    fields are not git's, in git's order (`_record_fields_in_order`), makes
+    the listing unreadable:
     `UNREADABLE_LISTING`, not records. So do an empty record and a listing
     with no record: git always lists the main worktree first. Without `-z`,
     a `bare` record that is not the main repository's directory does too,
@@ -443,6 +445,8 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
             return UNREADABLE_LISTING
     if current:
         records.append(current)
+    if nul:
+        records = [[f for f in record if _porcelain_key_known(f)] for record in records]
     if not records or not all(_record_fields_in_order(record) for record in records):
         return UNREADABLE_LISTING
     if not nul:
@@ -450,6 +454,17 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
         if records is None:
             return UNREADABLE_LISTING
     return records
+
+
+def _porcelain_key_known(field: str) -> bool:
+    """Whether a `-z` listing field's key is one `_PORCELAIN_ORDER` names.
+
+    A field with any other key is one git added after this reader (as git
+    2.31 added `locked` and `prunable`), and is skipped. With `-z` no path is
+    cut, so such a field is never part of a path; without `-z` it can be,
+    and every field must be known."""
+    key = field.split(" ", 1)[0]
+    return any(key == known.rstrip() for known, _ in _PORCELAIN_ORDER)
 
 
 def _record_fields_in_order(record: List[str]) -> bool:
