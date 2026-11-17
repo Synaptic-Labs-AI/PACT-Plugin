@@ -1759,11 +1759,12 @@ def _worktree_records(prefix: list) -> "Optional[List[List[str]] | str]":
     fields are not git's, in git's order (`_record_fields_in_order`), makes
     the listing `UNREADABLE_LISTING`, not records. An empty record or a
     listing with no record is `EMPTY_LISTING`: git always lists the main
-    worktree first. Without `-z`,
-    a `bare` record that is not the main repository's directory does too,
-    and a linked worktree's record whose path holds no `.git` is dropped
+    worktree first. Without `-z`, a `bare` record that is not the main
+    repository's directory also makes the listing `UNREADABLE_LISTING`, and
+    a linked worktree's record is dropped when its folder is present but
+    holds no `.git`; a record whose folder is absent is kept
     (`_plain_records_kept`). None is a failed or timed-out git. A caller
-    reads neither as an empty listing.
+    reads neither string as an empty listing.
     """
     from shared.project_scope import git_env_without_location
 
@@ -2089,11 +2090,12 @@ def _entry_listed_as_moved(git_dir: Path, records: List[List[str]]) -> bool:
     the path that the worktree entry at `git_dir` records: git lists a
     worktree moved with `mv` at its old path and marks it prunable.
 
-    Evidence git does not give shows no move: a git that prints no
-    `prunable` line, a listing read without `-z` (a gone path is dropped
-    there), and an entry whose `gitdir` file cannot be read or whose path
-    will not resolve all answer False, so the repair sentence is not
-    printed.
+    Evidence git does not give shows no move: a git before 2.31, which
+    prints no `prunable` line, and an entry whose `gitdir` file cannot be
+    read or whose path will not resolve answer False, so the repair
+    sentence is not printed. A listing read without `-z` keeps a record
+    whose folder is gone, so git 2.31 to 2.35, which rejects `-z` but
+    prints `prunable`, answers True as later git does.
     """
     try:
         text = project_identity.read_git_file(Path(git_dir) / "gitdir")

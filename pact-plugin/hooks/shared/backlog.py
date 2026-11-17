@@ -386,9 +386,14 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     another project's session. A missing entry costs that checkout a loud
     resolution failure UNLESS it sits inside a checkout that IS recorded, in
     which case the read path's enclosing-checkout rung still matches it. The
-    project root is always one of them, and the only one when git cannot
-    answer or prints a listing that cannot be read whole: it is always right
-    about at least itself, plus any carried root below.
+    project root is always one of them. With it come the listed worktrees
+    whose `.git` and admin entry name each other, and every listed worktree
+    whose folder is absent (a drive not mounted now, or a folder moved or
+    deleted), but only when the root is the checkout git lists first or git
+    lists the git dir there. The root is the only one, plus any carried root
+    below, when git cannot answer, prints a listing that cannot be read
+    whole, or lists another checkout first: it is always right about at
+    least itself.
 
     `recorded`, the roots the backlog file already holds, carries forward
     each one whose `.git` file names this repository's common dir. That is
@@ -397,11 +402,11 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     no other evidence of it. Each is checked again on every write; any other
     recorded root is dropped.
 
-    Deliberately NOT merged with _branch_and_worktree_names, which runs the
-    same porcelain: that caller reduces each `worktree` line to a BASENAME for
-    substring matching, this one keeps a path only when the worktree's `.git`
-    and its admin entry name each other — opposite ends of the same string,
-    so one helper serving both still needs a mode flag.
+    Deliberately NOT merged with _branch_and_worktree_names, which reads the
+    same listing with the same reader: that caller reduces each `worktree`
+    line to a BASENAME for substring matching, this one keeps whole paths
+    by the rules above — opposite ends of the same string, so one helper
+    serving both still needs a mode flag.
     """
     # ONLY TWO-WAY-LINKED worktrees, as the memory skill's read gate keeps
     # them (`_verified_worktree_roots`): a listed path is what this
