@@ -96,7 +96,8 @@ refused whether or not it does:
 - [wrapper] Any family above as the command of a program the census does not
   read (`timeout 60 pytest`, `sudo python -m pytest`, `uv run pytest`), refused
   whether or not it blocks pytest-randomly, since the census cannot tell what
-  environment and argv that program passes on. The program is any program
+  environment and argv that program passes on. An interpreter running such a
+  program as its module (`python3 -m uv run pytest`) is read as that program. The program is any program
   except an interpreter, `coverage`, pytest's program, and the programs that
   print, look up, read, list or ignore their words, or change to the directory
   they name, and run none of them: `echo`, `printf`, `which`, `true`, `false`,
@@ -130,8 +131,8 @@ refused whether or not it does:
   one word, so `git -C repo pytest` is refused and
   `git --no-pager grep python -m pytest` is a mention. Three git subcommands
   run a command, which is judged too: `git bisect run` the argv after `run`,
-  `git submodule foreach` its remaining words and `git rebase --exec` (or `-x`)
-  each value, both as shell
+  `git submodule foreach` its remaining words and `git rebase --exec` each
+  value, both as shell
   text, so `git bisect run pytest` is refused and `git bisect run make test`
   is not. The command bisect run and foreach run is in program position, so
   `git submodule foreach echo python -m pytest` is a mention. A rebase value is
@@ -139,7 +140,9 @@ refused whether or not it does:
   `git rebase -x 'echo python -m pytest' main` is a mention while
   `git rebase -x echo python -m pytest` is read as `make check python -m
   pytest` is: there `python -m pytest` are arguments of git, which the census
-  does not read.
+  does not read. rebase's --exec is read in every form git accepts: `--exec`
+  and its unambiguous prefixes `--ex` and `--exe`, with `=` or the next word,
+  and `-x` alone or ending a bundle of its short flags (`-ix`, `-ixpytest`).
 - [shell] Any family above inside the command text of a shell run with `-c`
   (below).
 `-m py.test` and `-m _pytest` start no pytest session and are no family.
@@ -181,8 +184,10 @@ not performed (blind spot 9):
   (`$'py\x74est'` is `pytest`), and `$"..."` is read as a double-quoted string,
   wherever quotes are read: inside substitutions and arithmetic too, and in a
   heredoc delimiter (`<<$'EOF'` ends at a line `EOF` and is quoted).
-- A `#` that starts a word begins a comment to the end of the line; a `#` inside
-  a word or inside quotes is text (`--base-url=http://x/#frag`).
+- A `#` that starts a word begins a comment to the end of the line, inside a
+  `$( )` too, so a quote or paren in a comment there does not move where the
+  substitution ends; a `#` inside a word or inside quotes is text
+  (`--base-url=http://x/#frag`).
 - Each command between `;`, `&`, `&&`, `||`, `|`, `|&`, a newline, `(` and `)`
   is judged on its own, written with or without spaces, and so is a function
   body, where it is defined, whether or not the function is called.
@@ -210,7 +215,9 @@ not performed (blind spot 9):
   bash reads it: dash rejects `<( )` and `<<<` as syntax errors, so
   `dash -c 'cat <(pytest -q)'` is refused although dash runs nothing.
 - Text that bash rejects as a syntax error is still judged by these rules and
-  refused on purpose, although it starts no child: `echo \\$(pytest -q)`.
+  refused on purpose, although it starts no child: `echo \\$(pytest -q)`, and a
+  substitution nothing closes (`echo $(pytest`, an unclosed backtick), whose
+  whole body is judged.
 
 On a pytest child that is not deterministic, or that starts through a program
 the census does not read, the census records a line naming PYTEST_CURRENT_TEST,
@@ -683,16 +690,27 @@ def _lex(text):
 
 def _closing(text, i, close):
     """Index after the `close` that ends a construct whose body starts at `i`,
-    skipping quotes, escapes, nested parentheses and, inside `$( )`, arithmetic
-    and heredoc bodies, so a `)` or quote in a heredoc body does not end it;
-    len(text) when unclosed. A backtick substitution ends at its first
-    unescaped backtick, heredoc or not, as bash's does."""
+    skipping quotes, escapes, nested parentheses and, inside `$( )`, comments,
+    arithmetic and heredoc bodies, so a `)` or quote in a comment or a heredoc
+    body does not end it; len(text) when unclosed. A backtick substitution ends
+    at its first unescaped backtick, heredoc or not, as bash's does."""
+    return _close(text, i, close)[0]
+
+
+def _close(text, i, close):
+    """(_closing's index, whether a `close` was found)."""
     depth = 1
     heredocs = []
+    start = i
     while i < len(text):
         char = text[i]
         if char == "\\":
             i += 2
+            continue
+        if (close == ")" and char == "#"
+                and (i == start or text[i - 1] in " \t\r\n" + _OPERATOR_CHARS)):
+            end = text.find("\n", i)  # a comment, as bash reads one inside $( )
+            i = len(text) if end < 0 else end
             continue
         if close == ")" and text.startswith("$'", i):
             i = _ansi_c(text, i)[1]
@@ -722,9 +740,9 @@ def _closing(text, i, close):
         elif char == close[0] and text.startswith(close, i):
             depth -= 1
             if depth == 0:
-                return i + len(close)
+                return i + len(close), True
         i += 1
-    return len(text)
+    return len(text), False
 
 
 def _arithmetic_end(text, i):
@@ -777,12 +795,14 @@ def _substitution(text, i, bodies):
         return "0", end  # arithmetic runs no command
     for opener, stands_for in (("$(", "_"), ("<(", "/dev/fd/63"), (">(", "/dev/fd/63")):
         if text.startswith(opener, i):
-            end = _closing(text, i + 2, ")")
-            bodies.append(text[i + 2:end - 1])
+            # An unclosed body is judged whole: bash rejects the text, which is
+            # judged and refused on purpose like any text bash rejects.
+            end, closed = _close(text, i + 2, ")")
+            bodies.append(text[i + 2:end - 1 if closed else end])
             return stands_for, end
     if text[i] == "`":
-        end = _closing(text, i + 1, "`")
-        bodies.append(re.sub(r"\\([`$\\])", r"\1", text[i + 1:end - 1]))
+        end, closed = _close(text, i + 1, "`")
+        bodies.append(re.sub(r"\\([`$\\])", r"\1", text[i + 1:end - 1 if closed else end]))
         return "_", end
     return None
 
@@ -1206,7 +1226,17 @@ def _modelled(word):
 def _wrapper(part, program, depth):
     """(program word, the _Hit that matched) when the program is none the census
     reads and a word that may be the command it runs starts pytest, else None."""
-    if program >= len(part) or _modelled(part[program]):
+    if program >= len(part):
+        return None
+    if _is_interpreter(part[program]):
+        # `python3 -m uv run pytest`: the interpreter runs a wrapper as its module.
+        module, after = _module(part, program + 1)
+        if module is None or _command_name(module) not in _CHAINED:
+            return None
+        inner = [module, *part[after:]]
+        hit = _command_starts_pytest(inner, 0, depth)
+        return ("%s -m %s" % (part[program], module), hit) if hit is not None else None
+    if _modelled(part[program]):
         return None
     hit = _command_starts_pytest(part, program, depth)
     return (part[program], hit) if hit is not None else None
@@ -1313,18 +1343,35 @@ def _git_subcommand(part, at, depth):
             return i
     if subcommand == "rebase":
         for i in range(at + 1, len(part)):
-            word = part[i]
-            if word in ("--exec", "-x"):
-                text = part[i + 1] if i + 1 < len(part) else ""
-            elif word.startswith("--exec="):
-                text = word.split("=", 1)[1]
-            elif word.startswith("-x"):
-                text = word[2:]
-            else:
-                continue
-            if _text_starts_pytest(text, depth):
+            text = _rebase_exec(part, i)
+            if text is not None and _text_starts_pytest(text, depth):
                 return _Hit(text)
     return at
+
+
+def _rebase_exec(part, i):
+    """The command text `git rebase` takes from the option at `i` for --exec,
+    else None: `--exec`, or an unambiguous prefix of it (`--ex`, `--exe`), with
+    its value attached by `=` or in the next word; or `-x` alone or ending a
+    bundle of rebase's short flags (`-ix`), with its value the rest of the word
+    or the next word. -s, -X, -C, -S and -r take the rest of a bundle as their
+    own value, so an `x` after them is not -x. git 2.43 reads every one of
+    these forms, and refuses `--e` as ambiguous."""
+    word = part[i]
+    following = part[i + 1] if i + 1 < len(part) else ""
+    if word.startswith("--"):
+        name, eq, value = word[2:].partition("=")
+        if len(name) >= 2 and "exec".startswith(name):
+            return value if eq else following
+        return None
+    if not word.startswith("-") or len(word) < 2:
+        return None
+    for at, letter in enumerate(word[1:], 1):
+        if letter == "x":
+            return word[at + 1:] or following
+        if letter in "sXCSr":
+            return None
+    return None
 
 
 def _leading_options(part, program):

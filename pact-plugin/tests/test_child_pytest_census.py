@@ -464,6 +464,9 @@ def test_a_blocked_pytest_child_inside_a_shell_command_is_accepted(argv):
 _SHELL_REFUSED = [
     # Process substitution runs its command.
     "cat <(pytest -q)",
+    # A quote or paren in a comment inside $( ) does not move its end.
+    "x=$(echo # it's\n); pytest",
+    "x=$(true # (\n); pytest",
     # cd runs nothing, and the command after it is still judged.
     "cd tests/pytest; pytest -q",
     # Nested to the fourth level, counting this text as the first, and read.
@@ -620,6 +623,8 @@ _SHELL_ACCEPTED = [
     # substitution never closes: bash rejects the text and runs nothing, and
     # the census, reading it the same way, finds no command after it.
     "x=$(cat <<E\n); pytest -q",
+    # A `)` in a comment inside $( ) does not end it, so `pytest -q` is comment.
+    "x=$(echo # ) pytest -q\n)",
     # cd, pushd and popd change directory and run no word after them.
     "cd tests/pytest && make",
     "pushd tests/pytest && make; popd",
@@ -1055,6 +1060,16 @@ _WRAPPED = [
     ["git", "rebase", "-x", "python -m pytest", "main"],
     ["git", "rebase", "--exec=pytest", "main"],
     ["git", "rebase", "-xpytest", "main"],
+    # Every form of --exec git reads: -x ending a bundle of rebase's short
+    # flags, and --exec's unambiguous prefixes (git 2.43 runs each of these).
+    ["git", "rebase", "-ix", "pytest", "main"],
+    ["git", "rebase", "-ixpytest", "main"],
+    ["git", "rebase", "-mx", "pytest", "main"],
+    ["git", "rebase", "--exe", "pytest", "main"],
+    ["git", "rebase", "--ex=pytest", "main"],
+    # An interpreter running such a program as its module is that program.
+    ["python3", "-m", "uv", "run", "pytest"],
+    [PY, "-m", "pipx", "run", "pytest"],
     # foreach's own command that starts pytest, through a chain.
     ["git", "submodule", "foreach", "timeout", "5", "pytest"],
     # Programs that run their arguments stay refused.
@@ -1084,6 +1099,22 @@ def test_a_listed_wrapper_blind_spot_is_accepted(argv):
     assert census._miss(argv, None, {}) is None, argv
 
 
+@pytest.mark.parametrize("argv", [
+    # git refuses `--e` as ambiguous (--empty, --exec) and runs nothing.
+    ["git", "rebase", "--e", "pytest", "main"],
+    # -s, -X and -r take the rest of the bundle as their value: no -x here,
+    # and git 2.43 runs no command for these.
+    ["git", "rebase", "-sx", "pytest", "main"],
+    ["git", "rebase", "-Xx", "pytest", "main"],
+    ["git", "rebase", "-rx", "pytest", "main"],
+    # A wrapper run as a module that runs no pytest.
+    ["python3", "-m", "uv", "pip", "list"],
+    ["python3", "-m", "uv", "run", "ruff", "check"],
+], ids=" ".join)
+def test_a_form_that_runs_no_pytest_command_is_accepted(argv):
+    assert census._miss(argv, None, {}) is None, argv
+
+
 def test_the_words_after_a_rebase_value_are_read_as_a_mention():
     """`-x` takes one word, so `python -m pytest` after it are arguments of git,
     a program the census does not read: the [mention] family judges them, unblocked
@@ -1106,6 +1137,16 @@ _BLOCKED_FORMS = {
         ["git", "rebase", "--exec=pytest -p no:randomly", "main"],
     ("git", "rebase", "-xpytest", "main"):
         ["git", "rebase", "-xpytest -p no:randomly", "main"],
+    ("git", "rebase", "-ix", "pytest", "main"):
+        ["git", "rebase", "-ix", "pytest -p no:randomly", "main"],
+    ("git", "rebase", "-ixpytest", "main"):
+        ["git", "rebase", "-ixpytest -p no:randomly", "main"],
+    ("git", "rebase", "-mx", "pytest", "main"):
+        ["git", "rebase", "-mx", "pytest -p no:randomly", "main"],
+    ("git", "rebase", "--exe", "pytest", "main"):
+        ["git", "rebase", "--exe", "pytest -p no:randomly", "main"],
+    ("git", "rebase", "--ex=pytest", "main"):
+        ["git", "rebase", "--ex=pytest -p no:randomly", "main"],
     ("timeout", "5", "find", ".", "-exec", "pytest", "{}", ";"):
         ["timeout", "5", "find", ".", "-exec", "pytest", *_BLOCK, "{}", ";"],
     ("find", ".", "-exec", "echo", "x", ";", "-exec", "python", "-m", "pytest", "{}", ";"):
@@ -1386,6 +1427,17 @@ def test_a_command_line_audited_as_one_string_is_judged(census_state, command):
     before = list(census_state["misses"])
     census._audit("subprocess.Popen", (None, blocked, None, None))
     assert census_state["misses"] == before
+
+
+# A substitution nothing closes: bash rejects the text and runs nothing, and the
+# census judges the whole body, refused on purpose as text bash rejects is (so
+# these rows stay out of the real-bash differential).
+@pytest.mark.parametrize("text", ["echo $(pytest", "echo `pytest", "cat <(pytest -q",
+                                  "echo $(python -m pytest"])
+def test_an_unclosed_substitution_is_judged_whole(text):
+    assert census._miss(["bash", "-c", text], None, {}) is not None, text
+    blocked = text + " -p no:randomly"
+    assert census._miss(["bash", "-c", blocked], None, {}) is None, blocked
 
 
 def test_the_docstring_lists_exactly_the_programs_that_run_nothing():
@@ -1779,6 +1831,32 @@ def pytest_sessionfinish(session):
 """
 
 
+def _require_unless_absent_off_ci(path):
+    """Skip when `path` is not in this tree, except on CI, where the file is
+    expected and its absence (a rename) fails the arm instead of hiding it.
+    Read before the arm sets GITHUB_ACTIONS for its child."""
+    if path.is_file():
+        return
+    reason = "%s is not in this tree" % path.name
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        pytest.fail("%s; CI has it, so this arm must run there" % reason)
+    pytest.skip("SKIPPED, NOT PASSED: " + reason)
+
+
+@pytest.mark.parametrize("on_ci", [True, False], ids=["ci", "local"])
+def test_a_missing_skills_test_fails_on_ci_and_skips_elsewhere(tmp_path, monkeypatch, on_ci):
+    if on_ci:
+        monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    else:
+        monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
+    expected = pytest.fail.Exception if on_ci else pytest.skip.Exception
+    # Catch both, so a skip where a failure is due fails this test, not skips it.
+    with pytest.raises((pytest.fail.Exception, pytest.skip.Exception)) as caught:
+        _require_unless_absent_off_ci(tmp_path / "test_renamed.py")
+    assert caught.type is expected, caught.type
+    _require_unless_absent_off_ci(Path(__file__))  # a present file returns
+
+
 @pytest.mark.parametrize("paths", [(_SKILLS_TEST,),
                                    (_SKILLS_TEST, "tests/test_session_home_sandbox.py")],
                          ids=["skills-alone", "skills-and-tests"])
@@ -1789,10 +1867,9 @@ def test_a_session_with_or_without_the_tests_conftest_refuses_an_unblocked_child
     a pytest child that does not block pytest-randomly is refused before it
     starts, and the session fails with one census report. GITHUB_ACTIONS is set
     here as on CI, and _session_env() must keep it from the child."""
-    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     plugin_root = Path(__file__).resolve().parents[1]
-    if not (plugin_root / _SKILLS_TEST).is_file():
-        pytest.skip("SKIPPED, NOT PASSED: %s is not in this tree" % _SKILLS_TEST)
+    _require_unless_absent_off_ci(plugin_root / _SKILLS_TEST)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     (tmp_path / "child_census_launch_probe.py").write_text(_UNBLOCKED_PROBE, encoding="utf-8")
     marker = tmp_path / "outcome"
     env = _session_env()
