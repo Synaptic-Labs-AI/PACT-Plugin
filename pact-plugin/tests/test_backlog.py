@@ -2237,17 +2237,37 @@ def test_a_separate_git_dir_checkout_is_one_of_its_own_roots(tmp_path, monkeypat
     assert set(roots) == expected, (roots, listed)
 
 
+def _git_rejecting_z(tmp_path, monkeypatch) -> None:
+    """Put first on PATH a `git` that rejects `-z`, as git before 2.36 does,
+    and otherwise runs the real git."""
+    import os
+    import shutil
+    import stat
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        '#!/bin/sh\nfor a in "$@"; do [ "$a" = "-z" ] && exit 129; done\n'
+        f'exec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+@pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
 @pytest.mark.parametrize("locked", [False, True], ids=["unlocked", "locked"])
 def test_a_listed_worktree_whose_git_does_not_name_it_back_is_not_a_root(
-    tmp_path, monkeypatch, locked
+    tmp_path, monkeypatch, locked, nul
 ):
     """git lists whatever a repository's admin entries name, and an entry
     can name another repository's checkout (a delivered `.git`, or a path
     cut at a newline on a git that rejects `-z`). Only a worktree whose
     `.git` and admin entry name each other is recorded, so that checkout,
     which another project's sessions run in, is not one of this project's
-    roots, locked or not: a locked entry is kept unlinked only while its
-    folder is absent.
+    roots, locked or not: an entry is kept unlinked only while its folder
+    is absent.
 
     Real repos, real git: the listing git prints is the thing under test."""
     main = _repo(tmp_path / "main")
@@ -2259,6 +2279,8 @@ def test_a_listed_worktree_whose_git_does_not_name_it_back_is_not_a_root(
         (admin / "locked").write_text("")
     (admin / "HEAD").write_text((main / ".git" / "HEAD").read_text())
     (admin / "commondir").write_text("../..\n")
+    if not nul:
+        _git_rejecting_z(tmp_path, monkeypatch)
     monkeypatch.setattr(backlog, "project_root", lambda: main.resolve())
 
     listed = {
@@ -2271,11 +2293,13 @@ def test_a_listed_worktree_whose_git_does_not_name_it_back_is_not_a_root(
     assert roots == [str(main.resolve())], roots
 
 
-def test_a_locked_worktree_whose_folder_is_absent_stays_a_root(tmp_path, monkeypatch):
-    """A worktree locked because it lives on removable media keeps its root
-    while the drive is unmounted, so a session there after the drive returns
-    matches this backlog before any write records it again. An unlocked
-    worktree whose folder is gone is not a root.
+@pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
+def test_a_worktree_whose_folder_is_absent_stays_a_root(tmp_path, monkeypatch, nul):
+    """A worktree whose folder is absent keeps its root, locked or not (a
+    drive not mounted now; git before 2.31 cannot say which), so a session
+    there after the drive returns matches this backlog before any write
+    records it again. A worktree whose folder is present but holds no `.git`
+    is not a root, as no `.git` names it back.
 
     Real repo, real git: the listing git prints is the thing under test."""
     main = _repo(tmp_path / "main")
@@ -2284,15 +2308,21 @@ def test_a_locked_worktree_whose_folder_is_absent_stays_a_root(tmp_path, monkeyp
     run("worktree", "add", "-q", str(tmp_path / "usb"), "-b", "usb")
     run("worktree", "lock", "--reason", "on a usb disk", str(tmp_path / "usb"))
     run("worktree", "add", "-q", str(tmp_path / "gone"), "-b", "gone")
+    run("worktree", "add", "-q", str(tmp_path / "bare-folder"), "-b", "bare-folder")
     usb, gone = (tmp_path / "usb").resolve(), (tmp_path / "gone").resolve()
+    folder = (tmp_path / "bare-folder").resolve()
     (tmp_path / "usb").rename(tmp_path / "unmounted")
     (tmp_path / "gone").rename(tmp_path / "deleted")
+    (folder / ".git").unlink()
+    if not nul:
+        _git_rejecting_z(tmp_path, monkeypatch)
     monkeypatch.setattr(backlog, "project_root", lambda: main.resolve())
 
     roots = backlog.checkout_roots()
 
     assert str(usb) in roots, roots
-    assert str(gone) not in roots, roots
+    assert str(gone) in roots, roots
+    assert str(folder) not in roots, roots
 
 
 def test_the_abandoned_heuristic_reads_real_branches(tmp_path, monkeypatch):
@@ -6316,13 +6346,13 @@ _LISTINGS = [
     ("plain, a repeated field", "REJECT", "worktree {a}\nHEAD 1\nHEAD 2\n\n", "unreadable"),
     ("plain, a record not led by its path", "REJECT", "HEAD 1\nworktree {a}\n\n", "unreadable"),
     ("plain, a bare main repository", "REJECT", "worktree {d}\nbare\n\n", ("{d}",)),
-    # A linked worktree whose folder holds no `.git` is dropped, not refused:
-    # git lists it while its folder is gone or lost its `.git`.
+    # A linked worktree whose folder is absent is kept, locked or not, as the
+    # `-z` listing keeps it (a drive not mounted now, or a folder moved or
+    # deleted). One whose folder is present but holds no `.git` is dropped,
+    # not refused: git lists a worktree whose folder lost its `.git`.
     ("plain, a stale worktree git marks prunable", "REJECT",
      "worktree {a}\nHEAD 1\n\nworktree {w}\nHEAD 2\nprunable gitdir file points to non-existent location\n\n",
-     ("{a}",)),
-    # Except a worktree git marks `locked` whose folder is absent (a drive not
-    # mounted now): it is kept, as the `-z` listing keeps it.
+     ("{a}", "{w}")),
     ("plain, a locked worktree whose folder is gone", "REJECT",
      "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 2\nbranch refs/heads/x\nlocked\n\n",
      ("{a}", "{w}")),
@@ -6333,7 +6363,7 @@ _LISTINGS = [
      "worktree {a}\nHEAD 1\n\nworktree {d}\nHEAD 2\nbranch refs/heads/x\nlocked\n\n", ("{a}",)),
     ("plain, a deleted worktree, no prunable line (git before 2.31)", "REJECT",
      "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 2\nbranch refs/heads/x\n\n",
-     ("{a}",)),
+     ("{a}", "{w}")),
     ("plain, a worktree folder whose .git was deleted", "REJECT",
      "worktree {a}\nHEAD 1\n\nworktree {d}\nHEAD 2\nbranch refs/heads/x\n"
      "prunable gitdir file points to non-existent location\n\n", ("{a}",)),
@@ -6345,10 +6375,14 @@ _LISTINGS = [
      "worktree {d}\nHEAD 1\nbranch refs/heads/main\n\nworktree {b}\nHEAD 2\nbranch refs/heads/x\n\n",
      ("{d}", "{b}")),
     # A folder named `w`, newline, then a whole record in git's order: the
-    # cut path `{w}` names nothing and is dropped. The record the name spells
-    # (`{b}`) is kept, as git's own admin entries could list it.
+    # cut path is kept when absent, as any absent listed path is, and
+    # dropped when it names a present folder with no `.git`. The record the
+    # name spells (`{b}`) is kept, as git's own admin entries could list it.
     ("plain, a cut path followed by a well-ordered record", "REJECT",
      "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 1\ndetached\n\n"
+     "worktree {b}\nHEAD 2\nbranch refs/heads/x\n\n", ("{a}", "{w}", "{b}")),
+    ("plain, a cut path naming a present folder, followed by a well-ordered record", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {d}\nHEAD 1\ndetached\n\n"
      "worktree {b}\nHEAD 2\nbranch refs/heads/x\n\n", ("{a}", "{b}")),
     ("plain, a bare record that is not the main repository's", "REJECT",
      "worktree {a}\nHEAD 1\n\nworktree {d}\nbare\n\n", "unreadable"),
@@ -6381,7 +6415,7 @@ _LISTINGS = [
      "worktree {b}\nHEAD 2\ndetached\nlocked\n\n"
      "worktree {a}\nHEAD 3\nbranch refs/heads/x\nlocked on a usb disk\n\n"
      "worktree {w}\nHEAD 4\nbranch refs/heads/y\n"
-     "prunable gitdir file points to non-existent location\n\n", ("{a}", "{b}", "{a}")),
+     "prunable gitdir file points to non-existent location\n\n", ("{a}", "{b}", "{a}", "{w}")),
     ("plain, a bare main repository with a worktree", "REJECT",
      "worktree {d}\nbare\n\nworktree {b}\nHEAD 2\nbranch refs/heads/x\n\n", ("{d}", "{b}")),
     ("no listing", "FAIL", "", None),
@@ -6467,25 +6501,14 @@ def test_every_layout_git_lists_reads_in_both_readers(tmp_path, monkeypatch, nul
     `-z` and on a git that rejects it: a branch, a detached HEAD, a lock with
     and without a reason, a bare main repository and a `--separate-git-dir`
     repository's main record (its git directory) are kept, and so is a
-    worktree locked with its folder gone. A worktree moved away and one whose
-    `.git` was deleted are kept with `-z`, where their paths are whole, and
-    dropped without it."""
-    import os
+    worktree whose folder is absent (moved away, or locked with its folder
+    gone). A worktree whose folder is present but lost its `.git` is kept
+    with `-z`, where its path is whole, and dropped without it."""
     import shutil
-    import stat
 
     from scripts import memory_api
 
     real_git = shutil.which("git")
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    wrapper = bin_dir / "git"
-    wrapper.write_text(
-        '#!/bin/sh\nfor a in "$@"; do [ "$a" = "-z" ] && exit 129; done\n'
-        f'exec "{real_git}" "$@"\n',
-        encoding="utf-8",
-    )
-    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
 
     def git(*args, cwd):
         subprocess.run([real_git, *args], cwd=cwd, check=True, capture_output=True)
@@ -6515,8 +6538,8 @@ def test_every_layout_git_lists_reads_in_both_readers(tmp_path, monkeypatch, nul
     git("worktree", "add", "-q", str(tmp_path / "separate-wt"), "-b", "s", cwd=separate)
 
     if not nul:
-        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    gone = ("moved", "locked-gone", "no-dotgit") if nul else ("locked-gone",)
+        _git_rejecting_z(tmp_path, monkeypatch)
+    gone =("moved", "locked-gone", "no-dotgit") if nul else ("moved", "locked-gone")
     kept = {
         main: [main, *(tmp_path / name for name in ("branch", "detached", "locked", "locked-why", *gone))],
         bare: [bare, tmp_path / "bare-wt"],

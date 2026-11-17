@@ -506,13 +506,14 @@ def _plain_records_kept(records: List[List[str]]) -> Optional[List[List[str]]]:
     repository itself, and with `--separate-git-dir` that path is the git
     directory, which holds no `.git`. If it says `bare`, its path must be a
     directory; `bare` in any other record is not git's. A linked worktree's
-    record is dropped when its path holds no `.git`: git still lists a
-    worktree whose folder is gone or lost its `.git` (before git 2.31 with no
-    `prunable` line), and a path cut at a newline names a folder git did not
-    list. A dropped record cannot be the asked checkout and adds no root.
-    One exception, as the `-z` listing keeps it: a record git marks `locked`
-    whose folder is absent is kept, a worktree on a drive not mounted now.
-    An absent folder names no other repository's checkout.
+    record is dropped when its folder is present but holds no `.git`: git
+    still lists a worktree whose folder lost its `.git`, and a path cut at a
+    newline can name a present folder git did not list. A dropped record
+    cannot be the asked checkout and adds no root. A record whose folder is
+    absent is kept, as the `-z` listing keeps it: a worktree on a drive not
+    mounted now, or one moved or deleted (git before 2.31 prints no
+    `prunable` or `locked` line to tell them apart). An absent folder names
+    no other repository's checkout.
     """
     kept = []
     for index, record in enumerate(records):
@@ -520,10 +521,12 @@ def _plain_records_kept(records: List[List[str]]) -> Optional[List[List[str]]]:
         if "bare" in record:
             if index != 0 or not os.path.isdir(path):
                 return None
-        elif index != 0 and not os.path.lexists(os.path.join(path, ".git")):
-            locked = any(field == "locked" or field.startswith("locked ") for field in record)
-            if not locked or os.path.lexists(path):
-                continue
+        elif (
+            index != 0
+            and not os.path.lexists(os.path.join(path, ".git"))
+            and os.path.lexists(path)
+        ):
+            continue
         kept.append(record)
     return kept
 
@@ -553,10 +556,10 @@ def checkout_roots() -> List[str]:
     # did not give, or one that cannot be read whole, adds no root. The
     # project root is always the first, and the only one, unresolved, when
     # its path will not resolve.
-    # A worktree git marks `locked` whose folder is absent (on a drive not
-    # mounted now) is kept too: a session there after the drive returns
-    # matches before any write records it again, and an absent folder names
-    # no other repository's checkout.
+    # A listed worktree whose folder is absent is kept too (on a drive not
+    # mounted now; git before 2.31 cannot say whether it is locked): a
+    # session there after the drive returns matches before any write records
+    # it again, and an absent folder names no other repository's checkout.
     memory_api = _memory_api()
     root = project_root()
     try:
@@ -569,8 +572,7 @@ def checkout_roots() -> List[str]:
         roots = [str(path) for path in memory_api._verified_worktree_roots(root, common, records)]
         for record in records[1:]:
             path = record[0][len("worktree "):]
-            locked = any(field == "locked" or field.startswith("locked ") for field in record)
-            if locked and not os.path.lexists(path):
+            if not os.path.lexists(path):
                 roots.append(str(Path(path).resolve()))
     except (OSError, RuntimeError, ValueError):
         return [str(root)]

@@ -3255,9 +3255,10 @@ def _relocated_worktree(field: str, how: str):
 class TestARelocatedWorktreeIsMovedOnlyWhereGitSaysSo:
     """A worktree whose `.git` names an entry git lists elsewhere is named
     moved exactly when git's listing marks that entry prunable, on every
-    route. The layouts cover every field git prints for a linked worktree,
-    each moved with `mv` and copied, so neither a missing folder nor any
-    other field stands in for git's mark."""
+    route, with `-z` and on a git that rejects it. The layouts cover every
+    field git prints for a linked worktree, each moved with `mv` and copied,
+    so neither a missing folder nor any other field stands in for git's
+    mark."""
 
     def test_every_record_field_is_set_up_or_named(self):
         from scripts import memory_api
@@ -3277,16 +3278,17 @@ class TestARelocatedWorktreeIsMovedOnlyWhereGitSaysSo:
             marks.add(marked["prunable"])
         assert marks == {True, False}, marks
 
+    @pytest.mark.parametrize("mode", ["PASS", "REJECT_Z"], ids=["git lists with -z", "git rejects -z"])
     @pytest.mark.parametrize("how", ["moved", "copied"])
     @pytest.mark.parametrize("field", sorted(_RECORD_FIELD_SETUP))
-    def test_moved_exactly_when_git_marks_it_prunable(self, tmp_path, monkeypatch, field, how):
+    def test_moved_exactly_when_git_marks_it_prunable(self, tmp_path, monkeypatch, field, how, mode):
         from fixtures.identity_routes import SHAPES, _with_sub
         from scripts import memory_api
 
         assert_outside_repository(tmp_path)
         build, marked = _relocated_worktree(field, how)
         monkeypatch.setitem(SHAPES, "relocated_worktree", _with_sub(build))
-        answers = _route_answers(tmp_path / "cells", "relocated_worktree", "PASS")
+        answers = _route_answers(tmp_path / "cells", "relocated_worktree", mode)
         expected = memory_api._REDIRECT_CAUSE_DETAILS[
             memory_api.REDIRECT_MOVED if marked["prunable"] else memory_api.REDIRECT_UNLISTED
         ]
