@@ -3082,30 +3082,100 @@ def _union_admits_str(annotation) -> bool:
     return False
 
 
-_GIT_MARKER = re.compile(r"(?<![\w-])\.git(?![\w-])")
-
-# Every clause naming `.git` that a declined identity prints, and why it
-# only describes. A clause not listed here fails the census, whatever its
-# wording, so advice to change a marker cannot pass by using a verb, voice
-# or command no list foresaw.
-_DESCRIBED_GIT_CLAUSES = {
+# Every clause a declined identity prints, on every print path
+# (`_printed_identity_messages`), and why it only describes or asks for a
+# read. A clause not listed here fails the census, whatever its wording or
+# spelling, so advice to change a marker cannot pass by a verb, voice,
+# pronoun or spelling no list foresaw. `X` is a value a rung fills in;
+# `<reason>` is an override reason.
+_OBSERVED = "reports what was observed"
+_DETAIL = "part of a rung detail: the rung and the path it read"
+_DESCRIBED_PRINTED_CLAUSES = {
+    "A `git init --separate-git-dir` layout of your own is a user decision":
+        "names the user's own layout as theirs to decide",
+    "A full 32-character id still resolves": "says which lookups still work",
+    "A linked worktree you moved is re-registered by running `git worktree repair` in it":
+        "names git's own repair command, run by the user",
+    "An override file at '/home/u/repo/.git/pact-project-id' was present but unusable (<reason>)":
+        _OBSERVED,
+    "An override file in the git directory this checkout's `.git` points at was present "
+    "but unusable (<reason>)": _OBSERVED,
     "Check that git can answer for this checkout (`git rev-parse --git-dir`, "
     "`git worktree list`), or run from the repository the `.git` points at":
         "asks for two read-only git answers, or for a run somewhere else",
-    "git lists the worktree entry its `.git` names at another path, which git "
-    "marks prunable, and not at this checkout":
-        "reports what git's worktree listing shows",
-    "its `.git` names a submodule's git directory, and git could not read that "
-    "directory's core.worktree":
-        "reports what the marker names and that git could not answer",
-    "its `.git` names another directory called `.git`, or a submodule's git "
-    "directory that does not record it as that submodule's working tree":
-        "reports what the marker names",
-    "the directory carries a `.git` marker but git could not answer for it":
-        "reports that the marker is there and git did not answer",
+    "Check that git can read the repository's config here": "asks for a read",
+    "Check that git is installed and can read the repository here": "asks for a read",
+    "No project directory was declared (CLAUDE_PROJECT_DIR is unset and the session "
+    "record names none), and no repository answered": _OBSERVED,
+    "Nothing was written": _OBSERVED,
+    "Otherwise, `git rev-parse --show-toplevel` run in the declined directory prints "
+    "git's own reason": "names a read-only git command",
+    "Pinning that directory is a user decision": "names the decision as the user's",
+    "Run from a checkout with a working tree": "asks for a run somewhere else",
+    "Run from inside the project directory, or set CLAUDE_PROJECT_DIR to an existing "
+    "project root": "asks for a run somewhere else or a declaration",
+    "Run the `project-id show` verb to inspect the detected identity": "names a read-only verb",
+    "Set CLAUDE_PROJECT_DIR to an existing project root": "asks for a declaration",
+    "The cwd rung declined": _OBSERVED,
     "Write an operator-chosen canonical id to '/home/u/repo/.git/pact-project-id', "
     "or set CLAUDE_PROJECT_DIR to another project root":
         "names a file to create inside the git directory; the marker is unchanged",
+    "X does not exist and no verified worktree identity record names it": _DETAIL,
+    "X gave no git dir)": _DETAIL,
+    "X is a bare repository, or git cannot describe its working tree)": _DETAIL,
+    "X)": _DETAIL,
+    "`git config --get remote.origin.url` run here prints git's own reason":
+        "names a read-only git command",
+    "`git rev-parse --git-dir` run here prints git's own reason": "names a read-only git command",
+    "a bare repository has none": _OBSERVED,
+    "a memory-id prefix was refused rather than listing matches from every project": _OBSERVED,
+    "a path git gave for it would not resolve": _OBSERVED,
+    "git could not list that repository's worktrees": _OBSERVED,
+    "git could not read the repository's origin remote": _OBSERVED,
+    "git does not confirm this checkout as a worktree of the repository git reports for it":
+        _OBSERVED,
+    "git does not confirm this checkout as a worktree of the repository git reports for it (X":
+        _OBSERVED,
+    "git gave no git directory for it": _OBSERVED,
+    "git gives no working tree for the repository": _OBSERVED,
+    "git gives no working tree for the repository (X": _OBSERVED,
+    "git gives no working tree for the repository (declared via X": _OBSERVED,
+    "git gives no working tree for the repository (the process's repository is bare, or "
+    "git cannot describe its working tree)": _OBSERVED,
+    "git listed that repository's worktrees, but PACT could not read a path in the "
+    "listing whole": _OBSERVED,
+    "git lists the worktree entry its `.git` names at another path, which git marks "
+    "prunable, and not at this checkout": "reports what git's worktree listing shows",
+    "git reports a git directory for it other than the repository's common directory, "
+    "and that repository's worktree list does not hold it": _OBSERVED,
+    "ignoring an unusable project override (<reason>) in the git directory this "
+    "checkout's `.git` points at": _OBSERVED,
+    "ignoring the project override at '/home/u/repo/.git/pact-project-id' (<reason>)":
+        _OBSERVED,
+    "its `.git` names a submodule's git directory, and git could not read that "
+    "directory's core.worktree": "reports what the marker names and that git could not answer",
+    "its `.git` names another directory called `.git`, or a submodule's git directory "
+    "that does not record it as that submodule's working tree": "reports what the marker names",
+    "its folder name is chosen by the superproject's .gitmodules": _OBSERVED,
+    "no name was derived from the path)": _DETAIL,
+    "no project id was derived": _OBSERVED,
+    "no project identity could be resolved": _OBSERVED,
+    "no single project id can be read from the repository's origin": _OBSERVED,
+    "resolution continues without it": _OBSERVED,
+    "see the pact-memory skill": "points at the skill",
+    "the checkout is a submodule": _OBSERVED,
+    "the declared directory could not be resolved": _OBSERVED,
+    "the declared directory could not be resolved (declared via X": _OBSERVED,
+    "the directory carries a `.git` marker but git could not answer for it":
+        "reports that the marker is there and git did not answer",
+    "the directory carries a `.git` marker but git could not answer for it (X": _OBSERVED,
+    "the directory carries a `.git` marker but git could not answer for it (cwd": _OBSERVED,
+    "the directory carries a `.git` marker but git could not answer for it (the working "
+    "directory is inside that work tree)": _OBSERVED,
+    "the repository at '/home/u/repo' has an origin remote that could not be read or "
+    "represented as a project id": _OBSERVED,
+    "the user runs that, not an agent": "says who runs the repair",
+    "the write was refused rather than filed under an unknown project": _OBSERVED,
 }
 
 
@@ -3128,14 +3198,6 @@ def _clauses(sentence: str) -> list:
     return [part.strip().rstrip(".!?").strip() for part in parts if part.strip()]
 
 
-def _git_clauses(message: str) -> set:
-    """Every clause of `message` that names `.git`."""
-    return {
-        clause for sentence in _sentences(message) for clause in _clauses(sentence)
-        if _GIT_MARKER.search(clause)
-    }
-
-
 def _sentences(text: str) -> list:
     """`text` split after every `.`, `!` or `?` followed by a space or the
     end, outside backticks. No capital letter is required after the stop,
@@ -3154,21 +3216,139 @@ def _sentences(text: str) -> list:
     return sentences
 
 
+def _rendered(node) -> "str | None":
+    """The text a string expression prints, each formatted value shown as
+    `X`; None for any other expression."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        return "".join(
+            part.value if isinstance(part, ast.Constant) else "X" for part in node.values
+        )
+    return None
+
+
+def _rung_details() -> tuple:
+    """((reason, detail), ...) for every rung detail a decline prints, read
+    from memory_api's source: each `detail=` of a `_decline` call, with the
+    call's reason, and each `no_working_tree_detail=` (the
+    `no_working_tree` decline's wording). Also every such expression that is
+    not a string, as (line, source), so a form this reader cannot render is
+    named, never skipped."""
+    tree = ast.parse(Path(memory_api.__file__).read_text(encoding="utf-8"))
+    pairs, unrendered = set(), []
+    for call in ast.walk(tree):
+        if not isinstance(call, ast.Call):
+            continue
+        callee = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", None)
+        for keyword in call.keywords:
+            if keyword.arg == "no_working_tree_detail":
+                reason = "no_working_tree"
+            elif keyword.arg == "detail" and callee == "_decline":
+                first = call.args[1] if len(call.args) > 1 else None
+                reason = first.value if isinstance(first, ast.Constant) else None
+            else:
+                continue
+            values = keyword.value.values if isinstance(keyword.value, ast.BoolOp) else [keyword.value]
+            for value in values:
+                text = _rendered(value)
+                if text is None or reason is None:
+                    unrendered.append(ast.unparse(value))
+                else:
+                    pairs.add((reason, text))
+    return pairs, unrendered
+
+
+# A rung detail expression that is not a string, and why it adds no
+# wording of its own.
+_PASSED_THROUGH_DETAILS = {
+    "no_working_tree_detail": "the parameter carrying a caller's `no_working_tree_detail=`, each read above",
+}
+
+
+def _override_reasons() -> set:
+    """Every reason an override read can give, read from project_identity's
+    source: the third argument of each `OverrideRead(...)` that is a
+    string."""
+    from scripts import project_identity as pi
+
+    tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
+    return {
+        call.args[2].value for call in ast.walk(tree)
+        if isinstance(call, ast.Call) and getattr(call.func, "id", None) == "OverrideRead"
+        and len(call.args) == 3 and isinstance(call.args[2], ast.Constant)
+        and isinstance(call.args[2].value, str)
+    }
+
+
+def _refusal_openings() -> list:
+    """What each unresolved-identity refusal says it refused: the default
+    of `_unresolved_identity_message`'s parameter, and every string a call
+    passes to it."""
+    tree = ast.parse(Path(memory_api.__file__).read_text(encoding="utf-8"))
+    openings = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_unresolved_identity_message":
+            openings += [ast.literal_eval(d) for d in node.args.defaults]
+        if (
+            isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "_unresolved_identity_message"
+            and node.args
+        ):
+            openings.append(ast.literal_eval(node.args[0]))
+    return openings
+
+
 def _printed_identity_messages(monkeypatch, caplog) -> list:
-    """Every message a declined identity prints: the decline warning and
-    the refused write's message, for every decline cause the module names
-    and for none, each with no override path and with one inside a `.git`
-    directory, and with no refusal detail and with each detail a redirect
-    can carry."""
+    """Every message a declined identity prints, on every print path:
+
+    - the decline warning and every unresolved-identity refusal (the
+      refused write and each other opening the module passes), for every
+      decline cause the module names and for none, each with no override
+      path and with one inside a `.git` directory, and with no refusal
+      detail and with each detail a redirect can carry;
+    - the decline warning with each rung's own detail, for that rung's
+      cause;
+    - the ignored-override warning and every refusal that names the
+      ignored override, for every reason an override read gives, with the
+      path and with the path withheld."""
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.setattr(memory_api, "get_project_dir_from_session_record", lambda: None)
     from scripts import project_identity as pi
+
+    openings = _refusal_openings()
+    messages = []
+
+    def refusals(record, ignored, detail):
+        instance = PACTMemory.__new__(PACTMemory)
+        instance._decline_reason = record
+        instance._override_ignored = ignored
+        instance._decline_detail = detail
+        return [instance._unresolved_identity_message(opening) for opening in openings]
+
+    pairs, _unrendered = _rung_details()
+    for reason, rung_detail in sorted(pairs):
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            memory_api._warn_declined(
+                {"reason": reason, "source": "cwd", "override_path": None},
+                root="/home/u/repo", detail=rung_detail,
+            )
+        messages += [entry.getMessage() for entry in caplog.records]
+    for reason in sorted(_override_reasons()):
+        for path in ("/home/u/repo/.git/pact-project-id", None):
+            ignored = {"path": path, "reason": reason}
+            caplog.clear()
+            with caplog.at_level(logging.WARNING):
+                PACTMemory._warn_override_ignored(type("Identity", (), {"override_ignored": ignored}))
+            messages += [entry.getMessage() for entry in caplog.records]
+            for token in [*sorted(memory_api._DECLINE_CAUSES), None]:
+                record = {"reason": token, "source": "cwd", "override_path": None} if token else None
+                messages += refusals(record, ignored, None)
 
     details = [
         None, *memory_api._REDIRECT_CAUSE_DETAILS.values(),
         pi.FOREIGN_GIT_DIR_DETAIL, pi.CORE_WORKTREE_UNREAD_DETAIL,
     ]
-    messages = []
     for token in [*sorted(memory_api._DECLINE_CAUSES), None]:
         for override_path in (None, "/home/u/repo/.git/pact-project-id"):
             for detail in details:
@@ -3177,12 +3357,23 @@ def _printed_identity_messages(monkeypatch, caplog) -> list:
                 with caplog.at_level(logging.WARNING):
                     memory_api._warn_declined(record if token else None, root="/home/u/repo", cause_detail=detail)
                 messages += [entry.getMessage() for entry in caplog.records]
-                instance = PACTMemory.__new__(PACTMemory)
-                instance._decline_reason = record if token else None
-                instance._override_ignored = None
-                instance._decline_detail = detail
-                messages.append(instance._unresolved_identity_message())
+                messages += refusals(record if token else None, None, detail)
     return messages
+
+
+def _printed_clauses(messages) -> set:
+    """Every clause of every message, an override reason shown as
+    `<reason>` (the reasons are `_override_reasons()`, data rather than
+    wording)."""
+    reasons = _override_reasons()
+    clauses = set()
+    for message in messages:
+        for sentence in _sentences(message):
+            for clause in _clauses(sentence):
+                for reason in reasons:
+                    clause = clause.replace(f"({reason})", "(<reason>)")
+                clauses.add(clause)
+    return clauses
 
 
 def _moved_linked_worktree(base: Path) -> Path:
@@ -3434,14 +3625,16 @@ class TestARedirectRefusalNamesWhatWasObserved:
         details = list(memory_api._REDIRECT_CAUSE_DETAILS.values())
         assert not [d for d in details if "another repository" in d], details
 
-    def test_every_printed_git_clause_is_a_described_one(self, monkeypatch, caplog):
+    def test_every_printed_clause_is_a_described_one(self, monkeypatch, caplog):
         """A moved worktree and a separate-git-dir checkout are layouts git
         made, and an unreadable repository is not a broken one, so no
         message a declined identity prints, on either the warning or the
-        refused write, may advise any change to a `.git`. Every clause naming
-        `.git` must equal one `_DESCRIBED_GIT_CLAUSES` entry, and every entry
-        must still be printed. Control: every remedy the module defines (each
-        module-level name holding REMEDY) appears in a message read."""
+        refused write, may advise any change to a `.git`. Every printed
+        clause, on every print path, must equal one
+        `_DESCRIBED_PRINTED_CLAUSES` entry, and every entry must still be
+        printed. Controls: every remedy the module defines (each
+        module-level name holding REMEDY) appears in a message read, and
+        every rung detail that is not a string is a named pass-through."""
         messages = [" ".join(message.split()) for message in _printed_identity_messages(monkeypatch, caplog)]
         remedies = [
             text
@@ -3451,9 +3644,12 @@ class TestARedirectRefusalNamesWhatWasObserved:
         assert len(remedies) >= 2, remedies  # control: the module still names its remedies
         unprinted = [r for r in remedies if not any(" ".join(r.split()) in m for m in messages)]
         assert unprinted == [], unprinted  # control: each remedy is in the population read
-        printed = set().union(*map(_git_clauses, messages))
-        assert printed - set(_DESCRIBED_GIT_CLAUSES) == set(), sorted(printed - set(_DESCRIBED_GIT_CLAUSES))
-        assert set(_DESCRIBED_GIT_CLAUSES) - printed == set(), sorted(set(_DESCRIBED_GIT_CLAUSES) - printed)
+        _pairs, unrendered = _rung_details()
+        assert set(unrendered) == set(_PASSED_THROUGH_DETAILS), unrendered
+        printed = _printed_clauses(messages)
+        described = set(_DESCRIBED_PRINTED_CLAUSES)
+        assert printed - described == set(), sorted(printed - described)
+        assert described - printed == set(), sorted(described - printed)
 
     @pytest.mark.parametrize(
         "added",
@@ -3464,17 +3660,20 @@ class TestARedirectRefusalNamesWhatWasObserved:
             "Run `find . -maxdepth 1 -name .git -delete` here.",
             "Its `.git` names a submodule's git directory; replace it.",
             "Check that git can answer for this checkout, or run from the repository the `.git` points at.",
+            "Delete the gitfile.",
+            "Move the .GIT folder aside.",
+            "Its marker names another directory; delete it.",
         ],
     )
-    def test_a_git_clause_not_described_fails_the_census(self, added):
-        """A sentence naming `.git` in any wording, added to a printed
-        message, carries a clause the census does not hold, so the census
-        fails; a near copy of a described clause fails too."""
+    def test_a_clause_not_described_fails_the_census(self, added):
+        """A sentence in any wording or spelling, added to a printed message,
+        carries a clause the census does not hold, so the census fails; a
+        near copy of a described clause fails too."""
         message = memory_api._REDIRECT_REMEDY + " " + added
-        assert _git_clauses(message) - set(_DESCRIBED_GIT_CLAUSES), added
+        assert _printed_clauses([message]) - set(_DESCRIBED_PRINTED_CLAUSES), added
 
     def test_control_the_described_remedy_passes_the_census(self):
-        assert _git_clauses(memory_api._REDIRECT_MOVED_REMEDY) <= set(_DESCRIBED_GIT_CLAUSES)
+        assert _printed_clauses([memory_api._REDIRECT_MOVED_REMEDY]) <= set(_DESCRIBED_PRINTED_CLAUSES)
 
     def test_the_redirect_remedy_names_the_users_own_layouts_as_theirs(self):
         """The remedy's sentences: the first asks only for read-only git
