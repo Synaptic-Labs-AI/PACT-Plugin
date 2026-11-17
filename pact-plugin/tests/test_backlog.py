@@ -6136,24 +6136,52 @@ fi
 cat "$CANNED_PLAIN"
 """
 
-# (name, -z listing or REJECT/FAIL, plain listing, the answer: "records",
-# "unreadable" for a listing that cannot be read whole, or None for no
-# listing). `{a}` and `{b}` are checkouts holding a `.git`, `{w}` a path that
-# does not exist, `{d}` a directory with no `.git`.
+# (name, -z listing or REJECT/FAIL, plain listing, the answer: the paths of
+# the records read, in order, "unreadable" for a listing that cannot be read
+# whole, or None for no listing). `{a}` and `{b}` are checkouts holding a
+# `.git`, `{w}` a path that does not exist, `{d}` a directory with no `.git`.
 _LISTINGS = [
     ("nul", "worktree {a}\0HEAD 1\0branch refs/heads/main\0\0worktree {b}\nc\0HEAD 2\0detached\0\0",
-     "", "records"),
+     "", ("{a}", "{b}\nc")),
     ("plain", "REJECT",
-     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {b}\nHEAD 2\ndetached\n\n", "records"),
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {b}\nHEAD 2\ndetached\n\n", ("{a}", "{b}")),
     ("plain, a path holding a newline", "REJECT",
      "worktree {a}\nHEAD 1\n\nworktree {b}\nc\nHEAD 2\n\n", "unreadable"),
     ("plain, an unknown field", "REJECT", "worktree {a}\nHEAD 1\nfoo bar\n\n", "unreadable"),
     ("plain, a repeated field", "REJECT", "worktree {a}\nHEAD 1\nHEAD 2\n\n", "unreadable"),
     ("plain, a record not led by its path", "REJECT", "HEAD 1\nworktree {a}\n\n", "unreadable"),
-    ("plain, a bare main repository", "REJECT", "worktree {d}\nbare\n\n", "records"),
+    ("plain, a bare main repository", "REJECT", "worktree {d}\nbare\n\n", ("{d}",)),
+    # A linked worktree whose folder holds no `.git` is dropped, not refused:
+    # git lists it while its folder is gone or lost its `.git`.
     ("plain, a stale worktree git marks prunable", "REJECT",
      "worktree {a}\nHEAD 1\n\nworktree {w}\nHEAD 2\nprunable gitdir file points to non-existent location\n\n",
-     "records"),
+     ("{a}",)),
+    ("plain, a locked worktree whose folder is gone", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 2\nbranch refs/heads/x\nlocked\n\n",
+     ("{a}",)),
+    ("plain, a deleted worktree, no prunable line (git before 2.31)", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 2\nbranch refs/heads/x\n\n",
+     ("{a}",)),
+    ("plain, a worktree folder whose .git was deleted", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nHEAD 2\nbranch refs/heads/x\n"
+     "prunable gitdir file points to non-existent location\n\n", ("{a}",)),
+    ("plain, a worktree folder whose .git was deleted, no prunable line", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nHEAD 2\nbranch refs/heads/x\n\n", ("{a}",)),
+    # With `--separate-git-dir`, git lists the main repository at its git
+    # directory, which holds no `.git`; the main record is kept.
+    ("plain, a separate git dir's main record", "REJECT",
+     "worktree {d}\nHEAD 1\nbranch refs/heads/main\n\nworktree {b}\nHEAD 2\nbranch refs/heads/x\n\n",
+     ("{d}", "{b}")),
+    # A folder named `w`, newline, then a whole record in git's order: the
+    # cut path `{w}` names nothing and is dropped. The record the name spells
+    # (`{b}`) is kept, as git's own admin entries could list it.
+    ("plain, a cut path followed by a well-ordered record", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 1\ndetached\n\n"
+     "worktree {b}\nHEAD 2\nbranch refs/heads/x\n\n", ("{a}", "{b}")),
+    ("plain, a bare record that is not the main repository's", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nbare\n\n", "unreadable"),
+    ("plain, a bare main repository that is not a directory", "REJECT",
+     "worktree {w}\nbare\n\n", "unreadable"),
     ("plain, a path cut before 'locked'", "REJECT",
      "worktree {a}\nHEAD 1\n\nworktree {w}\nlocked\nHEAD 2\n\n", "unreadable"),
     ("plain, a path cut before 'detached'", "REJECT",
@@ -6181,9 +6209,9 @@ _LISTINGS = [
      "worktree {b}\nHEAD 2\ndetached\nlocked\n\n"
      "worktree {a}\nHEAD 3\nbranch refs/heads/x\nlocked on a usb disk\n\n"
      "worktree {w}\nHEAD 4\nbranch refs/heads/y\n"
-     "prunable gitdir file points to non-existent location\n\n", "records"),
+     "prunable gitdir file points to non-existent location\n\n", ("{a}", "{b}", "{a}")),
     ("plain, a bare main repository with a worktree", "REJECT",
-     "worktree {d}\nbare\n\nworktree {b}\nHEAD 2\nbranch refs/heads/x\n\n", "records"),
+     "worktree {d}\nbare\n\nworktree {b}\nHEAD 2\nbranch refs/heads/x\n\n", ("{d}", "{b}")),
     ("no listing", "FAIL", "", None),
 ]
 
@@ -6224,7 +6252,12 @@ def test_the_worktree_listing_is_read_as_the_memory_skill_reads_it(
     ours = backlog._worktree_records(["-C", str(tmp_path)])
     theirs = memory_api._worktree_records(["-C", str(tmp_path)])
     assert ours == theirs, (name, ours, theirs)
-    assert ("records" if isinstance(ours, list) else ours) == readable, (name, ours)
+    if isinstance(readable, tuple):
+        assert isinstance(ours, list), (name, ours)
+        read = [record[0] for record in ours]
+        assert read == ["worktree " + path.format(**paths) for path in readable], (name, read)
+    else:
+        assert ours == readable, (name, ours)
 
 
 def test_a_worktree_whose_path_holds_a_newline_is_recorded_whole(tmp_path, monkeypatch):
@@ -6257,10 +6290,12 @@ def test_without_nul_a_path_holding_a_newline_records_no_worktree(tmp_path, monk
 
 
 def test_without_nul_every_layout_git_lists_still_reads(tmp_path, monkeypatch):
-    """On a git that rejects `-z`, real listings of every record shape git
-    prints read whole in both readers: a branch, a detached HEAD, a lock with
-    and without a reason, a moved worktree git marks prunable, and a bare
-    main repository."""
+    """On a git that rejects `-z`, real listings of every layout git prints
+    read in both readers: a branch, a detached HEAD, a lock with and without
+    a reason, and a bare main repository are kept; a worktree moved away, one
+    locked with its folder gone and one whose `.git` was deleted are dropped;
+    and a `--separate-git-dir` repository's main record, its git directory,
+    is kept."""
     import os
     import shutil
     import stat
@@ -6290,13 +6325,31 @@ def test_without_nul_every_layout_git_lists_still_reads(tmp_path, monkeypatch):
     git("worktree", "lock", "--reason", "on a usb disk", str(tmp_path / "locked-why"), cwd=main)
     git("worktree", "add", "-q", str(tmp_path / "moved"), "-b", "b4", cwd=main)
     (tmp_path / "moved").rename(tmp_path / "moved-away")
+    git("worktree", "add", "-q", str(tmp_path / "locked-gone"), "-b", "b5", cwd=main)
+    git("worktree", "lock", str(tmp_path / "locked-gone"), cwd=main)
+    shutil.rmtree(tmp_path / "locked-gone")
+    git("worktree", "add", "-q", str(tmp_path / "no-dotgit"), "-b", "b6", cwd=main)
+    (tmp_path / "no-dotgit" / ".git").unlink()
     bare = tmp_path / "bare.git"
     git("clone", "-q", "--bare", str(main), str(bare), cwd=tmp_path)
     git("worktree", "add", "-q", str(tmp_path / "bare-wt"), "b1", cwd=bare)
+    separate = tmp_path / "separate"
+    separate.mkdir()
+    git("init", "-q", f"--separate-git-dir={tmp_path / 'store'}", ".", cwd=separate)
+    git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q",
+        "--allow-empty", "-m", "c", cwd=separate)
+    git("worktree", "add", "-q", str(tmp_path / "separate-wt"), "-b", "s", cwd=separate)
 
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
-    for where, count in ((main, 6), (bare, 2)):
+    kept = {
+        main: [main, *(tmp_path / name for name in ("branch", "detached", "locked", "locked-why"))],
+        bare: [bare, tmp_path / "bare-wt"],
+        separate: [tmp_path / "store", tmp_path / "separate-wt"],
+    }
+    for where, paths in kept.items():
         ours = backlog._worktree_records(["-C", str(where)])
         theirs = memory_api._worktree_records(["-C", str(where)])
         assert ours == theirs, (where, ours, theirs)
-        assert isinstance(ours, list) and len(ours) == count, (where, ours)
+        assert isinstance(ours, list), (where, ours)
+        read = [Path(record[0][len("worktree "):]).resolve() for record in ours]
+        assert read == [path.resolve() for path in paths], (where, read)

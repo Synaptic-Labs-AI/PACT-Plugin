@@ -400,9 +400,10 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
     it. That listing is one field per line, with a blank line ending each
     record, and git prints a path there unquoted, so a path holding a newline
     cannot be read whole: a record whose lines are not git's fields in git's
-    order (`_plain_record_fields_in_order`), or whose path does not hold
-    what git lists there (`_plain_record_path_holds`), makes the listing
-    unreadable: `UNREADABLE_LISTING`, not records.
+    order (`_plain_record_fields_in_order`), or a `bare` record that is not
+    the main repository's directory, makes the listing unreadable:
+    `UNREADABLE_LISTING`, not records. A linked worktree's record whose path
+    holds no `.git` is dropped (`_plain_records_kept`).
     None is a failed or timed-out git. A caller reads neither as an empty
     listing.
 
@@ -435,12 +436,11 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
     if current:
         records.append(current)
     if not nul:
-        for index, record in enumerate(records):
-            if not (
-                _plain_record_fields_in_order(record)
-                and _plain_record_path_holds(index, record)
-            ):
-                return UNREADABLE_LISTING
+        if not all(_plain_record_fields_in_order(record) for record in records):
+            return UNREADABLE_LISTING
+        records = _plain_records_kept(records)
+        if records is None:
+            return UNREADABLE_LISTING
     return records
 
 
@@ -470,22 +470,30 @@ def _plain_record_fields_in_order(record: List[str]) -> bool:
     return record[1] != "bare" or 2 not in places
 
 
-def _plain_record_path_holds(index: int, record: List[str]) -> bool:
-    """Whether a record of a listing without `-z` names a path as git lists
-    it, so a path cut at a newline is caught: one stat, no git call.
+def _plain_records_kept(records: List[List[str]]) -> Optional[List[List[str]]]:
+    """The records of a listing without `-z` that name a checkout, or None
+    when the listing cannot be read: one stat per record, no git call.
 
-    The main repository's record may say `bare`, and then its path must be a
-    directory. A record git marks `prunable` may name a path that does not
-    exist (git marks a worktree whose folder is gone). Any other path must
-    hold a `.git`.
+    The main repository's record is kept: git derives its path from the
+    repository itself, and with `--separate-git-dir` that path is the git
+    directory, which holds no `.git`. If it says `bare`, its path must be a
+    directory; `bare` in any other record is not git's. A linked worktree's
+    record is dropped when its path holds no `.git`: git still lists a
+    worktree whose folder is gone or lost its `.git` (locked, or before git
+    2.31 with no `prunable` line), and a path cut at a newline names a folder
+    git did not list. A dropped record cannot be the asked checkout and adds
+    no root, so every reader of the records only narrows.
     """
-    path = record[0][len("worktree "):]
-    if "bare" in record:
-        return index == 0 and os.path.isdir(path)
-    if os.path.lexists(os.path.join(path, ".git")):
-        return True
-    prunable = any(field.startswith("prunable ") for field in record)
-    return prunable and not os.path.lexists(path)
+    kept = []
+    for index, record in enumerate(records):
+        path = record[0][len("worktree "):]
+        if "bare" in record:
+            if index != 0 or not os.path.isdir(path):
+                return None
+        elif index != 0 and not os.path.lexists(os.path.join(path, ".git")):
+            continue
+        kept.append(record)
+    return kept
 
 
 def checkout_roots() -> List[str]:
