@@ -414,13 +414,22 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     # mounted now; git before 2.31 cannot say whether it is locked): a
     # session there after the drive returns matches before any write records
     # it again, and an absent folder names no other repository's checkout.
+    # The listed worktrees join only when the root is the checkout git lists
+    # first, or git lists the git dir there because it cannot name the main
+    # checkout (a `--separate-git-dir` or `core.worktree` repository). A
+    # folder whose `.git` file names another repository's `.git` directory
+    # is neither, so it claims none of that repository's worktrees. One
+    # whose `.git` file names such a listed git dir still claims them: it
+    # reads exactly as that repository's own main checkout does, and only a
+    # hand-written `.git` file makes it.
     memory_api = _memory_api()
     root, common = _root_and_common_dir()
     try:
         records = (
             memory_api._worktree_records(["--git-dir", str(common)]) if common is not None else None
         )
-        if not isinstance(records, list):
+        own = (Path(root).resolve(), Path(common).resolve()) if common is not None else ()
+        if not isinstance(records, list) or Path(records[0][0][len("worktree "):]).resolve() not in own:
             roots = [str(Path(root).resolve())]
         else:
             roots = [str(path) for path in memory_api._verified_worktree_roots(root, common, records)]

@@ -2355,6 +2355,46 @@ def test_a_recorded_root_is_dropped_once_its_git_names_another_repository(tmp_pa
     assert backlog.checkout_roots([recorded, str(wt)]) == [str(wt)]
 
 
+def test_a_folder_naming_another_repositorys_git_dir_claims_none_of_its_worktrees(tmp_path, monkeypatch):
+    """A folder whose `.git` file names another repository's `.git`
+    directory gets that repository's worktree listing from git, with that
+    repository's checkout listed first. The folder is not that checkout, so
+    its roots are itself alone; the control shows git lists the worktree.
+
+    Real repos, real git."""
+    other = _repo(tmp_path / "other")
+    subprocess.run(["git", "-C", str(other), "worktree", "add", "-q", str(tmp_path / "other-wt"),
+                    "-b", "ow"], check=True, capture_output=True)
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    _root_is(monkeypatch, folder.resolve())
+    listed = [record[0] for record in backlog._memory_api()._worktree_records(["-C", str(folder)])]
+    assert f"worktree {(tmp_path / 'other-wt').resolve()}" in listed, f"control: {listed}"
+
+    assert backlog.checkout_roots() == [str(folder.resolve())]
+
+
+def test_a_core_worktree_repository_keeps_its_worktrees(tmp_path, monkeypatch):
+    """A repository made with `--git-dir` and `--work-tree` lists its git dir
+    first, as a `--separate-git-dir` one does, so its checkout's roots still
+    hold its linked worktree.
+
+    Real repo, real git."""
+    work = tmp_path / "work"
+    work.mkdir()
+    store = tmp_path / "g.git"
+    subprocess.run(["git", "--git-dir", str(store), "--work-tree", str(work), "init", "-q"],
+                   check=True, capture_output=True)
+    (work / ".git").write_text(f"gitdir: {store}\n")
+    run = lambda *a: subprocess.run(["git", "-C", str(work), *a], check=True, capture_output=True)
+    run("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "c")
+    run("worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
+    _root_is(monkeypatch, work.resolve())
+
+    assert set(backlog.checkout_roots()) == {str(work.resolve()), str((tmp_path / "wt").resolve())}
+
+
 def test_save_carries_the_separate_git_dir_checkout_it_read(tmp_path, monkeypatch):
     """`save` hands the roots the file already holds to `checkout_roots`, so
     a write from a linked worktree keeps the main checkout an earlier write
