@@ -172,7 +172,7 @@ class RootIdentity(NamedTuple):
 
 
 # The `detail` for a `.git` marker refused by its target's shape
-# (`_redirect_target_is_foreign`): a directory named `.git`, or a submodule's
+# (`_redirect_target_refusal`): a directory named `.git`, or a submodule's
 # git dir whose `core.worktree` is not the marker's directory or is unset.
 FOREIGN_GIT_DIR_DETAIL = (
     "its `.git` names another directory called `.git`, or a submodule's git "
@@ -1560,7 +1560,7 @@ def _redirect_target_refusal(target: Path, marker_root: Path) -> Optional[str]:
 
     - A target named exactly `.git` is another checkout's git dir: a
       redirect. (A legitimate `--separate-git-dir=<dir>/.git` takes this
-      shape too; see `_gitfile_points_at_foreign_gitdir`.)
+      shape too; see `_gitfile_redirect_detail`.)
     - A submodule admin dir at any depth (`_submodule_admin_dir`) has its
       git dir EQUAL to its common dir, so only its recorded `core.worktree`
       can tell a genuine submodule from a pointer at somebody else's.
@@ -1600,7 +1600,7 @@ def _gitfile_redirect_detail(root: Path) -> Optional[str]:
     then the detail of the refusal.
 
     Two routes reach the same question, and both answer through
-    `_redirect_target_is_foreign`:
+    `_redirect_target_refusal`:
 
     - a `.git` FILE whose `gitdir:` line names the target (followed, if the
       file is reached through a symlink, exactly as git reads it);
@@ -1761,7 +1761,7 @@ def detect_id_for_root(
     # refused is the ORIGIN, which belongs to the other repository — so a
     # forgery can at most bind a pin the victim deliberately wrote, which is
     # strictly narrower than binding its remote. See
-    # `_gitfile_points_at_foreign_gitdir`.
+    # `_gitfile_redirect_detail`.
     #
     # THE PREDICATE IS EVALUATED ON THE ASKED DIRECTORY, NOT ON `root`. This
     # is load-bearing and was measured wrong once: `main_repo_root` follows a

@@ -518,8 +518,9 @@ def checkout_roots() -> List[str]:
     still needs a mode flag. It also runs a second git call this one does not
     need. Two subprocesses per write on a path the design says can afford one.
     """
-    # A listing that cannot be read whole (`_worktree_records` is None) adds
-    # no root: a truncated path would name another directory.
+    # A listing git did not give (`_worktree_records` is None) or one that
+    # cannot be read whole (UNREADABLE_LISTING) adds no root: a truncated
+    # path would name another directory.
     records = _worktree_records(["-C", str(project_root())])
     if not isinstance(records, list):
         records = []
