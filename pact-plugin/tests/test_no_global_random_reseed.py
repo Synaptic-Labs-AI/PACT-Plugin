@@ -211,34 +211,55 @@ COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
 
 def _star_setters(tree):
     """{id of a Name read: setter} for each read a star import of random or
-    numpy.random binds to a setter, by the module-level binding in force there."""
+    numpy.random binds to a setter, by the module-level binding in force there.
+
+    Positions are (line, column), so two statements on one line are ordered too.
+    A binding takes effect where Python completes it: at the end of an import,
+    def, class or assignment statement (the right side of `seed = seed(1)` still
+    reads the earlier binding), and at the end of the name itself for a loop,
+    with or assignment-expression target."""
     bindings, reads = {}, []
 
-    def bind(name, line, setter=None):
-        bindings.setdefault(name, []).append((line, setter))
+    def end(node):
+        return (node.end_lineno, node.end_col_offset)
 
-    def visit(node, deferred, own_scope, local, skip=frozenset()):
+    def bind(name, position, setter=None):
+        bindings.setdefault(name, []).append((position, setter))
+
+    def assigned_at_statement_end(stmt):
+        if isinstance(stmt, ast.Assign):
+            roots = stmt.targets
+        elif isinstance(stmt, (ast.AugAssign, ast.AnnAssign)):
+            roots = [stmt.target]
+        else:
+            return set()
+        return {id(name) for root in roots for name in ast.walk(root)}
+
+    def visit(node, deferred, own_scope, local, skip=frozenset(), stmt=None):
         module_scope = not deferred and not own_scope
+        if isinstance(node, ast.stmt):
+            stmt = node
         if module_scope and isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name != "*":
                     dotted = f"{node.module}.{alias.name}"
-                    bind(alias.asname or alias.name, node.lineno, dotted if dotted in SETTERS else None)
+                    bind(alias.asname or alias.name, end(node), dotted if dotted in SETTERS else None)
                 elif not node.level:
                     for setter in SETTERS:
                         module, _, name = setter.rpartition(".")
                         if module == node.module:
-                            bind(name, node.lineno, setter)
+                            bind(name, end(node), setter)
         elif module_scope and isinstance(node, ast.Import):
             for alias in node.names:
-                bind(alias.asname or alias.name.split(".")[0], node.lineno)
+                bind(alias.asname or alias.name.split(".")[0], end(node))
         elif module_scope and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            bind(node.name, node.lineno)
+            bind(node.name, end(node))
         elif isinstance(node, ast.Name):
             if isinstance(node.ctx, ast.Load) and node.id not in local:
                 reads.append((node, deferred))
             elif module_scope:
-                bind(node.id, node.lineno)
+                at_end = stmt is not None and id(node) in assigned_at_statement_end(stmt)
+                bind(node.id, end(stmt) if at_end else end(node))
         inner_deferred = deferred or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
         inner_scope = own_scope or isinstance(node, (ast.ClassDef, *COMPREHENSIONS))
         if isinstance(node, SCOPES):
@@ -266,33 +287,35 @@ def _star_setters(tree):
         if not isinstance(node, COMPREHENSIONS):
             for child in ast.iter_child_nodes(node):
                 if id(child) not in skip:
-                    visit(child, inner_deferred, inner_scope, local, skip)
+                    visit(child, inner_deferred, inner_scope, local, skip, stmt)
             return
         # The first iterable runs in the enclosing scope, before any loop
         # variable exists; everything else runs inside the comprehension.
         first = node.generators[0].iter
-        visit(first, deferred, own_scope, local, skip)
+        visit(first, deferred, own_scope, local, skip, stmt)
         inner = local | {name.id for loop in node.generators
                          for name in ast.walk(loop.target) if isinstance(name, ast.Name)}
         for child in ast.iter_child_nodes(node):
             parts = ast.iter_child_nodes(child) if isinstance(child, ast.comprehension) else [child]
             for part in parts:
                 if part is not first and id(part) not in skip:
-                    visit(part, inner_deferred, inner_scope, inner, skip)
+                    visit(part, inner_deferred, inner_scope, inner, skip, stmt)
 
     visit(tree, False, False, frozenset())
     found = {}
     for read, deferred in reads:
         seen = sorted(bindings.get(read.id, []), key=lambda binding: binding[0])
-        in_force = seen if deferred else [b for b in seen if b[0] < read.lineno]
+        position = (read.lineno, read.col_offset)
+        in_force = seen if deferred else [b for b in seen if b[0] < position]
         if in_force and in_force[-1][1]:
             found[id(read)] = in_force[-1][1]
     return found
 
 
 def global_reseeds(source, where="<rig>"):
-    """'where:line: setter' for every global random-state setter `source` refers to."""
-    tree = ast.parse(source)
+    """'where:line: setter' for every global random-state setter `source` refers to.
+    `source` is module text, or a module tree already parsed."""
+    tree = source if isinstance(source, ast.AST) else ast.parse(source)
     scoped = _scoped_reads(tree)
     starred = _star_setters(tree)
     found = []
@@ -390,6 +413,9 @@ def test_an_untracked_file_is_not_read(tmp_path):
     "import random\nclass C[T: random.seed(1)]:\n    import os as random\n",
     "import random\ntype X[T: random.seed(1)] = int\n",
     "import random\ntype X = random.seed\n",
+    "from random import *; seed(1)\n",
+    "from random import *; x = 1; seed(1)\n",
+    "from random import *\nseed = seed(1)\n",
 ])
 def test_a_global_reseed_is_refused(source):
     assert global_reseeds(source), source
@@ -420,16 +446,40 @@ def test_a_global_reseed_is_refused(source):
     "import random\ntype X[random] = random.seed\n",
     "import random\ndef f[random](x: random.seed):\n    pass\n",
     "from random import *\ntype X = seed(1)\ndef seed(x):\n    return x\n",
+    "seed(1); from random import *\n",
+    "from random import *; seed = print; seed(1)\n",
 ])
 def test_a_local_generator_or_a_same_named_helper_is_not_refused(source):
     assert global_reseeds(source) == [], source
 
 
-@pytest.mark.skipif(sys.version_info < (3, 13), reason="type parameter defaults need Python 3.13")
-@pytest.mark.parametrize("source", [
-    "import random\ndef f[T = random.seed(1)](random):\n    pass\n",
-    "import random\nclass C[T = random.seed(1)]:\n    import os as random\n",
-    "import random\ntype X[T = random.seed(1)] = int\n",
+def _with_type_param_default(bare, default):
+    """`bare` parsed, with `default` attached to its type parameter as
+    TypeVar.default_value, the field Python 3.13 parses a PEP 696 default into.
+    Python 3.12's TypeVar does not list that field, so it is listed on this node
+    too, or ast.walk would not reach the default as it does on 3.13."""
+    tree = ast.parse(bare)
+    param = next(node for node in ast.walk(tree) if isinstance(node, ast.TypeVar))
+    param.default_value = ast.parse(default, mode="eval").body
+    if "default_value" not in param._fields:
+        param._fields = (*param._fields, "default_value")
+    return tree
+
+
+@pytest.mark.parametrize("bare, default, written", [
+    ("import random\ndef f[T](random):\n    pass\n", "random.seed(1)",
+     "import random\ndef f[T = random.seed(1)](random):\n    pass\n"),
+    ("import random\nclass C[T]:\n    import os as random\n", "random.seed(1)",
+     "import random\nclass C[T = random.seed(1)]:\n    import os as random\n"),
+    ("import random\ntype X[T] = int\n", "random.seed(1)",
+     "import random\ntype X[T = random.seed(1)] = int\n"),
 ])
-def test_a_reseed_in_a_type_parameter_default_is_refused(source):
-    assert global_reseeds(source), source
+def test_a_reseed_in_a_type_parameter_default_is_refused(bare, default, written):
+    """Python 3.12, the CI interpreter, cannot parse a PEP 696 default
+    (`[T = ...]`), so each row parses the definition without it and attaches the
+    default where Python 3.13 parses it. Where the written form parses, the two
+    trees must match, so the attached shape is the parsed one."""
+    tree = _with_type_param_default(bare, default)
+    if sys.version_info >= (3, 13):
+        assert ast.dump(tree) == ast.dump(ast.parse(written)), written
+    assert global_reseeds(tree), written

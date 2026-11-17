@@ -88,7 +88,7 @@ def _per_test_session_id(monkeypatch):
         yield session_id
 
 
-SEED ="# Project Memory\n\n## Retrieved Context\n\n## Working Memory\n"
+SEED = "# Project Memory\n\n## Retrieved Context\n\n## Working Memory\n"
 
 
 def _git(*args, cwd):
