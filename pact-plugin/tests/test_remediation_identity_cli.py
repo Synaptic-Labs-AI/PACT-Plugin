@@ -1475,3 +1475,121 @@ class TestTheRekeyRefusalOffersOnlyAWorkablePin:
         assert code == 1
         assert envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED"
         assert str(repo / ".git" / "pact-project-id") in envelope["message"]
+
+
+def _remedy_after(text: str, marker: str) -> str:
+    """The sentence(s) between `marker` and the closing show-verb pointer."""
+    head = text.rsplit(" Run the `project-id show`", 1)[0]
+    return head.split(marker, 1)[1].strip() if marker in head else ""
+
+
+def _refusing_instance(record):
+    """A `PACTMemory` holding only a detection pass's decline outcome."""
+    from scripts import memory_api
+
+    instance = object.__new__(memory_api.PACTMemory)
+    instance._decline_reason = record
+    instance._override_ignored = None
+    instance._decline_detail = None
+    return instance
+
+
+def _undeclined_remedy(monkeypatch) -> str:
+    """The write refusal's own remedy, printed only when no rung declined."""
+    from scripts import memory_api
+
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.setattr(memory_api, "get_project_dir_from_session_record", lambda: None)
+    undeclined = _refusing_instance(None)._unresolved_identity_message()
+    remedy = undeclined.rsplit(" Run the `project-id show`", 1)[0].rsplit(". ", 1)[1]
+    assert remedy, undeclined
+    return remedy
+
+
+class TestADeclineCausePrintsOneRemedyOnEveryVerb:
+    """A decline cause prints the same remedy in the detection warning and
+    in the write refusal.
+
+    Catches the refusal choosing its remedy by its own rules: a repository
+    git cannot read then warns "check that git can read the repository" but
+    refuses `save` with "run from inside the project directory", which the
+    caller already was, and a pinnable decline names its pin in two
+    different sentences.
+    """
+
+    @staticmethod
+    def _surfaces(record, monkeypatch, caplog):
+        from scripts import memory_api
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.setattr(memory_api, "get_project_dir_from_session_record", lambda: None)
+        caplog.clear()
+        memory_api._warn_declined(record, "/nowhere")
+        warning = " ".join(
+            r.getMessage() for r in caplog.records if "no project id was derived" in r.getMessage()
+        )
+        refusal = _refusing_instance(record)._unresolved_identity_message()
+        return warning, refusal
+
+    def test_every_cause_prints_its_own_remedy_on_both_surfaces(
+        self, identity_env, monkeypatch, caplog
+    ):
+        from scripts import memory_api
+
+        fallback = _undeclined_remedy(monkeypatch)
+        pin = identity_env / ".git" / "pact-project-id"
+        cells = 0
+        for token in sorted(memory_api._DECLINE_CAUSES):
+            for override in (None, str(pin)):
+                record = {"source": "probe", "reason": token, "override_path": override}
+                warning, refusal = self._surfaces(record, monkeypatch, caplog)
+                printed = _remedy_after(warning, "so no project id was derived.")
+                if token == "gitfile_redirect":
+                    assert printed == memory_api._REDIRECT_REMEDY, (token, override, warning)
+                elif override is not None:
+                    assert override in printed, (token, override, warning)
+                else:
+                    assert printed == memory_api._UNPINNABLE_REMEDIES.get(token, ""), (
+                        token, warning,
+                    )
+                head = refusal.rsplit(" Run the `project-id show`", 1)[0]
+                assert head.endswith(printed), (token, override, printed, refusal)
+                assert fallback not in refusal, (token, override, refusal)
+                cells += 1
+        assert cells == 2 * len(memory_api._DECLINE_CAUSES)
+
+    @pytest.mark.requires_non_root
+    def test_an_unreadable_repository_prints_one_remedy_on_every_verb(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        fallback = _undeclined_remedy(monkeypatch)
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        config = repo / ".git" / "config"
+        monkeypatch.chdir(repo)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+        config.chmod(0)
+        try:
+            caplog.clear()
+            code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+            warning = " ".join(
+                r.getMessage() for r in caplog.records
+                if "no project id was derived" in r.getMessage()
+            )
+            code, refusal = _cli(
+                ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+            )
+            prefix_code, prefix = _cli(["get", "abc1234", "--db-path", str(store)], capfd)
+        finally:
+            config.chmod(0o644)
+        assert show["result"]["decline_reason"]["reason"] == "broken_git_marker", show
+        remedy = memory_api._UNPINNABLE_REMEDIES["broken_git_marker"]
+        assert _remedy_after(warning, "so no project id was derived.") == remedy, warning
+        assert code == 1, refusal
+        message = refusal["message"]
+        assert message.rsplit(" Run the `project-id show`", 1)[0].endswith(remedy), message
+        assert fallback not in message, message
+        assert prefix_code != 0, prefix
+        assert prefix["message"].endswith(remedy), prefix

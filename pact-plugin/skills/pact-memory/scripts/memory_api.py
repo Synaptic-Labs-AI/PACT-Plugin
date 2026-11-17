@@ -683,6 +683,31 @@ _REDIRECT_REMEDY = (
 )
 
 
+def _decline_remedy(record: Optional[dict]) -> Optional[str]:
+    """The remedy a decline cause prints, or None when the cause has none:
+    one cause, one remedy, on every verb and route that reports it.
+
+    A redirect names its marker (`_REDIRECT_REMEDY`); a decline that names
+    the override file that would fix it offers that file; any other cause
+    takes its own `_UNPINNABLE_REMEDIES` entry.
+    """
+    token = (record or {}).get("reason")
+    if token == "gitfile_redirect":
+        return _REDIRECT_REMEDY
+    override_path = (record or {}).get("override_path")
+    if override_path is not None:
+        return _pin_remedy(override_path)
+    return _UNPINNABLE_REMEDIES.get(token)
+
+
+def _pin_remedy(override_path: Any) -> str:
+    """The remedy that writes an operator-chosen id to `override_path`."""
+    return (
+        f"Write an operator-chosen canonical id to {str(override_path)!r}, or "
+        "set CLAUDE_PROJECT_DIR to another project root."
+    )
+
+
 def _warn_declined(
     record: Optional[dict],
     root: Any = None,
@@ -710,30 +735,12 @@ def _warn_declined(
         cause = f"{cause}; {cause_detail}"
     if detail:
         cause = f"{cause} ({detail})"
-    if token == "gitfile_redirect":
-        logger.warning(
-            "%s, so no project id was derived. %s Run the `project-id show` "
-            "verb to inspect the detected identity.",
-            cause,
-            _REDIRECT_REMEDY,
-        )
-        return
-    override_path = (record or {}).get("override_path")
-    if override_path is None:
-        remedy = _UNPINNABLE_REMEDIES.get(token, "")
-        logger.warning(
-            "%s, so no project id was derived.%s Run the `project-id show` "
-            "verb to inspect the detected identity.",
-            cause,
-            f" {remedy}" if remedy else "",
-        )
-        return
+    remedy = _decline_remedy(record)
     logger.warning(
-        "%s, so no project id was derived. Run the `project-id show` verb to "
-        "inspect the detected identity, or write an operator-chosen canonical "
-        "id to %r.",
+        "%s, so no project id was derived.%s Run the `project-id show` verb "
+        "to inspect the detected identity.",
         cause,
-        str(override_path),
+        f" {remedy}" if remedy else "",
     )
 
 
@@ -4021,26 +4028,31 @@ class PACTMemory:
                 "An override file in the git directory this checkout's `.git` "
                 f"points at was present but unusable ({ignored['reason']})."
             )
-        override_path = reason.get("override_path") or ignored.get("path")
-        if reason.get("reason") == "gitfile_redirect":
-            remedy = _REDIRECT_REMEDY
-        elif override_path:
-            remedy = (
-                "Write an operator-chosen canonical id to "
-                f"{str(override_path)!r}, or set CLAUDE_PROJECT_DIR to another "
-                "project root."
-            )
-        else:
-            remedy = (
-                "Run from inside the project directory, or set "
-                "CLAUDE_PROJECT_DIR to an existing project root."
-            )
+        remedy = self._unresolved_identity_remedy()
         return (
             "no project identity could be resolved, so the write was refused "
             "rather than filed under an unknown project. Nothing was written. "
             + " ".join(parts)
-            + f" {remedy} Run the `project-id show` verb to inspect the "
-            "detected identity."
+            + (f" {remedy}" if remedy else "")
+            + " Run the `project-id show` verb to inspect the detected identity."
+        )
+
+    def _unresolved_identity_remedy(self) -> Optional[str]:
+        """The remedy every unresolved-identity refusal prints.
+
+        A decline's remedy is its cause's, the same one the warning prints
+        (`_decline_remedy`). Only a refusal no rung declined (nothing was
+        declared or answered) has a remedy of its own here.
+        """
+        reason = self._decline_reason or {}
+        ignored = self._override_ignored or {}
+        if reason.get("reason"):
+            return _decline_remedy(reason)
+        if ignored.get("path"):
+            return _pin_remedy(ignored["path"])
+        return (
+            "Run from inside the project directory, or set "
+            "CLAUDE_PROJECT_DIR to an existing project root."
         )
 
     @_with_store_scope
@@ -4910,12 +4922,12 @@ class PACTMemory:
         # name (the Bugbot finding this closes).
         project_scope = self._project_scope()
         if project_scope is None:
+            remedy = self._unresolved_identity_remedy()
             raise ProjectIdentityUnresolvedError(
                 "no project identity could be resolved, so a memory-id "
                 "prefix was refused rather than listing matches from every "
-                "project. A full 32-character id still resolves. Run from "
-                "inside the project directory, or set CLAUDE_PROJECT_DIR to "
-                "an existing project root."
+                "project. A full 32-character id still resolves."
+                + (f" {remedy}" if remedy else "")
             )
         return resolve_memory_id_prefix(
             conn, memory_id, project_id=self._read_project_scopes(conn)
