@@ -726,6 +726,54 @@ def test_under_xdist_a_wider_node_finalizer_after_the_last_test_is_refused(tmp_p
     assert output.count("HOME CENSUS: 1 distinct child launch(es) without HOME refused") == 1, output
 
 
+# A conftest report hook that launches a child without HOME in the teardown
+# phase of the marked test. It runs after pytest_runtest_teardown returns, so
+# it is the marked test's own hook whichever test is last in the module.
+_TEARDOWN_REPORT_HOOK = '''
+
+def pytest_runtest_makereport(item, call):
+    if call.when == "teardown" and item.name == "test_marked":
+        import os
+        import subprocess
+        try:
+            subprocess.run(["true"], env={"PATH": os.defpath})
+        except Exception:
+            pass
+'''
+_MARKED_ONLY = '''
+import pytest
+
+
+@pytest.mark.child_env_without_home(reason="rig: marked")
+def test_marked():
+    pass
+'''
+_PLAIN_ONLY = '''
+def test_plain():
+    pass
+'''
+
+
+@pytest.mark.parametrize("marked_first", [True, False], ids=["marked-first", "marked-last"])
+def test_a_teardown_report_hook_of_a_marked_test_is_exempt_whatever_the_order(
+        tmp_path, marked_first):
+    """MUTANT: the wider-teardown flag outlives pytest_runtest_teardown. With
+    the marked test last, its module's teardown sets the flag, and the teardown
+    phase's makereport launch, which runs after that, is refused as wider."""
+    (tmp_path / "conftest.py").write_text(
+        _RIG_CONFTEST.format(conftest=str(_CONFTEST)) + _TEARDOWN_REPORT_HOOK, encoding="utf-8")
+    body = (_MARKED_ONLY + _PLAIN_ONLY) if marked_first else (
+        "import pytest\n" + _PLAIN_ONLY + _MARKED_ONLY)
+    (tmp_path / "test_order.py").write_text(body, encoding="utf-8")
+    proc = subprocess.run(
+        [PY, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-p", "no:randomly", "test_order.py"],
+        cwd=tmp_path, env=_child_environ(), capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    assert "2 passed" in output, output
+    assert proc.returncode == 0, output
+    assert "without HOME refused" not in output, output
+
+
 def test_a_marked_tests_own_finalizer_stays_exempt(tmp_path):
     """The control: a function-scoped fixture's request.node is the test itself,
     so its finalizer runs before the wider teardown and the marker covers it."""

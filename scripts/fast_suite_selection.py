@@ -731,10 +731,12 @@ class FileScan:
     repo_reach: tuple[str, ...]
     # 'line:why' for every site that keeps a TEST-SIDE module unproven, and,
     # for any module, test-side or production, each joined-path read the
-    # resolver does not follow: a read past its limits, any Path(...) with more
-    # than one argument, .with_name(...) or .with_suffix(...) on an anchored
-    # path whatever it names, and an anchored argument passed into *args or
-    # **kwargs.
+    # resolver does not follow: a read past its limits, a pathlib constructor
+    # given more than one argument with an anchored first one, .with_name(...),
+    # .with_stem(...) or .with_suffix(...) on an anchored path whatever it
+    # names, a joined piece iterating a table that depends on scope, an
+    # anchored argument passed into *args or **kwargs, and an argument
+    # unpacked into a def (`*value`, `**value`) that may hold an anchored path.
     unproven: tuple[str, ...]
     dynamic_imports: tuple[str, ...]
     dynamic_fixtures: tuple[str, ...]
@@ -961,21 +963,77 @@ def _literal_loop_names(tree: ast.AST) -> set[str]:
     return names
 
 
+def _table_bindings(tree: ast.Module):
+    """(scope, name, value) for each binding of a bare name, by plain or
+    annotated assignment, in the module body (scope None) or a class body
+    (scope: that ClassDef)."""
+    bodies = [(None, tree.body)] + [(node, node.body) for node in ast.walk(tree)
+                                    if isinstance(node, ast.ClassDef)]
+    for scope, body in bodies:
+        for node in body:
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(
+                    node.targets[0], ast.Name):
+                yield scope, node.targets[0].id, node.value
+            elif (isinstance(node, ast.AnnAssign) and node.value is not None
+                  and isinstance(node.target, ast.Name)):
+                yield scope, node.target.id, node.value
+
+
+def _string_tables(tree: ast.Module) -> dict[str, ast.AST]:
+    """Names bound exactly once in the module, in the module body or a class
+    body, by a plain or annotated assignment: the table a `for` over that name
+    reads."""
+    once: dict[str, int] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            once[node.id] = once.get(node.id, 0) + 1
+    return {name: value for _, name, value in _table_bindings(tree) if once.get(name) == 1}
+
+
+def _unpinned_loop_targets(tree: ast.Module) -> set[str]:
+    """Names a `for` or comprehension binds while iterating a name whose
+    table depends on scope: a name bound in more than one of the module body
+    and the class bodies, or a parameter of an enclosing def or lambda that
+    shares a table's name. _literal_string_names reads names module-wide, so
+    it gives such a loop target the wrong table's strings, or none; a join
+    that reads it records an unproven site instead."""
+    tables = _string_tables(tree)
+    scopes: dict[str, set] = {}
+    for scope, name, _ in _table_bindings(tree):
+        scopes.setdefault(name, set()).add(id(scope))
+    shadowed = {name for name, where in scopes.items() if len(where) > 1}
+    found: set[str] = set()
+
+    def targets(target: ast.AST) -> set[str]:
+        return {inner.id for inner in ast.walk(target) if isinstance(inner, ast.Name)}
+
+    def visit(node: ast.AST, params: frozenset[str]) -> None:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            arguments = node.args
+            params = params | {arg.arg for arg in (*arguments.posonlyargs, *arguments.args,
+                                                   *arguments.kwonlyargs, arguments.vararg,
+                                                   arguments.kwarg) if arg is not None}
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)) and isinstance(
+                node.iter, ast.Name):
+            name = node.iter.id
+            if name in shadowed or (name in params and name in tables):
+                found.update(targets(node.target))
+        for child in ast.iter_child_nodes(node):
+            visit(child, params)
+
+    visit(tree, frozenset())
+    return found
+
+
 def _literal_string_names(tree: ast.Module) -> dict[str, frozenset[str]]:
     """Names every binding of which, anywhere in the module, is a string
     literal, and the strings they take: `name = "x.py"`, and a `for` or
     comprehension target over a tuple or list of string literals (rows of
     them unpack by position), written in place or held by a module-level
-    name bound exactly once, in the module body. A name with any other
+    name bound exactly once, by a plain or annotated assignment in the
+    module body or a class body (_string_tables). A name with any other
     binding (a parameter, an import, another assignment) is not one."""
-    once: dict[str, int] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            once[node.id] = once.get(node.id, 0) + 1
-    tables = {node.targets[0].id: node.value for node in tree.body
-              if isinstance(node, ast.Assign) and len(node.targets) == 1
-              and isinstance(node.targets[0], ast.Name)
-              and once.get(node.targets[0].id) == 1}
+    tables = _string_tables(tree)
     literal: dict[int, set[str]] = {}
     for node in ast.walk(tree):
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
@@ -1112,6 +1170,9 @@ def _join_text(node: ast.AST,
     if isinstance(node, ast.Name):
         found = anchors.get(node.id)
         return found if isinstance(found, str) else None
+    if (isinstance(node, ast.Attribute) and node.attr in ("curdir", "pardir")
+            and isinstance(node.value, ast.Name) and node.value.id == "os"):
+        return "." if node.attr == "curdir" else ".."
     return None
 
 
@@ -1464,16 +1525,174 @@ def _resolve_scope(bindings, outer: _Env, module_env: _Env, declared_global: set
     return env
 
 
+def _anchor_holder(tree: ast.Module, anchored: set[str]):
+    """A predicate: whether an expression may hold an anchored path, read
+    module-wide and by name, so over-approximating across scopes. Used for a
+    value a call unpacks (`*value`, `**value`), which the resolver does not
+    follow. An expression holds one when it is `__file__`, a name some scope
+    anchors, or a name or attribute name any binding of which, anywhere in
+    the module, holds one (a plain, annotated, augmented or walrus
+    assignment, or a loop or with target, which holds what it iterates or
+    enters); a parameter in a slot where a bare-name call of its def or
+    lambda passes an argument that holds one (_slots); a bare-name call of a
+    def or lambda some return or yield of which holds one; an attribute,
+    subscript or operand of one that does; a list, tuple, set, dict value,
+    conditional or boolean expression with an item that does; an f-string
+    that formats one; or a call in _PATH_PASSING_CALLS whose argument or
+    receiver does. Any other call result and a literal hold none."""
+    bindings: dict[str, list[ast.AST]] = {}
+    returns: dict[str, list[ast.AST]] = {}
+    params: dict[str, ast.arguments] = {}
+    passed: list[tuple[str, int | str | None, ast.AST]] = []
+
+    def bind(target: ast.AST, value: ast.AST) -> None:
+        for inner in ast.walk(target):
+            if isinstance(inner, ast.Name):
+                bindings.setdefault(inner.id, []).append(value)
+            elif isinstance(inner, ast.Attribute):
+                bindings.setdefault(inner.attr, []).append(value)
+
+    def own(function: ast.AST, name: str) -> None:
+        params[name] = function.args
+        body = [function.body] if isinstance(function, ast.Lambda) else function.body
+        for statement in body:
+            for inner in ast.walk(statement):
+                if isinstance(inner, (ast.Return, ast.Yield, ast.YieldFrom)) and inner.value:
+                    returns.setdefault(name, []).append(inner.value)
+            if isinstance(function, ast.Lambda):
+                returns.setdefault(name, []).append(statement)
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)) and node.value:
+            for target in getattr(node, "targets", [getattr(node, "target", None)]):
+                bind(target, node.value)
+                if isinstance(node.value, ast.Lambda) and isinstance(target, ast.Name):
+                    own(node.value, target.id)
+        elif isinstance(node, ast.NamedExpr):
+            bind(node.target, node.value)
+        elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+            bind(node.target, node.iter)
+        elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+            bind(node.optional_vars, node.context_expr)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            own(node, node.name)
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            name, unpacked = node.func.id, False
+            for position, argument in enumerate(node.args):
+                unpacked = unpacked or isinstance(argument, ast.Starred)
+                passed.append((name, None if unpacked else position,
+                               getattr(argument, "value", argument)
+                               if isinstance(argument, ast.Starred) else argument))
+            for keyword in node.keywords:
+                passed.append((name, keyword.arg or "**", keyword.value))
+
+    holders = set(anchored)
+    holding: set[str] = set()
+
+    def holds(value: ast.AST) -> bool:
+        if isinstance(value, ast.Name):
+            return value.id in holders or value.id == "__file__"
+        if isinstance(value, ast.Attribute):
+            return value.attr in holders or value.attr == "__file__" or holds(value.value)
+        if isinstance(value, ast.Call):
+            if isinstance(value.func, ast.Name) and value.func.id in holding:
+                return True
+            if _call_name(value) not in _PATH_PASSING_CALLS:
+                return False
+            parts = [*value.args, *(keyword.value for keyword in value.keywords)]
+            if isinstance(value.func, ast.Attribute):
+                parts.append(value.func.value)
+            return any(holds(part) for part in parts)
+        if isinstance(value, ast.Dict):
+            return any(holds(item) for item in value.values)
+        if isinstance(value, ast.JoinedStr):
+            return any(holds(part.value) for part in value.values
+                       if isinstance(part, ast.FormattedValue))
+        if isinstance(value, (ast.List, ast.Tuple, ast.Set, ast.Starred, ast.BinOp,
+                              ast.Subscript, ast.IfExp, ast.BoolOp, ast.NamedExpr)):
+            parts = {ast.Subscript: lambda: [value.value],
+                     ast.IfExp: lambda: [value.body, value.orelse],
+                     ast.BinOp: lambda: [value.left, value.right]}.get(
+                         type(value), lambda: list(ast.iter_child_nodes(value)))()
+            return any(holds(part) for part in parts)
+        return False
+
+    changed = True
+    while changed:
+        changed = False
+        for name, values in bindings.items():
+            if name not in holders and any(holds(value) for value in values):
+                holders.add(name)
+                changed = True
+        for name, values in returns.items():
+            if name not in holding and any(holds(value) for value in values):
+                holding.add(name)
+                changed = True
+        for name, slot, value in passed:
+            if name not in params or not holds(value):
+                continue
+            fresh = set(_slots(params[name], slot)) - holders
+            if fresh:
+                holders.update(fresh)
+                changed = True
+    return holds
+
+
+def _slots(arguments: ast.arguments, slot: int | str | None) -> list[str]:
+    """The parameter names a call's argument can land in: position `slot`;
+    keyword `slot`; None, a positional at or after an unpacked one, lands in
+    any positional slot or *args (over-approximating its position); "**", an
+    unpacked mapping, lands in any keyword or **kwargs."""
+    positional = [arg.arg for arg in (*arguments.posonlyargs, *arguments.args)]
+    keywords = [arg.arg for arg in (*arguments.args, *arguments.kwonlyargs)]
+    vararg = [arguments.vararg.arg] if arguments.vararg else []
+    kwarg = [arguments.kwarg.arg] if arguments.kwarg else []
+    if slot is None:
+        return positional + vararg
+    if slot == "**":
+        return keywords + kwarg
+    if isinstance(slot, int):
+        return positional[slot:slot + 1] or vararg
+    return [slot] if slot in keywords else kwarg
+
+
+def _join_base(node: ast.AST) -> ast.AST | None:
+    """The path a join appends to: the left side of `/`, the receiver of
+    `.joinpath(...)`, or the first argument of `os.path.join(...)`."""
+    if isinstance(node, ast.BinOp):
+        return node.left
+    if isinstance(node, ast.Call):
+        if _call_name(node) == "joinpath" and isinstance(node.func, ast.Attribute):
+            return node.func.value
+        if node.args and not isinstance(node.args[0], ast.Starred):
+            return node.args[0]
+    return None
+
+
+_PATH_CONSTRUCTORS = ("Path", "PurePath", "PosixPath", "PurePosixPath", "WindowsPath",
+                      "PureWindowsPath")
+
+
+# Calls whose result still holds the paths in their arguments or receiver: a
+# path rebuilt or converted, or a container built from them.
+_PATH_PASSING_CALLS = frozenset({
+    *_PATH_CONSTRUCTORS, "str", "fspath", "join", "joinpath", "resolve", "absolute",
+    "expanduser", "dict", "list", "tuple", "set", "frozenset", "sorted", "reversed"})
+
+
 def _rebuilt_from(node: ast.AST) -> ast.AST | None:
     """The path a call builds a new path from, when the resolver does not
-    follow that call: the receiver of `.with_name(...)` or `.with_suffix(...)`,
-    and the first argument of `Path(...)` (or `pathlib.Path(...)`) given more
-    than one. None for any other node."""
+    follow that call: the receiver of `.with_name(...)`, `.with_stem(...)` or
+    `.with_suffix(...)`, and the first argument of a pathlib constructor
+    (`Path`, `PurePath`, `PosixPath`, `PurePosixPath`, `WindowsPath`,
+    `PureWindowsPath`, bare or through `pathlib.`) given more than one. None
+    for any other node."""
     if not isinstance(node, ast.Call):
         return None
-    if isinstance(node.func, ast.Attribute) and node.func.attr in ("with_name", "with_suffix"):
+    if isinstance(node.func, ast.Attribute) and node.func.attr in (
+            "with_name", "with_stem", "with_suffix"):
         return node.func.value
-    if _call_name(node) == "Path" and len(node.args) > 1 and not isinstance(
+    if _call_name(node) in _PATH_CONSTRUCTORS and len(node.args) > 1 and not isinstance(
             node.args[0], ast.Starred):
         return node.args[0]
     return None
@@ -1495,12 +1714,19 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     other way) names no file and records no unproven site: a test that reads
     a production file that way is not re-selected when that file changes.
     A join onto a base that is not anchored (tmp_path, an absolute path,
-    `self.root`) names nothing and records nothing. Three forms that build a
-    path from an anchored one are not followed and record an unproven site
-    instead: `Path(ANCHORED, ...)` with more than one argument, and
-    `.with_name(...)` or `.with_suffix(...)` called on an anchored path
-    (otherwise the first names nothing, and the other two would name the path
-    before the call rather than the file read).
+    `self.root`) names nothing and records nothing. `os.curdir` and
+    `os.pardir` pieces are read as "." and "..". Forms that build a path from
+    an anchored one are not followed and record an unproven site instead: a
+    pathlib constructor (`Path`, `PurePath`, `PosixPath`, `PurePosixPath`,
+    `WindowsPath`, `PureWindowsPath`) given more than one argument with an
+    anchored first one, and `.with_name(...)`, `.with_stem(...)` or
+    `.with_suffix(...)` called on an anchored path (otherwise the first names
+    nothing, and the others would name the path before the call rather than
+    the file read). A joined piece that a `for` or comprehension binds from a
+    table whose binding depends on scope (_unpinned_loop_targets: the name is
+    bound in more than one of the module and class bodies, or is a parameter
+    there) also records an unproven site, since the module-wide string reading
+    gives it the wrong table or none.
 
     Names are resolved per scope, as Python resolves them: the module body,
     each def, async def and lambda, each class body, and each comprehension.
@@ -1527,10 +1753,14 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     starred argument, in its own slot or any later one), to any def of that
     name in the module or lambda a plain assignment gives that name. An
     anchored argument that lands in a def's *args or **kwargs is not followed
-    and records an unproven site. An
-    assignment through `global` or `nonlocal`, and a comprehension's walrus,
-    carries its value's paths to the scope that owns the name. A call through
-    an attribute, any other name or another module binds nothing.
+    and records an unproven site. So does an argument a call unpacks
+    (`*value`, `**value`) into a def of the module, whenever the value may
+    hold an anchored path (_anchor_holder): a display holding one, a name bound to
+    one, a parameter some call fills with one, or a def's result that
+    returns one. An assignment through `global` or `nonlocal`, and a
+    comprehension's walrus, carries its value's paths to the scope that owns
+    the name. A call through an attribute, any other name or another module
+    binds nothing.
 
     Over-approximates the anchored paths a name carries, and never cuts a
     reading short: carrying paths into
@@ -1621,6 +1851,12 @@ def _anchored_join_files(tree: ast.Module, rel: str,
 
     def contributions(envs: list[_Env]) -> dict[int, dict[str, set[_Anchor]]]:
         given: dict[int, dict[str, set[_Anchor]]] = {}
+        holder: list = []
+
+        def holds(value: ast.AST) -> bool:
+            if not holder:  # built once, and only for a module that unpacks into a def
+                holder.append(_anchor_holder(tree, {name for env in envs for name in env}))
+            return holder[0](value)
 
         def give(node: ast.AST, name: str, value: ast.AST, env: _Env) -> None:
             paths = _anchors_of(value, env, notes, strings)
@@ -1656,6 +1892,9 @@ def _anchored_join_files(tree: ast.Module, rel: str,
                     for position, argument in enumerate(node.args):
                         if isinstance(argument, ast.Starred):
                             starred += 1
+                            if holds(argument.value):
+                                notes.append(f"{node.lineno}:argument unpacked by * "
+                                             "is not followed")
                             continue
                         slots = (names[position - starred:position - starred + 1]
                                  if not starred else names[position - starred:])
@@ -1666,6 +1905,9 @@ def _anchored_join_files(tree: ast.Module, rel: str,
                             notes.append(f"{node.lineno}:anchored argument into "
                                          f"*{vararg.arg} is not followed")
                     for keyword in node.keywords:
+                        if keyword.arg is None and holds(keyword.value):
+                            notes.append(f"{node.lineno}:argument unpacked by ** "
+                                         "is not followed")
                         if keyword.arg is not None:
                             give(function, keyword.arg, keyword.value, env)
                             if (kwarg is not None and keyword.arg not in keyword_names
@@ -1689,6 +1931,7 @@ def _anchored_join_files(tree: ast.Module, rel: str,
         notes.append(f"1:join parameters not settled in {_JOIN_PASSES} passes")
         envs = environments(injected)
 
+    unpinned = _unpinned_loop_targets(tree)
     found: list[Path] = []
     for index, scope in enumerate(scopes):
         for node in scope["nodes"]:
@@ -1701,6 +1944,12 @@ def _anchored_join_files(tree: ast.Module, rel: str,
                 isinstance(node, ast.Call) and _call_name(node) in ("joinpath", "join"))
             if not joined:
                 continue
+            read = sorted({inner.id for inner in ast.walk(node)
+                           if isinstance(inner, ast.Name) and inner.id in unpinned})
+            base = _join_base(node)
+            if read and base is not None and _anchors_of(base, envs[index], notes, strings):
+                notes.append(f"{node.lineno}:joined piece {read[0]} iterates a name whose "
+                             "table depends on scope")
             for anchor in _anchors_of(node, envs[index], notes, strings):
                 if not anchor[1] or not anchor[1][-1].endswith(".py"):
                     continue
@@ -3990,10 +4239,13 @@ def broad_reasons(view: ExclusionView, facts: ChangeFacts) -> tuple[str, ...]:
     """Why an exclusion is BROAD: each unproven site, unless reviewed, of any
     module in its closure, test-side or production (a production module carries
     one for each joined-path read the resolver does not follow: a read past its
-    limits, any Path(...) with more than one argument, .with_name(...) or
-    .with_suffix(...) on an anchored path whatever it names, and an anchored
-    argument passed into *args or **kwargs), and of each fixture it requests,
-    and each production climb out of the plugin. Empty means CONFINED."""
+    limits, a pathlib constructor given more than one argument with an anchored
+    first one, .with_name(...), .with_stem(...) or .with_suffix(...) on an
+    anchored path whatever it names, a joined piece iterating a table that
+    depends on scope, an anchored argument passed into *args or **kwargs, and
+    an argument unpacked into a def that may hold an anchored path), and of
+    each fixture it requests, and each production climb out of the plugin.
+    Empty means CONFINED."""
     reasons: list[str] = []
     for module, sites in view.unproven:
         if module in facts.reviewed or module.split("::", 1)[0] in facts.reviewed:

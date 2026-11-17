@@ -694,6 +694,23 @@ def test_a_finished_workers_pid_is_recorded_once(monkeypatch, tmp_path, gateway_
     assert census._state["workers"] == expected
 
 
+def test_a_controller_without_worker_pids_does_not_count_its_own_launches(monkeypatch,
+                                                                          tmp_path):
+    """MUTANT: finish() picks worker mode only when a worker pid was collected.
+    A worker that crashed with no pid on its gateway and no handover then puts
+    the controller back on its own count, which is its launches of the workers
+    themselves, and the run fails for a shim that loaded."""
+    census = _fresh_census(monkeypatch, tmp_path, python_children=2)
+    (tmp_path / "ledger").write_text("%d controller\n" % os.getpid())
+    census.collect(SimpleNamespace(gateway=SimpleNamespace(id="gw0")))
+    assert census._state["workers"] == [], "this worker gave no pid"
+    reporter = _Reporter()
+    controller = _Session(reporter)
+    census.finish(controller)
+    assert controller.exitstatus == 0, reporter.lines
+    assert reporter.lines == [], reporter.lines
+
+
 def test_a_worker_reported_down_twice_is_collected_once(monkeypatch, tmp_path):
     """MUTANT: collect() takes a worker's handover each time xdist reports it
     down. A worker stopped by a keyboard interrupt is reported twice

@@ -157,7 +157,9 @@ class Plugin:
         beyond the test a finalizer that marks the rest of the teardown as
         wider. Each node's finalizers run last-in, first-out and nodes are torn
         down innermost first, so it runs after every finalizer of the test and
-        before every finalizer of the nodes around it."""
+        before every finalizer of the nodes around it. The wider teardown is
+        over when this hook returns, so the flag is cleared then: the teardown
+        phase's report hooks that follow are the test's own again."""
         kept = set(nextitem.listchain()) if nextitem is not None else set()
         for node in reversed(item.listchain()[:-1]):
             if node in kept:
@@ -167,7 +169,10 @@ class Plugin:
             except AssertionError:  # never set up, so it has nothing to tear down
                 continue
             break
-        yield
+        try:
+            yield
+        finally:
+            _state["wider_teardown"] = False
 
     @pytest.hookimpl(hookwrapper=True)
     def pytest_fixture_setup(self, fixturedef, request):

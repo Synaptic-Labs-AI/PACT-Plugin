@@ -1469,9 +1469,19 @@ class TestJoinPieces:
         ('NAME = "direct.py"\nT = (SHARED / NAME).read_text()\n',
          ["hooks/shared/direct.py"]),
         ('T = (SHARED / f"direct.py").read_text()\n', ["hooks/shared/direct.py"]),
+        ('NAMES: tuple = ("direct.py",)\n'
+         'for name in NAMES:\n    (SHARED / name).read_text()\n', ["hooks/shared/direct.py"]),
+        ('class Rows:\n    NAMES = ("direct.py",)\n'
+         '    FILES = [(SHARED / n).read_text() for n in NAMES]\n',
+         ["hooks/shared/direct.py"]),
+        ('T = os.path.join(SHARED, os.pardir, "shared", "direct.py")\n',
+         ["hooks/shared/direct.py"]),
+        ('T = os.path.join(SHARED, os.curdir, "direct.py")\n', ["hooks/shared/direct.py"]),
     ], ids=["loop-tuple", "loop-list-joinpath", "comprehension-os-path-join",
             "loop-over-module-constant", "loop-rows-unpacked",
-            "module-constant-name", "f-string-without-placeholder"])
+            "module-constant-name", "f-string-without-placeholder",
+            "loop-over-annotated-module-constant", "loop-over-class-body-constant",
+            "os-pardir-piece", "os-curdir-piece"])
     def test_a_piece_bound_only_to_string_literals_names_its_files(
             self, core, tmp_path, body, named):
         assert self._join(core, tmp_path, body) == (named, [])
@@ -1505,7 +1515,17 @@ class TestJoinPieces:
          ["hooks/shared/eager.py"], "with_name() of an anchored path"),
         ('T = (SHARED / "direct.txt").with_suffix(".py").read_text()\n', [],
          "with_suffix() of an anchored path"),
-    ], ids=["path-call-with-parts", "with-name", "with-suffix"])
+        ('T = (SHARED / "direct.txt").with_stem("eager").read_text()\n', [],
+         "with_stem() of an anchored path"),
+        ('from pathlib import PurePath\nT = PurePath(SHARED, "direct.py")\n', [],
+         "PurePath() of an anchored path"),
+        ('import pathlib\nT = pathlib.PurePosixPath(SHARED, "direct.py")\n', [],
+         "PurePosixPath() of an anchored path"),
+        ('from pathlib import PosixPath\nT = PosixPath(SHARED, "direct.py")\n', [],
+         "PosixPath() of an anchored path"),
+    ], ids=["path-call-with-parts", "with-name", "with-suffix", "with-stem",
+            "pure-path-call-with-parts", "module-pure-posix-path-call-with-parts",
+            "posix-path-call-with-parts"])
     def test_a_path_rebuilt_from_an_anchored_one_records_an_unproven_site(
             self, core, tmp_path, body, named, why):
         """MUTANT: these calls are left as forms that name nothing. Each would
@@ -1523,6 +1543,37 @@ class TestJoinPieces:
     def test_a_rebuilt_path_that_is_not_anchored_records_nothing(self, core, tmp_path, body):
         assert self._join(core, tmp_path, body) == ([], [])
 
+    @pytest.mark.parametrize("body,named", [
+        ('NAMES = ("eager.py",)\ndef read(NAMES):\n'
+         '    for name in NAMES:\n        (SHARED / name).read_text()\n'
+         'read(("direct.py",))\n', ["hooks/shared/eager.py"]),
+        ('NAMES = ("eager.py",)\nclass Rows:\n    NAMES = ("direct.py",)\n'
+         '    FILES = [(SHARED / n).read_text() for n in NAMES]\n', []),
+        ('class One:\n    NAMES = ("eager.py",)\nclass Two:\n    NAMES = ("direct.py",)\n'
+         '    FILES = [(SHARED / n).read_text() for n in NAMES]\n', []),
+    ], ids=["parameter-shadows-a-module-table", "class-table-shadows-a-module-table",
+            "two-class-tables-of-one-name"])
+    def test_a_piece_iterating_a_table_that_depends_on_scope_records_an_unproven_site(
+            self, core, tmp_path, body, named):
+        """MUTANT: the module-wide string reading is used as if it were right.
+        The loop reads a table the scope picks (a parameter, or a class-body
+        binding beside another one), so the module-wide reading names the
+        wrong file or none, and the read is recorded unproven, never dropped."""
+        files, sites = self._join(core, tmp_path, body)
+        assert files == named
+        assert len(sites) == 1 and "iterates a name whose table depends on scope" in sites[0], (
+            sites)
+
+    @pytest.mark.parametrize("body", [
+        'NAMES = ("eager.py",)\ndef read(NAMES):\n    return NAMES\n'
+        'for name in NAMES:\n    print(name)\n',
+        'NAMES = ("eager.py",)\nclass Rows:\n    NAMES = ("direct.py",)\n'
+        'T = (SHARED / "direct.py").read_text()\n',
+    ], ids=["shadowed-table-not-joined", "join-of-a-literal-beside-a-shadowed-table"])
+    def test_a_scope_dependent_table_no_join_reads_records_nothing(self, core, tmp_path, body):
+        files, sites = self._join(core, tmp_path, body)
+        assert sites == []
+
     @pytest.mark.parametrize("body,why", [
         ('def read(*roots):\n    return [(r / "direct.py") for r in roots]\nread(SHARED)\n',
          "anchored argument into *roots"),
@@ -1539,6 +1590,46 @@ class TestJoinPieces:
         files, sites = self._join(core, tmp_path, body)
         assert files == []
         assert len(sites) == 1 and why in sites[0], sites
+
+    _READ_ONE = 'def read(root):\n    return (root / "direct.py").read_text()\n'
+    _READ_ALL = 'def read(*roots):\n    return [(r / "direct.py").read_text() for r in roots]\n'
+
+    @pytest.mark.parametrize("body,why", [
+        (_READ_ALL + 'read(*[SHARED])\n', "unpacked by *"),
+        (_READ_ONE + 'read(*(SHARED,))\n', "unpacked by *"),
+        (_READ_ONE + 'ROOTS = (SHARED,)\nread(*ROOTS)\n', "unpacked by *"),
+        (_READ_ONE + 'ROOTS: list = [str(SHARED)]\nread(*ROOTS)\n', "unpacked by *"),
+        (_READ_ALL + 'def forward(roots):\n    return read(*roots)\nforward([SHARED])\n',
+         "unpacked by *"),
+        (_READ_ALL + 'def roots():\n    return [SHARED]\nread(*roots())\n', "unpacked by *"),
+        (_READ_ONE + 'read(**{"root": SHARED})\n', "unpacked by **"),
+        (_READ_ONE + 'KW = dict(root=SHARED)\nread(**KW)\n', "unpacked by **"),
+        (_READ_ONE + 'read(*[f"{SHARED}"])\n', "unpacked by *"),
+    ], ids=["list-display-into-star-args", "tuple-display-into-a-named-slot",
+            "module-tuple-name", "annotated-list-of-str", "parameter-filled-with-a-list",
+            "def-returning-a-list", "dict-display", "dict-call-name", "f-string"])
+    def test_an_unpacked_argument_that_may_hold_an_anchor_records_an_unproven_site(
+            self, core, tmp_path, body, why):
+        """MUTANT: an unpacked argument is skipped with no note. The def then
+        reads an anchored path the resolver never saw, so a joined file would
+        go unseen while the module stays confined."""
+        files, sites = self._join(core, tmp_path, body)
+        assert files == []
+        assert len(sites) == 1 and why in sites[0], sites
+
+    @pytest.mark.parametrize("body", [
+        _READ_ALL + 'read(*["/elsewhere"])\n',
+        _READ_ONE + 'ARGS = ("/elsewhere",)\nread(*ARGS)\n',
+        _READ_ONE + 'read(**{"root": "/elsewhere"})\n',
+        'print(*[SHARED])\n',
+        _READ_ONE + 'TEXT = (SHARED / "direct.py").read_text()\nread(*[TEXT])\n',
+    ], ids=["display-without-an-anchor", "name-without-an-anchor",
+            "dict-without-an-anchor", "into-a-function-from-elsewhere",
+            "a-file-read-result"])
+    def test_an_unpacked_argument_that_holds_no_anchor_records_nothing(
+            self, core, tmp_path, body):
+        files, sites = self._join(core, tmp_path, body)
+        assert not any("unpacked" in site for site in sites), sites
 
     @pytest.mark.parametrize("body,named", [
         ('def read(root, *rest):\n    return (root / "direct.py").read_text()\n'

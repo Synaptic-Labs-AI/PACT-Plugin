@@ -32,7 +32,9 @@ its Python child count and its pid to the controller through workeroutput,
 collect() gathers them as each worker goes down, and the controller's finish()
 runs check 2 once for the whole run: the workers' children counted, and the
 controller's and workers' own ledger lines ignored. The controller's own Python
-launches are its workers, so they get check 1 but are not counted for check 2.
+launches are its workers, so they get check 1 but are not counted for check 2:
+the controller counts only what workers hand over once any worker has been
+reported down, whether or not a pid came with it.
 A worker that crashes before its finish() hands over no misses and no child
 count. Its pid is still excluded from check 2, taken for every node, crashed or
 restarted, from the subprocess its execnet popen gateway holds (xdist's
@@ -222,7 +224,7 @@ def finish(session):
         }
         return
     problems = list(_state["misses"])
-    if _state["workers"]:
+    if _state["collected"]:  # an xdist controller: any worker reported down
         children, own = _state["worker_children"], _state["workers"]
     else:
         children, own = _state["python_children"], ()
