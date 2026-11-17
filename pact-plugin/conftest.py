@@ -23,8 +23,9 @@ session-wide plugin that needs another package is registered from
 tests/conftest.py instead.
 
 No dynamic import call (importlib.import_module, __import__, importlib.reload,
-find_spec, an importlib.util spec or loader call, runpy, exec or eval, or a
-standard-library helper that imports a module it is given by name, such as
+find_spec, an importlib.util spec or loader call, runpy, exec or eval, an
+object that runs source text it is given, such as code.InteractiveConsole,
+trace.Trace or pdb.runeval, or a standard-library helper that imports a module it is given by name, such as
 pkgutil.resolve_name, pydoc.locate, pydoc.safeimport, unittest.main or
 logging.config.dictConfig,
 pytest.importorskip, or a pytest plugin-manager method that imports a plugin by

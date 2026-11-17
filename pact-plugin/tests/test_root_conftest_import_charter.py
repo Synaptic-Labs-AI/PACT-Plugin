@@ -39,7 +39,11 @@ by what it is, not by its spelling:
   name (`def f(pydoc): pydoc.locate`) is still read as the module: an
   over-refusal. Only an import binds a module here, so a helper whose module is
   reached through a parameter, an assignment or a star import is not seen, and
-  one under an alias name reused for another module may not be seen.
+  one under an alias name reused for another module may not be seen. An object
+  that runs source text it is given (`code.InteractiveConsole`,
+  `code.InteractiveInterpreter`, `code.interact`, `trace.Trace`) is matched here
+  where it is made, so an instance used only to call a callable (a Trace's
+  runfunc) is refused too: an over-refusal.
 - TIMEIT_RUNNERS (`timeit.timeit`, `timeit.repeat`, `timeit.Timer`) only when a
   statement or setup it is given is not a lambda, since a statement string is
   compiled and run; with none given it times `pass`.
@@ -88,6 +92,13 @@ IMPORTING_HELPERS = frozenset({
     "pydoc.safeimport", "pydoc.importfile", "pydoc.apropos", "pkgutil.get_data",
     "unittest.main", "unittest.TestProgram", "unittest.main.main",
     "unittest.main.TestProgram",
+    # Objects that run source text they are given (an InteractiveConsole's push,
+    # an interpreter's runsource and runcode, interact's REPL, a Trace's run and
+    # runctx), refused where they are made, since `push` and `run` are too common
+    # to refuse as method names. A Trace used only for runfunc, which calls a
+    # callable, is refused too: an over-refusal.
+    "code.InteractiveConsole", "code.InteractiveInterpreter", "code.interact",
+    "trace.Trace",
 })
 # Standard-library helpers that import a module only when it is named by a
 # string: dotted path -> (position, keyword) of that argument. Each is refused
@@ -108,7 +119,8 @@ TIMEIT_RUNNERS = frozenset({"timeit.timeit", "timeit.repeat", "timeit.Timer"})
 # consider_module and consider_conftest from a module's pytest_plugins, and
 # load_setuptools_entrypoints from an entry-point group).
 IMPORTING_METHODS = frozenset({"loadTestsFromName", "loadTestsFromNames", "runsource",
-                               "runctx", "discover", "import_plugin", "consider_pluginarg",
+                               "runctx", "runeval", "discover", "import_plugin",
+                               "consider_pluginarg",
                                "consider_preparse", "consider_env", "consider_module",
                                "consider_conftest", "load_setuptools_entrypoints"})
 # pytest imports every module a conftest or plugin names in this variable.
@@ -738,6 +750,24 @@ def test_a_loaded_script_inside_the_charter_passes(tmp_path):
     ("import doctest\ndoctest.testfile('d.txt', package='yaml')\n", 'conftest.py:2: dynamic import `doctest.testfile` in `<module>` is not a charter deviation'),
     ("import doctest\ndoctest.testfile('d.txt', True, None, 'yaml')\n", 'conftest.py:2: dynamic import `doctest.testfile` in `<module>` is not a charter deviation'),
     ("from doctest import DocFileSuite\nDocFileSuite('d.txt', package='yaml')\n", 'conftest.py:2: dynamic import `doctest.DocFileSuite` in `<module>` is not a charter deviation'),
+    # Objects that run source text, refused where they are made, so the direct
+    # and the assigned-instance forms are both seen; and runeval by its name.
+    ("import code\ncode.InteractiveConsole().push('import yaml')\n",
+     'conftest.py:2: dynamic import `code.InteractiveConsole` in `<module>` is not a charter deviation'),
+    ("import code\nc = code.InteractiveConsole()\nc.push('import yaml')\n",
+     'conftest.py:2: dynamic import `code.InteractiveConsole` in `<module>` is not a charter deviation'),
+    ("from code import InteractiveInterpreter as I\nI().runcode(compile('import yaml', 's', 'exec'))\n",
+     'conftest.py:2: dynamic import `code.InteractiveInterpreter` in `<module>` is not a charter deviation'),
+    ("import code\ndef f():\n    code.interact(banner='')\n",
+     'conftest.py:3: dynamic import `code.interact` in `f` is not a charter deviation'),
+    ("import trace\ntrace.Trace(count=0, trace=0).run('import yaml')\n",
+     'conftest.py:2: dynamic import `trace.Trace` in `<module>` is not a charter deviation'),
+    ("from trace import Trace\nt = Trace()\nt.run('import yaml')\n",
+     'conftest.py:2: dynamic import `trace.Trace` in `<module>` is not a charter deviation'),
+    ("import pdb\npdb.runeval('__import__(\"yaml\")')\n",
+     'conftest.py:2: dynamic import `runeval` in `<module>` is not a charter deviation'),
+    ("def f(debugger):\n    return debugger.runeval('__import__(\"yaml\")')\n",
+     'conftest.py:2: dynamic import `runeval` in `f` is not a charter deviation'),
 ])
 def test_a_helper_that_imports_by_name_is_refused(tmp_path, conftest, expected):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest))
@@ -752,6 +782,10 @@ def test_a_helper_that_imports_by_name_is_refused(tmp_path, conftest, expected):
     "import timeit\ntimeit.timeit(stmt=lambda: None, setup=lambda: None, number=1)\n",
     "import timeit\ntimeit.Timer()\n",
     "def f():\n    runsource = 1\n    return runsource\n",
+    # `run` and `push` are refused only on an object made by a source-running
+    # constructor, never as bare method names.
+    "import subprocess\nsubprocess.run(['true'], check=False)\n",
+    "import contextlib\ncontextlib.ExitStack().push(lambda *exc: None)\n",
 ])
 def test_a_name_a_helper_shares_is_not_refused(tmp_path, conftest):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest))
