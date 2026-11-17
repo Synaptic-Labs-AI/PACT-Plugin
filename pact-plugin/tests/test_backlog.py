@@ -6143,6 +6143,16 @@ cat "$CANNED_PLAIN"
 _LISTINGS = [
     ("nul", "worktree {a}\0HEAD 1\0branch refs/heads/main\0\0worktree {b}\nc\0HEAD 2\0detached\0\0",
      "", ("{a}", "{b}\nc")),
+    ("nul, a lock with a reason and a stale worktree", "worktree {a}\0HEAD 1\0branch refs/heads/main\0\0"
+     "worktree {b}\0HEAD 2\0detached\0locked on a usb disk\0\0worktree {w}\0HEAD 3\0branch refs/heads/x\0"
+     "prunable gitdir file points to non-existent location\0\0", "", ("{a}", "{b}", "{w}")),
+    # With `-z`, a record that is not git's fields in git's order is refused
+    # as it is without: a listing cut short, one read with newlines in place
+    # of NULs, and one with a field git never prints.
+    ("nul, a listing cut short after a path", "worktree {a}\0HEAD 1\0\0worktree {b}", "", "unreadable"),
+    ("nul, newlines in place of NULs", "worktree {a}\nHEAD 1\n\n", "", "unreadable"),
+    ("nul, an unknown field", "worktree {a}\0HEAD 1\0foo bar\0\0", "", "unreadable"),
+    ("nul, a field out of order", "worktree {a}\0locked\0HEAD 1\0\0", "", "unreadable"),
     ("plain", "REJECT",
      "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {b}\nHEAD 2\ndetached\n\n", ("{a}", "{b}")),
     ("plain, a path holding a newline", "REJECT",
@@ -6289,13 +6299,14 @@ def test_without_nul_a_path_holding_a_newline_records_no_worktree(tmp_path, monk
     assert backlog.checkout_roots() == [str(tmp_path / "main")]
 
 
-def test_without_nul_every_layout_git_lists_still_reads(tmp_path, monkeypatch):
-    """On a git that rejects `-z`, real listings of every layout git prints
-    read in both readers: a branch, a detached HEAD, a lock with and without
-    a reason, and a bare main repository are kept; a worktree moved away, one
-    locked with its folder gone and one whose `.git` was deleted are dropped;
-    and a `--separate-git-dir` repository's main record, its git directory,
-    is kept."""
+@pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
+def test_every_layout_git_lists_reads_in_both_readers(tmp_path, monkeypatch, nul):
+    """Real listings of every layout git prints read in both readers, with
+    `-z` and on a git that rejects it: a branch, a detached HEAD, a lock with
+    and without a reason, a bare main repository and a `--separate-git-dir`
+    repository's main record (its git directory) are kept. A worktree moved
+    away, one locked with its folder gone and one whose `.git` was deleted
+    are kept with `-z`, where their paths are whole, and dropped without it."""
     import os
     import shutil
     import stat
@@ -6340,9 +6351,11 @@ def test_without_nul_every_layout_git_lists_still_reads(tmp_path, monkeypatch):
         "--allow-empty", "-m", "c", cwd=separate)
     git("worktree", "add", "-q", str(tmp_path / "separate-wt"), "-b", "s", cwd=separate)
 
-    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    if not nul:
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    gone = ("moved", "locked-gone", "no-dotgit") if nul else ()
     kept = {
-        main: [main, *(tmp_path / name for name in ("branch", "detached", "locked", "locked-why"))],
+        main: [main, *(tmp_path / name for name in ("branch", "detached", "locked", "locked-why", *gone))],
         bare: [bare, tmp_path / "bare-wt"],
         separate: [tmp_path / "store", tmp_path / "separate-wt"],
     }
@@ -6352,4 +6365,4 @@ def test_without_nul_every_layout_git_lists_still_reads(tmp_path, monkeypatch):
         assert ours == theirs, (where, ours, theirs)
         assert isinstance(ours, list), (where, ours)
         read = [Path(record[0][len("worktree "):]).resolve() for record in ours]
-        assert read == [path.resolve() for path in paths], (where, read)
+        assert sorted(read) == sorted(path.resolve() for path in paths), (where, read)

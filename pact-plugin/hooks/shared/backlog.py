@@ -397,13 +397,15 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
     `-z` is asked first: every field then ends in NUL and an empty field ends
     a record, so a path holding a newline stays whole. A git older than 2.36
     rejects `-z` as a usage error, and the listing is asked again without
-    it. That listing is one field per line, with a blank line ending each
+    it; that listing is one field per line, with a blank line ending each
     record, and git prints a path there unquoted, so a path holding a newline
-    cannot be read whole: a record whose lines are not git's fields in git's
-    order (`_plain_record_fields_in_order`), or a `bare` record that is not
-    the main repository's directory, makes the listing unreadable:
-    `UNREADABLE_LISTING`, not records. A linked worktree's record whose path
-    holds no `.git` is dropped (`_plain_records_kept`).
+    is cut into lines.
+
+    Either way, a record whose fields are not git's, in git's order
+    (`_record_fields_in_order`), makes the listing unreadable:
+    `UNREADABLE_LISTING`, not records. Without `-z`, a `bare` record that is
+    not the main repository's directory does too, and a linked worktree's
+    record whose path holds no `.git` is dropped (`_plain_records_kept`).
     None is a failed or timed-out git. A caller reads neither as an empty
     listing.
 
@@ -435,23 +437,24 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
             current = []
     if current:
         records.append(current)
+    if not all(_record_fields_in_order(record) for record in records):
+        return UNREADABLE_LISTING
     if not nul:
-        if not all(_plain_record_fields_in_order(record) for record in records):
-            return UNREADABLE_LISTING
         records = _plain_records_kept(records)
         if records is None:
             return UNREADABLE_LISTING
     return records
 
 
-def _plain_record_fields_in_order(record: List[str]) -> bool:
-    """Whether a record of a listing without `-z` holds only fields git
-    prints, in the order git prints them (`_PORCELAIN_ORDER`).
+def _record_fields_in_order(record: List[str]) -> bool:
+    """Whether a listing record holds only fields git prints, in the order
+    git prints them (`_PORCELAIN_ORDER`), with or without `-z`.
 
-    git prints a record's `worktree` line first and its `bare` or `HEAD`
-    line second. A path cut at a newline puts the rest of the folder name
-    between those two lines, or ends the record after the `worktree` line,
-    so its record is refused here.
+    git prints a record's `worktree` field first and its `bare` or `HEAD`
+    field second. Without `-z`, a path cut at a newline puts the rest of the
+    folder name between those two lines, or ends the record after the
+    `worktree` line; with `-z`, a listing cut short or holding a stray NUL
+    does the same. Either record is refused here.
     """
     places = []
     for field in record:
