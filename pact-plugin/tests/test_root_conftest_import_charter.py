@@ -25,7 +25,13 @@ that name exists: an over-refusal.
 
 No file the walk reaches may name a dynamic import callable (DYNAMIC_IMPORTS),
 called or not, imported by name or reached as an attribute, or bind
-pytest_plugins (PLUGIN_LIST) as a name or an attribute, except where
+pytest_plugins (PLUGIN_LIST) at any scope: as a name or an attribute target,
+or by an import or import alias, a def or class, an except handler, a match
+capture, a parameter or a type parameter. A binding inside a function binds a
+local, not the module's plugin list, and is refused too: an over-refusal. A
+star import binds it only from a module that binds it itself, which is refused
+where the walk reads that module. Bound through setattr or globals(), it is not
+seen. All of this holds except where
 DEVIATIONS allows it: one (file, enclosing function) site, with an exact count
 for each callable. A deviation the real tree no longer uses is reported too, so
 the charter cannot keep naming a deviation that is gone.
@@ -59,7 +65,10 @@ by what it is, not by its spelling:
   that runs source text it is given (`code.InteractiveConsole`,
   `code.InteractiveInterpreter`, `code.interact`, `trace.Trace`) is matched here
   where it is made, so an instance used only to call a callable (a Trace's
-  runfunc) is refused too: an over-refusal.
+  runfunc) is refused too: an over-refusal. So is a function type made from a
+  code object (`types.FunctionType`, `types.LambdaType`), which runs it when
+  called; one reached other than through `types` (`type(f)`), or a code object
+  assigned to an existing function's `__code__`, is not seen.
 - TIMEIT_RUNNERS (`timeit.timeit`, `timeit.repeat`, `timeit.Timer`) only when a
   statement or setup it is given is not a lambda, since a statement string is
   compiled and run; with none given it times `pass`.
@@ -115,6 +124,10 @@ IMPORTING_HELPERS = frozenset({
     # callable, is refused too: an over-refusal.
     "code.InteractiveConsole", "code.InteractiveInterpreter", "code.interact",
     "trace.Trace",
+    # A function made from a code object runs it when called, so a code object
+    # compiled from source imports what the source imports. `compile` itself
+    # runs nothing and is not refused.
+    "types.FunctionType", "types.LambdaType",
 })
 # Standard-library helpers that import a module only when it is named by a
 # string: dotted path -> (position, keyword) of that argument. Each is refused
@@ -141,6 +154,9 @@ IMPORTING_METHODS = frozenset({"loadTestsFromName", "loadTestsFromNames", "runso
                                "consider_conftest", "load_setuptools_entrypoints"})
 # pytest imports every module a conftest or plugin names in this variable.
 PLUGIN_LIST = "pytest_plugins"
+# Type parameters (Python 3.12), each binding a name.
+TYPE_PARAMS = tuple(getattr(ast, kind) for kind in ("TypeVar", "ParamSpec", "TypeVarTuple")
+                    if hasattr(ast, kind))
 # (file, enclosing function) -> the dynamic callables it may name, and how often.
 DEVIATIONS = {
     ("tests/ci_environment_binding.py", "_load_verify_script"):
@@ -250,6 +266,13 @@ def _scoped_nodes(tree):
             inner = f"{scope}.{node.name}" if scope else node.name
             for part in _header(node):
                 yield from visit(part, scope)
+            if not isinstance(node, ast.ClassDef):
+                args = node.args
+                # A parameter binds in the function's own scope; its annotation
+                # is in the header.
+                for arg in (*args.posonlyargs, *args.args, *args.kwonlyargs,
+                            *(arg for arg in (args.vararg, args.kwarg) if arg)):
+                    yield inner, arg
             for part in node.body:
                 yield from visit(part, inner)
         else:
@@ -258,6 +281,26 @@ def _scoped_nodes(tree):
 
     for child in ast.iter_child_nodes(tree):
         yield from visit(child, "")
+
+
+def _bound_names(node):
+    """The names `node` binds other than as a Name or Attribute target: an
+    import or import alias, a def or class, an except handler, a match capture,
+    a parameter and a type parameter."""
+    if isinstance(node, ast.Import):
+        return [alias.asname or alias.name.split(".")[0] for alias in node.names]
+    if isinstance(node, ast.ImportFrom):
+        return [alias.asname or alias.name for alias in node.names]
+    if isinstance(node, ast.MatchMapping):
+        name = node.rest
+    elif isinstance(node, ast.arg):
+        name = node.arg
+    elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef,
+                           ast.ExceptHandler, ast.MatchAs, ast.MatchStar, *TYPE_PARAMS)):
+        name = node.name
+    else:
+        name = None
+    return [name] if name else []
 
 
 def _dynamic_references(tree):
@@ -281,7 +324,8 @@ def _dynamic_references(tree):
             names.append(child.attr)
         elif isinstance(child, ast.ImportFrom):
             names.extend(alias.name for alias in child.names)
-        if isinstance(getattr(child, "ctx", None), ast.Store) and PLUGIN_LIST in names:
+        if (isinstance(getattr(child, "ctx", None), ast.Store) and PLUGIN_LIST in names) \
+                or PLUGIN_LIST in _bound_names(child):
             yield scope, PLUGIN_LIST, child.lineno
         for name in names:
             if name in DYNAMIC_IMPORTS or (
@@ -543,8 +587,10 @@ def test_the_conftest_states_the_charter_and_names_this_pin():
                    "pytest.importorskip, or a pytest plugin-manager method that imports a "
                    "plugin by name",
                    "none of them binds pytest_plugins",
-                   "It cannot see pytest_plugins bound through setattr or globals(), or a "
-                   "directory tests/conftest.py puts on sys.path other than by sys.path.insert."):
+                   ("It cannot see pytest_plugins bound through setattr or globals(), a code "
+                    "object run through a function type reached other than through types, or "
+                    "assigned to a function's __code__, or a directory tests/conftest.py puts "
+                    "on sys.path other than by sys.path.insert.")):
         assert phrase in docstring, (phrase, docstring)
 
 
@@ -639,6 +685,8 @@ INSERTS = ("import sys\nfrom pathlib import Path\n"
         "import_identity_map.py": IDENTITY}, None, 'tests/ci_environment_binding.py:7: dynamic import `exec_module` in `_load_verify_script` is not a charter deviation'),
     # A plugin list in a module the walk follows.
     ("import helper\n", {"helper.py": "pytest_plugins = ['yaml']\n"}, None, 'tests/helper.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    # A star import binds it only from a module that binds it, refused there.
+    ("from helper import *\n", {"helper.py": "pytest_plugins = ['yaml']\n"}, None, 'tests/helper.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
     # A name a directory tests/conftest.py puts ahead of tests/ holds, read
     # through a literal path, a name assigned once and .resolve().
     ("import helper\n", {"helper.py": "", "conftest.py": INSERTS, "../hooks/helper.py": ""},
@@ -909,6 +957,24 @@ def test_a_loaded_script_inside_the_charter_passes(tmp_path):
     ("pytest_plugins += ['yaml']\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
     ("def f():\n    global pytest_plugins\n    pytest_plugins = ['yaml']\n", 'conftest.py:3: dynamic import `pytest_plugins` in `f` is not a charter deviation'),
     ("import sys\nsys.modules[__name__].pytest_plugins = ['yaml']\n", 'conftest.py:2: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    # ... and however a statement binds it other than as a target: an import or
+    # import alias, a def or class, an except handler, a match capture, a
+    # parameter and a type parameter.
+    ("from json import loads as pytest_plugins\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("import json as pytest_plugins\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("from os import pytest_plugins\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("def pytest_plugins():\n    return ['yaml']\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("class pytest_plugins:\n    pass\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("try:\n    pass\nexcept Exception as pytest_plugins:\n    pass\n", 'conftest.py:3: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("match ['yaml']:\n    case pytest_plugins:\n        pass\n", 'conftest.py:2: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("match ['yaml']:\n    case [*pytest_plugins]:\n        pass\n", 'conftest.py:2: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("match {}:\n    case {**pytest_plugins}:\n        pass\n", 'conftest.py:2: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    ("def f(pytest_plugins):\n    return pytest_plugins\n", 'conftest.py:1: dynamic import `pytest_plugins` in `f` is not a charter deviation'),
+    ("def f[pytest_plugins]():\n    pass\n", 'conftest.py:1: dynamic import `pytest_plugins` in `<module>` is not a charter deviation'),
+    # A function made from a code object runs it when called.
+    ("import types\ntypes.FunctionType(compile('import yaml', 's', 'exec'), {})()\n", 'conftest.py:2: dynamic import `types.FunctionType` in `<module>` is not a charter deviation'),
+    ("from types import LambdaType\nLambdaType(compile('import yaml', 's', 'exec'), {})()\n", 'conftest.py:2: dynamic import `types.LambdaType` in `<module>` is not a charter deviation'),
+    ("from types import FunctionType as F\nF(compile('import yaml', 's', 'exec'), {})()\n", 'conftest.py:2: dynamic import `types.FunctionType` in `<module>` is not a charter deviation'),
     # Helpers that import or execute what they are given on every call.
     ("import pydoc\npydoc.safeimport('yaml')\n", 'conftest.py:2: dynamic import `pydoc.safeimport` in `<module>` is not a charter deviation'),
     ("import pydoc\npydoc.importfile('x.py')\n", 'conftest.py:2: dynamic import `pydoc.importfile` in `<module>` is not a charter deviation'),
@@ -995,6 +1061,10 @@ def test_a_name_a_helper_shares_is_not_refused(tmp_path, conftest):
     "import multiprocessing\nmultiprocessing.get_context('spawn').Process(target=print).start()\n",
     "import sys\nsetattr(sys.modules[__name__], 'pytest_plugins', ['yaml'])\n",
     "globals()['pytest_plugins'] = ['yaml']\n",
+    # A code object run through a function type reached other than through
+    # `types`, or swapped into an existing function.
+    "type(lambda: 0)(compile('import yaml', 's', 'exec'), {})()\n",
+    "def f():\n    pass\n\nf.__code__ = compile('import yaml', 's', 'exec')\nf()\n",
 ])
 def test_a_listed_blind_spot_is_not_seen(tmp_path, conftest):
     violations, _, _ = charter_violations(_rig(tmp_path, conftest))

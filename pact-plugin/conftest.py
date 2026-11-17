@@ -51,7 +51,8 @@ see a helper it matches by dotted path when that helper's
 module is bound other than by an import (a parameter, an assignment, a star
 import), and it may not see one whose import name is reused for another module
 elsewhere in the file. It cannot see pytest_plugins bound through setattr or
-globals(), or a directory tests/conftest.py puts on sys.path other than by
+globals(), a code object run through a function type reached other than
+through types, or assigned to a function's __code__, or a directory tests/conftest.py puts on sys.path other than by
 sys.path.insert. It cannot see a module named by a string to a
 standard-library helper whose name is too common to refuse, among them
 unittest.mock.patch's target, pickle.load and pickle.loads,
