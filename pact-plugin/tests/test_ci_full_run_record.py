@@ -30,6 +30,7 @@ from ci_full_run_record import (
     FullRunRecord,
     aggregate_worker_collection_counts,
 )
+from helpers import env_without_pytest_vars
 
 PLUGIN = Path(__file__).with_name("ci_full_run_record.py")
 COLLECTION_RECORD_NAME = ".full-collection-record.json"
@@ -139,7 +140,7 @@ def _child_environ():
     takes no PYTEST_ADDOPTS, PYTEST_PLUGINS or PYTEST_DISABLE_PLUGIN_AUTOLOAD
     (nor this session's xdist or current-test names) from the shell that runs
     the suite. A rig adds back what it sets on purpose."""
-    return {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+    return env_without_pytest_vars()
 
 
 def _run(plugin_root, workspace=None, args=(), gated=True, extra_env=None):

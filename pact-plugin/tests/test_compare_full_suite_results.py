@@ -29,6 +29,7 @@ if not SCRIPT.is_file():
         allow_module_level=True)
 
 import ci_contract  # noqa: E402  (repo-local helper; after the layout guard)
+from helpers import env_without_pytest_vars
 
 SPEC = importlib.util.spec_from_file_location("compare_full_suite_results", SCRIPT)
 comparator = importlib.util.module_from_spec(SPEC)
@@ -52,8 +53,7 @@ def case(node_id, outcome="pass", reason=None, duration=0.01):
 def child_env():
     """This process's environment without any PYTEST_* variable, so a developer
     shell that exports one cannot change what a child pytest loads or runs."""
-    return {key: value for key, value in os.environ.items()
-            if not key.startswith("PYTEST_")}
+    return env_without_pytest_vars()
 
 
 def write_json(path, value):

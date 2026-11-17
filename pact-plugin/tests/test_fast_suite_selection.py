@@ -19,7 +19,6 @@ Rows fall into three groups:
 import ast
 import importlib.util
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +26,7 @@ from pathlib import Path
 import pytest
 
 import ci_contract
+from helpers import env_without_pytest_vars
 
 SELECTOR = Path("scripts") / "fast_suite_selection.py"
 
@@ -2075,7 +2075,7 @@ class TestRunnerArtifactDestinations:
     def _env(self, workspace):
         # No PYTEST_* name from the shell that runs the suite reaches the runner
         # or the pytest it starts.
-        env = {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+        env = env_without_pytest_vars()
         env["GITHUB_WORKSPACE"] = str(workspace)
         return env
 

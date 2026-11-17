@@ -73,7 +73,6 @@ import ast
 import dataclasses
 import importlib.util
 import json
-import os
 import re
 import subprocess
 import sys
@@ -82,6 +81,7 @@ from pathlib import Path
 import pytest
 
 import ci_contract
+from helpers import env_without_pytest_vars
 
 # The two collection roots pytest resolves from `pact-plugin/`, and the pytest
 # config filenames that can carry a `testpaths` entry. Both directories are
@@ -349,7 +349,7 @@ def _collect_node_ids(args, cwd):
          "-p", "no:cacheprovider", "-p", "no:randomly", *args],
         cwd=str(cwd), capture_output=True, text=True, timeout=300,
         # No PYTEST_* name from the shell that runs the suite reaches the child.
-        env={key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")},
+        env=env_without_pytest_vars(),
     )
     ids = {line.strip() for line in result.stdout.splitlines() if "::" in line}
     return ids, result

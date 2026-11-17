@@ -25,6 +25,7 @@ import pytest
 
 import ci_contract
 import ci_full_run_record
+from helpers import env_without_pytest_vars
 
 
 def _child_environ():
@@ -32,7 +33,7 @@ def _child_environ():
     rig starts (directly, or through the full-collection guard) takes no
     PYTEST_ADDOPTS, PYTEST_PLUGINS or PYTEST_DISABLE_PLUGIN_AUTOLOAD from the
     shell that runs the suite."""
-    return {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+    return env_without_pytest_vars()
 
 
 # The run record's file name comes from the recorder that writes it, so a
@@ -1370,10 +1371,11 @@ class TestRemovability:
             Path("pact-plugin") / "tests" / "test_ci_collection_scope.py",
             Path("pact-plugin") / "tests" / "test_memory_init.py",
             Path("pact-plugin") / "tests" / "ci_contract.py",
-            # The converted modules import this fixture at module scope, so a
-            # rig that collects them without it fails collection instead of
-            # exercising the arm.
+            # The converted modules import these at module scope, so a rig that
+            # collects them without one fails collection instead of exercising
+            # the arm.
             Path("pact-plugin") / "tests" / "fixtures" / "tracked_files.py",
+            Path("pact-plugin") / "tests" / "helpers.py",
         ):
             target = rig / relative
             target.parent.mkdir(parents=True, exist_ok=True)

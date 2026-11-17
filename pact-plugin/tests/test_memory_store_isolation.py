@@ -38,6 +38,7 @@ from scripts.config import (  # noqa: E402
     compute_db_path,
     get_memory_dir,
 )
+from helpers import env_without_pytest_vars
 
 REAL_STORE_SUFFIX = os.path.join(".claude", "pact-memory")
 
@@ -409,7 +410,7 @@ class TestAutouseResetIntegration:
             encoding="utf-8",
         )
         # No PYTEST_* name from the shell that runs the suite reaches the child.
-        env = dict({key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}, PYTHONDONTWRITEBYTECODE="1")
+        env = dict(env_without_pytest_vars(), PYTHONDONTWRITEBYTECODE="1")
         env["PACT_AUTOUSE_SOURCE_ROOT"] = str(source_root)
         env["PYTHONPATH"] = os.pathsep.join(str(path) for path in (
             source_root / "tests",

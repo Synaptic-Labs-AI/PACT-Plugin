@@ -28,6 +28,7 @@ import yaml
 
 import ci_contract
 from fixtures.tracked_files import tracked_files as _tracked_files
+from helpers import env_without_pytest_vars
 
 
 class TestEnsureMemoryReady:
@@ -2232,7 +2233,7 @@ class TestCIEnvironmentBinding:
         (rig / "suite" / "test_probe.py").write_text(
             "def test_probe():\n    pass\n", encoding="utf-8")
         # No PYTEST_* name from the shell that runs the suite reaches the child.
-        env = dict({key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
+        env = dict(env_without_pytest_vars(), GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
         env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
 
         def run(pytest_pin):
@@ -2349,7 +2350,7 @@ class TestCIEnvironmentBinding:
                     pins.append(f"{name}=={dist.version}")
         (rig / "constraints-ci.txt").write_text("\n".join(pins) + "\n", encoding="utf-8")
         # No PYTEST_* name from the shell that runs the suite reaches the child.
-        env = dict({key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}, GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
+        env = dict(env_without_pytest_vars(), GITHUB_ACTIONS="true", PYTHONDONTWRITEBYTECODE="1")
         env["PATH"] = os.path.dirname(sys.executable) + os.pathsep + env.get("PATH", "")
         env.pop("PYTHONPATH", None)
 

@@ -13,7 +13,6 @@ seed-gate arms pin the runtime refusal wherever the plugin is loaded.
 """
 
 import ast
-import os
 import shlex
 import subprocess
 import sys
@@ -27,6 +26,7 @@ from _pytest.config.findpaths import locate_config
 import child_pytest_census
 import randomly_seed_gate
 from fixtures.tracked_files import tracked_files
+from helpers import env_without_pytest_vars
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 _REPO_ROOT = _PLUGIN_ROOT.parent
@@ -307,7 +307,7 @@ class TestSeedGate:
         skills_test = sorted(_PLUGIN_ROOT.glob("skills/*/test_*.py"))[0]
         plugin = ["-p", "zz_fake_randomly"] if fake_loaded else []
         # No PYTEST_* name from the shell that runs the suite reaches the child.
-        env = {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+        env = env_without_pytest_vars()
         env.update(PYTHONPATH=str(tmp_path), PYTHONDONTWRITEBYTECODE="1")
         run = subprocess.run(
             [sys.executable, "-m", "pytest", "-p", "no:randomly", "-p", "no:cacheprovider",

@@ -29,6 +29,7 @@ from pathlib import Path
 import pytest
 
 from fixtures import root_guard
+from helpers import env_without_pytest_vars
 
 # Set only in the child run the wiring test starts. In every other run the
 # child test is skipped and os.geteuid is left alone.
@@ -83,7 +84,7 @@ def test_the_conftest_hook_skips_a_marked_test_at_uid_0():
     """The wiring pin, on any uid. RED if the hook is removed or stops matching
     the marker: the child then runs its test body and reports a failure."""
     # No PYTEST_* name from the shell that runs the suite reaches the child.
-    env = {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+    env = env_without_pytest_vars()
     env[_CHILD_FLAG] = "1"
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-rs", "-p", "no:cacheprovider",

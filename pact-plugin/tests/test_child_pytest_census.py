@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 import child_pytest_census as census
+from helpers import env_without_pytest_vars
 
 PY = sys.executable
 _CONFTEST = Path(__file__).resolve().with_name("conftest.py")
@@ -29,7 +30,7 @@ def _child_env():
     """This process's environment without its PYTEST_* names, so a child
     pytest does not take PYTEST_ADDOPTS, PYTEST_PLUGINS or
     PYTEST_DISABLE_PLUGIN_AUTOLOAD from the shell that runs the suite."""
-    return {k: v for k, v in os.environ.items() if not k.startswith("PYTEST_")}
+    return env_without_pytest_vars()
 
 
 def _session_env():

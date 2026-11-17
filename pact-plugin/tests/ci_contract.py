@@ -13,7 +13,6 @@ selection options.
 """
 
 import json
-import os
 import re
 import shlex
 import subprocess
@@ -22,6 +21,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from helpers import env_without_pytest_vars
 
 REPO_MARKER = Path(".claude-plugin") / "marketplace.json"
 FULL_WORKFLOW = Path(".github") / "workflows" / "tests.yml"
@@ -286,7 +286,7 @@ def probe_options(probe_dir, args=(), timeout=120):
         command, cwd=str(probe_dir), capture_output=True, text=True,
         timeout=timeout,
         # No PYTEST_* name from the shell that runs the suite reaches the child.
-        env={key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")})
+        env=env_without_pytest_vars())
     report = None
     for raw in proc.stdout.splitlines():
         if raw.startswith("PACT-OPTION-PROBE:"):

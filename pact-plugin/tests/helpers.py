@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any
@@ -42,6 +43,14 @@ GIT_REDIRECTING_VARIABLES = (
     "GIT_NAMESPACE", "GIT_QUARANTINE_PATH", "GIT_CEILING_DIRECTORIES",
     "GIT_DISCOVERY_ACROSS_FILESYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM",
 )
+
+def env_without_pytest_vars(source=None):
+    """A copy of ``source`` (``os.environ`` when omitted) without its PYTEST_*
+    names, so a shell or parent session that exports one cannot change what a
+    child pytest loads or runs."""
+    source = os.environ if source is None else source
+    return {key: value for key, value in source.items() if not key.startswith("PYTEST_")}
+
 
 # The numbered pairs GIT_CONFIG_COUNT counts: GIT_CONFIG_KEY_0, GIT_CONFIG_VALUE_0, ...
 _GIT_CONFIG_PAIR = re.compile(r"GIT_CONFIG_(?:KEY|VALUE)_[0-9]+\Z")

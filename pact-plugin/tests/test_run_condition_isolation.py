@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from fixtures.session_marker import embedding_marker, fresh_session_id
-from helpers import GIT_REDIRECTING_VARIABLES, is_git_redirecting_variable
+from helpers import GIT_REDIRECTING_VARIABLES, is_git_redirecting_variable, env_without_pytest_vars
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CONFTEST = Path(__file__).resolve().with_name("conftest.py")
@@ -188,7 +188,7 @@ def test_a_rig_ignores_a_repository_the_shell_points_git_at(tmp_path, row):
         _GIT_RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
     (rig / "test_git_rig.py").write_text(_GIT_RIG_TESTS, encoding="utf-8")
     # No PYTEST_* name from the shell that runs the suite reaches the child.
-    env = {key: value for key, value in clean.items() if not key.startswith("PYTEST_")}
+    env = env_without_pytest_vars(clean)
     env.update(_shell_exports(decoy)[row])
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-rA", "-p", "no:cacheprovider",
@@ -235,7 +235,7 @@ def test_a_test_cannot_read_the_git_config_the_shell_points_xdg_config_home_at(t
     (rig / "conftest.py").write_text(
         _GIT_RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
     (rig / "test_xdg_rig.py").write_text(_XDG_RIG_TESTS, encoding="utf-8")
-    env = {key: value for key, value in clean.items() if not key.startswith("PYTEST_")}
+    env = env_without_pytest_vars(clean)
     env["XDG_CONFIG_HOME"] = str(xdg)
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-q", "-rA", "-p", "no:cacheprovider",
@@ -305,7 +305,7 @@ def test_the_conftest_fails_a_test_that_leaves_a_marker_under_an_importer_id(tmp
         _MARKER_RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
     (tmp_path / "test_marker_rig.py").write_text(_MARKER_RIG_TESTS, encoding="utf-8")
     # No PYTEST_* name from the shell that runs the suite reaches the child.
-    env = {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+    env = env_without_pytest_vars()
     record = tmp_path / "session_id.txt"
     try:
         proc = subprocess.run(

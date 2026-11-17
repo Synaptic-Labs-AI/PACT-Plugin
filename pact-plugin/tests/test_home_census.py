@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from helpers import is_git_redirecting_variable
+from helpers import is_git_redirecting_variable, env_without_pytest_vars
 import home_census as census
 
 PY = sys.executable
@@ -613,7 +613,7 @@ def _child_environ():
     takes no PYTEST_ADDOPTS, PYTEST_PLUGINS or PYTEST_DISABLE_PLUGIN_AUTOLOAD
     (nor this session's xdist or current-test names) from the shell that runs
     the suite. A rig adds back what it sets on purpose."""
-    return {key: value for key, value in os.environ.items() if not key.startswith("PYTEST_")}
+    return env_without_pytest_vars()
 
 
 def _run_rig(tmp_path, env_literal):
