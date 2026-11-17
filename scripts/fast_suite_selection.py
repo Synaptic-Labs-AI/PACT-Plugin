@@ -729,8 +729,12 @@ class FileScan:
     scanner_roots: frozenset[str] | None
     # 'line:why' evidence that a production module climbs out of the plugin.
     repo_reach: tuple[str, ...]
-    # 'line:why' for every site that keeps a TEST-SIDE module unproven, and
-    # for any module whose joined-path reads the resolver could not finish.
+    # 'line:why' for every site that keeps a TEST-SIDE module unproven, and,
+    # for any module, test-side or production, each joined-path read the
+    # resolver does not follow: a read past its limits, any Path(...) with more
+    # than one argument, .with_name(...) or .with_suffix(...) on an anchored
+    # path whatever it names, and an anchored argument passed into *args or
+    # **kwargs.
     unproven: tuple[str, ...]
     dynamic_imports: tuple[str, ...]
     dynamic_fixtures: tuple[str, ...]
@@ -1522,6 +1526,8 @@ def _anchored_join_files(tree: ast.Module, rel: str,
     passes in a slot it can land in (by position, or by keyword; after a
     starred argument, in its own slot or any later one), to any def of that
     name in the module or lambda a plain assignment gives that name. An
+    anchored argument that lands in a def's *args or **kwargs is not followed
+    and records an unproven site. An
     assignment through `global` or `nonlocal`, and a comprehension's walrus,
     carries its value's paths to the scope that owns the name. A call through
     an attribute, any other name or another module binds nothing.
@@ -1643,6 +1649,9 @@ def _anchored_join_files(tree: ast.Module, rel: str,
                 for function in defs.get(node.func.id, ()):
                     names = [arg.arg for arg in (*function.args.posonlyargs,
                                                  *function.args.args)]
+                    keyword_names = {arg.arg for arg in (*function.args.args,
+                                                         *function.args.kwonlyargs)}
+                    vararg, kwarg = function.args.vararg, function.args.kwarg
                     starred = 0
                     for position, argument in enumerate(node.args):
                         if isinstance(argument, ast.Starred):
@@ -1652,9 +1661,17 @@ def _anchored_join_files(tree: ast.Module, rel: str,
                                  if not starred else names[position - starred:])
                         for slot in slots:
                             give(function, slot, argument, env)
+                        if (vararg is not None and (starred or position >= len(names))
+                                and _anchors_of(argument, env, notes, strings)):
+                            notes.append(f"{node.lineno}:anchored argument into "
+                                         f"*{vararg.arg} is not followed")
                     for keyword in node.keywords:
                         if keyword.arg is not None:
                             give(function, keyword.arg, keyword.value, env)
+                            if (kwarg is not None and keyword.arg not in keyword_names
+                                    and _anchors_of(keyword.value, env, notes, strings)):
+                                notes.append(f"{node.lineno}:anchored argument into "
+                                             f"**{kwarg.arg} is not followed")
         return given
 
     injected: dict[int, dict[str, frozenset[_Anchor]]] = {}
@@ -3972,9 +3989,11 @@ def _review_applies(key: str, view: ExclusionView) -> bool:
 def broad_reasons(view: ExclusionView, facts: ChangeFacts) -> tuple[str, ...]:
     """Why an exclusion is BROAD: each unproven site, unless reviewed, of any
     module in its closure, test-side or production (a production module carries
-    one when its joined-path reads reach the resolver's limits), and of each
-    fixture it requests, and each production climb out of the plugin. Empty
-    means CONFINED."""
+    one for each joined-path read the resolver does not follow: a read past its
+    limits, any Path(...) with more than one argument, .with_name(...) or
+    .with_suffix(...) on an anchored path whatever it names, and an anchored
+    argument passed into *args or **kwargs), and of each fixture it requests,
+    and each production climb out of the plugin. Empty means CONFINED."""
     reasons: list[str] = []
     for module, sites in view.unproven:
         if module in facts.reviewed or module.split("::", 1)[0] in facts.reviewed:

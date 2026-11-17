@@ -609,7 +609,8 @@ def _fresh_census(monkeypatch, tmp_path, **state):
     # The same module object tests/conftest.py installs and its hooks call.
     assert clock_shift_census is sys.modules["clock_shift.clock_shift_census"]
     census = clock_shift_census
-    fresh = {"installed": True, "misses": [], "python_children": 0, "workers": [], "worker_children": 0}
+    fresh = {"installed": True, "misses": [], "python_children": 0, "workers": [], "worker_children": 0,
+             "collected": set()}
     fresh.update(state)
     monkeypatch.setattr(census, "_state", fresh)
     monkeypatch.setenv("PACT_TEST_CLOCK_SHIFT_LEDGER", str(tmp_path / "ledger"))
@@ -691,6 +692,27 @@ def test_a_finished_workers_pid_is_recorded_once(monkeypatch, tmp_path, gateway_
     census.collect(SimpleNamespace(gateway=gateway, workeroutput={census.WORKEROUTPUT_KEY: {
         "misses": [], "python_children": 0, "pid": handed_pid}}))
     assert census._state["workers"] == expected
+
+
+def test_a_worker_reported_down_twice_is_collected_once(monkeypatch, tmp_path):
+    """MUTANT: collect() takes a worker's handover each time xdist reports it
+    down. A worker stopped by a keyboard interrupt is reported twice
+    (worker_workerfinished, then worker_errordown), so its misses would repeat
+    and its Python children count twice. Another worker is still collected."""
+    census = _fresh_census(monkeypatch, tmp_path)
+
+    def node(name, pid):
+        gateway = SimpleNamespace(id=name, _io=SimpleNamespace(popen=SimpleNamespace(pid=pid)))
+        return SimpleNamespace(gateway=gateway, workeroutput={census.WORKEROUTPUT_KEY: {
+            "misses": ["t::a (call): x"], "python_children": 2, "pid": pid}})
+
+    interrupted = node("gw0", 6161616)
+    census.collect(interrupted)
+    census.collect(interrupted)
+    census.collect(node("gw1", 6262626))
+    assert census._state["misses"] == ["[gw0] t::a (call): x", "[gw1] t::a (call): x"]
+    assert census._state["worker_children"] == 4
+    assert census._state["workers"] == [6161616, 6262626]
 
 
 @pytest.mark.parametrize("prior, after", [(0, 1), (1, 1), (2, 2), (3, 3), (4, 4)])

@@ -202,6 +202,50 @@ def test_a_rig_ignores_a_repository_the_shell_points_git_at(tmp_path, row):
     assert proc.returncode == 0, output
 
 
+_XDG_RIG_TESTS = '''
+import os
+import subprocess
+
+
+def test_the_operators_xdg_git_config_is_not_read(tmp_path):
+    got = subprocess.run(["git", "config", "--get", "alias.zz"], cwd=tmp_path,
+                         capture_output=True, text=True, timeout=60)
+    assert got.stdout.strip() == "", got.stdout
+    assert "XDG_CONFIG_HOME" not in os.environ
+'''
+
+
+def test_a_test_cannot_read_the_git_config_the_shell_points_xdg_config_home_at(tmp_path):
+    """A child session whose shell exports XDG_CONFIG_HOME at a directory whose
+    git/config defines an alias. Its test asks git for that alias. MUTANT:
+    tests/conftest.py keeps XDG_CONFIG_HOME. git then reads the operator's
+    config from there despite the sandbox HOME and GIT_CONFIG_NOSYSTEM, and
+    the alias reaches the test (and merge-guard alias lookups)."""
+    xdg = tmp_path / "xdg"
+    (xdg / "git").mkdir(parents=True)
+    (xdg / "git" / "config").write_text("[alias]\n\tzz = status\n", encoding="utf-8")
+    clean = {key: value for key, value in os.environ.items()
+             if not is_git_redirecting_variable(key)}
+    control = subprocess.run(["git", "config", "--get", "alias.zz"], cwd=tmp_path,
+                             env={**clean, "XDG_CONFIG_HOME": str(xdg)},
+                             capture_output=True, text=True, timeout=60)
+    assert control.stdout.strip() == "status", "the planted alias is not readable at all"
+    rig = tmp_path / "rig"
+    rig.mkdir()
+    (rig / "conftest.py").write_text(
+        _GIT_RIG_CONFTEST.format(conftest=str(_CONFTEST)), encoding="utf-8")
+    (rig / "test_xdg_rig.py").write_text(_XDG_RIG_TESTS, encoding="utf-8")
+    env = {key: value for key, value in clean.items() if not key.startswith("PYTEST_")}
+    env["XDG_CONFIG_HOME"] = str(xdg)
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-rA", "-p", "no:cacheprovider",
+         "-p", "no:randomly", "test_xdg_rig.py"],
+        cwd=rig, env=env, capture_output=True, text=True, timeout=300)
+    output = proc.stdout + proc.stderr
+    assert _summary_counts(output) == {"passed": 1}, output
+    assert proc.returncode == 0, output
+
+
 def test_fresh_session_id_refuses_an_id_it_already_handed_out(monkeypatch):
     holder = SimpleNamespace(SID=None)
     seen: set[str] = set()

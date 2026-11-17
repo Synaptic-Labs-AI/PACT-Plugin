@@ -61,7 +61,8 @@ _SHELLS = frozenset({"bash", "sh", "zsh"})
 
 WORKEROUTPUT_KEY = "clock_shift_census"
 
-_state = {"installed": False, "misses": [], "python_children": 0, "workers": [], "worker_children": 0}
+_state = {"installed": False, "misses": [], "python_children": 0, "workers": [], "worker_children": 0,
+          "collected": set()}
 
 
 def installed():
@@ -185,7 +186,14 @@ def collect(node):
     """Controller side: take what a finished xdist worker handed over, and every
     worker's pid, a crashed one's included, so its own ledger lines never count
     as a child's. A finished worker's gateway pid and handed-over pid are
-    normally the same process and are recorded once; if they differ, both are."""
+    normally the same process and are recorded once; if they differ, both are.
+    Each worker is taken once: xdist reports a worker stopped by a keyboard
+    interrupt down twice (worker_workerfinished, then worker_errordown), and a
+    worker it restarts after a crash is a new node with a new gateway id."""
+    key = getattr(getattr(node, "gateway", None), "id", None) or id(node)
+    if key in _state["collected"]:
+        return
+    _state["collected"].add(key)
     found = (getattr(node, "workeroutput", None) or {}).get(WORKEROUTPUT_KEY)
     pid = _gateway_pid(node)
     if pid is not None:

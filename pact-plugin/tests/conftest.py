@@ -69,8 +69,15 @@ _SESSION_HOME_DIR = _process_temp_dir("pact-home-suite-")
 os.makedirs(os.path.join(_SESSION_HOME_DIR, ".claude"))
 os.environ["HOME"] = _SESSION_HOME_DIR
 os.environ.pop("CLAUDE_CONFIG_DIR", None)
-# The sandbox HOME drops the operator's global git config; this drops the
-# machine's system file, the remaining git config a test or child could read.
+# git reads its user config from $XDG_CONFIG_HOME/git/config as well as
+# ~/.gitconfig; without XDG_CONFIG_HOME it reads $HOME/.config/git/config,
+# which is inside the sandbox. The cache, data and state XDG directories are
+# left as inherited: they hold no git config, and the model-cache path above
+# is read from the inherited XDG_CACHE_HOME.
+os.environ.pop("XDG_CONFIG_HOME", None)
+# The sandbox HOME and the line above drop the operator's global git config;
+# this drops the machine's system file, the remaining git config a test or
+# child could read.
 # The suite's own git calls on the real checkout (tracked-file listings) then
 # rely on git's ownership check passing without a system safe.directory, which
 # holds wherever the checkout belongs to the user running the suite. Every

@@ -1523,6 +1523,34 @@ class TestJoinPieces:
     def test_a_rebuilt_path_that_is_not_anchored_records_nothing(self, core, tmp_path, body):
         assert self._join(core, tmp_path, body) == ([], [])
 
+    @pytest.mark.parametrize("body,why", [
+        ('def read(*roots):\n    return [(r / "direct.py") for r in roots]\nread(SHARED)\n',
+         "anchored argument into *roots"),
+        ('def read(first, *roots):\n    return roots\nread("x", SHARED)\n',
+         "anchored argument into *roots"),
+        ('def read(**kw):\n    return kw\nread(root=SHARED)\n',
+         "anchored argument into **kw"),
+    ], ids=["into-star-args", "past-the-named-slots", "into-star-star-kwargs"])
+    def test_an_anchored_argument_into_a_catch_all_parameter_records_an_unproven_site(
+            self, core, tmp_path, body, why):
+        """MUTANT: the argument is dropped with no note. The def reads its
+        catch-all parameter by index or key, which the resolver does not follow,
+        so a file it joins there would go unseen."""
+        files, sites = self._join(core, tmp_path, body)
+        assert files == []
+        assert len(sites) == 1 and why in sites[0], sites
+
+    @pytest.mark.parametrize("body,named", [
+        ('def read(root, *rest):\n    return (root / "direct.py").read_text()\n'
+         'read(SHARED)\n', ["hooks/shared/direct.py"]),
+        ('def read(*roots):\n    return roots\nread("x")\n', []),
+        ('def read(**kw):\n    return kw\nread(root="x")\n', []),
+    ], ids=["anchored-into-a-named-slot", "unanchored-into-star-args",
+            "unanchored-into-star-star-kwargs"])
+    def test_a_catch_all_parameter_without_an_anchored_argument_records_nothing(
+            self, core, tmp_path, body, named):
+        assert self._join(core, tmp_path, body) == (named, [])
+
     def test_string_names_outside_an_anchored_expression_do_not_count_as_readings(
             self, core, tmp_path):
         """9 x 9 string readings exceed the readings limit only if counted."""
