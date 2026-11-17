@@ -819,12 +819,35 @@ class TestWorktreeSetupVenvLinkReportPins:
         )
 
 
-# A forward pointer to an artifact the text defines later. The cold
-# prompt's order pin in test_peer_review_cold_lane_pin.py bans the same
-# phrasings in its clause.
+# A pointer that defers an artifact's definition: one of six verbs
+# (described, defined, given, built, explained, shown) followed by below,
+# next or later, or "see below". It does not ban a forward reference to a
+# rule ("the failing-test rule below", "the branches below", "at the end of
+# this bullet"): a rule may be named before it is stated, an artifact may not
+# be used before it is defined. The cold prompt's order pin in
+# test_peer_review_cold_lane_pin.py bans the same phrasings in its clause.
 FORWARD_POINTER = re.compile(
     r"\b(?:described|defined|given|built|explained|shown)\s+(?:below|next|later)\b|\bsee below\b",
     re.IGNORECASE)
+
+
+@pytest.mark.parametrize("text, banned", [
+    ("in the copy described below", True),
+    ("the clone defined next", True),
+    ("the recipe given later", True),
+    ("a copy built below", True),
+    ("Shown later in this bullet", True),
+    ("see below for the copy", True),
+    ("the failing-test rule below", False),
+    ("the pre-existing and failure branches below", False),
+    ("the pre-existing-failure rule at the end of this bullet", False),
+])
+def test_forward_pointer_scope(text, banned):
+    # The pattern bans the deferring forms its comment lists and nothing else.
+    assert bool(FORWARD_POINTER.search(text)) is banned, (
+        f"FORWARD_POINTER {'missed' if banned else 'banned'} {text!r}; "
+        "update the comment's list with the pattern"
+    )
 
 
 class TestRunReceiptAttribution:
@@ -840,17 +863,21 @@ class TestRunReceiptAttribution:
       each reported run; a run that starts with an unstaged or untracked path
       of the change does not count and is run again after staging.
     - The isolated copy that holds the change is defined in its own
-      sub-bullet before every re-run that uses it, with no forward pointer:
-      a remote-less clone at the pre-run HEAD with the saved staged change
-      applied.
+      sub-bullet before every run that uses it, with no forward pointer:
+      a remote-less clone of the worktree's local repository (never a remote
+      URL, which lacks unpushed commits) at the pre-run HEAD with the saved
+      staged change applied.
+    - When the worktree status before a run shows any path outside the
+      teammate's own paths, the run goes to that copy instead of the
+      worktree, so a peer's edit cannot mask the teammate's own break.
     - A moved HEAD is re-run once before the HANDOFF, in that copy, never
       in the worktree. That copy's run is the
       result; its own staged files are never read as written by the run.
-    - If the copy cannot be built or the command cannot be run in it, after
-      a moved HEAD, a status-only change or a worktree run with failing
-      tests alike (its own sub-bullet after both branches), the result is reported as unattributable, naming what
-      moved and stating the unmet exit-code precondition, and is not re-run
-      again. That exit
+    - If the copy cannot be built or the command cannot be run in it, on any
+      run that needs it (its own sub-bullet after both branches), the
+      teammate cannot tell whether a failure is its own, so it stops and
+      sends the lead a BLOCKER naming the command, what moved and why; it
+      never hands off past it. That exit
       never takes paths the change copy reproduces: on any run, those follow
       the pre-existing and failure branches.
     - A status-only change is re-run with the same interpreter, by absolute
@@ -858,12 +885,12 @@ class TestRunReceiptAttribution:
       result, stated once per branch.
     - One baseline clone, defined in its own sub-bullet before every
       branch, serves both the reproduced-path check and the failing-test
-      rule: a remote-less clone at the HEAD recorded before the run, with no
-      change applied. The teammate's subject is its own change, so a failure
+      rule: a remote-less clone of the worktree's local repository at the
+      HEAD recorded before the run, with no change applied. The teammate's subject is its own change, so a failure
       an earlier commit on the branch caused is pre-existing to it; the
       receipt names no merge base and no fetch.
     - One reproduced-path rule, its own sub-bullet after both branches and
-      the unbuildable exit, serves both re-runs: every path that differs
+      the unbuildable exit, serves every run in the copy: every path that differs
       between the copy's status before and after its run is reproduced,
       whatever the worktree status did, and a worktree path the copy does
       not change came from outside the run. With no reproduced path the
@@ -883,8 +910,9 @@ class TestRunReceiptAttribution:
       flags, so an order dependence the change causes still shows; a test
       that passes there came from outside the change, and one the baseline clone also fails is pre-existing. Only
       then may the teammate hand off, naming those tests and the
-      precondition unmet through them; any other failing test blocks it. The exit-code precondition names that exception and the
-      unattributable exit, so it does not contradict this bullet.
+      precondition unmet through them; any other failing test blocks it. The
+      exit-code precondition names that one exception and no other, so an
+      unbuildable copy never waives it.
     - No git archive export is named as the copy.
 
     Each arm is bound to the Step 0 receipt bullet, read through its
@@ -912,17 +940,19 @@ class TestRunReceiptAttribution:
          "the moved-HEAD branch: one re-run, in the change copy, never the worktree"),
         ("never report the moved run as a pass or a failure of your change. That copy's run is your result.",
          "the moved-HEAD copy run as the result"),
-        ("If the copy that holds your change cannot be built or the command cannot be run in it, after a moved `HEAD`, a status-only change or a worktree run with failing tests alike, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
-         "the stop: unattributable only when the copy cannot be built or run, naming what moved, with the unmet precondition stated"),
+        ("If the copy that holds your change cannot be built or the command cannot be run in it, on any run that needs the copy, you cannot tell whether a failure is yours: stop, do not hand off, and send the lead a BLOCKER as in [On Blocker](#on-blocker), naming the command, what moved (`HEAD` or the paths) and why the copy cannot be built or run.",
+         "the stop: an unbuildable copy is a blocker, never a waiver of the exit-code precondition"),
         ("This exit never applies to paths the copy that holds your change reproduces; on any run, those follow the pre-existing and failure branches below.",
-         "a reproduced write never reaches the unattributable exit"),
+         "a reproduced write never reaches the blocker exit"),
+        ("If, before a run you report, `git status --porcelain --untracked-files=all` shows any path that is not one of your paths, run the command in the isolated copy that holds your change instead of the worktree, with the same interpreter, by absolute path, and report that copy's run in place of a worktree run, judged by the rules below for a run in that copy.",
+         "a worktree carrying any path outside the teammate's own paths sends the run to the change copy"),
         ("If only the status differs, re-run the same command with the same interpreter, by absolute path (for example the worktree's venv `python`), in the isolated copy that holds your change. Compare its status before and after. That copy's run is your result.",
          "the isolated-copy re-run, with the same interpreter by absolute path"),
-        ("Every re-run below uses one isolated copy that holds your change: a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone.",
+        ("Every run below that leaves the worktree uses one isolated copy that holds your change: a clone of this worktree's local repository, made from its path and never from a remote URL, with its remote removed, checked out at the `HEAD` you recorded before the run, with the staged change you saved before the run applied by running `git apply --index` on that file in the clone.",
          "the recipe, defined once before every re-run: the pre-run HEAD plus the staged change saved before the run"),
-        ("The reproduced-path check and the failing-test rule below both use one baseline clone: a clone of the repository with its remote removed, checked out at the `HEAD` you recorded before the run, with no change applied.",
+        ("The reproduced-path check and the failing-test rule below both use one baseline clone: a clone of this worktree's local repository, made from its path and never from a remote URL, with its remote removed, checked out at the `HEAD` you recorded before the run, with no change applied.",
          "the one baseline clone both rules use: the recorded pre-run HEAD with no change applied"),
-        ("After either re-run, every path that differs between the status of the copy that holds your change before and after its run is a reproduced path, and a path that changed in the worktree but does not change in that copy came from outside the run and is not a failure of your change.",
+        ("After any run in the copy that holds your change, every path that differs between the status of that copy before and after its run is a reproduced path, and a path that changed in the worktree but does not change in that copy came from outside the run and is not a failure of your change.",
          "one reproduced-path rule for both re-runs: every path the copy's run changes"),
         ("If there is no reproduced path, that copy's run stands as your result. If there is any, run the same command the same way in the baseline clone.",
          "the reproduced-path check names the baseline clone, and no reproduced path leaves the copy's run standing"),
@@ -940,7 +970,7 @@ class TestRunReceiptAttribution:
          "the pre-existing-failure hand-off, naming the tests and the unmet precondition"),
         ("Any other failing test is a failure of your change and blocks the HANDOFF.",
          "any other failing test still blocks the HANDOFF"),
-        ("A reproduced path that does not change in the baseline clone's run was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never report it as unattributable or re-run it away.",
+        ("A reproduced path that does not change in the baseline clone's run was written by the run itself: treat it as a failure of your change, whatever the other paths are, fix it, and say so in your HANDOFF; never send it as a blocker or re-run it away.",
          "the change-only write treated as a failure of the change"),
     )
 
@@ -967,19 +997,20 @@ class TestRunReceiptAttribution:
             f"the {self.REL_PATH} Step 0 run-receipt bullet lost {lost} ({phrase!r})"
         )
 
-    def test_precondition_names_both_receipt_exceptions(self):
+    def test_precondition_names_its_one_receipt_exception(self):
         text = (SKILLS_DIR / self.REL_PATH).read_text(encoding="utf-8")
         line = (
             "- All relevant tests have been run with exit code 0, except failing tests "
-            "that the next bullet finds pre-existing or from outside your change, and a run that bullet "
-            "reports as unattributable because its isolated copy cannot be built or the "
-            "command cannot be run in it."
+            "that the next bullet finds pre-existing or from outside your change."
         )
         assert text.count(line) == 1, (
-            f"the {self.REL_PATH} exit-code precondition must name its two "
-            "exceptions, failing tests the run-receipt bullet finds pre-existing and "
-            "a run it reports as unattributable because its copy cannot be built or "
-            "run, so it does not contradict that bullet"
+            f"the {self.REL_PATH} exit-code precondition must name its one "
+            "exception, failing tests the run-receipt bullet finds pre-existing or "
+            "from outside your change, so it does not contradict that bullet"
+        )
+        assert "unattributable" not in text, (
+            f"the {self.REL_PATH} still names an unattributable run, which waived "
+            "the exit-code precondition when the copy could not be built"
         )
         # "The next bullet" must be the receipt bullet: an inserted bullet reds.
         lines = text.split("\n")
@@ -1042,13 +1073,13 @@ class TestRunReceiptAttribution:
         status_only = bullet.find("  - If only the status differs")
         exit_ = bullet.find("  - If the copy that holds your change cannot be built")
         assert -1 not in (moved, status_only, exit_) and moved < status_only < exit_, (
-            f"the {self.REL_PATH} unattributable exit must be its own sub-bullet "
+            f"the {self.REL_PATH} blocker exit must be its own sub-bullet "
             "after both the moved-HEAD and the status-only branches "
             f"(positions moved={moved}, status-only={status_only}, exit={exit_})"
         )
         moved_sub = bullet[moved:status_only]
         assert "cannot be built" not in moved_sub, (
-            f"the {self.REL_PATH} unattributable exit sits inside the moved-HEAD "
+            f"the {self.REL_PATH} blocker exit sits inside the moved-HEAD "
             "branch, where the status-only re-run does not reach it"
         )
 
@@ -1059,11 +1090,11 @@ class TestRunReceiptAttribution:
         bullet = self._bullet()
         moved = bullet.find("  - If `HEAD` differs")
         exit_ = bullet.find("  - If the copy that holds your change cannot be built")
-        shared = bullet.find("  - After either re-run, every path that differs")
+        shared = bullet.find("  - After any run in the copy that holds your change, every path that differs")
         decide = bullet.find("  - Decide each reproduced path on its own")
         assert -1 not in (moved, exit_, shared, decide) and moved < exit_ < shared < decide, (
             f"the {self.REL_PATH} reproduced-path rule must be one sub-bullet "
-            "after both branches and the unattributable exit, before the "
+            "after both branches and the blocker exit, before the "
             f"per-path decision (positions moved={moved}, exit={exit_}, "
             f"shared={shared}, decide={decide})"
         )
@@ -1142,7 +1173,7 @@ class TestRunReceiptAttribution:
         # before the first branch that re-runs in it, and no sentence may
         # point forward to an artifact defined later.
         bullet = self._bullet()
-        define = bullet.find("  - Every re-run below uses one isolated copy that holds your change: a clone of the repository")
+        define = bullet.find("  - Every run below that leaves the worktree uses one isolated copy that holds your change: a clone of this worktree's local repository")
         baseline = bullet.find("  - The reproduced-path check and the failing-test rule below both use one baseline clone")
         first_use = bullet.find("  - If `HEAD` differs")
         assert -1 not in (define, baseline, first_use) and baseline < first_use and define < first_use, (
@@ -1159,6 +1190,48 @@ class TestRunReceiptAttribution:
         assert pointer is None, (
             f"the {self.REL_PATH} run receipt points forward to an artifact it "
             f"has not defined yet: {pointer.group(0)!r}"
+        )
+
+    def test_peer_paths_in_the_worktree_send_the_run_to_the_copy(self):
+        # A peer's edit in the shared worktree can mask the teammate's own
+        # break, so a worktree carrying any path outside the teammate's paths
+        # is never the run that is reported.
+        bullet = self._bullet()
+        define = bullet.find("  - Every run below that leaves the worktree uses one isolated copy")
+        trigger = bullet.find("  - If, before a run you report, `git status --porcelain --untracked-files=all` shows any path that is not one of your paths")
+        moved = bullet.find("  - If `HEAD` differs")
+        assert -1 not in (define, trigger, moved) and define < trigger < moved, (
+            f"the {self.REL_PATH} peer-path trigger must follow the copy's "
+            "definition and precede the moved-HEAD branch "
+            f"(positions copy={define}, trigger={trigger}, moved={moved})"
+        )
+
+    def test_clones_are_made_from_the_local_repository(self):
+        # A clone of the remote lacks the teammate's unpushed HEAD, so it
+        # cannot be built; both clones name the worktree's local repository.
+        bullet = self._bullet()
+        source = "a clone of this worktree's local repository, made from its path and never from a remote URL"
+        assert bullet.count(source) == 2, (
+            f"the {self.REL_PATH} baseline clone and change copy must both be "
+            f"made from the worktree's local repository ({source!r})"
+        )
+        assert "a clone of the repository with its remote removed" not in bullet, (
+            f"the {self.REL_PATH} run receipt names a clone without its source"
+        )
+
+    def test_an_unbuildable_copy_is_a_blocker(self):
+        bullet = self._bullet()
+        exit_ = bullet.find("  - If the copy that holds your change cannot be built")
+        end = bullet.find("\n  - ", exit_ + 1)
+        text = bullet[exit_:end if end != -1 else None]
+        for phrase in ("stop, do not hand off, and send the lead a BLOCKER",
+                       "[On Blocker](#on-blocker)"):
+            assert phrase in text, (
+                f"the {self.REL_PATH} unbuildable-copy exit lost {phrase!r}"
+            )
+        assert "exit-code precondition" not in text, (
+            f"the {self.REL_PATH} unbuildable-copy exit still speaks of the "
+            "exit-code precondition, which it must never waive"
         )
 
     def test_receipt_names_no_archive_export(self):

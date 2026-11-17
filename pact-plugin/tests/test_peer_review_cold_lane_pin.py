@@ -392,14 +392,31 @@ RECHECK_VALIDITY = "A re-check report is valid only with"
 # form ('Superseded', 'restarts', 'ancestors') is caught too. Bare 'next
 # round' is deliberately absent: the lane legitimately says what the next
 # round does.
+# A pointer that defers an artifact's definition: one of six verbs
+# (described, defined, given, built, explained, shown) followed by below,
+# next or later, or "see below". It does not ban a forward reference to a
+# rule or a check ("the merge-base check below", "the rules below"): a rule
+# may be named before it is stated, an artifact may not be used before it
+# is defined. test_skills_structure.py bans the same phrasings in the
+# teammate run receipt.
+FORWARD_POINTER = re.compile(
+    r"\b(?:described|defined|given|built|explained|shown)\s+(?:below|next|later)\b|\bsee below\b",
+    re.IGNORECASE)
 RETIRED_LANE_STEMS = (
     "supersed",
     "restart",
-    # A re-check base that moved off {base}. The run receipt's control clone
-    # legitimately names `git merge-base {base} {head}`, so the bare command
-    # name is not retired; the moving-base wording is.
+    # A re-check base that moved off {base}. Only these spellings of that
+    # wording are retired; the bare command name `git merge-base` is not,
+    # because the run receipt's control clone legitimately runs
+    # `git merge-base {base} {head}`. A moving base worded any other way is
+    # not caught here.
     "merge-base of",
+    "merge base of",
     "re-check base",
+    "moved base",
+    "new base",
+    "newer base",
+    "base moved",
     "ancestor",
     "latest round",
     "previous cold",
@@ -758,7 +775,7 @@ class TestOperationalFactsClause:
         ("Do not look for run instructions in the avoided paths", (
          "the bar on recovering run instructions from the avoided paths")),
         ("untracked docs/", "the path-convention fact (untracked docs/ is normal)"),
-        ("When a re-run or the check below needs it, build the {head} clone: a clone of the repository with its remote removed, under {scratch_dir}, checked out at {head}", (
+        ("When a re-run or the check below needs it, build the {head} clone: a clone of the worktree's local repository, made from its path and never from a remote URL, with its remote removed, under {scratch_dir}, checked out at {head}", (
          "the instruction to build the {head} clone, once, before both branches that use it")),
         ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone, never in the worktree, and do not report the worktree run: report that clone's run in its place", (
          "the moved-HEAD branch: one re-run in the {head} clone, never the worktree")),
@@ -774,7 +791,7 @@ class TestOperationalFactsClause:
          "a base-reproduced write reported as pre-existing, not as a finding")),
         ("When every reproduced path is pre-existing, the {head} clone's run stands for the diff", (
          "the {head} clone's run as the result when every reproduced path is pre-existing")),
-        ("For any test result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in a clone of the repository with its remote removed, checked out at the commit git merge-base {base} {head} prints in the worktree: name each such test, with the command, under the open questions; any other failing test is a finding about the diff", (
+        ("For any test result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in a clone of the worktree's local repository, made from its path and never from a remote URL, with its remote removed, checked out at the commit git merge-base {base} {head} prints in the worktree: name each such test, with the command, under the open questions; any other failing test is a finding about the diff", (
          "the general per-test comparison with a merge-base clone, for every reported result")),
         ("A reproduced path that does not change in that second clone's run was written by the run itself, and it is a finding about the diff, whatever the other paths are", (
          "the change-only write reported as a finding about the diff, whatever the other paths are")),
@@ -782,6 +799,33 @@ class TestOperationalFactsClause:
     def test_operational_facts_token_present(self, token, lost):
         assert token in _clause("OPERATIONAL FACTS"), (
             f"the cold prompt's OPERATIONAL FACTS clause lost {lost} ({token!r})"
+        )
+
+    @pytest.mark.parametrize("text, banned", [
+        ("build the clone described below", True),
+        ("the clone defined later", True),
+        ("see below for the clone", True),
+        ("the merge-base check below", False),
+        ("by the rules below for a run in that clone", False),
+    ])
+    def test_forward_pointer_scope(self, text, banned):
+        # The pattern bans the deferring forms its comment lists and nothing else.
+        assert bool(FORWARD_POINTER.search(text)) is banned, (
+            f"FORWARD_POINTER {'missed' if banned else 'banned'} {text!r}; "
+            "update the comment's list with the pattern"
+        )
+
+    def test_clones_are_made_from_the_local_repository(self):
+        # A clone of the remote may lack the reviewed commit; every clone the
+        # run receipt builds names the worktree's local repository.
+        clause = _clause("OPERATIONAL FACTS")
+        source = "a clone of the worktree's local repository, made from its path and never from a remote URL"
+        assert clause.count(source) == 2, (
+            "the cold prompt's {head} clone and merge-base clone must both be made "
+            f"from the worktree's local repository ({source!r})"
+        )
+        assert "a clone of the repository with its remote removed" not in clause, (
+            "the cold prompt names a clone without its source"
         )
 
     def test_tested_tree_is_checked_against_head_before_the_first_run(self):
@@ -793,7 +837,7 @@ class TestOperationalFactsClause:
                  "run every test command you report in the {head} clone instead, with the same interpreter, by absolute path, "
                  "never in the worktree, and judge each such run by the rules below for a run in that clone.")
         assert check in clause, "the cold prompt no longer checks the tested tree against {head} before the first run"
-        build = clause.find("build the {head} clone: a clone of the repository")
+        build = clause.find("build the {head} clone: a clone of the worktree's local repository")
         at = clause.find(check)
         moved = clause.find("If HEAD differs")
         assert -1 not in (build, at, moved) and build < at < moved, (
@@ -867,15 +911,13 @@ class TestOperationalFactsClause:
 
     def test_head_clone_defined_before_first_use(self):
         clause = _clause("OPERATIONAL FACTS")
-        define = clause.find("build the {head} clone: a clone of the repository")
+        define = clause.find("build the {head} clone: a clone of the worktree's local repository")
         first_branch = clause.find("If HEAD differs")
         assert define != -1 and first_branch != -1 and define < first_branch, (
             "the cold prompt must define the {head} clone before the moved-HEAD "
             "branch, the first branch that uses it"
         )
-        pointer = re.search(
-            r"\b(?:described|defined|given|built|explained|shown)\s+(?:below|next|later)\b|\bsee below\b",
-            clause, re.IGNORECASE)
+        pointer = FORWARD_POINTER.search(clause)
         assert pointer is None, (
             "the cold prompt points forward to a clone it has not defined yet: "
             f"{pointer.group(0)!r}"
@@ -1045,6 +1087,25 @@ class TestLifecycleOrder:
             f"every round now reviews the whole PR with one retry, and a cold "
             f"report is held until every warm reviewer of its round is accepted "
             f"or stopped with TaskStop"
+        )
+
+    @pytest.mark.parametrize("text, retired", [
+        ("the commit git merge-base {base} {head} prints in the worktree", False),
+        ("the merge-base of the previous head", True),
+        ("the merge base of the last round", True),
+        ("the re-check base", True),
+        ("against the moved base", True),
+        ("against a new base", True),
+        ("a newer base than {base}", True),
+        ("when the base moved", True),
+    ])
+    def test_retired_stem_scope(self, text, retired):
+        # The command name stays usable; each listed moving-base spelling is
+        # refused, and the comment above says no other spelling is.
+        hit = any(term in text.lower() for term in RETIRED_LANE_STEMS)
+        assert hit is retired, (
+            f"RETIRED_LANE_STEMS {'missed' if retired else 'refused'} {text!r}; "
+            "update the comment's list with the stems"
         )
 
     def test_no_third_failure_term(self):
