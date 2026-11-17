@@ -2290,6 +2290,42 @@ def test_the_abandoned_heuristic_ignores_shas_and_path_components(tmp_path, monk
     )
 
 
+def test_an_unreadable_listing_with_no_branches_flags_nothing(tmp_path, monkeypatch):
+    """A worktree listing PACT cannot read whole is no listing, not an empty
+    one. With `git branch` also failing there are no names at all, so the
+    heuristic must stay silent rather than report every stale item as
+    abandoned.
+
+    The control runs the same failing `git branch` with git's real listing:
+    the stale item then flags, so the silence below comes from the unreadable
+    listing and not from a heuristic that never flags.
+
+    RED WHEN the unreadable answer is read as an empty listing.
+    """
+    repo = _repo(tmp_path / "repo", branch="feat/1-thing")
+    monkeypatch.setattr(backlog, "project_root", lambda: repo)
+    real = backlog._run_capture
+    monkeypatch.setattr(
+        backlog, "_run_capture",
+        lambda command, **kwargs: None if "branch" in command else real(command, **kwargs),
+    )
+    stale = [_item(status="active", ref="#9999", touched=_OLD)]
+
+    assert len(backlog._abandoned_flags(stale, str(repo))) == 1, (
+        "control: with a readable listing the stale item no longer flags, so "
+        "the silence asserted below proves nothing"
+    )
+
+    monkeypatch.setattr(
+        backlog, "_worktree_records", lambda at: backlog.UNREADABLE_LISTING
+    )
+    assert backlog._branch_and_worktree_names(str(repo)) is None
+    assert backlog._abandoned_flags(stale, str(repo)) == [], (
+        "an unreadable listing was read as an empty one, so every stale item "
+        "was reported abandoned"
+    )
+
+
 def test_staleness_flags_at_the_threshold_not_before(monkeypatch):
     """Exactly `_STALE_AFTER` days is quiet; a day older flags.
 
