@@ -450,9 +450,10 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
     if not records or not all(_record_fields_in_order(record) for record in records):
         return UNREADABLE_LISTING
     if not nul:
-        records = _plain_records_kept(records)
-        if records is None:
+        kept = _plain_records_kept(records)
+        if kept is None:
             return UNREADABLE_LISTING
+        records = kept
     # git prints the path a worktree's admin entry holds; a NUL in that file
     # can leave it empty or relative, and such a path would resolve against
     # the process cwd. It names no directory, so its record is dropped.
@@ -537,27 +538,57 @@ def checkout_roots() -> List[str]:
 
     Deliberately NOT merged with _branch_and_worktree_names, which runs the
     same porcelain: that caller reduces each `worktree` line to a BASENAME for
-    substring matching, this one resolves it to an absolute path for exact
-    membership — opposite ends of the same string, so one helper serving both
-    still needs a mode flag. It also runs a second git call this one does not
-    need. Two subprocesses per write on a path the design says can afford one.
+    substring matching, this one keeps a path only when the worktree's `.git`
+    and its admin entry name each other — opposite ends of the same string,
+    so one helper serving both still needs a mode flag.
     """
-    # A listing git did not give (`_worktree_records` is None) or one that
-    # cannot be read whole (UNREADABLE_LISTING) adds no root: a truncated
-    # path would name another directory.
-    root = str(project_root())
-    records = _worktree_records(["-C", root])
-    if not isinstance(records, list):
-        records = []
-    roots = [
-        str(Path(field[len("worktree "):]).resolve())
-        for record in records
-        for field in record
-        if field.startswith("worktree ")
-    ]
-    # The project root is always one: with `--separate-git-dir`, git lists
-    # the git directory as the main record's path, not the main checkout.
-    return roots + [root] if root not in roots else roots
+    # ONLY TWO-WAY-LINKED worktrees, as the memory skill's read gate keeps
+    # them (`_verified_worktree_roots`): a listed path is what this
+    # repository's admin entries claim, and a path cut at a newline or a
+    # delivered `.git` can name another repository's checkout. A listing git
+    # did not give, or one that cannot be read whole, adds no root. The
+    # project root is always the first, and the only one, unresolved, when
+    # its path will not resolve.
+    # A worktree git marks `locked` whose folder is absent (on a drive not
+    # mounted now) is kept too: a session there after the drive returns
+    # matches before any write records it again, and an absent folder names
+    # no other repository's checkout.
+    memory_api = _memory_api()
+    root = project_root()
+    try:
+        common = _git_common_dir(str(root))
+        records = (
+            memory_api._worktree_records(["--git-dir", str(common)]) if common is not None else None
+        )
+        if not isinstance(records, list):
+            return [str(Path(root).resolve())]
+        roots = [str(path) for path in memory_api._verified_worktree_roots(root, common, records)]
+        for record in records[1:]:
+            path = record[0][len("worktree "):]
+            locked = any(field == "locked" or field.startswith("locked ") for field in record)
+            if locked and not os.path.lexists(path):
+                roots.append(str(Path(path).resolve()))
+    except (OSError, RuntimeError, ValueError):
+        return [str(root)]
+    return list(dict.fromkeys(roots))
+
+
+def _git_common_dir(root: str) -> Optional[Path]:
+    """`git rev-parse --git-common-dir` asked at `root`, as a path joined to
+    `root` (git answers relative to where it ran), or None when git gives no
+    answer. Only the final newline is git's; a path may hold others."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", root, "rev-parse", "--git-common-dir"],
+            capture_output=True, timeout=_TRACKER_TIMEOUT_SECONDS,
+        )
+    except (subprocess.TimeoutExpired, OSError, ValueError):
+        return None
+    answer = os.fsdecode(result.stdout)
+    # A git older than 2.5 prints the option back: that is no answer.
+    if result.returncode != 0 or not answer.endswith("\n") or answer[:-1] in ("", "--git-common-dir"):
+        return None
+    return Path(root) / answer[:-1]
 
 
 # Key under which load_or_create stashes the bytes it read, so save() can

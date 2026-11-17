@@ -1798,9 +1798,10 @@ def _worktree_records(prefix: list) -> "Optional[List[List[str]] | str]":
     if not records or not all(_record_fields_in_order(record) for record in records):
         return UNREADABLE_LISTING
     if not nul:
-        records = _plain_records_kept(records)
-        if records is None:
+        kept = _plain_records_kept(records)
+        if kept is None:
             return UNREADABLE_LISTING
+        records = kept
     # git prints the path a worktree's admin entry holds; a NUL in that file
     # can leave it empty or relative, and such a path would resolve against
     # the process cwd. It names no directory, so its record is dropped.

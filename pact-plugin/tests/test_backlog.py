@@ -2208,8 +2208,9 @@ def test_the_writer_records_every_checkout_not_just_the_main_root(tmp_path, monk
 @pytest.mark.parametrize("linked_worktree", [False, True], ids=["alone", "with a worktree"])
 def test_a_separate_git_dir_checkout_is_one_of_its_own_roots(tmp_path, monkeypatch, linked_worktree):
     """With `--separate-git-dir`, git lists the main record at the git
-    directory, so the main checkout is recorded from the project root, and
-    nothing else is added: the roots are git's listed paths plus that root.
+    directory, so the main checkout is recorded from the project root. The
+    roots are that root and each linked worktree; the git directory, which
+    no session runs in, is not one.
 
     Real repo, real git: the listing git prints is the thing under test."""
     main = tmp_path / "main"
@@ -2232,7 +2233,66 @@ def test_a_separate_git_dir_checkout_is_one_of_its_own_roots(tmp_path, monkeypat
 
     assert str(main.resolve()) not in listed, "git listed the checkout itself, so this arm tests nothing"
     assert str(main.resolve()) in roots, roots
-    assert set(roots) == listed | {str(main.resolve())}, (roots, listed)
+    expected = {str(main.resolve())} | ({str((tmp_path / "wt").resolve())} if linked_worktree else set())
+    assert set(roots) == expected, (roots, listed)
+
+
+@pytest.mark.parametrize("locked", [False, True], ids=["unlocked", "locked"])
+def test_a_listed_worktree_whose_git_does_not_name_it_back_is_not_a_root(
+    tmp_path, monkeypatch, locked
+):
+    """git lists whatever a repository's admin entries name, and an entry
+    can name another repository's checkout (a delivered `.git`, or a path
+    cut at a newline on a git that rejects `-z`). Only a worktree whose
+    `.git` and admin entry name each other is recorded, so that checkout,
+    which another project's sessions run in, is not one of this project's
+    roots, locked or not: a locked entry is kept unlinked only while its
+    folder is absent.
+
+    Real repos, real git: the listing git prints is the thing under test."""
+    main = _repo(tmp_path / "main")
+    other = _repo(tmp_path / "other")
+    admin = main / ".git" / "worktrees" / "other"
+    admin.mkdir(parents=True)
+    (admin / "gitdir").write_text(f"{other / '.git'}\n")
+    if locked:
+        (admin / "locked").write_text("")
+    (admin / "HEAD").write_text((main / ".git" / "HEAD").read_text())
+    (admin / "commondir").write_text("../..\n")
+    monkeypatch.setattr(backlog, "project_root", lambda: main.resolve())
+
+    listed = {
+        str(Path(record[0][len("worktree "):]).resolve())
+        for record in backlog._worktree_records(["-C", str(main)])
+    }
+    roots = backlog.checkout_roots()
+
+    assert str(other.resolve()) in listed, "git did not list the entry, so this arm tests nothing"
+    assert roots == [str(main.resolve())], roots
+
+
+def test_a_locked_worktree_whose_folder_is_absent_stays_a_root(tmp_path, monkeypatch):
+    """A worktree locked because it lives on removable media keeps its root
+    while the drive is unmounted, so a session there after the drive returns
+    matches this backlog before any write records it again. An unlocked
+    worktree whose folder is gone is not a root.
+
+    Real repo, real git: the listing git prints is the thing under test."""
+    main = _repo(tmp_path / "main")
+    run = lambda *a: subprocess.run(["git", "-C", str(main), *a], check=True,
+                                    capture_output=True)
+    run("worktree", "add", "-q", str(tmp_path / "usb"), "-b", "usb")
+    run("worktree", "lock", "--reason", "on a usb disk", str(tmp_path / "usb"))
+    run("worktree", "add", "-q", str(tmp_path / "gone"), "-b", "gone")
+    usb, gone = (tmp_path / "usb").resolve(), (tmp_path / "gone").resolve()
+    (tmp_path / "usb").rename(tmp_path / "unmounted")
+    (tmp_path / "gone").rename(tmp_path / "deleted")
+    monkeypatch.setattr(backlog, "project_root", lambda: main.resolve())
+
+    roots = backlog.checkout_roots()
+
+    assert str(usb) in roots, roots
+    assert str(gone) not in roots, roots
 
 
 def test_the_abandoned_heuristic_reads_real_branches(tmp_path, monkeypatch):
