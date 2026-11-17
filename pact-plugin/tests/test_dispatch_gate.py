@@ -56,6 +56,7 @@ from unittest.mock import patch
 
 import pytest
 
+from fixtures.gate_reload import restored_env_and_reloaded
 from fixtures.role_frames import captured_pretooluse_teammate_tmux
 
 
@@ -846,13 +847,12 @@ def test_inline_mission_mode_strip_lower_normalization(
 
     import dispatch_gate
 
-    monkeypatch.setenv("PACT_DISPATCH_INLINE_MISSION_MODE", env_value)
-    reloaded = importlib.reload(dispatch_gate)
-    try:
+    # The helper puts the variable back as it was before the test (an ambient
+    # value included) and reloads, so no later test sees this test's mode.
+    with restored_env_and_reloaded(("PACT_DISPATCH_INLINE_MISSION_MODE",), ("dispatch_gate",)):
+        monkeypatch.setenv("PACT_DISPATCH_INLINE_MISSION_MODE", env_value)
+        reloaded = importlib.reload(dispatch_gate)
         assert reloaded.INLINE_MISSION_MODE == expected
-    finally:
-        monkeypatch.delenv("PACT_DISPATCH_INLINE_MISSION_MODE", raising=False)
-        importlib.reload(dispatch_gate)
 
 
 def test_warn_when_prompt_lacks_task_reference(tmp_path, monkeypatch, capsys):

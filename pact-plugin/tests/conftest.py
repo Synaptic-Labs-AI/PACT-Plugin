@@ -14,9 +14,11 @@ symbols); pytest-fixture-injected symbols would need a conftest
 re-export to be discoverable, but none are currently defined there.
 """
 
+import atexit
 import functools
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -43,13 +45,79 @@ if not os.environ.get("HF_HOME"):
         os.environ.get("XDG_CACHE_HOME", os.path.join(os.path.expanduser("~"), ".cache")),
         "huggingface",
     )
-_SESSION_HOME_DIR = tempfile.mkdtemp(prefix="pact-home-suite-")
+_CREATOR_PID = os.getpid()
+
+
+def _remove_own_dir(path):
+    """Remove a directory this process created. A process forked from this one
+    inherits the exit handler and must not remove its parent's directory."""
+    if os.getpid() == _CREATOR_PID:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def _process_temp_dir(prefix):
+    """A temporary directory this process removes when it exits. Each process
+    that loads this conftest (a serial session, an xdist controller and each of
+    its workers, a session that errors at collection) runs its exit handlers,
+    so none leaves its directory behind; a worker that crashes does."""
+    path = tempfile.mkdtemp(prefix=prefix)
+    atexit.register(_remove_own_dir, path)
+    return path
+
+
+_SESSION_HOME_DIR = _process_temp_dir("pact-home-suite-")
 os.makedirs(os.path.join(_SESSION_HOME_DIR, ".claude"))
 os.environ["HOME"] = _SESSION_HOME_DIR
 os.environ.pop("CLAUDE_CONFIG_DIR", None)
+# git reads its user config from $XDG_CONFIG_HOME/git/config as well as
+# ~/.gitconfig; without XDG_CONFIG_HOME it reads $HOME/.config/git/config,
+# which is inside the sandbox. The cache, data and state XDG directories are
+# left as inherited: they hold no git config, and the model-cache path above
+# is read from the inherited XDG_CACHE_HOME.
+os.environ.pop("XDG_CONFIG_HOME", None)
+# The sandbox HOME and the line above drop the operator's global git config;
+# this drops the machine's system file, the remaining git config a test or
+# child could read.
+# The suite's own git calls on the real checkout (tracked-file listings) then
+# rely on git's ownership check passing without a system safe.directory, which
+# holds wherever the checkout belongs to the user running the suite. Every
+# supported environment is that case: CI runs on the runner host, not in a
+# container (.github/workflows/tests.yml `runs-on: ubuntu-latest`, no
+# `container:`), and actions/checkout clones as the runner user and records
+# its own safe.directory in the global config, which the sandbox HOME already
+# drops; the Cursor cloud agent runs .cursor/install.sh in its workspace as
+# its own user (the script calls sudo for apt) and sets no safe.directory; a
+# developer runs the suite in their own clone. A checkout owned by another
+# uid, trusted only through /etc/gitconfig, is not a supported environment.
+os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
+
+# NO HYPOTHESIS EXAMPLE DATABASE, AND NO HYPOTHESIS STORAGE IN THE TREE.
+# Hypothesis otherwise saves failing examples under .hypothesis/ in the working
+# directory and replays them in later runs, so one run's outcome would depend on
+# what an earlier run left there. With the database off it still writes a
+# constants cache under the same directory, so its storage moves to the session
+# HOME; children inherit the variable.
+os.environ["HYPOTHESIS_STORAGE_DIRECTORY"] = os.path.join(_SESSION_HOME_DIR, ".hypothesis")
+try:
+    from hypothesis import settings as _hypothesis_settings
+except ImportError:
+    _hypothesis_settings = None
+else:
+    _hypothesis_settings.register_profile("pact-suite", database=None)
+    _hypothesis_settings.load_profile("pact-suite")
 
 # Add tests directory to path for helpers + fixtures module imports
 sys.path.insert(0, str(Path(__file__).parent))
+
+# NO GIT VARIABLE FROM THE SHELL REACHES A TEST'S GIT. Removed here, before any
+# test or hook module runs git, so the process, every xdist worker and every
+# child that inherits this environment find the repository, index and config
+# from their own directory, never from the shell that started the run. A test
+# that sets one itself (monkeypatch.setenv, its own env dict) still does.
+from helpers import is_git_redirecting_variable  # noqa: E402
+
+for _name in [name for name in os.environ if is_git_redirecting_variable(name)]:
+    del os.environ[_name]
 
 # Add hooks directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "hooks"))
@@ -71,7 +139,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "skills" / "pact-coding-st
 # Add plugin-level scripts to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-# The clock-shift census; tests/ is on sys.path from the insert above.
+# The clock-shift census; tests/ is on sys.path from the insert above. The
+# pytest-randomly seed gate and the HOME and child-pytest censuses run from
+# pact-plugin/conftest.py, which every session under pact-plugin/ loads.
 from clock_shift import clock_shift_census  # noqa: E402
 
 # Direct-import helpers for the CLAUDE.md redirect fixture below; tests/ is
@@ -81,6 +151,7 @@ from fixtures.claude_md_seed import seed_claude_md  # noqa: E402
 from fixtures.hf_cache import hf_cache_env  # noqa: E402
 from fixtures.root_guard import MARKER as _NON_ROOT_MARKER  # noqa: E402
 from fixtures.root_guard import non_root_skip_reason  # noqa: E402
+from fixtures.session_marker import remove_importer_markers  # noqa: E402
 
 # These copy names from shared modules at first import; loading them here keeps a test patch from being copied.
 # tests/test_conftest_import_guard.py derives which modules need a line here.
@@ -115,9 +186,7 @@ import validate_handoff  # noqa: E402, F401
 _MEMORY_DIR_ENV = "PACT_TEST_MEMORY_DIR"
 
 # Session-wide fallback store, created once and reused. See pytest_configure.
-_SESSION_MEMORY_DIR = os.path.join(
-    tempfile.mkdtemp(prefix="pact-memory-suite-"), "pact-memory"
-)
+_SESSION_MEMORY_DIR = os.path.join(_process_temp_dir("pact-memory-suite-"), "pact-memory")
 
 
 def pytest_configure(config):
@@ -212,6 +281,12 @@ def pytest_runtest_setup(item):
     reason = non_root_skip_reason()
     if reason:
         pytest.skip(reason)
+
+
+@pytest.hookimpl(optionalhook=True)
+def pytest_testnodedown(node, error):
+    """Collect the clock-shift census findings an xdist worker handed over."""
+    clock_shift_census.collect(node)
 
 
 def pytest_sessionfinish(session):
@@ -357,6 +432,25 @@ def _reset_specialist_registry_cache():
     dispatch_helpers._specialist_registry.cache_clear()
     yield
     dispatch_helpers._specialist_registry.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_merge_guard_git_caches():
+    """Clear ``merge_guard_common``'s two git lookups before and after every test.
+
+    ``_git_config_aliases`` and ``_git_commands`` memoize what git reports, keyed
+    on the cwd (None for the process's own directory) but not on
+    ``os.environ``, so without this the first test in a worker to read them fixes
+    the answer for every later test there, whatever git config those tests set.
+    """
+    import shared.merge_guard_common as merge_guard_common
+
+    caches = (merge_guard_common._git_config_aliases, merge_guard_common._git_commands)
+    for cache in caches:
+        cache.cache_clear()
+    yield
+    for cache in caches:
+        cache.cache_clear()
 
 
 @pytest.fixture(autouse=True)
@@ -862,6 +956,25 @@ def _scrub_session_id_from_test_env(monkeypatch):
     upgrade rather than a safety guarantee.
     """
     monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _refuse_a_marker_under_an_importer_session_id():
+    """Fail a test after which an importer session id's embedding marker exists.
+
+    A module constant from `fixtures.session_marker.importer_session_id()` is
+    bound once by every module that imports it, so a save that reaches
+    `maybe_embed_pending()` under it would leave a marker shared by every later
+    test in the process. The id is unique to this process, so the marker is
+    this process's own: remove it, then fail with the remedy.
+    """
+    yield
+    removed = remove_importer_markers()
+    assert not removed, (
+        f"a save reached the embedding marker under an importer session id "
+        f"({', '.join(str(path) for path in removed)}). Give the test its own "
+        f"session id with fixtures.session_marker.fresh_session_id."
+    )
 
 
 @pytest.fixture(autouse=True)

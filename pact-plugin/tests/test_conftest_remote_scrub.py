@@ -20,6 +20,7 @@ from pathlib import Path
 import pytest
 
 import shared.pact_context as pact_context
+from helpers import env_without_pytest_vars
 
 # Set only in the child run the parent starts; the child test is skipped in
 # every ordinary run.
@@ -41,7 +42,8 @@ def test_child_sees_the_variable_scrubbed():
 
 
 def test_scrub_removes_an_exported_cloud_signal():
-    env = dict(os.environ)
+    # No PYTEST_* name from the shell that runs the suite reaches the child.
+    env = env_without_pytest_vars()
     env["CLAUDE_CODE_REMOTE"] = "true"
     env[_CHILD_FLAG] = "1"
     result = subprocess.run(

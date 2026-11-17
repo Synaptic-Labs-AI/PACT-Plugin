@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 import handoff_ordering_gate as gate  # noqa: E402
+from fixtures.gate_reload import restored_env_and_reloaded
 
 TEAM = "test-team"
 LEAD = "PACT:pact-orchestrator"
@@ -897,14 +898,12 @@ class TestDispatchVarietyEnvKnobModes:
         ever stopped consulting the registry and hardcoded a mode, that row and
         the fallback rows could not both hold."""
         import importlib
-        monkeypatch.setenv("PACT_DISPATCH_VARIETY_MODE", env_value)
-        reloaded = importlib.reload(gate)
-        try:
+        # The helper puts the variable back as it was before the test (an
+        # ambient value included) and reloads, so sibling tests see it.
+        with restored_env_and_reloaded(("PACT_DISPATCH_VARIETY_MODE",), ("handoff_ordering_gate",)):
+            monkeypatch.setenv("PACT_DISPATCH_VARIETY_MODE", env_value)
+            reloaded = importlib.reload(gate)
             assert reloaded.DISPATCH_VARIETY_MODE == expected
-        finally:
-            # Restore the module's default-env resolution for sibling tests.
-            monkeypatch.delenv("PACT_DISPATCH_VARIETY_MODE", raising=False)
-            importlib.reload(gate)
 
     def test_deny_mode_fails_open_when_evaluation_raises(
         self, tmp_path, monkeypatch, pact_context, capsys,

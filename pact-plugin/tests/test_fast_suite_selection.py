@@ -19,7 +19,6 @@ Rows fall into three groups:
 import ast
 import importlib.util
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -27,6 +26,7 @@ from pathlib import Path
 import pytest
 
 import ci_contract
+from helpers import env_without_pytest_vars
 
 SELECTOR = Path("scripts") / "fast_suite_selection.py"
 
@@ -38,6 +38,7 @@ SELECTION_MACHINERY = (
     "scripts/fast_suite_exclusions.json",
     ".github/workflows/fast-tests.yml",
     "constraints-ci.txt",
+    "constraints-ci.in",
     "pyproject.toml",
 )
 # The exact ten discovery/isolation guards the manifest pins. The loader
@@ -47,7 +48,7 @@ GUARD_FILES = (
     "tests/test_import_hygiene.py",
     "tests/test_local_lint_parity.py",
     "tests/test_path_setup_pin.py",
-    "tests/test_suite_home_isolation.py",
+    "tests/test_session_home_sandbox.py",
     "tests/test_conftest_config_root_isolation.py",
     "tests/test_audit_protocol.py",
     "tests/test_memory_store_isolation.py",
@@ -218,6 +219,8 @@ class TestAddBacks:
          "selection-machinery"),
         ("constraints-pin", ("constraints-ci.txt",), "ok",
          "selection-machinery"),
+        ("constraints-input", ("constraints-ci.in",), "ok",
+         "selection-machinery"),
         ("pyproject-pin", ("pyproject.toml",), "ok", "selection-machinery"),
         # A changed conftest with no classification cannot be cleared.
         ("conftest-without-verdict", ("pact-plugin/tests/conftest.py",), "ok",
@@ -254,11 +257,12 @@ def test_changed_test_wins_over_changed_seam(core):
     assert result.added_back[0].reason == "changed_test"
 
 
-@pytest.mark.parametrize("pin", ["constraints-ci.txt", "pyproject.toml"])
+@pytest.mark.parametrize("pin", ["constraints-ci.txt", "constraints-ci.in", "pyproject.toml"])
 def test_the_dependency_pins_select_all_without_a_machinery_entry(core, pin):
     """The hard-coded pin rule fires on its own, not via the manifest list."""
     machinery = tuple(path for path in SELECTION_MACHINERY
-                      if path not in ("constraints-ci.txt", "pyproject.toml"))
+                      if path not in ("constraints-ci.txt", "constraints-ci.in",
+                                      "pyproject.toml"))
     result = _select(core, changed=[pin], machinery=machinery)
     assert result.select_all_reason == "selection-machinery"
     _assert_select_all(result)
@@ -1116,6 +1120,740 @@ class TestImportClosure:
         assert "hooks/shared/unrelated.py" not in closure
         assert "tests/helper.py" not in closure
 
+    def test_a_bare_package_marker_literal_is_not_a_script(self, core, tmp_path):
+        """`package / "__init__.py"` names the marker of whatever directory
+        it is joined to. Resolved bare against every root it would match
+        each root's own __init__.py, and with it that package's imports."""
+        plugin = self._rig(tmp_path)
+        _write(plugin / "hooks" / "__init__.py", "import shared.direct\n")
+        _write(plugin / "tests" / "test_c.py",
+               "from pathlib import Path\n\n"
+               "def marker(package):\n"
+               "    return Path(package) / \"__init__.py\"\n")
+        closure = core.import_closure(plugin, ["tests/test_c.py"])
+        assert closure == {"tests/test_c.py"}, sorted(closure)
+
+    def test_a_package_marker_path_with_its_directory_is_followed(
+            self, core, tmp_path):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "hooks" / "__init__.py", "import shared.direct\n")
+        _write(plugin / "tests" / "test_d.py",
+               'MARKER = "hooks/__init__.py"\n')
+        closure = core.import_closure(plugin, ["tests/test_d.py"])
+        assert {"hooks/__init__.py", "hooks/shared/direct.py"} <= closure
+
+    # A read of an anchored directory joined to file literals names that file,
+    # whether the base is a module name, an inline expression, a local, or a
+    # parameter an in-module call binds to an anchor. The package marker the
+    # join ends at is the file; a bare "__init__.py" literal alone is not.
+    @pytest.mark.parametrize("source", [
+        'from pathlib import Path\n'
+        'SHARED = Path(__file__).resolve().parent.parent / "hooks" / "shared"\n'
+        'TEXT = (SHARED / "__init__.py").read_text()\n',
+        'from pathlib import Path\n'
+        'TEXT = (Path(__file__).parent.parent / "hooks" / "shared" / "__init__.py")'
+        '.read_text()\n',
+        'from pathlib import Path\n'
+        'def read():\n'
+        '    shared = Path(__file__).parent.parent / "hooks" / "shared"\n'
+        '    return shared.joinpath("__init__.py").read_text()\n',
+        'import os\n'
+        'PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "hooks",\n'
+        '                    "shared", "__init__.py")\n',
+        'from pathlib import Path\n'
+        'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n'
+        'def guarded(conftest, hooks_root):\n'
+        '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+        'def test_real():\n'
+        '    guarded(None, HOOKS)\n'
+        'def test_rig(tmp_path):\n'
+        '    guarded(None, tmp_path)\n',
+        'from pathlib import Path\n'
+        'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n'
+        'def guarded(conftest, hooks_root):\n'
+        '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+        'def test_real():\n'
+        '    guarded(conftest=None, hooks_root=HOOKS)\n',
+    ], ids=["module-name", "inline", "local-joinpath", "os-path-join",
+            "parameter-positional", "parameter-keyword"])
+    def test_an_anchored_join_to_a_file_names_that_file(self, core, tmp_path, source):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "tests" / "test_e.py", source)
+        closure = core.import_closure(plugin, ["tests/test_e.py"])
+        assert {"hooks/shared/__init__.py", "hooks/shared/eager.py"} <= closure
+
+    @pytest.mark.parametrize("source", [
+        'def read(tmp_path):\n'
+        '    return (tmp_path / "hooks" / "shared" / "__init__.py").read_text()\n',
+        'from pathlib import Path\n'
+        'def guarded(hooks_root):\n'
+        '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+        'def test_rig(tmp_path):\n'
+        '    guarded(tmp_path)\n',
+        'from pathlib import Path\n'
+        'BASE = Path("/somewhere/else")\n'
+        'TEXT = (BASE / "hooks" / "shared" / "__init__.py").read_text()\n',
+        'from pathlib import Path\n'
+        'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n'
+        'def guarded(conftest, hooks_root):\n'
+        '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+        'def test_wrong_slot():\n'
+        '    guarded(HOOKS, None)\n',
+    ], ids=["tmp-path", "unbound-parameter", "absolute-base", "anchor-in-other-slot"])
+    def test_a_join_onto_a_base_that_is_not_anchored_names_nothing(
+            self, core, tmp_path, source):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "tests" / "test_f.py", source)
+        closure = core.import_closure(plugin, ["tests/test_f.py"])
+        assert "hooks/shared/__init__.py" not in closure, sorted(closure)
+
+    # Names resolve per scope, as Python resolves them. Each row reads
+    # hooks/shared/__init__.py through `base`, which in the scope of the read
+    # is bound only in a way that names no anchored path, though `base` is
+    # anchored outside that scope.
+    _HOOKS = ('from pathlib import Path\n'
+              'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n')
+    _BASE = _HOOKS + 'base = HOOKS / "shared"\n'
+    _READ = '    return (base / "__init__.py").read_text()\n'
+
+    @pytest.mark.parametrize("source", [
+        _HOOKS
+        + 'def a():\n'
+          '    base = HOOKS / "shared"\n'
+          '    return base\n'
+          'def b(tmp_path):\n'
+          '    base = tmp_path\n'
+        + _READ,
+        _BASE + 'def b(tmp_path):\n    base = tmp_path\n' + _READ,
+        _BASE + 'def b(cm):\n    with cm as base:\n        pass\n' + _READ,
+        _BASE + 'def b():\n    try:\n        pass\n    except OSError as base:\n'
+                '        pass\n' + _READ,
+        _BASE + 'def b():\n    import base\n' + _READ,
+        _BASE + 'def b():\n    del base\n' + _READ,
+        _BASE + 'def b(tmp_path):\n    if (base := tmp_path):\n        pass\n' + _READ,
+        _BASE + 'def b(value):\n    match value:\n        case base:\n            pass\n'
+        + _READ,
+        _BASE + 'def b(value):\n    match value:\n        case [*base]:\n            pass\n'
+        + _READ,
+        _BASE + 'def b(value):\n    match value:\n        case {**base}:\n'
+                '            pass\n' + _READ,
+        _BASE + 'def b():\n    def base():\n        pass\n' + _READ,
+        _BASE + 'def b():\n    class base:\n        pass\n' + _READ,
+        _BASE + 'def b():\n    type base = int\n' + _READ,
+        _BASE + 'def b(pair):\n    base, _ = pair\n' + _READ,
+        _BASE + 'def b(paths):\n    for base in paths:\n        pass\n' + _READ,
+        _BASE + 'def b():\n    base: Path\n' + _READ,
+        _BASE + 'def b():\n    base += "x"\n' + _READ,
+        _BASE + 'READ = lambda base: (base / "__init__.py").read_text()\n',
+        _BASE + 'def b(paths):\n'
+                '    return [(base / "__init__.py").read_text() for base in paths]\n',
+        _HOOKS
+        + 'class Rig:\n'
+          '    base = HOOKS / "shared"\n'
+          '    def read(self):\n'
+          '        return (base / "__init__.py").read_text()\n',
+        _HOOKS
+        + 'class Rig:\n'
+          '    base = HOOKS / "shared"\n'
+          '    FILES = [(base / "__init__.py") for _ in (1,)]\n',
+        _BASE + 'class Rig:\n'
+                '    base = None\n'
+                '    TEXT = (base / "__init__.py").read_text()\n',
+    ], ids=["other-functions-local", "unanchored-assignment", "with", "except",
+            "import", "del", "walrus", "match-capture", "match-star", "match-rest",
+            "nested-def", "nested-class", "type-alias", "unpacking", "loop-target",
+            "bare-annotation", "other-augmented-operator", "lambda-parameter",
+            "comprehension-target", "class-name-in-method",
+            "class-name-in-comprehension", "class-read-after-rebinding"])
+    def test_a_name_not_anchored_in_the_scope_of_its_read_names_nothing(
+            self, core, tmp_path, source):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "tests" / "test_h.py", source)
+        closure = core.import_closure(plugin, ["tests/test_h.py"])
+        assert "hooks/shared/__init__.py" not in closure, sorted(closure)
+
+    # A name names every anchored path any of its bindings names, and a
+    # parameter every path a call or default gives it, however many hops.
+    @pytest.mark.parametrize("source", [
+        _HOOKS
+        + 'def outer():\n'
+          '    base = HOOKS / "shared"\n'
+          '    def inner():\n'
+          '        return (base / "__init__.py").read_text()\n'
+          '    return inner\n',
+        _HOOKS
+        + 'BASE = HOOKS / "shared"\n'
+          'def outer(tmp_path):\n'
+          '    BASE = tmp_path\n'
+          '    def inner():\n'
+          '        global BASE\n'
+          '        return (BASE / "__init__.py").read_text()\n'
+          '    return inner, BASE\n',
+        _HOOKS
+        + 'class Rig:\n'
+          '    base = HOOKS / "shared"\n'
+          '    TEXT = (base / "__init__.py").read_text()\n',
+        _HOOKS
+        + 'class Rig:\n'
+          '    base = HOOKS / "shared"\n'
+          '    FILES = [path for path in [base / "__init__.py"]]\n',
+        _HOOKS
+        + 'def b():\n'
+          '    base = HOOKS / "other"\n'
+          '    base = HOOKS / "shared"\n'
+        + _READ,
+        _HOOKS
+        + 'def b(tmp_path):\n'
+          '    base = HOOKS / "shared"\n'
+          '    base = tmp_path\n'
+        + _READ,
+        _HOOKS
+        + 'def b():\n'
+          '    base = HOOKS\n'
+          '    base /= "shared"\n'
+        + _READ,
+        _HOOKS
+        + 'def b():\n'
+          '    base = HOOKS\n'
+          '    base = base / "shared"\n'
+        + _READ,
+        _HOOKS
+        + 'def b():\n'
+          '    if (base := HOOKS / "shared"):\n'
+          '        pass\n'
+        + _READ,
+        _HOOKS
+        + 'def b():\n'
+          '    [(base := HOOKS / "shared") for _ in (1,)]\n'
+        + _READ,
+        _HOOKS
+        + 'BASE = None\n'
+          'def setup():\n'
+          '    global BASE\n'
+          '    BASE = HOOKS / "shared"\n'
+          'TEXT = (BASE / "__init__.py").read_text()\n',
+        _HOOKS
+        + 'def outer():\n'
+          '    base = None\n'
+          '    def inner():\n'
+          '        nonlocal base\n'
+          '        base = HOOKS / "shared"\n'
+          '    inner()\n'
+        + _READ,
+        _BASE + 'def b():\n    base.name = None\n' + _READ,
+        _HOOKS
+        + 'def guarded(hooks_root, tmp_path):\n'
+          '    hooks_root = tmp_path\n'
+          '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+          'def test_real():\n'
+          '    guarded(HOOKS, None)\n',
+        _HOOKS
+        + 'def guarded(hooks_root, conftest=None):\n'
+          '    return (hooks_root / "shared" / "__init__.py").read_text()\n'
+          'def test_real():\n'
+          '    guarded(*(), HOOKS)\n',
+        _HOOKS
+        + 'def helper(base):\n'
+          '    return (base / "shared" / "__init__.py").read_text()\n'
+          'def read(root):\n'
+          '    return helper(root)\n'
+          'def test_real():\n'
+          '    read(HOOKS)\n',
+        _HOOKS
+        + 'def read(root):\n'
+          '    return (root / "shared" / "__init__.py").read_text()\n'
+          'def read(root):\n'
+          '    return None\n'
+          'def test_real():\n'
+          '    read(HOOKS)\n',
+        _HOOKS
+        + 'def read(root=HOOKS):\n'
+          '    return (root / "shared" / "__init__.py").read_text()\n',
+        _HOOKS
+        + 'def read(*, root=HOOKS):\n'
+          '    return (root / "shared" / "__init__.py").read_text()\n',
+        _HOOKS
+        + 'READ = lambda root: (root / "shared" / "__init__.py").read_text()\n'
+          'READ(HOOKS)\n',
+        _BASE + 'class Rig:\n'
+                '    TEXT = (base / "__init__.py").read_text()\n'
+                '    base = None\n',
+        _BASE + 'class Rig:\n'
+                '    base = base / "__init__.py"\n',
+        _HOOKS + 'base = HOOKS\n'
+                 'class Rig:\n'
+                 '    base /= "shared"\n'
+                 '    TEXT = (base / "__init__.py").read_text()\n',
+    ], ids=["enclosing-functions-local", "global-read", "class-body-read",
+            "class-comprehension-first-iterable", "conflicting-anchors",
+            "anchored-then-unanchored", "augmented-join", "self-reference",
+            "walrus", "comprehension-walrus", "global-assignment",
+            "nonlocal-assignment", "attribute-target-binds-nothing",
+            "rebound-parameter", "starred-argument", "two-hop-parameter",
+            "redefined-function", "default-value", "keyword-default",
+            "lambda-call", "class-read-before-rebinding", "class-first-binding-reads-it",
+            "class-augmented-first-binding"])
+    def test_a_name_anchored_in_the_scope_of_its_read_names_the_file(
+            self, core, tmp_path, source):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "tests" / "test_i.py", source)
+        closure = core.import_closure(plugin, ["tests/test_i.py"])
+        assert "hooks/shared/__init__.py" in closure, sorted(closure)
+
+    def test_a_joined_path_must_name_an_existing_py_file(self, core, tmp_path):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "hooks" / "data.json", "{}\n")
+        _write(plugin / "tests" / "test_j.py",
+               self._HOOKS
+               + 'A = (HOOKS / "shared" / "not_there.py").read_text()\n'
+                 'B = (HOOKS / "data.json").read_text()\n')
+        closure = core.import_closure(plugin, ["tests/test_j.py"])
+        assert closure == {"tests/test_j.py"}, sorted(closure)
+
+    @pytest.mark.parametrize("module, read", [
+        ("tests/test_conftest_import_guard.py", "hooks/shared/__init__.py"),
+        ("tests/test_import_bar_cause_presence.py", "scripts/memory_repair/__init__.py"),
+    ])
+    def test_the_real_joined_reads_are_in_their_modules_closures(self, core, module, read):
+        """The two real modules that read a package marker through an anchored
+        join: one through a parameter its call binds to HOOKS, which only the
+        join modelling reaches; one through a module-level PACKAGE_DIR, whose
+        file its imports of the package also reach."""
+        plugin = ci_contract.require_root("the real plugin tree") / "pact-plugin"
+        assert read in core.import_closure(plugin, [module])
+
+    def test_an_anchored_join_to_a_test_file_or_conftest_is_no_edge(self, core, tmp_path):
+        plugin = self._rig(tmp_path)
+        _write(plugin / "tests" / "test_g.py",
+               'from pathlib import Path\n'
+               'ROOT = Path(__file__).resolve().parents[1]\n'
+               'A = (ROOT / "tests" / "helper.py").read_text()\n'
+               'B = (ROOT / "conftest.py").read_text()\n')
+        closure = core.import_closure(plugin, ["tests/test_g.py"])
+        assert "tests/helper.py" not in closure and "conftest.py" not in closure
+        assert "hooks/shared/unrelated.py" not in closure
+
+
+class TestJoinPieces:
+    """What an anchored join's appended piece can be. The directory,
+    hooks/shared, is not an import root, so no whole-literal rule reaches
+    these files: only the join resolver does. Each row is
+    (source, the files it names, whether it records an unproven site)."""
+
+    _HEAD = ('import os\n'
+             'from pathlib import Path\n'
+             'SHARED = Path(__file__).resolve().parents[1] / "hooks" / "shared"\n')
+    _BOTH = ["hooks/shared/direct.py", "hooks/shared/eager.py"]
+
+    def _join(self, core, tmp_path, body):
+        plugin = tmp_path / "pact-plugin"
+        _write(plugin / "hooks" / "shared" / "direct.py", "value = 1\n")
+        _write(plugin / "hooks" / "shared" / "eager.py", "thing = 1\n")
+        source = self._HEAD + body
+        _write(plugin / "tests" / "test_j.py", source)
+        files, sites = core._anchored_join_files(ast.parse(source), "tests/test_j.py", {},
+                                                 plugin)
+        return sorted(path.relative_to(plugin).as_posix() for path in files), sites
+
+    @pytest.mark.parametrize("body,named", [
+        ('for name in ("direct.py", "eager.py"):\n    (SHARED / name).read_text()\n',
+         _BOTH),
+        ('for name in ["direct.py", "eager.py"]:\n    SHARED.joinpath(name).read_text()\n',
+         _BOTH),
+        ('T = [os.path.join(SHARED, n) for n in ("direct.py", "eager.py")]\n', _BOTH),
+        ('NAMES = ("direct.py", "eager.py")\n'
+         'def test_x():\n    for name in NAMES:\n        (SHARED / name).read_text()\n',
+         _BOTH),
+        ('for folder, name in (("shared", "direct.py"),):\n'
+         '    (SHARED.parent / folder / name).read_text()\n', ["hooks/shared/direct.py"]),
+        ('NAME = "direct.py"\nT = (SHARED / NAME).read_text()\n',
+         ["hooks/shared/direct.py"]),
+        ('T = (SHARED / f"direct.py").read_text()\n', ["hooks/shared/direct.py"]),
+        ('NAMES: tuple = ("direct.py",)\n'
+         'for name in NAMES:\n    (SHARED / name).read_text()\n', ["hooks/shared/direct.py"]),
+        ('class Rows:\n    NAMES = ("direct.py",)\n'
+         '    FILES = [(SHARED / n).read_text() for n in NAMES]\n',
+         ["hooks/shared/direct.py"]),
+        ('T = os.path.join(SHARED, os.pardir, "shared", "direct.py")\n',
+         ["hooks/shared/direct.py"]),
+        ('T = os.path.join(SHARED, os.curdir, "direct.py")\n', ["hooks/shared/direct.py"]),
+    ], ids=["loop-tuple", "loop-list-joinpath", "comprehension-os-path-join",
+            "loop-over-module-constant", "loop-rows-unpacked",
+            "module-constant-name", "f-string-without-placeholder",
+            "loop-over-annotated-module-constant", "loop-over-class-body-constant",
+            "os-pardir-piece", "os-curdir-piece"])
+    def test_a_piece_bound_only_to_string_literals_names_its_files(
+            self, core, tmp_path, body, named):
+        assert self._join(core, tmp_path, body) == (named, [])
+
+    @pytest.mark.parametrize("body", [
+        'def pick():\n    return "direct.py"\nT = (SHARED / pick()).read_text()\n',
+        'n = "direct"\nT = (SHARED / f"{n}.py").read_text()\n',
+        'def read(name):\n    return (SHARED / name).read_text()\nread("direct.py")\n',
+        'name = "direct.py"\ndef other(name):\n    return name\n'
+        'T = (SHARED / name).read_text()\n',
+        'def pick():\n    return "eager.py"\nname = "direct.py"\nname = pick()\n'
+        'T = (SHARED / name).read_text()\n',
+        'NAMES = ("direct.py",)\nNAMES = ("eager.py",)\n'
+        'for name in NAMES:\n    (SHARED / name).read_text()\n',
+        'PARTS = ("direct.py",)\nT = os.path.join(SHARED, *PARTS)\n',
+        'T = (SHARED / "nested" / str(1)).read_text()\n',
+    ], ids=["call-result", "f-string-with-placeholder", "parameter",
+            "name-also-a-parameter", "name-also-assigned-a-call",
+            "module-constant-bound-twice", "starred-pieces",
+            "call-after-a-literal"])
+    def test_a_piece_it_cannot_read_names_nothing_and_records_nothing(
+            self, core, tmp_path, body):
+        """The docstring's stated gap. Marking these joins unproven makes an
+        exclusion broad whose closure loads a production module that loads
+        hook files by a computed name, so a reach review stops clearing it."""
+        assert self._join(core, tmp_path, body) == ([], [])
+
+    @pytest.mark.parametrize("body,named,why", [
+        ('T = Path(SHARED, "direct.py").read_text()\n', [], "Path() of an anchored path"),
+        ('T = (SHARED / "eager.py").with_name("direct.py").read_text()\n',
+         ["hooks/shared/eager.py"], "with_name() of an anchored path"),
+        ('T = (SHARED / "direct.txt").with_suffix(".py").read_text()\n', [],
+         "with_suffix() of an anchored path"),
+        ('T = (SHARED / "direct.txt").with_stem("eager").read_text()\n', [],
+         "with_stem() of an anchored path"),
+        ('from pathlib import PurePath\nT = PurePath(SHARED, "direct.py")\n', [],
+         "PurePath() of an anchored path"),
+        ('import pathlib\nT = pathlib.PurePosixPath(SHARED, "direct.py")\n', [],
+         "PurePosixPath() of an anchored path"),
+        ('from pathlib import PosixPath\nT = PosixPath(SHARED, "direct.py")\n', [],
+         "PosixPath() of an anchored path"),
+    ], ids=["path-call-with-parts", "with-name", "with-suffix", "with-stem",
+            "pure-path-call-with-parts", "module-pure-posix-path-call-with-parts",
+            "posix-path-call-with-parts"])
+    def test_a_path_rebuilt_from_an_anchored_one_records_an_unproven_site(
+            self, core, tmp_path, body, named, why):
+        """MUTANT: these calls are left as forms that name nothing. Each would
+        read a file the resolver cannot name (or names the wrong one), so the
+        module is unproven instead of silently under-selected."""
+        files, sites = self._join(core, tmp_path, body)
+        assert files == named
+        assert len(sites) == 1 and why in sites[0], sites
+
+    @pytest.mark.parametrize("body", [
+        'T = Path(SHARED).read_text()\n',
+        'T = Path("/elsewhere", "direct.py").with_name("x.py").read_text()\n',
+        'def test_x(tmp_path):\n    (tmp_path / "a.txt").with_suffix(".py").read_text()\n',
+    ], ids=["path-call-one-argument", "unanchored-path-call", "unanchored-with-suffix"])
+    def test_a_rebuilt_path_that_is_not_anchored_records_nothing(self, core, tmp_path, body):
+        assert self._join(core, tmp_path, body) == ([], [])
+
+    @pytest.mark.parametrize("body,named", [
+        ('NAMES = ("eager.py",)\ndef read(NAMES):\n'
+         '    for name in NAMES:\n        (SHARED / name).read_text()\n'
+         'read(("direct.py",))\n', ["hooks/shared/eager.py"]),
+        ('NAMES = ("eager.py",)\nclass Rows:\n    NAMES = ("direct.py",)\n'
+         '    FILES = [(SHARED / n).read_text() for n in NAMES]\n', []),
+        ('class One:\n    NAMES = ("eager.py",)\nclass Two:\n    NAMES = ("direct.py",)\n'
+         '    FILES = [(SHARED / n).read_text() for n in NAMES]\n', []),
+    ], ids=["parameter-shadows-a-module-table", "class-table-shadows-a-module-table",
+            "two-class-tables-of-one-name"])
+    def test_a_piece_iterating_a_table_that_depends_on_scope_records_an_unproven_site(
+            self, core, tmp_path, body, named):
+        """MUTANT: the module-wide string reading is used as if it were right.
+        The loop reads a table the scope picks (a parameter, or a class-body
+        binding beside another one), so the module-wide reading names the
+        wrong file or none, and the read is recorded unproven, never dropped."""
+        files, sites = self._join(core, tmp_path, body)
+        assert files == named
+        assert len(sites) == 1 and "iterates a name whose table depends on scope" in sites[0], (
+            sites)
+
+    @pytest.mark.parametrize("body", [
+        'NAMES = ("eager.py",)\ndef read(NAMES):\n    return NAMES\n'
+        'for name in NAMES:\n    print(name)\n',
+        'NAMES = ("eager.py",)\nclass Rows:\n    NAMES = ("direct.py",)\n'
+        'T = (SHARED / "direct.py").read_text()\n',
+    ], ids=["shadowed-table-not-joined", "join-of-a-literal-beside-a-shadowed-table"])
+    def test_a_scope_dependent_table_no_join_reads_records_nothing(self, core, tmp_path, body):
+        files, sites = self._join(core, tmp_path, body)
+        assert sites == []
+
+    @pytest.mark.parametrize("body,why", [
+        ('def read(*roots):\n    return [(r / "direct.py") for r in roots]\nread(SHARED)\n',
+         "anchored argument into *roots"),
+        ('def read(first, *roots):\n    return roots\nread("x", SHARED)\n',
+         "anchored argument into *roots"),
+        ('def read(**kw):\n    return kw\nread(root=SHARED)\n',
+         "anchored argument into **kw"),
+    ], ids=["into-star-args", "past-the-named-slots", "into-star-star-kwargs"])
+    def test_an_anchored_argument_into_a_catch_all_parameter_records_an_unproven_site(
+            self, core, tmp_path, body, why):
+        """MUTANT: the argument is dropped with no note. The def reads its
+        catch-all parameter by index or key, which the resolver does not follow,
+        so a file it joins there would go unseen."""
+        files, sites = self._join(core, tmp_path, body)
+        assert files == []
+        assert len(sites) == 1 and why in sites[0], sites
+
+    _READ_ONE = 'def read(root):\n    return (root / "direct.py").read_text()\n'
+    _READ_ALL = 'def read(*roots):\n    return [(r / "direct.py").read_text() for r in roots]\n'
+
+    @pytest.mark.parametrize("body,why", [
+        (_READ_ALL + 'read(*[SHARED])\n', "unpacked by *"),
+        (_READ_ONE + 'read(*(SHARED,))\n', "unpacked by *"),
+        (_READ_ONE + 'ROOTS = (SHARED,)\nread(*ROOTS)\n', "unpacked by *"),
+        (_READ_ONE + 'ROOTS: list = [str(SHARED)]\nread(*ROOTS)\n', "unpacked by *"),
+        (_READ_ALL + 'def forward(roots):\n    return read(*roots)\nforward([SHARED])\n',
+         "unpacked by *"),
+        (_READ_ALL + 'def roots():\n    return [SHARED]\nread(*roots())\n', "unpacked by *"),
+        (_READ_ONE + 'read(**{"root": SHARED})\n', "unpacked by **"),
+        (_READ_ONE + 'KW = dict(root=SHARED)\nread(**KW)\n', "unpacked by **"),
+        (_READ_ONE + 'read(*[f"{SHARED}"])\n', "unpacked by *"),
+    ], ids=["list-display-into-star-args", "tuple-display-into-a-named-slot",
+            "module-tuple-name", "annotated-list-of-str", "parameter-filled-with-a-list",
+            "def-returning-a-list", "dict-display", "dict-call-name", "f-string"])
+    def test_an_unpacked_argument_that_may_hold_an_anchor_records_an_unproven_site(
+            self, core, tmp_path, body, why):
+        """MUTANT: an unpacked argument is skipped with no note. The def then
+        reads an anchored path the resolver never saw, so a joined file would
+        go unseen while the module stays confined."""
+        files, sites = self._join(core, tmp_path, body)
+        assert files == []
+        assert len(sites) == 1 and why in sites[0], sites
+
+    # Each form that builds a container or hands one on, with the text it
+    # unpacks (`*` into read(*roots), `**` into read(root)).
+    _CONTAINER_FORMS = {
+        "list-comprehension": "*[r for r in (SHARED,)]",
+        "set-comprehension": "*{r for r in (SHARED,)}",
+        "generator-expression": "*(r for r in (SHARED,))",
+        "comprehension-element-joined": '*[SHARED / n for n in ("a",)]',
+        "dict-comprehension-value": '**{k: SHARED for k in ("root",)}',
+        "dict-comprehension-key": "*{r: 1 for r in (SHARED,)}",
+        "dict-display-key": "*{SHARED: 1}",
+        "copy": "*[SHARED].copy()",
+        "keys": "*dict([(SHARED, 1)]).keys()",
+        "values": "*dict(root=SHARED).values()",
+        "items": "*dict(root=SHARED).items()",
+        "get": '*dict(root=[SHARED]).get("root")',
+        "pop": '*dict(root=[SHARED]).pop("root")',
+        "iter": "*iter([SHARED])",
+        "next": "*next(iter([[SHARED]]))",
+        "filter": "*filter(None, [SHARED])",
+        "zip": "*zip([SHARED])",
+        "enumerate": "*enumerate([SHARED])",
+        "chain": "*itertools.chain([SHARED])",
+        "chain-from-iterable": "*itertools.chain.from_iterable([[SHARED]])",
+        "fromkeys": "*dict.fromkeys([SHARED])",
+        "deque": "*collections.deque([SHARED])",
+        "ordered-dict": "**collections.OrderedDict(root=SHARED)",
+        "chain-map": '**collections.ChainMap({"root": SHARED})',
+    }
+    # Each method that puts its arguments into the container it is called on.
+    _MUTATIONS = {
+        "append": "ROOTS = []\nROOTS.append(SHARED)\n",
+        "extend": "ROOTS = []\nROOTS.extend([SHARED])\n",
+        "insert": "ROOTS = []\nROOTS.insert(0, SHARED)\n",
+        "add": "ROOTS = set()\nROOTS.add(SHARED)\n",
+        "update": "ROOTS = set()\nROOTS.update([SHARED])\n",
+        "setdefault": "ROOTS = {}\nROOTS.setdefault(SHARED, 1)\n",
+        "appendleft": "ROOTS = collections.deque()\nROOTS.appendleft(SHARED)\n",
+        "extendleft": "ROOTS = collections.deque()\nROOTS.extendleft([SHARED])\n",
+        "through-a-subscript": ('ROOTS = {"a": []}\nROOTS["a"].append(SHARED)\n'
+                                'ROOTS = ROOTS["a"]\n'),
+    }
+
+    @pytest.mark.parametrize("form", list(_CONTAINER_FORMS), ids=list(_CONTAINER_FORMS))
+    def test_a_container_built_or_handed_on_with_an_anchor_records_an_unproven_site(
+            self, core, tmp_path, form):
+        """MUTANT: the form is not read as holding what it builds from, so its
+        unpack records nothing and a joined file goes unseen."""
+        unpacked = self._CONTAINER_FORMS[form]
+        reader = self._READ_ONE if unpacked.startswith("**") else self._READ_ALL
+        body = "import collections\nimport itertools\n" + reader + f"read({unpacked})\n"
+        files, sites = self._join(core, tmp_path, body)
+        assert files == []
+        why = "unpacked by **" if unpacked.startswith("**") else "unpacked by *"
+        assert len(sites) == 1 and why in sites[0], sites
+
+    @pytest.mark.parametrize("form", list(_MUTATIONS), ids=list(_MUTATIONS))
+    def test_a_container_filled_by_a_method_records_an_unproven_site(
+            self, core, tmp_path, form):
+        """MUTANT: the method call is not read as binding its receiver to its
+        arguments, so the filled container unpacks with no note."""
+        body = ("import collections\n" + self._READ_ALL + self._MUTATIONS[form]
+                + "read(*ROOTS)\n")
+        files, sites = self._join(core, tmp_path, body)
+        assert files == []
+        assert len(sites) == 1 and "unpacked by *" in sites[0], sites
+
+    @pytest.mark.parametrize("unpacked", [
+        "*[*(SHARED,)]", "*([] + [SHARED])", "*([SHARED] * 2)", "*([] or [SHARED])",
+        "*(x := [SHARED])", "*([SHARED] if x else [])",
+    ], ids=["starred-item", "concatenation", "repetition", "boolean-operator", "walrus",
+            "conditional"])
+    def test_an_operator_over_a_container_with_an_anchor_records_an_unproven_site(
+            self, core, tmp_path, unpacked):
+        """These forms were counted before comprehensions were; the rows keep
+        each one counted. MUTANT: drop the operand branch and they record
+        nothing."""
+        body = "x = 1\n" + self._READ_ALL + f"read({unpacked})\n"
+        files, sites = self._join(core, tmp_path, body)
+        assert files == []
+        assert len(sites) == 1 and "unpacked by *" in sites[0], sites
+
+    @pytest.mark.parametrize("body", [
+        _READ_ALL + 'read(*["/elsewhere"])\n',
+        _READ_ONE + 'ARGS = ("/elsewhere",)\nread(*ARGS)\n',
+        _READ_ONE + 'read(**{"root": "/elsewhere"})\n',
+        'print(*[SHARED])\n',
+        _READ_ONE + 'TEXT = (SHARED / "direct.py").read_text()\nread(*[TEXT])\n',
+        _READ_ALL + 'read(*[1 for r in (SHARED,)])\n',
+        _READ_ALL + 'read(*map(str, [SHARED]))\n',
+        'import sys\n' + _READ_ALL + 'sys.path.append(str(SHARED))\nread(*sys.path)\n',
+    ], ids=["display-without-an-anchor", "name-without-an-anchor",
+            "dict-without-an-anchor", "into-a-function-from-elsewhere",
+            "a-file-read-result", "comprehension-whose-element-holds-none",
+            "map-is-left-out", "a-container-of-an-imported-module"])
+    def test_an_unpacked_argument_that_holds_no_anchor_records_nothing(
+            self, core, tmp_path, body):
+        files, sites = self._join(core, tmp_path, body)
+        assert not any("unpacked" in site for site in sites), sites
+
+    @pytest.mark.parametrize("body,named", [
+        ('def read(root, *rest):\n    return (root / "direct.py").read_text()\n'
+         'read(SHARED)\n', ["hooks/shared/direct.py"]),
+        ('def read(*roots):\n    return roots\nread("x")\n', []),
+        ('def read(**kw):\n    return kw\nread(root="x")\n', []),
+    ], ids=["anchored-into-a-named-slot", "unanchored-into-star-args",
+            "unanchored-into-star-star-kwargs"])
+    def test_a_catch_all_parameter_without_an_anchored_argument_records_nothing(
+            self, core, tmp_path, body, named):
+        assert self._join(core, tmp_path, body) == (named, [])
+
+    def test_string_names_outside_an_anchored_expression_do_not_count_as_readings(
+            self, core, tmp_path):
+        """9 x 9 string readings exceed the readings limit only if counted."""
+        nine = ", ".join(f'"{letter}"' for letter in "abcdefghi")
+        body = (f"for a in ({nine}):\n    for b in ({nine}):\n"
+                '        T = "-".join([a, b])\n')
+        assert 9 * 9 > core._JOIN_READINGS
+        assert self._join(core, tmp_path, body) == ([], [])
+
+    def test_a_piece_on_a_base_it_cannot_anchor_names_nothing_and_records_nothing(
+            self, core, tmp_path):
+        body = ('def test_x(tmp_path):\n    for name in ("direct.py",):\n'
+                '        (tmp_path / name).read_text()\n')
+        assert self._join(core, tmp_path, body) == ([], [])
+
+
+def _over_the_join_limits(core, kind, over=True):
+    """A module that reaches one of the join resolver's limits (or, with
+    over=False, stops one short of it), and the unproven site it records."""
+    head = ('from pathlib import Path\n'
+            'HOOKS = Path(__file__).resolve().parents[1] / "hooks"\n')
+    if kind in ("readings", "readings-no-py"):
+        calls = core._JOIN_READINGS + (1 if over else 0)
+        leaf = "x.py" if kind == "readings" else "x.json"
+        return (head + f'def read(root):\n    return root / "{leaf}"\n'
+                + "".join(f'read(HOOKS / "d{n}")\n' for n in range(calls)),
+                "join readings over")
+    if kind == "passes":
+        # Each hop takes one pass; the last pass must see no change.
+        hops = core._JOIN_PASSES - (1 if over else 2)
+        body = "".join(f"def f{n}(p):\n    return f{n + 1}(p)\n" for n in range(hops))
+        return (head + body + f'def f{hops}(p):\n    return p / "x.py"\n'
+                'f0(HOOKS)\n', "join parameters not settled")
+    tail = '    c = a / "x"\n' if over else '    c = HOOKS\n'
+    return (head + 'def b():\n    a = HOOKS\n' + tail + '    a = c\n'
+            '    return a / "y.py"\n', "join bindings not settled")
+
+
+class TestJoinLimits:
+    """A module whose joined-path reads reach the resolver's limits is
+    unproven, so every exclusion that loads it comes back on any change."""
+
+    @pytest.mark.parametrize("kind", ["readings", "readings-no-py", "passes", "bindings"])
+    def test_a_module_at_a_limit_records_an_unproven_site(self, core, tmp_path, kind):
+        source, why = _over_the_join_limits(core, kind)
+        sites = _classify(core, tmp_path, source)
+        assert any(why in site for site in sites), sites
+
+    @pytest.mark.parametrize("kind", ["readings", "readings-no-py", "passes", "bindings"])
+    def test_a_module_short_of_a_limit_records_none(self, core, tmp_path, kind):
+        source, why = _over_the_join_limits(core, kind, over=False)
+        sites = _classify(core, tmp_path, source)
+        assert not any(why in site for site in sites), sites
+
+    def test_the_last_hop_short_of_the_pass_limit_still_names_its_file(
+            self, core, tmp_path):
+        source, _ = _over_the_join_limits(core, "passes", over=False)
+        sites = _classify(core, tmp_path, source,
+                          extra={"hooks/x.py": "VALUE = 1\n"})
+        closure = core.import_closure(tmp_path / "repo" / "pact-plugin",
+                                      ["tests/test_probe.py"])
+        assert "hooks/x.py" in closure and not sites, (sorted(closure), sites)
+
+    def _select(self, core, tmp_path, source):
+        repo, plugin, _ = _git_rig(tmp_path)
+        _write(plugin / "hooks" / "unrelated.py", "VALUE = 1\n")
+        (plugin / "tests" / "test_slow.py").write_text(source, encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "rig")
+        base = _git(repo, "rev-parse", "HEAD")
+        (plugin / "hooks" / "unrelated.py").write_text("VALUE = 2\n", encoding="utf-8")
+        _git(repo, "commit", "-q", "-am", "change")
+        manifest = _facts_manifest(core)
+        changed = ["pact-plugin/hooks/unrelated.py"]
+        facts = core.gather_facts(repo, manifest, changed, base)
+        return core.select(core.discover(repo), manifest, changed, "ok", facts)
+
+    @pytest.mark.parametrize("kind", ["readings", "passes", "bindings"])
+    def test_an_exclusion_at_a_limit_comes_back_on_an_unrelated_change(
+            self, core, tmp_path, kind):
+        source, _ = _over_the_join_limits(core, kind)
+        result = self._select(core, tmp_path, source)
+        assert _reasons(result) == [("tests/test_slow.py", "unproven_reach")]
+
+    @pytest.mark.parametrize("kind", ["readings", "passes", "bindings"])
+    def test_an_exclusion_short_of_a_limit_stays_out(self, core, tmp_path, kind):
+        source, _ = _over_the_join_limits(core, kind, over=False)
+        result = self._select(core, tmp_path, source)
+        assert result.added_back == (), _reasons(result)
+
+
+class TestDeletedJoinedPath:
+    """A file an excluded test reads only through an anchored join, in a
+    directory no import root or whole literal reaches, re-selects the test
+    when the change edits it and when it deletes it."""
+
+    _READER = ('from pathlib import Path\n'
+               'SHARED = Path(__file__).resolve().parents[1] / "hooks" / "shared"\n'
+               'def test_reads():\n'
+               '    assert (SHARED / "joined_only.py").read_text()\n')
+
+    def _select(self, core, tmp_path, delete):
+        repo, plugin, _ = _git_rig(tmp_path)
+        target = plugin / "hooks" / "shared" / "joined_only.py"
+        _write(target, "VALUE = 1\n")
+        (plugin / "tests" / "test_slow.py").write_text(self._READER, encoding="utf-8")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "-q", "-m", "rig")
+        base = _git(repo, "rev-parse", "HEAD")
+        if delete:
+            target.unlink()
+        else:
+            target.write_text("VALUE = 2\n", encoding="utf-8")
+        _git(repo, "commit", "-q", "-am", "change")
+        manifest = _facts_manifest(core)
+        changed = ["pact-plugin/hooks/shared/joined_only.py"]
+        facts = core.gather_facts(repo, manifest, changed, base)
+        return core.select(core.discover(repo), manifest, changed, "ok", facts)
+
+    @pytest.mark.parametrize("delete", [False, True], ids=["edited", "deleted"])
+    def test_a_change_to_a_joined_path_reselects_its_reader(self, core, tmp_path, delete):
+        """MUTANT: a joined path that is no file in the head tree is dropped.
+        The deleted row then leaves the test out, and the full suite fails it
+        with FileNotFoundError."""
+        result = self._select(core, tmp_path, delete)
+        assert ("tests/test_slow.py", "closure") in _reasons(result), _reasons(result)
+
 
 class TestScanIndex:
     """What one module contributes to its exclusions' views."""
@@ -1511,8 +2249,9 @@ class TestRunnerArtifactDestinations:
         return root / "scripts" / "run_fast_suite.py"
 
     def _env(self, workspace):
-        env = {key: value for key, value in os.environ.items()
-               if key != "PYTEST_ADDOPTS"}
+        # No PYTEST_* name from the shell that runs the suite reaches the runner
+        # or the pytest it starts.
+        env = env_without_pytest_vars()
         env["GITHUB_WORKSPACE"] = str(workspace)
         return env
 

@@ -18,7 +18,7 @@ COVERED, and this list is the scope:
   clause labels, no backticks inside it, and every placeholder it uses
   defined in the placeholder list (and every defined placeholder used);
   the {base} and {head} definitions (one base for every round);
-  the bound on what a re-check appends;
+  the bar on adding to the prompt, with the re-check by resume only;
 - each prompt clause's content, bound to its own label line: ARTIFACT's
   diff instruction and its bar on PR and commit-message surfaces; AVOID's
   named paths and stores; CHANNELS' messaging, task-tool and pact-memory
@@ -304,7 +304,6 @@ ONCE_RULES = (
     ("Each round gets that one fresh dispatch at most", "the per-round dispatch bound"),
     ("The status row carries no severity", "the did-not-run row's routing"),
     ("Send it no message other than a HALT or the re-check message", "the lead's message bar"),
-    ("when the record holds no valid first-round cold report", "the first-round fallback in a re-review"),
     ("whichever report raised it", "the re-check list's scope"),
     ("ends in exactly one disposition", "the disposition rule"),
     ("verified invalid, when you find", "the verified-invalid disposition"),
@@ -318,9 +317,13 @@ ONCE_RULES = (
     ('"Run one more verify-only re-review round", described as', "the question's re-review option"),
     ("with every placeholder value it was dispatched with", "the full placeholder record at spawn"),
     ("in the changed code at `{head}`", "the evidence location for verified invalid"),
-    ("resume its subagent once in the same round", "the same-round re-check after a first-round fallback"),
-    ("even when the list is empty", "the no-skip rule"),
-    ("send it instead as a fresh cold dispatch", "the fresh re-check after imPACT corrections"),
+    ("resume its subagent once in the same round", "the one same-round re-check after the round's first-round review"),
+    ("In each verify-only re-review, dispatch the cold prompt as a first-round review", "the re-review's unconditional first-round dispatch"),
+    ("taken from the most recent line that changed that placeholder", "the per-placeholder use of corrected values in the re-review's first-round dispatch"),
+    ("was written by the run itself", "the run-made change rule in the run receipt"),
+    ("Decide each reproduced path on its own", "the per-path decision in the run receipt"),
+    ("A same-round re-check resume that returns no report", "the re-check resume's exclusion from the no-report rule"),
+    ("For any test result you report, with or without a status change", "the general per-test comparison with a merge-base clone"),
     ("or another reason, stated", "the REPORT reason set"),
     ("for any reason, or none, other than", "the blocker trigger's reason test"),
     ("routes it to a tracked GitHub issue there", "the tracked-issue decline"),
@@ -330,10 +333,8 @@ ONCE_RULES = (
     ("Cold findings count under the **Failed cycle** test", "the cold failed-cycle rule"),
     ("in the same parallel block as the warm reviewers", "the same-block spawn rule"),
     ("placeholder values `/PACT:imPACT` corrects", "the imPACT-correction record"),
-    ("a lead line of corrected placeholder values", "the resume test on corrections"),
     ("greedy-fix exclusion summary excludes it", "the greedy-fix decline"),
     ("as a status row with no severity, which step 4 does not route", "the verified-invalid status row"),
-    ("a resume other than a same-round re-check", "the retry exemption for the same-round re-check"),
     ("However many findings choose it, run one such round", "the one-round bound on re-review answers"),
     ("filling each slot in angle brackets from that finding in the record", "the question's slot-filling rule"),
     ("the valid first-round report is the round's end state instead", "the same-round re-check fallback"),
@@ -391,10 +392,31 @@ RECHECK_VALIDITY = "A re-check report is valid only with"
 # form ('Superseded', 'restarts', 'ancestors') is caught too. Bare 'next
 # round' is deliberately absent: the lane legitimately says what the next
 # round does.
+# A pointer that defers an artifact's definition: one of six verbs
+# (described, defined, given, built, explained, shown) followed by below,
+# next or later, or "see below". It does not ban a forward reference to a
+# rule or a check ("the merge-base check below", "the rules below"): a rule
+# may be named before it is stated, an artifact may not be used before it
+# is defined. This is the one definition: test_skills_structure.py imports
+# it for the teammate run receipt and pins that it keeps no copy.
+FORWARD_POINTER = re.compile(
+    r"\b(?:described|defined|given|built|explained|shown)\s+(?:below|next|later)\b|\bsee below\b",
+    re.IGNORECASE)
 RETIRED_LANE_STEMS = (
     "supersed",
     "restart",
-    "merge-base",
+    # A re-check base that moved off {base}. Only these spellings of that
+    # wording are retired; the bare command name `git merge-base` is not,
+    # because the run receipt's control clone legitimately runs
+    # `git merge-base {base} {head}`. A moving base worded any other way is
+    # not caught here.
+    "merge-base of",
+    "merge base of",
+    "re-check base",
+    "moved base",
+    "new base",
+    "newer base",
+    "base moved",
     "ancestor",
     "latest round",
     "previous cold",
@@ -412,6 +434,21 @@ RETIRED_LANE_STEMS = (
     "once it has handled that reviewer",
     # The release end that left a replaced reviewer holding forever.
     "calls for no replacement",
+    # A fresh subagent sent the re-check message never read the PR, so it
+    # reads only the listed hunks; a re-check goes only by resume.
+    "followed by the re-check message",
+    "for a re-check, the re-check message",
+    "appends the re-check message",
+    # The per-hunk trigger that chose between a first round and a re-check
+    # alone; every verify-only round now runs a first-round review.
+    "needs a first-round review",
+    "a hunk you cannot attribute to one of those fixes",
+    "only records that fix in the release notes",
+    "even when the list is empty",
+    "a resume other than a same-round re-check",
+    # An archive export has no .git, so tests that need a checkout skip there
+    # and a run-made path may not reappear; the receipt names only a clone.
+    "git archive",
 )
 # Each validity list ends at its consequence clause.
 VALIDITY_ENDS = ("; otherwise",)
@@ -574,9 +611,9 @@ class TestPromptShape:
 
     def test_re_check_append_is_bounded(self):
         before = _split_section()[0]
-        assert "a re-check also appends the re-check message (see **Re-check**), and nothing else" in before, (
-            "the cold lane no longer bounds what a re-check dispatch adds to "
-            "the verbatim prompt"
+        assert "Change only the placeholders, and nothing else; the re-check message goes only by resume (see **Re-check**)" in before, (
+            "the cold lane no longer bars adding anything to the verbatim "
+            "prompt, or no longer routes the re-check message by resume only"
         )
 
     def test_prompt_has_no_backticks(self):
@@ -738,10 +775,169 @@ class TestOperationalFactsClause:
         ("Do not look for run instructions in the avoided paths", (
          "the bar on recovering run instructions from the avoided paths")),
         ("untracked docs/", "the path-convention fact (untracked docs/ is normal)"),
+        ("When a re-run or the check below needs it, build the {head} clone: a clone of the worktree's local repository, made from its path and never from a remote URL, with its remote removed, under {scratch_dir}, checked out at {head}", (
+         "the instruction to build the {head} clone, once, before both branches that use it")),
+        ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone, never in the worktree, and do not report the worktree run: report that clone's run in its place", (
+         "the moved-HEAD branch: one re-run in the {head} clone, never the worktree")),
+        ("If the {head} clone cannot be built or the command cannot be run in it, on any run that needs it, report the result as unattributable because the worktree is not the {head} tree, naming HEAD or the paths that differ, not as a finding about the diff", (
+         "unattributable only when the {head} clone cannot be built or run, on any run that needs it")),
+        ("If only the status differs, re-run the same command with the same interpreter, by absolute path, in the {head} clone. Compare its status before and after", (
+         "the status-only re-run in the {head} clone, same interpreter by absolute path")),
+        ("After any run in the {head} clone, every path that differs between the {head} clone's status before and after its run is a reproduced path, and a path that changed in the worktree but does not change in the {head} clone came from outside the run and is not a finding about the diff", (
+         "one reproduced-path rule for every run in the {head} clone: every path the clone's run changes")),
+        ("If there is no reproduced path, the {head} clone's run stands for the diff. If there is any, run the same command the same way in a second such clone, checked out at the commit git merge-base {base} {head} prints in the worktree", (
+         "the base-control run at the merge base, and no reproduced path leaves the clone's run standing")),
+        ("Decide each reproduced path on its own. A reproduced path that also changes between that second clone's status before and after its run is a pre-existing defect: name it as pre-existing under the open questions, with the path and the command that wrote it, not as a finding about the diff", (
+         "a base-reproduced write reported as pre-existing, not as a finding")),
+        ("When every reproduced path is pre-existing, the {head} clone's run stands for the diff", (
+         "the {head} clone's run as the result when every reproduced path is pre-existing")),
+        ("For any test result you report, with or without a status change, a failing test is pre-existing only when the same test also fails, with the same command and interpreter, in a clone of the worktree's local repository, made from its path and never from a remote URL, with its remote removed, checked out at the commit git merge-base {base} {head} prints in the worktree: name each such test, with the command, under the open questions; any other failing test is a finding about the diff", (
+         "the general per-test comparison with a merge-base clone, for every reported result")),
+        ("A reproduced path that does not change in that second clone's run was written by the run itself, and it is a finding about the diff, whatever the other paths are", (
+         "the change-only write reported as a finding about the diff, whatever the other paths are")),
     ])
     def test_operational_facts_token_present(self, token, lost):
         assert token in _clause("OPERATIONAL FACTS"), (
             f"the cold prompt's OPERATIONAL FACTS clause lost {lost} ({token!r})"
+        )
+
+    @pytest.mark.parametrize("text, banned", [
+        ("build the clone described below", True),
+        ("the clone defined later", True),
+        ("see below for the clone", True),
+        ("the merge-base check below", False),
+        ("by the rules below for a run in that clone", False),
+    ])
+    def test_forward_pointer_scope(self, text, banned):
+        # The pattern bans the deferring forms its comment lists and nothing else.
+        assert bool(FORWARD_POINTER.search(text)) is banned, (
+            f"FORWARD_POINTER {'missed' if banned else 'banned'} {text!r}; "
+            "update the comment's list with the pattern"
+        )
+
+    def test_clones_are_made_from_the_local_repository(self):
+        # A clone of the remote may lack the reviewed commit; every clone the
+        # run receipt builds names the worktree's local repository.
+        clause = _clause("OPERATIONAL FACTS")
+        source = "a clone of the worktree's local repository, made from its path and never from a remote URL"
+        assert clause.count(source) == 2, (
+            "the cold prompt's {head} clone and merge-base clone must both be made "
+            f"from the worktree's local repository ({source!r})"
+        )
+        assert "a clone of the repository with its remote removed" not in clause, (
+            "the cold prompt names a clone without its source"
+        )
+
+    def test_tested_tree_is_checked_against_head_before_the_first_run(self):
+        # Before and after a run can match while the worktree sits at another
+        # commit or carries edits, so the tree is checked against {head} first.
+        clause = _clause("OPERATIONAL FACTS")
+        check = ("If, before the first test command you report, git rev-parse HEAD does not print {head} "
+                 "or git status --porcelain --untracked-files=all shows anything other than an untracked docs/ directory, "
+                 "run every test command you report in the {head} clone instead, with the same interpreter, by absolute path, "
+                 "never in the worktree, and judge each such run by the rules below for a run in that clone.")
+        assert check in clause, "the cold prompt no longer checks the tested tree against {head} before the first run"
+        build = clause.find("build the {head} clone: a clone of the worktree's local repository")
+        at = clause.find(check)
+        moved = clause.find("If HEAD differs")
+        assert -1 not in (build, at, moved) and build < at < moved, (
+            "the tested-tree check must follow the {head} clone's definition and precede the moved-HEAD branch "
+            f"(positions build={build}, check={at}, moved={moved})"
+        )
+        assert "An untracked docs/ directory is normal" in clause, (
+            "the tested-tree check's docs/ allowance must match the prompt's own docs/ sentence"
+        )
+
+    def test_unbuildable_clone_exit_follows_both_branches(self):
+        clause = _clause("OPERATIONAL FACTS")
+        moved = clause.find("If HEAD differs")
+        status_only = clause.find("If only the status differs")
+        exit_ = clause.find("If the {head} clone cannot be built")
+        assert -1 not in (moved, status_only, exit_) and moved < status_only < exit_, (
+            "the cold prompt's unattributable exit must follow both the moved-HEAD "
+            "and the status-only branches "
+            f"(positions moved={moved}, status-only={status_only}, exit={exit_})"
+        )
+        assert "cannot be built" not in clause[moved:status_only], (
+            "the cold prompt's unattributable exit sits inside the moved-HEAD "
+            "branch, where the status-only re-run does not reach it"
+        )
+
+    def test_one_reproduced_path_rule_follows_both_branches(self):
+        # Every run in the {head} clone (a re-run or an up-front clone run)
+        # shares one rule for which paths are reproduced, placed
+        # after both branches and the exit, so neither branch carries its own
+        # rule that the other can override.
+        clause = _clause("OPERATIONAL FACTS")
+        moved = clause.find("If HEAD differs")
+        exit_ = clause.find("If the {head} clone cannot be built")
+        shared = clause.find("After any run in the {head} clone, every path that differs")
+        decide = clause.find("Decide each reproduced path on its own")
+        assert -1 not in (moved, exit_, shared, decide) and moved < exit_ < shared < decide, (
+            "the cold prompt's reproduced-path rule must follow both branches "
+            "and the unattributable exit, before the per-path decision "
+            f"(positions moved={moved}, exit={exit_}, shared={shared}, decide={decide})"
+        )
+        branches = clause[moved:exit_]
+        for stray in ("reproduced path", "outside the run", "also change there", "stands for the diff"):
+            assert stray not in branches, (
+                "the cold prompt's re-run branches carry their own "
+                f"reproduced-path or outcome wording ({stray!r}); only the shared rule may"
+            )
+        assert clause.count("came from outside the run") == 1, (
+            "the cold prompt must say once, in the shared rule, which paths "
+            "came from outside the run"
+        )
+
+    def test_clone_rules_cover_every_run_in_the_clone(self):
+        # The up-front check sends runs to the {head} clone that are not
+        # re-runs, so the exit and the reproduced-path rule must name every
+        # run in the clone, not the two re-run branches only.
+        clause = _clause("OPERATIONAL FACTS")
+        for phrase in ("cannot be run in it, on any run that needs it, report the result as unattributable because the worktree is not the {head} tree",
+                       "After any run in the {head} clone, every path that differs"):
+            assert phrase in clause, (
+                f"the cold prompt's clone rules lost {phrase!r}"
+            )
+        for narrow in ("After either re-run", "after a moved HEAD or a status-only change alike"):
+            assert narrow not in clause, (
+                f"the cold prompt scopes a clone rule to re-runs only ({narrow!r}), "
+                "so a run the up-front check sends to the clone is not covered"
+            )
+
+    def test_pre_existing_decision_reads_the_merge_base_run(self):
+        # "Appears there" reads as "exists in that clone", and every tracked
+        # file exists in a merge-base checkout; only a change during that
+        # clone's own run makes a reproduced path pre-existing.
+        clause = _clause("OPERATIONAL FACTS")
+        decide = clause.find("Decide each reproduced path on its own")
+        end = clause.find("For any test result you report", decide)
+        assert -1 not in (decide, end), (
+            "the cold prompt's per-path decision or the failing-test rule after it is missing"
+        )
+        decision = clause[decide:end]
+        assert "appear" not in decision.lower(), (
+            "the cold prompt's per-path decision says a path 'appears' in the "
+            "merge-base clone; it must say the path changes during that clone's run"
+        )
+        for phrase in ("also changes between that second clone's status before and after its run",
+                       "does not change in that second clone's run"):
+            assert phrase in decision, (
+                f"the cold prompt's per-path decision lost {phrase!r}"
+            )
+
+    def test_head_clone_defined_before_first_use(self):
+        clause = _clause("OPERATIONAL FACTS")
+        define = clause.find("build the {head} clone: a clone of the worktree's local repository")
+        first_branch = clause.find("If HEAD differs")
+        assert define != -1 and first_branch != -1 and define < first_branch, (
+            "the cold prompt must define the {head} clone before the moved-HEAD "
+            "branch, the first branch that uses it"
+        )
+        pointer = FORWARD_POINTER.search(clause)
+        assert pointer is None, (
+            "the cold prompt points forward to a clone it has not defined yet: "
+            f"{pointer.group(0)!r}"
         )
 
     @pytest.mark.parametrize("token, lost", [
@@ -903,10 +1099,30 @@ class TestLifecycleOrder:
             f"the cold lane again uses {term!r} — machinery the lane dropped "
             f"(restart, supersession, a moving re-check base, round "
             f"bookkeeping, the re-check skip, the old append-at-return "
-            f"timing, and the stop valve that released on any imPACT outcome); "
+            f"timing, the stop valve that released on any imPACT outcome, and "
+            f"a fresh dispatch carrying the re-check message); "
             f"every round now reviews the whole PR with one retry, and a cold "
             f"report is held until every warm reviewer of its round is accepted "
             f"or stopped with TaskStop"
+        )
+
+    @pytest.mark.parametrize("text, retired", [
+        ("the commit git merge-base {base} {head} prints in the worktree", False),
+        ("the merge-base of the previous head", True),
+        ("the merge base of the last round", True),
+        ("the re-check base", True),
+        ("against the moved base", True),
+        ("against a new base", True),
+        ("a newer base than {base}", True),
+        ("when the base moved", True),
+    ])
+    def test_retired_stem_scope(self, text, retired):
+        # The command name stays usable; each listed moving-base spelling is
+        # refused, and the comment above says no other spelling is.
+        hit = any(term in text.lower() for term in RETIRED_LANE_STEMS)
+        assert hit is retired, (
+            f"RETIRED_LANE_STEMS {'missed' if retired else 'refused'} {text!r}; "
+            "update the comment's list with the stems"
         )
 
     def test_no_third_failure_term(self):
@@ -1095,12 +1311,14 @@ class TestLeadFacingRules:
          "the per-finding fields, bound with their quantifier")),
         ("Validity", "; otherwise it is not valid", (
          "the validity consequence — an incomplete report is not valid, and the next step handles it")),
-        ("No report or an invalid one", "When a cold dispatch, or a resume other than a same-round re-check (as **Re-check** says), returns no report or a report that is not valid, or such a resume is not possible, run one fresh cold dispatch", (
-         "the re-dispatch trigger, all three causes")),
+        ("No report or an invalid one", "When a first-round cold dispatch returns no report or a report that is not valid, run one fresh cold dispatch", (
+         "the re-dispatch trigger, scoped to a first-round dispatch")),
+        ("No report or an invalid one", "A same-round re-check resume that returns no report or a report that is not valid, or cannot be resumed, follows **Re-check** instead: the valid first-round report is the round's end state, with no fresh dispatch", (
+         "the re-check resume's exclusion from the fresh dispatch")),
         ("No report or an invalid one", "after any HALT and any /PACT:imPACT are resolved", (
          "the re-dispatch timing")),
-        ("No report or an invalid one", "with the placeholders as /PACT:imPACT corrected them and, for a re-check, the re-check message", (
-         "the re-dispatch's placeholders and message")),
+        ("No report or an invalid one", "as a first-round review with the placeholders as /PACT:imPACT corrected them; in a verify-only re-review it is the round's first-round review under **Re-check**, with that rule's one same-round re-check", (
+         "the re-dispatch's shape — a first-round review, never a fresh re-check")),
         ("No report or an invalid one", "Each round gets that one fresh dispatch at most", (
          "the per-round bound — no retry loop")),
         ("No report or an invalid one", "If it also returns no valid report, or /PACT:imPACT does not resolve the blocker, the cold lane did not run for this round", (
@@ -1148,7 +1366,7 @@ class TestLeadFacingRules:
          "the decline option's description")),
         ("Synthesis", '"Run one more verify-only re-review round", described as "Run one verify-only re-review round in which the cold re-check checks it."', (
          "the re-review option's description")),
-        ("Synthesis", "However many findings choose it, run one such round; it runs the cold re-check only, which lists every finding still without a disposition", (
+        ("Synthesis", "However many findings choose it, run one such round; it runs the cold lane only, per **Re-check**, whose re-check lists every finding still without a disposition", (
          "the one-round bound on re-review answers and its scope")),
         ("Synthesis", 'with the literal options "Decline it"', "the question's decline option"),
         ("Synthesis", '"Run one more verify-only re-review round"', "the question's re-review option"),
@@ -1166,14 +1384,12 @@ class TestLeadFacingRules:
         ("Remediation", "route its findings to warm fixers", "where its findings go"),
         ("Remediation", "Send it no message other than a HALT or the re-check message", (
          "the bar on any other message")),
-        ("Re-check", "when the record holds no valid first-round cold report, dispatch the cold prompt as a first-round review", (
-         "the first-round fallback in a re-review")),
-        ("Re-check", "when that review is valid and the record holds earlier findings with no disposition, resume its subagent once in the same round with the re-check message listing them, and that re-check's report is the round's end state", (
-         "the same-round re-check of earlier findings after the fallback")),
+        ("Re-check", "In each verify-only re-review, dispatch the cold prompt as a first-round review, with each placeholder value that a lead line of corrections in the record changed taken from the most recent line that changed that placeholder, except {base} and {head}, which follow their definitions", (
+         "the unconditional first-round dispatch, filled from the latest corrections, with base and head always fresh")),
+        ("Re-check", "when that review is valid and the record holds earlier findings with no disposition, resume its subagent once in the same round with the re-check message listing every one of them, whichever report raised it, and that re-check's report is the round's end state", (
+         "the one same-round re-check of every earlier undisposed finding")),
         ("Re-check", "if that re-check is not valid or not possible, the valid first-round report is the round's end state instead, with no fresh dispatch, and the earlier findings keep no disposition until the next round's re-check", (
          "the same-round re-check's fallback — the valid first round stands, no retry")),
-        ("Re-check", "Otherwise send the re-check message listing every cold finding in the record with no disposition, whichever report raised it, even when the list is empty", (
-         "the re-check list and the no-skip rule")),
         ("Re-check", "The re-check message is the paragraph below followed by the listed findings", (
          "the message composition — checklist plus findings")),
         ("Re-check", "copied verbatim from the record, never from synthesized rows", (
@@ -1189,8 +1405,6 @@ class TestLeadFacingRules:
         ("SendMessage to the agentId of the cold subagent that returned the most recent valid report", (
          "the resume target")),
         ("with the re-check message as the whole message", "the bar on adding anything to the resume"),
-        ("When the record holds a lead line of corrected placeholder values appended after that report, send it instead as a fresh cold dispatch: the cold prompt with the corrected placeholders, followed by the re-check message", (
-         "the fresh re-check after imPACT corrections")),
     ])
     def test_resume_paragraph_present(self, token, lost):
         region = _strip_ticks(_paragraph("Send the re-check message by resume"))
@@ -1306,8 +1520,12 @@ class TestOutsideSectionRules:
         ("pr", "takes the place of a teachback", "what stands in for the cold lane's teachback"),
         ("pr", "When a warm reviewer's findings need fixing", (
          "the warm scoping of reviewer-to-fixer reuse")),
-        ("pr", "Reuse the warm reviewer who found the issues; the cold reviewer re-checks its own findings", (
-         "the Verify-Only re-review routing")),
+        ("pr", "Warm: faster than the initial review; cold: a full first-round review each round, plus a re-check when **Re-check** calls for one", (
+         "the Verify-Only duration row: the cold lane's full first round each round")),
+        ("pr", "Warm: confirm each finding was addressed; cold: a first-round review, then one re-check by resume when that review is valid and earlier cold findings with no disposition remain, per **Re-check**", (
+         "the Verify-Only depth row: a cold first round every round, then the conditional re-check")),
+        ("pr", "Reuse the warm reviewer who found the issues; for the cold lane, dispatch a fresh cold subagent for the first-round review and resume that subagent for any re-check, per **Re-check**", (
+         "the Verify-Only re-review routing: a fresh cold subagent each round, resumed for any re-check")),
         ("pr", "and per open question in each first-round or re-check cold report,", (
          "the synthesis row for each cold open question")),
         ("pr", "every cold open question carries a disposition", (
@@ -1608,3 +1826,231 @@ class TestPersonaSites:
         assert "always" in lines[0], (
             f"the persona's cold reviewer bullet no longer says always: {lines[0]!r}"
         )
+
+
+class TestVerifyOnlyTableSplitsByLane:
+    """Every verify-only table row other than the header names the warm and
+    the cold lane, so no row reads as the cold lane's format or duty."""
+
+    @pytest.mark.parametrize("aspect", ["Scope", "Depth", "Format", "Duration"])
+    def test_row_names_both_lanes(self, aspect):
+        row = _table_row(_peer_review_text(), f"**{aspect}**", f"the verify-only {aspect} row")
+        cell = row.split("|")[2]
+        assert "Warm:" in cell and "cold:" in cell, (
+            f"the verify-only {aspect} row does not split warm from cold: {cell.strip()!r}"
+        )
+
+    def test_format_row_names_the_cold_report_formats(self):
+        row = _table_row(_peer_review_text(), "**Format**", "the verify-only Format row")
+        cell = row.split("|")[2]
+        cold = cell[cell.index("cold:"):]
+        assert "first-round report format" in cold and "RE-REVIEW CHECKLIST" in cold, (
+            "the verify-only Format row's cold side must name the first-round "
+            f"report format and the re-check's RE-REVIEW CHECKLIST: {cold!r}"
+        )
+
+
+class TestVerifyOnlyScopedToWarm:
+    """The two sentences that call a re-review verify-only and not a fresh
+    review must name the warm lane and point to the Cold Reviewer Lane, so
+    neither can be read as excusing the cold first-round review that every
+    verify-only round runs.
+
+    Any other sentence, diagram or fenced line of peer-review.md that makes
+    a verify-only claim about re-review must be scoped to the warm lane too.
+    The matcher judges these shapes only: ticks and bold are stripped, the
+    text is split on sentence ends, ";", newlines and table pipes, and a
+    sentence is a claim when it holds a re-review word (re-review, re-reviews,
+    re-reviewing, re-reviewed, rereview, or "re-run review", "re-run the
+    review" and "re-run the <word> review") and one claim token in either
+    order, case-insensitive. The claim tokens are: verify-only or verify only,
+    only verif..., verif... only, verif... followed by one or two words and
+    only ("verify fixes only"), limited to verif..., restricted to verif...,
+    nothing but or nothing more than verif..., just verif..., merely verif...,
+    and not a fresh or full review. A token directly followed by a re-review
+    word is the noun phrase ("verify-only re-review") and is not a claim. A
+    claim is scoped when "warm" sits directly before its re-review word, or
+    when "warm" appears earlier in the sentence than its claim token with no
+    "cold" between them.
+
+    What it does not see, each pinned by a row below, so that a matcher
+    change must update this list: a claim that names the review some other
+    way ("the follow-up review is verify-only"); a claim worded outside the
+    token list ("re-review checks only the fixes");
+    and a contrast that names warm without scoping to it ("Unlike the warm
+    lane, re-review is verify-only." passes). It also refuses two scoped
+    forms: a scope in another sentence, and "cold" between the scope and the
+    claim ("In the warm lane, unlike the cold one, re-review is verify-only.")."""
+
+    SITES = (
+        ("**Key rules**:", "warm re-review is verify-only (minimal scope), and the cold lane runs a full first-round review every round, per the Cold Reviewer Lane"),
+        ("After remediation fixes are applied,", "warm re-review is **verify-only** — not a fresh review. The cold lane still runs a full first-round review every round, per the Cold Reviewer Lane:"),
+    )
+
+    @pytest.mark.parametrize("lead, scoped", SITES)
+    def test_site_is_scoped_to_the_warm_lane(self, lead, scoped):
+        text = _peer_review_text()
+        lines = [line for line in text.splitlines() if line.startswith(lead)]
+        assert len(lines) == 1, f"expected one line starting {lead!r}, found {len(lines)}"
+        assert scoped in lines[0], (
+            f"the line starting {lead!r} no longer scopes verify-only to the "
+            f"warm lane with a pointer to the Cold Reviewer Lane ({scoped!r})"
+        )
+
+    def test_no_unscoped_verify_only_claim(self):
+        claims = _verify_only_claims(_peer_review_text())
+        assert len(claims) >= len(self.SITES), (
+            f"the claim matcher found {len(claims)} verify-only claims in "
+            f"peer-review.md, fewer than the {len(self.SITES)} scoped sites; "
+            "it no longer reads the file"
+        )
+        unscoped = [sentence for sentence, scoped in claims if not scoped]
+        assert not unscoped, (
+            "a sentence says re-review is verify-only without scoping it to "
+            f"the warm lane: {unscoped!r}"
+        )
+
+    @pytest.mark.parametrize("text", [
+        "Re-review is verify-only for both lanes.",
+        "Re-reviews are verify-only.",
+        "All re-review rounds stay verify-only.",
+        "├─ Cycle N: remediation tasks → re-review (verify-only) → check",
+        "Verify-only applies to every re-review.",
+        "Re-review is limited to verification.",
+        "Re-reviews only verify the fixes.",
+        "Re-review just verifies each finding.",
+        "Re-review is not a fresh review.",
+        "re-review is VERIFY ONLY.",
+        "Re-review is verify-only for warm and cold lanes.",
+        "In the warm and cold lanes, re-review is verify-only.",
+        "Re-run review to verify fixes only.",
+        "After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)",
+    ])
+    def test_matcher_flags_an_unscoped_claim(self, text):
+        claims = _verify_only_claims(text)
+        assert claims and not all(scoped for _, scoped in claims), (
+            f"the verify-only claim matcher did not flag {text!r}"
+        )
+
+    @pytest.mark.parametrize("text", [
+        "warm re-review is verify-only (minimal scope), and the cold lane runs a full first-round review every round, per the Cold Reviewer Lane;",
+        "After remediation fixes are applied, warm re-review is **verify-only** — not a fresh review.",
+        "├─ Cycle N: remediation tasks → re-review (warm: verify-only; cold: first-round) → check",
+        'This blocking finding has no disposition. Decline it, or run one more verify-only re-review round?", with the literal options "Decline it", described as "Record it as declined by you; it no longer holds merge readiness.", and "Run one more verify-only re-review round", described as "Run one verify-only re-review round in which the cold re-check checks it."',
+        "a remediation cycle fails when its verify-only re-review leaves a blocking finding open",
+        "In the warm lane, re-review is verify-only.",
+        "For warm reviewers, a re-review is limited to verification.",
+        "After all fixes complete, re-run the warm review to verify fixes only, and run the cold lane's first-round review, per the Cold Reviewer Lane (see Verify-Only Re-Review above)",
+    ])
+    def test_matcher_passes_a_scoped_claim_or_a_noun_use(self, text):
+        claims = _verify_only_claims(text)
+        assert all(scoped for _, scoped in claims), (
+            f"the verify-only claim matcher flagged {text!r}: {claims!r}"
+        )
+
+    @pytest.mark.parametrize("text", [
+        "The follow-up review is verify-only.",
+        "Re-review checks only the fixes.",
+        "Unlike the warm lane, re-review is verify-only.",
+    ])
+    def test_matcher_blind_spot_is_not_flagged(self, text):
+        # Each row is a claim the matcher does not see, as the class
+        # docstring lists; a matcher that starts flagging one must update it.
+        claims = _verify_only_claims(text)
+        assert all(scoped for _, scoped in claims), (
+            f"the verify-only claim matcher now flags the listed blind spot "
+            f"{text!r}; update the class docstring's list: {claims!r}"
+        )
+
+    @pytest.mark.parametrize("text", [
+        "Warm reviewers only. Re-review is verify-only.",
+        "In the warm lane, unlike the cold one, re-review is verify-only.",
+    ])
+    def test_matcher_refuses_a_listed_scoped_form(self, text):
+        # Each row is scoped prose the matcher refuses, as the class
+        # docstring lists; a matcher that starts passing one must update it.
+        claims = _verify_only_claims(text)
+        assert claims and not all(scoped for _, scoped in claims), (
+            f"the verify-only claim matcher now passes the listed refused "
+            f"form {text!r}; update the class docstring's list"
+        )
+
+
+_RE_REVIEW = r"(?:\bre-?review(?:s|ing|ed)?\b|\bre-?run (?:the )?(?:\w+ )?review\b)"
+_VERIFY_ONLY = (
+    r"(?:\bverify[- ]only\b|\bonly verif\w*|\bverif\w* only\b"
+    r"|\blimited to verif\w*|\brestricted to verif\w*"
+    r"|\bnothing (?:but|more than) verif\w*|\bjust verif\w*|\bmerely verif\w*"
+    r"|\bnot a (?:fresh|full) review\b|\bverif\w* (?:\w+ ){1,2}only\b)"
+)
+# A claim names re-review and one claim token, in either order; a token
+# directly followed by re-review is a noun phrase ("verify-only re-review"),
+# not a claim, and is skipped in both orders.
+_CLAIM_FORWARD = re.compile(
+    rf"(?P<rr>{_RE_REVIEW})(?:(?!{_VERIFY_ONLY}).)*?(?P<vo>{_VERIFY_ONLY})(?!\s+re-?review)",
+    re.IGNORECASE)
+_CLAIM_BACKWARD = re.compile(
+    rf"(?P<vo>{_VERIFY_ONLY})(?!\s+re-?review)(?:(?!{_VERIFY_ONLY}).)*?(?P<rr>{_RE_REVIEW})",
+    re.IGNORECASE)
+_SENTENCE_SPLIT = re.compile(r"(?<=[.;!?])\s+|\n|\|")
+_WARM_BEFORE = re.compile(r"\bwarm:?\s+$", re.IGNORECASE)
+_WARM = re.compile(r"\bwarm\b", re.IGNORECASE)
+_COLD = re.compile(r"\bcold\b", re.IGNORECASE)
+
+
+def _warm_scopes(sentence: str, claim_at: int) -> bool:
+    """Whether "warm" appears before `claim_at` with no "cold" after it and
+    before the claim."""
+    warms = [m.end() for m in _WARM.finditer(sentence, 0, claim_at)]
+    return bool(warms) and not _COLD.search(sentence, warms[-1], claim_at)
+
+
+def _verify_only_claims(text: str) -> list[tuple[str, bool]]:
+    """Each sentence that makes a verify-only claim about re-review, with
+    whether it is scoped to the warm lane, by the shapes and scope rule the
+    TestVerifyOnlyScopedToWarm docstring lists. Fenced and diagram lines are
+    read like prose."""
+    claims = []
+    for sentence in _SENTENCE_SPLIT.split(_strip_ticks(text).replace("**", "")):
+        for pattern in (_CLAIM_FORWARD, _CLAIM_BACKWARD):
+            for m in pattern.finditer(sentence):
+                scoped = bool(_WARM_BEFORE.search(sentence[:m.start("rr")])
+                              or _warm_scopes(sentence, m.start("vo")))
+                claims.append((sentence.strip(), scoped))
+    return claims
+
+
+class TestDuplicateColdFindingsMerge:
+    """A still-open cold finding that a later first-round report raises again
+    is synthesized as one finding: one merge line, one disposition, one
+    merge-readiness question and one re-check item carrying both texts,
+    resolved only when no report of its round raises it, with both verbatim
+    reports kept. The rule is lead-side; the cold prompt never sees it."""
+
+    SYNTHESIS_PHRASES = (
+        "raises a finding that shares a class with an earlier finding still without a disposition",
+        "one sentence names the behaviour that fails in both, as in **Failed cycle**",
+        "record one merge line, labelled as yours, naming both by report and file:line and stating that they are one finding",
+        "one disposition line covers both, the merge-readiness question asks about it once",
+        "the re-check lists it as one item carrying both findings' text, severity and file:line verbatim",
+        "It is resolved only when no report of the round that resolves it still raises either.",
+        "Leave both verbatim reports as they are.",
+    )
+
+    @pytest.mark.parametrize("phrase", SYNTHESIS_PHRASES)
+    def test_synthesis_merges_a_repeated_finding(self, phrase):
+        assert phrase in _paragraph("**Synthesis.**"), (
+            f"the cold lane's Synthesis rule lost the duplicate-finding merge ({phrase!r})"
+        )
+
+    def test_recheck_lists_a_merged_finding_as_one_item(self):
+        assert "List two findings a merge line joins as one item, marked as one finding, with both texts." in _paragraph("**Re-check.**"), (
+            "the cold lane's Re-check rule no longer lists two merged findings as one item with both texts"
+        )
+
+    def test_merge_rule_stays_out_of_the_cold_prompt(self):
+        for name, text in (("cold prompt", _prompt()),
+                           ("re-check message", _paragraph('"RE-REVIEW CHECKLIST:'))):
+            assert "merge line" not in text, (
+                f"the {name} names the lead's merge line; the cold reviewer must not see the synthesis rule"
+            )

@@ -689,6 +689,7 @@ def test_T10_subprocess_malformed_stdin_exits_zero_no_traceback(tmp_path):
     malformed-stdin path exits before any config read anyway.)"""
     env = {
         "PATH": __import__("os").environ.get("PATH", ""),
+        "HOME": __import__("os").environ["HOME"],
         "PYTHONPATH": str(_HOOKS_DIR),
         "CLAUDE_CONFIG_DIR": str(tmp_path / ".claude"),
     }
@@ -1136,6 +1137,7 @@ def test_subprocess_full_evaluate_path_exits_zero_no_traceback(tmp_path):
     )
     env = {
         "PATH": __import__("os").environ.get("PATH", ""),
+        "HOME": __import__("os").environ["HOME"],
         "PYTHONPATH": str(_HOOKS_DIR),
         "CLAUDE_CONFIG_DIR": str(claude),
     }

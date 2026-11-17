@@ -1,0 +1,485 @@
+"""
+Location: pact-plugin/tests/test_no_global_random_reseed.py
+Summary: Refuses test code that reseeds the global random generator.
+Used by: the suite.
+
+A test that reseeds Python's global `random` generator, or numpy's, leaves that
+state for every later test on the same worker. A test that needs a fixed
+sequence uses a local generator instead (`random.Random(seed)`).
+
+What it detects: a reference, called or not, to a global random-state setter
+(SETTERS), in any tracked .py under tests/, the plugin-root conftest.py, and any
+tracked test_*.py or conftest.py under skills/; an untracked file is not read. A
+name resolves through the imports of the scope that reads it (`import random as
+r`, `from random import seed`, `import numpy as np`): the reading function's
+own, then each enclosing function's, then the module's, with a class body's
+imports seen only in that class body, as Python resolves names. A def's
+decorators, default values and annotations, and a class's decorators, bases and
+keyword values, are read in the enclosing scope, where Python evaluates them; the
+star rule below treats them the same way. So are a type parameter's bound and
+default and a type alias's value (`def f[T: random.seed(1)](random)`, `type X =
+random.seed`), with the node's type parameter names shadowing a module of the
+same name; the star rule reads these as evaluated on first use, like a read
+inside a function. A parameter of the reading function or
+lambda, or of an enclosing one, shadows a module of the same name
+(`def f(random): random.seed(1)` is not refused, `def f(random=random.seed(1))`
+is). A name one scope
+imports more than once, or both imports and takes as a parameter, counts when
+any of those imports is a setter. A from-import of a setter counts too. The
+shared instances the module-level setters delegate to count as setters
+(`random._inst.seed`, `numpy.random.mtrand._rand.seed`). After `from random
+import *` or `from numpy.random import *`, a bare setter name (`seed(1)`)
+counts when the star import is the module-level binding of that name in force
+where it is read: the last one above the read for a read at module level, and
+the last one in the file for a read inside a function or lambda. A module-level
+def, class, import or assignment target rebinds the name. A method of a local
+generator (`random.Random(1).seed(2)`) is not a setter.
+
+Over-refused on purpose, in a module that star-imports random or numpy.random:
+a parameter or local variable named like a setter (`def f(seed): seed`), and a
+rebinding the rule does not read (one inside a class body, an `except ... as`
+clause, a `global` statement in a function, an assignment expression inside a
+comprehension, or a star import from another module) leave the name read as
+the setter. A local assignment or a comprehension variable that shadows a
+module name (`random = Random(1)` inside a function) is still read as the
+module. A comprehension's own loop variable is not a rebinding, and a read
+of it inside the comprehension is not a read of the setter; the comprehension's
+first iterable is read in the enclosing scope, before the variable exists.
+
+What it cannot see: a setter reached through getattr or a computed name; one
+whose module is bound other than by an import (an assignment such as
+`m = random`, or a parameter); a star import from a module that re-exports
+the setters (`from mylib import *` where mylib star-imports random); a setter
+outside SETTERS; and a reseed inside a non-test module or a library the tests
+import.
+"""
+import ast
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from fixtures.tracked_files import tracked_glob
+
+PLUGIN_ROOT = Path(__file__).resolve().parent.parent
+# The module-level setters, and the shared instances they delegate to:
+# random.seed is random._inst.seed, numpy.random.seed is numpy.random.mtrand.seed,
+# which seeds numpy.random.mtrand._rand.
+SETTERS = frozenset({
+    "random.seed", "random.setstate", "random._inst.seed", "random._inst.setstate",
+    "numpy.random.seed", "numpy.random.set_state",
+    "numpy.random.mtrand.seed", "numpy.random.mtrand.set_state",
+    "numpy.random.mtrand._rand.seed", "numpy.random.mtrand._rand.set_state",
+})
+
+
+def _test_files(plugin_root, known_member=None):
+    """The tracked test-side .py files the pin reads."""
+    files = tracked_glob(plugin_root, "tests/**/*.py", known_member=known_member)
+    files += tracked_glob(plugin_root, "conftest.py", allow_empty=True)
+    files += tracked_glob(plugin_root, "skills/**/test_*.py", allow_empty=True)
+    files += tracked_glob(plugin_root, "skills/**/conftest.py", allow_empty=True)
+    return sorted(set(files))
+
+
+SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)
+
+
+def _type_params(node):
+    """The PEP 695 type parameters of a def, class or type alias."""
+    return getattr(node, "type_params", None) or []
+
+
+def _type_param_parts(node):
+    """The bounds and defaults of a node's type parameters."""
+    return [part for param in _type_params(node)
+            for part in (getattr(param, "bound", None), getattr(param, "default_value", None))
+            if part is not None]
+
+
+def _evaluated_outside(node):
+    """(plain, typed, lazy): the parts of a def, lambda or class that Python
+    evaluates outside its body. Plain parts (decorators, default values) run in
+    the enclosing scope. Typed parts (annotations, a class's bases and keyword
+    values) and lazy parts (type parameter bounds and defaults, evaluated on
+    first use) run in the enclosing scope with the node's type parameters also
+    visible."""
+    if isinstance(node, ast.ClassDef):
+        return (list(node.decorator_list),
+                [*node.bases, *(word.value for word in node.keywords)],
+                _type_param_parts(node))
+    args = node.args
+    defaults = [*args.defaults, *(value for value in args.kw_defaults if value is not None)]
+    if isinstance(node, ast.Lambda):
+        return defaults, [], []
+    params = (*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg)
+    annotations = [arg.annotation for arg in params if arg is not None and arg.annotation is not None]
+    return ([*node.decorator_list, *defaults],
+            [*annotations, *([node.returns] if node.returns is not None else [])],
+            _type_param_parts(node))
+
+
+def _scoped_reads(tree):
+    """{id of a Name or Attribute read: dotted names it can stand for}, each name
+    resolved through the imports of the scope that reads it."""
+    imports = {}
+
+    def collect(node, scope):
+        for child in ast.iter_child_nodes(node):
+            bound = imports.setdefault(id(scope), {})
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                params = child.args
+                own = imports.setdefault(id(child), {})
+                for arg in (*params.posonlyargs, *params.args, *params.kwonlyargs,
+                            params.vararg, params.kwarg):
+                    if arg is not None:
+                        own.setdefault(arg.arg, set())
+            if isinstance(child, ast.Import):
+                for alias in child.names:
+                    top = alias.name.split(".")[0]
+                    bound.setdefault(alias.asname or top, set()).add(
+                        alias.name if alias.asname else top)
+            elif isinstance(child, ast.ImportFrom) and child.module and not child.level:
+                for alias in child.names:
+                    if alias.name != "*":
+                        bound.setdefault(alias.asname or alias.name, set()).add(
+                            f"{child.module}.{alias.name}")
+            collect(child, child if isinstance(child, SCOPES) else scope)
+
+    collect(tree, tree)
+
+    def lookup(name, chain):
+        for depth, scope in enumerate(reversed(chain)):
+            if depth and isinstance(scope, ast.ClassDef):
+                continue
+            if name in imports.get(id(scope), {}):
+                return imports[id(scope)][name]
+        return set()
+
+    def dotted(node, chain):
+        if isinstance(node, ast.Name):
+            return lookup(node.id, chain)
+        if isinstance(node, ast.Attribute):
+            return {f"{base}.{node.attr}" for base in dotted(node.value, chain)}
+        return set()
+
+    reads = {}
+    holders = []
+
+    def with_type_params(node, chain):
+        """`chain` plus a scope binding the node's type parameter names, where
+        a def, class or type alias has them."""
+        params = _type_params(node)
+        if not params:
+            return chain
+        holder = ast.Module(body=[], type_ignores=[])
+        holders.append(holder)
+        imports[id(holder)] = {param.name: set() for param in params}
+        return [*chain, holder]
+
+    def visit(node, chain, skip):
+        if isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Store):
+            reads[id(node)] = dotted(node, chain)
+        inner = chain
+        if isinstance(node, SCOPES):
+            plain, typed, lazy = _evaluated_outside(node)
+            typed_chain = with_type_params(node, chain)
+            for part in plain:
+                visit(part, chain, skip)
+            for part in (*typed, *lazy):
+                visit(part, typed_chain, skip)
+            skip = skip | {id(part) for part in (*plain, *typed, *lazy)}
+            inner = [*typed_chain, node]
+        elif isinstance(node, ast.TypeAlias):
+            typed_chain = with_type_params(node, chain)
+            parts = (node.value, *_type_param_parts(node))
+            for part in parts:
+                visit(part, typed_chain, skip)
+            skip = skip | {id(part) for part in parts}
+        for child in ast.iter_child_nodes(node):
+            if id(child) not in skip:
+                visit(child, inner, skip)
+
+    visit(tree, [tree], frozenset())
+    return reads
+
+
+COMPREHENSIONS = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+
+
+def _star_setters(tree):
+    """{id of a Name read: setter} for each read a star import of random or
+    numpy.random binds to a setter, by the module-level binding in force there.
+
+    Positions are (line, column), so two statements on one line are ordered too.
+    A binding takes effect where Python completes it: at the end of an import,
+    def, class or assignment statement (the right side of `seed = seed(1)` still
+    reads the earlier binding), and at the end of the name itself for a loop,
+    with or assignment-expression target."""
+    bindings, reads = {}, []
+
+    def end(node):
+        return (node.end_lineno, node.end_col_offset)
+
+    def bind(name, position, setter=None):
+        bindings.setdefault(name, []).append((position, setter))
+
+    def assigned_at_statement_end(stmt):
+        if isinstance(stmt, ast.Assign):
+            roots = stmt.targets
+        elif isinstance(stmt, (ast.AugAssign, ast.AnnAssign)):
+            roots = [stmt.target]
+        else:
+            return set()
+        return {id(name) for root in roots for name in ast.walk(root)}
+
+    def visit(node, deferred, own_scope, local, skip=frozenset(), stmt=None):
+        module_scope = not deferred and not own_scope
+        if isinstance(node, ast.stmt):
+            stmt = node
+        if module_scope and isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if alias.name != "*":
+                    dotted = f"{node.module}.{alias.name}"
+                    bind(alias.asname or alias.name, end(node), dotted if dotted in SETTERS else None)
+                elif not node.level:
+                    for setter in SETTERS:
+                        module, _, name = setter.rpartition(".")
+                        if module == node.module:
+                            bind(name, end(node), setter)
+        elif module_scope and isinstance(node, ast.Import):
+            for alias in node.names:
+                bind(alias.asname or alias.name.split(".")[0], end(node))
+        elif module_scope and isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bind(node.name, end(node))
+        elif isinstance(node, ast.Name):
+            if isinstance(node.ctx, ast.Load) and node.id not in local:
+                reads.append((node, deferred))
+            elif module_scope:
+                at_end = stmt is not None and id(node) in assigned_at_statement_end(stmt)
+                bind(node.id, end(stmt) if at_end else end(node))
+        inner_deferred = deferred or isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda))
+        inner_scope = own_scope or isinstance(node, (ast.ClassDef, *COMPREHENSIONS))
+        if isinstance(node, SCOPES):
+            # Decorators, defaults, annotations and class bases run where the
+            # def or class statement runs, not inside it; type parameter bounds
+            # and defaults run there too, but only when first used.
+            plain, typed, lazy = _evaluated_outside(node)
+            names = {param.name for param in _type_params(node)}
+            for part in plain:
+                visit(part, deferred, own_scope, local, skip)
+            for part in typed:
+                visit(part, deferred, own_scope, local | names, skip)
+            for part in lazy:
+                visit(part, True, own_scope, local | names, skip)
+            skip = skip | {id(part) for part in (*plain, *typed, *lazy)}
+            local = local | names
+        elif isinstance(node, ast.TypeAlias):
+            # A type alias's value and its parameters' bounds are evaluated on
+            # first use, with the alias's type parameters visible.
+            names = {param.name for param in _type_params(node)}
+            parts = (node.value, *_type_param_parts(node))
+            for part in parts:
+                visit(part, True, own_scope, local | names, skip)
+            skip = skip | {id(part) for part in parts}
+        if not isinstance(node, COMPREHENSIONS):
+            for child in ast.iter_child_nodes(node):
+                if id(child) not in skip:
+                    visit(child, inner_deferred, inner_scope, local, skip, stmt)
+            return
+        # The first iterable runs in the enclosing scope, before any loop
+        # variable exists; everything else runs inside the comprehension.
+        first = node.generators[0].iter
+        visit(first, deferred, own_scope, local, skip, stmt)
+        inner = local | {name.id for loop in node.generators
+                         for name in ast.walk(loop.target) if isinstance(name, ast.Name)}
+        for child in ast.iter_child_nodes(node):
+            parts = ast.iter_child_nodes(child) if isinstance(child, ast.comprehension) else [child]
+            for part in parts:
+                if part is not first and id(part) not in skip:
+                    visit(part, inner_deferred, inner_scope, inner, skip, stmt)
+
+    visit(tree, False, False, frozenset())
+    found = {}
+    for read, deferred in reads:
+        seen = sorted(bindings.get(read.id, []), key=lambda binding: binding[0])
+        position = (read.lineno, read.col_offset)
+        in_force = seen if deferred else [b for b in seen if b[0] < position]
+        if in_force and in_force[-1][1]:
+            found[id(read)] = in_force[-1][1]
+    return found
+
+
+def global_reseeds(source, where="<rig>"):
+    """'where:line: setter' for every global random-state setter `source` refers to.
+    `source` is module text, or a module tree already parsed."""
+    tree = source if isinstance(source, ast.AST) else ast.parse(source)
+    scoped = _scoped_reads(tree)
+    starred = _star_setters(tree)
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            found += [f"{where}:{node.lineno}: imports {node.module}.{alias.name}"
+                      for alias in node.names if f"{node.module}.{alias.name}" in SETTERS]
+        elif isinstance(node, (ast.Name, ast.Attribute)) and not isinstance(node.ctx, ast.Store):
+            setters = {starred[id(node)]} if id(node) in starred else scoped.get(id(node), set()) & SETTERS
+            found += [f"{where}:{node.lineno}: {setter}" for setter in sorted(setters)]
+    return found
+
+
+def reseed_findings(plugin_root, known_member=None):
+    """Every global reseed in the tracked test files under `plugin_root`."""
+    found = []
+    for path in _test_files(plugin_root, known_member):
+        found += global_reseeds(path.read_text(encoding="utf-8"),
+                                path.relative_to(plugin_root).as_posix())
+    return found
+
+
+def test_no_test_reseeds_the_global_random_generator():
+    assert len(_test_files(PLUGIN_ROOT, Path(__file__))) > 100
+    found = reseed_findings(PLUGIN_ROOT, Path(__file__))
+    assert found == [], (
+        "these reseed the global random generator and leave it for later tests; "
+        f"use a local random.Random(seed): {found}")
+
+
+def _git(*args, cwd):
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, timeout=60,
+                   env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1",
+                        "GIT_CONFIG_GLOBAL": os.devnull})
+
+
+def test_an_untracked_file_is_not_read(tmp_path):
+    """A scratch file beside the suite does not fail it, nor does a tracked file
+    deleted from the tree; a tracked file that reseeds does."""
+    root = tmp_path / "plugin"
+    (root / "tests").mkdir(parents=True)
+    (root / "tests" / "test_tracked.py").write_text("import random\nrandom.seed(1)\n")
+    (root / "tests" / "test_clean.py").write_text("import random\nrandom.Random(1)\n")
+    (root / "tests" / "test_gone.py").write_text("import random\nrandom.seed(2)\n")
+    _git("init", "-q", cwd=root)
+    _git("add", "tests", cwd=root)
+    (root / "tests" / "test_gone.py").unlink()
+    (root / "tests" / "zz_probe.py").write_text("import random\nrandom.seed(0)\n")
+    assert reseed_findings(root) == ["tests/test_tracked.py:2: random.seed"]
+
+
+@pytest.mark.parametrize("source", [
+    "import random\nrandom.seed(1136)\n",
+    "import random as r\nr.seed(1)\n",
+    "from random import seed\nseed(1)\n",
+    "from random import setstate as put\n",
+    "import random\nrandom.setstate(random.getstate())\n",
+    "import random\nreseed = random.seed\n",
+    "def f():\n    import random\n    random.seed(2)\n",
+    "import numpy as np\nnp.random.seed(0)\n",
+    "from numpy import random as npr\nnpr.seed(0)\n",
+    "import numpy.random\nnumpy.random.set_state(None)\n",
+    "from random import *\nseed(1)\n",
+    "from random import *\nsetstate(getstate())\n",
+    "from numpy.random import *\nseed(0)\n",
+    "from random import *\ndef f(seed):\n    return seed\n",
+    "from random import *\nseed(1)\ndef seed(x):\n    return x\n",
+    "def seed(x):\n    return x\nfrom random import *\nseed(1)\n",
+    "from random import *\ndef f():\n    seed(1)\n",
+    "from random import *\nfrom mylib import *\nseed(1)\n",
+    "from random import *\nclass C:\n    seed = print\n    seed(1)\n",
+    "from random import *\ntry:\n    pass\nexcept Exception as seed:\n    pass\nseed(1)\n",
+    "from random import *\ndef f():\n    global seed\n    seed = print\nf()\nseed(1)\n",
+    "from random import *\n[(seed := print) for _ in 'a']\nseed(1)\n",
+    "from random import *\n[seed for seed in range(2)]\nseed(1)\n",
+    "from random import *\nprint([0 for seed in range(2)], seed(1))\n",
+    "from random import *\nprint([0 for seed in seed(1)])\n",
+    "import random\ndef f():\n    import os as random\n    return random\nrandom.seed(1)\n",
+    "import random\nclass C:\n    import os as random\nrandom.seed(1)\n",
+    "import random\nclass C:\n    import os as random\n    def f(self):\n        random.seed(1)\n",
+    "import random\nrandom._inst.seed(1)\n",
+    "import random\nrandom._inst.setstate(random.getstate())\n",
+    "from random import _inst\n_inst.seed(1)\n",
+    "import numpy as np\nnp.random.mtrand._rand.seed(0)\n",
+    "from numpy.random import mtrand\nmtrand.set_state(None)\n",
+    "import random\ndef f(random):\n    pass\nrandom.seed(1)\n",
+    "import random\ndef f(random=random.seed(1)):\n    pass\n",
+    "import random\ndef f(*, random=random.seed(1)):\n    pass\n",
+    "import random\nreseed = lambda random=random.seed(1): random\n",
+    "import random\n@deco(random.seed(1))\ndef f(random):\n    pass\n",
+    "import random\ndef f(random) -> random.seed(1):\n    pass\n",
+    "import random\nclass C(base(random.seed(1))):\n    import os as random\n",
+    "from random import *\ndef f(x=seed(1)):\n    pass\ndef seed(x):\n    return x\n",
+    "import random\ndef f[T: random.seed(1)](random):\n    pass\n",
+    "import random\nclass C[T: random.seed(1)]:\n    import os as random\n",
+    "import random\ntype X[T: random.seed(1)] = int\n",
+    "import random\ntype X = random.seed\n",
+    "from random import *; seed(1)\n",
+    "from random import *; x = 1; seed(1)\n",
+    "from random import *\nseed = seed(1)\n",
+])
+def test_a_global_reseed_is_refused(source):
+    assert global_reseeds(source), source
+
+
+@pytest.mark.parametrize("source", [
+    "import random\nrng = random.Random(1136)\nrng.seed(2)\nrng.choice('ab')\n",
+    "import random\nrandom.Random(1).seed(2)\n",
+    "import random\nstate = random.getstate()\nrandom.random()\n",
+    "from random import Random\nRandom(3).randint(0, 4)\n",
+    "def seed(x):\n    return x\nseed(1)\n",
+    "import numpy as np\nnp.random.default_rng(0).integers(4)\n",
+    "from random import *\ndef seed(x):\n    return x\nseed(1)\n",
+    "from random import *\nRandom(1).seed(2)\n",
+    "from random import *\nseed = print\nseed(1)\n",
+    "from os import *\nseed(1)\n",
+    "from random import *\ndef f():\n    seed(1)\ndef seed(x):\n    return x\n",
+    "from random import *\nfrom mylib import seed\nseed(1)\n",
+    "from random import *\nfor seed in range(2):\n    seed\n",
+    "from mylib import *\nseed(1)\n",
+    "from random import *\nprint([seed for seed in range(2)])\n",
+    "import os as random\ndef f():\n    import random\n    return random\nrandom.seed(1)\n",
+    "import random\ndef f():\n    import os as random\n    random.seed(1)\n",
+    "import random\ndef f(random):\n    random.seed(1)\n",
+    "import random\nreseed = lambda random: random.seed(1)\n",
+    "import random\ndef f(*, random):\n    def g():\n        random.seed(1)\n",
+    "import os as random\nclass C(random.seed):\n    import random\n",
+    "import random\ntype X[random] = random.seed\n",
+    "import random\ndef f[random](x: random.seed):\n    pass\n",
+    "from random import *\ntype X = seed(1)\ndef seed(x):\n    return x\n",
+    "seed(1); from random import *\n",
+    "from random import *; seed = print; seed(1)\n",
+])
+def test_a_local_generator_or_a_same_named_helper_is_not_refused(source):
+    assert global_reseeds(source) == [], source
+
+
+def _with_type_param_default(bare, default):
+    """`bare` parsed, with `default` attached to its type parameter as
+    TypeVar.default_value, the field Python 3.13 parses a PEP 696 default into.
+    Python 3.12's TypeVar does not list that field, so it is listed on this node
+    too, or ast.walk would not reach the default as it does on 3.13."""
+    tree = ast.parse(bare)
+    param = next(node for node in ast.walk(tree) if isinstance(node, ast.TypeVar))
+    param.default_value = ast.parse(default, mode="eval").body
+    if "default_value" not in param._fields:
+        param._fields = (*param._fields, "default_value")
+    return tree
+
+
+@pytest.mark.parametrize("bare, default, written", [
+    ("import random\ndef f[T](random):\n    pass\n", "random.seed(1)",
+     "import random\ndef f[T = random.seed(1)](random):\n    pass\n"),
+    ("import random\nclass C[T]:\n    import os as random\n", "random.seed(1)",
+     "import random\nclass C[T = random.seed(1)]:\n    import os as random\n"),
+    ("import random\ntype X[T] = int\n", "random.seed(1)",
+     "import random\ntype X[T = random.seed(1)] = int\n"),
+])
+def test_a_reseed_in_a_type_parameter_default_is_refused(bare, default, written):
+    """Python 3.12, the CI interpreter, cannot parse a PEP 696 default
+    (`[T = ...]`), so each row parses the definition without it and attaches the
+    default where Python 3.13 parses it. Where the written form parses, the two
+    trees must match, so the attached shape is the parsed one."""
+    tree = _with_type_param_default(bare, default)
+    if sys.version_info >= (3, 13):
+        assert ast.dump(tree) == ast.dump(ast.parse(written)), written
+    assert global_reseeds(tree), written

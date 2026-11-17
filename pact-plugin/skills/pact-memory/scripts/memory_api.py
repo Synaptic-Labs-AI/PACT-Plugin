@@ -1096,7 +1096,7 @@ def render_rekey_command(
     """
     argv = [
         "python3",
-        str(prog) if prog is not None else str(Path(__file__).with_name("cli.py")),
+        str(prog) if prog is not None else str(Path(__file__).parent / "cli.py"),
         "project-id",
         "rekey",
         "--from=" + from_id,

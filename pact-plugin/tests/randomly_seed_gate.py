@@ -1,0 +1,128 @@
+"""
+Location: pact-plugin/tests/randomly_seed_gate.py
+Summary: Fails a pytest session that loaded pytest-randomly without an explicit
+         integer seed.
+Used by: pact-plugin/conftest.py, whose pytest_configure calls
+         refuse_unseeded(); tests/test_gate_default_block.py.
+
+SCOPE: the gate runs in every session that loads pact-plugin/conftest.py,
+which pytest loads for a run that collects any path under pact-plugin/:
+tests/ and the skills-adjacent tests alike. It does not run in a session that
+loads no conftest from pact-plugin/ (`--noconftest`, or a run collecting only
+paths outside it), nor in a child pytest rooted outside the repository; the
+child-pytest census judges those children by their launch instead.
+
+pytest-randomly is installed in the CI environment and blocked by the
+repository-root pyproject.toml addopts (`-p no:randomly`). A seeded diagnostic
+run re-enables it with `-p randomly --randomly-seed=N`. A session that has it
+loaded and names no seed shuffles in a fresh order every run. That happens when
+the addopts line is lost, or when a nearer pytest config file shadows the root
+one. It also happens when the plugin is loaded by its module name
+(`-p pytest_randomly`), which the `-p no:randomly` block does not stop.
+
+Every process that loads the conftest judges, xdist workers included. A run
+from the repository root that collects under pact-plugin/ only in its workers
+never loads the conftest in the controller, so a worker may be the only
+process that judges. Each worker reads the controller's own invocation args,
+so a seeded run passes in every process and an unseeded one is refused in
+whichever process judges first.
+
+The seed must appear in the invocation args. A seed supplied only through
+PYTEST_ADDOPTS or a config file is refused: the CI run line is the record of how
+a run was ordered. An `@file` argument is read as pytest reads it, one argument
+per line, so a seed named inside such a file counts and a later one there wins.
+"""
+
+import sys
+from pathlib import Path
+
+import pytest
+
+REMEDY = (
+    "Restore `addopts = \"-p no:randomly\"` under [tool.pytest.ini_options] in "
+    "the repository-root pyproject.toml, remove any nearer pytest config file "
+    "that shadows it, or pass `-p randomly --randomly-seed=<int>`."
+)
+
+
+def _is_seed(value):
+    """True for a value pytest-randomly reads as an integer seed: it parses the
+    value with int(), as here, so a sign, surrounding whitespace, underscores
+    between digits and any Unicode decimal digits are accepted (`+5`, `5_0`,
+    `\u0663`). Its special values `last` and `default` are not integers, so they are
+    refused: they name no seed the run line records."""
+    try:
+        int(value)
+    except ValueError:
+        return False
+    return True
+
+
+def expand_argsfiles(args, cwd):
+    """The args with each `@file` word replaced by the file's lines, as
+    pytest's parser (argparse with fromfile_prefix_chars="@") reads them: one
+    argument per line, `@` words inside a file expanded in turn, and a relative
+    path read from the invocation directory. A word whose file cannot be read
+    is kept as it is; pytest itself stops on it."""
+    expanded = []
+    for word in args:
+        if not word.startswith("@"):
+            expanded.append(word)
+            continue
+        try:
+            lines = (Path(cwd) / word[1:]).read_text(
+                encoding=sys.getfilesystemencoding(),
+                errors=sys.getfilesystemencodeerrors()).splitlines()
+        except OSError:
+            expanded.append(word)
+            continue
+        expanded.extend(expand_argsfiles(lines, cwd))
+    return expanded
+
+
+def explicit_seed(args):
+    """True when the last --randomly-seed in the args has an integer value, as
+    _is_seed reads one.
+
+    The last one counts because it is the one argparse keeps. The scan reads
+    past a bare `--` on purpose: pytest applies a `--randomly-seed` placed after
+    `--` when no path precedes the `--` (measured with pytest 9.2.0 and
+    pytest-randomly 5.1.0: `-p randomly -- --randomly-seed=5` runs with seed 5).
+    Where a path does precede it, pytest reads the word as a path and stops
+    with "file or directory not found" before any test runs. So stopping at
+    `--`, as plain argparse would, refuses a run pytest seeds; do not change it.
+    """
+    verdict = False
+    for index, word in enumerate(args):
+        if word.startswith("--randomly-seed="):
+            verdict = _is_seed(word.partition("=")[2])
+        elif word == "--randomly-seed":
+            verdict = index + 1 < len(args) and _is_seed(args[index + 1])
+    return verdict
+
+
+def is_randomly_module(name):
+    """True for pytest-randomly's own module, by any import name."""
+    return name == "pytest_randomly" or name.startswith("pytest_randomly.")
+
+
+def randomly_loaded(pluginmanager):
+    """True when pytest-randomly is registered under its entry-point name or
+    under its module name (`-p pytest_randomly` registers it there)."""
+    if pluginmanager.hasplugin("randomly"):
+        return True
+    return any(is_randomly_module(getattr(plugin, "__name__", None) or "")
+               for plugin in pluginmanager.get_plugins())
+
+
+def refuse_unseeded(config):
+    """Raise pytest.UsageError when pytest-randomly is loaded unseeded."""
+    if not randomly_loaded(config.pluginmanager):
+        return
+    params = config.invocation_params
+    if explicit_seed(expand_argsfiles(list(params.args), params.dir)):
+        return
+    raise pytest.UsageError(
+        "pytest-randomly is loaded but this invocation names no integer "
+        "--randomly-seed, so the test order would change on every run. " + REMEDY
+    )

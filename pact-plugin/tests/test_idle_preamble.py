@@ -11,7 +11,6 @@ Tests cover:
 """
 import io
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -89,10 +88,10 @@ class TestPreambleInMainOutput:
         assert "systemMessage" not in output
 
     def _run_main_with_idle_cleanup(
-        self, teammate_name="coder-a", team_name="pact-test",
-        idle_count=3, tmp_path=None,
+        self, tmp_path, teammate_name="coder-a", team_name="pact-test",
+        idle_count=3,
     ):
-        """Helper: run main() with idle cleanup scenario."""
+        """Helper: run main() with idle cleanup scenario under tmp_path as HOME."""
         from teammate_idle import main
 
         input_data = json.dumps({
@@ -112,20 +111,17 @@ class TestPreambleInMainOutput:
         ]
 
         # Create idle counts file to simulate consecutive idles
-        if tmp_path:
-            idle_path = tmp_path / ".claude" / "teams" / team_name / "idle_counts.json"
-            idle_path.parent.mkdir(parents=True, exist_ok=True)
-            idle_data = {
-                teammate_name: {"count": idle_count - 1, "task_id": "1"}
-            }
-            idle_path.write_text(json.dumps(idle_data))
-        else:
-            idle_path = Path("/nonexistent/path/idle_counts.json")
+        idle_path = tmp_path / ".claude" / "teams" / team_name / "idle_counts.json"
+        idle_path.parent.mkdir(parents=True, exist_ok=True)
+        idle_data = {
+            teammate_name: {"count": idle_count - 1, "task_id": "1"}
+        }
+        idle_path.write_text(json.dumps(idle_data))
 
         with patch("teammate_idle.frame_team_and_name", return_value=(team_name, "")), \
              patch("sys.stdin", io.StringIO(input_data)), \
              patch("teammate_idle.iter_team_task_jsons", return_value=mock_tasks), \
-             patch("pathlib.Path.home", return_value=tmp_path if tmp_path else Path("/tmp")):
+             patch("pathlib.Path.home", return_value=tmp_path):
             import io as io_module
             captured_stdout = io_module.StringIO()
             with patch("sys.stdout", captured_stdout):

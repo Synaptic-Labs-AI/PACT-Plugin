@@ -81,6 +81,7 @@ from pathlib import Path
 import pytest
 
 import ci_contract
+from helpers import env_without_pytest_vars
 
 # The two collection roots pytest resolves from `pact-plugin/`, and the pytest
 # config filenames that can carry a `testpaths` entry. Both directories are
@@ -345,8 +346,10 @@ def _collect_node_ids(args, cwd):
     """
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "--collect-only", "-q",
-         "-p", "no:cacheprovider", *args],
-        cwd=str(cwd), capture_output=True, text=True,
+         "-p", "no:cacheprovider", "-p", "no:randomly", *args],
+        cwd=str(cwd), capture_output=True, text=True, timeout=300,
+        # No PYTEST_* name from the shell that runs the suite reaches the child.
+        env=env_without_pytest_vars(),
     )
     ids = {line.strip() for line in result.stdout.splitlines() if "::" in line}
     return ids, result
@@ -358,6 +361,10 @@ class TestCiInvocationCollectsTheWholeCorpus:
     def test_dynamic_command_normalizes_to_the_static_default(self):
         normalized = ci_contract.normalized_workflow_test_argv()
         assert normalized == ci_contract.TEST_CMD.split()
+        # The seeded run line still normalizes to the static default: with
+        # PACT_SHUFFLE_SEED empty the expansion adds no words.
+        assert '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}' in (
+            ci_contract.WORKFLOW_TEST_CMD)
         assert _pytest_args(ci_contract.WORKFLOW_TEST_CMD) == [
             "-ra", "-n", "4", "--dist", "loadfile"
         ]
@@ -373,6 +380,25 @@ class TestCiInvocationCollectsTheWholeCorpus:
             ci_contract.WORKFLOW_TEST_CMD + " tests",
             ci_contract.WORKFLOW_TEST_CMD.replace(" " + junit, "", 1),
             ci_contract.WORKFLOW_TEST_CMD + " --deselect tests/test_smoke.py",
+            # The seed must reach pytest only through the guarded PACT_SHUFFLE_SEED key,
+            # inside the `${PACT_SHUFFLE_SEED:+...}` wrapper that expands to nothing when
+            # it is empty: a bare seed flag, an inline expression, a quoted
+            # wrapper (one word) or a dropped expansion is drift.
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}',
+                '-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed', 1),
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}',
+                '-p randomly --randomly-seed=${{ inputs.shuffle_seed }} '
+                '--randomly-dont-reset-seed', 1),
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                '${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}',
+                '"${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed=$PACT_SHUFFLE_SEED --randomly-dont-reset-seed}"', 1),
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                ' ${PACT_SHUFFLE_SEED:+-p randomly --randomly-seed="$PACT_SHUFFLE_SEED" --randomly-dont-reset-seed}', '', 1),
+            # A seeded run must not reseed before each test.
+            ci_contract.WORKFLOW_TEST_CMD.replace(
+                ' --randomly-dont-reset-seed}', '}', 1),
         ):
             with pytest.raises(AssertionError, match="PARSE FAILURE"):
                 ci_contract.normalized_workflow_test_argv(command)
