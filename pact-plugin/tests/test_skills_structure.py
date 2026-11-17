@@ -847,8 +847,8 @@ class TestRunReceiptAttribution:
       in the worktree. That copy's run is the
       result; its own staged files are never read as written by the run.
     - If the copy cannot be built or the command cannot be run in it, after
-      a moved HEAD, a status-only change or a worktree run's failing tests
-      alike (its own sub-bullet after both branches), the result is reported as unattributable, naming what
+      a moved HEAD, a status-only change or a worktree run with failing
+      tests alike (its own sub-bullet after both branches), the result is reported as unattributable, naming what
       moved and stating the unmet exit-code precondition, and is not re-run
       again. That exit
       never takes paths the change copy reproduces: on any run, those follow
@@ -878,9 +878,10 @@ class TestRunReceiptAttribution:
       general rule below.
     - For every reported run, with or without a status change, a failing
       test is a failure of the change only when the change copy fails it and
-      the baseline clone passes it. A worktree run's failing tests are re-run
-      once in the change copy; one that passes there came from outside the
-      change, and one the baseline clone also fails is pre-existing. Only
+      the baseline clone passes it. A worktree run with failing tests is
+      re-run once in the change copy with the same command, selection and
+      flags, so an order dependence the change causes still shows; a test
+      that passes there came from outside the change, and one the baseline clone also fails is pre-existing. Only
       then may the teammate hand off, naming those tests and the
       precondition unmet through them; any other failing test blocks it. The exit-code precondition names that exception and the
       unattributable exit, so it does not contradict this bullet.
@@ -911,7 +912,7 @@ class TestRunReceiptAttribution:
          "the moved-HEAD branch: one re-run, in the change copy, never the worktree"),
         ("never report the moved run as a pass or a failure of your change. That copy's run is your result.",
          "the moved-HEAD copy run as the result"),
-        ("If the copy that holds your change cannot be built or the command cannot be run in it, after a moved `HEAD`, a status-only change or a worktree run's failing tests alike, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
+        ("If the copy that holds your change cannot be built or the command cannot be run in it, after a moved `HEAD`, a status-only change or a worktree run with failing tests alike, report that result as unattributable in `uncertainty`: name what moved (`HEAD` or the paths), state that the exit-code precondition above is not met, and do not re-run it again.",
          "the stop: unattributable only when the copy cannot be built or run, naming what moved, with the unmet precondition stated"),
         ("This exit never applies to paths the copy that holds your change reproduces; on any run, those follow the pre-existing and failure branches below.",
          "a reproduced write never reaches the unattributable exit"),
@@ -931,7 +932,7 @@ class TestRunReceiptAttribution:
          "the all-pre-existing branch defers failing tests to the general rule"),
         ("For any run whose result you report, with or without a status change, a failing test is a failure of your change only when it fails in the copy that holds your change and passes, with the same command and interpreter, in the baseline clone.",
          "a failing test counts only when the change copy fails it and the baseline clone passes it, for every reported run"),
-        ("When the run you report is the worktree's, re-run its failing tests once in that copy, and no more: a test that fails in the worktree but passes in that copy came from outside your change, so report it with the command, and it does not block.",
+        ("When the run you report is the worktree's and a test fails, re-run the same command, with the same test selection and flags, once in that copy, and no more: a test that fails in the worktree but passes in that copy's run came from outside your change, so report it with the command, and it does not block.",
          "a worktree failure is re-run once in the change copy, and one that passes there is reported, not blocking"),
         ("A failing test that also fails in the baseline clone is pre-existing.",
          "a failing test the baseline clone also fails is pre-existing"),
@@ -1113,18 +1114,24 @@ class TestRunReceiptAttribution:
     def test_a_worktree_failure_is_decided_in_the_change_copy(self):
         # A worktree run carries every peer's edits, so its failing test is
         # the teammate's only when the copy holding just the teammate's change
-        # fails it too, after one bounded re-run there.
+        # fails it too, after one bounded re-run of the same command there; a
+        # re-run of the failing tests alone would excuse a failure the change
+        # causes through test order.
         bullet = self._bullet()
         rule = bullet.find("  - For any run whose result you report")
         assert rule != -1, f"the {self.REL_PATH} failing-test rule is missing"
         end = bullet.find("\n  - ", rule + 1)
         text = bullet[rule:end if end != -1 else None]
         for phrase in ("fails in the copy that holds your change and passes",
-                       "re-run its failing tests once in that copy, and no more",
+                       "re-run the same command, with the same test selection and flags, once in that copy, and no more",
                        "came from outside your change"):
             assert phrase in text, (
                 f"the {self.REL_PATH} failing-test rule lost {phrase!r}"
             )
+        assert "re-run its failing tests" not in text, (
+            f"the {self.REL_PATH} failing-test rule re-runs only the failing "
+            "tests, which excuses a failure the change causes through test order"
+        )
         assert "is pre-existing only when" not in text, (
             f"the {self.REL_PATH} failing-test rule still decides a failure by the "
             "baseline clone alone, charging a peer's worktree edits to the teammate"

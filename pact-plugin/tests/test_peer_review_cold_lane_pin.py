@@ -319,7 +319,7 @@ ONCE_RULES = (
     ("in the changed code at `{head}`", "the evidence location for verified invalid"),
     ("resume its subagent once in the same round", "the one same-round re-check after the round's first-round review"),
     ("In each verify-only re-review, dispatch the cold prompt as a first-round review", "the re-review's unconditional first-round dispatch"),
-    ("taken from the most recent such line", "the use of corrected placeholders in the re-review's first-round dispatch"),
+    ("taken from the most recent line that changed that placeholder", "the per-placeholder use of corrected values in the re-review's first-round dispatch"),
     ("was written by the run itself", "the run-made change rule in the run receipt"),
     ("Decide each reproduced path on its own", "the per-path decision in the run receipt"),
     ("A same-round re-check resume that returns no report", "the re-check resume's exclusion from the no-report rule"),
@@ -758,7 +758,7 @@ class TestOperationalFactsClause:
         ("Do not look for run instructions in the avoided paths", (
          "the bar on recovering run instructions from the avoided paths")),
         ("untracked docs/", "the path-convention fact (untracked docs/ is normal)"),
-        ("When a re-run below needs it, build the {head} clone: a clone of the repository with its remote removed, under {scratch_dir}, checked out at {head}", (
+        ("When a re-run or the check below needs it, build the {head} clone: a clone of the repository with its remote removed, under {scratch_dir}, checked out at {head}", (
          "the instruction to build the {head} clone, once, before both branches that use it")),
         ("If HEAD differs, re-run the same command once, with the same interpreter, by absolute path, in the {head} clone, never in the worktree, and do not report the worktree run: report that clone's run in its place", (
          "the moved-HEAD branch: one re-run in the {head} clone, never the worktree")),
@@ -782,6 +782,26 @@ class TestOperationalFactsClause:
     def test_operational_facts_token_present(self, token, lost):
         assert token in _clause("OPERATIONAL FACTS"), (
             f"the cold prompt's OPERATIONAL FACTS clause lost {lost} ({token!r})"
+        )
+
+    def test_tested_tree_is_checked_against_head_before_the_first_run(self):
+        # Before and after a run can match while the worktree sits at another
+        # commit or carries edits, so the tree is checked against {head} first.
+        clause = _clause("OPERATIONAL FACTS")
+        check = ("If, before the first test command you report, git rev-parse HEAD does not print {head} "
+                 "or git status --porcelain --untracked-files=all shows anything other than an untracked docs/ directory, "
+                 "run every test command you report in the {head} clone instead, with the same interpreter, by absolute path, "
+                 "never in the worktree, and judge each such run by the rules below for a run in that clone.")
+        assert check in clause, "the cold prompt no longer checks the tested tree against {head} before the first run"
+        build = clause.find("build the {head} clone: a clone of the repository")
+        at = clause.find(check)
+        moved = clause.find("If HEAD differs")
+        assert -1 not in (build, at, moved) and build < at < moved, (
+            "the tested-tree check must follow the {head} clone's definition and precede the moved-HEAD branch "
+            f"(positions build={build}, check={at}, moved={moved})"
+        )
+        assert "An untracked docs/ directory is normal" in clause, (
+            "the tested-tree check's docs/ allowance must match the prompt's own docs/ sentence"
         )
 
     def test_unbuildable_clone_exit_follows_both_branches(self):
@@ -1286,7 +1306,7 @@ class TestLeadFacingRules:
         ("Remediation", "route its findings to warm fixers", "where its findings go"),
         ("Remediation", "Send it no message other than a HALT or the re-check message", (
          "the bar on any other message")),
-        ("Re-check", "In each verify-only re-review, dispatch the cold prompt as a first-round review, with any placeholder value that a lead line of corrections in the record changed taken from the most recent such line, except {base} and {head}, which follow their definitions", (
+        ("Re-check", "In each verify-only re-review, dispatch the cold prompt as a first-round review, with each placeholder value that a lead line of corrections in the record changed taken from the most recent line that changed that placeholder, except {base} and {head}, which follow their definitions", (
          "the unconditional first-round dispatch, filled from the latest corrections, with base and head always fresh")),
         ("Re-check", "when that review is valid and the record holds earlier findings with no disposition, resume its subagent once in the same round with the re-check message listing every one of them, whichever report raised it, and that re-check's report is the round's end state", (
          "the one same-round re-check of every earlier undisposed finding")),
@@ -1763,9 +1783,11 @@ class TestVerifyOnlyScopedToWarm:
     The matcher judges these shapes only: ticks and bold are stripped, the
     text is split on sentence ends, ";", newlines and table pipes, and a
     sentence is a claim when it holds a re-review word (re-review, re-reviews,
-    re-reviewing, re-reviewed, rereview) and one claim token in either order,
-    case-insensitive. The claim tokens are: verify-only or verify only,
-    only verif..., verif... only, limited to verif..., restricted to verif...,
+    re-reviewing, re-reviewed, rereview, or "re-run review", "re-run the
+    review" and "re-run the <word> review") and one claim token in either
+    order, case-insensitive. The claim tokens are: verify-only or verify only,
+    only verif..., verif... only, verif... followed by one or two words and
+    only ("verify fixes only"), limited to verif..., restricted to verif...,
     nothing but or nothing more than verif..., just verif..., merely verif...,
     and not a fresh or full review. A token directly followed by a re-review
     word is the noun phrase ("verify-only re-review") and is not a claim. A
@@ -1774,9 +1796,9 @@ class TestVerifyOnlyScopedToWarm:
     "cold" between them.
 
     What it does not see, each pinned by a row below, so that a matcher
-    change must update this list: a claim that never says re-review ("the
-    follow-up review is verify-only", "re-run review to verify fixes only"); a
-    claim worded outside the token list ("re-review checks only the fixes");
+    change must update this list: a claim that names the review some other
+    way ("the follow-up review is verify-only"); a claim worded outside the
+    token list ("re-review checks only the fixes");
     and a contrast that names warm without scoping to it ("Unlike the warm
     lane, re-review is verify-only." passes). It also refuses two scoped
     forms: a scope in another sentence, and "cold" between the scope and the
@@ -1823,6 +1845,8 @@ class TestVerifyOnlyScopedToWarm:
         "re-review is VERIFY ONLY.",
         "Re-review is verify-only for warm and cold lanes.",
         "In the warm and cold lanes, re-review is verify-only.",
+        "Re-run review to verify fixes only.",
+        "After all fixes complete, re-run review to verify fixes only (see Verify-Only Re-Review above)",
     ])
     def test_matcher_flags_an_unscoped_claim(self, text):
         claims = _verify_only_claims(text)
@@ -1838,6 +1862,7 @@ class TestVerifyOnlyScopedToWarm:
         "a remediation cycle fails when its verify-only re-review leaves a blocking finding open",
         "In the warm lane, re-review is verify-only.",
         "For warm reviewers, a re-review is limited to verification.",
+        "After all fixes complete, re-run the warm review to verify fixes only, and run the cold lane's first-round review, per the Cold Reviewer Lane (see Verify-Only Re-Review above)",
     ])
     def test_matcher_passes_a_scoped_claim_or_a_noun_use(self, text):
         claims = _verify_only_claims(text)
@@ -1847,7 +1872,6 @@ class TestVerifyOnlyScopedToWarm:
 
     @pytest.mark.parametrize("text", [
         "The follow-up review is verify-only.",
-        "Re-run review to verify fixes only.",
         "Re-review checks only the fixes.",
         "Unlike the warm lane, re-review is verify-only.",
     ])
@@ -1874,12 +1898,12 @@ class TestVerifyOnlyScopedToWarm:
         )
 
 
-_RE_REVIEW = r"\bre-?review(?:s|ing|ed)?\b"
+_RE_REVIEW = r"(?:\bre-?review(?:s|ing|ed)?\b|\bre-?run (?:the )?(?:\w+ )?review\b)"
 _VERIFY_ONLY = (
     r"(?:\bverify[- ]only\b|\bonly verif\w*|\bverif\w* only\b"
     r"|\blimited to verif\w*|\brestricted to verif\w*"
     r"|\bnothing (?:but|more than) verif\w*|\bjust verif\w*|\bmerely verif\w*"
-    r"|\bnot a (?:fresh|full) review\b)"
+    r"|\bnot a (?:fresh|full) review\b|\bverif\w* (?:\w+ ){1,2}only\b)"
 )
 # A claim names re-review and one claim token, in either order; a token
 # directly followed by re-review is a noun phrase ("verify-only re-review"),
