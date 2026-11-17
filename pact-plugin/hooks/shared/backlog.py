@@ -507,9 +507,9 @@ def checkout_roots() -> List[str]:
     another project's session. A missing entry costs that checkout a loud
     resolution failure UNLESS it sits inside a checkout that IS recorded, in
     which case the read path's enclosing-checkout rung still matches it. The
-    fallback when git cannot answer, or prints a listing that cannot be
-    read whole, is the project root alone, which is always right about at
-    least itself.
+    project root is always one of them, and the only one when git cannot
+    answer or prints a listing that cannot be read whole: it is always right
+    about at least itself.
 
     Deliberately NOT merged with _branch_and_worktree_names, which runs the
     same porcelain: that caller reduces each `worktree` line to a BASENAME for
@@ -521,7 +521,8 @@ def checkout_roots() -> List[str]:
     # A listing git did not give (`_worktree_records` is None) or one that
     # cannot be read whole (UNREADABLE_LISTING) adds no root: a truncated
     # path would name another directory.
-    records = _worktree_records(["-C", str(project_root())])
+    root = str(project_root())
+    records = _worktree_records(["-C", root])
     if not isinstance(records, list):
         records = []
     roots = [
@@ -530,7 +531,9 @@ def checkout_roots() -> List[str]:
         for field in record
         if field.startswith("worktree ")
     ]
-    return roots or [str(project_root())]
+    # The project root is always one: with `--separate-git-dir`, git lists
+    # the git directory as the main record's path, not the main checkout.
+    return roots + [root] if root not in roots else roots
 
 
 # Key under which load_or_create stashes the bytes it read, so save() can

@@ -2205,6 +2205,36 @@ def test_the_writer_records_every_checkout_not_just_the_main_root(tmp_path, monk
     assert len(roots) == 2, f"expected exactly the two checkouts, got {roots}"
 
 
+@pytest.mark.parametrize("linked_worktree", [False, True], ids=["alone", "with a worktree"])
+def test_a_separate_git_dir_checkout_is_one_of_its_own_roots(tmp_path, monkeypatch, linked_worktree):
+    """With `--separate-git-dir`, git lists the main record at the git
+    directory, so the main checkout is recorded from the project root, and
+    nothing else is added: the roots are git's listed paths plus that root.
+
+    Real repo, real git: the listing git prints is the thing under test."""
+    main = tmp_path / "main"
+    main.mkdir()
+    store = tmp_path / "store.git"
+    run = lambda *a: subprocess.run(["git", "-C", str(main), *a], check=True,
+                                    capture_output=True)
+    run("init", "-q", f"--separate-git-dir={store}")
+    run("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q",
+        "--allow-empty", "-m", "c")
+    if linked_worktree:
+        run("worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
+    monkeypatch.setattr(backlog, "project_root", lambda: main.resolve())
+
+    listed = {
+        str(Path(record[0][len("worktree "):]).resolve())
+        for record in backlog._worktree_records(["-C", str(main)])
+    }
+    roots = backlog.checkout_roots()
+
+    assert str(main.resolve()) not in listed, "git listed the checkout itself, so this arm tests nothing"
+    assert str(main.resolve()) in roots, roots
+    assert set(roots) == listed | {str(main.resolve())}, (roots, listed)
+
+
 def test_the_abandoned_heuristic_reads_real_branches(tmp_path, monkeypatch):
     """An active item flags only when NO branch or worktree carries its ref.
 
