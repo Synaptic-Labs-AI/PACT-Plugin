@@ -3075,28 +3075,58 @@ def _union_admits_str(annotation) -> bool:
     return False
 
 
-# Words that, as advice, change a `.git` marker.
-_GIT_CHANGING_VERBS = frozenset(
-    {"remove", "delete", "rm", "rename", "mv", "move", "rewrite", "replace", "edit", "point", "unlink"}
-)
-# Words that may stand before the verb of an instruction without changing it.
-_INSTRUCTION_LEAD_WORDS = frozenset(
-    {"and", "or", "then", "either", "just", "please", "simply", "first", "instead", "you", "also"}
-)
-# Words after which a verb is advice: `to rename`, `can be removed`.
-_MODAL_WORDS = frozenset({"to", "can", "could", "should", "must", "may", "might", "please"})
 _GIT_MARKER = re.compile(r"(?<![\w-])\.git(?![\w-])")
 
+# Every clause naming `.git` that a declined identity prints, and why it
+# only describes. A clause not listed here fails the census, whatever its
+# wording, so advice to change a marker cannot pass by using a verb, voice
+# or command no list foresaw.
+_DESCRIBED_GIT_CLAUSES = {
+    "Check that git can answer for this checkout (`git rev-parse --git-dir`, "
+    "`git worktree list`), or run from the repository the `.git` points at":
+        "asks for two read-only git answers, or for a run somewhere else",
+    "git lists the worktree entry its `.git` names at another path, which git "
+    "marks prunable, and not at this checkout":
+        "reports what git's worktree listing shows",
+    "its `.git` names a submodule's git directory, and git could not read that "
+    "directory's core.worktree":
+        "reports what the marker names and that git could not answer",
+    "its `.git` names another directory called `.git`, or a submodule's git "
+    "directory that does not record it as that submodule's working tree":
+        "reports what the marker names",
+    "the directory carries a `.git` marker but git could not answer for it":
+        "reports that the marker is there and git did not answer",
+    "Write an operator-chosen canonical id to '/home/u/repo/.git/pact-project-id', "
+    "or set CLAUDE_PROJECT_DIR to another project root":
+        "names a file to create inside the git directory; the marker is unchanged",
+}
 
-def _verb_forms(verb: str) -> set:
-    """The base form and the past participle of `verb`."""
-    participle = {"rewrite": "rewritten", "rm": "rmed", "mv": "mved"}.get(
-        verb, verb + "d" if verb.endswith("e") else verb + "ed"
-    )
-    return {verb, participle}
+
+def _clauses(sentence: str) -> list:
+    """`sentence` split at `; `, `: ` and `, so ` outside backticks, each
+    part without its closing stop."""
+    parts, start, quoted, index = [], 0, False, 0
+    while index < len(sentence):
+        if sentence[index] == "`":
+            quoted = not quoted
+        elif not quoted:
+            separator = next((s for s in ("; ", ": ", ", so ") if sentence.startswith(s, index)), None)
+            if separator:
+                parts.append(sentence[start:index])
+                start = index + len(separator)
+                index = start
+                continue
+        index += 1
+    parts.append(sentence[start:])
+    return [part.strip().rstrip(".!?").strip() for part in parts if part.strip()]
 
 
-_GIT_CHANGING_FORMS = {form for verb in _GIT_CHANGING_VERBS for form in _verb_forms(verb)}
+def _git_clauses(message: str) -> set:
+    """Every clause of `message` that names `.git`."""
+    return {
+        clause for sentence in _sentences(message) for clause in _clauses(sentence)
+        if _GIT_MARKER.search(clause)
+    }
 
 
 def _sentences(text: str) -> list:
@@ -3115,32 +3145,6 @@ def _sentences(text: str) -> list:
     if text[start:].strip():
         sentences.append(text[start:].strip())
     return sentences
-
-
-def _advises_changing_a_git_marker(sentence: str) -> bool:
-    """Whether `sentence` advises an action on a `.git` marker: a clause
-    that names `.git` and opens with a verb that changes it (after `and`,
-    `or`, `then`, `you` and the like), or carries such a verb after `to`, a
-    modal or `be`, or a backticked command naming `.git` that holds such a
-    verb. A clause that only says what the `.git` names (`the repository
-    the `.git` points at`) advises nothing."""
-    for command in re.findall(r"`([^`]*)`", sentence):
-        if _GIT_MARKER.search(command) and set(command.lower().split()) & _GIT_CHANGING_FORMS:
-            return True
-    prose = re.sub(r"`[^`]*`", lambda match: " CODE " if _GIT_MARKER.search(match.group()) else " code ", sentence)
-    for clause in re.split(r"[;:,()]| and | or | then | but ", prose):
-        if not ("CODE" in clause or _GIT_MARKER.search(clause)):
-            continue
-        words = [word.strip(".!?'\"").lower() for word in clause.split()]
-        words = [word for word in words if word]
-        while words and words[0] in _INSTRUCTION_LEAD_WORDS:
-            words.pop(0)
-        if words and words[0] in _GIT_CHANGING_FORMS:
-            return True
-        for before, after in zip(words, words[1:]):
-            if before in _MODAL_WORDS | {"be"} and after in _GIT_CHANGING_FORMS:
-                return True
-    return False
 
 
 def _printed_identity_messages(monkeypatch, caplog) -> list:
@@ -3421,12 +3425,13 @@ class TestARedirectRefusalNamesWhatWasObserved:
         details = list(memory_api._REDIRECT_CAUSE_DETAILS.values())
         assert not [d for d in details if "another repository" in d], details
 
-    def test_no_printed_remedy_advises_changing_a_git_marker(self, monkeypatch, caplog):
+    def test_every_printed_git_clause_is_a_described_one(self, monkeypatch, caplog):
         """A moved worktree and a separate-git-dir checkout are layouts git
         made, and an unreadable repository is not a broken one, so no
-        sentence a declined identity prints, on either the warning or the
-        refused write, advises removing, renaming, moving, rewriting or
-        repointing a `.git`. Control: every remedy the module defines (each
+        message a declined identity prints, on either the warning or the
+        refused write, may advise any change to a `.git`. Every clause naming
+        `.git` must equal one `_DESCRIBED_GIT_CLAUSES` entry, and every entry
+        must still be printed. Control: every remedy the module defines (each
         module-level name holding REMEDY) appears in a message read."""
         messages = [" ".join(message.split()) for message in _printed_identity_messages(monkeypatch, caplog)]
         remedies = [
@@ -3437,39 +3442,30 @@ class TestARedirectRefusalNamesWhatWasObserved:
         assert len(remedies) >= 2, remedies  # control: the module still names its remedies
         unprinted = [r for r in remedies if not any(" ".join(r.split()) in m for m in messages)]
         assert unprinted == [], unprinted  # control: each remedy is in the population read
-        advising = [s for m in messages for s in _sentences(m) if _advises_changing_a_git_marker(s)]
-        assert advising == [], advising
+        printed = set().union(*map(_git_clauses, messages))
+        assert printed - set(_DESCRIBED_GIT_CLAUSES) == set(), sorted(printed - set(_DESCRIBED_GIT_CLAUSES))
+        assert set(_DESCRIBED_GIT_CLAUSES) - printed == set(), sorted(set(_DESCRIBED_GIT_CLAUSES) - printed)
 
     @pytest.mark.parametrize(
-        "sentence",
+        "added",
         [
             "Rename its .git file to .git.bak.",
-            "Or point the `.git` at this checkout's own git dir.",
-            "Then run `mv .git .git.old` here.",
-            "Rewrite the `.git` file.",
-            "Run `rm .git` and re-clone.",
-            "The `.git` file can be deleted.",
-            "You may want to move the .git aside, e.g. into a backup folder.",
+            "The `.git` file can be trashed.",
+            "Deletion of the `.git` file clears this.",
+            "Run `find . -maxdepth 1 -name .git -delete` here.",
+            "Its `.git` names a submodule's git directory; replace it.",
+            "Check that git can answer for this checkout, or run from the repository the `.git` points at.",
         ],
     )
-    def test_advice_changing_a_git_marker_is_recognised(self, sentence):
-        """Each way a sentence can advise changing a `.git` marker is
-        recognised, whatever its first letter."""
-        assert [s for s in _sentences(sentence) if _advises_changing_a_git_marker(s)], sentence
+    def test_a_git_clause_not_described_fails_the_census(self, added):
+        """A sentence naming `.git` in any wording, added to a printed
+        message, carries a clause the census does not hold, so the census
+        fails; a near copy of a described clause fails too."""
+        message = memory_api._REDIRECT_REMEDY + " " + added
+        assert _git_clauses(message) - set(_DESCRIBED_GIT_CLAUSES), added
 
-    @pytest.mark.parametrize(
-        "sentence",
-        [
-            "Check that git can answer, or run from the repository the `.git` points at.",
-            "Its `.git` names a submodule's git directory.",
-            "Write an operator-chosen canonical id to '/home/u/repo/.git/pact-project-id'.",
-            "A linked worktree you moved is re-registered by running `git worktree repair` in it.",
-        ],
-    )
-    def test_a_sentence_only_describing_a_git_marker_is_not_advice(self, sentence):
-        """A sentence that says what a `.git` names or holds, or advises an
-        action on something else, is not advice to change the marker."""
-        assert not [s for s in _sentences(sentence) if _advises_changing_a_git_marker(s)], sentence
+    def test_control_the_described_remedy_passes_the_census(self):
+        assert _git_clauses(memory_api._REDIRECT_MOVED_REMEDY) <= set(_DESCRIBED_GIT_CLAUSES)
 
     def test_the_redirect_remedy_names_the_users_own_layouts_as_theirs(self):
         """The remedy's sentences: the first asks only for read-only git

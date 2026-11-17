@@ -159,6 +159,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: a test reads every binding form from Python's grammar and checks that the refusal census counts each one, so a detail constant bound twice is never taken as a refusal.
 - Tests: three parser tests take their cases from git, the code and the platform: every ASCII separator between include headers, every exception and exit the core.worktree read can see, and every open-flag read in the three modules that promise to run without optional flags, import-time reads included.
 - Tests: the test that finds functions passing a worktree listing's answer places every expression class of Python's grammar, so a wrapper using `or`, `:=`, `await` or a keyword lambda is checked too.
+- Tests: every clause naming `.git` in a printed decline message must equal a described entry, so advice to change a marker fails however it is worded.
 
 ### Why
 
