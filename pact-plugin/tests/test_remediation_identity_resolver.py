@@ -2943,9 +2943,16 @@ _ANSWER_TRANSFORMED = {
 
 
 def _grammar_expression_classes() -> set:
-    """Every expression class Python's grammar defines, read from the
-    `ast.expr` signature."""
-    return set(re.findall(r"\b([A-Z]\w*)\(", ast.expr.__doc__))
+    """Every expression class the compiler builds: each subclass of
+    `ast.expr` that the compiler's own module (`_ast`) defines. `ast` keeps
+    deprecated expression classes in Python, which the parser never
+    produces."""
+    import _ast
+
+    return {
+        node.__name__ for node in ast.expr.__subclasses__()
+        if vars(_ast).get(node.__name__) is node
+    }
 
 
 def _answer_passers(tree) -> dict:

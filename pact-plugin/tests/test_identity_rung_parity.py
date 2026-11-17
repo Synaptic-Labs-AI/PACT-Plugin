@@ -2445,12 +2445,38 @@ class TestEveryBindingFormOfADetailIsCounted:
         )
 
     def test_every_expression_context_has_a_form(self):
-        """The contexts are the grammar's (`expr_context = Load | Store |
-        Del`), not every subclass: the deprecated ones are never parsed."""
-        signature = ast.expr_context.__doc__.split("=", 1)[1]
-        contexts = {part.strip() for part in signature.split("|")}
-        assert "Store" in contexts, signature  # control
-        assert contexts == set(_NAME_CONTEXT_FORMS), contexts
+        """The contexts are the ones the compiler accepts: each subclass of
+        `ast.expr_context` the compiler's own module (`_ast`) defines, which
+        `compile` takes on a Name in a load, store or delete position. The
+        others (`ast` keeps deprecated ones in Python) it refuses in every
+        position, so a context the compiler gains or drops changes this
+        set."""
+        import _ast
+
+        def positions(context):
+            name = ast.Name(id="x", ctx=context())
+            trees = {
+                "load": (ast.Expression(body=name), "eval"),
+                "store": (ast.Module(body=[ast.Assign(targets=[name], value=ast.Constant(1))], type_ignores=[]), "exec"),
+                "del": (ast.Module(body=[ast.Delete(targets=[name])], type_ignores=[]), "exec"),
+            }
+            accepted = set()
+            for position, (tree, mode) in trees.items():
+                try:
+                    compile(ast.fix_missing_locations(tree), "<context>", mode)
+                except (TypeError, ValueError, SyntaxError):
+                    continue
+                accepted.add(position)
+            return accepted
+
+        subclasses = ast.expr_context.__subclasses__()
+        compiled = {c.__name__ for c in subclasses if vars(_ast).get(c.__name__) is c}
+        assert "Store" in compiled, compiled  # control
+        refused = {c.__name__: positions(c) for c in subclasses if c.__name__ not in compiled}
+        assert all(not accepted for accepted in refused.values()), refused
+        unplaced = {c.__name__ for c in subclasses if c.__name__ in compiled and not positions(c)}
+        assert unplaced == set(), unplaced
+        assert compiled == set(_NAME_CONTEXT_FORMS), compiled
 
     @pytest.mark.parametrize(
         "source",
