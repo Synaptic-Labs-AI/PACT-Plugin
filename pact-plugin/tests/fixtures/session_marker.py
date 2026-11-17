@@ -58,7 +58,11 @@ def fresh_session_id(monkeypatch, module, name, make_id, seen):
     """Bind ``module.<name>`` to ``make_id()`` for the block, then remove its marker.
 
     ``seen`` is a set owned by the calling module; an id already in it fails the
-    test, so a fixed id cannot come back unnoticed.
+    test, so a fixed id cannot come back unnoticed. Today's callers draw a uuid4
+    each time, so the check does not fire for them. It fires on the second test
+    of any caller whose ``make_id`` returns the same id again, which is the shared
+    marker this helper exists to prevent; tests/test_run_condition_isolation.py
+    makes it fire with a fixed ``make_id``.
     """
     session_id = make_id()
     assert session_id not in seen, (

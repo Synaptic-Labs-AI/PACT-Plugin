@@ -13,9 +13,13 @@ tracked test_*.py or conftest.py under skills/; an untracked file is not read. A
 name resolves through the imports of the scope that reads it (`import random as
 r`, `from random import seed`, `import numpy as np`): the reading function's
 own, then each enclosing function's, then the module's, with a class body's
-imports seen only in that class body, as Python resolves names. A name one
-scope imports more than once counts when any of those imports is a setter. A
-from-import of a setter counts too. After `from random
+imports seen only in that class body, as Python resolves names. A parameter of
+the reading function or lambda, or of an enclosing one, shadows a module of the
+same name (`def f(random): random.seed(1)` is not refused). A name one scope
+imports more than once, or both imports and takes as a parameter, counts when
+any of those imports is a setter. A from-import of a setter counts too. The
+shared instances the module-level setters delegate to count as setters
+(`random._inst.seed`, `numpy.random.mtrand._rand.seed`). After `from random
 import *` or `from numpy.random import *`, a bare setter name (`seed(1)`)
 counts when the star import is the module-level binding of that name in force
 where it is read: the last one above the read for a read at module level, and
@@ -28,7 +32,9 @@ a parameter or local variable named like a setter (`def f(seed): seed`), and a
 rebinding the rule does not read (one inside a class body, an `except ... as`
 clause, a `global` statement in a function, an assignment expression inside a
 comprehension, or a star import from another module) leave the name read as
-the setter. A comprehension's own loop variable is not a rebinding, and a read
+the setter. A local assignment or a comprehension variable that shadows a
+module name (`random = Random(1)` inside a function) is still read as the
+module. A comprehension's own loop variable is not a rebinding, and a read
 of it inside the comprehension is not a read of the setter; the comprehension's
 first iterable is read in the enclosing scope, before the variable exists.
 
@@ -49,8 +55,15 @@ import pytest
 from fixtures.tracked_files import tracked_glob
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
-SETTERS = frozenset({"random.seed", "random.setstate", "numpy.random.seed",
-                     "numpy.random.set_state"})
+# The module-level setters, and the shared instances they delegate to:
+# random.seed is random._inst.seed, numpy.random.seed is numpy.random.mtrand.seed,
+# which seeds numpy.random.mtrand._rand.
+SETTERS = frozenset({
+    "random.seed", "random.setstate", "random._inst.seed", "random._inst.setstate",
+    "numpy.random.seed", "numpy.random.set_state",
+    "numpy.random.mtrand.seed", "numpy.random.mtrand.set_state",
+    "numpy.random.mtrand._rand.seed", "numpy.random.mtrand._rand.set_state",
+})
 
 
 def _test_files(plugin_root, known_member=None):
@@ -73,6 +86,13 @@ def _scoped_reads(tree):
     def collect(node, scope):
         for child in ast.iter_child_nodes(node):
             bound = imports.setdefault(id(scope), {})
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                params = child.args
+                own = imports.setdefault(id(child), {})
+                for arg in (*params.posonlyargs, *params.args, *params.kwonlyargs,
+                            params.vararg, params.kwarg):
+                    if arg is not None:
+                        own.setdefault(arg.arg, set())
             if isinstance(child, ast.Import):
                 for alias in child.names:
                     top = alias.name.split(".")[0]
@@ -258,6 +278,12 @@ def test_an_untracked_file_is_not_read(tmp_path):
     "import random\ndef f():\n    import os as random\n    return random\nrandom.seed(1)\n",
     "import random\nclass C:\n    import os as random\nrandom.seed(1)\n",
     "import random\nclass C:\n    import os as random\n    def f(self):\n        random.seed(1)\n",
+    "import random\nrandom._inst.seed(1)\n",
+    "import random\nrandom._inst.setstate(random.getstate())\n",
+    "from random import _inst\n_inst.seed(1)\n",
+    "import numpy as np\nnp.random.mtrand._rand.seed(0)\n",
+    "from numpy.random import mtrand\nmtrand.set_state(None)\n",
+    "import random\ndef f(random):\n    pass\nrandom.seed(1)\n",
 ])
 def test_a_global_reseed_is_refused(source):
     assert global_reseeds(source), source
@@ -281,6 +307,9 @@ def test_a_global_reseed_is_refused(source):
     "from random import *\nprint([seed for seed in range(2)])\n",
     "import os as random\ndef f():\n    import random\n    return random\nrandom.seed(1)\n",
     "import random\ndef f():\n    import os as random\n    random.seed(1)\n",
+    "import random\ndef f(random):\n    random.seed(1)\n",
+    "import random\nreseed = lambda random: random.seed(1)\n",
+    "import random\ndef f(*, random):\n    def g():\n        random.seed(1)\n",
 ])
 def test_a_local_generator_or_a_same_named_helper_is_not_refused(source):
     assert global_reseeds(source) == [], source

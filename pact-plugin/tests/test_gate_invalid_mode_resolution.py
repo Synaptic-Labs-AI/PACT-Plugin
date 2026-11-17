@@ -399,12 +399,6 @@ class TestTeardownRestoresAmbientModes:
         assert INLINE_ENV not in os.environ
         assert importlib.import_module("dispatch_gate").INLINE_MISSION_MODE == "warn"
 
-    # Kept the last test in this file that reloads dispatch_gate. With the
-    # per-test reload in place its position does not matter. It matters only
-    # if that reload is removed: then, in file order, the leftover check at the
-    # end of the file catches the dispatch leftover only because this test
-    # leaves one. Under a shuffled order the end check may not catch a removed
-    # per-test reload; the every-test fixture check above does.
     def test_an_ambient_value_removed_inside_comes_back(self, monkeypatch):
         monkeypatch.setenv(INLINE_ENV, "deny")
         with contextlib.redirect_stderr(io.StringIO()):
@@ -438,8 +432,7 @@ class TestTeardownRestoresAmbientModes:
     def test_each_gate_module_reloads_the_gates_after_every_test(self, module_file):
         """Both modules restore the mode variables and reload the gates after
         EVERY test, through a function-scoped autouse fixture, so no test hands
-        a test-chosen mode to the next. Holds in any test order, unlike the
-        leftover check at the end of this file."""
+        a test-chosen mode to the next. Holds in any test order."""
         tree = ast.parse((Path(__file__).parent / module_file).read_text(encoding="utf-8"))
         fixture = next((node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)
                         and node.name == "_reload_gates_after_each_test"), None)
@@ -563,22 +556,41 @@ class TestTeardownRestoresAmbientModes:
         assert _environ_writes(tree, _restore_fixture(tree), "rig") == []
 
 
-class TestNoTestLeavesAGateReloaded:
-    """Each gate's mode constant matches what a fresh reload under the current
-    environment gives, so no earlier test left it reloaded at a test-chosen
-    mode. In file order this runs after every test above that reloads a gate.
-    Under a shuffled order it can run first and then checks nothing; the
-    every-test fixture check above holds in any order."""
+class TestEveryTestGetsTheGatesBack:
+    """No test hands a test-chosen gate mode to the next one. Two parts make
+    that hold, and each has a check that can fail in any test order: the
+    restore helper puts the variable and the gate constant back, and this
+    module's autouse fixtures that call it are registered for its tests."""
 
-    @pytest.mark.parametrize("module_name,const_name", [
-        ("dispatch_gate", "INLINE_MISSION_MODE"),
-        ("handoff_ordering_gate", "DISPATCH_VARIETY_MODE"),
+    @pytest.mark.parametrize("module_name,env_name,const_name", [
+        ("dispatch_gate", INLINE_ENV, "INLINE_MISSION_MODE"),
+        ("handoff_ordering_gate", VARIETY_ENV, "DISPATCH_VARIETY_MODE"),
     ])
-    def test_the_gate_constant_matches_the_current_environment(self, module_name, const_name):
+    def test_the_helper_restores_each_gate_variable_and_constant(
+            self, module_name, env_name, const_name):
+        """Inside the helper the gate is reloaded at a mode it does not hold now;
+        after the helper the variable and the constant are as they were."""
         module = importlib.import_module(module_name)
-        left = getattr(module, const_name)
+        env_before = os.environ.get(env_name)
+        const_before = getattr(module, const_name)
+        chosen = next(mode for mode in ("shadow", "warn", "deny") if mode != const_before)
         with contextlib.redirect_stderr(io.StringIO()):
-            importlib.reload(module)
-        assert getattr(module, const_name) == left, (
-            f"{module_name}.{const_name} was {left!r}, but the current environment "
-            f"resolves to {getattr(module, const_name)!r}: an earlier test left it reloaded")
+            with restored_env_and_reloaded((INLINE_ENV, VARIETY_ENV), _GATE_MODULES):
+                os.environ[env_name] = chosen
+                importlib.reload(module)
+                assert getattr(module, const_name) == chosen, (
+                    f"{module_name} did not take {env_name}={chosen}, so the "
+                    "restore below would be checked against an unchanged constant")
+        assert os.environ.get(env_name) == env_before, (
+            f"the helper left {env_name}={os.environ.get(env_name)!r}, "
+            f"not {env_before!r}")
+        assert getattr(module, const_name) == const_before, (
+            f"the helper left {module_name}.{const_name} at "
+            f"{getattr(module, const_name)!r}, not {const_before!r}")
+
+    def test_the_restoring_fixtures_are_registered_for_this_module(self, request):
+        """Both fixtures that call the helper are active for this module's tests,
+        so removing one's autouse wiring fails here, not only a broken helper."""
+        missing = {"_reload_gates_after_each_test", "_restore_gate_modules"} - set(
+            request.fixturenames)
+        assert not missing, f"these restoring fixtures do not run for this module's tests: {missing}"
