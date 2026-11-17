@@ -8,6 +8,7 @@ origin URL, and every store is a scratch file under `tmp_path`.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -1496,30 +1497,84 @@ class TestTheRepairSentencePrintsOnlyForAMovedWorktree:
             assert "git worktree repair" not in text, text
 
 
-class TestANulInAWorktreeEntryAnswersTheSameFromAnyCwd:
-    """A moved worktree whose admin `gitdir` file starts with a NUL is
-    listed by git with an empty path. Catches that path resolving against
-    the process cwd: from inside the moved checkout it then matched, and
-    the identity bound there while every other cwd declined."""
+# A `git` that prints the `worktree list -z` answer from $LISTING_FILE,
+# notes each such call in $LISTING_LOG, and runs the real git otherwise.
+_LISTING_GIT = """#!/bin/sh
+listing=0
+for a in "$@"; do
+  [ "$a" = worktree ] && listing=$((listing + 1))
+  [ "$a" = -z ] && listing=$((listing + 1))
+done
+if [ "$listing" = 2 ]; then
+  echo listed >> "$LISTING_LOG"
+  cat "$LISTING_FILE"
+  exit 0
+fi
+exec "{git}" "$@"
+"""
 
-    @pytest.mark.parametrize("cwd_inside", [True, False], ids=["cwd inside", "cwd elsewhere"])
-    def test_it_declines_as_a_redirect(
-        self, identity_env, store, monkeypatch, capfd, cwd_inside
+
+class TestANulInAWorktreeEntryAnswersTheSameFromAnyCwd:
+    """A moved worktree whose admin `gitdir` file starts with a NUL names a
+    path git cannot print, and git versions list that entry differently:
+    git 2.43 with an empty path, git 2.56 at the entry's admin directory.
+    Whatever git prints, the answer is the same from inside the moved
+    checkout and from elsewhere, and it is a decline. Catches a listed path
+    resolving against the process cwd: from inside the moved checkout an
+    empty path then matched, and the identity bound there while every
+    other cwd declined. The listing git prints here is used as it is, and
+    each other version's listing is built from it and served by a
+    stand-in `git`."""
+
+    @pytest.mark.parametrize(
+        "listed_as", ["as git here lists it", "an empty path", "its admin directory"]
+    )
+    def test_every_cwd_gets_the_same_decline(
+        self, identity_env, store, monkeypatch, capfd, listed_as
     ):
+        import shutil
+
         from fixtures.identity_git import make_worktree, run_git
 
         main = make_repo(identity_env / "main", remote="https://github.com/o/main.git")
         moved = identity_env / "moved"
         make_worktree(main, identity_env / "wt").rename(moved)
-        (main / ".git" / "worktrees" / "wt" / "gitdir").write_bytes(b"\0/nowhere/.git\n")
+        admin = main / ".git" / "worktrees" / "wt"
+        (admin / "gitdir").write_bytes(b"\0/nowhere/.git\n")
         listing = run_git("worktree", "list", "--porcelain", "-z", cwd=moved)
-        assert "\0worktree \0" in listing, "git no longer lists the cut path as empty"
-        monkeypatch.chdir(moved if cwd_inside else identity_env)
+        records = [record.split("\0") for record in listing.split("\0\0") if record]
+        # control: git lists the main checkout and the damaged entry, and
+        # lists no record at the moved checkout
+        assert len(records) == 2, records
+        assert f"worktree {moved}" not in [record[0] for record in records], records
+        log = identity_env / "listing.log"
+        if listed_as != "as git here lists it":
+            damaged = "" if listed_as == "an empty path" else str(admin)
+            records[1][0] = "worktree " + damaged
+            served = identity_env / "listing"
+            served.write_bytes("".join("\0".join(r) + "\0\0" for r in records).encode())
+            bin_dir = identity_env / "bin"
+            bin_dir.mkdir()
+            stand_in = bin_dir / "git"
+            stand_in.write_text(_LISTING_GIT.replace("{git}", shutil.which("git")), encoding="utf-8")
+            stand_in.chmod(0o755)
+            monkeypatch.setenv("LISTING_FILE", str(served))
+            monkeypatch.setenv("LISTING_LOG", str(log))
+            monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(moved))
-        code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
-        assert code == 0, show
-        assert show["result"]["project_id"] is None, show
-        assert show["result"]["decline_reason"]["reason"] == "gitfile_redirect", show
+        answers = {}
+        for name, cwd in (("cwd inside", moved), ("cwd elsewhere", identity_env)):
+            monkeypatch.chdir(cwd)
+            code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+            assert code == 0, show
+            decline = show["result"].get("decline_reason") or {}
+            answers[name] = (show["result"]["project_id"], decline.get("reason"))
+        if listed_as != "as git here lists it":
+            assert log.exists(), "control: the stand-in git served no listing"
+        assert answers == {
+            "cwd inside": (None, "gitfile_redirect"),
+            "cwd elsewhere": (None, "gitfile_redirect"),
+        }, answers
 
 
 class TestADeclaredRepositoryWithNoWorkingTreeSaysOnlyWhatGitShowed:
