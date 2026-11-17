@@ -6227,6 +6227,16 @@ _LISTINGS = [
      ("{a}", "{b}")),
     ("nul, an unknown field leading a record", "foo bar\0worktree {a}\0HEAD 1\0\0", "", ("{a}",)),
     ("nul, only unknown fields", "foo bar\0newflag\0\0", "", "unreadable"),
+    # A NUL in a worktree's admin `gitdir` file cuts the path git prints, to
+    # nothing or to a relative path; either would resolve against the cwd,
+    # so that record is dropped and the others are kept.
+    ("nul, a worktree whose listed path is empty",
+     "worktree {a}\0HEAD 1\0\0worktree \0HEAD 2\0detached\0\0worktree {b}\0HEAD 3\0detached\0\0", "",
+     ("{a}", "{b}")),
+    ("nul, a worktree whose listed path is relative",
+     "worktree {a}\0HEAD 1\0\0worktree b\0HEAD 2\0detached\0\0", "", ("{a}",)),
+    ("plain, a worktree whose listed path is empty", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree \nHEAD 2\ndetached\n\n", ("{a}",)),
     # git always lists the main worktree first, so a listing with no record,
     # or with an empty record anywhere, is not git's.
     ("nul, an empty listing", "", "", "unreadable"),

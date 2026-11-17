@@ -1496,6 +1496,32 @@ class TestTheRepairSentencePrintsOnlyForAMovedWorktree:
             assert "git worktree repair" not in text, text
 
 
+class TestANulInAWorktreeEntryAnswersTheSameFromAnyCwd:
+    """A moved worktree whose admin `gitdir` file starts with a NUL is
+    listed by git with an empty path. Catches that path resolving against
+    the process cwd: from inside the moved checkout it then matched, and
+    the identity bound there while every other cwd declined."""
+
+    @pytest.mark.parametrize("cwd_inside", [True, False], ids=["cwd inside", "cwd elsewhere"])
+    def test_it_declines_as_a_redirect(
+        self, identity_env, store, monkeypatch, capfd, cwd_inside
+    ):
+        from fixtures.identity_git import make_worktree, run_git
+
+        main = make_repo(identity_env / "main", remote="https://github.com/o/main.git")
+        moved = identity_env / "moved"
+        make_worktree(main, identity_env / "wt").rename(moved)
+        (main / ".git" / "worktrees" / "wt" / "gitdir").write_bytes(b"\0/nowhere/.git\n")
+        listing = run_git("worktree", "list", "--porcelain", "-z", cwd=moved)
+        assert "\0worktree \0" in listing, "git no longer lists the cut path as empty"
+        monkeypatch.chdir(moved if cwd_inside else identity_env)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(moved))
+        code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert code == 0, show
+        assert show["result"]["project_id"] is None, show
+        assert show["result"]["decline_reason"]["reason"] == "gitfile_redirect", show
+
+
 class TestADeclaredRepositoryWithNoWorkingTreeSaysOnlyWhatGitShowed:
     """A declared directory git gives no toplevel for is refused with a
     detail, cause and remedy that hold for a bare repository AND for a

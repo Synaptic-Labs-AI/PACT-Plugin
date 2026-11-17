@@ -453,7 +453,10 @@ def _worktree_records(at: Sequence[str]) -> "Optional[List[List[str]] | str]":
         records = _plain_records_kept(records)
         if records is None:
             return UNREADABLE_LISTING
-    return records
+    # git prints the path a worktree's admin entry holds; a NUL in that file
+    # can leave it empty or relative, and such a path would resolve against
+    # the process cwd. It names no directory, so its record is dropped.
+    return [record for record in records if os.path.isabs(record[0][len("worktree "):])]
 
 
 def _porcelain_key_known(field: str) -> bool:
