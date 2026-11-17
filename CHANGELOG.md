@@ -109,6 +109,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: each FIFO, link and directory `.git` arm first reads a regular file through the same reader and checks its content, so an arm cannot pass on a read that never ran; the legacy link case is labelled as the islink check's control.
 - Tests: the genuine-submodule subdirectory control gives its git calls a long timeout, so a loaded machine cannot fail it through the production five-second limit (which is unchanged).
 - Tests: two identity test modules spell non-ASCII test data, including a byte order mark and a combining accent, as escapes, so the raw-invisible-character scan passes again.
+- Tests: the identity parser's platform-flag, include-header and core.worktree arms now cover every optional open flag, a header directly after another one, and every way the core.worktree read can fail.
 
 ### Corrected during review
 

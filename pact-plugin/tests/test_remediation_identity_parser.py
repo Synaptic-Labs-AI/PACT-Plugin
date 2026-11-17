@@ -2343,16 +2343,24 @@ class TestAnIncludeOnlyOriginDeclinesOnEveryBranch:
         assert self._read(repo).state == pi.ORIGIN_CONFIG_UNREAD
 
 
-# The open flags a platform may lack (Windows has neither of the first two).
-_OPTIONAL_OPEN_FLAGS = ("O_NONBLOCK", "O_NOFOLLOW", "O_CLOEXEC")
+# The open flags Python defines on every platform ("available on Unix and
+# Windows" in the `os.open` flag documentation). Every other `os.O_*` flag
+# is missing on some platform the module runs on.
+_UNIVERSAL_OPEN_FLAGS = frozenset(
+    {"O_RDONLY", "O_WRONLY", "O_RDWR", "O_APPEND", "O_CREAT", "O_EXCL", "O_TRUNC"}
+)
 
 
 @pytest.fixture
 def without_optional_open_flags(monkeypatch):
-    """`os` as on a platform that defines none of `_OPTIONAL_OPEN_FLAGS`."""
-    for name in _OPTIONAL_OPEN_FLAGS:
-        monkeypatch.delattr(os, name, raising=False)
-    assert not [name for name in _OPTIONAL_OPEN_FLAGS if hasattr(os, name)]
+    """`os` with every open flag outside `_UNIVERSAL_OPEN_FLAGS` deleted, so
+    a reader that names any platform-specific flag directly raises."""
+    optional = [name for name in dir(os) if name.startswith("O_")]
+    optional = [name for name in optional if name not in _UNIVERSAL_OPEN_FLAGS]
+    assert optional, "control: this platform defines no optional open flag to delete"
+    for name in optional:
+        monkeypatch.delattr(os, name)
+    assert sorted(n for n in dir(os) if n.startswith("O_")) == sorted(_UNIVERSAL_OPEN_FLAGS)
 
 
 class TestEveryReaderOpensWithoutAnOptionalFlag:
@@ -2449,6 +2457,8 @@ _HEADER_FORMS = {
     "vertical tab before": "\v[include]\n\tpath = inc\n",
     "key on the same line": "[include] path = inc\n",
     "after another header": "[gc] [include]\n\tpath = inc\n",
+    "directly after another header": "[gc][include]\n\tpath = inc\n",
+    "after another header and a tab": "[gc]\t[include]\n\tpath = inc\n",
     "CRLF lines": "[include]\r\n\tpath = inc\r\n",
     "includeIf": '[includeIf "gitdir:{repo}/"]\n\tpath = inc\n',
     "includeIf after a tab": '[includeIf\t"gitdir:{repo}/"]\n\tpath = inc\n',
@@ -2550,13 +2560,28 @@ class TestTheSubmoduleWorktreeCheckNamesItsCause:
         monkeypatch.setattr(pi.subprocess, "run", run)
         assert pi._admin_dir_refusal(admin, checkout) == pi.CORE_WORKTREE_UNREAD_DETAIL
 
-    def test_a_git_that_cannot_run_is_named_as_unread(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize(
+        "failure",
+        [
+            subprocess.TimeoutExpired(["git"], 5),
+            FileNotFoundError("git"),
+            OSError("git cannot run"),
+            subprocess.CompletedProcess(["git"], 1, b"../../../x\n", b""),
+        ],
+        ids=["timed out", "not found", "cannot run", "exit 1 with output"],
+    )
+    def test_a_git_that_cannot_answer_is_named_as_unread(self, tmp_path, monkeypatch, failure):
+        """Each way the `core.worktree` read can fail to answer, and an exit
+        of 1 that still printed something (not git's "unset"), is named as
+        unread, never as a recorded other checkout."""
         admin, checkout = self._submodule(tmp_path)
         real = pi.subprocess.run
 
         def run(command, *args, **kwargs):
             if "core.worktree" in command:
-                raise OSError("git cannot run")
+                if isinstance(failure, BaseException):
+                    raise failure
+                return failure
             return real(command, *args, **kwargs)
 
         monkeypatch.setattr(pi.subprocess, "run", run)
