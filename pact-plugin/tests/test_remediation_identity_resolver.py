@@ -2903,10 +2903,9 @@ class TestTheCwdMarkerDeclinesAMarkerGitCannotAnswerFor:
         assert answers and {answer[1] for answer in answers.values()} == {"no_working_tree"}, answers
 
 
-# Every expression class in Python's grammar, by how a reader's answer held
-# in it reaches the expression's own value. The census test compares the
-# union of the three tables with the grammar, so a class the grammar gains
-# must be placed in one.
+# The expression classes the walk reads outright. Every other expression
+# with a passing child is evaluated by `_gives_back_an_answer`, and one that
+# can give an answer back fails the walk's ban.
 #
 # The expression's value can be one of these children, unchanged:
 _ANSWER_CHILDREN = {
@@ -2920,30 +2919,111 @@ _ANSWER_BASES = {
     "Name": "`UNREADABLE_LISTING`, or a name bound to an answer",
     "Call": "a call to a reader, or a call handed a lambda (by position or keyword) whose body passes one",
 }
-# Never the answer unchanged:
-_ANSWER_TRANSFORMED = {
-    "BinOp": "computes a new value from its operands",
-    "UnaryOp": "computes a new value from its operand",
-    "Compare": "gives a bool",
-    "Lambda": "is a function; its body counts where a call is handed it",
-    "Dict": "a new container holding it",
-    "Set": "a new container holding it",
-    "List": "a new container holding it",
-    "Tuple": "a new container holding it",
-    "ListComp": "a new container built from it",
-    "SetComp": "a new container built from it",
-    "DictComp": "a new container built from it",
-    "GeneratorExp": "a generator, not the value",
-    "Yield": "gives what the caller sends in",
-    "YieldFrom": "gives the inner generator's return",
-    "FormattedValue": "formats a new string",
-    "JoinedStr": "formats a new string",
-    "Constant": "holds no expression",
-    "Attribute": "reads a part of it",
-    "Subscript": "reads a part of it",
-    "Starred": "unpacks it into a container or call",
-    "Slice": "is an index, not a value",
-}
+
+
+def _expression_children(node) -> list:
+    """The expressions `node` evaluates directly: its expression children,
+    and those under a part that is no expression of its own (a
+    comprehension's `iter` and `ifs`, a keyword's value, a default)."""
+    found, parts = [], list(ast.iter_child_nodes(node))
+    while parts:
+        part = parts.pop(0)
+        if isinstance(part, ast.expr):
+            found.append(part)
+        elif not isinstance(part, (ast.expr_context, ast.operator, ast.boolop, ast.unaryop, ast.cmpop)):
+            parts.extend(ast.iter_child_nodes(part))
+    return found
+
+
+def _holds(value, answer, depth=4) -> bool:
+    """Whether `answer` can be had back from `value`: it is `value`, or it
+    comes out of iterating it, of a mapping's keys and values, of calling
+    it with no argument, or, for an object that is none of those (a
+    slice), of what the interpreter records it refers to."""
+    import gc
+    import itertools
+
+    if value is answer:
+        return True
+    if depth == 0 or isinstance(value, (str, bytes, type, type(ast))):
+        return False
+    try:
+        if isinstance(value, dict):
+            parts = [*value.keys(), *value.values()]
+        elif callable(value):
+            parts = [value()]
+        elif hasattr(value, "__iter__"):
+            parts = list(itertools.islice(iter(value), 100))
+        else:
+            parts = gc.get_referents(value)
+    except Exception:
+        return False
+    return any(_holds(part, answer, depth - 1) for part in parts)
+
+
+def _gives_back_an_answer(node, passing, parents, constants, sentinel_values) -> bool:
+    """Whether the expression `node`, whose children `passing` pass an
+    answer, can give one back. The nearest expression that compiles on its
+    own (a formatted value's string, a starred item's container) is
+    evaluated with each passing child replaced by each answer a reader
+    gives (each sentinel string and a record list), every other name being
+    a module string constant (`constants`). FAIL CLOSED: an expression with
+    any other name, or none that compiles, can."""
+    held = {id(child) for child in passing}
+    while True:
+        copy = ast.parse("x", mode="eval")
+        copy.body = _replace_passing(node, held)
+        names = {
+            name.id for name in ast.walk(copy.body)
+            if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load)
+        } - {"__answer__"} - _comprehension_and_lambda_names(copy.body)
+        if names - set(constants):
+            return True
+        try:
+            code = compile(ast.fix_missing_locations(copy), "<held>", "eval")
+            break
+        except SyntaxError:
+            node = parents.get(id(node))
+            if not isinstance(node, ast.expr):
+                return True
+    for answer in [*sentinel_values, [["worktree /a", "HEAD 0"]]]:
+        try:
+            result = eval(code, {"__builtins__": {}, **constants, "__answer__": answer})
+        except Exception:
+            continue
+        if _holds(result, answer):
+            return True
+    return False
+
+
+def _replace_passing(node, held):
+    """A copy of `node` with each child in `held` (by id) replaced by the
+    name `__answer__`."""
+    if id(node) in held:
+        return ast.copy_location(ast.Name(id="__answer__", ctx=ast.Load()), node)
+    copy = type(node)()
+    for field, value in ast.iter_fields(node):
+        if isinstance(value, ast.AST):
+            value = _replace_passing(value, held)
+        elif isinstance(value, list):
+            value = [_replace_passing(v, held) if isinstance(v, ast.AST) else v for v in value]
+        setattr(copy, field, value)
+    for attribute in node._attributes:
+        if hasattr(node, attribute):
+            setattr(copy, attribute, getattr(node, attribute))
+    return copy
+
+
+def _comprehension_and_lambda_names(node) -> set:
+    """The names a comprehension target or a lambda parameter binds inside
+    `node`."""
+    names = set()
+    for part in ast.walk(node):
+        if isinstance(part, ast.comprehension):
+            names |= {n.id for n in ast.walk(part.target) if isinstance(n, ast.Name)}
+        elif isinstance(part, ast.Lambda):
+            names |= {a.arg for a in ast.walk(part.args) if isinstance(a, ast.arg)}
+    return names
 
 
 def _grammar_expression_classes() -> set:
@@ -3021,11 +3101,14 @@ def _listing_sentinels() -> set:
 _ANY_ANSWER = "<an answer>"
 
 
-def _walk_answers(trees: dict, sentinels: "set | None" = None) -> tuple:
+def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | None" = None) -> tuple:
     """For `trees` ({module: tree}), every function that can return a
     worktree-listing reader's answer unchanged, as {(module, name): def},
     and every other call that is handed a passing value, as
-    {callee name: (module, function)}.
+    {callee name: (module, function)}. `held`, when given, receives
+    (module, function, expression, passing children, parents) for each
+    expression of a class the walk does not read outright that a passing
+    value is evaluated in; a lambda handed to a call is read.
 
     An expression passes an answer when it is one of `sentinels` (by
     default `_listing_sentinels()`); a name
@@ -3126,7 +3209,18 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None) -> tuple:
     taking = {}
     for (module, name), function in functions.items():
         bound = bound_names(function, module)
+        parents = {id(child): node for node in ast.walk(function) for child in ast.iter_child_nodes(node)}
         for call in ast.walk(function):
+            if held is not None and isinstance(call, ast.expr) and type(call).__name__ not in {
+                *_ANSWER_CHILDREN, *_ANSWER_BASES,
+            }:
+                handed_lambda = isinstance(call, ast.Lambda) and (
+                    isinstance(parents.get(id(call)), ast.Call) and call in parents[id(call)].args
+                    or isinstance(parents.get(id(call)), ast.keyword)
+                )
+                passing = [child for child in _expression_children(call) if passes(child, bound, module)]
+                if passing and not handed_lambda:
+                    held.append((module, name, call, passing, parents))
             if not isinstance(call, ast.Call) or is_reader_call(call, module):
                 continue
             if callee(call) in _ARGUMENT_PASSERS:
@@ -3151,6 +3245,37 @@ def _listing_answer_modules() -> dict:
         Path(module.__file__).name: ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
         for module in (memory_api, backlog)
     }
+
+
+def _string_constants(tree) -> dict:
+    """{name: value} for every module-level string constant in `tree`."""
+    return {
+        target.id: node.value.value for node in tree.body
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+
+
+def _held_answers(trees: dict) -> tuple:
+    """(every expression in `trees` the walk does not read outright that a
+    passing value is evaluated in, those that can give an answer back), each
+    as (module, function, line, source)."""
+    held = []
+    _walk_answers(trees, held=held)
+    constants, readers_constants = {}, {}
+    for tree in trees.values():
+        constants.update(_string_constants(tree))
+    for tree in _listing_answer_modules().values():
+        readers_constants.update(_string_constants(tree))
+    sentinel_values = [readers_constants[name] for name in sorted(_listing_sentinels())]
+    every, giving = [], []
+    for module, function, node, passing, parents in held:
+        place = (module, function, node.lineno, ast.unparse(node))
+        every.append(place)
+        if _gives_back_an_answer(node, passing, parents, constants, sentinel_values):
+            giving.append(place)
+    return every, giving
 
 
 # Every call in the listing modules that is handed a passing value and is
@@ -3196,10 +3321,32 @@ class TestTheListingAnswerWalkFollowsEveryForm:
     places every expression class of the grammar, and finds a wrapper
     written in each form that passes the answer."""
 
-    def test_every_expression_class_is_placed_once(self):
-        tables = [set(_ANSWER_CHILDREN), set(_ANSWER_BASES), set(_ANSWER_TRANSFORMED)]
-        assert sum(map(len, tables)) == len(set().union(*tables)), tables  # no class twice
-        assert set().union(*tables) == _grammar_expression_classes()
+    def test_the_classes_read_outright_are_grammar_classes_placed_once(self):
+        assert not set(_ANSWER_CHILDREN) & set(_ANSWER_BASES)
+        assert set(_ANSWER_CHILDREN) | set(_ANSWER_BASES) <= _grammar_expression_classes()
+
+    def test_no_listing_module_holds_an_answer_in_an_unread_form(self):
+        """FAIL CLOSED: an answer stored in a container, passed through a
+        comprehension or generator, bound in a lambda, or held by any other
+        expression the walk does not read, which can give it back, is a
+        wrapper the walk cannot see."""
+        _every, giving = _held_answers(_listing_answer_modules())
+        assert giving == [], giving
+
+    def test_control_the_ban_sees_the_held_answers_and_spares_the_comparisons(self):
+        """Control: the listing modules' comparisons of an answer with a
+        sentinel and their slices of a record list are found and evaluated,
+        and none gives an answer back; a container of an answer does."""
+        every, giving = _held_answers(_listing_answer_modules())
+        sources = {place[3] for place in every}
+        assert {"records == UNREADABLE_LISTING", "records[1:]"} <= sources, sorted(sources)
+        assert not giving
+        source = (
+            "def reader():\n    return UNREADABLE_LISTING\n\n\n"
+            "def wrapper():\n    box = [reader()]\n    return box\n"
+        )
+        tree = ast.parse("UNREADABLE_LISTING = 'unreadable'\n" + source)
+        assert [place[3] for place in _held_answers({"m": tree})[1]] == ["[reader()]"]
 
     def test_every_passing_child_has_a_form(self):
         assert set(_ANSWER_CHILDREN) | set(_ANSWER_BASES) <= set(_PASSING_FORMS)
