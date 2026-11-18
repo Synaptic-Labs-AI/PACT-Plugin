@@ -50,6 +50,7 @@ from __future__ import annotations
 import ast
 import collections
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -2393,21 +2394,167 @@ class TestAGitPathAnswerIsNeverStripped:
         assert pi._admin_dir_names_another_checkout(admin, checkout) is False
 
 
-def _grammar_identifier_fields() -> set:
-    """Every (node class, field) in Python's own grammar that holds an
-    identifier, read from each ast class's signature (`Name(identifier id,
-    ...)`), so a form the grammar gains is a form the arms below must cover."""
-    import re
+_CONVERSION_MISSING = re.compile(r'required field "(\w+)" missing from (\w+)')
+_CONVERSION_SORT = re.compile(r"expected some sort of (\w+)")
+_CONVERSION_IDENTIFIER = "AST identifier must be of type str"
 
-    fields = set()
-    for name in dir(ast):
-        node = getattr(ast, name)
-        signature = (getattr(node, "__doc__", None) or "").split("\n")[0]
-        if isinstance(node, type) and issubclass(node, ast.AST) and re.match(r"\w+\(", signature):
-            for kind, field in re.findall(r"(\w+)[?*]? (\w+)", signature[signature.index("(") :]):
-                if kind == "identifier":
-                    fields.add((node.__name__, field))
-    return fields
+
+def _compiler_classes() -> dict:
+    """Every node class the compiler's own module (`_ast`) defines."""
+    import _ast
+
+    return {
+        name: node for name, node in vars(_ast).items()
+        if isinstance(node, type) and issubclass(node, ast.AST) and node is not ast.AST
+    }
+
+
+def _grammar_type(node_class) -> str:
+    """The grammar type a node of `node_class` fills: its base class, or
+    the class itself when it is a product type."""
+    base = node_class.__bases__[0]
+    return base.__name__ if base is not ast.AST else node_class.__name__
+
+
+def _probe_module(*statements):
+    return ast.Module(body=list(statements), type_ignores=[])
+
+
+def _probe_name():
+    return ast.Name(id="x", ctx=ast.Load())
+
+
+def _probe_arguments(**lists):
+    fields = {field: [] for field in ("posonlyargs", "args", "kwonlyargs", "kw_defaults", "defaults")}
+    fields.update(lists)
+    return ast.arguments(**fields)
+
+
+# Where a node of each grammar type sits so that compile() converts it. A
+# grammar type with no entry here leaves its fields unread, which fails the
+# arm below.
+_PROBE_PLACES = {
+    "mod": lambda n: (n, {"Module": "exec", "Expression": "eval", "Interactive": "single",
+                          "FunctionType": "func_type"}[type(n).__name__]),
+    "expr": lambda n: (ast.Expression(body=n), "eval"),
+    "stmt": lambda n: (_probe_module(n), "exec"),
+    "expr_context": lambda n: (ast.Expression(body=ast.Name(id="x", ctx=n)), "eval"),
+    "boolop": lambda n: (ast.Expression(body=ast.BoolOp(op=n, values=[_probe_name(), _probe_name()])), "eval"),
+    "operator": lambda n: (ast.Expression(body=ast.BinOp(left=_probe_name(), op=n, right=_probe_name())), "eval"),
+    "unaryop": lambda n: (ast.Expression(body=ast.UnaryOp(op=n, operand=_probe_name())), "eval"),
+    "cmpop": lambda n: (
+        ast.Expression(body=ast.Compare(left=_probe_name(), ops=[n], comparators=[_probe_name()])), "eval"
+    ),
+    "comprehension": lambda n: (ast.Expression(body=ast.ListComp(elt=_probe_name(), generators=[n])), "eval"),
+    "excepthandler": lambda n: (
+        _probe_module(ast.Try(body=[ast.Pass()], handlers=[n], orelse=[], finalbody=[])), "exec"
+    ),
+    "arguments": lambda n: (ast.Expression(body=ast.Lambda(args=n, body=_probe_name())), "eval"),
+    "arg": lambda n: (ast.Expression(body=ast.Lambda(args=_probe_arguments(args=[n]), body=_probe_name())), "eval"),
+    "keyword": lambda n: (ast.Expression(body=ast.Call(func=_probe_name(), args=[], keywords=[n])), "eval"),
+    "alias": lambda n: (_probe_module(ast.Import(names=[n])), "exec"),
+    "withitem": lambda n: (_probe_module(ast.With(items=[n], body=[ast.Pass()])), "exec"),
+    "match_case": lambda n: (_probe_module(ast.Match(subject=_probe_name(), cases=[n])), "exec"),
+    "pattern": lambda n: (
+        _probe_module(ast.Match(subject=_probe_name(), cases=[ast.match_case(pattern=n, body=[ast.Pass()])])),
+        "exec",
+    ),
+    "type_ignore": lambda n: (ast.Module(body=[], type_ignores=[n]), "exec"),
+    "type_param": lambda n: (
+        _probe_module(ast.TypeAlias(name=ast.Name(id="x", ctx=ast.Store()), type_params=[n], value=_probe_name())),
+        "exec",
+    ),
+}
+
+
+def _conversion_error(node_class, node):
+    """The compiler's TypeError text converting `node` in its place, or None
+    once it converts (a later check refusing the tree counts as converted).
+    A grammar type with no place never converts."""
+    place = _PROBE_PLACES.get(_grammar_type(node_class))
+    if place is None:
+        return f"no place for {_grammar_type(node_class)}"
+    tree, mode = place(node)
+    try:
+        compile(ast.fix_missing_locations(tree), "<probe>", mode)
+    except TypeError as error:
+        return str(error)
+    except (ValueError, SyntaxError):
+        return None
+    return None
+
+
+def _probe_build(node_class, found, reached, depth=0):
+    """A `node_class` node whose every field converts, built field by field
+    in the order the compiler converts them. Handing each field an int first
+    makes the compiler name the field's type; each field it names as an
+    identifier goes in `found`, and each field it reached in `reached`."""
+    if depth > 5:
+        return None
+    node = node_class()
+    fields = list(node_class._fields)
+    classes = _compiler_classes()
+    for index, field in enumerate(fields):
+        later = set(fields[index + 1:])
+
+        def converts_past(error):
+            missing = _CONVERSION_MISSING.search(error or "")
+            return error is None or bool(
+                missing and missing.group(2) == node_class.__name__ and missing.group(1) in later
+            )
+
+        def trial(value):
+            setattr(node, field, value)
+            return _conversion_error(node_class, node)
+
+        error = trial(1)
+        missing = _CONVERSION_MISSING.search(error or "")
+        if not (missing and missing.group(1) in fields[:index]):
+            reached.add((node_class.__name__, field))
+        if error and _CONVERSION_IDENTIFIER in error:
+            found.add((node_class.__name__, field))
+        if converts_past(error):
+            continue
+        as_list = bool(error and "must be a list" in error)
+        if as_list:
+            error = trial([1])
+            if error and _CONVERSION_IDENTIFIER in error:
+                found.add((node_class.__name__, field))
+            if converts_past(error):
+                continue
+        value = None
+        if error and "must be of type str" in error:
+            value = "x"
+        else:
+            sort = _CONVERSION_SORT.search(error or "")
+            missing = _CONVERSION_MISSING.search(error or "")
+            kind = sort.group(1) if sort else missing.group(2) if missing else None
+            if kind in classes and kind != node_class.__name__:
+                base = classes[kind]
+                choices = [c for c in classes.values() if c is not base and issubclass(c, base)] or [base]
+                for choice in sorted(choices, key=lambda c: (len(c._fields), c.__name__)):
+                    value = _probe_build(choice, found, set(), depth + 1)
+                    if value is not None:
+                        break
+        if value is None or not converts_past(trial([value] if as_list else value)):
+            return None
+    return node
+
+
+def _grammar_identifier_fields() -> tuple:
+    """(identifier fields, fields the compiler was never made to convert):
+    every (node class, field) of Python's grammar that holds an identifier,
+    as the compiler itself answers when handed an int in that field. A form
+    the grammar gains is a form the arms below must cover; a field the probe
+    cannot reach is listed, never assumed not to be an identifier."""
+    found, reached, every = set(), set(), set()
+    for name, node_class in _compiler_classes().items():
+        if node_class.__subclasses__():
+            continue
+        every |= {(name, field) for field in node_class._fields}
+        if node_class._fields and _grammar_type(node_class) in _PROBE_PLACES:
+            _probe_build(node_class, found, reached)
+    return found, every - reached
 
 
 # One statement per identifier field of the grammar, holding the name `X`
@@ -2446,7 +2593,8 @@ class TestEveryBindingFormOfADetailIsCounted:
     refusal's detail. The forms are the grammar's own identifier fields."""
 
     def test_every_identifier_field_of_the_grammar_has_a_form(self):
-        fields = _grammar_identifier_fields()
+        fields, unread = _grammar_identifier_fields()
+        assert unread == set(), sorted(unread)  # every field of the grammar was converted
         assert ("Name", "id") in fields and ("alias", "asname") in fields  # control
         assert fields == set(_IDENTIFIER_FORMS) | {("alias", "asname")}, (
             fields ^ (set(_IDENTIFIER_FORMS) | {("alias", "asname")})
