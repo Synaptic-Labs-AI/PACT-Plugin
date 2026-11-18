@@ -253,10 +253,12 @@ def excluded_rig(identity_env, store, monkeypatch):
 class TestTheRekeyNoOpGivesTheLibrarysAnswer:
     """`--from` equal to `--to` reports what the library reports for the
     same no-op, key for key, and leaves the store as it found it, its
-    journal mode included, whether the store file is writable or not.
+    journal mode included, whether the store file is writable or not. An
+    absent store answers without the library and still marks the no-op.
 
     Catches a CLI no-op that answers before the library and drops the
-    counters a plan carries (`from_bucket_empty`, the NULL-row counts).
+    counters a plan carries (`from_bucket_empty`, the NULL-row counts), and
+    a no-op route that leaves out `noop: True`.
     """
 
     BUCKET = "github.com/o/same"
@@ -300,6 +302,29 @@ class TestTheRekeyNoOpGivesTheLibrarysAnswer:
             assert conn.execute("PRAGMA journal_mode").fetchone()[0] == journal
         finally:
             conn.close()
+
+    @pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+    @pytest.mark.parametrize(
+        ("to_id", "noop"), [(BUCKET, True), ("github.com/o/other", None)],
+        ids=["same bucket", "another bucket"],
+    )
+    def test_an_absent_store_marks_the_no_op_and_creates_nothing(
+        self, identity_env, monkeypatch, capfd, apply, to_id, noop
+    ):
+        memory_dir = identity_env / "user-memory"
+        memory_dir.mkdir()
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
+        monkeypatch.chdir(identity_env)
+
+        code, envelope = _cli(
+            ["project-id", "rekey", f"--from={self.BUCKET}", f"--to={to_id}",
+             *(["--apply"] if apply else [])],
+            capfd,
+        )
+
+        result = envelope.get("result", {})
+        assert (code, result.get("store_absent"), result.get("noop")) == (0, True, noop), envelope
+        assert list(memory_dir.iterdir()) == []
 
 
 class TestTheRekeyRefusalContract:

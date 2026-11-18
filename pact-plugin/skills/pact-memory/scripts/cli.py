@@ -1142,6 +1142,9 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     target_defaulted = not args.to_id
     to_id = args.to_id or memory.project_id
     legacy_verdict = None
+    # Every envelope that answers `--from` equal to `--to` carries
+    # `noop: True`, whichever route answers it.
+    noop = from_id == to_id
     if not store.exists():
         # NOTHING TO MOVE AND NOTHING TO CREATE: a plan against a store that
         # does not exist must not bring one into existence.
@@ -1152,6 +1155,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             "store_absent": True,
             "from_bucket_empty": True,
             "schema_absent": True,
+            **({"noop": True} if noop else {}),
             "target_defaulted": target_defaulted,
             "legacy_verdict": None,
             **{key: 0 for key in _REKEY_ZERO_COUNTERS},
@@ -1247,11 +1251,10 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 ),
             )
 
-    # `--from` EQUAL TO `--to` IS ANSWERED BY THE LIBRARY TOO, so the no-op
-    # envelope carries every counter a plan carries. The library only reads
-    # on that path, and the read scope keeps opening the store from
-    # switching its journal mode.
-    noop = from_id == to_id
+    # ON A PRESENT STORE `--from` EQUAL TO `--to` IS ANSWERED BY THE LIBRARY
+    # TOO, so the no-op envelope carries every counter a plan carries. The
+    # library only reads on that path, and the read scope keeps opening the
+    # store from switching its journal mode.
     try:
         with read_only_scope() if noop else nullcontext(), db_connection() as conn:
             counters = rekey_project(
