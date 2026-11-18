@@ -3241,8 +3241,9 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | Non
     to a function outside the listing modules handed one (both evaluated by
     `_gives_back_an_answer`); and, with `unread` true, a passing value
     stored into a subscript or attribute target or added with an augmented
-    assignment, and one handed to a listing-module function where no
-    parameter can be named.
+    assignment, one handed to a listing-module function where no
+    parameter can be named, and a `global` or `nonlocal` statement naming a
+    name bound to a passing value.
 
     An expression passes an answer when it is one of `sentinels` (by
     default `_listing_sentinels()`); a name bound to a passing value (by
@@ -3394,6 +3395,13 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | Non
         bound = bound_names(function, key)
         parents = {id(child): node for node in ast.walk(function) for child in ast.iter_child_nodes(node)}
         for node in ast.walk(function):
+            if isinstance(node, (ast.Global, ast.Nonlocal)):
+                # A name bound to an answer and declared global or nonlocal
+                # hands the answer to another function's scope, which the walk
+                # does not follow.
+                if set(node.names) & bound:
+                    held.append((module, name, node, [], parents, True))
+                continue
             if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
                 targets = node.targets if isinstance(node, ast.Assign) else [node.target]
                 stored = isinstance(node, ast.AugAssign) or any(
@@ -3681,6 +3689,27 @@ class TestTheListingAnswerWalkFollowsEveryForm:
         """Stored where an `isinstance(<name>, list)` test dominates it, the
         value can only be a record list, never a sentinel string."""
         source = "UNREADABLE_LISTING = 'unreadable'\ndef reader():\n    return UNREADABLE_LISTING\n\n\n" + body
+        assert _held_answers({"m": ast.parse(source)})[1] == [], source
+
+    @pytest.mark.parametrize("body", [
+        "def fill():\n    global RECORDS\n    RECORDS = reader()\n\n\ndef wrapper():\n    fill()\n    return RECORDS\n",
+        "def wrapper():\n    records = None\n\n    def fill():\n        nonlocal records\n        records = reader()\n"
+        "    fill()\n    return records\n",
+        "def wrapper():\n    records = reader()\n\n    def give():\n        nonlocal records\n        return records\n"
+        "    return give()\n",
+    ])
+    def test_a_global_or_nonlocal_answer_fails_the_ban(self, body):
+        """A name that holds an answer, declared global or nonlocal, hands
+        the answer to a scope the walk does not follow."""
+        source = "UNREADABLE_LISTING = 'unreadable'\ndef reader():\n    return UNREADABLE_LISTING\n\n\n" + body
+        giving = _held_answers({"m": ast.parse(source)})[1]
+        assert [place for place in giving if place[3].startswith(("global ", "nonlocal "))], source
+
+    def test_a_global_name_that_holds_no_answer_is_read(self):
+        source = (
+            "UNREADABLE_LISTING = 'unreadable'\ndef reader():\n    return UNREADABLE_LISTING\n\n\n"
+            "def count():\n    global CALLS\n    CALLS = 1\n    records = reader()\n    return records\n"
+        )
         assert _held_answers({"m": ast.parse(source)})[1] == [], source
 
 
