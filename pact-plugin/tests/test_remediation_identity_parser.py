@@ -2726,6 +2726,39 @@ _HEADER_FORMS.update({
     ) + "\n\tpath = inc\n"
     for count in range(2, 65)
 })
+# Longer runs of each ASCII character between two headers and between a
+# section name and its quoted subsection, so a scan that steps over any
+# fixed number of characters short of the run misses what git reads on.
+_HEADER_FORMS.update({
+    f"{length} of {ord(separator):#04x} {where}": (
+        form.format(run=separator * length).replace("{", "{{").replace("}", "}}") + "\n\tpath = inc\n"
+    )
+    for length in (4, 100)
+    for separator in map(chr, range(1, 128))
+    for where, form in (
+        ("between headers", "[gc]{run}[include]"),
+        ("before a quoted subsection", '[remote{run}"a]b"][include]'),
+    )
+})
+# Chains longer than sixty-four headers, so a scan that stops after any
+# number of headers up to the longest here misses the include at the end.
+_HEADER_FORMS.update({
+    f"{count} headers joined directly": "".join(
+        [f"[s{index}]" for index in range(count - 1)] + ["[include]"]
+    ) + "\n\tpath = inc\n"
+    for count in (65, 71, 128, 1024)
+})
+# Each ASCII character escaped by a backslash inside a quoted subsection,
+# before a `]` and the closing quote, and directly before the closing quote,
+# then an include header: git takes the escaped character as it is, so an
+# escaped quote does not end the quotes and the next character is read.
+_HEADER_FORMS.update({
+    f"{ord(escaped):#04x} escaped {where} in a quoted subsection": (
+        '[remote "a\\' + escaped + after + '][include]'
+    ).replace("{", "{{").replace("}", "}}") + "\n\tpath = inc\n"
+    for escaped in map(chr, range(1, 128))
+    for where, after in (("before a bracket", ']b"'), ("before the closing quote", '"'))
+})
 
 
 class TestTheIncludeScanReadsAHeaderAsGitDoes:
