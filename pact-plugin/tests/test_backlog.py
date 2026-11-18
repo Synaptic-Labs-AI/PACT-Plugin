@@ -2441,8 +2441,7 @@ def _logging_git(tmp_path, monkeypatch) -> Path:
     ("main checkout", 4, 5),
     ("linked worktree", 4, 5),
     ("separate-git-dir linked worktree", 4, 5),
-    ("bare repository", 3, 4),
-], ids=["main checkout", "linked worktree", "separate-git-dir linked worktree", "bare repository"])
+], ids=["main checkout", "linked worktree", "separate-git-dir linked worktree"])
 def test_one_roots_lookup_lists_the_worktrees_once(
     tmp_path, monkeypatch, layout, commands_with_z, commands_rejecting_z, nul
 ):
@@ -2450,19 +2449,14 @@ def test_one_roots_lookup_lists_the_worktrees_once(
     once: from a linked worktree the root's redirect check reads it, and the
     roots reuse that answer. The roots are the ones git's listing gives, and
     the lookup runs the number of git commands the release notes state: four
-    from a checkout, three from a bare repository, which reads the listing
-    before git says it has no working tree. A git that rejects `-z`, as git
-    before 2.36 does, is asked that one listing twice (`-z`, then without
-    it), one command more in each layout.
+    from a checkout. A git that rejects `-z`, as git before 2.36 does, is
+    asked that one listing twice (`-z`, then without it), one command more in
+    each layout.
 
     Real repos, real git, a `git` that logs each command it runs."""
     import os
 
-    if layout == "bare repository":
-        main = (tmp_path / "bare.git").resolve()
-        subprocess.run(["git", "init", "-q", "--bare", str(main)], check=True, capture_output=True)
-        recorded, expected = None, [str(main)]
-    elif layout == "separate-git-dir linked worktree":
+    if layout == "separate-git-dir linked worktree":
         main, _store, wt = _separate_git_dir_repo(tmp_path)
         recorded, expected = [str(main)], [str(wt), str(main)]
     else:
@@ -2471,7 +2465,7 @@ def test_one_roots_lookup_lists_the_worktrees_once(
                        check=True, capture_output=True)
         wt = (tmp_path / "wt").resolve()
         recorded, expected = None, [str(main), str(wt)]
-    start = main if layout in ("main checkout", "bare repository") else wt
+    start = main if layout == "main checkout" else wt
     for name in [n for n in os.environ if n.startswith("CLAUDE_")]:
         monkeypatch.delenv(name)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(start))
@@ -2598,6 +2592,255 @@ def test_without_git_no_recorded_root_is_carried(tmp_path, monkeypatch):
         monkeypatch.delenv(name)
 
     assert backlog.checkout_roots([str(main)]) == [str(folder.resolve())]
+
+
+def _project_dir_is(monkeypatch, start: Path) -> None:
+    """Make `start` the declared project directory and the cwd, with no other
+    CLAUDE_* variable set, so the real anchor, root and roots run."""
+    import os
+
+    for name in [n for n in os.environ if n.startswith("CLAUDE_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(start))
+    monkeypatch.chdir(start)
+
+
+def _roots_or_refusal(recorded=None):
+    """`checkout_roots(recorded)`, or the exception it raised: the outcome is
+    what an arm compares, so a raise fails at the arm's own assertion."""
+    try:
+        return backlog.checkout_roots(recorded)
+    except Exception as error:  # the outcome under test, not a harness failure
+        return error
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+@pytest.mark.parametrize("layout", ["main checkout", "separate-git-dir linked worktree"])
+def test_a_listing_read_that_raises_gives_the_answer_no_listing_gives(tmp_path, monkeypatch, layout, error):
+    """The worktree listing read itself raising gives what git giving no
+    listing gives: from a main checkout the root, plus each carried root;
+    from a linked worktree, whose root the memory skill's redirect check
+    confirms in that same listing, a refusal naming that check and its
+    cause. Never the raised error. The control shows the listing, read,
+    gives more roots.
+
+    Real repos, real git; the raise is the stand-in."""
+    if layout == "main checkout":
+        start = _repo(tmp_path / "main").resolve()
+        subprocess.run(["git", "-C", str(start), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                       check=True, capture_output=True)
+        recorded, listed = None, [str(start), str((tmp_path / "wt").resolve())]
+    else:
+        main, _store, start = _separate_git_dir_repo(tmp_path)
+        recorded, listed = [str(main)], [str(start), str(main)]
+    _project_dir_is(monkeypatch, start)
+    memory_api = backlog._memory_api()
+    assert _roots_or_refusal(recorded) == listed, "control: the listing, read, gives these roots"
+
+    def raising(*_args):
+        raise error("the listing read raised")
+
+    monkeypatch.setattr(memory_api, "_worktree_records", raising)
+    outcome = _roots_or_refusal(recorded)
+
+    if layout == "main checkout":
+        assert outcome == [str(start)], outcome
+    else:
+        refusal = memory_api._REDIRECT_CAUSE_DETAILS[memory_api.REDIRECT_UNLISTABLE]
+        assert (type(outcome), refusal in str(outcome)) == (backlog.BacklogWriteError, True), outcome
+
+
+_HONEST_REFUSALS = [
+    "linked worktree, git gives no listing",
+    "linked worktree, a listing holding no record",
+    "linked worktree, a listing that is not git's fields",
+    "linked worktree, the first record's path is relative",
+    "linked worktree moved with mv",
+    "bare repository inside a checkout",
+    "bare repository",
+    "subdirectory of a bare repository",
+    "main checkout, git absent",
+]
+
+
+def _honest_layout(tmp_path, monkeypatch, row):
+    """Build `row`'s honest layout and its git; return the declared directory."""
+    import os
+
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    wt = (tmp_path / "wt").resolve()
+    listings = {
+        "linked worktree, git gives no listing": "git gives no listing",
+        "linked worktree, a listing holding no record": "a listing holding no record",
+        "linked worktree, a listing that is not git's fields": "a listing that is not git's fields",
+        "linked worktree, the first record's path is relative": "the first record's path is relative",
+    }
+    if row in listings:
+        _git_listing(tmp_path, monkeypatch, _LISTINGS_WITH_NO_RECORD[listings[row]])
+        return wt
+    if row == "linked worktree moved with mv":
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "from"), "-b", "mv"],
+                       check=True, capture_output=True)
+        os.rename(tmp_path / "from", tmp_path / "to")
+        return (tmp_path / "to").resolve()
+    if row == "bare repository inside a checkout":
+        subprocess.run(["git", "init", "-q", "--bare", str(main / "inner.git")], check=True, capture_output=True)
+        return main / "inner.git"
+    if row in ("bare repository", "subdirectory of a bare repository"):
+        bare = (tmp_path / "bare.git").resolve()
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+        return bare if row == "bare repository" else bare / "hooks"
+    empty = tmp_path / "no-git"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    return main
+
+
+@pytest.mark.parametrize("row", _HONEST_REFUSALS)
+def test_a_refusal_inside_a_checkout_names_the_root_checks_cause(tmp_path, monkeypatch, row):
+    """From an honest layout whose root the memory skill's root check
+    refuses, the backlog refusal names that check, its cause and its remedy,
+    the same ones the check itself gives for the directory (`_root_guard`),
+    and gives no advice to set CLAUDE_PROJECT_DIR, which already names it.
+
+    Real repos, real git (or none); a listing git prints is the stand-in."""
+    start = _honest_layout(tmp_path, monkeypatch, row)
+    _project_dir_is(monkeypatch, start)
+    memory_api = backlog._memory_api()
+    common = memory_api.main_repo_common_dir(str(start))
+    guard = memory_api._root_guard(start, common, "probe")
+    assert guard is not None, "control: the memory skill's root check refuses this directory"
+    reason, detail = guard.decline_reason["reason"], guard.decline_detail
+    cause = memory_api._DECLINE_CAUSES[reason] + (f"; {detail}" if detail else "")
+    remedy = memory_api._decline_remedy(guard.decline_reason, detail)
+
+    outcome = _roots_or_refusal()
+
+    text = str(outcome)
+    assert (type(outcome), f"because {cause}." in text, bool(remedy) and text.endswith(remedy)) == (
+        backlog.BacklogWriteError, True, True), text
+    assert "root check refused CLAUDE_PROJECT_DIR=" in text, text
+    assert text.count("CLAUDE_PROJECT_DIR") == 1, text
+
+
+def test_a_bare_repository_refuses_and_its_linked_worktree_writes(tmp_path):
+    """A bare repository is not an umbrella: git answers for it and the
+    memory skill declines it, so a write there refuses and nothing is
+    written. The remedy it prints, running from a checkout with a working
+    tree, works: a linked worktree of that repository writes, and its file
+    holds that worktree as project_path. Neither run prints a decline on a
+    successful write; the refusal prints the memory skill's decline first,
+    then the refusal naming the root check's cause.
+
+    Real repositories, real git, the CLI."""
+    source = _repo(tmp_path / "source")
+    hub = (tmp_path / "hub.git").resolve()
+    subprocess.run(["git", "clone", "-q", "--bare", str(source), str(hub)], check=True, capture_output=True)
+    worktree = tmp_path / "hubwt"
+    subprocess.run(["git", "-C", str(hub), "worktree", "add", "-q", str(worktree), "-b", "w"],
+                   check=True, capture_output=True)
+    outcomes = {}
+    for start in (hub, worktree.resolve()):
+        store = tmp_path / f"store-{start.name}"
+        store.mkdir()
+        run = _cli_write(start, store)
+        files = list(store.glob("*.json"))
+        paths = [json.loads(f.read_text(encoding="utf-8"))["project_path"] for f in files]
+        decline = run.stderr.find("so no project id was derived")
+        refusal = run.stderr.find("refused: ")
+        outcomes[start.name] = (run.returncode, paths, decline, refusal, decline < refusal)
+
+    assert (outcomes["hub.git"][0], outcomes["hub.git"][1], outcomes["hub.git"][2] >= 0,
+            outcomes["hub.git"][4]) == (backlog._EXIT_REFUSED, [], True, True), outcomes
+    assert outcomes["hubwt"] == (0, [str(worktree.resolve())], -1, -1, False), outcomes
+
+
+def _cli_write(start: Path, store: Path) -> "subprocess.CompletedProcess":
+    """`backlog.py add` run as its own process from `start`, declared as the
+    project directory: the memory skill's warnings reach stderr there as
+    they do for a user, which they do not inside pytest's logging capture."""
+    import os
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env["CLAUDE_PROJECT_DIR"] = str(start)
+    return subprocess.run(
+        [sys.executable, str(Path(backlog.__file__)), "--backlog-dir", str(store), "add", "x"],
+        env=env, cwd=str(start), capture_output=True, text=True, timeout=60,
+    )
+
+
+def _named_apart_layout(tmp_path, layout):
+    """Build `layout`, one whose backlog file key and project_path name
+    different folders, and return the directory a session declares."""
+    if layout == "linked worktree of a bare repository":
+        source = _repo(tmp_path / "source")
+        hub = tmp_path / "hub.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(source), str(hub)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(hub), "worktree", "add", "-q", str(tmp_path / "hubwt"), "-b", "w"],
+                       check=True, capture_output=True)
+        return (tmp_path / "hubwt").resolve()
+    if layout == "submodule with no origin":
+        lib = _repo(tmp_path / "lib")
+        sup = _repo(tmp_path / "super")
+        subprocess.run(["git", "-C", str(sup), "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                        str(lib), "mod"], check=True, capture_output=True)
+        return (sup / "mod").resolve()
+    main, _store, wt = _separate_git_dir_repo(tmp_path)
+    return main if layout == "separate-git-dir main checkout" else wt
+
+
+@pytest.mark.parametrize("layout", [
+    "linked worktree of a bare repository",
+    "separate-git-dir main checkout",
+    "separate-git-dir linked worktree",
+    "submodule with no origin",
+])
+def test_the_file_key_and_project_path_name_different_folders_by_design(tmp_path, monkeypatch, layout):
+    """The backlog file is keyed by the pre-change folder name and
+    project_path is the identity root; on these layouts they name different
+    folders. The write succeeds, prints nothing on stderr (a decline of the
+    canonical id says nothing about a write keyed by the folder name), and
+    stores the identity root under the folder-name key.
+
+    Real repositories, real git, the CLI."""
+    start = _named_apart_layout(tmp_path, layout)
+    store = tmp_path / "store"
+    store.mkdir()
+    run = _cli_write(start, store)
+
+    _project_dir_is(monkeypatch, start)
+    key = backlog._project_name()
+    root = backlog._memory_api().main_repo_root(str(start))
+    assert key and root is not None, "control: both the key and the root resolve"
+    assert key != Path(root).name, "control: the key and the root name different folders"
+    files = sorted(p.name for p in store.glob("*.json"))
+    path = json.loads((store / files[0]).read_text(encoding="utf-8"))["project_path"] if files else None
+    assert (run.returncode, files, path, run.stderr) == (0, [f"{key}.json"], str(root), "")
+
+
+def test_a_refusal_the_root_check_does_not_give_names_what_git_did_not_give(tmp_path, monkeypatch):
+    """A directory under GIT_CEILING_DIRECTORIES sits inside a checkout git
+    will not look into from there; the memory skill's root check finds no
+    marker git would use and passes it, so the refusal says git gave no root
+    for it, names the checkout around it, and points at git's own reason.
+
+    Real repo, real git."""
+    main = _repo(tmp_path / "main").resolve()
+    (main / "sub").mkdir()
+    _project_dir_is(monkeypatch, main / "sub")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(main))
+    memory_api = backlog._memory_api()
+    assert memory_api.main_repo_common_dir(str(main / "sub")) is None, "control: git gives no repository here"
+
+    outcome = _roots_or_refusal()
+
+    text = str(outcome)
+    assert type(outcome) is backlog.BacklogWriteError, text
+    assert f"git gave no root for CLAUDE_PROJECT_DIR={str(main / 'sub')!r}" in text, text
+    assert f"inside the checkout at {str(main)!r}" in text, text
+    assert text.count("CLAUDE_PROJECT_DIR") == 1, text
 
 
 @pytest.mark.parametrize(
@@ -5607,6 +5850,11 @@ def test_a_directory_inside_a_repository_git_cannot_read_still_refuses(tmp_path,
         @staticmethod
         def env_record_project_dir_disagreement():
             return None
+
+        # The refusal's own cause comes from the real root check, which asks
+        # no git when git gave no common dir.
+        root_check_refusal = staticmethod(real.root_check_refusal)
+        _LISTING_UNASKED = real._LISTING_UNASKED
 
     monkeypatch.setattr(backlog, "_memory_api", lambda: _NoGit)
     for env_path in (sub, linked):

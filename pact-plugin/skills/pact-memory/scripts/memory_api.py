@@ -33,7 +33,7 @@ import unicodedata
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, cast
+from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple, cast
 
 # Use the same sqlite3 module as database.py for type consistency
 try:
@@ -828,8 +828,9 @@ def _decline_detected(
 # guard asks git itself.
 _TOPLEVEL_UNASKED: Any = object()
 
-# `main_repo_root`'s and the redirect check's default for `listing`: the
-# caller holds no worktree listing, so the check asks git itself.
+# The default for `listing` in `main_repo_root`, `root_check_refusal` and
+# the redirect check: the caller holds no worktree listing, so the check
+# asks git itself.
 _LISTING_UNASKED: Any = object()
 
 
@@ -910,6 +911,40 @@ def _root_guard(
             ),
         )
     return None
+
+
+def root_check_refusal(
+    asked_root: Path, common_dir: Optional[Path], *, listing: Any = _LISTING_UNASKED,
+) -> Optional[Tuple[str, Optional[str]]]:
+    """The cause and the remedy `_root_guard` gives when it declines
+    `asked_root`, as one sentence each, or None when the root passes. The
+    arms and their order are `_root_guard`'s; nothing is logged.
+
+    `listing` is the caller's `_worktree_records` answer for `--git-dir
+    <common_dir>`, when it holds one, for the redirect check; left out, the
+    check asks git."""
+    cause_detail = None
+    if common_dir is None:
+        if _unanswerable_repository(asked_root) is None:
+            return None
+        reason = "broken_git_marker"
+    else:
+        toplevel = _git_rev_parse(str(asked_root), "--show-toplevel")
+        redirect = _worktree_redirect_cause(
+            asked_root, common_dir,
+            toplevel=Path(toplevel) if toplevel else None, listing=listing,
+        )
+        if redirect is not None:
+            reason = "gitfile_redirect"
+            cause_detail = _REDIRECT_CAUSE_DETAILS[redirect]
+        elif toplevel is None:
+            reason = "no_working_tree"
+        else:
+            return None
+    cause = _DECLINE_CAUSES[reason]
+    if cause_detail:
+        cause = f"{cause}; {cause_detail}"
+    return cause, _decline_remedy(decline_record(reason, None, None), cause_detail)
 
 
 def _is_live_decline(detected: "_DetectedIdentity") -> bool:
@@ -1897,6 +1932,11 @@ def _ask_worktree_records(start, git_dir: Optional[Path]) -> "Optional[List[List
         else []
     )
     records = _worktree_records(prefix)
+    # KEEP THIS `if not isinstance(records, list): return` ABOVE THE STORE
+    # BELOW, and bind `records` nowhere between them. A listing answer may be
+    # stored in a container only where such a test, or the body of `if
+    # isinstance(records, list):`, has excluded every answer that is not a
+    # record list; a test fails a store of a listing answer neither guards.
     if not isinstance(records, list):
         return records
     listings = _DETECTION_LISTINGS.get()
