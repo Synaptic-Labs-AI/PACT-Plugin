@@ -51,6 +51,7 @@ import ast
 import collections
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -700,8 +701,9 @@ def _callee(func, aliases: dict, scope_bindings: dict):
     `from scripts.project_identity import detect_id_for_root as d`), and a
     plain name assigned from one of those in the same scope (`r =
     main_repo_root`). An attribute on a call result (`_memory_api().x`)
-    resolves by its attribute name. NOT SEEN: `getattr` with a string, `exec`
-    and `eval`, which no memory script uses to reach these functions.
+    resolves by its attribute name. Every other way to reach one (a name in a
+    string handed to `getattr`, `eval` or an import, or a namespace such as
+    `globals()`) is banned by `_identity_reaches_unread`.
     """
     targets = [func]
     if isinstance(func, ast.Name) and func.id not in aliases:
@@ -763,6 +765,435 @@ def _identity_call_forms() -> tuple:
 def _identity_call_sites() -> set:
     """The call sites `_identity_call_forms` reads."""
     return _identity_call_forms()[0]
+
+
+# Run in a child with no PATH, an empty working directory and an alarm per
+# call: every builtin, and every callable of each standard module a census
+# scope imports, is handed a probe module and the name of one of its
+# attributes, a name of a global, a line of code and a module name, and the
+# ways it gives back what that name names are recorded.
+_DYNAMIC_ACCESS_PROBE = r"""
+import builtins, importlib, io, json, os, select, signal, sys, traceback, types
+
+OUT_PATH = sys.argv[2]
+sys.breakpointhook = lambda *args, **kwargs: None
+
+
+def on_alarm(signum, frame):
+    raise TimeoutError
+
+
+signal.signal(signal.SIGALRM, on_alarm)
+modules = sys.argv[1].split(",") if sys.argv[1] else []
+SENT, SENT2 = object(), object()
+secret_global = SENT
+sys.modules["probe_secret_module"] = types.ModuleType("probe_secret_module")
+
+
+def probe_module():
+    module = types.ModuleType("probe")
+    module.secret_attr = SENT
+    return module
+
+
+def attempt(call):
+    signal.alarm(2)
+    try:
+        return call()
+    except BaseException:
+        return None
+    finally:
+        signal.alarm(0)
+
+
+def kinds(callable_):
+    found = []
+    m = probe_module()
+    if attempt(lambda: callable_(m, "secret_attr")) is SENT:
+        found.append(("attribute", 1))
+    m = probe_module()
+    if attempt(lambda: callable_(m, "secret_attr")) is True and attempt(lambda: callable_(m, "no_such_attr")) is False:
+        found.append(("attribute", 1))
+    m = probe_module()
+    attempt(lambda: callable_(m, "secret_attr", SENT2))
+    if getattr(m, "secret_attr", None) is SENT2:
+        found.append(("attribute", 1))
+    m = probe_module()
+    attempt(lambda: callable_(m, "secret_attr"))
+    if not hasattr(m, "secret_attr"):
+        found.append(("attribute", 1))
+    made = attempt(lambda: callable_("secret_attr"))
+    if callable(made) and attempt(lambda: made(probe_module())) is SENT:
+        found.append(("attribute", 0))
+    space = attempt(lambda: callable_(probe_module()))
+    if hasattr(space, "get") and attempt(lambda: space.get("secret_attr")) is SENT:
+        found.append(("namespace", None))
+    if attempt(lambda: callable_("secret_global")) is SENT:
+        found.append(("code", 0))
+    space = {"hit": [], "secret_global": SENT}
+    attempt(lambda: callable_("hit.append(secret_global)", space))
+    if space["hit"] and space["hit"][0] is SENT:
+        found.append(("code", 0))
+    code = attempt(lambda: callable_("secret_global", "<probe>", "eval"))
+    if "secret_global" in getattr(code, "co_names", ()):
+        found.append(("code", 0))
+    if attempt(lambda: callable_("probe_secret_module")) is sys.modules["probe_secret_module"]:
+        found.append(("import", 0))
+    return sorted(set(found), key=str)
+
+
+def call_here(callable_):
+    secret_local = SENT
+    try:
+        return callable_()
+    except BaseException:
+        return None
+
+
+def namespace_without_arguments(callable_):
+    space = attempt(lambda: call_here(callable_))
+    return hasattr(space, "get") and (
+        attempt(lambda: space.get("secret_local")) is SENT
+        or attempt(lambda: space.get("secret_global")) is SENT
+    )
+
+
+def probe_function():
+    return secret_global
+
+
+def probe_frame():
+    secret_local = SENT
+    return sys._getframe()
+
+
+def probe_objects():
+    probe_class = type("ProbeClass", (), {"secret_attr": SENT})
+    instance = type("ProbeInstance", (), {})()
+    instance.secret_attr = SENT
+    return [probe_module(), probe_class, instance, probe_function, probe_frame()]
+
+
+def object_kinds(index, name):
+    probe = probe_objects()[index]
+    value = attempt(lambda: getattr(probe, name))
+    space = attempt(lambda: value.get) if not callable(value) else None
+    if space is not None and any(
+        attempt(lambda: space(key)) is SENT for key in ("secret_attr", "secret_local", "secret_global")
+    ):
+        return [("namespace", None)]
+    if not callable(value) or isinstance(value, type):
+        return []
+    if attempt(lambda: value("secret_attr")) is SENT:
+        return [("attribute", 0)]
+    target = probe_objects()[index]
+    attempt(lambda: getattr(target, name)("secret_attr", SENT2))
+    if attempt(lambda: target.secret_attr) is SENT2:
+        return [("attribute", 0)]
+    target = probe_objects()[index]
+    held = attempt(lambda: target.secret_attr) is SENT
+    attempt(lambda: getattr(target, name)("secret_attr"))
+    if held and attempt(lambda: target.secret_attr) is None:
+        return [("attribute", 0)]
+    return []
+
+
+def isolated(probe):
+    # A probed call can change the interpreter itself (an audit hook, the
+    # working directory, a signal handler), so each runs in a forked child
+    # and one that dies or hangs is recorded as unprobed.
+    read, write = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(read)
+        try:
+            data = json.dumps(probe())
+        except BaseException:
+            data = "null"
+        os.write(write, data.encode())
+        os._exit(0)
+    os.close(write)
+    chunks = []
+    ready = select.select([read], [], [], 10)[0]
+    while ready:
+        chunk = os.read(read, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        ready = select.select([read], [], [], 10)[0]
+    os.close(read)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    os.waitpid(pid, 0)
+    try:
+        found = json.loads(b"".join(chunks))
+    except ValueError:
+        found = None
+    return [("unprobed", None)] if found is None else [tuple(kind) for kind in found]
+
+
+def builtin_kinds(value):
+    found = kinds(value)
+    if namespace_without_arguments(value):
+        found.append(("namespace", None))
+    return sorted(set(found), key=str)
+
+
+def module_kinds(module_name, name):
+    return kinds(getattr(importlib.import_module(module_name), name))
+
+
+def main():
+    out = {}
+    for name, value in sorted(vars(builtins).items()):
+        if callable(value):
+            out["builtins." + name] = isolated(lambda: builtin_kinds(value))
+    for module_name in modules:
+        module = attempt(lambda: importlib.import_module(module_name))
+        for name in sorted(dir(module) if module else []):
+            if callable(getattr(module, name, None)) and not name.startswith("_"):
+                out[module_name + "." + name] = isolated(lambda: module_kinds(module_name, name))
+    for index, probe in enumerate(probe_objects()):
+        for name in sorted(set(dir(type(probe))) | set(dir(probe))):
+            found = isolated(lambda: object_kinds(index, name))
+            if found:
+                out["." + name] = sorted(set(out.get("." + name, [])) | set(found), key=str)
+    return {name: found for name, found in out.items() if found}
+
+
+sys.stdout = sys.stderr = io.StringIO()
+try:
+    result = {"forms": main()}
+except BaseException:
+    result = {"error": traceback.format_exc()}
+with builtins.open(OUT_PATH, "w") as handle:
+    handle.write(json.dumps(result))
+os._exit(0)
+"""
+
+
+def _scope_standard_modules(paths) -> list:
+    """Every standard-library module the files at `paths` import."""
+    names = set()
+    for path in paths:
+        for node in ast.walk(ast.parse(Path(path).read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                names |= {alias.name.split(".")[0] for alias in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+                names.add(node.module.split(".")[0])
+    return sorted(name for name in names if name in sys.stdlib_module_names and name != "__future__")
+
+
+def dynamic_access_forms(paths) -> dict:
+    """{qualified callable: [(kind, index of its name argument)]} for every
+    way the language, and each standard module the files at `paths`
+    import, reaches what a runtime name names: by attribute name, as a
+    namespace, as a line of code, or as a module name. Measured by handing
+    each callable a probe in a sandboxed child. `.x` keys are attributes of
+    every module object (`__getattribute__`, `__dict__`)."""
+    import json
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as empty, tempfile.TemporaryDirectory() as out:
+        result_path = Path(out) / "forms.json"
+        run = subprocess.run(
+            [sys.executable, "-I", "-c", _DYNAMIC_ACCESS_PROBE,
+             ",".join(_scope_standard_modules(paths)), str(result_path)],
+            capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL, cwd=empty,
+            env={"PATH": "", "HOME": empty},
+        )
+        assert result_path.is_file(), (run.returncode, run.stderr[-2000:])
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+    assert "error" not in result, result.get("error")
+    return {name: [tuple(kind) for kind in kinds] for name, kinds in result["forms"].items()}
+
+
+def name_values(node, function, tree):
+    """The strings `node` can hold, or None when they cannot be read from
+    the code: a constant; a name assigned only constants, or bound by a
+    `for` over a literal of constants (by position in each item); or a
+    parameter every call in the module passes only such values."""
+    if isinstance(node, ast.Constant):
+        return {node.value} if isinstance(node.value, str) else set()
+    if not isinstance(node, ast.Name) or function is None:
+        return None
+    params = [a.arg for a in [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]]
+    if node.id in params:
+        values = set()
+        calls = [
+            call for call in ast.walk(tree)
+            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == function.name
+        ]
+        index = params.index(node.id)
+        for call in calls:
+            passed = [k.value for k in call.keywords if k.arg == node.id] or call.args[index:index + 1]
+            if not passed:
+                return None
+            caller = next(
+                (f for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and any(c is call for c in ast.walk(f))), None,
+            )
+            found = name_values(passed[0], caller, tree)
+            if found is None:
+                return None
+            values |= found
+        return values if calls else None
+    values, bound = set(), False
+    for statement in ast.walk(function):
+        if isinstance(statement, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == node.id for t in statement.targets
+        ):
+            bound = True
+            found = name_values(statement.value, None, tree) if isinstance(statement.value, ast.Constant) else None
+            if found is None:
+                return None
+            values |= found
+        elif isinstance(statement, (ast.For, ast.AsyncFor)):
+            targets = statement.target.elts if isinstance(statement.target, ast.Tuple) else [statement.target]
+            if not any(isinstance(t, ast.Name) and t.id == node.id for t in targets):
+                continue
+            bound = True
+            position = next(i for i, t in enumerate(targets) if isinstance(t, ast.Name) and t.id == node.id)
+            source = statement.iter
+            if isinstance(source, ast.Name):
+                literal = [
+                    s.value for s in ast.walk(function) if isinstance(s, ast.Assign)
+                    and any(isinstance(t, ast.Name) and t.id == source.id for t in s.targets)
+                ]
+                source = literal[0] if len(literal) == 1 else None
+            if not isinstance(source, (ast.List, ast.Tuple)):
+                return None
+            for item in source.elts:
+                element = item.elts[position] if isinstance(statement.target, ast.Tuple) and isinstance(
+                    item, ast.Tuple) else item if not isinstance(statement.target, ast.Tuple) else None
+                if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
+                    return None
+                values.add(element.value)
+    return values if bound else None
+
+
+def dynamic_reaches(paths, forms, reaches_by_name, read_outright=lambda path, call: False) -> list:
+    """Each use, in the files at `paths`, of a dynamic access form (`forms`,
+    from `dynamic_access_forms`) that can reach a census anchor, as
+    (file, line, source): a form named by attribute (`x.__dict__`,
+    `x.__getattribute__(...)`) or as a namespace always can; one handed a
+    name, line of code or module name can unless every value it can hold
+    (`name_values`) is known and `reaches_by_name(kind, value)` is false for
+    each. A form the census reads outright (`read_outright(path, call)`) is the
+    census's, not this ban's. A dynamic callable referenced other than as
+    the target of a call (stored, passed on) always can."""
+    found = []
+    for path in paths:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+        aliases = import_aliases(tree)
+        functions = [f for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+        def enclosing(node):
+            inner = [f for f in functions if any(n is node for n in ast.walk(f))]
+            return min(inner, key=lambda f: len(list(ast.walk(f))), default=None)
+
+        def qualified(func):
+            if isinstance(func, ast.Name):
+                if func.id in aliases:
+                    return aliases[func.id]
+                return "builtins." + func.id
+            if isinstance(func, ast.Attribute):
+                if "." + func.attr in forms:
+                    return "." + func.attr
+                if isinstance(func.value, ast.Name) and func.value.id in aliases:
+                    return aliases[func.value.id] + "." + func.attr
+            return None
+
+        targets = {id(n.func) for n in ast.walk(tree) if isinstance(n, ast.Call)}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                name = qualified(node.func)
+                if name not in forms or read_outright(path, node):
+                    continue
+                function = enclosing(node)
+                for kind, index in forms[name]:
+                    if kind in ("namespace", "unprobed"):
+                        hit = True
+                    else:
+                        arguments = node.args[index:index + 1]
+                        values = name_values(arguments[0], function, tree) if arguments else None
+                        hit = values is None or any(reaches_by_name(kind, value) for value in values)
+                    if hit:
+                        found.append((Path(path).name, node.lineno, ast.unparse(node)))
+                        break
+            elif isinstance(node, (ast.Name, ast.Attribute)) and id(node) not in targets:
+                name = qualified(node)
+                if name in forms and isinstance(getattr(node, "ctx", None), ast.Load):
+                    found.append((Path(path).name, node.lineno, ast.unparse(node)))
+    return sorted(set(found))
+
+
+def _identity_modules() -> set:
+    """The names an import of a module defining an identity function can
+    carry: each such module's name and its package's."""
+    names = set()
+    for path in _identity_caller_files():
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        if any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in IDENTITY_FUNCTIONS
+            for node in ast.walk(tree)
+        ):
+            names |= {path.stem, path.parent.name}
+    return names
+
+
+def _identity_reached_by(kind, value) -> bool:
+    """Whether a name, line of code or module name handed to a dynamic
+    access form can name an identity function."""
+    if kind == "attribute":
+        return value in IDENTITY_FUNCTIONS
+    if kind == "code":
+        return any(name in value for name in IDENTITY_FUNCTIONS)
+    return bool(set(value.split(".")) & _identity_modules())
+
+
+@pytest.fixture(scope="module")
+def identity_dynamic_forms():
+    return dynamic_access_forms(_identity_caller_files())
+
+
+def _identity_reaches_unread(forms) -> list:
+    """Each place the memory scripts and the backlog writer can reach an
+    identity function through a form the call-site census does not read."""
+    return dynamic_reaches(_identity_caller_files(), forms, _identity_reached_by)
+
+
+def _module_defs(path) -> set:
+    """The names of the module-level functions defined in the file at `path`."""
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    return {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def _reached_by_name(anchors, module_names):
+    """`reaches_by_name` for a census whose anchor is the names `anchors`,
+    defined in the modules `module_names`."""
+    def reached(kind, value):
+        if kind == "attribute":
+            return value in anchors
+        if kind == "code":
+            return any(name in value for name in anchors)
+        return bool(set(value.split(".")) & module_names)
+    return reached
+
+
+# The other censuses that read their anchor by name in one module: the rung
+# call sites and the guard's decline reasons in memory_api, and the marker
+# and layout predicates among project_identity's functions.
+_NAMED_ANCHOR_CENSUSES = {
+    "rungs and decline reasons": (
+        lambda: Path(memory_api.__file__), lambda: {*RUNGS, "_decline"}, {"memory_api", "scripts"},
+    ),
+    "marker and layout predicates": (
+        lambda: Path(pi.__file__), lambda: _module_defs(pi.__file__), {"project_identity", "scripts"},
+    ),
+}
 
 
 def _cwd_repo(monkeypatch, target, elsewhere):
@@ -853,6 +1284,45 @@ class TestEveryIdentityCallerIsCovered:
             if counts.get(key, 0) != listed
         }
         assert mismatched == {}, f"(found, listed) call sites: {mismatched}"
+
+    def test_no_identity_function_is_reached_through_an_unread_form(self, identity_dynamic_forms):
+        """FAIL CLOSED: a string name, a line of code, a module name or a
+        namespace that can reach an identity function is a call the census
+        cannot see."""
+        assert _identity_reaches_unread(identity_dynamic_forms) == []
+
+    def test_the_unread_form_ban_sees_the_scope_and_spares_honest_names(self, identity_dynamic_forms):
+        """Control: the forms come from the probe (the attribute, namespace,
+        code and import builtins among them), every use of one in the scope
+        is found, and the uses with a known name that is no identity
+        function (`getattr(args, ...)`, `getattr(record, ...)`) are spared."""
+        assert {
+            "builtins.getattr", "builtins.setattr", "builtins.delattr", "builtins.hasattr",
+            "builtins.vars", "builtins.globals", "builtins.locals", "builtins.exec",
+            "builtins.eval", "builtins.compile", "builtins.__import__",
+            "importlib.import_module", ".__dict__", ".__getattribute__",
+        } <= set(identity_dynamic_forms)
+        every_use = dynamic_reaches(
+            _identity_caller_files(), identity_dynamic_forms, lambda kind, value: True,
+        )
+        honest = [
+            use for use in every_use
+            if use[0] == "backlog.py" and use[2].startswith(("getattr(args,", "getattr(record,"))
+        ]
+        assert {use[2].split(",")[0] for use in honest} == {"getattr(args", "getattr(record"}
+        assert not set(honest) & set(_identity_reaches_unread(identity_dynamic_forms))
+
+    @pytest.mark.parametrize("census", sorted(_NAMED_ANCHOR_CENSUSES))
+    def test_no_named_anchor_is_reached_through_an_unread_form(self, census):
+        """FAIL CLOSED, for each census that reads its anchor by name in one
+        module: a string name, a line of code, a module name or a namespace
+        that can reach an anchor is a reference the census cannot see.
+        Control: the anchor set is not empty."""
+        path, anchors, module_names = _NAMED_ANCHOR_CENSUSES[census]
+        names = anchors()
+        assert names, census
+        forms = dynamic_access_forms([path()])
+        assert dynamic_reaches([path()], forms, _reached_by_name(names, module_names)) == []
 
     def test_the_cwd_repository_never_names_the_victim(self, identity_callers):
         _executed, cwd_ids = identity_callers

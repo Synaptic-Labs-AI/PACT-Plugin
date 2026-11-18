@@ -177,6 +177,7 @@ pact-memory derives its `project_id` from the repository a session is in rather 
 - Tests: the binding census asks the compiler which grammar fields hold an identifier (handing each field an int and reading the compiler's answer) instead of reading ast signature docstrings, and fails if any grammar field is never converted.
 - Tests: the exact-key arm also builds every key a known listing key starts with (the known key less its last character among them) and reads a `lock` field end to end, so a reader that takes `lock` as `locked` fails.
 - Tests: the include-scan rows ask git about runs of 4 and 100 of each ASCII character between headers and before a quoted subsection, chains of up to 1024 headers, and each ASCII character escaped inside a quoted subsection.
+- Tests: the identity, open-flag, rung, decline and predicate censuses fail on any way production code could reach their target that they do not read: a name in a string, a namespace such as `vars()` or `globals()`, `eval`, or an import by name. The forms are derived by probing the interpreter.
 - Tests: an unknown -z listing field must match a known key whole; a key extending a known one, or differing only in case, is skipped like any unknown field.
 
 ### Why

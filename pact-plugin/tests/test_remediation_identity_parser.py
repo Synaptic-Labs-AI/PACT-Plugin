@@ -2409,8 +2409,10 @@ class _OpenFlagReads(ast.NodeVisitor):
         self.scope = []
         self.os_names = {"os"}
         self.reads = []
+        self.places = set()
 
     def _record(self, flag, form, node):
+        self.places.add((node.lineno, node.col_offset, node.end_lineno, node.end_col_offset))
         self.reads.append((
             ".".join(name for _kind, name in self.scope) or "<module>",
             all(kind == "class" for kind, _name in self.scope),
@@ -2582,6 +2584,52 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
             and not (read[3] == "attribute" and read[2] in _UNIVERSAL_OPEN_FLAGS)
         ]
         assert direct == [], direct
+
+    @staticmethod
+    def _unread_reaches() -> tuple:
+        """(forms, every use of one in the claiming modules, each place they
+        can reach an `os.O_*` flag through a form this census does not
+        read)."""
+        from test_identity_rung_parity import dynamic_access_forms, dynamic_reaches
+
+        paths = list(_platform_claim_modules().values())
+        places = {}
+        for path in paths:
+            visitor = _OpenFlagReads()
+            visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
+            places[path] = visitor.places
+
+        def read_outright(path, call):
+            return (call.lineno, call.col_offset, call.end_lineno, call.end_col_offset) in places[path]
+
+        def reaches_flag(kind, value):
+            if kind == "attribute":
+                return value.startswith("O_")
+            return kind == "code" and "O_" in value
+
+        forms = dynamic_access_forms(paths)
+        every_use = dynamic_reaches(paths, forms, lambda kind, value: True)
+        return forms, every_use, dynamic_reaches(paths, forms, reaches_flag, read_outright)
+
+    def test_no_flag_is_reached_through_an_unread_form(self):
+        """FAIL CLOSED: a flag name handed to `hasattr`, `__getattribute__` or
+        `eval`, a computed name on an object not known to be `os`, or a
+        namespace (`vars(os)`, `os.__dict__`) is a read this census cannot
+        see."""
+        _forms, _every_use, unread = self._unread_reaches()
+        assert unread == [], unread
+
+    def test_the_unread_form_ban_sees_the_modules_and_spares_census_reads(self):
+        """Control: the probe found the forms, the guarded `getattr(os,
+        "O_X", 0)` reads are among the uses found, and they and the
+        `getattr` reads of other names are not counted as unread."""
+        forms, every_use, unread = self._unread_reaches()
+        assert {"builtins.getattr", "builtins.vars", ".__dict__", ".__getattribute__"} <= set(forms)
+        guarded = [use for use in every_use if use[2].startswith("getattr(os, 'O_")]
+        other = [use for use in every_use if use[2].startswith("getattr(") and "'O_" not in use[2]]
+        assert {use[0] for use in guarded} == {"project_identity.py", "memory_api.py", "session_end.py"}
+        assert other, every_use
+        assert not set(guarded + other) & set(unread)
 
     def test_every_function_reading_an_optional_flag_runs_without_it(self):
         readers = {
