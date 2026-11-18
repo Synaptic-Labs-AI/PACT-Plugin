@@ -2657,6 +2657,14 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
         `pkgutil.resolve_name("os:O_X")`) unless this census reads it."""
         assert self._flag_strings(self._read_outright()) == []
 
+    def test_no_call_in_the_claiming_modules_has_a_call_result_as_its_callee(self):
+        """FAIL CLOSED: a callee another call returned
+        (`operator.methodcaller("__getattribute__", name)(os)`) can reach a
+        flag by a name built at run time, which no census reads."""
+        from test_identity_rung_parity import call_result_callees
+
+        assert call_result_callees(list(_platform_claim_modules().values())) == []
+
     def test_the_flag_string_ban_spares_only_the_census_reads(self):
         """Control: with no read spared, the guarded `getattr(os, "O_X", 0)`
         names are found in each module, so the ban sees them."""

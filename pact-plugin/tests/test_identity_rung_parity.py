@@ -1158,6 +1158,123 @@ def named_anchor_strings(paths, named, read_outright=lambda path, parent: False)
     return sorted(set(found))
 
 
+def call_result_callees(paths) -> list:
+    """Each call in the files at `paths` whose callee can be another call's
+    result, as (file, line, source). Such a callee (`methodcaller(...)`,
+    `attrgetter(...)`) can reach any anchor through a name computed at run
+    time, which neither the probe nor the string rule reads.
+
+    The callee is followed to every place it can come from: a call; a name
+    or attribute bound to one (assignment, class-body name, or a parameter,
+    through the arguments every call in the file passes it); an element of a
+    literal container, with `.get` on a literal dict read as its values and
+    default. FAIL CLOSED: an element of a container that is not a literal, a
+    parameter no call in the file passes, or a chain too deep to follow is
+    taken to be one. A name bound only by a def, class or import, a
+    decorator's first parameter where the decorator is applied to a def, and
+    a method's own first parameter, are not."""
+    functions = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+    found = []
+    for path in paths:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+        owner = {}
+
+        def note(node, function):
+            for child in ast.iter_child_nodes(node):
+                owner[id(child)] = function
+                note(child, child if isinstance(child, functions) else function)
+
+        note(tree, None)
+        names, attrs = collections.defaultdict(list), collections.defaultdict(list)
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
+                for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
+                    if isinstance(target, ast.Name):
+                        names[(owner.get(id(node)), target.id)].append(node.value)
+                    elif isinstance(target, ast.Attribute):
+                        attrs[target.attr].append(node.value)
+            if isinstance(node, ast.ClassDef):
+                for statement in node.body:
+                    if isinstance(statement, ast.Assign):
+                        for target in statement.targets:
+                            if isinstance(target, ast.Name):
+                                attrs[target.id].append(statement.value)
+        methods = {
+            id(member) for node in ast.walk(tree) if isinstance(node, ast.ClassDef) for member in node.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and not any(getattr(d, "id", None) == "staticmethod" for d in member.decorator_list)
+        }
+
+        def sources(name, function):
+            """What the name can hold where `function` reads it; None when
+            that cannot be read from the file."""
+            if names.get((function, name)):
+                return names[(function, name)]
+            if isinstance(function, ast.Lambda):
+                if name in {a.arg for a in function.args.args}:
+                    return None
+                return sources(name, owner.get(id(function)))
+            if function is not None:
+                params = [a.arg for a in [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]]
+                if name in params:
+                    if id(function) in methods and name == params[0]:
+                        return []
+                    passed = []
+                    for call in ast.walk(tree):
+                        if not isinstance(call, ast.Call) or getattr(
+                            call.func, "id", getattr(call.func, "attr", None)
+                        ) != function.name:
+                            continue
+                        shift = 1 if id(function) in methods and isinstance(call.func, ast.Attribute) else 0
+                        index = params.index(name) - shift
+                        passed += [k.value for k in call.keywords if k.arg == name] or (
+                            call.args[index:index + 1] if index >= 0 else []
+                        )
+                    if params.index(name) == 0:
+                        # a decorator is handed the def it decorates
+                        passed += [
+                            node for node in ast.walk(tree)
+                            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+                            and any(getattr(d, "id", getattr(d, "attr", None)) == function.name for d in node.decorator_list)
+                        ]
+                    return passed or None
+                return sources(name, owner.get(id(function)))
+            return names.get((None, name), [])
+
+        def may_be_result(node, function, depth=0):
+            if depth > 8:
+                return True
+            follow = lambda value, where=function: may_be_result(value, where, depth + 1)  # noqa: E731
+            if isinstance(node, ast.Call):
+                func = node.func
+                if isinstance(func, ast.Attribute) and func.attr == "get" and isinstance(func.value, ast.Name):
+                    held = sources(func.value.id, function)
+                    if held and all(isinstance(h, ast.Dict) for h in held):
+                        return any(follow(v) for h in held for v in h.values) or any(follow(a) for a in node.args[1:])
+                return True
+            if isinstance(node, ast.Name):
+                held = sources(node.id, function)
+                if held is None:
+                    return True
+                return any(follow(value, owner.get(id(value))) for value in held)
+            if isinstance(node, ast.Attribute):
+                return any(follow(value, owner.get(id(value))) for value in attrs.get(node.attr, []))
+            if isinstance(node, ast.Subscript):
+                container = node.value
+                held = sources(container.id, function) if isinstance(container, ast.Name) else [container]
+                if held and all(isinstance(h, (ast.Dict, ast.List, ast.Tuple, ast.Set)) for h in held):
+                    return any(follow(e) for h in held for e in (h.values if isinstance(h, ast.Dict) else h.elts))
+                return True
+            if isinstance(node, (ast.IfExp, ast.BoolOp)):
+                return any(follow(part) for part in ([node.body, node.orelse] if isinstance(node, ast.IfExp) else node.values))
+            return False
+
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and may_be_result(node.func, owner.get(id(node))):
+                found.append((Path(path).name, node.lineno, ast.unparse(node)))
+    return sorted(set(found))
+
+
 def _identity_modules() -> set:
     """The names an import of a module defining an identity function can
     carry: each such module's name and its package's."""
@@ -1368,6 +1485,44 @@ class TestEveryIdentityCallerIsCovered:
         names = anchors()
         assert names, census
         assert named_anchor_strings([path()], names.__contains__) == []
+
+    def test_no_identity_scope_call_has_a_call_result_as_its_callee(self):
+        """FAIL CLOSED: a callee another call returned
+        (`operator.methodcaller("__getattribute__", name)(module)`) can
+        reach an identity function by a name built at run time
+        (`"MAIN_REPO_ROOT".lower()`, a join, an f-string), which no census
+        reads. The scope holds both named-anchor modules."""
+        assert call_result_callees(_identity_caller_files()) == []
+
+    @pytest.mark.parametrize("source, held", [
+        ("operator.methodcaller('a', n)(x)\n", True),
+        ("get = operator.methodcaller('a', n)\nget(x)\n", True),
+        ("def f():\n    get = operator.methodcaller('a', n)\n    return get(x)\n", True),
+        ("table = {'k': operator.methodcaller('a', n)}\ntable['k'](x)\n", True),
+        ("table = {'k': operator.methodcaller('a', n)}\nhandler = table.get('k')\nhandler(x)\n", True),
+        ("class Holder:\n    get = operator.methodcaller('a', n)\nHolder.get(x)\n", True),
+        ("holder.get = operator.methodcaller('a', n)\nholder.get(x)\n", True),
+        ("def use(fn):\n    return fn(x)\nuse(operator.methodcaller('a', n))\n", True),
+        ("def use(fn):\n    return fn(x)\n", True),
+        ("rows[0](x)\n", True),
+        ("(lambda fn: fn(x))(g)\n", True),
+        ("get = cached or operator.methodcaller('a', n)\nget(x)\n", True),
+        ("def a():\n    pass\ntable = {'a': a}\nhandler = table.get(k)\nhandler(x)\n", False),
+        ("def a():\n    pass\ntable = {'a': a}\ntable['a'](x)\n", False),
+        ("def a():\n    pass\na()\n", False),
+        ("import os\nos.getcwd()\n", False),
+        ("obj.method(x)\n", False),
+        ("class K:\n    def m(self):\n        return self(1)\n", False),
+        ("def use(fn):\n    return fn(x)\ndef a():\n    pass\nuse(a)\n", False),
+        ("def wrap(method):\n    def inner(*a):\n        return method(*a)\n    return inner\n@wrap\ndef a():\n    pass\n",
+         False),
+        ("def wrap(method):\n    def inner(*a):\n        return method(*a)\n    return inner\nwrap(operator.methodcaller('a', n))\n",
+         True),
+    ])
+    def test_a_callee_is_followed_to_where_it_comes_from(self, tmp_path, source, held):
+        path = tmp_path / "scope.py"
+        path.write_text(source, encoding="utf-8")
+        assert bool(call_result_callees([path])) is held, call_result_callees([path])
 
     @pytest.mark.parametrize("source, named", [
         ("VALUE = 'detect_id_for_root'\n", True),
