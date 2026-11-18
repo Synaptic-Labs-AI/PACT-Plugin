@@ -250,6 +250,58 @@ def excluded_rig(identity_env, store, monkeypatch):
     return one
 
 
+class TestTheRekeyNoOpGivesTheLibrarysAnswer:
+    """`--from` equal to `--to` reports what the library reports for the
+    same no-op, key for key, and leaves the store as it found it, its
+    journal mode included, whether the store file is writable or not.
+
+    Catches a CLI no-op that answers before the library and drops the
+    counters a plan carries (`from_bucket_empty`, the NULL-row counts).
+    """
+
+    BUCKET = "github.com/o/same"
+
+    @pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+    @pytest.mark.parametrize("writable", [True, False], ids=["writable", "read-only file"])
+    def test_the_no_op_envelope_is_the_librarys_answer(
+        self, identity_env, store, monkeypatch, capfd, apply, writable
+    ):
+        import hashlib
+
+        from scripts.database import rekey_project
+
+        _seed(store, self.BUCKET, memory_id="same0001", path="a.py")
+        _seed(store, None, memory_id="null0001", path="b.py")
+        monkeypatch.chdir(identity_env)
+        conn = sqlite3.connect(str(store))
+        try:
+            library = rekey_project(conn, self.BUCKET, self.BUCKET, dry_run=not apply)
+            journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+        assert library["null_project_memories"] == 1, "control: the library counts the NULL row"
+        before = hashlib.sha256(store.read_bytes()).hexdigest()
+        if not writable:
+            store.chmod(0o444)
+
+        code, envelope = _cli(
+            ["project-id", "rekey", f"--from={self.BUCKET}", f"--to={self.BUCKET}",
+             *(["--apply"] if apply else []), "--db-path", str(store)],
+            capfd,
+        )
+
+        result = envelope.get("result", {})
+        assert (code, {key: result.get(key) for key in library}) == (0, library), envelope
+        assert result.get("noop") is True, envelope
+        store.chmod(0o644)
+        assert hashlib.sha256(store.read_bytes()).hexdigest() == before
+        conn = sqlite3.connect(str(store))
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == journal
+        finally:
+            conn.close()
+
+
 class TestTheRekeyRefusalContract:
     """A defaulted `--to` moves only this checkout's own, non-excluded bucket.
 

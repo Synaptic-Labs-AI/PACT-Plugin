@@ -40,7 +40,7 @@ import json
 import os
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import NoReturn
 
@@ -50,7 +50,7 @@ _SKILL_ROOT = str(Path(__file__).resolve().parent.parent)
 if _SKILL_ROOT not in sys.path:
     sys.path.insert(0, _SKILL_ROOT)
 
-from scripts.config import resolve_db_path, store_scope
+from scripts.config import read_only_scope, resolve_db_path, store_scope
 from scripts.database import (
     CALLER_FACING_CREATE_FIELDS,
     CALLER_FACING_UPDATE_FIELDS,
@@ -1247,18 +1247,13 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 ),
             )
 
-    if from_id == to_id:
-        _success({
-            "from": from_id,
-            "to": to_id,
-            "dry_run": not args.apply,
-            "noop": True,
-            "target_defaulted": target_defaulted,
-            "legacy_verdict": legacy_verdict,
-        })
-
+    # `--from` EQUAL TO `--to` IS ANSWERED BY THE LIBRARY TOO, so the no-op
+    # envelope carries every counter a plan carries. The library only reads
+    # on that path, and the read scope keeps opening the store from
+    # switching its journal mode.
+    noop = from_id == to_id
     try:
-        with db_connection() as conn:
+        with read_only_scope() if noop else nullcontext(), db_connection() as conn:
             counters = rekey_project(
                 conn, from_id, to_id, dry_run=not args.apply
             )
@@ -1296,6 +1291,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         )
     _success({
         **counters,
+        **({"noop": True} if noop else {}),
         "target_defaulted": target_defaulted,
         "legacy_verdict": legacy_verdict,
     })
