@@ -3124,6 +3124,23 @@ _ARGUMENT_PASSERS = {
 _BINDINGS_READ = {"Assign", "AnnAssign", "AugAssign", "NamedExpr", "For", "AsyncFor", "withitem", "comprehension"}
 
 
+# Every match pattern class that captures a name, read by the walk: each
+# name a case of a passing subject captures may hold the answer. The census
+# compares this with the compiler's pattern classes that name a capture.
+_CAPTURES_READ = {"MatchAs", "MatchStar", "MatchMapping"}
+
+
+def _capture_classes() -> set:
+    """The compiler's pattern classes (`_ast`) with a field naming the name
+    a match binds (`name`, or a mapping's `rest`)."""
+    import _ast
+
+    return {
+        name for name, node in vars(_ast).items()
+        if isinstance(node, type) and issubclass(node, ast.pattern) and {"name", "rest"} & set(node._fields)
+    }
+
+
 def _target_classes() -> set:
     """The compiler's classes (`_ast`) with a target field and a field
     besides it, which binds the target from a value."""
@@ -3138,23 +3155,22 @@ def _target_classes() -> set:
     }
 
 
-def _listing_sentinels() -> set:
-    """Every module-level string constant a listing module's
-    `_worktree_records` returns bare: the answers that are no record list."""
+def _listing_sentinels(trees: "dict | None" = None) -> set:
+    """Every module-level string constant (`module_string_constants`, read
+    from every binding form) a listing module's `_worktree_records` returns
+    bare, where the function binds no local of that name: the answers that
+    are no record list."""
+    from test_identity_rung_parity import _reader_for, module_string_constants
+
     sentinels = set()
-    for tree in _listing_answer_modules().values():
-        constants = {
-            target.id for node in tree.body
-            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-            and isinstance(node.value.value, str)
-            for target in node.targets if isinstance(target, ast.Name)
-        }
+    for tree in (_listing_answer_modules() if trees is None else trees).values():
+        constants, reader = module_string_constants(tree), _reader_for(tree)
         for node in tree.body:
             if isinstance(node, ast.FunctionDef) and node.name == "_worktree_records":
                 sentinels |= {
                     ret.value.id for ret in ast.walk(node)
                     if isinstance(ret, ast.Return) and isinstance(ret.value, ast.Name)
-                    and ret.value.id in constants
+                    and ret.value.id in constants and (id(node), ret.value.id) not in reader.sources
                 }
     return sentinels
 
@@ -3250,13 +3266,25 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | Non
     default `_listing_sentinels()`); a name bound to a passing value (by
     assignment, annotated assignment, `:=`, position in a tuple assignment,
     a `for` over a literal container, a `with` whose entered answer gives
-    it back, or a parameter some call hands one; `_BINDINGS_READ`); a call
+    it back, a `match` capture of a passing subject (`_CAPTURES_READ`), or a
+    parameter some call hands one; `_BINDINGS_READ`); an answer imported
+    under another name or read as a module attribute; a call
     to a found function by name in its own module or by attribute in any;
     an `_ARGUMENT_PASSERS` call whose argument passes; a call handed a
     lambda whose body passes; or one of the `_ANSWER_CHILDREN` children.
     Followed to a fixed point, so every wrapper of a reader is found however
-    the functions are ordered."""
+    the functions are ordered.
+
+    ADVERSARIAL-ONLY, not read (no good-faith edit writes it to pass an
+    answer on): a decorator that replaces a def with an answer
+    (`@lambda f: reader()`), since a decorator that discards the function it
+    decorates turns a definition into a value only to hide it."""
     answers = (_listing_sentinels() if sentinels is None else set(sentinels)) | {_ANY_ANSWER}
+    # an answer imported under another name is that answer
+    answers |= {
+        alias.asname for tree in trees.values() for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+        for alias in node.names if alias.asname and alias.name in answers
+    }
     functions = {
         (module, node.name): node
         for module, tree in trees.items() for node in ast.walk(tree)
@@ -3308,6 +3336,8 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | Non
     def passes(value, bound, module):
         if isinstance(value, ast.Name):
             return value.id in answers or value.id in bound
+        if isinstance(value, ast.Attribute) and value.attr in answers:
+            return True  # an answer read from the module that holds it
         if isinstance(value, ast.Call):
             if is_reader_call(value, module):
                 return True
@@ -3331,6 +3361,15 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | Non
             elif isinstance(node, ast.withitem) and node.optional_vars is not None:
                 if passes(node.context_expr, bound, module) and _enter_gives_back_an_answer():
                     yield from (n.id for n in ast.walk(node.optional_vars) if isinstance(n, ast.Name))
+                continue
+            elif isinstance(node, ast.Match):
+                if passes(node.subject, bound, module):
+                    # a capture holds the subject or a part of it, so every
+                    # name a case captures may hold the answer
+                    yield from (
+                        name for case in node.cases for pattern in ast.walk(case.pattern)
+                        for name in (getattr(pattern, "name", None), getattr(pattern, "rest", None)) if name
+                    )
                 continue
             else:
                 continue
@@ -3464,13 +3503,11 @@ def _listing_answer_modules() -> dict:
 
 
 def _string_constants(tree) -> dict:
-    """{name: value} for every module-level string constant in `tree`."""
-    return {
-        target.id: node.value.value for node in tree.body
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-        and isinstance(node.value.value, str)
-        for target in node.targets if isinstance(target, ast.Name)
-    }
+    """{name: value} for every module-level string constant in `tree`, read
+    from every binding form (`module_string_constants`)."""
+    from test_identity_rung_parity import module_string_constants
+
+    return module_string_constants(tree)
 
 
 def _held_answers(trees: dict) -> tuple:
@@ -3487,17 +3524,10 @@ def _held_answers(trees: dict) -> tuple:
     sentinel_values = [readers_constants[name] for name in sorted(_listing_sentinels())]
     import builtins
 
-    shadowed = {
-        alias.asname or alias.name.split(".")[0]
-        for tree in trees.values() for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
-        for alias in node.names
-    } | {
-        node.name for tree in trees.values() for node in tree.body
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-    } | {
-        target.id for tree in trees.values() for node in tree.body if isinstance(node, ast.Assign)
-        for target in node.targets if isinstance(target, ast.Name)
-    }
+    from test_identity_rung_parity import _reader_for
+
+    # every name a module binds at module level, by any binding form
+    shadowed = {name for tree in trees.values() for key, name in _reader_for(tree).sources if key is None}
     builtin_names = frozenset(name for name in dir(builtins) if not name.startswith("_")) - shadowed
     every, giving = [], []
     for module, function, node, passing, parents, unread in held:
@@ -3589,6 +3619,35 @@ class TestTheListingAnswerWalkFollowsEveryForm:
         assert "UNREADABLE_LISTING" in sentinels, sentinels  # control
         assert sentinels <= set(vars(memory_api)), sentinels - set(vars(memory_api))
 
+    def test_the_answers_are_every_string_the_readers_return_bare(self):
+        """Control: the names `_worktree_records` returns bare whose value in
+        the imported module is a string are exactly the answers read from
+        the source, so a sentinel bound by a form the table cannot read is
+        missed loudly."""
+        returned = set()
+        for module in (memory_api, backlog):
+            tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            for node in tree.body:
+                if isinstance(node, ast.FunctionDef) and node.name == "_worktree_records":
+                    returned |= {
+                        ret.value.id for ret in ast.walk(node)
+                        if isinstance(ret, ast.Return) and isinstance(ret.value, ast.Name)
+                        and isinstance(getattr(module, ret.value.id, None), str)
+                    }
+        assert {"UNREADABLE_LISTING", "EMPTY_LISTING"} <= returned, returned
+        assert _listing_sentinels() == returned, _listing_sentinels() ^ returned
+
+    @pytest.mark.parametrize("source, sentinels", [
+        ("EMPTY_LISTING = 'empty'\ndef _worktree_records():\n    return EMPTY_LISTING\n", {"EMPTY_LISTING"}),
+        ("EMPTY_LISTING: Final = 'empty'\ndef _worktree_records():\n    return EMPTY_LISTING\n", {"EMPTY_LISTING"}),
+        ("EMPTY_LISTING = 'empty'\nEMPTY_LISTING += 'x'\ndef _worktree_records():\n    return EMPTY_LISTING\n", set()),
+        ("EMPTY_LISTING = 'empty'\ndef _worktree_records():\n    EMPTY_LISTING = g()\n    return EMPTY_LISTING\n",
+         set()),
+        ("def _worktree_records(records):\n    return records\n", set()),
+    ])
+    def test_an_answer_is_a_constant_by_every_binding_form(self, source, sentinels):
+        assert _listing_sentinels({"m": ast.parse(source)}) == sentinels
+
     @pytest.mark.parametrize("sentinel", sorted(_listing_sentinels()))
     def test_a_function_returning_each_answer_alone_is_found(self, sentinel):
         source = f"def wrapper():\n    return {sentinel}\n"
@@ -3616,6 +3675,48 @@ class TestTheListingAnswerWalkFollowsEveryForm:
     def test_every_binding_class_is_read(self):
         assert {"Assign", "withitem"} <= _target_classes() and "Delete" not in _target_classes()  # control
         assert _BINDINGS_READ == _target_classes(), _target_classes() ^ _BINDINGS_READ
+
+    def test_every_capture_class_is_read(self):
+        assert "MatchAs" in _capture_classes() and "MatchValue" not in _capture_classes()  # control
+        assert _CAPTURES_READ == _capture_classes(), _capture_classes() ^ _CAPTURES_READ
+
+    @pytest.mark.parametrize("trees, wrapper", [
+        ({"skill": "def reader():\n    return UNREADABLE_LISTING\n",
+          "user": "def wrapper():\n    match skill.reader():\n        case got:\n            return got\n"}, True),
+        ({"skill": "def reader():\n    return UNREADABLE_LISTING\n",
+          "user": "def wrapper():\n    match skill.reader():\n        case {**got}:\n            return got\n"}, True),
+        ({"skill": "UNREADABLE_LISTING = 'unreadable'\n",
+          "user": "from skill import UNREADABLE_LISTING as gone\ndef wrapper():\n    return gone\n"}, True),
+        ({"skill": "UNREADABLE_LISTING = 'unreadable'\n",
+          "user": "import skill\ndef wrapper():\n    return skill.UNREADABLE_LISTING\n"}, True),
+        ({"skill": "def reader():\n    return UNREADABLE_LISTING\n",
+          "user": "def wrapper():\n    match skill.reader():\n        case str():\n            return 'text'\n"}, False),
+    ])
+    def test_an_answer_held_by_a_capture_or_alias_is_followed(self, trees, wrapper):
+        passers, _taking = _walk_answers({name: ast.parse(source) for name, source in trees.items()})
+        assert (("user", "wrapper") in passers) is wrapper, passers
+
+    @pytest.mark.parametrize("source, texts, resolved", [
+        ("def f():\n    detail = 'a'\n    return detail\n", {"a"}, True),
+        ("DETAIL = 'a'\ndef f():\n    return DETAIL\n", {"a"}, True),
+        ("TABLE = {'k': 'a'}\ndef f(k):\n    return TABLE[k]\n", {"a"}, True),
+        ("def f():\n    detail = 'a'\n    detail += 'b'\n    return detail\n", {"a"}, False),
+        ("def f(c):\n    detail = 'a'\n    for detail in c():\n        pass\n    return detail\n", {"a"}, False),
+        ("def f(c):\n    detail = 'a'\n    with c as detail:\n        return detail\n", {"a"}, False),
+        ("def f(c):\n    detail = 'a'\n    match c:\n        case [detail]:\n            pass\n    return detail\n", {"a"}, False),
+        ("DETAIL = 'a'\nDETAIL += 'b'\ndef f():\n    return DETAIL\n", {"a"}, False),
+        ("def f(detail):\n    if detail:\n        detail = 'a'\n    return detail\n", {"a"}, False),
+        ("def f():\n    detail = 'a'\n    match 'b':\n        case [detail]:\n            pass\n    return detail\n", {"a", "b"}, False),
+    ])
+    def test_a_detail_name_is_read_from_every_binding(self, source, texts, resolved):
+        """A detail name is followed only when every binding of it, by any
+        binding form, is an assignment; any other binding is left in
+        `unresolved`, so no text it can hold goes unchecked."""
+        tree = ast.parse(source)
+        function = next(n for n in tree.body if isinstance(n, ast.FunctionDef))
+        returned = next(n.value for n in ast.walk(function) if isinstance(n, ast.Return))
+        found, unresolved = _detail_values(returned, function, tree)
+        assert found <= texts and (not unresolved) is resolved, (found, unresolved)
 
     def test_each_call_handed_an_answer_is_followed_or_evaluated(self):
         """Control: in the listing modules a call handed an answer is a
@@ -4022,16 +4123,19 @@ _PASSED_THROUGH_DETAILS = {
 
 def _detail_values(expression, function, module_tree, seen=frozenset()) -> tuple:
     """(texts, unresolved) for a detail expression in `function` of
-    `module_tree`: every string it can hold, followed through module
-    constants, local assignments, conditional expressions, f-strings,
-    module dict lookups and calls to the module's own functions (their
-    returns). Any other form is returned in `unresolved` as source text."""
-    constants = {
-        target.id: node.value for node in module_tree.body
-        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None
-        for target in (node.targets if isinstance(node, ast.Assign) else [node.target])
-        if isinstance(target, ast.Name)
-    }
+    `module_tree`: every string it can hold, followed through conditional
+    expressions, f-strings, calls to the module's own functions (their
+    returns), and names and dict lookups whose every binding, by each
+    binding form the compiler defines (the rung parity `_CalleeReader`), is
+    an assignment. Any other form, a name with any other binding included,
+    is returned in `unresolved` as source text."""
+    from test_identity_rung_parity import _reader_for
+
+    reader = _reader_for(module_tree)
+
+    def held(name):
+        return reader.held(name.id, reader.scope.get(id(name)))
+
     functions = {
         node.name: node for node in module_tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
@@ -4053,9 +4157,9 @@ def _detail_values(expression, function, module_tree, seen=frozenset()) -> tuple
                 texts = {text + value for text in texts for value in inner}
             return texts, unresolved
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
-            table = constants.get(node.value.id)
-            if isinstance(table, ast.Dict):
-                parts = [values(value, scope, seen) for value in table.values]
+            tables = held(node.value)
+            if tables and all(kind == "value" and isinstance(table, ast.Dict) for kind, table in tables):
+                parts = [values(value, scope, seen) for _kind, table in tables for value in table.values]
                 return set().union(*(p[0] for p in parts)), [u for p in parts for u in p[1]]
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
             if node.func.id in seen:
@@ -4067,17 +4171,13 @@ def _detail_values(expression, function, module_tree, seen=frozenset()) -> tuple
             ]
             return set().union(set(), *(p[0] for p in parts)), [u for p in parts for u in p[1]]
         if isinstance(node, ast.Name):
-            local = [
-                assign.value for assign in ast.walk(scope)
-                if isinstance(assign, (ast.Assign, ast.AnnAssign)) and assign.value is not None
-                and any(isinstance(t, ast.Name) and t.id == node.id
-                        for t in (assign.targets if isinstance(assign, ast.Assign) else [assign.target]))
-            ] if scope is not None else []
-            if local and (scope.name, node.id) not in seen:
-                parts = [values(value, scope, seen | {(scope.name, node.id)}) for value in local]
+            token = (node.id, id(reader.scope.get(id(node))))
+            if token in seen:
+                return set(), []
+            sources = held(node)
+            if sources and all(kind == "value" for kind, _value in sources):
+                parts = [values(value, reader.scope.get(id(value)), seen | {token}) for _kind, value in sources]
                 return set().union(*(p[0] for p in parts)), [u for p in parts for u in p[1]]
-            if node.id in constants and node.id not in seen:
-                return values(constants[node.id], None, seen | {node.id})
         return set(), [ast.unparse(node)]
 
     return values(expression, function, seen)

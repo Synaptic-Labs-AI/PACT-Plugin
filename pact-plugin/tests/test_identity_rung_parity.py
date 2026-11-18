@@ -1016,68 +1016,109 @@ def dynamic_access_forms(paths) -> dict:
     return {name: [tuple(kind) for kind in kinds] for name, kinds in result["forms"].items()}
 
 
-def name_values(node, function, tree):
+_READERS: dict = {}
+
+
+def _reader_for(tree):
+    """The binding reader of the module `tree`, built once per tree."""
+    held = _READERS.get(id(tree))
+    if held is None or held[0] is not tree:
+        held = _READERS[id(tree)] = (tree, _CalleeReader(tree, compile(tree, "<census>", "exec")))
+    return held[1]
+
+
+def module_string_constants(tree) -> dict:
+    """{name: text} for each module-level name of `tree` whose every
+    binding, by every binding form the compiler defines (`_CalleeReader`),
+    assigns the same string constant. A name with any other binding is left
+    out, so no reader of the table takes it for that constant."""
+    reader = _reader_for(tree)
+    found = {}
+    for (key, name), sources in reader.sources.items():
+        if key is not None or (None, name) in reader.unread:
+            continue
+        if all(kind == "value" and isinstance(v, ast.Constant) and isinstance(v.value, str) for kind, v in sources):
+            texts = {value.value for _kind, value in sources}
+            if len(texts) == 1:
+                found[name] = texts.pop()
+    return found
+
+
+def name_values(node, function, tree, seen=frozenset()):
     """The strings `node` can hold, or None when they cannot be read from
-    the code: a constant; a name assigned only constants, or bound by a
-    `for` over a literal of constants (by position in each item); or a
-    parameter every call in the module passes only such values."""
+    the code: a constant; or a name each of whose bindings, by every
+    binding form the compiler defines (`_CalleeReader`), holds only such
+    values: an assignment of one, an element of a literal container of
+    them (a `for` target, an unpacking), a parameter whose default and
+    every value a call in the module passes are such values. FAIL CLOSED:
+    any other binding (a call result, a `with` target, an augmented
+    assignment, an import, an unread binding) makes the name unreadable.
+    `function` is unused: the reader finds the scope the name is read in."""
     if isinstance(node, ast.Constant):
         return {node.value} if isinstance(node.value, str) else set()
-    if not isinstance(node, ast.Name) or function is None:
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return _element_values(node, tree, seen)
+    if not isinstance(node, ast.Name) or id(node) in seen:
+        return None if not isinstance(node, ast.Name) else set()
+    reader = _reader_for(tree)
+    sources = reader.held(node.id, reader.scope.get(id(node)))
+    if not sources:
         return None
-    params = [a.arg for a in [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]]
-    if node.id in params:
+    values = set()
+    for kind, value in sources:
+        if kind == "value":
+            found = name_values(value, None, tree, seen | {id(node)})
+        elif kind == "element" and value is not None:
+            found = _element_values(value, tree, seen | {id(node)})
+        elif kind == "param":
+            passed = reader._param_values(*value)
+            found = None if passed is None else set()
+            for given, _scope, whole in passed or ():
+                part = (
+                    name_values(given, None, tree, seen | {id(node)}) if whole
+                    else _element_values(given, tree, seen | {id(node)})
+                )
+                if part is None:
+                    found = None
+                    break
+                found |= part
+        else:
+            found = None
+        if found is None:
+            return None
+        values |= found
+    return values
+
+
+def _element_values(container, tree, seen=frozenset()):
+    """The strings an element of `container` can hold, or None: each element
+    of a literal container (nested literals included), or of the literal a
+    name holds."""
+    if isinstance(container, (ast.List, ast.Tuple, ast.Set)):
         values = set()
-        calls = [
-            call for call in ast.walk(tree)
-            if isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == function.name
-        ]
-        index = params.index(node.id)
-        for call in calls:
-            passed = [k.value for k in call.keywords if k.arg == node.id] or call.args[index:index + 1]
-            if not passed:
-                return None
-            caller = next(
-                (f for f in ast.walk(tree) if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
-                 and any(c is call for c in ast.walk(f))), None,
+        for element in container.elts:
+            element = element.value if isinstance(element, ast.Starred) else element
+            found = (
+                _element_values(element, tree, seen) if isinstance(element, (ast.List, ast.Tuple, ast.Set))
+                else name_values(element, None, tree, seen)
             )
-            found = name_values(passed[0], caller, tree)
             if found is None:
                 return None
             values |= found
-        return values if calls else None
-    values, bound = set(), False
-    for statement in ast.walk(function):
-        if isinstance(statement, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == node.id for t in statement.targets
-        ):
-            bound = True
-            found = name_values(statement.value, None, tree) if isinstance(statement.value, ast.Constant) else None
+        return values
+    if isinstance(container, ast.Name) and id(container) not in seen:
+        reader = _reader_for(tree)
+        sources = reader.held(container.id, reader.scope.get(id(container)))
+        if not sources:
+            return None
+        values = set()
+        for kind, value in sources:
+            found = _element_values(value, tree, seen | {id(container)}) if kind in ("value", "element") else None
             if found is None:
                 return None
             values |= found
-        elif isinstance(statement, (ast.For, ast.AsyncFor)):
-            targets = statement.target.elts if isinstance(statement.target, ast.Tuple) else [statement.target]
-            if not any(isinstance(t, ast.Name) and t.id == node.id for t in targets):
-                continue
-            bound = True
-            position = next(i for i, t in enumerate(targets) if isinstance(t, ast.Name) and t.id == node.id)
-            source = statement.iter
-            if isinstance(source, ast.Name):
-                literal = [
-                    s.value for s in ast.walk(function) if isinstance(s, ast.Assign)
-                    and any(isinstance(t, ast.Name) and t.id == source.id for t in s.targets)
-                ]
-                source = literal[0] if len(literal) == 1 else None
-            if not isinstance(source, (ast.List, ast.Tuple)):
-                return None
-            for item in source.elts:
-                element = item.elts[position] if isinstance(statement.target, ast.Tuple) and isinstance(
-                    item, ast.Tuple) else item if not isinstance(statement.target, ast.Tuple) else None
-                if not (isinstance(element, ast.Constant) and isinstance(element.value, str)):
-                    return None
-                values.add(element.value)
-    return values if bound else None
+        return values
+    return None
 
 
 def dynamic_reaches(paths, forms, reaches_by_name, read_outright=lambda path, call: False) -> list:
@@ -2262,6 +2303,56 @@ class TestEveryIdentityCallerIsCovered:
         (tmp_path / "use.py").write_text(use, encoding="utf-8")
         found = call_result_callees([tmp_path / "scope.py", tmp_path / "use.py"])
         assert any(name == "use.py" for name, _line, _source in found) is held, found
+
+    @pytest.mark.parametrize("source, held", [
+        ("def f():\n    n = 'O_A'\n    return getattr(os, n)\n", ['O_A']),
+        ("def f():\n    for n in ('O_A', 'O_B'):\n        getattr(os, n)\n", ['O_A', 'O_B']),
+        ("N = 'O_A'\ndef f():\n    return getattr(os, N)\n", ['O_A']),
+        ("def f(n):\n    return getattr(os, n)\nf('O_A')\n", ['O_A']),
+        ("def f(n='O_A'):\n    return getattr(os, n)\nf()\n", ['O_A']),
+        ("def f():\n    n, m = 'O_A', 0\n    return getattr(os, n)\n", ['O_A']),
+        ("def f():\n    n = 'O_A'\n    n += 'X'\n    return getattr(os, n)\n", None),
+        ("def f(c):\n    n = 'O_A'\n    with c as n:\n        return getattr(os, n)\n", None),
+        ("def f(c):\n    n = 'O_A'\n    if (n := c()):\n        return getattr(os, n)\n", None),
+        ("def f(c):\n    n = 'O_A'\n    n: str = c()\n    return getattr(os, n)\n", None),
+        ("def f(c):\n    n = 'O_A'\n    n, m = c()\n    return getattr(os, n)\n", None),
+        ("def f(c):\n    n = 'O_A'\n    for (n, m), k in c():\n        return getattr(os, n)\n", None),
+        ("def f(c):\n    n = 'O_A'\n    try:\n        pass\n    except Exception as n:\n        return getattr(os, n)\n", None),
+        ("def f(c):\n    n = 'O_A'\n    import os as n\n    return getattr(os, n)\n", None),
+        ("def f(c):\n    n = 'O_A'\n    match c:\n        case [n]:\n            return getattr(os, n)\n", None),
+        ("def f(c):\n    global n\n    n = 'O_A'\n    return getattr(os, n)\ndef g(c):\n    global n\n    n = c()\n", None),
+        ("def f(c):\n    n = 'O_A'\n    return [getattr(os, n) for n in c()]\n", None),
+        ("def f(c):\n    n = 'O_A'\n    def n():\n        pass\n    return getattr(os, n)\n", None),
+        ('def f(n):\n    return getattr(os, n)\n', None),
+        ("def f(n='O_A'):\n    return getattr(os, n)\nf(g())\n", None),
+    ])
+    def test_a_name_handed_to_a_lookup_is_read_from_every_binding(self, source, held):
+        """A name is read as the strings it holds only when every binding of
+        it, by any binding form, holds a known string; any other binding
+        makes it unreadable, which the dynamic-access ban reds."""
+        tree = ast.parse(source)
+        call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "getattr")
+        found = name_values(call.args[1], None, tree)
+        assert (sorted(found) if found is not None else None) == held
+
+    @pytest.mark.parametrize("source, table", [
+        ("A = 'a'\n", {"A": "a"}),
+        ("A: Final = 'a'\n", {"A": "a"}),
+        ("A = 'a'\nA = 'a'\n", {"A": "a"}),
+        ("A = B = 'a'\n", {"A": "a", "B": "a"}),
+        ("A = 'a'\nA = 'b'\n", {}),
+        ("A = 'a'\nA += 'b'\n", {}),
+        ("A = 'a'\ndef f():\n    global A\n    A = g()\n", {}),
+        ("A = 'a'\nfor A in ('a',):\n    pass\n", {}),
+        ("A = 'a'\nfrom m import A\n", {}),
+        ("A = 'a'\nA, B = g()\n", {}),
+        ("A = 'a'\ndef f():\n    A = g()\n", {"A": "a"}),
+    ])
+    def test_a_module_string_constant_is_read_from_every_binding(self, source, table):
+        """A module name is a string constant only when every module-level
+        binding of it, by any binding form, assigns that one string; a
+        function's own local of the same name is not one of them."""
+        assert module_string_constants(ast.parse(source)) == table
 
     def test_the_reader_reads_every_binding_the_compiler_makes(self):
         """The population is the compiler's: every name a code object of a

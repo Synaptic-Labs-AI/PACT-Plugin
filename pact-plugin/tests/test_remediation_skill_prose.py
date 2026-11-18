@@ -1641,7 +1641,6 @@ class _DetectionGraph:
                     bound.add(name)
                     changed = True
         self.env_aliases[module] = bound
-        constants = {}
         for node in tree.body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.defs[(module, node.name)] = node
@@ -1649,14 +1648,10 @@ class _DetectionGraph:
                 for item in node.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         self.defs[(module, f"{node.name}.{item.name}")] = item
-            elif (
-                isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant)
-                and isinstance(node.value.value, str)
-            ):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        constants[target.id] = node.value.value
-        self.constants[module] = constants
+        from test_identity_rung_parity import module_string_constants
+
+        # every module-level binding of a name, by any binding form, assigns this string
+        self.constants[module] = module_string_constants(tree)
         return True
 
     def follow(self, qualified: str, depth: int = 0):
@@ -2764,7 +2759,9 @@ def route_inputs() -> dict:
         for read, shown in _env_reads(node, module, key[1], graph):
             if isinstance(read, ast.Constant) and isinstance(read.value, str):
                 add(("env", read.value), f"{site}:{read.lineno}", key)
-            elif isinstance(read, ast.Name) and read.id in graph.constants[module]:
+            elif isinstance(read, ast.Name) and read.id in graph.constants[module] and (
+                key[1] == "<import>" or not graph._bindings(node, name=read.id)
+            ):
                 add(("env", graph.constants[module][read.id]), f"{site}:{read.lineno}", key)
             elif isinstance(read, ast.Name) and read.id in params(node):
                 parameter_keys[key] = params(node).index(read.id)
@@ -2790,7 +2787,9 @@ def route_inputs() -> dict:
             constants = graph.constants[key[0]]
             if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
                 add(("env", argument.value), f"{key[0]}.py:{node.lineno}", target)
-            elif isinstance(argument, ast.Name) and argument.id in constants:
+            elif isinstance(argument, ast.Name) and argument.id in constants and (
+                key[1] == "<import>" or not graph._bindings(scope, name=argument.id)
+            ):
                 add(("env", constants[argument.id]), f"{key[0]}.py:{node.lineno}", target)
             else:
                 add(("env", f"<{target[0]}.{target[1]}: argument at {key[0]}.py:{node.lineno}>"),
