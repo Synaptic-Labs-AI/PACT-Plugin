@@ -2665,6 +2665,11 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
 
         assert call_result_callees(list(_platform_claim_modules().values())) == []
 
+    def test_the_callee_reader_reads_every_binding_in_the_claiming_modules(self):
+        from test_identity_rung_parity import unread_bindings
+
+        assert unread_bindings(list(_platform_claim_modules().values())) == []
+
     def test_the_flag_string_ban_spares_only_the_census_reads(self):
         """Control: with no read spared, the guarded `getattr(os, "O_X", 0)`
         names are found in each module, so the ban sees them."""

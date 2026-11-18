@@ -48,6 +48,7 @@ so the guard behind it can still be compared.
 from __future__ import annotations
 
 import ast
+import builtins
 import collections
 import os
 import re
@@ -1158,119 +1159,722 @@ def named_anchor_strings(paths, named, read_outright=lambda path, parent: False)
     return sorted(set(found))
 
 
+_SCOPES = (
+    ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+    ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp,
+)
+_DEF_NODES = (ast.FunctionDef, ast.AsyncFunctionDef)
+_LITERALS = (ast.List, ast.Tuple, ast.Set, ast.Dict)
+
+
+def _wrapper_types() -> frozenset:
+    """The builtin types that, made from one callable, call that callable
+    when they are called (`staticmethod`, `classmethod`), measured by making
+    each builtin type from a probe function."""
+
+    def probe():
+        return None
+
+    found = set()
+    for name, value in vars(builtins).items():
+        if not isinstance(value, type):
+            continue
+        try:
+            made = value(probe)
+        except Exception:  # a type that is not made from one callable
+            continue
+        if getattr(made, "__func__", None) is probe or getattr(made, "__wrapped__", None) is probe:
+            found.add(name)
+    return frozenset(found)
+
+
+def _stored_names(code) -> set:
+    """Every name the compiled `code` object binds: each STORE_ instruction
+    that names a variable (not an attribute or item), and its parameters."""
+    import dis
+
+    names = set()
+    for instruction in dis.get_instructions(code):
+        if instruction.opname.startswith("STORE_") and instruction.opname not in (
+            "STORE_ATTR", "STORE_SUBSCR", "STORE_SLICE",
+        ):
+            value = instruction.argval
+            names.update(value if isinstance(value, tuple) else [value])
+    flags = code.co_flags
+    count = code.co_argcount + code.co_kwonlyargcount + bool(flags & 0x04) + bool(flags & 0x08)
+    names.update(code.co_varnames[:count])
+    return {name for name in names if isinstance(name, str)}
+
+
+def _code_objects(code):
+    yield code
+    for constant in code.co_consts:
+        if hasattr(constant, "co_code"):
+            yield from _code_objects(constant)
+
+
+_BINDING_PROBE = '''"""A module docstring."""
+import os.path as p, sys
+from os import sep as s
+a: int = 1
+b += 1
+(c := 2)
+d, *e = f, g = [1, 2]
+for h in (): pass
+async def i(j, /, k=1, *l, m, **n):
+    async for o in j: pass
+    async with j as q: pass
+    return [r async for r in j]
+with p as (t, u): pass
+try: pass
+except Exception as v: pass
+match a:
+    case [w, *x] | {"k": w, **x}: pass
+    case Exception(y) as x: pass
+    case z: pass
+@p
+class A:
+    """A class docstring."""
+    B: int
+    def m(self, D, E: int = 1) -> int:
+        global F
+        F = 1
+        def G():
+            nonlocal D
+            D = super()
+        return [H for H in ()] + list(I for I in ()) and {J: K for J, K in ()} and {L for L in ()}
+X = lambda M: M
+'''
+
+
+def _implicit_bindings() -> frozenset:
+    """The names the compiler binds that no source line writes (a class
+    body's `__module__`, `__qualname__` and `__doc__`, the `__class__` cell,
+    a generator's `.0`), read from compiling a probe that writes every binding
+    form and subtracting each name the probe's own source spells."""
+    tree = ast.parse(_BINDING_PROBE)
+    spelled = {
+        getattr(node, field) for node in ast.walk(tree)
+        for field in ("id", "arg", "name", "asname", "rest")
+        if isinstance(getattr(node, field, None), str)
+    } | {part for node in ast.walk(tree) if isinstance(node, ast.alias) for part in node.name.split(".")}
+    spelled |= {name for node in ast.walk(tree) if isinstance(node, (ast.Global, ast.Nonlocal)) for name in node.names}
+    return frozenset(
+        name for code in _code_objects(compile(tree, "<probe>", "exec")) for name in _stored_names(code)
+    ) - spelled
+
+
+class _CalleeReader:
+    """Where every name, attribute and parameter in one module gets its
+    value, read from each binding form the compiler defines, so a callee can
+    be followed to every place it can come from.
+
+    Binding forms read: assignment, annotated assignment, `:=`, augmented
+    assignment (an arithmetic result, holding the elements of what it adds),
+    unpacking into a tuple or list (paired by position with a literal, else
+    any element), `for` and `async for` targets and comprehension and
+    generator targets (an element of what they iterate), `with ... as` (what
+    `__enter__` returns), def and class with their decorators, import
+    aliases, `except ... as`, match captures, and parameters (the default
+    and what each call or decorator in the file passes). `global` and `nonlocal`
+    bind in the scope they name. FAIL CLOSED: a binding the compiler makes
+    (`_stored_names` on the compiled module) that no form here read is
+    unread, and an unread name may hold anything."""
+
+    def __init__(self, tree, code, imported=None):
+        self.imported = imported or {}
+        self.parent, self.scope = {}, {}
+        self._index(tree, None)
+        self.tree = tree
+        self.sources = collections.defaultdict(list)
+        self.attrs = collections.defaultdict(list)
+        self.class_names = collections.defaultdict(lambda: collections.defaultdict(list))
+        self.declared = {}
+        self.methods = {}
+        self.wrappers = _wrapper_types()
+        self._collect()
+        self.unread = self._unread(code)
+        self._active = set()
+
+    def _index(self, node, scope):
+        for child in ast.iter_child_nodes(node):
+            self.parent[id(child)] = node
+            self.scope[id(child)] = scope
+            self._index(child, child if isinstance(child, _SCOPES) else scope)
+
+    @staticmethod
+    def _key(scope):
+        return None if scope is None else id(scope)
+
+    def _enclosing_function(self, scope):
+        scope = self.scope.get(id(scope))
+        while scope is not None and not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            scope = self.scope.get(id(scope))
+        return scope
+
+    def _home(self, scope, name, walrus=False):
+        """The scope a binding of `name` made in `scope` binds in."""
+        if walrus:
+            while isinstance(scope, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)):
+                scope = self.scope.get(id(scope))
+        if scope is not None:
+            kind = self.declared.get((id(scope), name))
+            if kind == "global":
+                return None
+            if kind == "nonlocal":
+                return self._enclosing_function(scope)
+        return scope
+
+    def _add(self, scope, name, source, walrus=False):
+        home = self._home(scope, name, walrus)
+        self.sources[(self._key(home), name)].append(source)
+        if isinstance(home, ast.ClassDef):
+            self.class_names[id(home)][name].append(source)
+
+    def _target_source(self, target):
+        """(kind, expression) for what a store target receives."""
+        node, path = target, []
+        parent = self.parent[id(node)]
+        while isinstance(parent, (ast.Tuple, ast.List, ast.Starred)):
+            if isinstance(parent, ast.Starred):
+                path.append(None)
+            else:
+                path.append(next(i for i, e in enumerate(parent.elts) if e is node))
+            node, parent = parent, self.parent[id(parent)]
+        path.reverse()
+        if isinstance(parent, (ast.Assign, ast.AnnAssign, ast.NamedExpr)):
+            if parent.value is None:
+                return ("nothing", None)
+            value = parent.value
+            for index in path:
+                if index is None or not isinstance(value, (ast.Tuple, ast.List)) or any(
+                    isinstance(e, ast.Starred) for e in value.elts
+                ):
+                    return ("element", value)
+                value = value.elts[index]
+            return ("value", value)
+        if isinstance(parent, ast.AugAssign):
+            return ("augmented", parent)
+        if isinstance(parent, (ast.For, ast.AsyncFor, ast.comprehension)) and node is parent.target:
+            return ("element", parent.iter)
+        if isinstance(parent, ast.withitem):
+            return ("enter", parent.context_expr)
+        return ("unknown", None)
+
+    def _match_subject(self, node):
+        parent = self.parent.get(id(node))
+        while parent is not None and not isinstance(parent, ast.Match):
+            parent = self.parent.get(id(parent))
+        return parent.subject if parent is not None else None
+
+    def _collect(self):
+        for node in ast.walk(self.tree):
+            if isinstance(node, (ast.Global, ast.Nonlocal)):
+                for name in node.names:
+                    self.declared[(id(self.scope[id(node)]), name)] = (
+                        "global" if isinstance(node, ast.Global) else "nonlocal"
+                    )
+            if isinstance(node, ast.ClassDef):
+                for member in node.body:
+                    if isinstance(member, _DEF_NODES) and not any(
+                        getattr(d, "id", None) == "staticmethod" for d in member.decorator_list
+                    ):
+                        self.methods[id(member)] = node
+        for node in ast.walk(self.tree):
+            scope = self.scope.get(id(node))
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                kind, value = self._target_source(node)
+                self._add(scope, node.id, (kind, value), walrus=isinstance(self.parent[id(node)], ast.NamedExpr))
+            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Store):
+                self.attrs[node.attr].append(self._target_source(node))
+            elif isinstance(node, (*_DEF_NODES, ast.ClassDef)):
+                self._add(scope, node.name, ("def", node))
+            elif isinstance(node, ast.alias):
+                bound = node.asname or node.name.split(".")[0]
+                self._add(scope, bound, ("import", (self.parent[id(node)], node)))
+            elif isinstance(node, ast.ExceptHandler) and node.name:
+                self._add(scope, node.name, ("nothing", None))
+            elif isinstance(node, ast.arg):
+                function = self.parent[id(self.parent[id(node)])]
+                self.sources[(id(function), node.arg)].append(("param", (function, node.arg)))
+            elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+                subject = self._match_subject(node)
+                whole = isinstance(node, ast.MatchAs) and node.pattern is None and isinstance(
+                    self.parent.get(id(node)), ast.match_case
+                )
+                self._add(scope, node.name, ("value" if whole else "element", subject))
+            elif isinstance(node, ast.MatchMapping) and node.rest:
+                self._add(scope, node.rest, ("element", self._match_subject(node)))
+
+    def _scopes_by_code(self):
+        found = collections.defaultdict(list)
+        names = {ast.ListComp: "<listcomp>", ast.SetComp: "<setcomp>", ast.DictComp: "<dictcomp>",
+                 ast.GeneratorExp: "<genexpr>", ast.Lambda: "<lambda>"}
+        for node in ast.walk(self.tree):
+            if isinstance(node, (*_DEF_NODES, ast.ClassDef)):
+                first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
+                found[(node.name, first)].append(node)
+            elif type(node) in names:
+                found[(names[type(node)], node.lineno)].append(node)
+        return found
+
+    def _read_in(self, scope, name):
+        """Whether a binding of `name` made by code compiled for `scope` was read."""
+        if (self._key(scope), name) in self.sources:
+            return True
+        # comprehensions the compiler inlines bind in the function around them
+        return any(
+            (id(node), name) in self.sources for node in ast.walk(scope if scope is not None else self.tree)
+            if isinstance(node, (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp))
+        )
+
+    def _bound_here(self, scope, name):
+        """Whether a binding of `name` compiled for `scope` was read: in that
+        scope, or where its `global` or `nonlocal` statement sends it."""
+        if self._read_in(scope, name):
+            return True
+        kind = self.declared.get((id(scope), name)) if scope is not None else None
+        if kind == "global":
+            return (None, name) in self.sources
+        if kind == "nonlocal":
+            return (self._key(self._enclosing_function(scope)), name) in self.sources
+        return False
+
+    def _unread(self, code):
+        """(scope key, name) for every binding the compiled `code` makes that
+        no form here read."""
+        implicit = _implicit_bindings()
+        by_code = self._scopes_by_code()
+        unread = set()
+        for compiled in _code_objects(code):
+            if compiled.co_name == "<module>":
+                scopes = [None]
+            else:
+                scopes = by_code.get((compiled.co_name, compiled.co_firstlineno), [])
+            for name in _stored_names(compiled) - implicit:
+                if scopes and any(self._bound_here(scope, name) for scope in scopes):
+                    continue
+                for scope in scopes or [None]:
+                    unread.add((self._key(scope), name))
+        return unread
+
+    def held(self, name, scope):
+        """The sources of `name` read where `scope` reads it: its own scope's,
+        else each enclosing function's, then the module's (a class body is
+        seen only from itself). A builtin holds nothing here; any other name
+        the file never binds (a star import, a name set from outside) may
+        hold anything."""
+        current, first = scope, True
+        while True:
+            key = self._key(current)
+            if (key, name) in self.unread:
+                return [("unknown", None)]
+            found = self.sources.get((key, name))
+            if found and (first or not isinstance(current, ast.ClassDef)):
+                return found
+            if current is None:
+                return [] if hasattr(builtins, name) else [("unknown", None)]
+            first = False
+            current = self.scope.get(id(current))
+
+    def attribute_sources(self, node, scope):
+        """What `node` (`receiver.attr`) can hold: each attribute target of
+        that name in the file and each class body's name of that name (a
+        class, an instance, a subclass and `self` all read it), or, for a
+        module imported from another file in scope, its module-level name."""
+        found = list(self.attrs.get(node.attr, []))
+        receiver = node.value
+        held = self.held(receiver.id, scope) if isinstance(receiver, ast.Name) else []
+        if not held or any(kind != "import" for kind, _value in held):
+            for names in self.class_names.values():
+                found += names.get(node.attr, [])
+        for kind, value in held:
+            if kind == "import":
+                statement, alias = value
+                stem = alias.name.split(".")[-1]
+                if node.attr in self.imported.get(stem, ()):
+                    found.append(("unknown", None))
+        return found
+
+    def _callers(self, function):
+        """The calls in the file that call `function`."""
+        calls = []
+        for call in ast.walk(self.tree):
+            if not isinstance(call, ast.Call):
+                continue
+            func = call.func
+            if func is function:
+                calls.append((call, 0))
+            elif isinstance(function, _DEF_NODES) and getattr(func, "id", getattr(func, "attr", None)) == function.name:
+                shift = 1 if id(function) in self.methods and isinstance(func, ast.Attribute) else 0
+                calls.append((call, shift))
+            elif isinstance(function, ast.Lambda) and isinstance(func, ast.Name) and any(
+                kind == "value" and value is function for kind, value in self.held(func.id, self.scope.get(id(call)))
+            ):
+                calls.append((call, 0))
+        return calls
+
+    def _passed_elsewhere(self, function):
+        """Whether `function` is used other than by a call or a decorator
+        in this file (handed to `map`, stored in a table), so a caller this
+        file does not show may pass its parameters."""
+        parent = self.parent.get(id(function))
+        if isinstance(function, ast.Lambda):
+            if self._decorates(function) or isinstance(parent, ast.Call) and parent.func is function:
+                return False
+            if not (isinstance(parent, ast.Assign) and all(isinstance(t, ast.Name) for t in parent.targets)):
+                return True
+            names = {target.id for target in parent.targets}
+        else:
+            names = {function.name}
+        called = {id(call.func) for call in ast.walk(self.tree) if isinstance(call, ast.Call)}
+        called |= {id(d) for node in ast.walk(self.tree) for d in getattr(node, "decorator_list", ())}
+        return any(
+            isinstance(node, (ast.Name, ast.Attribute)) and isinstance(node.ctx, ast.Load)
+            and getattr(node, "id", getattr(node, "attr", None)) in names and id(node) not in called
+            for node in ast.walk(self.tree)
+        )
+
+    def _decorates(self, function):
+        """Whether `function` is a decorator applied in this file, so its
+        first parameter receives the def or class it decorates."""
+        name = getattr(function, "name", None)
+        return any(
+            d is function or name is not None and getattr(d, "id", getattr(d, "attr", None)) == name
+            for node in ast.walk(self.tree) for d in getattr(node, "decorator_list", ())
+        )
+
+    def _param_values(self, function, name):
+        """(expression, scope, whole) for each value the parameter `name` of
+        `function` can receive in this file: its default, and what each call
+        passes (a starred or `**` argument by its elements, `whole` False).
+        None when it cannot be paired: `*args` or `**kwargs`, no call or
+        decorator in the file passes it, or the function is used elsewhere."""
+        positional = [a.arg for a in [*function.args.posonlyargs, *function.args.args]]
+        keyword_only = [a.arg for a in function.args.kwonlyargs]
+        if name not in positional + keyword_only or self._passed_elsewhere(function):
+            return None
+        outer = self.scope.get(id(function))
+        defaults = dict(zip(positional[len(positional) - len(function.args.defaults):], function.args.defaults))
+        defaults.update((arg, d) for arg, d in zip(keyword_only, function.args.kw_defaults) if d is not None)
+        values = [(defaults[name], outer, True)] if name in defaults else []
+        passed = self._decorates(function) and positional[:1] == [name]
+        for call, shift in self._callers(function):
+            passed = True
+            scope = self.scope.get(id(call))
+            for keyword in call.keywords:
+                if keyword.arg == name or keyword.arg is None:
+                    values.append((keyword.value, scope, keyword.arg is not None))
+            if name not in positional:
+                continue
+            # a method called on its class (`Cls.m(obj, a)`) shifts by one less
+            indexes = {positional.index(name) - shift, positional.index(name)}
+            starred = next((i for i, a in enumerate(call.args) if isinstance(a, ast.Starred)), len(call.args))
+            for position, arg in enumerate(call.args):
+                if isinstance(arg, ast.Starred):
+                    values.append((arg.value, scope, False))
+                elif position in indexes or position >= starred:
+                    values.append((arg, scope, True))
+        return values if passed else None
+
+    def _param_may_be(self, function, name):
+        params = [a.arg for a in [*function.args.posonlyargs, *function.args.args]]
+        if id(function) in self.methods and params[:1] == [name]:
+            return False  # the instance or class the method is called on
+        values = self._param_values(function, name)
+        if values is None:
+            return True
+        return any(self.may_be(v, s) if whole else self.element_may_be(v, s) for v, s, whole in values)
+
+    def _returns(self, function):
+        return [
+            node.value for node in ast.walk(function)
+            if isinstance(node, ast.Return) and node.value is not None
+            and self._enclosing_def(node) is function
+        ]
+
+    def _enclosing_def(self, node):
+        scope = self.scope.get(id(node))
+        while scope is not None and not isinstance(scope, (*_DEF_NODES, ast.Lambda)):
+            scope = self.scope.get(id(scope))
+        return scope
+
+    def _decorator_may_be(self, kind, value, prev):
+        """What applying a decorator held as (kind, value) to a value that
+        `prev` says may or may not be a call result gives."""
+        if kind == "def" and isinstance(value, _DEF_NODES):
+            params = [a.arg for a in [*value.args.posonlyargs, *value.args.args]]
+            for returned in self._returns(value):
+                if isinstance(returned, ast.Name) and params[:1] == [returned.id]:
+                    if prev:
+                        return True
+                elif self.may_be(returned, value):
+                    return True
+            return False
+        if kind == "def":
+            return False  # a class: an instance of it
+        if kind == "import":
+            return prev  # a decorator from another module (`functools.lru_cache`)
+        return self.source_may_be((kind, value))
+
+    def _decorated_may_be(self, node):
+        value = False  # the def or class itself
+        scope = self.scope.get(id(node))
+        for decorator in reversed(node.decorator_list):
+            value = self._applied_may_be(decorator, value, scope)
+        return value
+
+    def _applied_may_be(self, decorator, prev, scope):
+        if isinstance(decorator, ast.Lambda):
+            return self.may_be(decorator.body, decorator)
+        if isinstance(decorator, ast.Name):
+            sources = self.held(decorator.id, scope)
+        elif isinstance(decorator, ast.Attribute):
+            sources = self.attribute_sources(decorator, scope)
+        elif isinstance(decorator, ast.Call):
+            factory = decorator.func
+            if isinstance(factory, ast.Name):
+                makers = self.held(factory.id, scope)
+            elif isinstance(factory, ast.Attribute):
+                makers = self.attribute_sources(factory, scope)
+            else:
+                return True
+            if not makers:
+                return prev  # a factory from another module (`functools.wraps(f)`)
+            for kind, value in makers:
+                if kind == "def" and isinstance(value, _DEF_NODES):
+                    for returned in self._returns(value):
+                        inner = self.held(returned.id, value) if isinstance(returned, ast.Name) else [("value", returned)]
+                        if any(self._decorator_may_be(k, v, prev) for k, v in inner):
+                            return True
+                elif kind == "import":
+                    continue
+                elif self.source_may_be((kind, value)):
+                    return True
+            return prev
+        else:
+            return True
+        if not sources:
+            return prev  # a builtin decorator (`staticmethod`, `property`)
+        return any(self._decorator_may_be(kind, value, prev) for kind, value in sources)
+
+    def _import_may_be(self, value):
+        statement, alias = value
+        if isinstance(statement, ast.ImportFrom):
+            stem = (statement.module or "").split(".")[-1]
+            return alias.name in self.imported.get(stem, ())
+        return False
+
+    def source_may_be(self, source):
+        kind, value = source
+        if kind == "value":
+            return self.may_be(value, self.scope.get(id(value)))
+        if kind == "element":
+            return value is None or self.element_may_be(value, self.scope.get(id(value)))
+        if kind == "def":
+            return self._decorated_may_be(value)
+        if kind == "import":
+            return self._import_may_be(value)
+        if kind == "param":
+            return self._param_may_be(*value)
+        if kind in ("nothing", "augmented"):
+            return False
+        return True  # enter, unknown
+
+    def element_may_be(self, container, scope):
+        """Whether an element of `container` may be a call result."""
+        token = ("element", id(container))
+        if token in self._active:
+            return False
+        self._active.add(token)
+        try:
+            if isinstance(container, ast.Dict):
+                parts = [*(k for k in container.keys if k is not None), *container.values]
+            elif isinstance(container, (ast.List, ast.Tuple, ast.Set)):
+                parts = container.elts
+            elif isinstance(container, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+                return self.may_be(container.elt, container) or (
+                    isinstance(container.elt, _LITERALS) and self.element_may_be(container.elt, container)
+                )
+            elif isinstance(container, ast.DictComp):
+                return self.may_be(container.value, container) or self.may_be(container.key, container)
+            elif isinstance(container, ast.Name):
+                return any(self._source_elements_may_be(s) for s in self.held(container.id, scope))
+            elif isinstance(container, ast.Attribute):
+                return any(self._source_elements_may_be(s) for s in self.attribute_sources(container, scope))
+            elif isinstance(container, (ast.Subscript, ast.Starred)):
+                return self.element_may_be(container.value, scope)
+            elif isinstance(container, ast.Call):
+                return self._returned_elements_may_be(container, scope)
+            elif isinstance(container, ast.BinOp):
+                return self.element_may_be(container.left, scope) or self.element_may_be(container.right, scope)
+            elif isinstance(container, ast.Constant):
+                return False
+            else:
+                return True  # a call's result or another expression: its elements are not read here
+            for part in parts:
+                if isinstance(part, ast.Starred):
+                    if self.element_may_be(part.value, scope):
+                        return True
+                elif self.may_be(part, scope) or (
+                    isinstance(part, _LITERALS) and self.element_may_be(part, scope)
+                ):
+                    return True
+            return False
+        finally:
+            self._active.discard(token)
+
+    def _returned_elements_may_be(self, call, scope):
+        """Whether an element of what `call` returns may be a call result:
+        read from the returns of the undecorated plain function of this file
+        it calls, and taken to be one for any other callee (a generator, a
+        coroutine, a decorated or imported function, a method)."""
+        if not isinstance(call.func, ast.Name):
+            return True
+        made = self.held(call.func.id, scope)
+        if not made or not all(
+            kind == "def" and isinstance(value, ast.FunctionDef) and not value.decorator_list
+            and not any(isinstance(n, (ast.Yield, ast.YieldFrom)) and self._enclosing_def(n) is value
+                        for n in ast.walk(value))
+            for kind, value in made
+        ):
+            return True
+        return any(self.element_may_be(returned, value) for _kind, value in made for returned in self._returns(value))
+
+    def _source_elements_may_be(self, source):
+        kind, value = source
+        if kind in ("value", "element"):
+            return value is None or self.element_may_be(value, self.scope.get(id(value)))
+        if kind == "augmented":
+            return self.element_may_be(value.value, self.scope.get(id(value)))
+        if kind in ("def", "import", "nothing"):
+            return False
+        if kind == "param":
+            values = self._param_values(*value)
+            return values is None or any(self.element_may_be(v, s) for v, s, _whole in values)
+        return True
+
+    def may_be(self, node, scope):
+        """Whether `node`, read in `scope`, may be another call's result."""
+        token = (id(node), self._key(scope))
+        if token in self._active:
+            return False  # a cycle adds nothing a binding outside it does not
+        self._active.add(token)
+        try:
+            return self._may_be(node, scope)
+        finally:
+            self._active.discard(token)
+
+    def _is_partial(self, func, scope):
+        """Whether `func` names `functools.partial` (imported from the
+        module, or read as an attribute of the imported module)."""
+        if isinstance(func, ast.Name):
+            held = self.held(func.id, scope)
+            return bool(held) and all(
+                kind == "import" and isinstance(value[0], ast.ImportFrom) and value[0].module == "functools"
+                and value[0].level == 0 and value[1].name == "partial"
+                for kind, value in held
+            )
+        if isinstance(func, ast.Attribute) and func.attr == "partial" and isinstance(func.value, ast.Name):
+            held = self.held(func.value.id, scope)
+            return bool(held) and all(
+                kind == "import" and isinstance(value[0], ast.Import) and value[1].name == "functools"
+                for kind, value in held
+            )
+        return False
+
+    def _may_be(self, node, scope):
+        if isinstance(node, ast.Call):
+            func = node.func
+            if (
+                isinstance(func, ast.Name) and func.id in self.wrappers and not self.held(func.id, scope)
+                and len(node.args) == 1 and not node.keywords
+            ):
+                return self.may_be(node.args[0], scope)
+            if self._is_partial(func, scope) and node.args:
+                return self.may_be(node.args[0], scope)  # calling the partial calls its first argument
+            if isinstance(func, ast.Attribute) and func.attr == "get" and isinstance(func.value, ast.Name):
+                held = self.held(func.value.id, scope)
+                if held and all(kind == "value" and isinstance(value, ast.Dict) for kind, value in held):
+                    return any(self.may_be(v, self.scope.get(id(v))) for _k, d in held for v in d.values) or any(
+                        self.may_be(a, scope) for a in node.args[1:]
+                    )
+            return True
+        if isinstance(node, ast.Name):
+            return any(self.source_may_be(source) for source in self.held(node.id, scope))
+        if isinstance(node, ast.Attribute):
+            return any(self.source_may_be(source) for source in self.attribute_sources(node, scope))
+        if isinstance(node, ast.Subscript):
+            return self.element_may_be(node.value, scope)
+        if isinstance(node, ast.IfExp):
+            return self.may_be(node.body, scope) or self.may_be(node.orelse, scope)
+        if isinstance(node, ast.BoolOp):
+            return any(self.may_be(value, scope) for value in node.values)
+        if isinstance(node, (ast.NamedExpr, ast.Starred)):
+            return self.may_be(node.value, scope)
+        return False
+
+
+def _callee_readers(paths) -> list:
+    """(path, tree, reader) for each file at `paths`, each reader told which
+    module-level names of the other files may hold a call result, so a name
+    imported from one of them is read too."""
+    parsed = []
+    for path in paths:
+        text = Path(path).read_text(encoding="utf-8")
+        parsed.append((path, ast.parse(text), compile(text, str(path), "exec")))
+    imported = {}
+    for path, tree, code in parsed:
+        reader = _CalleeReader(tree, code)
+        imported[Path(path).stem] = {
+            name for (key, name), sources in reader.sources.items()
+            if key is None and any(reader.source_may_be(s) for s in sources)
+        }
+    return [(path, tree, _CalleeReader(tree, code, imported)) for path, tree, code in parsed]
+
+
+def unread_bindings(paths) -> list:
+    """Each binding the compiler makes in the files at `paths` that the
+    callee reader does not read, as (file, name)."""
+    return sorted(
+        (Path(path).name, name) for path, _tree, reader in _callee_readers(paths) for _key, name in reader.unread
+    )
+
+
 def call_result_callees(paths) -> list:
     """Each call in the files at `paths` whose callee can be another call's
     result, as (file, line, source). Such a callee (`methodcaller(...)`,
     `attrgetter(...)`) can reach any anchor through a name computed at run
     time, which neither the probe nor the string rule reads.
 
-    The callee is followed to every place it can come from: a call; a name
-    or attribute bound to one (assignment, class-body name, or a parameter,
-    through the arguments every call in the file passes it); an element of a
-    literal container, with `.get` on a literal dict read as its values and
-    default. FAIL CLOSED: an element of a container that is not a literal, a
-    parameter no call in the file passes, or a chain too deep to follow is
-    taken to be one. A name bound only by a def, class or import, a
-    decorator's first parameter where the decorator is applied to a def, and
-    a method's own first parameter, are not."""
-    functions = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+    The callee is followed to every place it can come from (`_CalleeReader`):
+    a call; a name bound by any binding form the compiler defines; an
+    attribute target or class-body name of that name anywhere in the file,
+    or a module-level name of another file in scope it is imported from; an element of a literal container, with `.get` on a
+    literal dict read as its values and default; a builtin wrapper made from
+    one callable (`staticmethod(f)`), and `functools.partial(f, ...)`, as
+    that callable; a decorated def as
+    what its decorators return; an element of what a plain function of the
+    file returns, read from its returns. FAIL CLOSED: an element of another
+    container, a parameter no call in the file passes or of a function the
+    file hands elsewhere, a `with` target, and a binding no form reads are
+    taken to be one.
+
+    ADVERSARIAL-ONLY, not read (no good-faith edit writes them to call a
+    function):
+    - `setattr(obj, name, call_result)`: a callable is stored by a name the
+      reader of the line cannot see, which hides it on purpose.
+    - an attribute set from another file (`other_module.get = ...`): one
+      module rewriting another's attributes is monkeypatching, never a
+      call an edit to this code means to make.
+    - a library factory that builds a name-based callable applied as a
+      decorator (`@operator.methodcaller(...)`): a decorator replaces a def
+      with a wrapper of it, and using one to swap a function for a
+      name-reader is obfuscation."""
     found = []
-    for path in paths:
-        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
-        owner = {}
-
-        def note(node, function):
-            for child in ast.iter_child_nodes(node):
-                owner[id(child)] = function
-                note(child, child if isinstance(child, functions) else function)
-
-        note(tree, None)
-        names, attrs = collections.defaultdict(list), collections.defaultdict(list)
+    for path, tree, reader in _callee_readers(paths):
         for node in ast.walk(tree):
-            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.NamedExpr)) and node.value is not None:
-                for target in node.targets if isinstance(node, ast.Assign) else [node.target]:
-                    if isinstance(target, ast.Name):
-                        names[(owner.get(id(node)), target.id)].append(node.value)
-                    elif isinstance(target, ast.Attribute):
-                        attrs[target.attr].append(node.value)
-            if isinstance(node, ast.ClassDef):
-                for statement in node.body:
-                    if isinstance(statement, ast.Assign):
-                        for target in statement.targets:
-                            if isinstance(target, ast.Name):
-                                attrs[target.id].append(statement.value)
-        methods = {
-            id(member) for node in ast.walk(tree) if isinstance(node, ast.ClassDef) for member in node.body
-            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-            and not any(getattr(d, "id", None) == "staticmethod" for d in member.decorator_list)
-        }
-
-        def sources(name, function):
-            """What the name can hold where `function` reads it; None when
-            that cannot be read from the file."""
-            if names.get((function, name)):
-                return names[(function, name)]
-            if isinstance(function, ast.Lambda):
-                if name in {a.arg for a in function.args.args}:
-                    return None
-                return sources(name, owner.get(id(function)))
-            if function is not None:
-                params = [a.arg for a in [*function.args.posonlyargs, *function.args.args, *function.args.kwonlyargs]]
-                if name in params:
-                    if id(function) in methods and name == params[0]:
-                        return []
-                    passed = []
-                    for call in ast.walk(tree):
-                        if not isinstance(call, ast.Call) or getattr(
-                            call.func, "id", getattr(call.func, "attr", None)
-                        ) != function.name:
-                            continue
-                        shift = 1 if id(function) in methods and isinstance(call.func, ast.Attribute) else 0
-                        index = params.index(name) - shift
-                        passed += [k.value for k in call.keywords if k.arg == name] or (
-                            call.args[index:index + 1] if index >= 0 else []
-                        )
-                    if params.index(name) == 0:
-                        # a decorator is handed the def it decorates
-                        passed += [
-                            node for node in ast.walk(tree)
-                            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-                            and any(getattr(d, "id", getattr(d, "attr", None)) == function.name for d in node.decorator_list)
-                        ]
-                    return passed or None
-                return sources(name, owner.get(id(function)))
-            return names.get((None, name), [])
-
-        def may_be_result(node, function, depth=0):
-            if depth > 8:
-                return True
-            follow = lambda value, where=function: may_be_result(value, where, depth + 1)  # noqa: E731
-            if isinstance(node, ast.Call):
-                func = node.func
-                if isinstance(func, ast.Attribute) and func.attr == "get" and isinstance(func.value, ast.Name):
-                    held = sources(func.value.id, function)
-                    if held and all(isinstance(h, ast.Dict) for h in held):
-                        return any(follow(v) for h in held for v in h.values) or any(follow(a) for a in node.args[1:])
-                return True
-            if isinstance(node, ast.Name):
-                held = sources(node.id, function)
-                if held is None:
-                    return True
-                return any(follow(value, owner.get(id(value))) for value in held)
-            if isinstance(node, ast.Attribute):
-                return any(follow(value, owner.get(id(value))) for value in attrs.get(node.attr, []))
-            if isinstance(node, ast.Subscript):
-                container = node.value
-                held = sources(container.id, function) if isinstance(container, ast.Name) else [container]
-                if held and all(isinstance(h, (ast.Dict, ast.List, ast.Tuple, ast.Set)) for h in held):
-                    return any(follow(e) for h in held for e in (h.values if isinstance(h, ast.Dict) else h.elts))
-                return True
-            if isinstance(node, (ast.IfExp, ast.BoolOp)):
-                return any(follow(part) for part in ([node.body, node.orelse] if isinstance(node, ast.IfExp) else node.values))
-            return False
-
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and may_be_result(node.func, owner.get(id(node))):
+            if isinstance(node, ast.Call) and reader.may_be(node.func, reader.scope.get(id(node))):
                 found.append((Path(path).name, node.lineno, ast.unparse(node)))
     return sorted(set(found))
 
@@ -1494,6 +2098,11 @@ class TestEveryIdentityCallerIsCovered:
         reads. The scope holds both named-anchor modules."""
         assert call_result_callees(_identity_caller_files()) == []
 
+    def test_the_callee_reader_reads_every_binding_in_the_identity_scope(self):
+        """The ban above is only as wide as its reader: every name the
+        compiled identity-scope modules bind is read by some binding form."""
+        assert unread_bindings(_identity_caller_files()) == []
+
     @pytest.mark.parametrize("source, held", [
         ("operator.methodcaller('a', n)(x)\n", True),
         ("get = operator.methodcaller('a', n)\nget(x)\n", True),
@@ -1518,11 +2127,114 @@ class TestEveryIdentityCallerIsCovered:
          False),
         ("def wrap(method):\n    def inner(*a):\n        return method(*a)\n    return inner\nwrap(operator.methodcaller('a', n))\n",
          True),
+        ("for get in [operator.methodcaller('a', n)]:\n    get(x)\n", True),
+        ("async def f(rows):\n    async for get in rows:\n        get(x)\nf([operator.methodcaller('a', n)])\n", True),
+        ("with operator.methodcaller('a', n) as get:\n    get(x)\n", True),
+        ("[get(x) for get in [operator.methodcaller('a', n)]]\n", True),
+        ("list(get(x) for get in [operator.methodcaller('a', n)])\n", True),
+        ("{k: get(x) for k, get in [(1, operator.methodcaller('a', n))]}\n", True),
+        ("{get(x) for get in (operator.methodcaller('a', n),)}\n", True),
+        ("get, other = operator.methodcaller('a', n), None\nget(x)\n", True),
+        ('get, other = make()\nget(x)\n', True),
+        ("def make():\n    return operator.methodcaller('a', n), None\nget, other = make()\nget(x)\n", True),
+        ("def make():\n    yield operator.methodcaller('a', n)\nfor get in make():\n    get(x)\n", True),
+        ("*rest, get = [None, operator.methodcaller('a', n)]\nget(x)\n", True),
+        ("first, *more = [None, operator.methodcaller('a', n)]\nmore[0](x)\n", True),
+        ("a, (get, b) = 1, (operator.methodcaller('a', n), 2)\nget(x)\n", True),
+        ("get: object = operator.methodcaller('a', n)\nget(x)\n", True),
+        ("(get := operator.methodcaller('a', n))(x)\n", True),
+        ("if (get := operator.methodcaller('a', n)):\n    get(x)\n", True),
+        ("[get := operator.methodcaller('a', n) for _ in (1,)]\nget(x)\n", True),
+        ("rows = []\nrows += [operator.methodcaller('a', n)]\nrows[0](x)\n", True),
+        ("def deco(f):\n    return operator.methodcaller('a', n)\n@deco\ndef get():\n    pass\nget(x)\n", True),
+        ("def deco(c):\n    return operator.methodcaller('a', n)\n@deco\nclass Get:\n    pass\nGet(x)\n", True),
+        ("@lambda f: operator.methodcaller('a', n)\ndef get():\n    pass\nget(x)\n", True),
+        ("def make():\n    def deco(f):\n        return operator.methodcaller('a', n)\n    return deco\n@make()\ndef get():\n    pass\nget(x)\n", True),
+        ("match operator.methodcaller('a', n):\n    case get:\n        get(x)\n", True),
+        ("match [operator.methodcaller('a', n)]:\n    case [get]:\n        get(x)\n", True),
+        ("match {'k': operator.methodcaller('a', n)}:\n    case {'k': get}:\n        get(x)\n", True),
+        ("match {'k': operator.methodcaller('a', n)}:\n    case {**rest}:\n        rest['k'](x)\n", True),
+        ("match [operator.methodcaller('a', n)]:\n    case [*rest]:\n        rest[0](x)\n", True),
+        ("match operator.methodcaller('a', n):\n    case object() as get:\n        get(x)\n", True),
+        ("def use(fn=operator.methodcaller('a', n)):\n    return fn(x)\nuse()\n", True),
+        ("def a():\n    pass\ndef use(fn=operator.methodcaller('a', n)):\n    return fn(x)\nuse(a)\n", True),
+        ("def use(fn):\n    return fn(x)\nuse(*[operator.methodcaller('a', n)])\n", True),
+        ("def use(fn):\n    return fn(x)\nuse(**{'fn': operator.methodcaller('a', n)})\n", True),
+        ("def a():\n    pass\ndef use(fn):\n    return fn(x)\nuse(a)\nlist(map(use, [operator.methodcaller('a', n)]))\n", True),
+        ("def f():\n    global get\n    get = operator.methodcaller('a', n)\nf()\nget(x)\n", True),
+        ("def f():\n    get = None\n    def g():\n        nonlocal get\n        get = operator.methodcaller('a', n)\n    g()\n    return get(x)\n", True),
+        ("class Holder:\n    get = operator.methodcaller('a', n)\nHolder().get(x)\n", True),
+        ("class Base:\n    get = operator.methodcaller('a', n)\nclass Child(Base):\n    pass\nChild.get(x)\n", True),
+        ("class Base:\n    def run(self):\n        return self.get(x)\nclass Child(Base):\n    get = operator.methodcaller('a', n)\n", True),
+        ("class K:\n    get = staticmethod(dict.get)\nd = {}\nd.get('k')\nK.get(d, 'k')\n", False),
+        ('class K:\n    make = classmethod(lambda cls: cls)\nK.make()\n', False),
+        ('def a():\n    pass\nfor fn in [a]:\n    fn(x)\n', False),
+        ('def a():\n    pass\nfn, other = a, None\nfn(x)\n', False),
+        ("def a():\n    pass\nfn, other = a, operator.methodcaller('a', n)\nfn(x)\n", False),
+        ('def a():\n    pass\ndef make():\n    return a, None\nfn, _ = make()\nfn(x)\n', False),
+        ('with open(p) as handle:\n    handle.read()\n', False),
+        ('import functools\n@functools.lru_cache\ndef a():\n    pass\na()\n', False),
+        ('def a():\n    pass\nmatch a:\n    case fn:\n        fn(x)\n', False),
+        ('try:\n    pass\nexcept Exception as err:\n    err.with_traceback(None)\n', False),
+        ('def a():\n    pass\ndef use(fn=a):\n    return fn(x)\nuse()\n', False),
+        ('def a():\n    pass\n[fn(x) for fn in (a,)]\n', False),
+        ('rows = []\nrows += [len]\nrows[0](x)\n', False),
+        ("import functools\nfunctools.partial(int, base=2)('10')\n", False),
+        ("from functools import partial\npartial(int, base=2)('10')\n", False),
+        ("import functools\nfunctools.partial(operator.methodcaller('a', n))(x)\n", True),
+        ("from functools import partial\nget = partial(operator.methodcaller('a', n))\nget(x)\n", True),
+        ("def partial(f):\n    return operator.methodcaller('a', n)\npartial(int)(x)\n", True),
+        ("import functools\nfunctools.partial()(x)\n", True),
     ])
     def test_a_callee_is_followed_to_where_it_comes_from(self, tmp_path, source, held):
         path = tmp_path / "scope.py"
         path.write_text(source, encoding="utf-8")
         assert bool(call_result_callees([path])) is held, call_result_callees([path])
+
+    @pytest.mark.parametrize("use, held", [
+        ("from scope import get\nget(x)\n", True),
+        ("from scope import get as fetch\nfetch(x)\n", True),
+        ("import scope\nscope.get(x)\n", True),
+        ("import scope as other\nother.get(x)\n", True),
+        ("from scope import plain\nplain(x)\n", False),
+    ])
+    def test_a_callee_imported_from_another_file_in_scope_is_followed(self, tmp_path, use, held):
+        (tmp_path / "scope.py").write_text(
+            "get = operator.methodcaller('a', n)\ndef plain():\n    pass\n", encoding="utf-8"
+        )
+        (tmp_path / "use.py").write_text(use, encoding="utf-8")
+        found = call_result_callees([tmp_path / "scope.py", tmp_path / "use.py"])
+        assert any(name == "use.py" for name, _line, _source in found) is held, found
+
+    def test_the_reader_reads_every_binding_the_compiler_makes(self):
+        """The population is the compiler's: every name a code object of a
+        probe holding each binding form stores is read by some form."""
+        tree = ast.parse(_BINDING_PROBE)
+        reader = _CalleeReader(tree, compile(tree, "<probe>", "exec"))
+        assert reader.unread == set()
+
+    def test_a_binding_no_form_reads_is_unread_and_fails_closed(self):
+        """Each name the probe binds, with what the reader read for it taken
+        away, is reported unread, and a call through it is a hit."""
+        tree = ast.parse(_BINDING_PROBE)
+        code = compile(tree, "<probe>", "exec")
+        names = {
+            name for compiled in _code_objects(code) for name in _stored_names(compiled)
+        } - _implicit_bindings()
+        assert len(names) > 30, names
+        for name in sorted(names):
+
+            class Unread(_CalleeReader):
+                def _collect(self):
+                    super()._collect()
+                    for key in [key for key in self.sources if key[1] == name]:
+                        del self.sources[key]
+
+            assert name in {n for _scope, n in Unread(tree, code).unread}, name
+        reader = _CalleeReader(ast.parse("get = len\nget(x)\n"), compile("get = len\nget(x)\n", "<t>", "exec"))
+        assert not reader.may_be(ast.Name("get"), None)
+        reader.unread.add((None, "get"))
+        assert reader.may_be(ast.Name("get"), None)
 
     @pytest.mark.parametrize("source, named", [
         ("VALUE = 'detect_id_for_root'\n", True),
