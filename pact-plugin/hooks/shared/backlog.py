@@ -391,16 +391,19 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     whose folder is absent (a drive not mounted now, or a folder moved or
     deleted), but only when the root is the checkout git lists first or git
     lists the git dir there. The root is the only one, plus any carried root
-    below, when git cannot answer, prints a listing that cannot be read
-    whole, or lists another checkout first: it is always right about at
-    least itself.
+    below, when git gives no listing, prints a listing that cannot be read
+    whole or holds no record once its unusable paths are dropped, lists
+    another checkout first, or a path will not resolve: it is always right
+    about at least itself.
 
     `recorded`, the roots the backlog file already holds, carries forward
     each one whose `.git` file names this repository's common dir. That is
     the main checkout of a `--separate-git-dir` repository: git lists its
     git dir in its place, so a write from one of its linked worktrees finds
     no other evidence of it. Each is checked again on every write; any other
-    recorded root is dropped.
+    recorded root is dropped. With no common dir (git is absent, or no
+    repository holds the root) there is nothing to check a recorded root
+    against, so none is carried and the root is the only one.
 
     Deliberately NOT merged with _branch_and_worktree_names, which reads the
     same listing with the same reader: that caller reduces each `worktree`
@@ -442,7 +445,7 @@ def checkout_roots(recorded: Any = None) -> List[str]:
                 if not os.path.lexists(path):
                     roots.append(str(Path(path).resolve()))
     except (OSError, RuntimeError, ValueError):
-        return [str(root)]
+        roots = [str(root)]
     if common is not None and isinstance(recorded, list):
         roots += [r for r in recorded if _names_common_dir(r, common)]
     return list(dict.fromkeys(roots))
@@ -451,8 +454,9 @@ def checkout_roots(recorded: Any = None) -> List[str]:
 def _lists_first(records: List[List[str]], root: Any, common: Optional[Path]) -> bool:
     """Whether git's listing `records` puts `root` first, or the git dir
     `common` first because it cannot name the main checkout: only then are
-    the listed worktrees `root`'s. Raises what `Path.resolve` raises."""
-    if common is None:
+    the listed worktrees `root`'s. An empty listing (its first record was
+    dropped) puts nothing first. Raises what `Path.resolve` raises."""
+    if common is None or not records:
         return False
     first = Path(records[0][0][len("worktree "):]).resolve()
     return first in (Path(root).resolve(), Path(common).resolve())

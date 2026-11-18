@@ -2415,6 +2415,141 @@ def test_save_carries_the_separate_git_dir_checkout_it_read(tmp_path, monkeypatc
     assert set(json.loads(path.read_text())["roots"]) == {str(main), str(wt)}
 
 
+def _git_listing(tmp_path, monkeypatch, listing: "bytes | None") -> None:
+    """Put first on PATH a `git` that answers `worktree list` with `listing`
+    (or exits 1 for None, a listing git did not give) and otherwise runs the
+    real git, so the real reader reads exactly these bytes."""
+    import os
+    import shutil
+    import stat
+
+    bin_dir = tmp_path / "listing-bin"
+    bin_dir.mkdir()
+    answer = tmp_path / "listing.out"
+    if listing is None:
+        reply = "exit 1"
+    else:
+        answer.write_bytes(listing)
+        reply = f'cat "{answer}"; exit 0'
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        '#!/bin/sh\nprev=\nfor a in "$@"; do\n'
+        f'  if [ "$prev" = worktree ] && [ "$a" = list ]; then {reply}; fi\n'
+        '  prev=$a\ndone\n'
+        f'exec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+_HEAD = "HEAD " + "0" * 40
+
+# Every listing git can print that leaves the roots no record to read, each
+# as the bytes `git worktree list --porcelain -z` would print. None is a
+# listing git did not give.
+_LISTINGS_WITH_NO_RECORD = {
+    "git gives no listing": None,
+    "a listing holding no record": b"\0",
+    "a listing that is not git's fields": b"worktree /x\0stray\0\0",
+    "the first record's path is empty": f"worktree \0{_HEAD}\0branch refs/heads/main\0\0".encode(),
+    "the first record's path is relative": f"worktree main\0{_HEAD}\0branch refs/heads/main\0\0".encode(),
+}
+
+
+@pytest.mark.parametrize("listing", list(_LISTINGS_WITH_NO_RECORD), ids=list(_LISTINGS_WITH_NO_RECORD))
+def test_a_listing_with_no_record_to_read_gives_one_answer(tmp_path, monkeypatch, listing):
+    """Whatever git printed, a listing that leaves no record to read gives
+    the roots git giving no listing gives: the root, plus each recorded
+    root whose `.git` names this repository's git dir. A listing whose
+    first record is dropped (its path empty or relative) is an empty list,
+    which puts no checkout first.
+
+    Real repos, real reader; git's listing is the stand-in."""
+    main, store, wt = _separate_git_dir_repo(tmp_path)
+    _root_is(monkeypatch, wt)
+    _git_listing(tmp_path, monkeypatch, _LISTINGS_WITH_NO_RECORD[listing])
+
+    read = backlog._memory_api()._worktree_records(["--git-dir", str(store)])
+    try:
+        roots = backlog.checkout_roots([str(main), str(wt)])
+    except Exception as error:  # a raise is the answer under test, not a harness failure
+        roots = error
+
+    assert not (isinstance(read, list) and read), f"control: the reader found a record to read: {read!r}"
+    assert roots == [str(wt), str(main)], roots
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+def test_a_raised_error_keeps_the_carried_roots(tmp_path, monkeypatch, error):
+    """A path that will not resolve while the listing is read gives the
+    roots no listing gives: the root, plus each recorded root whose `.git`
+    names this repository's git dir. The control shows the carried root
+    comes from the record, not from git.
+
+    Real repos, real git; the raise is the stand-in."""
+    main, store, wt = _separate_git_dir_repo(tmp_path)
+    _root_is(monkeypatch, wt)
+    assert backlog.checkout_roots() == [str(wt)], "control: git alone names the main checkout"
+
+    def unresolvable(*_args):
+        raise error("a path that will not resolve")
+
+    monkeypatch.setattr(backlog, "_lists_first", unresolvable)
+
+    assert backlog.checkout_roots([str(main), str(wt)]) == [str(wt), str(main)]
+
+
+def test_without_git_no_recorded_root_is_carried(tmp_path, monkeypatch):
+    """With no git to ask, there is no common dir to check a recorded root
+    against, so none is carried: the roots are the project folder alone.
+    The control shows the recorded root names a git dir, so with git it
+    would be carried.
+
+    Real folders; git's absence is real (an empty PATH)."""
+    import os
+
+    main, store, _wt = _separate_git_dir_repo(tmp_path)
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    assert backlog._names_common_dir(str(main), store), "control: the recorded root names a git dir"
+    empty = tmp_path / "no-git"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(folder))
+    for name in [n for n in os.environ if n.startswith("CLAUDE_") and n != "CLAUDE_PROJECT_DIR"]:
+        monkeypatch.delenv(name)
+
+    assert backlog.checkout_roots([str(main)]) == [str(folder.resolve())]
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [k for k in _LISTINGS_WITH_NO_RECORD if k != "git gives no listing"],
+)
+def test_a_listing_with_no_record_to_read_adds_no_worktree_names(tmp_path, monkeypatch, listing):
+    """The abandoned-work names from a listing that leaves no record to read
+    are the names git giving no listing gives: the branches alone.
+
+    Real repo, real reader; git's listing is the stand-in."""
+    repo = _repo(tmp_path / "repo", branch="feat/1234-thing")
+    expected = backlog._branch_and_worktree_names(str(repo))
+    assert "feat/1234-thing" in (expected or []), "control: git listed the branches"
+    (tmp_path / "bin-none").mkdir()
+    _git_listing(tmp_path / "bin-none", monkeypatch, None)
+    without_listing = backlog._branch_and_worktree_names(str(repo))
+    _git_listing(tmp_path, monkeypatch, _LISTINGS_WITH_NO_RECORD[listing])
+
+    try:
+        names = backlog._branch_and_worktree_names(str(repo))
+    except Exception as error:  # a raise is the answer under test, not a harness failure
+        names = error
+
+    assert without_listing is not None and set(without_listing) < set(expected), (
+        "control: no listing drops the worktree names", without_listing, expected)
+    assert names == without_listing, names
+
+
 def _git_rejecting_z(tmp_path, monkeypatch) -> None:
     """Put first on PATH a `git` that rejects `-z`, as git before 2.36 does,
     and otherwise runs the real git."""
