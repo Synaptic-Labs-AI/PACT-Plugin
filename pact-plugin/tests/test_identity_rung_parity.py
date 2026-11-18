@@ -1135,6 +1135,29 @@ def dynamic_reaches(paths, forms, reaches_by_name, read_outright=lambda path, ca
     return sorted(set(found))
 
 
+def named_anchor_strings(paths, named, read_outright=lambda path, parent: False) -> list:
+    """Each string or bytes constant in the files at `paths` that names a
+    census anchor, as (file, line, text): split at every ".", ":" and
+    format-field delimiter (`os.O_X`, `os:O_X`, `{0.O_X}`), one part,
+    stripped, is a name `named` accepts. Whatever receives it, such a
+    string can reach the anchor by a form no census reads, docstrings
+    included. A string whose parent node the census reads outright
+    (`read_outright(path, parent)`) is the census's."""
+    found = []
+    for path in paths:
+        tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+        parents = {id(child): node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Constant) or not isinstance(node.value, (str, bytes)):
+                continue
+            text = node.value.decode("latin-1") if isinstance(node.value, bytes) else node.value
+            if any(named(part.strip()) for part in re.split(r"[.:{}\[\]!]", text)) and not read_outright(
+                path, parents.get(id(node))
+            ):
+                found.append((Path(path).name, node.lineno, text))
+    return sorted(set(found))
+
+
 def _identity_modules() -> set:
     """The names an import of a module defining an identity function can
     carry: each such module's name and its package's."""
@@ -1328,6 +1351,45 @@ class TestEveryIdentityCallerIsCovered:
         assert names, census
         forms = dynamic_access_forms([path()])
         assert dynamic_reaches([path()], forms, _reached_by_name(names, module_names)) == []
+
+    def test_no_string_names_an_identity_function(self):
+        """FAIL CLOSED: a string naming an identity function can reach it
+        through a callable the probe does not model
+        (`operator.methodcaller("__getattribute__", name)`,
+        `pkgutil.resolve_name("module:name")`)."""
+        assert named_anchor_strings(_identity_caller_files(), IDENTITY_FUNCTIONS.__contains__) == []
+
+    @pytest.mark.parametrize("census", sorted(_NAMED_ANCHOR_CENSUSES))
+    def test_no_string_names_a_named_anchor(self, census):
+        """FAIL CLOSED, for each census that reads its anchor by name in one
+        module: a string naming an anchor. Control: the anchor set is not
+        empty."""
+        path, anchors, _module_names = _NAMED_ANCHOR_CENSUSES[census]
+        names = anchors()
+        assert names, census
+        assert named_anchor_strings([path()], names.__contains__) == []
+
+    @pytest.mark.parametrize("source, named", [
+        ("VALUE = 'detect_id_for_root'\n", True),
+        ("VALUE = 'scripts.project_identity.detect_id_for_root'\n", True),
+        ("VALUE = 'project_identity:detect_id_for_root'\n", True),
+        ("VALUE = '{0.detect_id_for_root!r}'\n", True),
+        ("VALUE = b'detect_id_for_root'\n", True),
+        ("VALUE = ' detect_id_for_root '\n", True),
+        ("def f():\n    'detect_id_for_root'\n", True),
+        ("VALUE = f'{x}.detect_id_for_root'\n", True),
+        ("VALUE = 'calls detect_id_for_root on the asked root'\n", False),
+        ("VALUE = 'detect_id_for_roots'\n", False),
+        ("VALUE = '_detect_id_for_root'\n", False),
+    ])
+    def test_a_string_names_an_anchor_only_as_a_whole_part(self, tmp_path, source, named):
+        """A part between separators equal to the anchor names it; text a
+        runtime lookup cannot use as the name (prose around it, a longer
+        name) does not."""
+        path = tmp_path / "scope.py"
+        path.write_text(source, encoding="utf-8")
+        found = named_anchor_strings([path], IDENTITY_FUNCTIONS.__contains__)
+        assert bool(found) is named, found
 
     def test_the_cwd_repository_never_names_the_victim(self, identity_callers):
         _executed, cwd_ids = identity_callers

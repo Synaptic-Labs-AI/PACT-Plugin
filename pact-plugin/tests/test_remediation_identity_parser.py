@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import ast
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -2586,6 +2587,23 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
         assert direct == [], direct
 
     @staticmethod
+    def _read_outright():
+        """Whether a node of a claiming module is a flag read this census
+        records (`_OpenFlagReads.places`)."""
+        places = {}
+        for path in _platform_claim_modules().values():
+            visitor = _OpenFlagReads()
+            visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
+            places[path] = visitor.places
+
+        def read_outright(path, node):
+            return node is not None and (
+                getattr(node, "lineno", None), getattr(node, "col_offset", None),
+                getattr(node, "end_lineno", None), getattr(node, "end_col_offset", None),
+            ) in places[path]
+        return read_outright
+
+    @staticmethod
     def _unread_reaches() -> tuple:
         """(forms, every use of one in the claiming modules, each place they
         can reach an `os.O_*` flag through a form this census does not
@@ -2593,14 +2611,7 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
         from test_identity_rung_parity import dynamic_access_forms, dynamic_reaches
 
         paths = list(_platform_claim_modules().values())
-        places = {}
-        for path in paths:
-            visitor = _OpenFlagReads()
-            visitor.visit(ast.parse(path.read_text(encoding="utf-8")))
-            places[path] = visitor.places
-
-        def read_outright(path, call):
-            return (call.lineno, call.col_offset, call.end_lineno, call.end_col_offset) in places[path]
+        read_outright = TestEveryOpenFlagReadInTheClaimingModulesIsPortable._read_outright()
 
         def reaches_flag(kind, value):
             if kind == "attribute":
@@ -2630,6 +2641,44 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
         assert {use[0] for use in guarded} == {"project_identity.py", "memory_api.py", "session_end.py"}
         assert other, every_use
         assert not set(guarded + other) & set(unread)
+
+    @staticmethod
+    def _flag_strings(read_outright) -> list:
+        from test_identity_rung_parity import named_anchor_strings
+
+        paths = list(_platform_claim_modules().values())
+        return named_anchor_strings(paths, re.compile(r"O_[A-Z0-9_]+").fullmatch, read_outright)
+
+    def test_no_string_names_a_flag_outside_a_census_read(self):
+        """FAIL CLOSED: a string naming an `os.O_*` flag can reach it through
+        a callable the probe does not model
+        (`operator.methodcaller("__getattribute__", "O_X")`,
+        `pkgutil.resolve_name("os:O_X")`) unless this census reads it."""
+        assert self._flag_strings(self._read_outright()) == []
+
+    def test_the_flag_string_ban_spares_only_the_census_reads(self):
+        """Control: with no read spared, the guarded `getattr(os, "O_X", 0)`
+        names are found in each module, so the ban sees them."""
+        found = self._flag_strings(lambda path, parent: False)
+        assert {hit[0] for hit in found} == {"project_identity.py", "memory_api.py", "session_end.py"}, found
+
+    @pytest.mark.parametrize("source, named", [
+        ("VALUE = 'O_NOFOLLOW'\n", True),
+        ("VALUE = 'os.O_NOFOLLOW'\n", True),
+        ("VALUE = 'os:O_NOFOLLOW'\n", True),
+        ("VALUE = '{0.O_NOFOLLOW}'\n", True),
+        ("VALUE = b'O_NOFOLLOW'\n", True),
+        ("VALUE = 'the O_NOFOLLOW flag is optional'\n", False),
+        ("VALUE = 'NO_O_NOFOLLOW'\n", False),
+        ("VALUE = getattr(os, 'O_NOFOLLOW', 0)\n", True),
+    ])
+    def test_a_string_names_a_flag_only_as_a_whole_part(self, tmp_path, source, named):
+        from test_identity_rung_parity import named_anchor_strings
+
+        path = tmp_path / "scope.py"
+        path.write_text(source, encoding="utf-8")
+        found = named_anchor_strings([path], re.compile(r"O_[A-Z0-9_]+").fullmatch)
+        assert bool(found) is named, found
 
     def test_every_function_reading_an_optional_flag_runs_without_it(self):
         readers = {
