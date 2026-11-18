@@ -3284,16 +3284,21 @@ def _listing_readers() -> dict:
 class TestAnUnknownZFieldIsMatchedByItsWholeKey:
     """With `-z`, a field whose key is not one of `_PORCELAIN_ORDER`'s is
     skipped, and the key is compared whole and as written: a key that only
-    starts with a known one (`HEADx`, `lockedx`) or differs from one only in
-    case (`head`, `LOCKED`) is unknown too. Each such key is built from the
-    table itself, and the listing must read exactly as it does without that
+    starts with a known one (`HEADx`, `lockedx`), one a known key starts with
+    (`lock`, `locke`), or one that differs from a known key only in case
+    (`head`, `LOCKED`) is unknown too. Each such key is built from the table
+    itself, and the listing must read exactly as it does without that
     field."""
 
     @staticmethod
     def _keys():
         known = {key.rstrip() for key, _rank in memory_api._PORCELAIN_ORDER}
-        built = {f"{key}x" for key in known} | {key.swapcase() for key in known}
-        return sorted(built), known
+        built = (
+            {f"{key}x" for key in known}
+            | {key.swapcase() for key in known}
+            | {key[:end] for key in known for end in range(1, len(key))}
+        )
+        return sorted(built - known), known
 
     def _read(self, monkeypatch, reader, listing):
         monkeypatch.setattr(
@@ -3305,7 +3310,12 @@ class TestAnUnknownZFieldIsMatchedByItsWholeKey:
     def test_control_the_built_keys_extend_known_keys_only(self):
         extended, known = self._keys()
         assert known and extended and not set(extended) & known, extended
-        assert all(key[:-1] in known or key.swapcase() in known for key in extended), extended
+        assert all(
+            key[:-1] in known or key.swapcase() in known or any(k.startswith(key) for k in known)
+            for key in extended
+        ), extended
+        truncated = {key[:-1] for key in known} - known
+        assert truncated and truncated <= set(extended), truncated - set(extended)
 
     @pytest.mark.parametrize("position", ["after HEAD", "last"])
     def test_a_key_extending_a_known_one_is_skipped(self, monkeypatch, position):
@@ -3324,6 +3334,19 @@ class TestAnUnknownZFieldIsMatchedByItsWholeKey:
                 if answer != expected:
                     wrong[(name, key)] = answer
         assert wrong == {}, wrong
+
+    def test_a_key_a_known_one_starts_with_changes_no_answer_end_to_end(self, monkeypatch):
+        """End to end: a `lock` field after HEAD, read as the known `locked`,
+        would make the record's fields out of git's order and the listing
+        unreadable; read as unknown, the listing is the same records."""
+        readers = _listing_readers()
+        assert readers, "control: some module reads the listing"
+        base = [b"worktree /p", b"HEAD 0123", b"branch refs/heads/m"]
+        for name, reader in readers.items():
+            expected = self._read(monkeypatch, reader, b"\0".join(base) + b"\0\0")
+            fields = base[:2] + [b"lock v"] + base[2:]
+            answer = self._read(monkeypatch, reader, b"\0".join(fields) + b"\0\0")
+            assert answer == expected and isinstance(answer, list), (name, answer)
 
 
 def _union_admits_str(annotation) -> bool:
