@@ -8,6 +8,7 @@ origin URL: the seam under test is what git answers, not what a mock says.
 from __future__ import annotations
 
 import ast
+import collections
 import logging
 import re
 import subprocess
@@ -2961,14 +2962,78 @@ def _holds(value, answer, depth=4) -> bool:
     return any(_holds(part, answer, depth - 1) for part in parts)
 
 
-def _gives_back_an_answer(node, passing, parents, constants, sentinel_values) -> bool:
+class _Adversary:
+    """A value for a name an evaluated expression cannot read: the worst
+    the name could hold. It keeps everything it is handed (in `handed`,
+    shared by every adversary of one evaluation), since an unknown object
+    may store it. Called, it gives back its first argument; compared or
+    combined, the other operand; indexed or asked for an attribute,
+    itself; and it is true and iterates to itself."""
+
+    def __init__(self, handed):
+        object.__setattr__(self, "handed", handed)
+
+    def __call__(self, *args, **kwargs):
+        self.handed.extend([*args, *kwargs.values()])
+        return args[0] if args else self
+
+    def __setattr__(self, name, value):
+        self.handed.append(value)
+
+    def __setitem__(self, key, value):
+        self.handed.extend([key, value])
+
+    def __getattr__(self, name):
+        return self
+
+    def __getitem__(self, key):
+        return self
+
+    def __iter__(self):
+        return iter([self])
+
+    def __bool__(self):
+        return True
+
+
+def _arm_the_adversary():
+    """Give `_Adversary` every operator the `operator` module names that the
+    builtin types implement: one taking an operand gives back the operand,
+    one taking none gives back itself."""
+    import inspect
+    import operator
+
+    implemented = set().union(*(dir(t) for t in (int, set, str, list, dict)))
+    for function_name in operator.__all__:
+        try:
+            arity = len(inspect.signature(getattr(operator, function_name)).parameters)
+        except (TypeError, ValueError):
+            continue
+        base = function_name.rstrip("_")
+        names = [f"__{base}__", f"__r{base}__"] if arity >= 2 else [f"__{base}__"]
+        for name in names:
+            if name in implemented and name not in vars(_Adversary):
+                setattr(_Adversary, name, _binary if arity >= 2 else (lambda self: self))
+
+
+def _binary(self, other, *rest):
+    """An adversary's operator: it keeps the operand and gives it back."""
+    self.handed.append(other)
+    return other
+
+
+_arm_the_adversary()
+
+
+def _gives_back_an_answer(node, passing, parents, constants, sentinel_values, builtin_names=frozenset()) -> bool:
     """Whether the expression `node`, whose children `passing` pass an
     answer, can give one back. The nearest expression that compiles on its
     own (a formatted value's string, a starred item's container) is
     evaluated with each passing child replaced by each answer a reader
     gives (each sentinel string and a record list), every other name being
-    a module string constant (`constants`). FAIL CLOSED: an expression with
-    any other name, or none that compiles, can."""
+    a module string constant (`constants`) or a builtin the module does not
+    shadow (`builtin_names`). FAIL CLOSED: an expression with any other
+    name, or none that compiles, can."""
     held = {id(child) for child in passing}
     while True:
         copy = ast.parse("x", mode="eval")
@@ -2977,8 +3042,7 @@ def _gives_back_an_answer(node, passing, parents, constants, sentinel_values) ->
             name.id for name in ast.walk(copy.body)
             if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Load)
         } - {"__answer__"} - _comprehension_and_lambda_names(copy.body)
-        if names - set(constants):
-            return True
+        unknown = names - set(constants) - set(builtin_names)
         try:
             code = compile(ast.fix_missing_locations(copy), "<held>", "eval")
             break
@@ -2986,12 +3050,17 @@ def _gives_back_an_answer(node, passing, parents, constants, sentinel_values) ->
             node = parents.get(id(node))
             if not isinstance(node, ast.expr):
                 return True
-    for answer in [*sentinel_values, [["worktree /a", "HEAD 0"]]]:
+    import builtins
+
+    names_bound = {name: getattr(builtins, name) for name in builtin_names}
+    for answer in [*sentinel_values, _ANSWER_SAMPLES[1]]:
+        handed = []
+        adversaries = {name: _Adversary(handed) for name in unknown}
         try:
-            result = eval(code, {"__builtins__": {}, **constants, "__answer__": answer})
+            result = eval(code, {"__builtins__": {}, **names_bound, **constants, **adversaries, "__answer__": answer})
         except Exception:
-            continue
-        if _holds(result, answer):
+            result = None
+        if _holds(result, answer) or any(_holds(value, answer) for value in handed):
             return True
     return False
 
@@ -3046,33 +3115,25 @@ _ARGUMENT_PASSERS = {
     "setdefault": 1,  # d.setdefault(key, default) can return default
 }
 
-# Every statement or clause that binds a target from a value, by how the
-# walk treats a passing value on its right. The census compares the two
-# tables with the compiler's classes that have a target field.
-_BINDINGS_READ = {
-    "Assign": "the target is the value; a tuple target pairs with a tuple value",
-    "AnnAssign": "the target is the value",
-    "NamedExpr": "the target is the value",
-    "For": "the target is each element; an element of a literal container that passes binds it",
-    "AsyncFor": "the target is each element; an element of a literal container that passes binds it",
-}
-_BINDINGS_NAMED = {
-    "AugAssign": "computes a new value from the target and the value",
-    "comprehension": "binds only inside the comprehension, which builds a new container or generator",
-    "withitem": "binds what `__enter__` returns; the answer, a list or a string, has none, "
-    "and a call the answer is handed to is in the `_ANSWER_TAKING_CALLS` census",
-    "Delete": "unbinds; binds nothing",
-}
+# Every class that binds a target from a value, read by the walk: a name
+# target binds a passing value, a subscripted name holds it, and any other
+# target, an augmented assignment and a comprehension fail the walk's ban.
+# The census compares this with the compiler's classes that have a target
+# field and a value to bind it from.
+_BINDINGS_READ = {"Assign", "AnnAssign", "AugAssign", "NamedExpr", "For", "AsyncFor", "withitem", "comprehension"}
 
 
 def _target_classes() -> set:
-    """The compiler's classes (`_ast`) with a target field."""
+    """The compiler's classes (`_ast`) with a target field and a field
+    besides it, which binds the target from a value."""
     import _ast
 
+    targets = {"target", "targets", "optional_vars"}
     return {
         name for name, node in vars(_ast).items()
         if isinstance(node, type) and issubclass(node, ast.AST)
-        and {"target", "targets", "optional_vars"} & set(getattr(node, "_fields", ()))
+        and targets & set(getattr(node, "_fields", ()))
+        and set(getattr(node, "_fields", ())) - targets
     }
 
 
@@ -3100,26 +3161,99 @@ def _listing_sentinels() -> set:
 # The value an unpacking the walk does not pair binds to every target name.
 _ANY_ANSWER = "<an answer>"
 
+# One answer of each type a reader gives: a sentinel string and a record list.
+_ANSWER_SAMPLES = ("unreadable", [["worktree /a", "HEAD 0"]])
+
+
+def _enter_gives_back_an_answer() -> bool:
+    """Whether `with answer as name` can bind `name` to an answer: what
+    entering each sample answer gives back."""
+    for answer in _ANSWER_SAMPLES:
+        try:
+            entered = type(answer).__enter__(answer)
+        except Exception:
+            continue
+        if _holds(entered, answer):
+            return True
+    return False
+
+
+def _is_list_test(test, name) -> bool:
+    """Whether `test` is exactly `isinstance(<name>, list)`."""
+    return (
+        isinstance(test, ast.Call) and isinstance(test.func, ast.Name) and test.func.id == "isinstance"
+        and not test.keywords and len(test.args) == 2
+        and isinstance(test.args[0], ast.Name) and test.args[0].id == name
+        and isinstance(test.args[1], ast.Name) and test.args[1].id == "list"
+    )
+
+
+def _narrowed_to_a_list(store, name, function, parents) -> bool:
+    """Whether `name`, the value `store` puts into a container, can only be
+    a record list there: in the same function the store sits in the body of
+    `if isinstance(name, list):`, or follows, in a block enclosing it, an
+    `if not isinstance(name, list):` with no else whose body ends in a
+    return or raise; and nothing binds `name` again between that test and
+    the store."""
+    rebinds = [
+        node.lineno for node in ast.walk(function)
+        if isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Store)
+    ]
+
+    def clear_between(start, end):
+        return not any(start < line <= end for line in rebinds)
+
+    child = store
+    while child is not function:
+        parent = parents.get(id(child))
+        if parent is None:
+            return False
+        if isinstance(parent, ast.If) and any(s is child for s in parent.body) and _is_list_test(parent.test, name):
+            return clear_between(parent.test.end_lineno, store.lineno)
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(parent, field, None)
+            if not isinstance(block, list):
+                continue
+            index = next((i for i, s in enumerate(block) if s is child), None)
+            if index is None:
+                continue
+            for sibling in block[:index]:
+                if (
+                    isinstance(sibling, ast.If) and not sibling.orelse
+                    and isinstance(sibling.test, ast.UnaryOp) and isinstance(sibling.test.op, ast.Not)
+                    and _is_list_test(sibling.test.operand, name)
+                    and isinstance(sibling.body[-1], (ast.Return, ast.Raise))
+                    and clear_between(sibling.end_lineno, store.lineno)
+                ):
+                    return True
+        child = parent
+    return False
+
 
 def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | None" = None) -> tuple:
     """For `trees` ({module: tree}), every function that can return a
     worktree-listing reader's answer unchanged, as {(module, name): def},
-    and every other call that is handed a passing value, as
-    {callee name: (module, function)}. `held`, when given, receives
-    (module, function, expression, passing children, parents) for each
-    expression of a class the walk does not read outright that a passing
-    value is evaluated in; a lambda handed to a call is read.
+    and every call to a function outside the listing modules that is
+    handed a passing value, as {callee name: (module, function)}. `held`,
+    when given, receives (module, function, node, passing children,
+    parents, unread) for each place the walk does not read outright: an
+    expression of another class a passing value is evaluated in, or a call
+    to a function outside the listing modules handed one (both evaluated by
+    `_gives_back_an_answer`); and, with `unread` true, a passing value
+    stored into a subscript or attribute target or added with an augmented
+    assignment, and one handed to a listing-module function where no
+    parameter can be named.
 
     An expression passes an answer when it is one of `sentinels` (by
-    default `_listing_sentinels()`); a name
-    bound to a passing value (by assignment, annotated assignment, `:=`,
-    position in a tuple assignment, or a `for` over a literal container,
-    followed through other names; `_BINDINGS_READ`); a call
+    default `_listing_sentinels()`); a name bound to a passing value (by
+    assignment, annotated assignment, `:=`, position in a tuple assignment,
+    a `for` over a literal container, a `with` whose entered answer gives
+    it back, or a parameter some call hands one; `_BINDINGS_READ`); a call
     to a found function by name in its own module or by attribute in any;
     an `_ARGUMENT_PASSERS` call whose argument passes; a call handed a
     lambda whose body passes; or one of the `_ANSWER_CHILDREN` children.
-    Followed to a fixed point, so every wrapper of a reader is found
-    however the functions are ordered."""
+    Followed to a fixed point, so every wrapper of a reader is found however
+    the functions are ordered."""
     answers = (_listing_sentinels() if sentinels is None else set(sentinels)) | {_ANY_ANSWER}
     functions = {
         (module, node.name): node
@@ -3127,6 +3261,7 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | Non
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
     }
     found = set()
+    seeds = collections.defaultdict(set)  # parameters some call hands a passing value
 
     def callee(call):
         return call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", None)
@@ -3135,6 +3270,38 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | Non
         if isinstance(call.func, ast.Name):
             return (module, call.func.id) in found
         return isinstance(call.func, ast.Attribute) and any(name == call.func.attr for _m, name in found)
+
+    def defs_called(call, module):
+        """The listing modules' functions `call` can reach: by name in its
+        own module, or by attribute any function of that name."""
+        if isinstance(call.func, ast.Name):
+            return [(module, call.func.id)] if (module, call.func.id) in functions else []
+        if isinstance(call.func, ast.Attribute):
+            return [key for key in functions if key[1] == call.func.attr]
+        return []
+
+    def handed_to(call, key):
+        """[(parameter or None, argument)] for each argument `call` hands
+        the function `key`; None where no parameter can be named."""
+        arguments = functions[key].args
+        positional = [a.arg for a in [*arguments.posonlyargs, *arguments.args]]
+        if isinstance(call.func, ast.Attribute) and positional[:1] in (["self"], ["cls"]):
+            positional = positional[1:]
+        named = set(positional) | {a.arg for a in arguments.kwonlyargs}
+        pairs = []
+        for index, argument in enumerate(call.args):
+            if isinstance(argument, ast.Starred):
+                pairs.append((None, argument.value))
+            elif index < len(positional):
+                pairs.append((positional[index], argument))
+            else:
+                pairs.append((arguments.vararg.arg if arguments.vararg else None, argument))
+        for keyword in call.keywords:
+            if keyword.arg in named:
+                pairs.append((keyword.arg, keyword.value))
+            else:
+                pairs.append((arguments.kwarg.arg if arguments.kwarg and keyword.arg else None, keyword.value))
+        return pairs
 
     def passes(value, bound, module):
         if isinstance(value, ast.Name):
@@ -3159,6 +3326,10 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | Non
                 pairs = [(node.target, node.value)]
             elif isinstance(node, (ast.For, ast.AsyncFor)) and isinstance(node.iter, (ast.List, ast.Tuple, ast.Set)):
                 pairs = [(node.target, element) for element in node.iter.elts if not isinstance(element, ast.Starred)]
+            elif isinstance(node, ast.withitem) and node.optional_vars is not None:
+                if passes(node.context_expr, bound, module) and _enter_gives_back_an_answer():
+                    yield from (n.id for n in ast.walk(node.optional_vars) if isinstance(n, ast.Name))
+                continue
             else:
                 continue
             for target, value in pairs:
@@ -3184,10 +3355,10 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | Non
                 elif isinstance(target, ast.Name) and passes(value, bound, module):
                     yield target.id
 
-    def bound_names(function, module):
-        bound = set()
+    def bound_names(function, key):
+        bound = set(seeds[key])
         while True:
-            more = set(bindings(function, bound, module)) - bound
+            more = set(bindings(function, bound, key[0])) - bound
             if not more:
                 return bound
             bound |= more
@@ -3195,39 +3366,75 @@ def _walk_answers(trees: dict, sentinels: "set | None" = None, held: "list | Non
     changed = True
     while changed:
         changed = False
-        for (module, name), function in functions.items():
-            if (module, name) in found:
-                continue
-            bound = bound_names(function, module)
-            if any(
+        for key, function in functions.items():
+            module = key[0]
+            bound = bound_names(function, key)
+            if key not in found and any(
                 isinstance(node, ast.Return) and node.value is not None and passes(node.value, bound, module)
                 for node in ast.walk(function)
             ):
-                found.add((module, name))
+                found.add(key)
                 changed = True
+            for call in ast.walk(function):
+                if not isinstance(call, ast.Call):
+                    continue
+                for target in defs_called(call, module):
+                    for parameter, argument in handed_to(call, target):
+                        if parameter is not None and parameter not in seeds[target] and passes(
+                            argument, bound, module
+                        ):
+                            seeds[target].add(parameter)
+                            changed = True
 
     taking = {}
-    for (module, name), function in functions.items():
-        bound = bound_names(function, module)
+    if held is None:
+        held = []
+    for key, function in functions.items():
+        module, name = key
+        bound = bound_names(function, key)
         parents = {id(child): node for node in ast.walk(function) for child in ast.iter_child_nodes(node)}
-        for call in ast.walk(function):
-            if held is not None and isinstance(call, ast.expr) and type(call).__name__ not in {
-                *_ANSWER_CHILDREN, *_ANSWER_BASES,
-            }:
-                handed_lambda = isinstance(call, ast.Lambda) and (
-                    isinstance(parents.get(id(call)), ast.Call) and call in parents[id(call)].args
-                    or isinstance(parents.get(id(call)), ast.keyword)
+        for node in ast.walk(function):
+            if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                stored = isinstance(node, ast.AugAssign) or any(
+                    isinstance(part, (ast.Subscript, ast.Attribute))
+                    for target in targets for part in [target, *getattr(target, "elts", [])]
                 )
-                passing = [child for child in _expression_children(call) if passes(child, bound, module)]
+                if (
+                    stored and node.value is not None and passes(node.value, bound, module)
+                    and not (
+                        isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Name)
+                        and _narrowed_to_a_list(node, node.value.id, function, parents)
+                    )
+                ):
+                    held.append((module, name, node, [node.value], parents, True))
+                continue
+            if isinstance(node, ast.Call):
+                if is_reader_call(node, module):
+                    continue
+                handed = [*node.args, *(keyword.value for keyword in node.keywords)]
+                passing = [arg for arg in handed if not isinstance(arg, ast.Lambda) and passes(arg, bound, module)]
+                if not passing:
+                    continue
+                targets = defs_called(node, module)
+                if targets:
+                    if any(
+                        parameter is None and passes(argument, bound, module)
+                        for target in targets for parameter, argument in handed_to(node, target)
+                    ):
+                        held.append((module, name, node, passing, parents, True))
+                    continue
+                taking.setdefault(callee(node), (module, name))
+                held.append((module, name, node, passing, parents, False))
+                continue
+            if isinstance(node, ast.expr) and type(node).__name__ not in {*_ANSWER_CHILDREN, *_ANSWER_BASES}:
+                handed_lambda = isinstance(node, ast.Lambda) and (
+                    isinstance(parents.get(id(node)), ast.Call) and node in parents[id(node)].args
+                    or isinstance(parents.get(id(node)), ast.keyword)
+                )
+                passing = [child for child in _expression_children(node) if passes(child, bound, module)]
                 if passing and not handed_lambda:
-                    held.append((module, name, call, passing, parents))
-            if not isinstance(call, ast.Call) or is_reader_call(call, module):
-                continue
-            if callee(call) in _ARGUMENT_PASSERS:
-                continue
-            handed = [*call.args, *(keyword.value for keyword in call.keywords)]
-            if any(not isinstance(arg, ast.Lambda) and passes(arg, bound, module) for arg in handed):
-                taking.setdefault(callee(call), (module, name))
+                    held.append((module, name, node, passing, parents, False))
     return {key: functions[key] for key in found}, taking
 
 
@@ -3269,26 +3476,27 @@ def _held_answers(trees: dict) -> tuple:
     for tree in _listing_answer_modules().values():
         readers_constants.update(_string_constants(tree))
     sentinel_values = [readers_constants[name] for name in sorted(_listing_sentinels())]
+    import builtins
+
+    shadowed = {
+        alias.asname or alias.name.split(".")[0]
+        for tree in trees.values() for node in tree.body if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    } | {
+        node.name for tree in trees.values() for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    } | {
+        target.id for tree in trees.values() for node in tree.body if isinstance(node, ast.Assign)
+        for target in node.targets if isinstance(target, ast.Name)
+    }
+    builtin_names = frozenset(name for name in dir(builtins) if not name.startswith("_")) - shadowed
     every, giving = [], []
-    for module, function, node, passing, parents in held:
+    for module, function, node, passing, parents, unread in held:
         place = (module, function, node.lineno, ast.unparse(node))
         every.append(place)
-        if _gives_back_an_answer(node, passing, parents, constants, sentinel_values):
+        if unread or _gives_back_an_answer(node, passing, parents, constants, sentinel_values, builtin_names):
             giving.append(place)
     return every, giving
-
-
-# Every call in the listing modules that is handed a passing value and is
-# not a reader, an argument passer or a call handed a lambda, and why its
-# value is not the answer. Compared by equality with what the walk finds.
-_ANSWER_TAKING_CALLS = {
-    "_worktree_toplevels": "its caller has returned on both sentinels first; it answers a set of paths",
-    "_entry_listed_as_moved": "its caller has returned on both sentinels first; it answers a bool",
-    "isinstance": "tests the answer's type; only a list is read as records",
-    "_verified_worktree_roots": "reached only with a list; it answers the gate roots",
-    "_lists_first": "reached only with a list; it answers a bool",
-    "_root_and_common_dir": "hands it only to the redirect check, which returns on each answer that is no record list; it answers the root and the common dir",
-}
 
 
 # One function body per way an answer reaches a return: each child the
@@ -3396,28 +3604,84 @@ class TestTheListingAnswerWalkFollowsEveryForm:
         passers, _taking = _walk_answers(trees)
         assert set(passers) == {("skill", "reader"), ("user", "wrapper")}, passers
 
-    def test_every_binding_class_is_read_or_named(self):
-        tables = [set(_BINDINGS_READ), set(_BINDINGS_NAMED)]
-        assert not tables[0] & tables[1], tables
-        assert "Assign" in _target_classes()  # control
-        assert set().union(*tables) == _target_classes(), _target_classes() ^ set().union(*tables)
+    def test_every_binding_class_is_read(self):
+        assert {"Assign", "withitem"} <= _target_classes() and "Delete" not in _target_classes()  # control
+        assert _BINDINGS_READ == _target_classes(), _target_classes() ^ _BINDINGS_READ
 
-    def test_every_call_taking_an_answer_is_named(self):
-        """In the listing modules, every call handed a passing value that is
-        not a reader, an argument passer or a lambda-taking call is named
-        with why its value is not the answer, compared by equality."""
+    def test_each_call_handed_an_answer_is_followed_or_evaluated(self):
+        """Control: in the listing modules a call handed an answer is a
+        listing-module function the walk follows into, or is evaluated
+        (`isinstance` gives a bool); none is excused by name."""
         _passers, taking = _walk_answers(_listing_answer_modules())
-        assert set(taking) == set(_ANSWER_TAKING_CALLS), {
-            name: taking.get(name, "not found") for name in set(taking) ^ set(_ANSWER_TAKING_CALLS)
-        }
+        assert set(taking) == {"isinstance"}, taking
+        every, giving = _held_answers(_listing_answer_modules())
+        assert any(place[3].startswith("isinstance(") for place in every)
+        assert not giving
 
-    def test_control_an_unnamed_call_taking_an_answer_is_reported(self):
+    def test_control_a_call_to_an_unknown_function_taking_an_answer_fails(self):
         source = (
+            "UNREADABLE_LISTING = 'unreadable'\n"
             "def reader():\n    return UNREADABLE_LISTING\n\n\n"
             "def wrapper():\n    return describe(reader())\n"
         )
         _passers, taking = _walk_answers({"m": ast.parse(source)})
         assert set(taking) == {"describe"}, taking
+        assert [place[3] for place in _held_answers({"m": ast.parse(source)})[1]] == ["describe(reader())"]
+
+    @pytest.mark.parametrize("body, found", [
+        ("def keep(records):\n    return records\n\n\ndef wrapper():\n    return keep(reader())\n",
+         {"reader", "keep", "wrapper"}),
+        ("def keep(*, listing):\n    return listing\n\n\ndef wrapper():\n    return keep(listing=reader())\n",
+         {"reader", "keep", "wrapper"}),
+        ("def check(records):\n    return records == UNREADABLE_LISTING\n\n\ndef wrapper():\n"
+         "    return check(reader())\n", {"reader"}),
+    ])
+    def test_an_answer_handed_as_an_argument_is_followed(self, body, found):
+        source = "UNREADABLE_LISTING = 'unreadable'\ndef reader():\n    return UNREADABLE_LISTING\n\n\n" + body
+        assert set(_answer_passers(ast.parse(source))) == found, source
+
+    @pytest.mark.parametrize("body", [
+        "def wrapper(holder):\n    holder.records = reader()\n    return holder\n",
+        "def wrapper(rows):\n    rows[0][1] = reader()\n    return rows\n",
+        "def wrapper():\n    box = {}\n    box['k'] = reader()\n    return box['k']\n",
+        "def wrapper(total):\n    total += reader()\n    return total\n",
+        "def wrapper(box):\n    box.update(k=reader())\n",
+        "def wrapper(box):\n    return box.setdefault('k', reader())\n",
+        "def wrapper(box):\n    box.append(reader())\n",
+        "def wrapper(holder):\n    first, holder.records = None, reader()\n",
+        # a list test that does not make the stored name a record list
+        "def wrapper(box):\n    records = reader()\n    box['k'] = records\n",
+        "def wrapper(box):\n    records = reader()\n    if isinstance(records, list):\n        return records\n"
+        "    box['k'] = records\n",
+        "def wrapper(box, other):\n    records = reader()\n    if not isinstance(other, list):\n"
+        "        return records\n    box['k'] = records\n",
+        "def wrapper(box):\n    records = reader()\n    box['k'] = records\n    if not isinstance(records, list):\n"
+        "        return records\n",
+        "def wrapper(box, flag):\n    records = reader()\n    if flag:\n        if not isinstance(records, list):\n"
+        "            return records\n    box['k'] = records\n",
+        "def wrapper(box):\n    records = reader()\n    if not isinstance(records, list):\n        pass\n"
+        "    box['k'] = records\n",
+        "def wrapper(box):\n    records = reader()\n    if not isinstance(records, list):\n        return records\n"
+        "    records = reader()\n    box['k'] = records\n",
+        "def wrapper(box):\n    records = reader()\n    if not isinstance(records, (list, str)):\n        return records\n"
+        "    box['k'] = records\n",
+    ])
+    def test_a_store_of_an_answer_fails_the_ban(self, body):
+        source = "UNREADABLE_LISTING = 'unreadable'\ndef reader():\n    return UNREADABLE_LISTING\n\n\n" + body
+        assert _held_answers({"m": ast.parse(source)})[1], source
+
+    @pytest.mark.parametrize("body", [
+        "def wrapper(box):\n    records = reader()\n    if not isinstance(records, list):\n        return records\n"
+        "    box['k'] = records\n",
+        "def wrapper(box):\n    records = reader()\n    if not isinstance(records, list):\n"
+        "        raise ValueError('no record list')\n    if box is not None:\n        box['k'] = records\n",
+        "def wrapper(box):\n    records = reader()\n    if isinstance(records, list):\n        box['k'] = records\n",
+    ])
+    def test_a_store_of_a_value_a_list_test_has_narrowed_is_read(self, body):
+        """Stored where an `isinstance(<name>, list)` test dominates it, the
+        value can only be a record list, never a sentinel string."""
+        source = "UNREADABLE_LISTING = 'unreadable'\ndef reader():\n    return UNREADABLE_LISTING\n\n\n" + body
+        assert _held_answers({"m": ast.parse(source)})[1] == [], source
 
 
 def _listing_readers() -> dict:
