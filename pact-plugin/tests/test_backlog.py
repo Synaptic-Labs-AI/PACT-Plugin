@@ -2436,16 +2436,33 @@ def _logging_git(tmp_path, monkeypatch) -> Path:
     return log
 
 
-@pytest.mark.parametrize("layout", ["main checkout", "linked worktree", "separate-git-dir linked worktree"])
-def test_one_roots_lookup_lists_the_worktrees_once(tmp_path, monkeypatch, layout):
+@pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
+@pytest.mark.parametrize("layout, commands_with_z, commands_rejecting_z", [
+    ("main checkout", 4, 5),
+    ("linked worktree", 4, 5),
+    ("separate-git-dir linked worktree", 4, 5),
+    ("bare repository", 3, 4),
+], ids=["main checkout", "linked worktree", "separate-git-dir linked worktree", "bare repository"])
+def test_one_roots_lookup_lists_the_worktrees_once(
+    tmp_path, monkeypatch, layout, commands_with_z, commands_rejecting_z, nul
+):
     """From any checkout, one roots lookup asks git for the worktree listing
     once: from a linked worktree the root's redirect check reads it, and the
-    roots reuse that answer. The roots are the ones git's listing gives.
+    roots reuse that answer. The roots are the ones git's listing gives, and
+    the lookup runs the number of git commands the release notes state: four
+    from a checkout, three from a bare repository, which reads the listing
+    before git says it has no working tree. A git that rejects `-z`, as git
+    before 2.36 does, is asked that one listing twice (`-z`, then without
+    it), one command more in each layout.
 
     Real repos, real git, a `git` that logs each command it runs."""
     import os
 
-    if layout == "separate-git-dir linked worktree":
+    if layout == "bare repository":
+        main = (tmp_path / "bare.git").resolve()
+        subprocess.run(["git", "init", "-q", "--bare", str(main)], check=True, capture_output=True)
+        recorded, expected = None, [str(main)]
+    elif layout == "separate-git-dir linked worktree":
         main, _store, wt = _separate_git_dir_repo(tmp_path)
         recorded, expected = [str(main)], [str(wt), str(main)]
     else:
@@ -2454,11 +2471,13 @@ def test_one_roots_lookup_lists_the_worktrees_once(tmp_path, monkeypatch, layout
                        check=True, capture_output=True)
         wt = (tmp_path / "wt").resolve()
         recorded, expected = None, [str(main), str(wt)]
-    start = main if layout == "main checkout" else wt
+    start = main if layout in ("main checkout", "bare repository") else wt
     for name in [n for n in os.environ if n.startswith("CLAUDE_")]:
         monkeypatch.delenv(name)
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(start))
     monkeypatch.chdir(start)
+    if not nul:
+        _git_rejecting_z(tmp_path, monkeypatch)
     log = _logging_git(tmp_path, monkeypatch)
 
     try:
@@ -2469,7 +2488,8 @@ def test_one_roots_lookup_lists_the_worktrees_once(tmp_path, monkeypatch, layout
     calls = log.read_text().splitlines()
     assert calls, "control: the logging git ran"
     assert roots == expected, roots
-    assert sum(" worktree list" in f" {call}" for call in calls) == 1, calls
+    assert sum(" worktree list" in f" {call}" for call in calls) == (1 if nul else 2), calls
+    assert len(calls) == (commands_with_z if nul else commands_rejecting_z), calls
 
 
 def _git_listing(tmp_path, monkeypatch, listing: "bytes | None") -> None:
