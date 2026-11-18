@@ -678,8 +678,8 @@ NO_IDENTITY_BOUND = {
         "this project's names; binds nothing",
     ),
     ("hooks/shared/backlog.py", "_project_anchor", "main_repo_common_dir"): (
-        1, "the common dir that root came from, whose worktree listing gives "
-        "the backlog's roots; binds nothing",
+        1, "the declared project directory's common dir, whose worktree listing "
+        "gives the backlog's roots; binds nothing",
     ),
     ("skills/pact-memory/scripts/memory_api.py", "_location_divergence_warning", "main_repo_root"): (
         1, "compares the process's repository with the id already bound; binds nothing",
