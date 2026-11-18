@@ -996,13 +996,18 @@ def dynamic_access_forms(paths) -> dict:
     import json
     import tempfile
 
-    with tempfile.TemporaryDirectory() as empty, tempfile.TemporaryDirectory() as out:
-        result_path = Path(out) / "forms.json"
+    with tempfile.TemporaryDirectory() as scratch:
+        # Everything the probed calls write (a temporary file a callable
+        # makes when handed a name) lands in this folder and goes with it.
+        empty, out, temp = (Path(scratch) / part for part in ("cwd", "out", "tmp"))
+        for folder in (empty, out, temp):
+            folder.mkdir()
+        result_path = out / "forms.json"
         run = subprocess.run(
             [sys.executable, "-I", "-c", _DYNAMIC_ACCESS_PROBE,
              ",".join(_scope_standard_modules(paths)), str(result_path)],
             capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL, cwd=empty,
-            env={"PATH": "", "HOME": empty},
+            env={"PATH": "", "HOME": str(empty), "TMPDIR": str(temp), "TEMP": str(temp), "TMP": str(temp)},
         )
         assert result_path.is_file(), (run.returncode, run.stderr[-2000:])
         result = json.loads(result_path.read_text(encoding="utf-8"))
