@@ -1962,6 +1962,9 @@ def call_result_callees(paths) -> list:
     function):
     - `setattr(obj, name, call_result)`: a callable is stored by a name the
       reader of the line cannot see, which hides it on purpose.
+    - a starred first argument to `functools.partial`, `staticmethod` or
+      `classmethod` (`partial(*callables)`): unpacking a container into the
+      one callable the wrapper takes only hides which callable it wraps.
     - an attribute set from another file (`other_module.get = ...`): one
       module rewriting another's attributes is monkeypatching, never a
       call an edit to this code means to make.
