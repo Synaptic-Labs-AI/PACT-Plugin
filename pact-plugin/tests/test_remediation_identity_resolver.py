@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import collections
+import itertools
 import logging
 import re
 import subprocess
@@ -3724,21 +3725,22 @@ def _listing_readers() -> dict:
 
 class TestAnUnknownZFieldIsMatchedByItsWholeKey:
     """With `-z`, a field whose key is not one of `_PORCELAIN_ORDER`'s is
-    skipped, and the key is compared whole and as written: a key that only
-    starts with a known one (`HEADx`, `lockedx`), one a known key starts with
-    (`lock`, `locke`), or one that differs from a known key only in case
-    (`head`, `LOCKED`) is unknown too. Each such key is built from the table
-    itself, and the listing must read exactly as it does without that
-    field."""
+    skipped, and the key is compared whole and as written. Every composition
+    of the three ways a key can be near a known one is built from the table
+    itself: each prefix of a known key (truncation, the whole key included),
+    with or without one more character (extension), in every pattern of
+    upper and lower case (case change): `lock`, `LOCK`, `Lockedx`, `hEAD`.
+    Each that is not a known key is unknown, and the listing must read
+    exactly as it does without that field."""
 
     @staticmethod
     def _keys():
         known = {key.rstrip() for key, _rank in memory_api._PORCELAIN_ORDER}
-        built = (
-            {f"{key}x" for key in known}
-            | {key.swapcase() for key in known}
-            | {key[:end] for key in known for end in range(1, len(key))}
-        )
+        built = {
+            "".join(letters)
+            for key in known for end in range(1, len(key) + 1) for extension in ("", "x")
+            for letters in itertools.product(*({c.lower(), c.upper()} for c in key[:end] + extension))
+        }
         return sorted(built - known), known
 
     def _read(self, monkeypatch, reader, listing):
@@ -3748,15 +3750,23 @@ class TestAnUnknownZFieldIsMatchedByItsWholeKey:
         )
         return reader(["-C", "/nowhere"])
 
-    def test_control_the_built_keys_extend_known_keys_only(self):
+    def test_control_the_built_keys_are_near_known_keys_and_hold_each_composition(self):
         extended, known = self._keys()
         assert known and extended and not set(extended) & known, extended
         assert all(
-            key[:-1] in known or key.swapcase() in known or any(k.startswith(key) for k in known)
+            any(
+                k.lower().startswith(key.lower())
+                or key.lower().endswith("x") and k.lower().startswith(key.lower()[:-1])
+                for k in known
+            )
             for key in extended
         ), extended
-        truncated = {key[:-1] for key in known} - known
-        assert truncated and truncated <= set(extended), truncated - set(extended)
+        compositions = (
+            {key[:-1] for key in known} | {key[:-1].swapcase() for key in known}
+            | {key.swapcase() for key in known} | {key + "X" for key in known}
+            | {key[:1].swapcase() + key[1:] for key in known}
+        ) - known
+        assert compositions <= set(extended), compositions - set(extended)
 
     @pytest.mark.parametrize("position", ["after HEAD", "last"])
     def test_a_key_extending_a_known_one_is_skipped(self, monkeypatch, position):

@@ -11,6 +11,7 @@ Used by: pytest. Shares the real-git helpers in `fixtures/identity_git.py`.
 from __future__ import annotations
 
 import ast
+import itertools
 import os
 import re
 import subprocess
@@ -2814,15 +2815,6 @@ _HEADER_FORMS.update({
     ).replace("{", "{{").replace("}", "}}") + "\n\tpath = inc\n"
     for separator in map(chr, range(1, 128))
 })
-# Chains of every length from two to sixty-four headers, joined directly,
-# so a scan that stops after any fixed number of headers short of that
-# misses the include git reads at the end.
-_HEADER_FORMS.update({
-    f"{count} headers joined directly": "".join(
-        [f"[s{index}]" for index in range(count - 1)] + ["[include]"]
-    ) + "\n\tpath = inc\n"
-    for count in range(2, 65)
-})
 # Longer runs of each ASCII character between two headers and between a
 # section name and its quoted subsection, so a scan that steps over any
 # fixed number of characters short of the run misses what git reads on.
@@ -2837,14 +2829,6 @@ _HEADER_FORMS.update({
         ("before a quoted subsection", '[remote{run}"a]b"][include]'),
     )
 })
-# Chains longer than sixty-four headers, so a scan that stops after any
-# number of headers up to the longest here misses the include at the end.
-_HEADER_FORMS.update({
-    f"{count} headers joined directly": "".join(
-        [f"[s{index}]" for index in range(count - 1)] + ["[include]"]
-    ) + "\n\tpath = inc\n"
-    for count in (65, 71, 128, 1024)
-})
 # Each ASCII character escaped by a backslash inside a quoted subsection,
 # before a `]` and the closing quote, and directly before the closing quote,
 # then an include header: git takes the escaped character as it is, so an
@@ -2858,6 +2842,100 @@ _HEADER_FORMS.update({
 })
 
 
+def _scan_disagreement(repo, body):
+    """None when the include scan agrees with git's own parse of `repo`'s
+    config with `body` appended (`path = inc` naming a file that sets an
+    origin; None puts an include after a BOM at the start instead), else
+    (git's answer, the scan's). Where git refuses the file, the origin read
+    must be unavailable."""
+    git_dir = (repo / ".git").resolve()
+    (git_dir / "inc").write_text('[remote "origin"]\n\turl = https://github.com/me/inc.git\n')
+    config = git_dir / "config"
+    original = config.read_text()
+    if body is None:
+        config.write_bytes(("\ufeff[include]\n\tpath = inc\n" + original).encode())
+    else:
+        config.write_bytes((original + body).encode())
+    try:
+        listed = subprocess.run(
+            ["git", "config", "--file", str(config), "--list", "--name-only"],
+            capture_output=True, text=True,
+        )
+        if listed.returncode != 0:
+            state = pi.read_origin(git_dir).state
+            return None if state == pi.ORIGIN_UNAVAILABLE else ("refused", state)
+        git_says = any(
+            name.split(".")[0] in ("include", "includeif") for name in listed.stdout.split()
+        )
+        scan = pi._holds_include_section(pi.read_git_file(config))
+        return None if scan == git_says else (git_says, scan)
+    finally:
+        config.write_text(original)
+
+
+@pytest.fixture(scope="module")
+def header_joints(tmp_path_factory):
+    """Every ASCII character git reads between two section headers and then
+    still reads the second (`[gc]` + c + `[include]`), asked of git."""
+    folder = tmp_path_factory.mktemp("joints")
+    config = folder / "config"
+    joints = []
+    for code in range(1, 128):
+        config.write_bytes(("[gc]" + chr(code) + "[include]\n\tpath = inc\n").encode())
+        listed = subprocess.run(
+            ["git", "config", "--file", str(config), "--list", "--name-only"],
+            capture_output=True, text=True,
+        )
+        if listed.returncode == 0 and "include.path" in listed.stdout.split():
+            joints.append(chr(code))
+    return joints
+
+
+# The longest header chain asked of git: a scan that stops after any
+# number of headers up to it misses the include at the end of a chain.
+_LONGEST_CHAIN = 1024
+
+
+class TestTheIncludeScanReadsEveryJointAndChainAsGitDoes:
+    """Every sequence of one to three characters git reads between two
+    headers, and every chain of two to `_LONGEST_CHAIN` headers joined
+    directly, `include` last: the scan agrees with git on each. The joints
+    are asked of git (`header_joints`), not listed here."""
+
+    def test_control_git_reads_some_joint_and_the_table_is_its_full_product(self, header_joints):
+        assert header_joints
+        assert len(_joint_bodies(header_joints)) == sum(len(header_joints) ** n for n in (1, 2, 3))
+
+    def test_every_joint_of_up_to_three_characters(self, tmp_path, header_joints):
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "proj")
+        wrong = {
+            joint: found for joint, body in _joint_bodies(header_joints).items()
+            if (found := _scan_disagreement(repo, body)) is not None
+        }
+        assert wrong == {}, wrong
+
+    def test_every_chain_up_to_the_longest(self, tmp_path):
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "proj")
+        wrong = {}
+        for count in range(2, _LONGEST_CHAIN + 1):
+            body = "".join([f"[s{index}]" for index in range(count - 1)] + ["[include]"]) + "\n\tpath = inc\n"
+            found = _scan_disagreement(repo, body)
+            if found is not None:
+                wrong[count] = found
+        assert wrong == {}, wrong
+
+
+def _joint_bodies(joints) -> dict:
+    """{joint: config body} for every sequence of one to three `joints`
+    between a `[gc]` header and an include header."""
+    return {
+        "".join(joint): "[gc]" + "".join(joint) + "[include]\n\tpath = inc\n"
+        for length in (1, 2, 3) for joint in itertools.product(joints, repeat=length)
+    }
+
+
 class TestTheIncludeScanReadsAHeaderAsGitDoes:
     """For each header form, git's own parse decides the answer. Where git
     reads the file, the scan finds an include section exactly when git lists
@@ -2869,26 +2947,8 @@ class TestTheIncludeScanReadsAHeaderAsGitDoes:
     def test_the_scan_agrees_with_git(self, tmp_path, form):
         assert_outside_repository(tmp_path)
         repo = make_repo(tmp_path / "proj")
-        git_dir = (repo / ".git").resolve()
-        (git_dir / "inc").write_text('[remote "origin"]\n\turl = https://github.com/me/inc.git\n')
-        config = git_dir / "config"
-        original = config.read_text()
         body = _HEADER_FORMS[form]
-        if body is None:
-            config.write_bytes(("\ufeff[include]\n\tpath = inc\n" + original).encode())
-        else:
-            config.write_bytes((original + body.format(repo=repo.resolve())).encode())
-        listed = subprocess.run(
-            ["git", "config", "--file", str(config), "--list", "--name-only"],
-            capture_output=True, text=True,
-        )
-        if listed.returncode != 0:
-            assert pi.read_origin(git_dir).state == pi.ORIGIN_UNAVAILABLE
-            return
-        git_says = any(
-            name.split(".")[0] in ("include", "includeif") for name in listed.stdout.split()
-        )
-        assert pi._holds_include_section(pi.read_git_file(config)) == git_says
+        assert _scan_disagreement(repo, None if body is None else body.format(repo=repo.resolve())) is None
 
     def test_a_bom_before_an_onbranch_include_declines_off_the_branch(self, tmp_path):
         """The measured case: an origin set only through an `onbranch`
