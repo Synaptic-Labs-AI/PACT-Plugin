@@ -1136,14 +1136,72 @@ def dynamic_reaches(paths, forms, reaches_by_name, read_outright=lambda path, ca
     return sorted(set(found))
 
 
+def _resolver_walk(value) -> set:
+    """Every module and attribute name a name resolver walks to resolve
+    `value`: `pkgutil.resolve_name`, and `importlib.import_module` for a
+    name whose every `.`-separated part is an identifier (a leading-dot name
+    relative to a stand-in package), each run with a stand-in for the import
+    system that records each module it is asked for and imports nothing. A module is asked for with each of its parents
+    first, so each `.` prefix of an asked name is walked too. `getattr`
+    takes a whole string as one name, and every identifier `getattr` could
+    take as an anchor is a name `pkgutil.resolve_name` already walks."""
+    import importlib
+    import pkgutil
+
+    walked, asked = set(), []
+
+    class StandIn:
+        def __getattr__(self, name):
+            walked.add(name)
+            return StandIn()
+
+    def find_and_load(name, _import):
+        asked.append(name)
+        return StandIn()
+
+    pkgutil.resolve_name("os")  # the resolver builds its pattern on first use, with the real import system
+    bootstrap = importlib._bootstrap
+    real = bootstrap._find_and_load
+    level = len(value) - len(value.lstrip(".")) if isinstance(value, str) else 0
+    package = ".".join(["<stand-in>"] * max(level, 1))
+    bootstrap._find_and_load = find_and_load
+    try:
+        dotted = isinstance(value, str) and all(part.isidentifier() for part in value.lstrip(".").split("."))
+        for resolve in (pkgutil.resolve_name, lambda name: importlib.import_module(name, package)):
+            if resolve is not pkgutil.resolve_name and not dotted:
+                continue  # a module name is identifiers joined by dots
+            try:
+                resolve(value)
+            except Exception:  # this resolver does not take `value` as a name
+                pass
+    finally:
+        bootstrap._find_and_load = real
+    for name in asked:
+        while name:
+            name, _dot, part = name.rpartition(".")
+            walked.add(part)
+    return walked
+
+
 def named_anchor_strings(paths, named, read_outright=lambda path, parent: False) -> list:
-    """Each string or bytes constant in the files at `paths` that names a
-    census anchor, as (file, line, text): split at every ".", ":" and
-    format-field delimiter (`os.O_X`, `os:O_X`, `{0.O_X}`), one part,
-    stripped, is a name `named` accepts. Whatever receives it, such a
+    """Each string constant in the files at `paths` that a name resolver can
+    take as a name reaching a census anchor, as (file, line, text): one name
+    `_resolver_walk` walks for the stripped string (`O_X`, `os.O_X`,
+    `os:O_X`, `.O_X`) is a name `named` accepts. Whatever receives it, such a
     string can reach the anchor by a form no census reads, docstrings
-    included. A string whose parent node the census reads outright
-    (`read_outright(path, parent)`) is the census's."""
+    included. Prose around a name is not a name any resolver takes. A string
+    whose parent node the census reads outright (`read_outright(path,
+    parent)`) is the census's.
+
+    ADVERSARIAL-ONLY, not read (no good-faith edit writes them to reach a
+    function):
+    - a format field (`"{0.O_X}".format(os)`): a format string written to
+      read a module's attribute by name hides the access in text formatting.
+    - a name kept as bytes and decoded (`b"O_X".decode()`): no resolver takes
+      bytes (each is run on them and refuses), and decoding a name before a
+      lookup only hides it; the lookup still has a computed name, which the
+      dynamic-access rule reds, or a call result as its callee, which the
+      call-result rule reds."""
     found = []
     for path in paths:
         tree = ast.parse(Path(path).read_text(encoding="utf-8"))
@@ -1151,11 +1209,10 @@ def named_anchor_strings(paths, named, read_outright=lambda path, parent: False)
         for node in ast.walk(tree):
             if not isinstance(node, ast.Constant) or not isinstance(node.value, (str, bytes)):
                 continue
-            text = node.value.decode("latin-1") if isinstance(node.value, bytes) else node.value
-            if any(named(part.strip()) for part in re.split(r"[.:{}\[\]!]", text)) and not read_outright(
+            if any(named(name) for name in _resolver_walk(node.value.strip())) and not read_outright(
                 path, parents.get(id(node))
             ):
-                found.append((Path(path).name, node.lineno, text))
+                found.append((Path(path).name, node.lineno, node.value))
     return sorted(set(found))
 
 
@@ -2240,23 +2297,52 @@ class TestEveryIdentityCallerIsCovered:
         ("VALUE = 'detect_id_for_root'\n", True),
         ("VALUE = 'scripts.project_identity.detect_id_for_root'\n", True),
         ("VALUE = 'project_identity:detect_id_for_root'\n", True),
-        ("VALUE = '{0.detect_id_for_root!r}'\n", True),
-        ("VALUE = b'detect_id_for_root'\n", True),
+        ("VALUE = '{0.detect_id_for_root!r}'\n", False),
+        ("VALUE = b'detect_id_for_root'\n", False),
         ("VALUE = ' detect_id_for_root '\n", True),
         ("def f():\n    'detect_id_for_root'\n", True),
         ("VALUE = f'{x}.detect_id_for_root'\n", True),
         ("VALUE = 'calls detect_id_for_root on the asked root'\n", False),
         ("VALUE = 'detect_id_for_roots'\n", False),
         ("VALUE = '_detect_id_for_root'\n", False),
+        ("VALUE = '.detect_id_for_root'\n", True),
+        ("VALUE = 'detect_id_for_root:'\n", True),
+        ("VALUE = 'detect_id_for_root: the asked root'\n", False),
+        ("def f():\n    '''Args:\n        detect_id_for_root: the asked root.\n    '''\n", False),
+        ("VALUE = 'scripts.project_identity.detect_id_for_root is read here'\n", False),
+        ("VALUE = 'Wraps project_identity.detect_id_for_root'\n", False),
+        ("VALUE = 'see project_identity:detect_id_for_root'\n", False),
+        ("VALUE = 'project_identity.detect_id_for_root'\n", True),
+        ("VALUE = '..scripts.detect_id_for_root'\n", True),
     ])
     def test_a_string_names_an_anchor_only_as_a_whole_part(self, tmp_path, source, named):
-        """A part between separators equal to the anchor names it; text a
-        runtime lookup cannot use as the name (prose around it, a longer
-        name) does not."""
+        """A string a resolver takes as a name walking to the anchor names
+        it; text no resolver takes as a name (prose around it, a longer name,
+        a format field, bytes) does not."""
         path = tmp_path / "scope.py"
         path.write_text(source, encoding="utf-8")
         found = named_anchor_strings([path], IDENTITY_FUNCTIONS.__contains__)
         assert bool(found) is named, found
+
+    def test_the_resolvers_are_run_and_import_nothing(self):
+        """The accepted names are the resolvers' own: each part of a name
+        `pkgutil.resolve_name` or `importlib.import_module` takes is walked,
+        and the stand-in importer imports nothing and is put back."""
+        import importlib
+
+        real = importlib._bootstrap._find_and_load
+        assert _resolver_walk("no_such_module_here.inner:attr.leaf") >= {
+            "no_such_module_here", "inner", "attr", "leaf",
+        }
+        assert "no_such_module_here" not in sys.modules
+        assert importlib._bootstrap._find_and_load is real
+        dotted = [name for name in list(sys.modules) if all(part.isidentifier() for part in name.split("."))]
+        assert len(dotted) > 50
+        for name in dotted:
+            assert set(name.split(".")) <= _resolver_walk(name), name
+        assert _resolver_walk("two words") == set()
+        assert _resolver_walk("calls os.O_NOFOLLOW") == set()
+        assert _resolver_walk(b"bytes.name") == set()
 
     def test_the_cwd_repository_never_names_the_victim(self, identity_callers):
         _executed, cwd_ids = identity_callers
