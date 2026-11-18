@@ -760,7 +760,16 @@ def _warn_declined(
         "to inspect the detected identity.",
         cause,
         f" {remedy}" if remedy else "",
+        extra={"pact_identity_decline": True},
     )
+
+
+def is_decline_record(record: logging.LogRecord) -> bool:
+    """Whether `record` is an identity decline warning (`_warn_declined`).
+    A caller that does not use the canonical id holds that warning apart
+    from every other one by it. The attribute name is spelled here and in
+    `_warn_declined` only."""
+    return getattr(record, "pact_identity_decline", False) is True
 
 
 def _decline(
@@ -1729,15 +1738,19 @@ def _listed_worktree_records(
     the only form that reaches a submodule's own worktrees: run from a
     directory, git discovers the enclosing repository instead.
 
-    `None` when git cannot enumerate — a failed ANSWER, not a failed
-    verification, so callers must not treat it as proof of a redirect.
-    `EMPTY_LISTING` or `UNREADABLE_LISTING` when git printed a listing that
-    is no record list (`_worktree_records`).
+    `None` when git cannot enumerate, or the read raises — a failed ANSWER,
+    not a failed verification, so callers must not treat it as proof of a
+    redirect. `EMPTY_LISTING` or `UNREADABLE_LISTING` when git printed a
+    listing that is no record list (`_worktree_records`).
     """
     target = ("--git-dir", _where(git_dir)) if git_dir is not None else ("-C", _where(start))
-    return _detection_answer(
-        ("worktree list", target), lambda: _ask_worktree_records(start, git_dir)
-    )
+    try:
+        return _detection_answer(
+            ("worktree list", target), lambda: _ask_worktree_records(start, git_dir)
+        )
+    except (OSError, RuntimeError, ValueError):
+        # A read that raises gives no listing, as a git that failed does.
+        return None
 
 
 def _worktree_toplevels(records) -> "Optional[set | str]":
@@ -1957,8 +1970,9 @@ def _verified_worktree_roots(
     kept only when (a) git does not call it prunable, (b) `W/.git` is a FILE
     whose `gitdir:` is `<common>/worktrees/<name>`, and (c) that admin dir's
     `gitdir` names `W/.git` back. Anything else is dropped, which can only
-    narrow the gate; no listing, or a listing that is no record list
-    (`EMPTY_LISTING`, `UNREADABLE_LISTING`), narrows it to the identity root.
+    narrow the gate; no listing (git failed, or the read raised), or a
+    listing that is no record list (`EMPTY_LISTING`, `UNREADABLE_LISTING`),
+    narrows it to the identity root.
 
     `listing`, the records (`_worktree_records`) the detection pass got for
     this same `common_dir`, is used instead of asking git again.
@@ -1966,7 +1980,11 @@ def _verified_worktree_roots(
     roots = [Path(repo_root).resolve()]
     if common_dir is None:
         return roots
-    records = listing if listing is not None else _worktree_records(["--git-dir", str(common_dir)])
+    try:
+        records = listing if listing is not None else _worktree_records(["--git-dir", str(common_dir)])
+    except (OSError, RuntimeError, ValueError):
+        # A read that raises gives no listing, as a git that failed does.
+        records = None
     if not isinstance(records, list):
         return roots
     try:

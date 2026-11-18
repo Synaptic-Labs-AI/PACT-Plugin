@@ -405,9 +405,11 @@ def _root_and_common_dir(
         # unresolved path, the same fallback the detector takes for the name.
         resolved = _resolved(Path(project_dir))
         enclosing = _enclosing_checkout(resolved)
-        # AN UMBRELLA ONLY WHERE GIT RESOLVES NOTHING. A bare repository, or a
-        # directory inside one, has no `.git` above it, but git answers for
-        # it, and the memory skill declines it.
+        # AN UMBRELLA ONLY WHERE NO CHECKOUT ENCLOSES IT AND GIT GIVES NO
+        # COMMON DIR. A bare repository, or a directory inside one, can have
+        # no `.git` above it, but git still gives its common dir, so it is no
+        # umbrella and the memory skill declines it below. Inside a checkout
+        # it has that checkout's `.git` above it as well.
         if enclosing is None and common is None:
             return resolved, None
         # Say what the memory skill's root check observed, with its own
@@ -2011,11 +2013,12 @@ def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
         return None
     branches = _run_capture(["git", *at, "branch", "--format=%(refname:short)"])
     memory_api = _memory_api()
-    worktrees = memory_api._worktree_records(at)
     # The worktrees are this project's only by the roots' rule: a folder
     # whose `.git` names another repository's `.git` directory reads that
     # repository's listing, and its worktree folders are not this project's.
+    # A listing read that raises gives no listing, as a git that failed does.
     try:
+        worktrees = memory_api._worktree_records(at)
         ours = isinstance(worktrees, list) and _lists_first(
             worktrees, project_path, memory_api.main_repo_common_dir(project_path)
         )
@@ -2190,30 +2193,34 @@ def _add_item_arguments(parser: argparse.ArgumentParser) -> None:
         )
 
 
-class _HeldWarnings(logging.Handler):
-    """Holds the memory skill's warnings while one command runs. A command
-    that succeeds drops them: its project name came from the pre-change
-    folder-name key, so a decline of the canonical id says nothing about the
-    write. A command that does not succeed prints them (`replay`), so a
-    refusal still shows the cause the memory skill observed."""
+class _HeldWarnings(logging.Filter):
+    """Holds the memory skill's identity decline warnings
+    (`is_decline_record`) while one command runs. A command that succeeds
+    drops them: its project name came from the pre-change folder-name key,
+    so a decline of the canonical id says nothing about the write. A command
+    that does not succeed prints them (`replay`), so a refusal still shows
+    the cause the memory skill observed. Every other warning prints when it
+    is logged."""
 
     def __init__(self) -> None:
-        super().__init__(logging.WARNING)
+        super().__init__()
+        memory_api = _memory_api()
         self.records: List[logging.LogRecord] = []
-        self.logger = logging.getLogger(_memory_api().__name__.rpartition(".")[0])
-        self._propagate = self.logger.propagate
+        self.logger = memory_api.logger
+        self.is_decline = memory_api.is_decline_record
 
-    def emit(self, record: logging.LogRecord) -> None:
-        self.records.append(record)
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self.is_decline(record):
+            self.records.append(record)
+            return False
+        return True
 
     def __enter__(self) -> "_HeldWarnings":
-        self.logger.addHandler(self)
-        self.logger.propagate = False
+        self.logger.addFilter(self)
         return self
 
     def __exit__(self, *_exc: Any) -> None:
-        self.logger.removeHandler(self)
-        self.logger.propagate = self._propagate
+        self.logger.removeFilter(self)
 
     def replay(self) -> None:
         """Print the held warnings as the memory skill would have, once."""

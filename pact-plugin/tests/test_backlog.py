@@ -2650,6 +2650,129 @@ def test_a_listing_read_that_raises_gives_the_answer_no_listing_gives(tmp_path, 
         assert (type(outcome), refusal in str(outcome)) == (backlog.BacklogWriteError, True), outcome
 
 
+def _first_write_or_refusal(path: Path):
+    """What `load_or_create` gives for a backlog file not yet written: its
+    project_path and roots, or the exception it raised."""
+    try:
+        doc = backlog.load_or_create(path)
+        return {"project_path": doc["project_path"], "roots": doc["roots"]}
+    except Exception as error:  # the outcome under test, not a harness failure
+        return error
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+@pytest.mark.parametrize("layout", ["main checkout", "linked worktree", "separate-git-dir linked worktree"])
+def test_a_first_write_whose_listing_read_raises_gives_a_later_writes_answer(
+    tmp_path, monkeypatch, layout, error
+):
+    """The first write of a backlog file, whose root the memory skill's
+    redirect check confirms with its own listing read, gives the answer a
+    later write's roots lookup gives when that read raises: from a main
+    checkout the root alone, from a linked worktree a refusal naming the
+    check's cause. Never the raised error. The control shows the first
+    write resolves with the read.
+
+    Real repos, real git; the raise is the stand-in."""
+    if layout == "separate-git-dir linked worktree":
+        _main, _store, start = _separate_git_dir_repo(tmp_path)
+    else:
+        main = _repo(tmp_path / "main").resolve()
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                       check=True, capture_output=True)
+        start = main if layout == "main checkout" else (tmp_path / "wt").resolve()
+    _project_dir_is(monkeypatch, start)
+    memory_api = backlog._memory_api()
+    new = tmp_path / "backlog" / "new.json"
+    assert isinstance(_first_write_or_refusal(new), dict), "control: the first write resolves"
+
+    def raising(*_args):
+        raise error("the listing read raised")
+
+    monkeypatch.setattr(memory_api, "_worktree_records", raising)
+    first, later = _first_write_or_refusal(new), _roots_or_refusal()
+
+    if layout == "main checkout":
+        assert (first, later) == ({"project_path": str(start), "roots": [str(start)]}, [str(start)])
+    else:
+        refusal = memory_api._REDIRECT_CAUSE_DETAILS[memory_api.REDIRECT_UNLISTABLE]
+        assert [(type(o), refusal in str(o)) for o in (first, later)] == [
+            (backlog.BacklogWriteError, True)] * 2, (first, later)
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+def test_every_other_listing_read_that_raises_gives_what_no_listing_gives(tmp_path, monkeypatch, error):
+    """The read gate's verified roots and the abandoned-work names read the
+    worktree listing too. A read that raises gives what git giving no
+    listing gives there, never the raised error. The control shows the
+    listing adds a root and a name.
+
+    Real repo, real git; the raise and the absent listing are the stand-ins."""
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    memory_api = backlog._memory_api()
+    common = memory_api.main_repo_common_dir(str(main))
+
+    def readers():
+        outcomes = []
+        for read in (lambda: memory_api._verified_worktree_roots(main, common),
+                     lambda: backlog._branch_and_worktree_names(str(main))):
+            try:
+                outcomes.append(read())
+            except Exception as raised:  # the outcome under test, not a harness failure
+                outcomes.append(raised)
+        return outcomes
+
+    listed = readers()
+    monkeypatch.setattr(memory_api, "_worktree_records", lambda *_args: None)
+    unlisted = readers()
+    assert all(len(a) > len(b) for a, b in zip(listed, unlisted)), "control: the listing adds to each"
+
+    def raising(*_args):
+        raise error("the listing read raised")
+
+    monkeypatch.setattr(memory_api, "_worktree_records", raising)
+    assert readers() == unlisted
+
+
+@pytest.mark.parametrize("outcome", ["success", "refusal", "raise"])
+def test_only_the_identity_decline_is_held_and_only_a_success_drops_it(monkeypatch, caplog, outcome):
+    """While one command runs, the memory skill's identity decline is held
+    and every other warning it logs prints at once. A success drops the
+    decline; a refusal or a raise prints it after them. The holder leaves
+    the memory skill's logger as it found it.
+
+    The command is the stand-in; the decline is the memory skill's own."""
+    import logging
+
+    memory_api = backlog._memory_api()
+    filters = list(memory_api.logger.filters)
+    raised = RuntimeError("the command raised")
+
+    def command(_args, _backlog_dir, _held):
+        memory_api._warn_declined({"reason": "no_working_tree"})
+        memory_api.logger.warning("another warning")
+        if outcome == "raise":
+            raise raised
+        return backlog._EXIT_OK if outcome == "success" else backlog._EXIT_REFUSED
+
+    monkeypatch.setattr(backlog, "_main", command)
+    with caplog.at_level(logging.WARNING, logger=memory_api.logger.name):
+        try:
+            result = backlog.main(["show"])
+        except RuntimeError as error:
+            result = error
+    printed = ["decline" if "so no project id was derived" in r.getMessage() else r.getMessage()
+               for r in caplog.records if r.name == memory_api.logger.name]
+
+    expected = {
+        "success": (backlog._EXIT_OK, ["another warning"]),
+        "refusal": (backlog._EXIT_REFUSED, ["another warning", "decline"]),
+        "raise": (raised, ["another warning", "decline"]),
+    }[outcome]
+    assert (result, printed, memory_api.logger.filters) == (*expected, filters)
+
+
 _HONEST_REFUSALS = [
     "linked worktree, git gives no listing",
     "linked worktree, a listing holding no record",
@@ -5855,6 +5978,9 @@ def test_a_directory_inside_a_repository_git_cannot_read_still_refuses(tmp_path,
         # no git when git gave no common dir.
         root_check_refusal = staticmethod(real.root_check_refusal)
         _LISTING_UNASKED = real._LISTING_UNASKED
+        # `main` holds the memory skill's decline warnings on its own logger.
+        logger = real.logger
+        is_decline_record = staticmethod(real.is_decline_record)
 
     monkeypatch.setattr(backlog, "_memory_api", lambda: _NoGit)
     for env_path in (sub, linked):
