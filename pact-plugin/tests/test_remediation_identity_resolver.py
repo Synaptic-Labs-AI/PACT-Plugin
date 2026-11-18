@@ -3287,6 +3287,7 @@ _ANSWER_TAKING_CALLS = {
     "isinstance": "tests the answer's type; only a list is read as records",
     "_verified_worktree_roots": "reached only with a list; it answers the gate roots",
     "_lists_first": "reached only with a list; it answers a bool",
+    "_root_and_common_dir": "hands it only to the redirect check, which returns on each answer that is no record list; it answers the root and the common dir",
 }
 
 

@@ -677,7 +677,7 @@ NO_IDENTITY_BOUND = {
         1, "the common dir that decides whether the listed worktree folders are "
         "this project's names; binds nothing",
     ),
-    ("hooks/shared/backlog.py", "_root_and_common_dir", "main_repo_common_dir"): (
+    ("hooks/shared/backlog.py", "_project_anchor", "main_repo_common_dir"): (
         1, "the common dir that root came from, whose worktree listing gives "
         "the backlog's roots; binds nothing",
     ),

@@ -828,6 +828,10 @@ def _decline_detected(
 # guard asks git itself.
 _TOPLEVEL_UNASKED: Any = object()
 
+# `main_repo_root`'s and the redirect check's default for `listing`: the
+# caller holds no worktree listing, so the check asks git itself.
+_LISTING_UNASKED: Any = object()
+
 
 def _root_guard(
     asked_root: Optional[Path],
@@ -2000,17 +2004,17 @@ _REDIRECT_CAUSE_DETAILS = {
 
 def _worktree_redirect(
     asked_root, common_dir, *, git_dir: Optional[Path] = None,
-    toplevel: Optional[Path] = None,
+    toplevel: Optional[Path] = None, listing: Any = _LISTING_UNASKED,
 ) -> bool:
     """Whether the check refuses the shape (`_worktree_redirect_cause`)."""
     return _worktree_redirect_cause(
-        asked_root, common_dir, git_dir=git_dir, toplevel=toplevel
+        asked_root, common_dir, git_dir=git_dir, toplevel=toplevel, listing=listing
     ) is not None
 
 
 def _worktree_redirect_cause(
     asked_root, common_dir, *, git_dir: Optional[Path] = None,
-    toplevel: Optional[Path] = None,
+    toplevel: Optional[Path] = None, listing: Any = _LISTING_UNASKED,
 ) -> Optional[str]:
     """Why the linked-worktree shape is NOT backed by git's listing, or None
     when it is (or is not a linked-worktree shape).
@@ -2029,7 +2033,9 @@ def _worktree_redirect_cause(
     would fail this test (measured). They never reach it.
 
     `git_dir` and `toplevel`, when the caller already holds git's answers
-    for `asked_root`, are used instead of asking git again.
+    for `asked_root`, are used instead of asking git again. So is `listing`,
+    the caller's `_worktree_records` answer for `--git-dir <common_dir>`
+    (any answer it gave, None included).
 
     MISSING EVIDENCE REFUSES, and the cause names what was missing:
     `REDIRECT_UNLISTED` (git's listing does not hold the checkout),
@@ -2064,7 +2070,10 @@ def _worktree_redirect_cause(
     # LISTED BY THE REPOSITORY THE COMMON DIR BELONGS TO: a submodule's
     # admin dir sits inside the superproject's `.git`, so a listing run from
     # a directory would report the SUPERPROJECT's worktrees.
-    records = _listed_worktree_records(None, git_dir=common_path)
+    records = (
+        _listed_worktree_records(None, git_dir=common_path)
+        if listing is _LISTING_UNASKED else listing
+    )
     if records is None:
         return REDIRECT_UNLISTABLE
     if records == EMPTY_LISTING:
@@ -2274,6 +2283,7 @@ def main_repo_root(
     start: Optional[str] = None,
     common: Optional[Path] = None,
     toplevel: Any = _TOPLEVEL_UNASKED,
+    listing: Any = _LISTING_UNASKED,
 ) -> Optional[Path]:
     """The repository's identity ROOT — the working tree, or the main checkout.
 
@@ -2306,6 +2316,9 @@ def main_repo_root(
             a duplicate `rev-parse`; `None` resolves it here.
         toplevel: The caller's `--show-toplevel` answer for `start` (None: git
             gave none), when it holds one; left out, it is asked here.
+        listing: The caller's `_worktree_records` answer for
+            `--git-dir <common>`, when it holds one, for the redirect check a
+            linked worktree runs; left out, the check asks git.
 
     Returns:
         The identity root, or None when git is absent, times out, exits
@@ -2348,7 +2361,7 @@ def main_repo_root(
         # resolver rung names it as `gitfile_redirect` through its own guard,
         # so a warning here would log the one cause twice.
         asked = Path(start) if start is not None else Path.cwd()
-        if _worktree_redirect(asked, common_path, git_dir=git_dir, toplevel=root):
+        if _worktree_redirect(asked, common_path, git_dir=git_dir, toplevel=root, listing=listing):
             return None
         if main_git == common_path:
             # LINKED WORKTREE of a main checkout: the main checkout is the

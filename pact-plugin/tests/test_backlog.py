@@ -2188,7 +2188,8 @@ def _root_is(monkeypatch, root: Path, common: "Path | None" = None) -> None:
     if common is None:
         common = backlog._memory_api().main_repo_common_dir(str(root))
     monkeypatch.setattr(backlog, "project_root", lambda: root)
-    monkeypatch.setattr(backlog, "_root_and_common_dir", lambda: (root, common))
+    monkeypatch.setattr(backlog, "_project_anchor", lambda: (str(root), "CLAUDE_PROJECT_DIR", common))
+    monkeypatch.setattr(backlog, "_root_and_common_dir", lambda anchor=None, listing=None: (root, common))
 
 
 def test_the_roots_ignore_git_location_variables_in_the_environment(tmp_path, monkeypatch):
@@ -2413,6 +2414,62 @@ def test_save_carries_the_separate_git_dir_checkout_it_read(tmp_path, monkeypatc
     data = backlog.load_or_create(path)
     assert backlog.save(data, path) == []
     assert set(json.loads(path.read_text())["roots"]) == {str(main), str(wt)}
+
+
+def _logging_git(tmp_path, monkeypatch) -> Path:
+    """Put first on PATH a `git` that appends each command it runs to the
+    returned log and then runs the real git."""
+    import os
+    import shutil
+    import stat
+
+    log = tmp_path / "git.log"
+    bin_dir = tmp_path / "logging-bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return log
+
+
+@pytest.mark.parametrize("layout", ["main checkout", "linked worktree", "separate-git-dir linked worktree"])
+def test_one_roots_lookup_lists_the_worktrees_once(tmp_path, monkeypatch, layout):
+    """From any checkout, one roots lookup asks git for the worktree listing
+    once: from a linked worktree the root's redirect check reads it, and the
+    roots reuse that answer. The roots are the ones git's listing gives.
+
+    Real repos, real git, a `git` that logs each command it runs."""
+    import os
+
+    if layout == "separate-git-dir linked worktree":
+        main, _store, wt = _separate_git_dir_repo(tmp_path)
+        recorded, expected = [str(main)], [str(wt), str(main)]
+    else:
+        main = _repo(tmp_path / "main").resolve()
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                       check=True, capture_output=True)
+        wt = (tmp_path / "wt").resolve()
+        recorded, expected = None, [str(main), str(wt)]
+    start = main if layout == "main checkout" else wt
+    for name in [n for n in os.environ if n.startswith("CLAUDE_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(start))
+    monkeypatch.chdir(start)
+    log = _logging_git(tmp_path, monkeypatch)
+
+    try:
+        roots = backlog.checkout_roots(recorded)
+    except Exception as error:  # a refusal is the answer under test, not a harness failure
+        roots = error
+
+    calls = log.read_text().splitlines()
+    assert calls, "control: the logging git ran"
+    assert roots == expected, roots
+    assert sum(" worktree list" in f" {call}" for call in calls) == 1, calls
 
 
 def _git_listing(tmp_path, monkeypatch, listing: "bytes | None") -> None:

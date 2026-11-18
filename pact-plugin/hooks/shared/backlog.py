@@ -335,11 +335,12 @@ def project_root() -> Path:
     return _root_and_common_dir()[0]
 
 
-def _root_and_common_dir() -> Tuple[Path, Optional[Path]]:
-    """`project_root()` and the repository's common dir git gave for it, or
-    None for an umbrella directory that no repository holds. One
-    `--git-common-dir` answer serves both, so `checkout_roots()` lists the
-    same repository the root came from and asks git for it once."""
+def _project_anchor() -> Tuple[Optional[str], str, Optional[Path]]:
+    """The declared project directory (None when nothing declares one), the
+    name of where it came from, and the common dir git gives for it (None
+    for an umbrella directory that no repository holds). Raises
+    BacklogWriteError when the environment and the session record name
+    different directories."""
     memory_api = _memory_api()
     disagreement = memory_api.env_record_project_dir_disagreement()
     if disagreement is not None:
@@ -352,8 +353,35 @@ def _root_and_common_dir() -> Tuple[Path, Optional[Path]]:
     # attributes a recorded value to the (unset) variable, or vice versa.
     project_dir = env_dir or record_dir or None
     source = "CLAUDE_PROJECT_DIR" if env_dir else "the session record's project_dir"
-    common = memory_api.main_repo_common_dir(project_dir)
-    root = memory_api.main_repo_root(project_dir, common=common) if common is not None else None
+    return project_dir, source, memory_api.main_repo_common_dir(project_dir)
+
+
+# `_root_and_common_dir`'s default for `listing`: the caller read no
+# worktree listing, so the root's redirect check asks git itself.
+_LISTING_NOT_READ: Any = object()
+
+
+def _root_and_common_dir(
+    anchor: Optional[tuple] = None, listing: Any = _LISTING_NOT_READ
+) -> Tuple[Path, Optional[Path]]:
+    """`project_root()` and the repository's common dir git gave for it, or
+    None for an umbrella directory that no repository holds. One
+    `--git-common-dir` answer serves both, so `checkout_roots()` lists the
+    same repository the root came from and asks git for it once.
+
+    `anchor`, `_project_anchor()`'s answer, and `listing`, the worktree
+    listing of its common dir, when the caller already holds them, are used
+    instead of asking again: a linked worktree's root is checked against
+    that same listing."""
+    memory_api = _memory_api()
+    project_dir, source, common = anchor if anchor is not None else _project_anchor()
+    root = (
+        memory_api.main_repo_root(
+            project_dir, common=common,
+            listing=memory_api._LISTING_UNASKED if listing is _LISTING_NOT_READ else listing,
+        )
+        if common is not None else None
+    )
     if root is not None:
         return root, common
     if project_dir and Path(project_dir).is_dir():
@@ -431,11 +459,17 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     # reads exactly as that repository's own main checkout does, and only a
     # hand-written `.git` file makes it.
     memory_api = _memory_api()
-    root, common = _root_and_common_dir()
+    # ONE LISTING PER LOOKUP: read here and handed to the root's redirect
+    # check, which a linked worktree runs on the same `--git-dir` listing.
+    anchor = _project_anchor()
+    records = (
+        memory_api._worktree_records(["--git-dir", str(anchor[2])])
+        if anchor[2] is not None else None
+    )
+    root, common = _root_and_common_dir(anchor, records)
     try:
-        records = (
-            memory_api._worktree_records(["--git-dir", str(common)]) if common is not None else None
-        )
+        if common is None:
+            records = None
         if not isinstance(records, list) or not _lists_first(records, root, common):
             roots = [str(Path(root).resolve())]
         else:
