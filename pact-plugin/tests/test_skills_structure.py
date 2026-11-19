@@ -9,6 +9,7 @@ Tests cover:
 5. SKILL.md body contains substantive content
 """
 import ast
+import re
 import subprocess
 from pathlib import Path
 
@@ -646,13 +647,14 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     commands/, protocols/ — every tracked markdown file): a token an LLM
     loads as instruction re-teaches the retired flag wherever it appears.
     The repo-root CHANGELOG's retirement note legitimately names the flag
-    and stays out of scope. A bare substring check is deliberate — it
-    catches backtick-wrapped, fenced, and prose forms alike. A tracked
+    and stays out of scope. A case-insensitive pattern match is
+    deliberate — it covers markup wrapping AND spelling variants
+    (memory_saved, memorySaved, memory-saved, "memory saved"). A tracked
     file that is not valid UTF-8 is named by the pin rather than raising
     a bare decode error.
     """
 
-    FORBIDDEN_TOKEN = "memory_saved"
+    FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]?saved", re.IGNORECASE)
 
     def test_no_memory_saved_in_any_llm_loaded_surface(self):
         offenders = []
@@ -663,7 +665,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             except UnicodeDecodeError:
                 undecodable.append(path)
                 continue
-            if self.FORBIDDEN_TOKEN in text:
+            if self.FORBIDDEN_PATTERN.search(text):
                 offenders.append(path)
         assert not offenders, (
             f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in offenders]} "
