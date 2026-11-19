@@ -953,6 +953,27 @@ def test_build_argv_rejects_workers_in_collect_only(core, tmp_path):
         core.build_argv(_selection(core, set()), plugin, "collect-only", workers=2)
 
 
+def test_the_runner_pins_four_workers_on_the_real_run_only():
+    """The production call site cannot silently fall back to serial execution."""
+    root = ci_contract.require_root("the fast runner worker pin")
+    tree = ast.parse((root / "scripts" / "run_fast_suite.py").read_text(
+        encoding="utf-8"))
+    run_calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "build_argv"
+        and len(node.args) >= 3
+        and isinstance(node.args[2], ast.Constant)
+        and node.args[2].value == "run"
+    ]
+    assert len(run_calls) == 1
+    workers = [keyword.value for keyword in run_calls[0].keywords
+               if keyword.arg == "workers"]
+    assert len(workers) == 1
+    assert isinstance(workers[0], ast.Constant) and workers[0].value == 4
+
+
 def _git(repo, *args):
     proc = subprocess.run(
         ["git", *args], cwd=str(repo), capture_output=True, text=True)

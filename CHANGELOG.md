@@ -18,6 +18,24 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.36: run the fast CI suite in parallel with fail-closed evidence
+
+### Summary
+
+The fast PR suite now runs its selected tests with four pytest-xdist workers using loadfile distribution. Serial collection remains the independent canary and the full-suite collection oracle. Fast-lane artifacts now bind the distributed run to its collection canary and the unchanged schema-v3 run record, so missing workers, narrowed collection, changed terminal node IDs, outcome mismatches and contaminated runner environments fail verification instead of producing a false green.
+
+### What landed
+
+- The real fast run uses fixed `-n 4 --dist loadfile` arguments; the canary stays serial and records every sorted, unique collected node ID.
+- Fast canary and summary artifacts move together to schema v2, adding Actions run ID and attempt, manifest and selection evidence, and xfail/xpass outcomes. The schema-v3 full-run recorder and record are unchanged and are now required for fast verification.
+- The fast verifier independently reconstructs both commands and checks SHAs, manifest and selection identity, worker collection aggregates, arithmetic, exact terminal-node set equality, outcomes and skip accounting. Full-suite skip-allowlist differences remain advisory in the selected fast lane.
+- The runner refuses every inherited `PYTEST_*` variable and a pre-set recorder-owner variable before selection, exiting 3 without writing an artifact.
+- Real xdist integration controls cover valid skip/xfail evidence, module-level collection skips, same-count/different-node refusal and late worker loss with exit status zero, each with a matched valid control.
+
+### Why
+
+Parallel execution shortens the fast lane, but count-only summaries cannot prove that every worker reported or that the distributed run executed the same tests the serial canary collected. Binding all three artifacts closes that false-green window without changing the full-suite recorder, full verifier, selection logic or workflow wrapper commands.
+
 ## v4.8.35: find order-dependent tests and isolate the state tests shared
 
 ### Summary

@@ -11,6 +11,7 @@ expected file set is every discovered module.
 """
 
 import hashlib
+import importlib.util
 import json
 import os
 import subprocess
@@ -19,7 +20,23 @@ from pathlib import Path
 
 import pytest
 
+from helpers import env_without_pytest_vars
+
 ROOT = Path(__file__).resolve().parents[2]
+_SELECTOR_SPEC = importlib.util.spec_from_file_location(
+    "_pact_fast_verifier_selection", ROOT / "scripts" / "fast_suite_selection.py")
+selector = importlib.util.module_from_spec(_SELECTOR_SPEC)
+# Dataclass annotation resolution requires registration before execution.
+sys.modules[_SELECTOR_SPEC.name] = selector
+try:
+    _SELECTOR_SPEC.loader.exec_module(selector)
+except BaseException:
+    sys.modules.pop(_SELECTOR_SPEC.name, None)
+    raise
+build_argv = selector.build_argv
+load_manifest = selector.load_manifest
+select_for_change = selector.select_for_change
+
 VERIFIER = ROOT / "scripts" / "verify_fast_summary.py"
 
 GUARD_FILES = (
@@ -137,67 +154,93 @@ def _artifacts(root, plugin, manifest, *, summary_line=None,
     discovered = _discovered(plugin)
     if expected_files is None:
         expected_files = discovered
+    node_ids = sorted(f"{path}::test_ok" for path in expected_files)
+    count = len(expected_files)
     if summary_line is None:
-        summary_line = f"{len(expected_files)} passed in 0.01s"
+        summary_line = f"{count} passed in 0.01s"
     selection = {
         "status": selection_status,
         "select_all_reason": select_all_reason,
         "discovered": len(discovered),
         "excluded": excluded,
         "added_back": added_back,
-        "included": len(expected_files),
+        "included": count,
         "included_files": expected_files,
         "included_sha256": "0" * 64,
     }
-    canary = {
-        "schema_version": 1,
-        "mode": "collect-only",
+    recomputed, _, _ = select_for_change(
+        root, load_manifest(manifest), base_sha)
+    canary_command = build_argv(recomputed, plugin, "collect-only")
+    run_command = build_argv(recomputed, plugin, "run", workers=4)
+    common = {
+        "schema_version": 2,
         "manifest": {"path": "scripts/fast_suite_exclusions.json",
                      "sha256": manifest_sha},
         "base_sha": base_sha,
-        "head_sha": base_sha,
+        "head_sha": head_sha,
+        "run_id": "test-run",
+        "run_attempt": "1",
         "selection": selection,
-        "canary": {
-            "command": ["python", "-m", "pytest", "--collect-only", "-q"],
-            "ignore_paths": [],
-            "rc": 0,
-            "summary_line": f"{len(expected_files)} tests collected in 0.01s",
-            "expected_files": expected_files,
-            "collected_files": expected_files,
-            "collected_items": len(expected_files),
-            "missing": [],
-            "extra": [],
-        },
     }
-    summary = {
-        "schema_version": 1,
-        "mode": "run",
-        "manifest": {"path": "scripts/fast_suite_exclusions.json",
-                     "sha256": manifest_sha},
-        "base_sha": base_sha,
-        "head_sha": base_sha,
-        "selection": selection,
-        "run": {
-            "command": ["python", "-m", "pytest", "-ra"],
-            "rc": 0,
-            "summary_line": summary_line,
-            "collected": len(expected_files),
-            "passed": len(expected_files),
-            "failed": 0,
-            "errors": 0,
-            "skipped": 0,
-            "deselected": 0,
-        },
+    canary = dict(common, mode="collect-only", canary={
+        "command": canary_command,
+        "ignore_paths": [argument.split("=", 1)[1]
+                         for argument in canary_command
+                         if argument.startswith("--ignore=")],
+        "rc": 0,
+        "summary_line": f"{count} tests collected in 0.01s",
+        "expected_files": expected_files,
+        "collected_files": expected_files,
+        "collected_items": count,
+        "collected_node_ids": node_ids,
+        "missing": [],
+        "extra": [],
+        "unresolvable_node_id_bases": [],
+    })
+    summary = dict(common, mode="run", run={
+        "command": run_command,
+        "rc": 0,
+        "summary_line": summary_line,
+        "collected": count,
+        "passed": count,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0,
+        "deselected": 0,
+        "xfailed": 0,
+        "xpassed": 0,
+    })
+    record = {
+        "schema_version": 3,
+        "collected": count,
+        "passed": count,
+        "skipped": 0,
+        "failed": 0,
+        "errors": 0,
+        "deselected": 0,
+        "xfailed": 0,
+        "xpassed": 0,
+        "exitstatus": 0,
+        "summary_line": summary_line,
+        "terminal_node_ids": node_ids,
+        "items_before_modifyitems": count,
+        "items_after_modifyitems": count,
+        "run_id": "test-run",
+        "run_attempt": "1",
+        "skip_sites": [],
+        "skipped_at_collection": 0,
     }
     summary_path = root / ".fast-suite-summary.json"
     canary_path = root / ".fast-suite-canary.json"
+    record_path = root / ".full-run-record.json"
     summary_path.write_text(json.dumps(summary, indent=1), encoding="utf-8")
     canary_path.write_text(json.dumps(canary, indent=1), encoding="utf-8")
+    record_path.write_text(json.dumps(record, indent=1), encoding="utf-8")
     return summary_path, canary_path, base_sha
 
 
 def _run(summary_path, canary_path, base_sha, root, manifest,
-         run_record=None):
+         run_record=None, env_updates=None):
     command = [
         sys.executable, str(VERIFIER),
         "--summary", str(summary_path),
@@ -207,10 +250,15 @@ def _run(summary_path, canary_path, base_sha, root, manifest,
     ]
     if base_sha is not None:
         command += ["--base-sha", base_sha]
-    if run_record is not None:
-        command += ["--run-record", str(run_record)]
+    if run_record is None:
+        run_record = root / ".full-run-record.json"
+    command += ["--run-record", str(run_record)]
     env = os.environ.copy()
     env.pop("BASE_SHA", None)
+    env["GITHUB_RUN_ID"] = "test-run"
+    env["GITHUB_RUN_ATTEMPT"] = "1"
+    if env_updates:
+        env.update(env_updates)
     return subprocess.run(
         command, capture_output=True, text=True, env=env, timeout=120)
 
@@ -219,7 +267,8 @@ def test_the_valid_baseline_is_green(tmp_path, rig):
     """Non-vacuity floor: every bad-input row below starts from this pair."""
     root, plugin, manifest = rig
     summary, canary, base_sha = _artifacts(root, plugin, manifest)
-    proc = _run(summary, canary, base_sha, root, manifest)
+    proc = _run(summary, canary, base_sha, root, manifest,
+                env_updates={"GITHUB_ACTIONS": "true"})
     assert proc.returncode == 0, proc.stderr
     assert "VERIFY-OK" in proc.stdout
 
@@ -338,8 +387,10 @@ def test_a_selection_that_misses_a_closure_add_back_is_refused(tmp_path, rig):
 def test_a_decorated_summary_is_accepted(tmp_path, rig):
     """The CI run form (`-ra`, no `-q`) is `=`-decorated."""
     root, plugin, manifest = rig
+    count = len(_discovered(plugin))
     summary, canary, base_sha = _artifacts(
-        root, plugin, manifest, summary_line="===== 7 passed in 0.01s =====")
+        root, plugin, manifest,
+        summary_line=f"===== {count} passed in 0.01s =====")
     proc = _run(summary, canary, base_sha, root, manifest)
     assert proc.returncode == 0, proc.stderr
     assert "VERIFY-OK" in proc.stdout
@@ -367,6 +418,12 @@ def _set(path, value):
         ("run-absent", "ABSENT", None, "ARTIFACT-ABSENT-RUN"),
         ("schema-version", None, _set(("schema_version",), 99),
          "SCHEMA-VERSION-CANARY"),
+        ("mode-missing", None, lambda d: d.pop("mode"), "KEY-MISSING-CANARY"),
+        ("mode-mismatch", None, _set(("mode",), "run"), "MODE-MISMATCH"),
+        ("manifest-key-missing", None,
+         lambda d: d["manifest"].pop("sha256"), "KEY-MISSING-CANARY"),
+        ("selection-not-object", None, _set(("selection",), None),
+         "BAD-FIELD-CANARY-SELECTION"),
         ("key-missing", None,
          lambda d: d["canary"].pop("summary_line"), "KEY-MISSING-CANARY"),
         ("no-summary", None, _set(("canary", "summary_line"), ""),
@@ -391,7 +448,8 @@ def _set(path, value):
         # than the run, with no deselection reported anywhere.
         ("collected-count-mismatch", None,
          lambda d: d["canary"].update(
-             collected_items=d["canary"]["collected_items"] + 1),
+             collected_items=d["canary"]["collected_items"] + 1,
+             summary_line=f"{d['canary']['collected_items'] + 1} tests collected in 0.01s"),
          "COLLECTED-COUNT-MISMATCH"),
         ("ignore-mismatch", None,
          _set(("canary", "ignore_paths"), ["/tmp/x.py"]),
@@ -465,8 +523,8 @@ def test_the_runner_canary_rejects_a_deselected_summary(tmp_path, rig):
          "--base-sha", base_sha, "--repo-root", str(root),
          "--manifest", str(manifest), "--summary", str(summary),
          "--canary", str(summary.with_name(".fast-suite-canary.json"))],
-        capture_output=True, text=True, timeout=120)
-    assert proc.returncode == 1, proc.stdout + proc.stderr
+        capture_output=True, text=True, timeout=120,
+        env=env_without_pytest_vars())
     assert "CANARY FAILURE" in proc.stderr
     assert "reports deselection or errors" in proc.stderr
 
@@ -481,6 +539,155 @@ def test_no_summary_line_uses_the_no_summary_condition(tmp_path, rig):
     assert "NO-SUMMARY-RUN" in proc.stderr
     assert "RUN-COLLECTED" not in proc.stderr
 
+def _mutate_record(root, mutation):
+    path = root / ".full-run-record.json"
+    _mutate(path, mutation)
+    return path
+
+
+@pytest.mark.parametrize("case_id,mutation,expected", [
+    ("schema", _set(("schema_version",), 2), "SCHEMA-VERSION-RECORD"),
+    ("missing-key", lambda d: d.pop("terminal_node_ids"), "KEY-MISSING"),
+    ("null-deselected", _set(("deselected",), None), "BAD-FIELD-DESELECTED"),
+    ("null-before", _set(("items_before_modifyitems",), None),
+     "BAD-FIELD-ITEMS_BEFORE_MODIFYITEMS"),
+    ("null-after", _set(("items_after_modifyitems",), None),
+     "BAD-FIELD-ITEMS_AFTER_MODIFYITEMS"),
+    ("collection-hook", lambda d: d.update(
+        items_after_modifyitems=d["collected"] - 1),
+     "COLLECTION-HOOK-NARROWING"),
+    ("exitstatus", _set(("exitstatus",), 1), "EXITSTATUS"),
+    ("record-failed", _set(("failed",), 1), "RECORD-FAILED"),
+    ("record-errors", _set(("errors",), 1), "RECORD-ERRORS"),
+    ("record-deselected", _set(("deselected",), 1), "RECORD-DESELECTED"),
+    ("negative-passed", _set(("passed",), -1), "BAD-FIELD-PASSED"),
+    ("terminal-duplicate", lambda d: d["terminal_node_ids"].__setitem__(
+        1, d["terminal_node_ids"][0]), "TERMINAL-SET"),
+    ("terminal-missing", lambda d: d["terminal_node_ids"].pop(), "TERMINAL-SET"),
+    ("same-count-different-node", lambda d: d["terminal_node_ids"].__setitem__(
+        0, "tests/test_other.py::test_ok"), "NODE-ID-SET-MISMATCH"),
+    ("bad-skip-sites", _set(("skip_sites",), [{"file": "x"}]), "SKIP-SITES-BAD"),
+    ("skip-total", _set(("skip_sites",), [
+        {"file": "tests/test_x.py", "reason": "x", "count": 1}]),
+     "SKIP-SITES-INCOMPLETE"),
+    ("collection-skips", _set(("skipped_at_collection",), 1),
+     "BAD-FIELD-SKIPPED_AT_COLLECTION"),
+])
+def test_each_record_failure_is_reachable(tmp_path, rig, case_id, mutation, expected):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    record = _mutate_record(root, mutation)
+    proc = _run(summary, canary, base_sha, root, manifest, run_record=record)
+    assert proc.returncode == 1, (case_id, proc.stdout, proc.stderr)
+    assert expected in proc.stderr, (case_id, proc.stderr)
+
+
+@pytest.mark.parametrize("path,value,expected", [
+    (("run", "command", -2), "2", "RUN-COMMAND-MISMATCH"),
+    (("run", "xfailed"), 1, "RUN-SUMMARY-OUTCOME-MISMATCH"),
+])
+def test_run_command_and_outcome_mutations_are_refused(
+        tmp_path, rig, path, value, expected):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    _mutate(summary, _set(path, value))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1
+    assert expected in proc.stderr
+
+
+def test_a_canary_command_mutation_is_refused(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    _mutate(canary, lambda d: d["canary"]["command"].append("-q"))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1
+    assert "CANARY-COMMAND-MISMATCH" in proc.stderr
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda d: d["canary"].update(
+        collected_node_ids=list(reversed(d["canary"]["collected_node_ids"]))),
+    lambda d: d["canary"]["collected_node_ids"].__setitem__(
+        1, d["canary"]["collected_node_ids"][0]),
+])
+def test_invalid_canary_node_ids_are_refused(tmp_path, rig, mutation):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    _mutate(canary, mutation)
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1
+    assert "CANARY-NODE-IDS" in proc.stderr
+
+
+@pytest.mark.parametrize("artifact_name", ["summary", "canary", "record"])
+def test_cross_artifact_run_identity_is_required(
+        tmp_path, rig, artifact_name):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    artifact = {"summary": summary, "canary": canary,
+                "record": root / ".full-run-record.json"}[artifact_name]
+    _mutate(artifact, _set(("run_attempt",), "2"))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1
+    assert "RUN-IDENTITY" in proc.stderr
+
+
+def test_actions_rejects_null_identity_even_when_all_artifacts_agree(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    for artifact in (summary, canary, root / ".full-run-record.json"):
+        _mutate(artifact, _set(("run_id",), None))
+    proc = _run(summary, canary, base_sha, root, manifest,
+                env_updates={"GITHUB_ACTIONS": "true"})
+    assert proc.returncode == 1
+    assert "RUN-IDENTITY" in proc.stderr
+
+
+def test_summary_record_outcome_disagreement_is_refused(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+
+    def make_xfail(record):
+        record["passed"] -= 1
+        record["xfailed"] = 1
+        record["summary_line"] = (
+            f"{record['passed']} passed, 1 xfailed in 0.01s")
+
+    _mutate_record(root, make_xfail)
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1
+    assert "OUTCOME-MISMATCH" in proc.stderr
+
+
+def test_consistent_but_incomplete_outcome_accounting_is_refused(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+
+    def lose_one(artifact):
+        target = artifact["run"] if "run" in artifact else artifact
+        target["passed"] -= 1
+        target["summary_line"] = f"{target['passed']} passed in 0.01s"
+
+    _mutate(summary, lose_one)
+    _mutate_record(root, lose_one)
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1
+    assert "ACCOUNTING" in proc.stderr
+
+
+def test_the_run_record_option_is_required(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    proc = subprocess.run(
+        [sys.executable, str(VERIFIER), "--summary", str(summary),
+         "--canary", str(canary), "--repo-root", str(root),
+         "--manifest", str(manifest), "--base-sha", base_sha],
+        capture_output=True, text=True, timeout=60)
+    assert proc.returncode == 2
+    assert "--run-record" in proc.stderr
+
+
 def _fake_collect(plugin, discovered, summary):
     """A stand-in `pytest` module in the runner's working directory."""
     fake = "\n".join(f'print("{rel}::test_ok")' for rel in discovered)
@@ -490,6 +697,9 @@ def _fake_collect(plugin, discovered, summary):
 
 def _run_canary(root, manifest, summary, base_sha, env=None):
     runner = ROOT / "scripts" / "run_fast_suite.py"
+    if env is None:
+        env = env_without_pytest_vars()
+        env.pop("PACT_FULL_RUN_RECORD_OWNER", None)
     return subprocess.run(
         [sys.executable, str(runner), "--collect-only",
          "--base-sha", base_sha, "--repo-root", str(root),
@@ -504,28 +714,62 @@ def test_the_canary_records_its_collected_item_count(tmp_path, rig):
     base_sha = _git(root, "rev-parse", "HEAD")
     discovered = _discovered(plugin)
     _fake_collect(plugin, discovered,
-                  f"{len(discovered) + 5} tests collected in 0.01s")
+                  f"{len(discovered)} tests collected in 0.01s")
     summary = tmp_path / "summary.json"
     proc = _run_canary(root, manifest, summary, base_sha)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     canary = json.loads(
         (tmp_path / ".fast-suite-canary.json").read_text(encoding="utf-8"))
-    assert canary["canary"]["collected_items"] == len(discovered) + 5
+    assert canary["canary"]["collected_items"] == len(discovered)
+    assert canary["canary"]["collected_node_ids"] == sorted(
+        f"{path}::test_ok" for path in discovered)
 
 
-def test_the_runner_refuses_an_inherited_pytest_addopts(tmp_path, rig):
-    """Inherited options can narrow the run where no artifact records it."""
+def test_the_canary_refuses_a_count_node_id_mismatch(tmp_path, rig):
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    discovered = _discovered(plugin)
+    _fake_collect(plugin, discovered,
+                  f"{len(discovered) + 5} tests collected in 0.01s")
+    summary = tmp_path / "summary.json"
+    proc = _run_canary(root, manifest, summary, base_sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "unique collected node IDs" in proc.stderr
+
+
+def test_the_canary_refuses_duplicate_node_ids(tmp_path, rig):
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    discovered = _discovered(plugin)
+    fake = "\n".join(f'print("{relative}::test_ok")'
+                     for relative in discovered)
+    fake += f'\nprint("{discovered[0]}::test_ok")\n'
+    fake += f'print("{len(discovered)} tests collected in 0.01s")\n'
+    (plugin / "pytest.py").write_text(fake, encoding="utf-8")
+    proc = _run_canary(root, manifest, tmp_path / "summary.json", base_sha)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "duplicate collected node IDs" in proc.stderr
+
+
+@pytest.mark.parametrize("name", [
+    "PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTEST_XDIST_WORKER",
+    "PACT_FULL_RUN_RECORD_OWNER",
+])
+def test_the_runner_refuses_inherited_pytest_or_recorder_environment(
+        tmp_path, rig, name):
+    """Inherited options can narrow the run or suppress its in-band record."""
     root, plugin, manifest = rig
     base_sha = _git(root, "rev-parse", "HEAD")
     discovered = _discovered(plugin)
     _fake_collect(plugin, discovered,
                   f"{len(discovered)} tests collected in 0.01s")
     summary = tmp_path / "summary.json"
-    env = os.environ.copy()
-    env["PYTEST_ADDOPTS"] = "-k nothing"
+    env = env_without_pytest_vars()
+    env.pop("PACT_FULL_RUN_RECORD_OWNER", None)
+    env[name] = "contaminated"
     proc = _run_canary(root, manifest, summary, base_sha, env=env)
     assert proc.returncode == 3, proc.stdout + proc.stderr
-    assert "PYTEST_ADDOPTS" in proc.stderr
+    assert name in proc.stderr
     assert not (tmp_path / ".fast-suite-canary.json").exists()
 
 
@@ -535,17 +779,30 @@ _LISTED_SITE = {"file": "tests/test_plugin_root_allowlist.py",
                 "reason": "the environment cannot hold a NUL", "count": 1}
 
 
-def _record(tmp_path, sites):
-    path = tmp_path / ".full-run-record.json"
-    path.write_text(json.dumps({"skip_sites": sites}), encoding="utf-8")
-    return path
+def _record_with_sites(summary_path, sites):
+    """Give both fast summary and record the same structurally valid skips."""
+    root = summary_path.parent
+    record_path = root / ".full-run-record.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    skipped = sum(site["count"] for site in sites)
+    passed = record["collected"] - skipped
+    summary_line = f"{passed} passed, {skipped} skipped in 0.01s"
+    for artifact, nested in ((summary["run"], "run"), (record, "record")):
+        artifact["passed"] = passed
+        artifact["skipped"] = skipped
+        artifact["summary_line"] = summary_line
+    record["skip_sites"] = sites
+    summary_path.write_text(json.dumps(summary), encoding="utf-8")
+    record_path.write_text(json.dumps(record), encoding="utf-8")
+    return record_path
 
 
 def test_a_listed_skip_site_is_reported_as_admitted(tmp_path, rig):
     root, plugin, manifest = rig
     summary, canary, base_sha = _artifacts(root, plugin, manifest)
     proc = _run(summary, canary, base_sha, root, manifest,
-                run_record=_record(tmp_path, [_LISTED_SITE]))
+                run_record=_record_with_sites(summary, [_LISTED_SITE]))
     assert proc.returncode == 0, proc.stderr
     assert "SKIP-ADVISORY-OK" in proc.stdout, proc.stdout
 
@@ -557,7 +814,7 @@ def test_an_unlisted_skip_site_warns_without_failing(tmp_path, rig):
     unlisted = {"file": "tests/test_new.py", "reason": "brand new skip",
                 "count": 1}
     proc = _run(summary, canary, base_sha, root, manifest,
-                run_record=_record(tmp_path, [unlisted]))
+                run_record=_record_with_sites(summary, [unlisted]))
     assert proc.returncode == 0, proc.stderr
     assert "VERIFY-OK" in proc.stdout
     assert "SKIP-ADVISORY SKIP-UNLISTED" in proc.stderr, proc.stderr
@@ -567,19 +824,20 @@ def test_an_unlisted_skip_site_warns_without_failing(tmp_path, rig):
 def test_an_over_allowance_skip_site_warns_without_failing(tmp_path, rig):
     root, plugin, manifest = rig
     summary, canary, base_sha = _artifacts(root, plugin, manifest)
-    proc = _run(summary, canary, base_sha, root, manifest,
-                run_record=_record(tmp_path, [dict(_LISTED_SITE, count=9)]))
+    proc = _run(
+        summary, canary, base_sha, root, manifest,
+        run_record=_record_with_sites(summary, [dict(_LISTED_SITE, count=9)]))
     assert proc.returncode == 0, proc.stderr
     assert "SKIP-ADVISORY SKIP-OVER-ALLOWANCE" in proc.stderr, proc.stderr
 
 
-def test_an_absent_run_record_is_reported_and_never_fails(tmp_path, rig):
+def test_an_absent_run_record_is_a_hard_failure(tmp_path, rig):
     root, plugin, manifest = rig
     summary, canary, base_sha = _artifacts(root, plugin, manifest)
     proc = _run(summary, canary, base_sha, root, manifest,
                 run_record=tmp_path / "missing.json")
-    assert proc.returncode == 0, proc.stderr
-    assert "skip sites not compared" in proc.stderr, proc.stderr
+    assert proc.returncode == 1, proc.stderr
+    assert "RECORD-ABSENT" in proc.stderr
 
 
 def test_the_advisory_does_not_mask_a_real_failure(tmp_path, rig):
@@ -587,9 +845,10 @@ def test_the_advisory_does_not_mask_a_real_failure(tmp_path, rig):
     summary, canary, base_sha = _artifacts(root, plugin, manifest)
     canary.unlink()
     proc = _run(summary, canary, base_sha, root, manifest,
-                run_record=_record(tmp_path, [_LISTED_SITE]))
+                run_record=_record_with_sites(summary, [_LISTED_SITE]))
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "VERIFY-FAILURE" in proc.stderr
+    assert "SKIP-ADVISORY" not in proc.stdout + proc.stderr
 
 
 def test_the_artifact_paths_have_no_environment_default(tmp_path, rig):
