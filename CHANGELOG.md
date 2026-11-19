@@ -32,7 +32,7 @@ For a plugin user, one instruction changes: teammates are no longer told to set 
 
 ### Why
 
-A signal nothing reads and nothing enforces is not a signal: it asked agents to attest a save no mechanism could verify, against a referent (the agent's own memory directory) with no task-scoped trace. The durable record of what was actually saved already exists downstream — the `agent_handoff` journal events at lead acceptance and the secretary's harvest ledger — so the flag retired rather than gained an enforcer.
+A signal nothing reads and nothing enforces is not a signal: it asked agents to attest a save no mechanism could verify, against a referent (the agent's own memory directory) with no task-scoped trace. The durable record of banked HANDOFFs already exists downstream — the `agent_handoff` journal events at lead acceptance and the secretary's harvest ledger — so the flag retired rather than gained an enforcer.
 
 ## v4.8.35: find order-dependent tests and isolate the state tests shared
 
