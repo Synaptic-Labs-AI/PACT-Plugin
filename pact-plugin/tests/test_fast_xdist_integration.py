@@ -48,6 +48,14 @@ def test_never_collected():
     assert True
 '''
 
+WORKER_ONLY_SILENT_REMOVAL_CONFTEST = '''
+
+def pytest_collection_modifyitems(config, items):
+    worker = getattr(config, "workerinput", None)
+    if worker is not None and items:
+        del items[-1]
+'''
+
 
 def _write(path, text="def test_ok():\n    assert True\n"):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -103,7 +111,8 @@ def _rig(tmp_path, suites=None, extra_conftest=""):
         **(suites or {}),
     }
     for relative, source in selected_suites.items():
-        _write(plugin / relative, source)
+        if source is not None:
+            _write(plugin / relative, source)
     shutil.copy2(RECORDER, plugin / "tests" / RECORDER.name)
     (plugin / "conftest.py").write_text(
         RIG_CONFTEST + extra_conftest, encoding="utf-8")
@@ -210,6 +219,47 @@ def test_real_distributed_module_skip_reconciles_without_a_node_id(tmp_path):
                    for node_id in canary["canary"]["collected_node_ids"])
     assert not any(node_id.startswith("tests/test_alpha.py")
                    for node_id in record["terminal_node_ids"])
+
+
+def test_real_one_selected_non_guard_file_retains_four_worker_evidence(tmp_path):
+    rig = _rig(tmp_path, suites={"tests/test_beta.py": None})
+    base_sha = rig.base_sha
+    _write(rig.root / "README.md", "ordinary selection\n")
+    _git(rig.root, "add", "README.md")
+    _git(rig.root, "commit", "-q", "-m", "apply exclusions")
+    rig.base_sha = base_sha
+    summary, canary, record, _ = _assert_valid(rig)
+    expected_files = sorted([*GUARD_FILES, "tests/test_alpha.py"])
+    assert canary["canary"]["expected_files"] == expected_files
+    assert summary["run"]["command"][-4:] == ["-n", "4", "--dist", "loadfile"]
+    assert record["collected"] == 14
+    assert record["items_before_modifyitems"] == 14
+    assert record["items_after_modifyitems"] == 14
+
+
+def test_real_collection_hook_narrowing_is_refused(tmp_path):
+    control = _rig(tmp_path / "control")
+    _, control_canary, control_record, _ = _assert_valid(control)
+
+    rig = _rig(
+        tmp_path / "narrowed",
+        extra_conftest=WORKER_ONLY_SILENT_REMOVAL_CONFTEST)
+    canary_proc = _runner(rig, collect_only=True)
+    assert canary_proc.returncode == 0, canary_proc.stdout + canary_proc.stderr
+    assert _read(rig.canary)["canary"]["collected_node_ids"] == (
+        control_canary["canary"]["collected_node_ids"])
+    run_proc = _runner(rig)
+    assert run_proc.returncode == 0, run_proc.stdout + run_proc.stderr
+    record = _read(rig.record)
+    assert record["items_before_modifyitems"] == (
+        control_record["items_before_modifyitems"])
+    assert record["items_after_modifyitems"] < (
+        control_record["items_after_modifyitems"])
+    assert record["collected"] == record["items_after_modifyitems"]
+    assert record["deselected"] == 0
+    verdict = _verify(rig)
+    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
+    assert "COLLECTION-HOOK-NARROWING" in verdict.stderr
 
 
 def test_real_run_only_same_count_node_mutation_is_refused(tmp_path):
