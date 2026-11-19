@@ -28,7 +28,7 @@ For a plugin user, one instruction changes: teammates are no longer told to set 
 
 - The "Confirm Memory Saved" step is deleted from the pact-agent-teams skill's Before Completing checklist. The flag was self-reported and unenforced: nothing verified a save, and the measured incident behind the change found tasks flagged true with no record saved anywhere. The save-discipline prose in step 1 is untouched — domain learnings still go to agent memory, institutional knowledge still goes in the HANDOFF.
 - The agent-handoff emitter's docstring drops the line documenting that no hook enforces the flag; the flag no longer exists, so the caveat had no referent. No code changes.
-- Two validation-silence tests swap their example extra key to a neutral name and drop a comment that misdescribed the key as a real secretary field; the property under test — extra keys in a HANDOFF stay silent — is unchanged and still positively asserted.
+- Two validation-silence tests swap their example extra key to a neutral name; one also drops a comment that misdescribed the old key as a real secretary field. The property under test — extra keys in a HANDOFF stay silent — is unchanged and still positively asserted.
 
 ### Why
 
