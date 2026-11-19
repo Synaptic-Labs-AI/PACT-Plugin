@@ -622,30 +622,49 @@ class TestNoFirstActionFossilInSkillBodies:
         )
 
 
-class TestMemorySavedRetiredFromAgentTeamsSkill:
+def _instruction_surface_population():
+    """Every tracked markdown file across the four LLM-loaded surfaces.
+
+    Built from the collection-time populations so an untracked scratch
+    file stays invisible and the installed-layout skip behavior matches
+    the rest of the module.
+    """
+    files = []
+    for surface in ("skills", "agents", "commands", "protocols"):
+        files.extend(_collection_population(f"{PLUGIN_ROOT.name}/{surface}", "**"))
+    return sorted(p for p in files if p.suffix == ".md")
+
+
+class TestMemorySavedRetiredFromInstructionSurfaces:
     """The memory_saved flag was retired in v4.8.36: zero code readers,
     self-reported, unenforced — the "Confirm Memory Saved" checklist step
     in pact-agent-teams/SKILL.md and the emitter docstring caveat naming
     the flag were both deleted. Nothing else asserted that retirement, so
     a future reintroduction would land unpinned.
 
-    Scoped to the instruction file only: the CHANGELOG's retirement note
-    legitimately names the flag. A bare substring check is deliberate —
-    it catches backtick-wrapped, fenced, and prose forms alike.
+    Scoped to the four LLM-loaded instruction surfaces (skills/, agents/,
+    commands/, protocols/ — every tracked markdown file): a token an LLM
+    loads as instruction re-teaches the retired flag wherever it appears.
+    The repo-root CHANGELOG's retirement note legitimately names the flag
+    and stays out of scope. A bare substring check is deliberate — it
+    catches backtick-wrapped, fenced, and prose forms alike.
     """
 
-    AGENT_TEAMS_PATH = SKILLS_DIR / "pact-agent-teams" / "SKILL.md"
     FORBIDDEN_TOKEN = "memory_saved"
 
-    def test_agent_teams_skill_has_no_memory_saved(self):
-        text = self.AGENT_TEAMS_PATH.read_text(encoding="utf-8")
-        assert self.FORBIDDEN_TOKEN not in text, (
-            f"{self.AGENT_TEAMS_PATH.relative_to(SKILLS_DIR.parent)} "
-            f"re-teaches the retired memory_saved flag. The flag was "
-            f"removed in v4.8.36 (zero code readers, unenforced — a task "
-            f"could attest a save no mechanism verified); reintroducing "
-            f"the token revives a write-only signal. Update this pin "
-            f"deliberately if the flag ever returns with an enforcer."
+    def test_no_memory_saved_in_any_llm_loaded_surface(self):
+        offenders = [
+            p for p in _instruction_surface_population()
+            if self.FORBIDDEN_TOKEN in p.read_text(encoding="utf-8")
+        ]
+        assert not offenders, (
+            f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in offenders]} "
+            f"re-teach the retired memory_saved flag. The flag was removed "
+            f"in v4.8.36 (zero code readers, unenforced — a task could "
+            f"attest a save no mechanism verified); reintroducing the token "
+            f"in an LLM-loaded surface revives a write-only signal. Update "
+            f"this pin deliberately if the flag ever returns with an "
+            f"enforcer."
         )
 
 
