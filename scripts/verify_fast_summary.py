@@ -275,6 +275,34 @@ def _require_commands(canary: dict, summary: dict, recomputed, plugin_root: Path
             f"run command {run_command!r} != independently constructed {expected_run!r}")
 
 
+def _require_selection_identity(canary: dict, summary: dict, selection) -> None:
+    included = sorted(selection.included)
+    included_sha256 = hashlib.sha256()
+    for path in included:
+        included_sha256.update(path.encode("utf-8"))
+        included_sha256.update(b"\n")
+    expected = {
+        "status": selection.status,
+        "select_all_reason": selection.select_all_reason,
+        "discovered": len(selection.discovered),
+        "excluded": len(selection.excluded),
+        "added_back": len(selection.added_back),
+        "included": len(included),
+        "included_files": included,
+        "included_sha256": included_sha256.hexdigest(),
+    }
+    for label, artifact in (("canary", canary), ("run", summary)):
+        actual = artifact["selection"]
+        if actual != expected:
+            differing = sorted(
+                key for key in set(actual) | set(expected)
+                if actual.get(key) != expected.get(key))
+            raise VerificationFailure(
+                "SELECTION-METADATA-MISMATCH",
+                f"{label}.selection differs from the independently recomputed "
+                f"selection; mismatched fields={differing}")
+
+
 def _require_process_and_workers(canary: dict, summary: dict, record: dict) -> None:
     if canary["canary"]["rc"] != 0:
         raise VerificationFailure("CANARY-RC", f"canary rc is {canary['canary']['rc']}")
@@ -446,6 +474,7 @@ def main(argv: list[str] | None = None) -> int:
                         "EXPECTED-SET-MISMATCH", "canary.expected_files")
         _set_difference(expected, collected_files,
                         "COLLECTED-SET-MISMATCH", "canary.collected_files")
+        _require_selection_identity(canary, summary, recomputed)
         manifest_sha = _sha256_file(manifest_path)
         for label, artifact in (("canary", canary), ("run", summary)):
             if artifact["manifest"].get("sha256") != manifest_sha:

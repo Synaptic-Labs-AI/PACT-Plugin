@@ -167,7 +167,9 @@ def _artifacts(root, plugin, manifest, *, summary_line=None,
         "added_back": added_back,
         "included": count,
         "included_files": expected_files,
-        "included_sha256": "0" * 64,
+        "included_sha256": hashlib.sha256(
+            "".join(f"{path}\n" for path in sorted(expected_files)).encode("utf-8")
+        ).hexdigest(),
     }
     recomputed, _, _ = select_for_change(
         root, load_manifest(manifest), base_sha)
@@ -272,6 +274,53 @@ def test_the_valid_baseline_is_green(tmp_path, rig):
                 env_updates={"GITHUB_ACTIONS": "true"})
     assert proc.returncode == 0, proc.stderr
     assert "VERIFY-OK" in proc.stdout
+
+
+@pytest.mark.parametrize("artifact_label", ["run", "canary"])
+@pytest.mark.parametrize("field,forged_value", [
+    ("status", "forged"),
+    ("select_all_reason", "forged-reason"),
+    ("discovered", -1),
+    ("excluded", -1),
+    ("added_back", -1),
+    ("included", -1),
+    ("included_files", ["tests/not_run.py"]),
+    ("included_sha256", "f" * 64),
+])
+def test_each_selection_metadata_forgery_is_refused(
+        tmp_path, rig, artifact_label, field, forged_value):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    valid = _run(summary, canary, base_sha, root, manifest)
+    assert valid.returncode == 0, valid.stderr
+
+    target = summary if artifact_label == "run" else canary
+    _mutate(target, _set(("selection", field), forged_value))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, (artifact_label, field, proc.stdout, proc.stderr)
+    assert "SELECTION-METADATA-MISMATCH" in proc.stderr
+    assert f"{artifact_label}.selection" in proc.stderr
+    assert field in proc.stderr
+
+
+def test_the_cold_probe_run_selection_forgery_is_refused(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    valid = _run(summary, canary, base_sha, root, manifest)
+    assert valid.returncode == 0, valid.stderr
+
+    def forge(data):
+        data["selection"].update(
+            status="forged", included=1,
+            included_files=["tests/not_run.py"], included_sha256="f" * 64)
+
+    _mutate(summary, forge)
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "SELECTION-METADATA-MISMATCH" in proc.stderr
+    assert "run.selection" in proc.stderr
+    for field in ("status", "included", "included_files", "included_sha256"):
+        assert field in proc.stderr
 
 
 def test_an_add_back_selection_is_accepted(tmp_path, rig):
