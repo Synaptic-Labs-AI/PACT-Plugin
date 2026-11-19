@@ -647,16 +647,24 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     loads as instruction re-teaches the retired flag wherever it appears.
     The repo-root CHANGELOG's retirement note legitimately names the flag
     and stays out of scope. A bare substring check is deliberate — it
-    catches backtick-wrapped, fenced, and prose forms alike.
+    catches backtick-wrapped, fenced, and prose forms alike. A tracked
+    file that is not valid UTF-8 is named by the pin rather than raising
+    a bare decode error.
     """
 
     FORBIDDEN_TOKEN = "memory_saved"
 
     def test_no_memory_saved_in_any_llm_loaded_surface(self):
-        offenders = [
-            p for p in _instruction_surface_population()
-            if self.FORBIDDEN_TOKEN in p.read_text(encoding="utf-8")
-        ]
+        offenders = []
+        undecodable = []
+        for path in _instruction_surface_population():
+            try:
+                text = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                undecodable.append(path)
+                continue
+            if self.FORBIDDEN_TOKEN in text:
+                offenders.append(path)
         assert not offenders, (
             f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in offenders]} "
             f"re-teach the retired memory_saved flag. The flag was removed "
@@ -665,6 +673,12 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             f"in an LLM-loaded surface revives a write-only signal. Update "
             f"this pin deliberately if the flag ever returns with an "
             f"enforcer."
+        )
+        assert not undecodable, (
+            f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in undecodable]} "
+            f"is not valid UTF-8, so this pin cannot read it to check for "
+            f"the retired memory_saved flag; instruction surfaces must "
+            f"stay UTF-8."
         )
 
 
