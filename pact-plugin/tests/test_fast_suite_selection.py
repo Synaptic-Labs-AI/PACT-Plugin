@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 import ci_contract
+from ci_full_run_record import OWNER_ENV
 from helpers import env_without_pytest_vars
 
 SELECTOR = Path("scripts") / "fast_suite_selection.py"
@@ -2273,6 +2274,7 @@ class TestRunnerArtifactDestinations:
         # No PYTEST_* name from the shell that runs the suite reaches the runner
         # or the pytest it starts.
         env = env_without_pytest_vars()
+        env.pop(OWNER_ENV, None)
         env["GITHUB_WORKSPACE"] = str(workspace)
         return env
 

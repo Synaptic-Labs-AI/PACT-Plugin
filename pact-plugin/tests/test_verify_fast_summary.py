@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from ci_full_run_record import OWNER_ENV
 from helpers import env_without_pytest_vars
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -518,13 +519,15 @@ def test_the_runner_canary_rejects_a_deselected_summary(tmp_path, rig):
     (plugin / "pytest.py").write_text(fake, encoding="utf-8")
     summary = tmp_path / "summary.json"
     runner = ROOT / "scripts" / "run_fast_suite.py"
+    env = env_without_pytest_vars()
+    env.pop(OWNER_ENV, None)
     proc = subprocess.run(
         [sys.executable, str(runner), "--collect-only",
          "--base-sha", base_sha, "--repo-root", str(root),
          "--manifest", str(manifest), "--summary", str(summary),
          "--canary", str(summary.with_name(".fast-suite-canary.json"))],
         capture_output=True, text=True, timeout=120,
-        env=env_without_pytest_vars())
+        env=env)
     assert "CANARY FAILURE" in proc.stderr
     assert "reports deselection or errors" in proc.stderr
 
