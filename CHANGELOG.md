@@ -18,6 +18,22 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.36: retire the memory_saved flag
+
+### Summary
+
+For a plugin user, one instruction changes: teammates are no longer told to set a `memory_saved` flag in task metadata before completing. No hook, agent, command or test behaves differently — the flag had zero code readers, so removing it changes no observable behavior.
+
+### What landed
+
+- The "Confirm Memory Saved" step is deleted from the pact-agent-teams skill's Before Completing checklist. The flag was self-reported and unenforced: nothing verified a save, and the measured incident behind the change found tasks flagged true with no record saved anywhere. The save-discipline prose in step 1 is untouched — domain learnings still go to agent memory, institutional knowledge still goes in the HANDOFF.
+- The agent-handoff emitter's docstring drops the line documenting that no hook enforces the flag; the flag no longer exists, so the caveat had no referent. No code changes.
+- Two validation-silence tests swap their example extra key to a neutral name and drop a comment that misdescribed the key as a real secretary field; the property under test — extra keys in a HANDOFF stay silent — is unchanged and still positively asserted.
+
+### Why
+
+A signal nothing reads and nothing enforces is not a signal: it asked agents to attest a save no mechanism could verify, against a referent (the agent's own memory directory) with no task-scoped trace. The durable record of what was actually saved already exists downstream — the `agent_handoff` journal events at lead acceptance and the secretary's harvest ledger — so the flag retired rather than gained an enforcer.
+
 ## v4.8.35: find order-dependent tests and isolate the state tests shared
 
 ### Summary

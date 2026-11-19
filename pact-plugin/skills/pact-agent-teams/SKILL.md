@@ -628,11 +628,6 @@ Before returning your final output:
 
    If you're working without an assigned task (no HANDOFF will be collected), message the secretary directly to save significant decisions or non-obvious discoveries: `SendMessage(to="secretary", message="[{your-name}→secretary] Save: {what you learned and why it matters}", summary="Save request: {topic}")`
 
-2. **Confirm Memory Saved**: After saving domain learnings, set `memory_saved: true` in your task metadata:
-   ```
-   TaskUpdate(taskId, metadata={"memory_saved": true})
-   ```
-
 ## Shutdown
 
 When you receive a `shutdown_request`:
