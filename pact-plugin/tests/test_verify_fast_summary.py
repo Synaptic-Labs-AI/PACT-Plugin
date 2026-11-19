@@ -528,6 +528,7 @@ def test_the_runner_canary_rejects_a_deselected_summary(tmp_path, rig):
          "--canary", str(summary.with_name(".fast-suite-canary.json"))],
         capture_output=True, text=True, timeout=120,
         env=env)
+    assert proc.returncode == 1
     assert "CANARY FAILURE" in proc.stderr
     assert "reports deselection or errors" in proc.stderr
 
@@ -551,6 +552,13 @@ def _mutate_record(root, mutation):
 @pytest.mark.parametrize("case_id,mutation,expected", [
     ("schema", _set(("schema_version",), 2), "SCHEMA-VERSION-RECORD"),
     ("missing-key", lambda d: d.pop("terminal_node_ids"), "KEY-MISSING"),
+    ("no-summary", _set(("summary_line",), ""), "NO-SUMMARY-RECORD"),
+    ("zero-collected", lambda d: d.update(
+        collected=0, items_before_modifyitems=0, items_after_modifyitems=0),
+     "RECORD-COLLECTED"),
+    ("summary-outcome-mismatch", lambda d: d.update(
+        summary_line=f"{d['passed'] + 1} passed in 0.01s"),
+     "RECORD-SUMMARY-OUTCOME-MISMATCH"),
     ("null-deselected", _set(("deselected",), None), "BAD-FIELD-DESELECTED"),
     ("null-before", _set(("items_before_modifyitems",), None),
      "BAD-FIELD-ITEMS_BEFORE_MODIFYITEMS"),

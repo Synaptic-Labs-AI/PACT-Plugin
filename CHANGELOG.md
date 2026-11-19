@@ -27,10 +27,10 @@ The fast PR suite now runs its selected tests with four pytest-xdist workers usi
 ### What landed
 
 - The real fast run uses fixed `-n 4 --dist loadfile` arguments; the canary stays serial and records every sorted, unique collected node ID.
-- Fast canary and summary artifacts move together to schema v2, adding Actions run ID and attempt, manifest and selection evidence, and xfail/xpass outcomes. The schema-v3 full-run recorder and record are unchanged and are now required for fast verification.
+- Fast canary and summary artifacts move together to schema v2, adding Actions run ID and attempt, complete collected node IDs in the canary, and xfail/xpass outcomes in the run summary. The schema-v3 full-run recorder and record are unchanged and are now required for fast verification.
 - The fast verifier independently reconstructs both commands and checks SHAs, manifest and selection identity, worker collection aggregates, arithmetic, exact terminal-node set equality, outcomes and skip accounting. Full-suite skip-allowlist differences remain advisory in the selected fast lane.
 - The runner refuses every inherited `PYTEST_*` variable and a pre-set recorder-owner variable before selection, exiting 3 without writing an artifact.
-- Real xdist integration controls cover valid skip/xfail evidence, module-level collection skips, same-count/different-node refusal and late worker loss with exit status zero, each with a matched valid control.
+- Real xdist integration covers valid skip/xfail evidence, module-level collection skips and positive execution with one selected non-guard file. Negative controls with matched valid runs cover worker-only silent collection narrowing, same-count/different-node refusal and late worker loss with exit status zero.
 
 ### Why
 
