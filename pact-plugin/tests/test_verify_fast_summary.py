@@ -961,6 +961,52 @@ def test_an_invalid_manifest_is_refused(tmp_path, rig):
     assert "rejected_manifest.json" in proc.stderr
 
 
+def test_canary_internal_parity_summary_vs_collected_items(tmp_path, rig):
+    """The canary's parsed summary count must equal its own collected_items.
+
+    This is the PARITY arm of CANARY-COLLECTED: both numbers come from the
+    canary artifact itself, so a disagreement is the artifact contradicting
+    its own evidence. Distinct from the _positive_int arm the existing
+    matrix drives (collected_items <= 0) — that one needs a bad number,
+    this one needs two DIFFERENT positive counts. Control arm first: the
+    unmutated artifacts verify green.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    control = _run(summary, canary, base_sha, root, manifest)
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert "VERIFY-OK" in control.stdout
+    count = len(_discovered(plugin))
+    _mutate(canary, _set(("canary", "summary_line"),
+                         f"{count - 1} tests collected in 0.01s"))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "CANARY-COLLECTED" in proc.stderr
+    assert "canary summary collected" in proc.stderr
+
+
+def test_a_missing_run_artifact_key_is_refused_as_key_missing_run(tmp_path, rig):
+    """A required key popped from the run artifact refuses as KEY-MISSING-RUN.
+
+    The record's missing-key case is censused by the shared matrix; this is
+    the run-artifact sibling through the same _require_keys branch (the
+    canary sibling shares the branch and differs only in label). Control
+    arm first: the unmutated artifacts verify green.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    control = _run(summary, canary, base_sha, root, manifest)
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert "VERIFY-OK" in control.stdout
+    _mutate(summary, lambda d: d["run"].pop("collected"))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "KEY-MISSING-RUN" in proc.stderr
+    assert "'collected'" in proc.stderr
+
+
 def _selection_block_of(selection):
     """The selection block the verifier's _require_selection_identity expects."""
     included = sorted(selection.included)
