@@ -28,9 +28,10 @@ The fast PR suite now runs its selected tests with four pytest-xdist workers usi
 
 - The real fast run uses fixed `-n 4 --dist loadfile` arguments; the canary stays serial and records every sorted, unique collected node ID.
 - Fast canary and summary artifacts move together to schema v2, adding Actions run ID and attempt, complete collected node IDs in the canary, and xfail/xpass outcomes in the run summary. The schema-v3 full-run recorder and record are unchanged and are now required for fast verification.
-- The fast verifier independently reconstructs both commands and the complete selection payload, requires both artifacts' selection metadata to equal that recomputation exactly, and checks SHAs, manifest identity, worker collection aggregates, arithmetic, exact terminal-node set equality, outcomes and skip accounting. Full-suite skip-allowlist differences remain advisory in the selected fast lane.
+- The fast verifier independently reconstructs both commands and the complete selection payload, requires both artifacts' selection metadata to equal that recomputation exactly, and checks SHAs, manifest identity, arithmetic, outcomes and skip accounting. Worker collection aggregates are recorded by the schema-v3 recorder, which refuses the aggregate when a ready worker fails to report; the verifier gates worker completeness through that null-field refusal together with exact terminal-node set equality, and gates collection-hook narrowing separately. Full-suite skip-allowlist differences remain advisory in the selected fast lane.
 - The runner refuses every inherited `PYTEST_*` variable and a pre-set recorder-owner variable before selection, exiting 3 without writing an artifact.
 - Real xdist integration covers valid skip/xfail evidence, module-level collection skips and positive execution with one selected non-guard file. Negative controls with matched valid runs cover worker-only silent collection narrowing, same-count/different-node refusal and late worker loss with exit status zero.
+- Review-cycle hardening also lands in this batch: header-capture hardening in the runner, verify-time binding between each artifact's `head_sha` and the workflow's `GITHUB_SHA`, a contract-pinning comment for the verifier's private imports from the full verifier, a recorder `deselected`-accumulation fix, and four new refusal mutation tests.
 
 ### Why
 

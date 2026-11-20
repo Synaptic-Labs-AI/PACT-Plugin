@@ -29,10 +29,12 @@ test that builds a child environment for its own record (a rig) must remove
 A collect-only session is not a run and writes nothing either.
 
 WHY THE TERMINAL SUMMARY IS THE SOURCE. ``deselected`` comes from the
-terminal reporter's stats, never ``len(session.items)``: deselection shrinks
-the item list before tests run, so the item list cannot see it. The summary
-line is built from the same reporter's ``build_summary_stats_line`` so the
-record carries the line pytest would have printed.
+recorder's own ``pytest_deselected`` accumulation — the same events the
+terminal reporter's stats count — never ``len(session.items)``: deselection
+shrinks the item list before tests run, so the item list cannot see it. The
+other outcome counts come from the terminal reporter's stats, and the
+summary line is built from the same reporter's ``build_summary_stats_line``
+so the record carries the line pytest would have printed.
 
 WHY THE COLLECTION HOOK IS WRAPPED. A ``pytest_collection_modifyitems``
 implementation can drop items without reporting them as deselected; that
@@ -184,9 +186,10 @@ def aggregate_worker_collection_counts(triples_by_node, collected,
       a test that is not its last, makes the controller abort in its event
       loop, at a site that depends on the order the events arrive, and the
       session exits non-zero. Either no record is written and the verifier
-      fails RECORD-ABSENT, or it fails the record: on BAD-FIELD-DESELECTED
-      when a ready node did not report, which it checks before the exit
-      status, otherwise on EXITSTATUS.
+      fails RECORD-ABSENT, or it fails the record: on EXITSTATUS when the
+      exit status is non-zero, otherwise on BAD-FIELD-DESELECTED when a
+      ready node did not report. The exit status is read first; both
+      orders fail closed.
 
     EXITSTATUS is what a non-zero exit prints only when every ready node
     reported. Any refusal leaves the collection fields and ``deselected``
@@ -263,10 +266,12 @@ class FullRunRecord:
     def pytest_deselected(self, items):
         """Count the items reported as deselected in this session.
 
-        Under xdist the controller never collects, so it never sees a worker's
-        deselection and its own stats report 0. The worker sees every event,
-        which is why this count travels in the worker's (before, after,
-        deselected) triple rather than being left to the controller.
+        This accumulation is the deselected count of the record's serial path
+        AND the count a worker publishes in its (before, after, deselected)
+        triple — one event source serving both roles. Under xdist the
+        controller never collects, so it never sees a worker's deselection
+        and its own count stays 0; there the published worker triple, not
+        this controller-side number, is what the record carries.
         """
         self._deselected += len(items)
 
@@ -405,7 +410,12 @@ class FullRunRecord:
                 summary_line = None
         items_before = self._items_before
         items_after = self._items_after
-        deselected = len(stats.get("deselected", []))
+        # The hook accumulation, not the reporter's stats: one deselection
+        # event source for both roles (see pytest_deselected). The counts are
+        # equal today — the reporter extends its stats from the same hook —
+        # but consuming the accumulation directly is what keeps this session
+        # role and the worker-publish role served by one counter.
+        deselected = self._deselected
         # xdist's own distribution predicate: tx specs present and a dist
         # mode other than "no". It covers -n and --tx alike; without xdist
         # neither option exists and the run is serial.
