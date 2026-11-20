@@ -345,10 +345,25 @@ def _require_clean_exits_and_collection_identity(canary: dict, summary: dict,
     when the worker population is unprovable (refused here as BAD-FIELD),
     and exact terminal node sets are _require_node_identity's.
     """
-    if canary["canary"]["rc"] != 0:
-        raise VerificationFailure("CANARY-RC", f"canary rc is {canary['canary']['rc']}")
-    if summary["run"]["rc"] != 0:
-        raise VerificationFailure("RUN-RC", f"run rc is {summary['run']['rc']}")
+    # JSON false == 0 in Python, so rc truthiness cannot gate: False passed
+    # an untyped comparison as a clean exit, and True failed only by the
+    # accident that True != 0. Type first, then value.
+    canary_rc = canary["canary"].get("rc")
+    if type(canary_rc) is not int:
+        raise VerificationFailure(
+            "BAD-FIELD-CANARY-RC",
+            f"canary.rc is {canary_rc!r}; expected an integer, not a JSON "
+            "boolean, string, or null")
+    if canary_rc != 0:
+        raise VerificationFailure("CANARY-RC", f"canary rc is {canary_rc}")
+    run_rc = summary["run"].get("rc")
+    if type(run_rc) is not int:
+        raise VerificationFailure(
+            "BAD-FIELD-RUN-RC",
+            f"run.rc is {run_rc!r}; expected an integer, not a JSON "
+            "boolean, string, or null")
+    if run_rc != 0:
+        raise VerificationFailure("RUN-RC", f"run rc is {run_rc}")
     # Exit status is read BEFORE the deselected null-check: a non-zero exit
     # reports EXITSTATUS, and the exit-0 late-worker-loss case (null fields)
     # reports BAD-FIELD-DESELECTED. Both orders fail closed.
@@ -373,6 +388,21 @@ def _require_clean_exits_and_collection_identity(canary: dict, summary: dict,
 
 def _require_node_identity(canary: dict, summary: dict, record: dict,
                            canary_summary: dict) -> None:
+    """The canary's node IDs are the corpus; the run's terminal set equals it.
+
+    SCOPING (honest blind spot): this binding detects ASYMMETRIC divergence
+    only — a repo-side pytest_collection_modifyitems hook dropping the SAME
+    items from both the serial canary and the parallel run stays
+    self-consistent by construction here. That symmetric blind spot is
+    shared with the required full lane's before/after identity, and this
+    lane remains advisory: it never certifies a merge.
+    """
+    unresolvable = canary["canary"]["unresolvable_node_id_bases"]
+    if unresolvable:
+        raise VerificationFailure(
+            "CANARY-UNRESOLVED-BASES",
+            f"canary.unresolvable_node_id_bases is {unresolvable!r}; the "
+            "canary must account for every file it collected")
     canary_items = _positive_int(
         canary["canary"], "collected_items", "CANARY-COLLECTED", "canary")
     run_collected = _positive_int(summary["run"], "collected", "RUN-COLLECTED", "run")

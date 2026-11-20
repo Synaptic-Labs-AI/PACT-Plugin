@@ -27,7 +27,7 @@ The fast PR suite now runs its selected tests with four pytest-xdist workers usi
 ### What landed
 
 - The real fast run uses fixed `-n 4 --dist loadfile` arguments; the canary stays serial and records every sorted, unique collected node ID.
-- Fast canary and summary artifacts move together to schema v2, adding Actions run ID and attempt, complete collected node IDs in the canary, and xfail/xpass outcomes in the run summary. The schema-v3 full-run recorder and record are unchanged and are now required for fast verification.
+- Fast canary and summary artifacts move together to schema v2, adding Actions run ID and attempt, complete collected node IDs in the canary, and xfail/xpass outcomes in the run summary. The schema-v3 record format is unchanged and is now required for fast verification; the recorder's `deselected` count now comes from its own hook accumulation rather than the terminal reporter's stats.
 - The fast verifier independently reconstructs both commands and the complete selection payload, requires both artifacts' selection metadata to equal that recomputation exactly, and checks SHAs, manifest identity, arithmetic, outcomes and skip accounting. Worker collection aggregates are recorded by the schema-v3 recorder, which refuses the aggregate when a ready worker fails to report; the verifier gates worker completeness through that null-field refusal together with exact terminal-node set equality, and gates collection-hook narrowing separately. Full-suite skip-allowlist differences remain advisory in the selected fast lane.
 - The runner refuses every inherited `PYTEST_*` variable and a pre-set recorder-owner variable before selection, exiting 3 without writing an artifact.
 - Real xdist integration covers valid skip/xfail evidence, module-level collection skips and positive execution with one selected non-guard file. Negative controls with matched valid runs cover worker-only silent collection narrowing, same-count/different-node refusal and late worker loss with exit status zero.
@@ -35,7 +35,7 @@ The fast PR suite now runs its selected tests with four pytest-xdist workers usi
 
 ### Why
 
-Parallel execution shortens the fast lane, but count-only summaries cannot prove that every worker reported or that the distributed run executed the same tests the serial canary collected. Binding all three artifacts closes that false-green window without changing the full-suite recorder, full verifier, selection logic or workflow wrapper commands.
+Parallel execution shortens the fast lane, but count-only summaries cannot prove that every worker reported or that the distributed run executed the same tests the serial canary collected. Binding all three artifacts closes that false-green window without changing the record format, the full verifier, selection logic or workflow wrapper commands. That binding detects asymmetric narrowing only: a repo-side collection hook dropping the same items from both the serial canary and the parallel run stays self-consistent by construction, a blind spot shared with the required full lane's before/after identity, and the lane stays advisory.
 
 ## v4.8.35: find order-dependent tests and isolate the state tests shared
 

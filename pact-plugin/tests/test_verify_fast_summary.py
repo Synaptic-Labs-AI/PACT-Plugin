@@ -275,12 +275,20 @@ def _run(summary_path, canary_path, base_sha, root, manifest,
     command += ["--run-record", str(run_record)]
     env = os.environ.copy()
     env.pop("BASE_SHA", None)
+    # Synthetic-artifact tests must deterministically exercise the LOCAL
+    # verifier path even under Actions, where GITHUB_ACTIONS=true and
+    # GITHUB_SHA name the REAL checkout: these artifacts carry fabricated
+    # head_sha values (rig heads built mid-test, not the PR head), so the
+    # Actions-gated bindings would rightly refuse them. Scrub unless a test
+    # explicitly supplies its own Actions identity (the three head_sha arms
+    # and the null-identity test do). Measured cost of NOT scrubbing: the
+    # four selection tests died under Actions on HEAD-SHA-MISMATCH — a
+    # GITHUB_SHA pin to the test's base cannot survive the tests' own
+    # post-pin commits.
+    for name in ("GITHUB_ACTIONS", "GITHUB_SHA"):
+        env.pop(name, None)
     env["GITHUB_RUN_ID"] = "test-run"
     env["GITHUB_RUN_ATTEMPT"] = "1"
-    # The rig's head, so the Actions-gated head_sha binding passes with
-    # synthetic artifacts exactly as the run-identity checks already do.
-    if base_sha is not None:
-        env["GITHUB_SHA"] = base_sha
     if env_updates:
         env.update(env_updates)
     return subprocess.run(
@@ -288,11 +296,16 @@ def _run(summary_path, canary_path, base_sha, root, manifest,
 
 
 def test_the_valid_baseline_is_green(tmp_path, rig):
-    """Non-vacuity floor: every bad-input row below starts from this pair."""
+    """Non-vacuity floor: every bad-input row below starts from this pair.
+
+    This is an Actions-mode control, so it names the checkout its synthetic
+    artifacts carry (the post-F2 contract: the Actions path always has a
+    GITHUB_SHA to bind against).
+    """
     root, plugin, manifest = rig
     summary, canary, base_sha = _artifacts(root, plugin, manifest)
-    proc = _run(summary, canary, base_sha, root, manifest,
-                env_updates={"GITHUB_ACTIONS": "true"})
+    proc = _run(summary, canary, base_sha, root, manifest, env_updates={
+        "GITHUB_ACTIONS": "true", "GITHUB_SHA": base_sha})
     assert proc.returncode == 0, proc.stderr
     assert "VERIFY-OK" in proc.stdout
 
@@ -720,8 +733,10 @@ def test_actions_rejects_null_identity_even_when_all_artifacts_agree(tmp_path, r
     summary, canary, base_sha = _artifacts(root, plugin, manifest)
     for artifact in (summary, canary, root / ".full-run-record.json"):
         _mutate(artifact, _set(("run_id",), None))
-    proc = _run(summary, canary, base_sha, root, manifest,
-                env_updates={"GITHUB_ACTIONS": "true"})
+    # Actions mode names the checkout too (post-F2 contract), so the null
+    # run_id — not a head mismatch — is what this refusal isolates.
+    proc = _run(summary, canary, base_sha, root, manifest, env_updates={
+        "GITHUB_ACTIONS": "true", "GITHUB_SHA": base_sha})
     assert proc.returncode == 1
     assert "RUN-IDENTITY" in proc.stderr
 
@@ -1005,6 +1020,74 @@ def test_a_missing_run_artifact_key_is_refused_as_key_missing_run(tmp_path, rig)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "KEY-MISSING-RUN" in proc.stderr
     assert "'collected'" in proc.stderr
+
+
+def test_canary_unresolvable_node_id_bases_are_refused(tmp_path, rig):
+    """A canary that cannot account for a collected file cannot verify.
+
+    The runner refuses non-empty unresolvable_node_id_bases at collection
+    time; this is the verifier-side twin, so a tampered or stale canary
+    artifact cannot carry unaccounted bases past the gate. Control arm
+    first: the unmutated artifacts verify green.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    control = _run(summary, canary, base_sha, root, manifest)
+    assert control.returncode == 0, control.stdout + control.stderr
+    assert "VERIFY-OK" in control.stdout
+    _mutate(canary, _set(("canary", "unresolvable_node_id_bases"),
+                         ["tests/test_unaccounted.py::test_ok"]))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "CANARY-UNRESOLVED-BASES" in proc.stderr
+    assert "test_unaccounted" in proc.stderr
+
+
+@pytest.mark.parametrize("artifact_name, nested_key, condition", [
+    ("canary", "canary", "BAD-FIELD-CANARY-RC"),
+    ("summary", "run", "BAD-FIELD-RUN-RC"),
+])
+@pytest.mark.parametrize("value", [False, True])
+def test_a_boolean_rc_is_refused_as_a_bad_field(tmp_path, rig, artifact_name,
+                                                nested_key, condition, value):
+    """JSON false compares == 0 in Python, so rc truthiness cannot gate.
+
+    An untyped rc check passes rc=false as a clean exit; rc=true only
+    failed by the accident that True != 0. Both booleans are type-refused
+    under BAD-FIELD names; integer rc values keep the CANARY-RC / RUN-RC
+    conditions the existing matrix pins.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    artifact = {"canary": canary, "summary": summary}[artifact_name]
+    _mutate(artifact, _set((nested_key, "rc"), value))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert condition in proc.stderr
+
+
+def test_an_integer_zero_rc_passes_the_typed_check(tmp_path, rig):
+    """The type refusal must not over-block a real clean exit (control)."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "VERIFY-OK" in proc.stdout
+
+
+def test_a_missing_canary_rc_takes_the_missing_key_path(tmp_path, rig):
+    """rc absent is a shape failure (KEY-MISSING-CANARY), not a bad value."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate(canary, lambda d: d["canary"].pop("rc"))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "KEY-MISSING-CANARY" in proc.stderr
+    assert "BAD-FIELD" not in proc.stderr
 
 
 def _selection_block_of(selection):
