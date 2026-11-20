@@ -20,6 +20,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from fixtures.tracked_files import tracked_glob as _shared_tracked_glob
 
 _REPO_ROOT = Path(__file__).parent.parent
@@ -165,7 +167,8 @@ class TestSpawnOverheadRegression:
           - peer_inject.get_peer_context() output (additionalContext
             injected at SubagentStart — the routing prelude + peer list +
             plugin banner + teachback reminder + completion-authority
-            note + charter cross-ref)
+            note (including crossed-wake no-echo discipline) + charter
+            cross-ref)
           - The agent body file (sentinel teammate as representative)
 
         Not measured (by design): lazy-loaded content reachable only via
@@ -211,6 +214,21 @@ class TestSpawnOverheadRegression:
             f"it should live in a lazy-loaded skill instead of the always-"
             f"on spawn path."
         )
+
+    def test_oversized_completion_note_rejects_at_definition_site(
+        self, tmp_path, monkeypatch
+    ):
+        """The existing spawn measurement must count the shared note itself."""
+        import shared.peer_context as peer_context
+
+        monkeypatch.setattr(
+            peer_context,
+            "_COMPLETION_AUTHORITY_NOTE",
+            peer_context._COMPLETION_AUTHORITY_NOTE
+            + ("\n\nOversized note mutation: " + "x" * self.THRESHOLD_BYTES),
+        )
+        with pytest.raises(AssertionError, match="Spawn overhead regression"):
+            self.test_peer_inject_prelude_plus_agent_body_under_threshold(tmp_path)
 
     def test_bootstrap_md_not_in_spawn_path(self):
         """session_init.py and peer_inject.py are the two hooks whose

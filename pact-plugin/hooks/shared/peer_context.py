@@ -47,7 +47,15 @@ _COMPLETION_AUTHORITY_NOTE = (
     "Your dispatch may be a Task A (teachback) + Task B (work) pair: claim A, "
     "submit teachback, idle on `intentional_wait{reason=awaiting_lead_completion}`. "
     "Do NOT begin Task B until A.status == 'completed' (team-lead's wake-signal "
-    "SendMessage confirms; you cannot self-wake to poll TaskList while idle)."
+    "SendMessage confirms; you cannot self-wake to poll TaskList while idle). "
+    "On a wake carrying an inbound directive, fresh-read the task file; if the "
+    "directive is already satisfied, send no standalone confirmation. Never "
+    "re-announce an unchanged `intentional_wait` state. Fold necessary "
+    "reconciliation into a `boundary-drain` line only when another "
+    "protocol-boundary message is already required. With no new work and no "
+    "exception below, end silently without text or a filler tool call. Still "
+    "report blockers, corrections, questions, divergent or actionable state, "
+    "and every resolving message you owe."
 )
 
 

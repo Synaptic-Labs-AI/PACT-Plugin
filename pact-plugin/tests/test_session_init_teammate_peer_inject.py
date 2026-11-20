@@ -31,6 +31,7 @@ rows the architect specified.
 import ast
 import io
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import patch
 
@@ -47,6 +48,39 @@ _SESSION_ID = "aabb1122-0000-0000-0000-000000000000"
 _PROJECT_DIR = "/Users/example/Sites/test-project"
 _ORCH_MARKER = "YOUR PACT ROLE: orchestrator"
 _PEER_SENTINEL = "PEER_CONTEXT_SENTINEL_BODY"
+_CROSSED_WAKE_RULE = (
+    "On a wake carrying an inbound directive, fresh-read the task file; if the "
+    "directive is already satisfied, send no standalone confirmation. Never "
+    "re-announce an unchanged `intentional_wait` state. Fold necessary "
+    "reconciliation into a `boundary-drain` line only when another "
+    "protocol-boundary message is already required. With no new work and no "
+    "exception below, end silently without text or a filler tool call. Still "
+    "report blockers, corrections, questions, divergent or actionable state, "
+    "and every resolving message you owe."
+)
+_CROSSED_WAKE_CLAUSES = [
+    (
+        "C1",
+        "On a wake carrying an inbound directive, fresh-read the task file; if "
+        "the directive is already satisfied, send no standalone confirmation.",
+    ),
+    ("C2", "Never re-announce an unchanged `intentional_wait` state."),
+    (
+        "C3",
+        "Fold necessary reconciliation into a `boundary-drain` line only when "
+        "another protocol-boundary message is already required.",
+    ),
+    (
+        "C4-no-text",
+        "With no new work and no exception below, end silently without text",
+    ),
+    ("C4-no-filler", "or a filler tool call."),
+    (
+        "C5",
+        "Still report blockers, corrections, questions, divergent or actionable "
+        "state, and every resolving message you owe.",
+    ),
+]
 
 
 def _stdin_for(frame: dict, source: str = "resume") -> str:
@@ -56,14 +90,16 @@ def _stdin_for(frame: dict, source: str = "resume") -> str:
 
 
 def _run_main_capture(stdin_data, monkeypatch, tmp_path, *, peer_return=_PEER_SENTINEL,
-                      resolver_return=None, peer_raises=False):
-    """Run session_init.main() with the heavy collaborators patched out and
-    get_peer_context stubbed to ``peer_return``; return
+                      resolver_return=None, peer_raises=False,
+                      real_peer_builder=False):
+    """Run session_init.main() with heavy collaborators patched out. By default
+    get_peer_context is stubbed to ``peer_return``; return
     (additionalContext_str, get_peer_context_mock).
 
     Stubbing get_peer_context isolates the teammate/else FORK DECISION from the
     builder internals (covered separately below + by the ported test_peer_inject
-    corpus).
+    corpus). Set ``real_peer_builder=True`` to leave that one seam unstubbed;
+    the returned mock slot is then None.
 
     The self-registration registry resolver (``_registry_resolve``) is ALSO
     stubbed (default ``None`` → the teammate branch takes the generate_team_name
@@ -80,6 +116,15 @@ def _run_main_capture(stdin_data, monkeypatch, tmp_path, *, peer_return=_PEER_SE
     monkeypatch.delenv("CLAUDE_ENV_FILE", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
+    if real_peer_builder:
+        peer_patch = nullcontext()
+    else:
+        peer_patch = patch(
+            "session_init.get_peer_context",
+            side_effect=(RuntimeError("peer-build boom") if peer_raises else None),
+            return_value=peer_return,
+        )
+
     with patch("session_init.setup_plugin_symlinks", return_value=None), \
          patch("session_init.ensure_project_memory_md", return_value=None), \
          patch("session_init.check_pinned_staleness", return_value=None), \
@@ -92,9 +137,7 @@ def _run_main_capture(stdin_data, monkeypatch, tmp_path, *, peer_return=_PEER_SE
          patch("session_init.update_session_info", return_value=None), \
          patch("session_init.check_resume_state", return_value=None), \
          patch("session_init._registry_resolve", return_value=resolver_return), \
-         patch("session_init.get_peer_context",
-               side_effect=(RuntimeError("peer-build boom") if peer_raises else None),
-               return_value=peer_return) as mock_gpc, \
+         peer_patch as mock_gpc, \
          patch("sys.stdin", io.StringIO(stdin_data)), \
          patch("sys.stdout", new_callable=io.StringIO) as mock_stdout:
         with pytest.raises(SystemExit) as exc_info:
@@ -155,6 +198,94 @@ class TestTeammateBranchInjects:
             _stdin_for(teammate_frame(agent_type)), monkeypatch, tmp_path
         )
         assert _PEER_SENTINEL in additional
+        assert _ORCH_MARKER not in additional
+
+
+class TestCrossedWakeRealBuilderComposition:
+    """SessionStart composes the actual shared builder only for teammates."""
+
+    @staticmethod
+    def _write_team(tmp_path, team="pact-real"):
+        team_dir = tmp_path / ".claude" / "teams" / team
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(json.dumps({
+            "members": [
+                {"name": "backend-coder", "agentType": "pact-backend-coder"},
+                {"name": "architect", "agentType": "pact-architect"},
+            ]
+        }), encoding="utf-8")
+
+    @pytest.mark.parametrize(
+        "clause_id,clause",
+        _CROSSED_WAKE_CLAUSES,
+        ids=[clause_id for clause_id, _ in _CROSSED_WAKE_CLAUSES],
+    )
+    def test_teammate_real_builder_contains_clause(
+        self, clause_id, clause, monkeypatch, tmp_path
+    ):
+        self._write_team(tmp_path)
+        additional, mock_gpc = _run_main_capture(
+            _stdin_for(teammate_frame("pact-backend-coder"), source="startup"),
+            monkeypatch,
+            tmp_path,
+            resolver_return="backend-coder@pact-real",
+            real_peer_builder=True,
+        )
+        assert mock_gpc is None
+        assert clause in additional, f"{clause_id}: missing from real SessionStart"
+        assert additional.count(_CROSSED_WAKE_RULE) == 1
+        assert _ORCH_MARKER not in additional
+
+    @pytest.mark.parametrize("frame_builder", [lead_frame_qualified, plain_frame])
+    def test_lead_and_unknown_stay_free_of_teammate_rule(
+        self, frame_builder, monkeypatch, tmp_path
+    ):
+        additional, _ = _run_main_capture(
+            _stdin_for(frame_builder()), monkeypatch, tmp_path,
+            real_peer_builder=True,
+        )
+        assert _CROSSED_WAKE_RULE not in additional
+
+    def test_unresolved_registry_stays_free_of_teammate_rule(
+        self, monkeypatch, tmp_path
+    ):
+        additional, _ = _run_main_capture(
+            _stdin_for(teammate_frame("pact-backend-coder")),
+            monkeypatch,
+            tmp_path,
+            resolver_return=None,
+            real_peer_builder=True,
+        )
+        assert _CROSSED_WAKE_RULE not in additional
+        assert _ORCH_MARKER not in additional
+
+    def test_missing_team_config_stays_free_of_teammate_rule(
+        self, monkeypatch, tmp_path
+    ):
+        additional, _ = _run_main_capture(
+            _stdin_for(teammate_frame("pact-backend-coder")),
+            monkeypatch,
+            tmp_path,
+            resolver_return="backend-coder@pact-missing",
+            real_peer_builder=True,
+        )
+        assert _CROSSED_WAKE_RULE not in additional
+        assert _ORCH_MARKER not in additional
+
+    def test_malformed_team_config_stays_free_of_teammate_rule(
+        self, monkeypatch, tmp_path
+    ):
+        self._write_team(tmp_path)
+        config = tmp_path / ".claude" / "teams" / "pact-real" / "config.json"
+        config.write_text("not valid json{{{", encoding="utf-8")
+        additional, _ = _run_main_capture(
+            _stdin_for(teammate_frame("pact-backend-coder")),
+            monkeypatch,
+            tmp_path,
+            resolver_return="backend-coder@pact-real",
+            real_peer_builder=True,
+        )
+        assert _CROSSED_WAKE_RULE not in additional
         assert _ORCH_MARKER not in additional
 
 

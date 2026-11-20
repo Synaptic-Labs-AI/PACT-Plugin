@@ -31,6 +31,59 @@ from fixtures.tracked_files import tracked_files as _shared_tracked_files
 HOOK = Path(__file__).resolve().parents[1] / "hooks" / "peer_inject.py"
 SUPPRESS = {"suppressOutput": True}
 
+_CROSSED_WAKE_RULE = (
+    "On a wake carrying an inbound directive, fresh-read the task file; if the "
+    "directive is already satisfied, send no standalone confirmation. Never "
+    "re-announce an unchanged `intentional_wait` state. Fold necessary "
+    "reconciliation into a `boundary-drain` line only when another "
+    "protocol-boundary message is already required. With no new work and no "
+    "exception below, end silently without text or a filler tool call. Still "
+    "report blockers, corrections, questions, divergent or actionable state, "
+    "and every resolving message you owe."
+)
+_CROSSED_WAKE_CLAUSES = [
+    (
+        "C1",
+        "On a wake carrying an inbound directive, fresh-read the task file; if "
+        "the directive is already satisfied, send no standalone confirmation.",
+    ),
+    ("C2", "Never re-announce an unchanged `intentional_wait` state."),
+    (
+        "C3",
+        "Fold necessary reconciliation into a `boundary-drain` line only when "
+        "another protocol-boundary message is already required.",
+    ),
+    (
+        "C4-no-text",
+        "With no new work and no exception below, end silently without text",
+    ),
+    ("C4-no-filler", "or a filler tool call."),
+    (
+        "C5",
+        "Still report blockers, corrections, questions, divergent or actionable "
+        "state, and every resolving message you owe.",
+    ),
+]
+_CROSSED_WAKE_MUTANTS = [
+    ("C1", "fresh-read the task file; ", ""),
+    ("C2", "Never re-announce", "Re-announce"),
+    ("C3", "only when another", "whenever another"),
+    ("C4-no-text", "without text", "with text"),
+    ("C4-no-filler", "or a filler tool call", "or no filler tool call"),
+    ("C5", "Still report", "Suppress"),
+]
+
+
+def _assert_crossed_wake_clause(rendered, clause_id, clause):
+    assert clause in rendered, (
+        f"{clause_id}: crossed-wake instruction missing or altered: {clause!r}"
+    )
+
+
+def _assert_crossed_wake_rule(rendered):
+    for clause_id, clause in _CROSSED_WAKE_CLAUSES:
+        _assert_crossed_wake_clause(rendered, clause_id, clause)
+
 
 def _tracked_glob(directory, pattern):
     """Return current tracked files only, excluding deleted index entries."""
@@ -1144,6 +1197,81 @@ class TestCompletionAuthorityNote:
         assert result.index(_TEACHBACK_REMINDER) < result.index(_COMPLETION_AUTHORITY_NOTE)
 
 
+class TestCrossedWakeDiscipline:
+    """The shared completion note carries every no-echo clause on both modes."""
+
+    @pytest.mark.parametrize(
+        "clause_id,clause",
+        _CROSSED_WAKE_CLAUSES,
+        ids=[clause_id for clause_id, _ in _CROSSED_WAKE_CLAUSES],
+    )
+    def test_completion_note_contains_clause(self, clause_id, clause):
+        from peer_inject import _COMPLETION_AUTHORITY_NOTE
+
+        _assert_crossed_wake_clause(_COMPLETION_AUTHORITY_NOTE, clause_id, clause)
+
+    @pytest.mark.parametrize("include_role_marker", [True, False])
+    @pytest.mark.parametrize("clause_id,clause", _CROSSED_WAKE_CLAUSES)
+    def test_builder_contains_clause_in_both_modes(
+        self, clause_id, clause, include_role_marker, tmp_path
+    ):
+        from peer_inject import get_peer_context
+
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(json.dumps({
+            "members": [
+                {"name": "architect", "agentType": "pact-architect"},
+                {"name": "backend-coder", "agentType": "pact-backend-coder"},
+            ]
+        }), encoding="utf-8")
+        result = get_peer_context(
+            agent_type="pact-architect",
+            team_name="pact-test",
+            agent_name="architect",
+            teams_dir=str(tmp_path / "teams"),
+            include_role_marker=include_role_marker,
+        )
+
+        assert result is not None
+        _assert_crossed_wake_clause(result, clause_id, clause)
+
+    @pytest.mark.parametrize("include_role_marker", [True, False])
+    def test_builder_emits_rule_once_and_keeps_terminal_note(
+        self, include_role_marker, tmp_path
+    ):
+        from peer_inject import _COMPLETION_AUTHORITY_NOTE, get_peer_context
+
+        team_dir = tmp_path / "teams" / "pact-test"
+        team_dir.mkdir(parents=True)
+        (team_dir / "config.json").write_text(json.dumps({
+            "members": [{"name": "architect", "agentType": "pact-architect"}]
+        }), encoding="utf-8")
+        result = get_peer_context(
+            agent_type="pact-architect",
+            team_name="pact-test",
+            agent_name="architect",
+            teams_dir=str(tmp_path / "teams"),
+            include_role_marker=include_role_marker,
+        )
+
+        assert result is not None
+        assert result.count(_CROSSED_WAKE_RULE) == 1
+        assert result.endswith(_COMPLETION_AUTHORITY_NOTE)
+
+    @pytest.mark.parametrize(
+        "clause_id,old,new",
+        _CROSSED_WAKE_MUTANTS,
+        ids=[clause_id for clause_id, _, _ in _CROSSED_WAKE_MUTANTS],
+    )
+    def test_clause_pin_rejects_deletion_or_inversion(self, clause_id, old, new):
+        mutated = _CROSSED_WAKE_RULE.replace(old, new, 1)
+        assert mutated != _CROSSED_WAKE_RULE, "mutation fixture did not land"
+        clause = dict(_CROSSED_WAKE_CLAUSES)[clause_id]
+        with pytest.raises(AssertionError, match=clause_id):
+            _assert_crossed_wake_clause(mutated, clause_id, clause)
+
+
 # The PACT agent types a team member can be spawned as. The builder must attach
 # the completion-authority directive for each of them; peer_inject builds the
 # block only for a team member, whatever its type. Sourced from agents/; if a
@@ -1421,6 +1549,59 @@ class TestMemberOnlyInjection:
         context = out["hookSpecificOutput"]["additionalContext"]
         assert context.startswith("YOUR PACT ROLE: teammate (architect)."), context[:80]
         assert _peer_list(context) == ["backend-coder", "preparer"], context
+
+    @pytest.mark.parametrize(
+        "clause_id,clause",
+        _CROSSED_WAKE_CLAUSES,
+        ids=[clause_id for clause_id, _ in _CROSSED_WAKE_CLAUSES],
+    )
+    def test_real_subagent_start_composes_crossed_wake_clause(
+        self, clause_id, clause, tmp_path, capsys, pact_context
+    ):
+        """The positive seam uses peer_inject.main and the real builder."""
+        pact_context(team_name="pact-test")
+        _write_team_config(Path.home(), "pact-test", self.MEMBERS)
+        out = self._main(capsys, {
+            "agent_type": "architect",
+            "agent_id": "aarchitect-0123456789abcdef",
+        })
+        context = out["hookSpecificOutput"]["additionalContext"]
+        _assert_crossed_wake_clause(context, clause_id, clause)
+        assert context.count(_CROSSED_WAKE_RULE) == 1
+
+    def test_composition_pin_rejects_builder_bypass(
+        self, tmp_path, capsys, pact_context, monkeypatch
+    ):
+        """Strip only the new rule after a simulated final build; old markers
+        remain, so the clause assertions must still reject the composition."""
+        import peer_inject
+        import shared.peer_context as peer_context
+
+        pact_context(team_name="pact-test")
+        _write_team_config(Path.home(), "pact-test", self.MEMBERS)
+        monkeypatch.setattr(
+            peer_context,
+            "_COMPLETION_AUTHORITY_NOTE",
+            peer_context._COMPLETION_AUTHORITY_NOTE.replace(
+                " " + _CROSSED_WAKE_RULE, ""
+            ) + " " + _CROSSED_WAKE_RULE,
+        )
+        real_builder = peer_inject.get_peer_context
+
+        def bypassed_builder(*args, **kwargs):
+            rendered = real_builder(*args, **kwargs)
+            return rendered.replace(" " + _CROSSED_WAKE_RULE, "", 1)
+
+        monkeypatch.setattr(peer_inject, "get_peer_context", bypassed_builder)
+        out = self._main(capsys, {
+            "agent_type": "architect",
+            "agent_id": "aarchitect-0123456789abcdef",
+        })
+        context = out["hookSpecificOutput"]["additionalContext"]
+        assert "TEACHBACK TIMING" in context
+        assert "COMPLETION AUTHORITY" in context
+        with pytest.raises(AssertionError, match="C1"):
+            _assert_crossed_wake_rule(context)
 
     @pytest.mark.parametrize(
         "agent_type",
