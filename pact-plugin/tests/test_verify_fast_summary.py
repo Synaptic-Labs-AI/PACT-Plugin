@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace as _replace_selection
 from pathlib import Path
 
 import pytest
@@ -37,6 +38,22 @@ except BaseException:
 build_argv = selector.build_argv
 load_manifest = selector.load_manifest
 select_for_change = selector.select_for_change
+
+# The verifier module itself, for the two guards no honest manifest can
+# reach: EMPTY-EXPECTED and SELECTION-ARITHMETIC fire on a degenerate
+# RECOMPUTED selection, and a correct selector never produces one (guard
+# files are always included, and included == discovered - excluded by
+# construction). Their tests patch the selection seam in-process instead of
+# forging an input the selector cannot return.
+_VERIFIER_SPEC = importlib.util.spec_from_file_location(
+    "_pact_fast_verifier_summary", ROOT / "scripts" / "verify_fast_summary.py")
+verifier = importlib.util.module_from_spec(_VERIFIER_SPEC)
+sys.modules[_VERIFIER_SPEC.name] = verifier
+try:
+    _VERIFIER_SPEC.loader.exec_module(verifier)
+except BaseException:
+    sys.modules.pop(_VERIFIER_SPEC.name, None)
+    raise
 
 VERIFIER = ROOT / "scripts" / "verify_fast_summary.py"
 
@@ -260,6 +277,10 @@ def _run(summary_path, canary_path, base_sha, root, manifest,
     env.pop("BASE_SHA", None)
     env["GITHUB_RUN_ID"] = "test-run"
     env["GITHUB_RUN_ATTEMPT"] = "1"
+    # The rig's head, so the Actions-gated head_sha binding passes with
+    # synthetic artifacts exactly as the run-identity checks already do.
+    if base_sha is not None:
+        env["GITHUB_SHA"] = base_sha
     if env_updates:
         env.update(env_updates)
     return subprocess.run(
@@ -592,6 +613,7 @@ def test_no_summary_line_uses_the_no_summary_condition(tmp_path, rig):
     assert "NO-SUMMARY-RUN" in proc.stderr
     assert "RUN-COLLECTED" not in proc.stderr
 
+
 def _mutate_record(root, mutation):
     path = root / ".full-run-record.json"
     _mutate(path, mutation)
@@ -831,6 +853,272 @@ def test_the_runner_refuses_inherited_pytest_or_recorder_environment(
     assert proc.returncode == 3, proc.stdout + proc.stderr
     assert name in proc.stderr
     assert not (tmp_path / ".fast-suite-canary.json").exists()
+
+
+# ---- head_sha checkout binding, header capture, degenerate selections ----
+
+def test_actions_head_sha_must_equal_the_checked_out_head(tmp_path, rig):
+    """Under Actions the artifacts name THIS checkout, not just each other.
+
+    Both artifacts are moved to the same wrong head — a stale pair agreeing
+    with each other, which the canary-to-run equality cannot see.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate(canary, _set(("head_sha",), "f" * 40))
+    _mutate(summary, _set(("head_sha",), "f" * 40))
+    proc = _run(summary, canary, base_sha, root, manifest, env_updates={
+        "GITHUB_ACTIONS": "true", "GITHUB_SHA": base})
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "HEAD-SHA-MISMATCH" in proc.stderr
+    assert "ffffffff" in proc.stderr
+
+
+def test_actions_head_sha_binding_refuses_a_missing_github_sha(tmp_path, rig):
+    """No checkout anchor under Actions is a refusal, never a skip."""
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    proc = _run(summary, canary, base_sha, root, manifest, env_updates={
+        "GITHUB_ACTIONS": "true", "GITHUB_SHA": ""})
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "HEAD-SHA-MISMATCH" in proc.stderr
+
+
+def test_actions_head_sha_binding_accepts_the_real_checkout(tmp_path, rig):
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    proc = _run(summary, canary, base_sha, root, manifest, env_updates={
+        "GITHUB_ACTIONS": "true", "GITHUB_SHA": base})
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "VERIFY-OK" in proc.stdout
+
+
+def test_the_runner_captures_the_first_collected_header_only(tmp_path, rig):
+    """Two disagreeing header lines: only the top-of-log one is this run's.
+
+    The first line uses xdist's workers form, so the parse of that form is
+    pinned too. A last-match capture records 999 here; first-match records
+    the real header count.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    discovered = _discovered(plugin)
+    count = len(discovered)
+    fake = (
+        "import sys\n"
+        f"print('4 workers [{count} items]')\n"
+        "print('noise line one')\n"
+        "print('collected 999 items')\n"
+        f"print('{count} passed in 0.01s')\n"
+    )
+    (plugin / "pytest.py").write_text(fake, encoding="utf-8")
+    summary = tmp_path / "summary.json"
+    runner = ROOT / "scripts" / "run_fast_suite.py"
+    env = env_without_pytest_vars()
+    env.pop(OWNER_ENV, None)
+    proc = subprocess.run(
+        [sys.executable, str(runner), "--base-sha", base_sha,
+         "--repo-root", str(root), "--manifest", str(manifest),
+         "--summary", str(summary),
+         "--canary", str(summary.with_name(".fast-suite-canary.json"))],
+        capture_output=True, text=True, timeout=120, env=env)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    artifact = json.loads(summary.read_text(encoding="utf-8"))
+    assert artifact["run"]["collected"] == count, artifact["run"]
+    assert artifact["run"]["collected"] != 999
+
+
+def test_an_unparseable_canary_artifact_is_refused(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    canary.write_text("{not json", encoding="utf-8")
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "ARTIFACT-UNPARSEABLE-CANARY" in proc.stderr
+    assert "not readable JSON" in proc.stderr
+
+
+def test_an_unparseable_run_artifact_is_refused(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    summary.write_text("{not json either", encoding="utf-8")
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "ARTIFACT-UNPARSEABLE-RUN" in proc.stderr
+    assert "not readable JSON" in proc.stderr
+
+
+def test_an_invalid_manifest_is_refused(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    bad = root / "scripts" / "rejected_manifest.json"
+    bad.write_text(json.dumps({"schema_version": 99}), encoding="utf-8")
+    proc = _run(summary, canary, base_sha, root, bad)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "MANIFEST-INVALID" in proc.stderr
+    assert "rejected_manifest.json" in proc.stderr
+
+
+def _selection_block_of(selection):
+    """The selection block the verifier's _require_selection_identity expects."""
+    included = sorted(selection.included)
+    digest = hashlib.sha256()
+    for path in included:
+        digest.update(path.encode("utf-8"))
+        digest.update(b"\n")
+    return {
+        "status": selection.status,
+        "select_all_reason": selection.select_all_reason,
+        "discovered": len(selection.discovered),
+        "excluded": len(selection.excluded),
+        "added_back": len(selection.added_back),
+        "included": len(included),
+        "included_files": included,
+        "included_sha256": digest.hexdigest(),
+    }
+
+
+def _artifacts_from_selection(root, plugin, manifest, selection, base_sha):
+    """Valid artifacts for an arbitrary selection, doctored or not."""
+    expected_files = sorted(selection.included)
+    node_ids = sorted(f"{path}::test_ok" for path in expected_files)
+    count = len(expected_files)
+    manifest_sha = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    common = {
+        "schema_version": 2,
+        "manifest": {"path": "scripts/fast_suite_exclusions.json",
+                     "sha256": manifest_sha},
+        "base_sha": base_sha,
+        "head_sha": base_sha,
+        "run_id": "test-run",
+        "run_attempt": "1",
+        "selection": _selection_block_of(selection),
+    }
+    canary_command = build_argv(selection, plugin, "collect-only")
+    run_command = build_argv(selection, plugin, "run", workers=4)
+    canary = dict(common, mode="collect-only", canary={
+        "command": canary_command,
+        "ignore_paths": [argument.split("=", 1)[1]
+                         for argument in canary_command
+                         if argument.startswith("--ignore=")],
+        "rc": 0,
+        "summary_line": f"{count} tests collected in 0.01s",
+        "expected_files": expected_files,
+        "collected_files": expected_files,
+        "collected_items": count,
+        "collected_node_ids": node_ids,
+        "missing": [],
+        "extra": [],
+        "unresolvable_node_id_bases": [],
+    })
+    summary = dict(common, mode="run", run={
+        "command": run_command,
+        "rc": 0,
+        "summary_line": f"{count} passed in 0.01s",
+        "collected": count,
+        "passed": count,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0,
+        "deselected": 0,
+        "xfailed": 0,
+        "xpassed": 0,
+    })
+    record = {
+        "schema_version": 3,
+        "collected": count,
+        "passed": count,
+        "skipped": 0,
+        "failed": 0,
+        "errors": 0,
+        "deselected": 0,
+        "xfailed": 0,
+        "xpassed": 0,
+        "exitstatus": 0,
+        "summary_line": f"{count} passed in 0.01s",
+        "terminal_node_ids": node_ids,
+        "items_before_modifyitems": count,
+        "items_after_modifyitems": count,
+        "run_id": "test-run",
+        "run_attempt": "1",
+        "skip_sites": [],
+        "skipped_at_collection": 0,
+    }
+    summary_path = root / ".fast-suite-summary.json"
+    canary_path = root / ".fast-suite-canary.json"
+    record_path = root / ".full-run-record.json"
+    summary_path.write_text(json.dumps(summary, indent=1), encoding="utf-8")
+    canary_path.write_text(json.dumps(canary, indent=1), encoding="utf-8")
+    record_path.write_text(json.dumps(record, indent=1), encoding="utf-8")
+    return summary_path, canary_path
+
+
+def _doctored_selection(root, manifest, base_sha, **changes):
+    real, _, _ = select_for_change(root, load_manifest(manifest), base_sha)
+    return _replace_selection(real, **changes)
+
+
+def _verify_in_process(root, manifest, summary, canary, base_sha,
+                       selection, monkeypatch):
+    # Actions identity must not leak a real run's env into synthetic
+    # artifacts: locally it is absent, in CI it is present and true.
+    for name in ("GITHUB_ACTIONS", "BASE_SHA"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(
+        verifier, "select_for_change",
+        lambda repo_root, manifest_path, base: (selection, None, None))
+    return verifier.main([
+        "--summary", str(summary), "--canary", str(canary),
+        "--repo-root", str(root), "--manifest", str(manifest),
+        "--base-sha", base_sha,
+        "--run-record", str(root / ".full-run-record.json")])
+
+
+def test_an_empty_recomputed_selection_is_refused(tmp_path, rig, monkeypatch,
+                                                  capsys):
+    """EMPTY-EXPECTED: the recomputed expected set itself may not be empty.
+
+    Unreachable through any manifest a correct selector accepts, so the
+    selection seam is patched to exactly the degenerate output the guard
+    exists for; the surrounding artifacts are built honest to that output.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    empty = _doctored_selection(root, manifest, base_sha,
+                                included=frozenset())
+    summary, canary = _artifacts_from_selection(root, plugin, manifest,
+                                                empty, base_sha)
+    rc = _verify_in_process(root, manifest, summary, canary, base_sha,
+                            empty, monkeypatch)
+    captured = capsys.readouterr()
+    assert rc == 1, captured.out + captured.err
+    assert "EMPTY-EXPECTED" in captured.err
+    assert "VERIFY-OK" not in captured.out
+
+
+def test_selection_arithmetic_drift_is_refused(tmp_path, rig, monkeypatch,
+                                               capsys):
+    """SELECTION-ARITHMETIC: included must equal discovered minus excluded.
+
+    One phantom file is added to `included` alone, so the artifacts stay
+    self-consistent and only the arithmetic identity is violated.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    drifted = _doctored_selection(
+        root, manifest, base_sha,
+        included=frozenset({"tests/test_phantom_added.py"}),
+    )
+    summary, canary = _artifacts_from_selection(root, plugin, manifest,
+                                                drifted, base_sha)
+    rc = _verify_in_process(root, manifest, summary, canary, base_sha,
+                            drifted, monkeypatch)
+    captured = capsys.readouterr()
+    assert rc == 1, captured.out + captured.err
+    assert "SELECTION-ARITHMETIC" in captured.err
+    assert "VERIFY-OK" not in captured.out
 
 
 # ---- the skip advisory ---------------------------------------------------

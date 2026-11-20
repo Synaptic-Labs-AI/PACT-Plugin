@@ -162,6 +162,10 @@ def _runner(rig, collect_only=False):
 
 
 def _verify(rig):
+    # The Actions-gated head_sha binding anchors artifacts to the checkout
+    # they verified: here, the rig's head at verify time.
+    env = dict(rig.env)
+    env["GITHUB_SHA"] = _git(rig.root, "rev-parse", "HEAD")
     return subprocess.run([
         sys.executable, str(VERIFIER),
         "--base-sha", rig.base_sha,
@@ -170,7 +174,7 @@ def _verify(rig):
         "--summary", str(rig.summary),
         "--canary", str(rig.canary),
         "--run-record", str(rig.record),
-    ], capture_output=True, text=True, env=rig.env, timeout=120)
+    ], capture_output=True, text=True, env=env, timeout=120)
 
 
 def _read(path):

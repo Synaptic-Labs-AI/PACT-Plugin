@@ -304,14 +304,18 @@ def _collect_only(args, selection, manifest_path: Path, plugin_root: Path,
 def _run(args, selection, manifest_path: Path, plugin_root: Path,
          repo_root: Path) -> int:
     argv = build_argv(selection, plugin_root, "run", workers=4)
-    # The `collected N items` header sits at the TOP of a run log of tens of
-    # thousands of lines, so a tail-only parse never sees it and the collected
-    # count silently falls back to the outcome sum. Capture it as it streams.
+    # The `collected N items` / `N workers [M items]` header sits at the TOP
+    # of a run log of tens of thousands of lines, so a tail-only parse never
+    # sees it and the collected count silently falls back to the outcome sum.
+    # FIRST match wins: the header prints once, before any test output, and
+    # any later matching line belongs to a nested session, not this run (the
+    # same first-match rule parse_pytest_summary applies to its own items
+    # fallback).
     collected_header: list[str] = []
 
     def note_collected(line: str) -> None:
-        if _ITEMS_LINE_RE.search(line):
-            collected_header[:] = [line.strip()]
+        if not collected_header and _ITEMS_LINE_RE.search(line):
+            collected_header.append(line.strip())
 
     rc, tail = _stream(argv, plugin_root, note_collected)
     parsed = parse_pytest_summary(

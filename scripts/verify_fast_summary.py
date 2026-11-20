@@ -26,6 +26,24 @@ from fast_suite_selection import (  # noqa: E402  (path must precede import)
     parse_pytest_summary,
     select_for_change,
 )
+# DELIBERATE PRIVATE-IMPORT CONTRACT on verify_full_run: this verifier reuses
+# the full-run verifier's record validation instead of re-implementing it, so
+# both lanes refuse a malformed record identically. The five underscore names
+# below are that contract, per name:
+#   _load               read a JSON-object record; absent/unparseable is
+#                       RunFailure, never None.
+#   _require_int        a field that is an int (bool refused), else
+#                       RunFailure(BAD-FIELD-<KEY>).
+#   _require_keys       every schema-v3 record key present, else
+#                       RunFailure(KEY-MISSING-<KEY>).
+#   _require_run_identity  under Actions the record's run_id/run_attempt must
+#                       equal the environment, else RunFailure(RUN-IDENTITY).
+#   _require_skip_sites structurally validated (file, reason, count) sites,
+#                       else RunFailure(SKIP-SITES-BAD).
+# An upstream RENAME breaks this module at import time with a loud
+# ImportError before any verification runs — the fail-closed direction — and
+# a semantic drift of any helper is caught by the shared record tests
+# (tests/test_verify_full_run.py) both lanes' verdicts rest on.
 from verify_full_run import (  # noqa: E402  (path must precede import)
     RunFailure,
     SKIP_ALLOWLIST,
@@ -220,6 +238,19 @@ def _require_identity(canary: dict, summary: dict, record: dict) -> None:
                 "ARTIFACT-SHA-MISMATCH",
                 f"{key}: canary records {canary.get(key)!r} but run records "
                 f"{summary.get(key)!r}")
+    # Under Actions, head_sha must be THE checkout this job verified, not
+    # merely canary-to-run equal: a stale artifact pair from another head
+    # would otherwise agree with each other. Locally there is no checkout
+    # anchor, so the check stays Actions-gated like the run-identity one.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        expected_head = os.environ.get("GITHUB_SHA")
+        if (not expected_head or canary.get("head_sha") != expected_head
+                or summary.get("head_sha") != expected_head):
+            raise VerificationFailure(
+                "HEAD-SHA-MISMATCH",
+                f"head_sha is canary={canary.get('head_sha')!r} "
+                f"run={summary.get('head_sha')!r} but GITHUB_SHA is "
+                f"{expected_head!r}")
     for key, env_name in (("run_id", "GITHUB_RUN_ID"),
                           ("run_attempt", "GITHUB_RUN_ATTEMPT")):
         values = (canary.get(key), summary.get(key), record.get(key))
@@ -303,11 +334,24 @@ def _require_selection_identity(canary: dict, summary: dict, selection) -> None:
                 f"selection; mismatched fields={differing}")
 
 
-def _require_process_and_workers(canary: dict, summary: dict, record: dict) -> None:
+def _require_clean_exits_and_collection_identity(canary: dict, summary: dict,
+                                                 record: dict) -> None:
+    """The three exits finished clean and no outcome contradicts zero-failure.
+
+    Checks canary rc, run rc, and record exitstatus are 0; run and record
+    failed/errors/deselected are 0; and the collection-hook identity
+    (after + deselected == before, after == collected) holds. Worker evidence
+    itself is enforced elsewhere: the recorder nulls the collection fields
+    when the worker population is unprovable (refused here as BAD-FIELD),
+    and exact terminal node sets are _require_node_identity's.
+    """
     if canary["canary"]["rc"] != 0:
         raise VerificationFailure("CANARY-RC", f"canary rc is {canary['canary']['rc']}")
     if summary["run"]["rc"] != 0:
         raise VerificationFailure("RUN-RC", f"run rc is {summary['run']['rc']}")
+    # Exit status is read BEFORE the deselected null-check: a non-zero exit
+    # reports EXITSTATUS, and the exit-0 late-worker-loss case (null fields)
+    # reports BAD-FIELD-DESELECTED. Both orders fail closed.
     if _require_record_int(record, "exitstatus") != 0:
         raise VerificationFailure("EXITSTATUS", f"record exitstatus is {record['exitstatus']}")
     deselected = _record_outcome_int(record, "deselected")
@@ -480,7 +524,7 @@ def main(argv: list[str] | None = None) -> int:
             if artifact["manifest"].get("sha256") != manifest_sha:
                 raise VerificationFailure(
                     "MANIFEST-DRIFT", f"{label} manifest hash differs from the current manifest")
-        _require_process_and_workers(canary, summary, record)
+        _require_clean_exits_and_collection_identity(canary, summary, record)
         _require_node_identity(canary, summary, record, canary_summary)
         _require_outcomes(summary, record, run_summary, record_summary)
         identity = len(recomputed.discovered) - len(recomputed.excluded)
