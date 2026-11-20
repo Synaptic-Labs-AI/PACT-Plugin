@@ -80,6 +80,25 @@ INTENTIONAL_WAITING = "### Intentional Waiting (orchestrator responsibilities)"
 
 SECTION_HEADINGS = [WAIT_IN_SILENCE, INTENTIONAL_WAITING]
 
+_CROSSED_WAKE_SENTENCE = (
+    "Keep crossed-wake housekeeping out of the user channel: do not acknowledge "
+    "stragglers or narrate the durable read and any required redundant confirm, "
+    "while still reporting milestones and escalating genuine stalls."
+)
+_CROSSED_WAKE_PHRASE_PINS = [
+    (
+        INTENTIONAL_WAITING,
+        "Keep crossed-wake housekeeping out of the user channel: do not "
+        "acknowledge stragglers",
+    ),
+    (
+        INTENTIONAL_WAITING,
+        "or narrate the durable read and any required redundant confirm",
+    ),
+    (INTENTIONAL_WAITING, "while still reporting milestones"),
+    (INTENTIONAL_WAITING, "and escalating genuine stalls."),
+]
+
 
 def _raw(path: Path) -> str:
     return path.read_text(encoding="utf-8")
@@ -222,6 +241,17 @@ SECTION_PHRASE_PINS = [
     # The named crossed-wake-confirm boundary: nudge-first does not collide
     # with the anti-acceleration rule.
     (INTENTIONAL_WAITING, "never accelerate nudging in response to idle ticks"),
+    # --- §12: crossed-wake user-channel housekeeping + safety bounds ---
+    *_CROSSED_WAKE_PHRASE_PINS,
+    (INTENTIONAL_WAITING, "durable-read the task"),
+    (INTENTIONAL_WAITING, "send exactly ONE redundant confirm naming the actionable state"),
+    (INTENTIONAL_WAITING, "take no action at all"),
+    (
+        INTENTIONAL_WAITING,
+        "escalate to stall diagnosis only on task-file-mtime plus sustained-silence evidence",
+    ),
+    (INTENTIONAL_WAITING, "Applies under both teammateModes"),
+    (INTENTIONAL_WAITING, "pact-completion-authority §Crossed-Wake Idles"),
     # --- §5: the terminating condition is the awaited event itself ---
     (WAIT_IN_SILENCE, "That terminating condition must BE the awaited event, never a correlate of it."),
     (WAIT_IN_SILENCE, "If the awaited event cannot be tested directly, poll until it can be"),
@@ -242,6 +272,17 @@ SECTION_PHRASE_PINS = [
 ]
 
 
+def _assert_rule_phrase(path: Path, heading: str, phrase: str):
+    normalized_phrase = _phrase(phrase)
+    assert normalized_phrase in _phrase(_section(path, heading)), (
+        f"pact-orchestrator.md {heading}: rule phrase {phrase!r} not found "
+        f"in the section (backtick-and-whitespace-normalized match). If the "
+        f"wording was changed intentionally, update this pin in lockstep; "
+        f"otherwise the wait-discipline rule this phrase carries is missing "
+        f"from a runtime-loaded surface."
+    )
+
+
 @pytest.mark.parametrize(
     "heading, phrase",
     SECTION_PHRASE_PINS,
@@ -255,11 +296,37 @@ def test_rule_phrase_present(heading: str, phrase: str):
     so moving the statement out of its §5 home (or dropping a reference
     site) flips exactly the pin for that site. If the wording was changed
     intentionally, update the pin in lockstep."""
-    normalized_phrase = _phrase(phrase)
-    assert normalized_phrase in _phrase(_section(ORCHESTRATOR, heading)), (
-        f"pact-orchestrator.md {heading}: rule phrase {phrase!r} not found "
-        f"in the section (backtick-and-whitespace-normalized match). If the "
-        f"wording was changed intentionally, update this pin in lockstep; "
-        f"otherwise the wait-discipline rule this phrase carries is missing "
-        f"from a runtime-loaded surface."
+    _assert_rule_phrase(ORCHESTRATOR, heading, phrase)
+
+
+@pytest.mark.parametrize(
+    "heading,phrase",
+    _CROSSED_WAKE_PHRASE_PINS,
+    ids=[f"B{index}" for index in range(1, 5)],
+)
+def test_crossed_wake_pin_rejects_clause_deletion(
+    tmp_path, heading: str, phrase: str
+):
+    """Exercise the shipped assertion against a simulated final sentence."""
+    persona = tmp_path / "pact-orchestrator.md"
+    persona.write_text(
+        f"{heading}\n{_CROSSED_WAKE_SENTENCE}\n", encoding="utf-8"
     )
+    _assert_rule_phrase(persona, heading, phrase)
+
+    mutated = _CROSSED_WAKE_SENTENCE.replace(phrase, "", 1)
+    assert mutated != _CROSSED_WAKE_SENTENCE, "mutation fixture did not land"
+    persona.write_text(f"{heading}\n{mutated}\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="rule phrase"):
+        _assert_rule_phrase(persona, heading, phrase)
+
+
+def test_crossed_wake_pin_rejects_wrong_section_bypass(tmp_path):
+    """Generic §5 silence prose cannot satisfy the §12 channel pins."""
+    persona = tmp_path / "pact-orchestrator.md"
+    persona.write_text(
+        f"{WAIT_IN_SILENCE}\n{_CROSSED_WAKE_SENTENCE}\n", encoding="utf-8"
+    )
+    for heading, phrase in _CROSSED_WAKE_PHRASE_PINS:
+        with pytest.raises(AssertionError, match="rule phrase"):
+            _assert_rule_phrase(persona, heading, phrase)

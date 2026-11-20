@@ -18,6 +18,22 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.36: reduce crossed-wake acknowledgements and narration
+
+### Summary
+
+Teammate and orchestrator instruction prose now separates routine crossed-wake housekeeping from actionable communication. Teammates no longer need to acknowledge an already-satisfied directive or re-announce an unchanged wait, and leads keep routine straggler handling, durable reads, and redundant confirms out of the user channel. No hook, task-state, acceptance, liveness, protocol, or platform behavior changes.
+
+### What landed
+
+- The existing shared teammate completion reminder now requires a fresh task-file read after a directive-bearing wake, no standalone confirmation when that directive is already satisfied, and no re-announcement of an unchanged `intentional_wait`. Necessary reconciliation folds into a `boundary-drain` line only when another protocol-boundary message is already required; with no new work or exception, the teammate ends without text or a filler tool call. Blockers, corrections, questions, divergent or actionable state, and every owed resolving message still require a response. The existing peer-context builder delivers this instruction to in-process teammates and to separate-process teammates at startup and after compaction.
+- The orchestrator's crossed-wake rule now forbids user-facing straggler acknowledgements and narration of the durable read and any required redundant confirm. The durable read, exactly one operational confirm for an unresolved post-directive wait, no action for a pre-directive straggler, milestone reporting, and evidence-based genuine-stall escalation remain unchanged under both teammate modes.
+- Focused composition, negative-role, dark-fallback, clause-mutation, wake-ordering, and spawn-byte controls cover both instruction changes. The spawn total remains strictly below the unchanged 10,000-byte ceiling, and the separate-process subprocess controls prove delivery rather than live model behavior.
+
+### Why
+
+Routine acknowledgements and housekeeping narration add crossed-wake noise without advancing the work. Keeping those messages conditional preserves required acceptance and stall-recovery communication while leaving platform-generated idle notifications outside the claimed reduction.
+
 ## v4.8.35: find order-dependent tests and isolate the state tests shared
 
 ### Summary
