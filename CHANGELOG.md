@@ -22,13 +22,14 @@ goes only above the newest version. Every PR checks the whole file with
 
 ### Summary
 
-For a plugin user, one instruction changes: teammates are no longer told to set a `memory_saved` flag in task metadata before completing. No hook, agent or command behaves differently — the flag had zero code readers, so removing it changes no observable behavior.
+For a plugin user, one instruction changes: teammates are no longer told to set a `memory_saved` flag in task metadata before completing, so they intentionally stop writing that retired metadata. No runtime or hook code path behaves differently — the flag had zero code readers.
 
 ### What landed
 
 - The "Confirm Memory Saved" step is deleted from the pact-agent-teams skill's Before Completing checklist. The flag was self-reported and unenforced: nothing verified a save, and the measured incident behind the change found tasks flagged true with no record saved anywhere. The step was the list's last item; the surviving item was unnumbered so the checklist does not read as having lost a step; the save-discipline prose is untouched — domain learnings still go to agent memory, institutional knowledge still goes in the HANDOFF.
 - The agent-handoff emitter's docstring drops the line documenting that no hook enforces the flag; the flag no longer exists, so the caveat had no referent. No code changes.
 - Two validation-silence tests swap their example extra key to a neutral name; one also drops a comment that misdescribed the old key as a real secretary field. The property under test — extra keys in a HANDOFF stay silent — is unchanged and still positively asserted.
+- A regression pin scans every tracked Markdown file across the six LLM-loaded instruction surfaces — `skills/`, `agents/`, `commands/`, `protocols/`, `reference/`, and `templates/` — for case-insensitive `memory_saved` spelling variants, and names any non-UTF-8 file it cannot check. The root CHANGELOG's historical retirement note is outside that population.
 
 ### Why
 

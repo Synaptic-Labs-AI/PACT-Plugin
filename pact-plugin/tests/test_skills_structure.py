@@ -624,14 +624,16 @@ class TestNoFirstActionFossilInSkillBodies:
 
 
 def _instruction_surface_population():
-    """Every tracked markdown file across the four LLM-loaded surfaces.
+    """Every tracked markdown file across the six LLM-loaded surfaces.
 
     Built from the collection-time populations so an untracked scratch
     file stays invisible and the installed-layout skip behavior matches
     the rest of the module.
     """
     files = []
-    for surface in ("skills", "agents", "commands", "protocols"):
+    for surface in (
+        "skills", "agents", "commands", "protocols", "reference", "templates"
+    ):
         files.extend(_collection_population(f"{PLUGIN_ROOT.name}/{surface}", "**"))
     return sorted(p for p in files if p.suffix == ".md")
 
@@ -643,18 +645,78 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     the flag were both deleted. Nothing else asserted that retirement, so
     a future reintroduction would land unpinned.
 
-    Scoped to the four LLM-loaded instruction surfaces (skills/, agents/,
-    commands/, protocols/ — every tracked markdown file): a token an LLM
-    loads as instruction re-teaches the retired flag wherever it appears.
-    The repo-root CHANGELOG's retirement note legitimately names the flag
-    and stays out of scope. A case-insensitive pattern match is
-    deliberate — it covers markup wrapping AND spelling variants
-    (memory_saved, memorySaved, memory-saved, "memory saved"). A tracked
-    file that is not valid UTF-8 is named by the pin rather than raising
-    a bare decode error.
+    Scoped to six LLM-loaded instruction surfaces (skills/, agents/,
+    commands/, protocols/, reference/, templates/ — every tracked markdown
+    file): a token an LLM loads as instruction re-teaches the retired flag
+    wherever it appears. The repo-root CHANGELOG's retirement note
+    legitimately names the flag and stays out of scope. Inline Markdown
+    delimiters are removed and whitespace is collapsed before the
+    case-insensitive match, covering markup wrapping, inline markup,
+    line wrapping, and spelling variants (memory_saved, memorySaved,
+    memory-saved, "memory saved"). A tracked file that is not valid UTF-8
+    is named by the pin rather than raising a bare decode error.
     """
 
     FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]?saved", re.IGNORECASE)
+    SURFACE_FILES = (
+        "skills/pact-agent-teams/SKILL.md",
+        "skills/pact-testing-strategies/references/test-pyramid.md",
+        "agents/pact-orchestrator.md",
+        "commands/orchestrate.md",
+        "protocols/pact-protocols.md",
+        "reference/config.md",
+        "templates/environment-model.md",
+    )
+    PROHIBITED_FORMS = (
+        "memory_saved",
+        "memorySaved",
+        "memory-saved",
+        "memory saved",
+        "memory\nsaved",
+        "memory  saved",
+        "memory\tsaved",
+        "memory**_**saved",
+        "memory`-`saved",
+        "`memory_saved`",
+        "**memory-saved**",
+        "MEMORY_SAVED",
+    )
+
+    @staticmethod
+    def _seed_tracked_repo(repo):
+        plugin = repo / "pact-plugin"
+        for relative in TestMemorySavedRetiredFromInstructionSurfaces.SURFACE_FILES:
+            path = plugin / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("clean\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+        return plugin
+
+    def test_population_covers_every_surface_and_nested_skill_markdown(
+            self, tmp_path, monkeypatch):
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "skills" / "untracked.md").write_text("memory_saved\n")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        assert {
+            path.relative_to(plugin).as_posix()
+            for path in _instruction_surface_population()
+        } == set(self.SURFACE_FILES)
+
+    @pytest.mark.parametrize("form", PROHIBITED_FORMS)
+    def test_pin_rejects_prohibited_form_in_real_tracked_repo(
+            self, form, tmp_path, monkeypatch):
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "skills" / "pact-agent-teams" / "SKILL.md").write_text(
+            form, encoding="utf-8"
+        )
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        with pytest.raises(AssertionError, match="re-teach the retired"):
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
 
     def test_no_memory_saved_in_any_llm_loaded_surface(self):
         offenders = []
@@ -665,7 +727,10 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             except UnicodeDecodeError:
                 undecodable.append(path)
                 continue
-            if self.FORBIDDEN_PATTERN.search(text):
+            normalized = " ".join(
+                text.replace("*", "").replace("`", "").split()
+            )
+            if self.FORBIDDEN_PATTERN.search(normalized):
                 offenders.append(path)
         assert not offenders, (
             f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in offenders]} "
