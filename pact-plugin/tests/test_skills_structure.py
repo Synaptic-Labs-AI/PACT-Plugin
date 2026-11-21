@@ -623,6 +623,19 @@ class TestNoFirstActionFossilInSkillBodies:
         )
 
 
+def _separator_entity(match):
+    """Bounded numeric-entity decoder for the memory_saved pin: only
+    separator-class characters (_ - space) are resolved; any other
+    reference is returned unchanged."""
+    code = match.group(1)
+    n = int(code[1:], 16) if code[0] in "xX" else int(code, 10)
+    try:
+        char = chr(n)
+    except ValueError:  # out-of-range reference: leave it literal
+        return match.group(0)
+    return char if char in "_- " else match.group(0)
+
+
 def _instruction_surface_population():
     """Every tracked markdown file across the six LLM-loaded surfaces.
 
@@ -635,7 +648,7 @@ def _instruction_surface_population():
         "skills", "agents", "commands", "protocols", "reference", "templates"
     ):
         files.extend(_collection_population(f"{PLUGIN_ROOT.name}/{surface}", "**"))
-    return sorted(p for p in files if p.suffix == ".md")
+    return sorted(p for p in files if p.suffix.lower() in (".md", ".markdown"))
 
 
 class TestMemorySavedRetiredFromInstructionSurfaces:
@@ -646,15 +659,19 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     a future reintroduction would land unpinned.
 
     Scoped to six LLM-loaded instruction surfaces (skills/, agents/,
-    commands/, protocols/, reference/, templates/ — every tracked markdown
-    file): a token an LLM loads as instruction re-teaches the retired flag
-    wherever it appears. The repo-root CHANGELOG's retirement note
-    legitimately names the flag and stays out of scope. Inline Markdown
-    delimiters are removed and whitespace is collapsed before the
-    case-insensitive match, covering markup wrapping, inline markup,
-    line wrapping, and spelling variants (memory_saved, memorySaved,
-    memory-saved, "memory saved"). A tracked file that is not valid UTF-8
-    is named by the pin rather than raising a bare decode error.
+    commands/, protocols/, reference/, templates/ — every tracked
+    Markdown file, .md/.markdown/.MD extensions alike): a token an LLM
+    loads as instruction re-teaches the retired flag wherever it
+    appears. The repo-root CHANGELOG's retirement note legitimately
+    names the flag and stays out of scope. Backslash-escaped separators
+    (underscore, hyphen, star) are unescaped, separator-only numeric
+    character references are decoded (any other entity stays literal),
+    Markdown delimiters are removed and whitespace is collapsed before
+    the case-insensitive match, covering markup wrapping, inline
+    markup, line wrapping, and spelling variants (memory_saved,
+    memorySaved, memory-saved, "memory saved"). A tracked file that is
+    not valid UTF-8 is named by the pin rather than raising a bare
+    decode error.
     """
 
     FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]*saved", re.IGNORECASE)
@@ -689,6 +706,11 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "memory--saved",
         r"memory\_saved",
         r"memory\-saved",
+        r"memory\*saved",
+        r"memory\*\*saved",
+        "memory&#95;saved",
+        "memory&#x2d;saved",
+        "memory&#32;saved",
     )
 
     @staticmethod
@@ -714,9 +736,30 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             for path in _instruction_surface_population()
         } == set(self.SURFACE_FILES)
 
+    def test_pin_rejects_case_and_markdown_extension_variants(
+            self, tmp_path, monkeypatch):
+        """Uppercase and .markdown extensions are Markdown instruction files
+        too; the population must not let them silently escape the pin."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "skills" / "GUIDE.MD").write_text("memory_saved\n")
+        (plugin / "agents" / "NOTES.markdown").write_text("memory-saved\n")
+        subprocess.run(
+            ["git", "add", "--", "pact-plugin/skills/GUIDE.MD",
+             "pact-plugin/agents/NOTES.markdown"],
+            cwd=tmp_path, check=True,
+        )
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        with pytest.raises(AssertionError) as exc_info:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        message = str(exc_info.value)
+        assert "pact-plugin/skills/GUIDE.MD" in message
+        assert "pact-plugin/agents/NOTES.markdown" in message
+
     @pytest.mark.parametrize("surface", SURFACE_FILES)
     @pytest.mark.parametrize("form", PROHIBITED_FORMS)
-    def test_pin_rejects_prohibited_form_in_real_tracked_repo(
+    def test_pin_rejects_prohibited_form_in_seeded_temp_git_repo(
             self, form, surface, tmp_path, monkeypatch):
         plugin = self._seed_tracked_repo(tmp_path)
         (plugin / surface).write_text(form, encoding="utf-8")
@@ -762,8 +805,17 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             except UnicodeDecodeError:
                 undecodable.append(path)
                 continue
+            # Bounded decode: numeric character references are resolved only
+            # when they denote a separator-class char (_ - space); every
+            # other entity stays literal. Arbitrary-markup evasion shapes
+            # (e.g. memory<br>saved) are ruled out-of-contract, so no
+            # general HTML decode happens here.
             normalized = " ".join(
-                re.sub(r"\\([_-])", r"\1", text)
+                re.sub(
+                    r"&#([xX][0-9a-fA-F]+|\d+);",
+                    _separator_entity,
+                    re.sub(r"\\([_*-])", r"\1", text),
+                )
                 .replace("*", "")
                 .replace("`", "")
                 .split()
