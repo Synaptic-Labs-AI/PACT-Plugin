@@ -3362,6 +3362,53 @@ def test_a_show_that_opens_the_memory_store_asks_git_each_question_once(tmp_path
         causes, commands)
 
 
+@pytest.mark.parametrize("layout", ["main checkout", "linked worktree"])
+def test_a_show_that_opens_the_memory_store_reads_each_roots_identity_once(tmp_path, monkeypatch, layout):
+    """`backlog show` with a live item's memory id asks a root's identity
+    more than once in its one pass (the memory skill's guard, the roots and
+    the store it opens), and the pass reads that identity, the override file
+    and the origin, once for each root and directory asked from, so every
+    reader of the root gets the one answer. The control shows a root asked
+    for twice and the store opened inside the command.
+
+    Real repos and git."""
+    main = _repo(tmp_path / "main").resolve()
+    start = main
+    if layout == "linked worktree":
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                       check=True, capture_output=True)
+        start = (tmp_path / "wt").resolve()
+    _project_dir_is(monkeypatch, start)
+    monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+    memory_api = backlog._memory_api()
+    monkeypatch.setattr(memory_api, "_instance", None)
+    store = tmp_path / "store"
+    store.mkdir()
+    assert backlog.main(["--backlog-dir", str(store), "add", "x", "--memory", "a" * 32]) == backlog._EXIT_OK
+    monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+    asked, read = [], []
+    at_root, detect = memory_api.PACTMemory._identity_at_root, memory_api.detect_id_for_root
+
+    def asking(root, common_dir, **kwargs):
+        asked.append((str(root), str(common_dir), str(kwargs.get("asked_root"))))
+        return at_root(root, common_dir, **kwargs)
+
+    def reading(root, common_dir, **kwargs):
+        read.append((str(root), str(common_dir), str(kwargs.get("asked_root"))))
+        return detect(root, common_dir, **kwargs)
+
+    monkeypatch.setattr(memory_api.PACTMemory, "_identity_at_root", staticmethod(asking))
+    monkeypatch.setattr(memory_api, "detect_id_for_root", reading)
+
+    code = backlog.main(["--backlog-dir", str(store), "show"])
+
+    assert (memory_api._instance is not None, max(asked.count(key) for key in asked) >= 2) == (True, True), (
+        "control: show opened the store and asked a root's identity twice", asked)
+    assert ({key: read.count(key) for key in read}, code) == ({key: 1 for key in asked}, backlog._EXIT_OK), (
+        asked, read)
+
+
 def _cli_run(start: Path, store: Path, *argv: str) -> "subprocess.CompletedProcess":
     """`backlog.py <argv>` run as its own process from `start`, declared as
     the project directory, as `_cli_write` runs `add`."""

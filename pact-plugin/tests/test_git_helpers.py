@@ -262,3 +262,41 @@ def test_a_pass_answers_each_git_question_once_and_no_other(tmp_path, monkeypatc
     assert len(failures) == 2 and failures[0] is failures[1], failures
     assert [r for r in runs if r[0][-1] == "--raises"] == [(("git", "rev-parse", "--raises"), False)]
     assert (PASS_GIT_RESULTS.get(), after) == (None, len(runs)), "the pass ended with its block"
+
+
+def test_a_pass_keys_a_question_on_the_directory_its_run_sets(tmp_path, monkeypatch):
+    """A `run` that sets its own `cwd=` is keyed on that directory, given to
+    `answered_once` as `cwd`: in one pass the same argv run in two
+    repositories is two questions with two answers, the same argv run again
+    in one of them is answered from the pass, and `-C` pairs resolve against
+    the given directory as git resolves them against its own.
+
+    Real repositories with no remote, real git."""
+    import subprocess
+
+    from shared.git_helpers import answered_once, git_results_pass
+
+    a, b = (tmp_path / "a").resolve(), (tmp_path / "b").resolve()
+    for repo in (a, b):
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (b / "sub").mkdir()
+    monkeypatch.chdir(a)
+    runs = []
+
+    def ask(argv, cwd=None):
+        def run():
+            runs.append((tuple(argv), cwd))
+            return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=5, check=True)
+        return answered_once(argv, run, text=True, env=None, cwd=cwd).stdout.strip()
+
+    toplevel = ["git", "rev-parse", "--show-toplevel"]
+    with git_results_pass():
+        answers = [
+            ask(toplevel, cwd=b),
+            ask(toplevel),
+            ask(toplevel, cwd=b),
+            ask(["git", "-C", "..", *toplevel[1:]], cwd=b / "sub"),
+        ]
+
+    assert answers == [str(b), str(a), str(b), str(b)], answers
+    assert runs == [(tuple(toplevel), b), (tuple(toplevel), None)], runs

@@ -60,12 +60,18 @@ def git_results_pass() -> Iterator[None]:
         PASS_GIT_RESULTS.reset(token)
 
 
-def _question(argv: Sequence[str], text: bool, env: Optional[Mapping[str, str]]) -> Optional[tuple]:
-    """The memo key of git command `argv`, or None when its directory will
-    not resolve (then it is asked, never shared)."""
+def _question(
+    argv: Sequence[str],
+    text: bool,
+    env: Optional[Mapping[str, str]],
+    cwd: "Optional[str | os.PathLike[str]]",
+) -> Optional[tuple]:
+    """The memo key of git command `argv` run in `cwd` (this process's
+    directory when None), or None when its directory will not resolve (then
+    it is asked, never shared)."""
     rest = list(map(str, argv[1:]))
     try:
-        where = os.getcwd()
+        where = os.getcwd() if cwd is None else os.fspath(cwd)
         while len(rest) >= 2 and rest[0] == "-C":
             where = os.path.join(where, rest[1])
             rest = rest[2:]
@@ -86,17 +92,20 @@ def answered_once(
     *,
     text: bool,
     env: Optional[Mapping[str, str]],
+    cwd: "Optional[str | os.PathLike[str]]" = None,
 ) -> _Answer:
     """`run()`, the caller's own call of git command `argv`, made once per
     `git_results_pass` for each question (`_question`): a later caller asking
     the same question gets the same CompletedProcess, or the same exception
-    raised again. `text` and `env` must be the ones `run` passes. Outside a
-    pass, `run()` is called every time. Only a READ may come through here: a
-    command that changes the repository must run each time it is asked."""
+    raised again. `text`, `env` and `cwd` must be the ones `run` passes; a
+    `run` that sets no `cwd=` runs in this process's directory and passes
+    none here. Outside a pass, `run()` is called every time. Only a READ may
+    come through here: a command that changes the repository must run each
+    time it is asked."""
     memo = PASS_GIT_RESULTS.get()
     if memo is None:
         return run()
-    key = _question(argv, text, env)
+    key = _question(argv, text, env, cwd)
     if key is None:
         return run()
     if key not in memo:
