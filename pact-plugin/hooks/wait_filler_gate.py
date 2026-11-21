@@ -4,7 +4,9 @@ Location: pact-plugin/hooks/wait_filler_gate.py
 Summary: PreToolUse hook (matcher: Bash) that denies bare `true`/`sleep <N>`
     filler commands — the turn-manufacturing no-ops a waiting agent emits
     under the filler-call compulsion — with a count-and-escalate gradient
-    and a bounded circuit-breaker valve (issue #1657).
+    (issue #1657) whose computed tier 3 carries a PACT-WAIT-OUTLET: a
+    ready-to-run arm command for the structural wait watcher
+    (hooks/pact_wait.py).
 Used by: pact-plugin/hooks/hooks.json PreToolUse "Bash" matcher entry.
 
 A command is denied iff, after normalization, it IS nothing but a filler
@@ -40,19 +42,15 @@ A session-total saturation boost (`total > 6`) escalates command-walking
 on the POST-NORMALIZATION command only — `description` is never read (a
 description-keyed counter resets when the model varies the description).
 
-VALVE: at computed tier 3, an INSTANT form (bare `true`, or `sleep` with
-zero duration) is ALLOWED with a CIRCUIT-BREAKER additionalContext
-payload — the sanctioned terminal no-op that deterministically ends the
-loop (no hook can end a turn; an allowed inert call plus an imperative
-payload can). The budget is 2 per (session_id, agent_type) SECTION, so
-each agent's loop gets its own sanctioned exit under session identity
-collapse, not 2 for the whole session file. The instant-form predicate
-is derived from the SAME normalized command and, on filler-matched
-strings, admits exactly the all-zero-duration spellings plus bare
-`true`: `sleep N>0` / `sleep infinity` are NEVER instant. "At most
-twice" is the DEFAULT: a writer able to modify the 0600 state file can
-raise `valve_budget` above 2 (same local trust domain as the accepted
-no-HMAC stance) — each extra allowance is still an inert no-op.
+OUTLET: at computed tier 3 the denial's reason carries a ready-to-run arm
+command for the structural wait watcher (hooks/pact_wait.py). The waiting
+agent launches it with ONE background `Bash` frame (`run_in_background:
+true`) BEFORE ending its turn; the watcher process's completion
+notification is the wake that re-invokes the agent — the structural,
+condition-based end of the wait. The tier-3 verdict is ALWAYS a denial:
+no hook can end a turn, so an allowed inert no-op only ever manufactured
+the next one — the productive terminal act is arming the watcher, then
+ending the turn.
 
 STATE: one JSON file per session_id at
 <CLAUDE_CONFIG_DIR>/pact-filler-state/<session_id>.json, agent_type
@@ -71,10 +69,10 @@ level. Any internal error before the filler verdict — malformed stdin, a
 matcher exception — allows the command (exit 0 + stderr note): a load
 failure that denied on matcher=Bash would block every Bash call in every
 consumer session, and the gated commands are inert no-ops. Any state
-failure after the verdict — unreadable file, corrupt JSON, non-int
-valve_budget, lock timeout — degrades to the frozen tier-1 advisory deny
-with the valve CLOSED (UNKNOWN = DENY): bad state must never flip the
-verdict to allow and must never manufacture a harder denial. Stale state
+failure after the verdict — unreadable file, corrupt JSON, lock
+timeout — degrades to the frozen tier-1 advisory deny: bad state must
+never flip the verdict to allow and must never manufacture a harder
+denial. Stale state
 files are TTL-reaped (30d) by cleanup_old_filler_state in
 hooks/session_end.py.
 
@@ -82,8 +80,8 @@ Input: JSON on stdin, {"tool_name": "Bash", "tool_input": {"command": "<cmd>"}}
 Output: deny = {"hookSpecificOutput": {...}} + exit 2 (the reason is also
         mirrored to stderr for harnesses reported to ignore stdout JSON
         at exit 2; the channel probe of 2026-10-24 confirmed stdout JSON
-        reaches the model in this harness);
-        valve allow = {"hookSpecificOutput": {"additionalContext": ...}} + exit 0;
+        reaches the model in this harness; the tier-3 reason carries the
+        PACT-WAIT-OUTLET arm command);
         plain allow = {"suppressOutput": true} + exit 0. Errors to stderr.
 """
 
@@ -119,25 +117,19 @@ _TRAILING_COMMENT = re.compile(r"\s+#.*\Z")
 # Same command re-fired: 2 -> tier 2, 3+ -> tier 3. Fresh command in a
 # saturated session (total past the threshold): 1 + 1 -> tier 2, and it
 # reaches tier 3 on its own first re-fire — the command-walk backstop.
-#
-# The instant-form predicate below is a STRICT SUBSET of _FILLER_PATTERN's
-# language (the V1 pin), and the property holds BOTH by pattern and by
-# call-site discipline. By pattern: the duration alternation requires a
-# digit (`0+\.?0*` or `\.0+`), so no duration-less spelling like `sleep s`
-# is admitted, and every all-zero spelling (`0`, `00`, `0.`, `0.0`, `.0`,
-# `.00`, optional s/m/h/d suffix) is also in the filler grammar's duration
-# set; anything carrying a nonzero digit, and `infinity`, fail the anchor.
-# By call-site discipline: the sole call site computes it from the
-# normalized string that already produced the filler verdict, so even a
-# future pattern regression cannot widen the valve beyond denied commands.
 _MAX_TIER = 3
 _SATURATION_TOTAL = 6
-_INITIAL_VALVE_BUDGET = 2
 _MAX_TRACKED_PAIRS = 64
 _MAX_AGENT_SECTIONS = 32
 _FILLER_STATE_DIRNAME = "pact-filler-state"
 _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
-_INSTANT_FILLER = re.compile(r"\A(?:true|sleep[ \t]+(?:0+\.?0*|\.0+)(?:[smhd])?)\Z")
+
+# The structural wait watcher this hook arms the waiting agent with at
+# tier 3: the sibling entrypoint next to this file, so the path in the
+# denial reason is always the live install's real one.
+_WATCHER_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "pact_wait.py"
+)
 
 _TIER2_SUFFIX = (
     " This exact call has now been denied {count} time{plural} this "
@@ -145,16 +137,18 @@ _TIER2_SUFFIX = (
 )
 _TIER3_REASON = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
-    "session ({total} filler calls in total). Your turn ends now — make "
-    "NO further tool calls this turn. Passive waiting is the protocol: "
-    "teammate messages arrive as their own turns."
-)
-_VALVE_PAYLOAD = (
-    "CIRCUIT-BREAKER: this no-op filler call was allowed as your "
-    "sanctioned terminal wait — it produced no new information, and "
-    "nothing will come of it. Your turn ends NOW: do not call any tool "
-    "again this turn. Teammate messages arrive as their own turns. "
-    "(Circuit-breaker budget remaining: {budget}.)"
+    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
+    "re-filling — end this wait structurally instead. FIRST arm the "
+    "deliverable watcher with ONE `Bash` call (`run_in_background: "
+    "true`), substituting your team name and the task id you are "
+    "waiting on:\n"
+    'python3 "{watcher}" --team <team-name> --task <task-id> '
+    "--predicate handoff --deadline 900\n"
+    "(use --predicate teachback_submit when the awaited deliverable is "
+    "a teachback submission). THEN end your turn with no further tool "
+    "calls — the watcher exits 0 when the deliverable lands, 3 when the "
+    "deadline passes without it, 4 when it cannot watch at all — and "
+    "its completion notification re-invokes you."
 )
 
 
@@ -197,28 +191,24 @@ def _load_locked_update():
         return None
 
 
-def _compute_gradient(section, key: str, instant: bool):
-    """Pure tier/valve arithmetic for one agent_type section. No I/O, so
+def _compute_gradient(section, key: str):
+    """Pure tier arithmetic for one agent_type section. No I/O, so
     the gradient is unit-testable without a filesystem.
 
     `section` is the parsed section dict, or None when absent (a fresh
-    session — the first write creates it with the default budget).
-    Returns (tier, count, total, valve_open, budget) with count/total
-    INCLUDING the current attempt, or None when the section or its
-    `valve_budget` is corrupt: the caller treats that as UNKNOWN = DENY
-    at tier 1 with the valve closed (V2), never harder on bad state.
+    session). Returns (tier, count, total) with count/total INCLUDING
+    the current attempt, or None when the section is not a dict: the
+    caller treats that as UNKNOWN = DENY at tier 1, never harder on bad
+    state.
 
-    Corrupt-field treatment is deliberately asymmetric. Soft fields —
-    `pairs` (non-dict) and `total` (non-int/negative) — are reset to
-    {}/0 and the reset is PERSISTED (repair-on-write): a reset only
-    softens the gradient, so rewriting the record clean is safe. A
-    corrupt `valve_budget` instead degrades WITHOUT touching the file:
-    V2 requires UNKNOWN = DENY, and silently repairing the budget would
-    re-open the valve on unverified state — the one field whose corrupt
-    value must never be laundered into a fresh one.
+    Soft fields — `pairs` (non-dict) and `total` (non-int/negative) —
+    are reset to {}/0 and the reset is PERSISTED (repair-on-write): a
+    reset only softens the gradient, so rewriting the record clean is
+    safe. Unknown section keys (e.g. fields written by other hook
+    versions) are ignored here and preserved by the writer.
     """
     if section is None:
-        pairs, total, budget = {}, 0, _INITIAL_VALVE_BUDGET
+        pairs, total = {}, 0
     elif not isinstance(section, dict):
         return None
     else:
@@ -226,9 +216,6 @@ def _compute_gradient(section, key: str, instant: bool):
         pairs = pairs if isinstance(pairs, dict) else {}
         total = section.get("total")
         total = total if isinstance(total, int) and total >= 0 else 0
-        budget = section.get("valve_budget")
-        if not isinstance(budget, int) or budget < 0:
-            return None
     count = pairs.get(key)
     count = count if isinstance(count, int) and count >= 0 else 0
     new_count = count + 1
@@ -236,20 +223,19 @@ def _compute_gradient(section, key: str, instant: bool):
     tier = min(
         _MAX_TIER, new_count + (1 if new_total > _SATURATION_TOTAL else 0)
     )
-    valve_open = tier == _MAX_TIER and instant and budget > 0
-    return tier, new_count, new_total, valve_open, budget
+    return tier, new_count, new_total
 
 
 def _escalate(input_data, normalized):
-    """Gradient verdict for a filler-matched command: ("deny", reason) or
-    ("valve", additional_context payload).
+    """Gradient verdict for a filler-matched command: the deny reason.
+    The tier-3 reason carries the PACT-WAIT-OUTLET arm command.
 
     FAIL DIRECTION: any state failure — missing/unsafe session_id,
-    unresolvable state module, unreadable file, corrupt JSON, non-int
-    budget, lock timeout, growth cap reached — degrades to the frozen
-    tier-1 advisory deny with the valve closed. A state error must never
-    flip the verdict to allow (the matcher-level fail-open one branch up
-    owns that) and never deny harder than tier 1.
+    unresolvable state module, unreadable file, corrupt JSON, lock
+    timeout, growth cap reached — degrades to the frozen tier-1 advisory
+    deny. A state error must never flip the verdict to allow (the
+    matcher-level fail-open one branch up owns that) and never deny
+    harder than tier 1.
     """
     session_id = input_data.get("session_id")
     agent_type = input_data.get("agent_type")
@@ -259,16 +245,16 @@ def _escalate(input_data, normalized):
             # Unreachable while _is_filler_command and _normalize_filler
             # share one pure chain; guarded so the pairing cannot rot into
             # a crash if they ever diverge. Degrades, never denies harder.
-            return "deny", _DENY_REASON
+            return _DENY_REASON
         if not isinstance(session_id, str) or not _SAFE_SESSION_ID.fullmatch(
             session_id
         ):
             # No session identity, or one that cannot be a filename:
             # never persist, deny at the frozen tier 1 (today's denial).
-            return "deny", _DENY_REASON
+            return _DENY_REASON
         locked_update = _load_locked_update()
         if locked_update is None:
-            return "deny", _DENY_REASON
+            return _DENY_REASON
         # Config root from the environment ONLY, with no literal
         # fallback: this is a degraded path that must not import the
         # resolver (shared package), and the unset-env case degrades to
@@ -276,18 +262,17 @@ def _escalate(input_data, normalized):
         # install may not use (test_hook_emitted_config_root contract).
         config_root = os.environ.get("CLAUDE_CONFIG_DIR")
         if not config_root:
-            return "deny", _DENY_REASON
+            return _DENY_REASON
         root = os.path.join(config_root, _FILLER_STATE_DIRNAME)
         state_path = os.path.join(root, session_id + ".json")
         key = _pair_key(normalized)
-        instant = _INSTANT_FILLER.match(normalized) is not None
 
         def _apply(text):
             """(new_text, changed, result) for locked_update. Pure given
             `text`; runs at most twice per call (locked_update contract).
             A result of None is the shared DEGRADE marker — corrupt JSON,
-            non-dict state, corrupt section/budget, or a growth cap —
-            and leaves the file untouched."""
+            non-dict state, corrupt section, or a growth cap — and
+            leaves the file untouched."""
             try:
                 data = json.loads(text) if text else {}
             except ValueError:
@@ -300,10 +285,10 @@ def _escalate(input_data, normalized):
             ):
                 return text, False, None
             section = data.get(agent_key)
-            gradient = _compute_gradient(section, key, instant)
+            gradient = _compute_gradient(section, key)
             if gradient is None:
                 return text, False, None
-            tier, new_count, new_total, valve_open, budget = gradient
+            tier, new_count, new_total = gradient
             # Repair-and-persist for the soft `pairs` field (Bugbot-1,
             # review cycle 2): a non-dict pairs value — truthy or falsy —
             # coerces to {} instead of raising, matching the guard
@@ -318,45 +303,37 @@ def _escalate(input_data, normalized):
             if key not in pairs and len(pairs) >= _MAX_TRACKED_PAIRS:
                 return text, False, None
             pairs[key] = new_count
-            new_budget = budget - 1 if valve_open else budget
             # Preserve unknown keys: copy the section and overwrite the
-            # three known fields, so a rewrite by an OLDER hook never
+            # two known fields, so a rewrite by an OLDER hook never
             # strips fields a NEWER version wrote (bc-F1 — review cycle 1).
             new_section = dict(section) if isinstance(section, dict) else {}
             new_section["pairs"] = pairs
             new_section["total"] = new_total
-            new_section["valve_budget"] = new_budget
             data[agent_key] = new_section
-            return (
-                json.dumps(data),
-                True,
-                (tier, new_count, new_total, valve_open, new_budget),
-            )
+            return (json.dumps(data), True, (tier, new_count, new_total))
 
         result = locked_update(state_path, _apply, root, timeout=2.0)
         if result is None:
-            return "deny", _DENY_REASON
-        tier, new_count, new_total, valve_open, budget_left = result
-        if valve_open:
-            return "valve", _VALVE_PAYLOAD.format(budget=budget_left)
+            return _DENY_REASON
+        tier, new_count, new_total = result
         if tier >= _MAX_TIER:
-            return "deny", _TIER3_REASON.format(
-                count=new_count, total=new_total
+            return _TIER3_REASON.format(
+                watcher=_WATCHER_PATH, count=new_count, total=new_total
             )
         if tier == 2:
-            return "deny", _DENY_REASON + _TIER2_SUFFIX.format(
+            return _DENY_REASON + _TIER2_SUFFIX.format(
                 count=new_count,
                 plural="" if new_count == 1 else "s",
                 total=new_total,
             )
-        return "deny", _DENY_REASON
+        return _DENY_REASON
     except Exception as error:  # noqa: BLE001 — fail-direction catch-all
         print(
             f"wait_filler_gate: filler-state error — denying at tier 1 "
             f"(fail-direction): {error}",
             file=sys.stderr,
         )
-        return "deny", _DENY_REASON
+        return _DENY_REASON
 
 
 # --- Background-launch advisory (a SECOND, INDEPENDENT concern) -------------
@@ -547,34 +524,23 @@ def main() -> None:
             print(_ALLOW_OUTPUT)
             sys.exit(0)
 
-        # DENY. The command normalizes to bare filler; the gradient and
-        # valve decide the exact verdict. Every state failure inside
+        # DENY. The command normalizes to bare filler; the gradient picks
+        # the exact tier text — at tier 3 the reason carries the
+        # PACT-WAIT-OUTLET arm command. Every state failure inside
         # _escalate degrades to the frozen tier-1 advisory (fail-direction
         # invariant) — only a failure in the reporting below can reach the
         # outer matcher-level fail-open.
         normalized = _normalize_filler(command)
-        verdict, text = _escalate(input_data, normalized)
-        if verdict == "valve":
-            # Circuit-breaker: a tier-3 instant form is ALLOWED as the
-            # session's sanctioned terminal no-op, with a payload whose
-            # whole job is to end the turn. Same envelope shape as the
-            # background advisory above.
-            print(json.dumps({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "additionalContext": text,
-                }
-            }))
-            sys.exit(0)
+        reason = _escalate(input_data, normalized)
         # The reason rides stdout JSON (the surface the 2026-10-24 channel
         # probe confirmed this harness parses at exit 2) and is mirrored to
         # stderr for harnesses reported to ignore stdout at exit 2.
-        print(text, file=sys.stderr)
+        print(reason, file=sys.stderr)
         print(json.dumps({
             "hookSpecificOutput": {
                 "hookEventName": "PreToolUse",
                 "permissionDecision": "deny",
-                "permissionDecisionReason": text,
+                "permissionDecisionReason": reason,
             }
         }))
         sys.exit(2)

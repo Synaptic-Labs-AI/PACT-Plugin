@@ -782,10 +782,14 @@ def test_retire_leaves_sibling_teachback_completion_advisories_intact(pact_conte
 # teachback-completion advisory MUST add its rule-name here — that deliberate
 # update is the intended human gate, and is exactly what makes the pin below a
 # name-agnostic guard rather than a brittle one.
+# wait_arm_supply: the structural wait arming at the teachback-acceptance
+# shape — the lead accepting the gate is about to idle on the gated work
+# task's HANDOFF, and the advisory supplies the watcher arm command for it.
 _TEACHBACK_COMPLETION_ALLOWED_RULES = frozenset({
     "teachback_submit_missing",
     "teachback_submit_schema_invalid",
     "self_completion",
+    "wait_arm_supply",
 })
 
 
@@ -4916,3 +4920,189 @@ def test_bounded_error_text_genuine_str_name_unchanged_by_cycle4():
         "_HostileStrError: <exception str() raised>"
     )
     assert tlg._bounded_error_text(_IntNameError("msg")) == "exception: msg"
+
+
+# =============================================================================
+# wait_arm_supply — structural wait arming at the teammate-deliverable shapes
+#
+# Three shapes supply the ready-to-run pact-wait arm command as an advisory
+# (ADVISORY ONLY — the command text is the whole deliverable; nothing is
+# spawned, the lead launches the watcher with its own Bash frame):
+#   Task A dispatch — owner-bearing update on a PENDING teachback-subject
+#     task -> predicate teachback_submit on that task;
+#   Task B wiring — the composite owner+addBlockedBy write to a specialist
+#     owner on a non-teachback subject -> predicate handoff on that task;
+#   teachback acceptance — status=completed on a teachback-subject task
+#     -> predicate handoff on the blocked work task.
+# =============================================================================
+
+
+def test_arm_supply_on_teachback_gate_dispatch(tmp_path, monkeypatch, pact_context):
+    """Dispatching a pending teachback gate (owner-bearing update) supplies
+    the arm command for ITS deliverable: predicate teachback_submit, this
+    task's id, the resolved team."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "A",
+        subject="preparer: TEACHBACK for foo",
+        status="pending",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "A", "owner": "pact-preparer"},
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, f"expected one arm advisory, got: {advisories}"
+    assert "--predicate teachback_submit" in arms[0]
+    assert "--task A" in arms[0]
+    assert "--team test-team" in arms[0]
+    assert "run_in_background" in arms[0]
+    assert "pact_wait.py" in arms[0]
+
+
+def test_no_arm_supply_when_teachback_task_already_claimed(
+    tmp_path, monkeypatch, pact_context
+):
+    """A teammate claim (owner-bearing update on an in_progress teachback
+    task) is not a wiring moment: no arm advisory re-fires mid-flight."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "A",
+        subject="preparer: TEACHBACK for foo",
+        status="in_progress",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "A", "owner": "preparer"},
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "wait_arm_supply" for rule, _ in advisories), (
+        f"expected no arm advisory on a claimed task, got: {advisories}"
+    )
+
+
+def test_arm_supply_on_work_task_wiring(tmp_path, monkeypatch, pact_context):
+    """The composite owner+addBlockedBy wiring write to a specialist owner
+    supplies the arm command for the work task's HANDOFF deliverable."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "B",
+        subject="implement hook core",
+        status="pending",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {
+            "taskId": "B",
+            "owner": "backend-coder",
+            "addBlockedBy": ["A"],
+        },
+        "tool_response": {},
+    }
+    monkeypatch.setattr(tlg, "is_pact_specialist_owner", lambda *_a, **_k: True)
+    advisories = tlg.evaluate_lifecycle(payload)
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, f"expected one arm advisory, got: {advisories}"
+    assert "--predicate handoff" in arms[0]
+    assert "--task B" in arms[0]
+
+
+def test_no_arm_supply_on_plain_owner_update_of_work_task(
+    tmp_path, monkeypatch, pact_context
+):
+    """An owner-only update on a work task (no addBlockedBy — a partial
+    write or a teammate claim) is not the composite wiring shape: no arm
+    advisory."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "B",
+        subject="implement hook core",
+        status="pending",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "B", "owner": "backend-coder"},
+        "tool_response": {},
+    }
+    monkeypatch.setattr(tlg, "is_pact_specialist_owner", lambda *_a, **_k: True)
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "wait_arm_supply" for rule, _ in advisories), (
+        f"expected no arm advisory off the wiring shape, got: {advisories}"
+    )
+
+
+def test_arm_supply_on_teachback_acceptance(tmp_path, monkeypatch, pact_context):
+    """Accepting a teachback gate supplies the arm command for the gated
+    work task's HANDOFF deliverable — the wait the lead idles on next."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "A", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "A",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "pact-preparer",
+                "blocks": ["B"],
+                "metadata": {
+                    "teachback_submit": {
+                        "understanding": "u",
+                        "most_likely_wrong": "m",
+                        "least_confident_item": "l",
+                        "first_action": "f",
+                        "variety_acknowledgment": {
+                            "rationale_articulates_this_dispatch": "yes",
+                        },
+                    }
+                },
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, f"expected one arm advisory, got: {advisories}"
+    assert "--predicate handoff" in arms[0]
+    assert "--task B" in arms[0]
+    assert "--team test-team" in arms[0]
+
+
+def test_no_arm_supply_on_teachback_acceptance_without_blocks(
+    tmp_path, monkeypatch, pact_context
+):
+    """A teachback gate with no resolvable blocked work task cannot name a
+    watch target: no arm advisory (fail-open skip, never a broken
+    command)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "A", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "A",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "pact-preparer",
+                "metadata": {},
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "wait_arm_supply" for rule, _ in advisories), (
+        f"expected no arm advisory without a blocked task, got: {advisories}"
+    )

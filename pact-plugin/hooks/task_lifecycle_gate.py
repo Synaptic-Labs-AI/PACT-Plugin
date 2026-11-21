@@ -301,6 +301,7 @@ try:
     )
     from shared.dispatch_helpers import (
         is_owner_bearing_write,
+        is_owner_wiring_shape,
         is_pact_specialist_owner,
         variety_stamp_as_of_write,
     )
@@ -1418,6 +1419,43 @@ def _resolve_required_band_via_blocks(
     return _band_from_total(total)
 
 
+# The structural wait watcher this gate arms the lead with at the
+# teammate-deliverable wait shapes (dispatch wiring, teachback acceptance):
+# the sibling entrypoint next to this file, so the command in the advisory
+# is always the live install's real path. ADVISORY ONLY — this gate never
+# spawns the watcher; the process is launched solely by the lead's own
+# `Bash` frame (`run_in_background: true`), because a hook-spawned process
+# is not harness-tracked and its completion would reach nothing idle.
+_WAIT_WATCHER_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "pact_wait.py"
+)
+
+
+def _wait_arm_advisory(
+    shape: str, team_name: str, task_id: str, predicate: str
+) -> tuple[str, str]:
+    """The (rule, message) advisory supplying the ready-to-run arm command
+    for one teammate-deliverable wait. The deadline is a sane default the
+    lead edits when the expected wait differs; the predicate names a
+    shared/wait_target.py registry entry, so re-keying the watcher is a
+    command-text change, never schema surgery."""
+    command = (
+        f'python3 "{_WAIT_WATCHER_PATH}" --team {team_name} '
+        f"--task {task_id} --predicate {predicate} --deadline 1800"
+    )
+    message = (
+        f"PACT task_lifecycle_gate: {shape} — you are about to wait on a "
+        "teammate deliverable. Arm the structural wait watcher BEFORE you "
+        "end this turn, with ONE `Bash` call (`run_in_background: true`):\n"
+        f"{command}\n"
+        "Its completion notification re-invokes you: exit 0 deliverable "
+        "landed, 3 deadline expired with it absent, 4 could not watch at "
+        "all. A duplicate arm whose deliverable is already present exits "
+        "0 immediately — re-arming is safe."
+    )
+    return "wait_arm_supply", message
+
+
 def evaluate_lifecycle(
     input_data: dict, *, decision: dict | None = None
 ) -> list[tuple[str, str]]:
@@ -1543,6 +1581,57 @@ def evaluate_lifecycle(
                     _writeback_audit_recovery(
                         ah_task_id, {"audit_summary_authored": incoming_audit}
                     )
+
+        # Structural wait arming at the DISPATCH-WIRING shapes: the lead's
+        # next stage after wiring a dispatch is idling on a teammate
+        # deliverable, so the advisory supplies the ready-to-run watcher
+        # arm command. ADVISORY ONLY — the lead launches the watcher with
+        # its own `Bash` frame; this gate never spawns a process. Two
+        # shapes:
+        #   Task A (teachback gate) dispatched — an owner-bearing update on
+        #     a teachback-subject task that is still pending: the lead's
+        #     wait is the teammate's teachback submission landing in THIS
+        #     task's metadata (predicate teachback_submit). Pending-only
+        #     keeps a later teammate claim (owner + in_progress) from
+        #     re-advising mid-flight.
+        #   Task B (work task) wired — the composite owner + addBlockedBy
+        #     write to a specialist owner on a non-teachback subject (the
+        #     same shape handoff_ordering_gate keys the dispatch-variety
+        #     gate on): the lead's wait is Task B's HANDOFF (predicate
+        #     handoff). Teammate claims carry no addBlockedBy, so only the
+        #     lead's wiring write fires this.
+        # A duplicate arm is safe by construction (the duplicate watcher
+        # fast-exits 0 when the deliverable is already present), which is
+        # why this needs no dedup marker.
+        if team_name:
+            wiring_task_id = tool_input.get("taskId", "") or ""
+            wiring_owner = tool_input.get("owner")
+            if (
+                isinstance(wiring_task_id, str)
+                and wiring_task_id.strip()
+                and isinstance(wiring_owner, str)
+                and wiring_owner.strip()
+            ):
+                wired = read_task_json(wiring_task_id, team_name)
+                wired_subject = wired.get("subject") or ""
+                if _is_teachback_subject(wired_subject):
+                    if wired.get("status") == "pending":
+                        advisories.append(_wait_arm_advisory(
+                            "teachback gate dispatched",
+                            team_name,
+                            wiring_task_id,
+                            "teachback_submit",
+                        ))
+                elif (
+                    is_owner_wiring_shape(tool_input)
+                    and is_pact_specialist_owner(wiring_owner, team_name)
+                ):
+                    advisories.append(_wait_arm_advisory(
+                        "work task wired",
+                        team_name,
+                        wiring_task_id,
+                        "handoff",
+                    ))
 
     # ② TaskCreate rules — teachback addBlocks + work-task addBlockedBy
     if tool_name == "TaskCreate":
@@ -1783,6 +1872,27 @@ def evaluate_lifecycle(
             owner = ""
         raw_metadata = task.get("metadata")
         metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
+
+        # Structural wait arming at the TEACHBACK-ACCEPTANCE shape: the
+        # lead accepting the teachback is about to idle on the gated work
+        # task's HANDOFF, so the advisory supplies the arm command for
+        # that task (predicate handoff). Duplicates the wiring-shape arm
+        # by design — the wiring write may predate the acceptance by
+        # hours, and a duplicate watcher fast-exits 0 (deliverable
+        # already present). First block entry: one teachback gate gates
+        # one work task in every shipped workflow shape; extra entries
+        # get their arms from the lead's own follow-up dispatches.
+        if is_teachback and team_name:
+            blocks = task.get("blocks")
+            work_id = (
+                blocks[0]
+                if isinstance(blocks, list) and blocks
+                else ""
+            )
+            if isinstance(work_id, str) and work_id.strip():
+                advisories.append(_wait_arm_advisory(
+                    "teachback accepted", team_name, work_id, "handoff"
+                ))
 
         # RETIRED: the work-task handoff-presence/schema branch (gated on
         # `is_work_task = not is_teachback and owner.startswith("pact-")`,
