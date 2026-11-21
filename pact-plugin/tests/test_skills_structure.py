@@ -657,7 +657,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     is named by the pin rather than raising a bare decode error.
     """
 
-    FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]?saved", re.IGNORECASE)
+    FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]*saved", re.IGNORECASE)
     SURFACE_FILES = (
         "skills/pact-agent-teams/SKILL.md",
         "skills/pact-testing-strategies/references/test-pyramid.md",
@@ -680,6 +680,13 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "`memory_saved`",
         "**memory-saved**",
         "MEMORY_SAVED",
+        "memory_\nsaved",
+        "memory\n_saved",
+        "memory  _  saved",
+        "memory-\nsaved",
+        "memory\n-saved",
+        "memory__saved",
+        "memory--saved",
     )
 
     @staticmethod
@@ -705,18 +712,28 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             for path in _instruction_surface_population()
         } == set(self.SURFACE_FILES)
 
+    @pytest.mark.parametrize("surface", SURFACE_FILES)
     @pytest.mark.parametrize("form", PROHIBITED_FORMS)
     def test_pin_rejects_prohibited_form_in_real_tracked_repo(
-            self, form, tmp_path, monkeypatch):
+            self, form, surface, tmp_path, monkeypatch):
         plugin = self._seed_tracked_repo(tmp_path)
-        (plugin / "skills" / "pact-agent-teams" / "SKILL.md").write_text(
-            form, encoding="utf-8"
-        )
+        (plugin / surface).write_text(form, encoding="utf-8")
         monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
 
         with pytest.raises(AssertionError, match="re-teach the retired"):
             self.test_no_memory_saved_in_any_llm_loaded_surface()
+
+    def test_pin_names_non_utf8_surface(self, tmp_path, monkeypatch):
+        plugin = self._seed_tracked_repo(tmp_path)
+        path = plugin / "agents" / "pact-orchestrator.md"
+        path.write_bytes(b"\xff")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        with pytest.raises(AssertionError, match="is not valid UTF-8") as exc_info:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        assert "pact-plugin/agents/pact-orchestrator.md" in str(exc_info.value)
 
     def test_no_memory_saved_in_any_llm_loaded_surface(self):
         offenders = []
