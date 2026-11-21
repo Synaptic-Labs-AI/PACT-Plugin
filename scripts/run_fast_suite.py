@@ -33,16 +33,18 @@ INVARIANTS
   written even when pytest fails.
 
   Artifact ABSENCE certifies nothing: pass/fail is decided by the verifier
-  from evidence, never from an artifact existing. A missing run artifact
-  means exactly one of four cases: the run never started (contaminated
-  environment, rc 3); selection refused (bad manifest, rc 2); the run
-  started but produced no collection evidence and refused at write time
-  (NO-COLLECTED-HEADER, rc 3 -- the verifier re-derives the collected count
-  from the persisted header, so an artifact without it is unverifiable by
-  construction); or the run was interrupted mid-stream (SIGINT/SIGTERM) and
-  died before the write. No case means "ran to completion and failed": a
-  completed run's exit code and outcome counts are always recorded in an
-  artifact.
+  from evidence, never from an artifact existing, and the gate treats a
+  missing run artifact as uncertifiable regardless of cause. The named
+  paths that leave no artifact: the run never started (contaminated
+  environment, rc 3); selection refused (bad manifest, rc 2; an argparse
+  usage error also exits before selection); the run started but produced
+  no collection evidence and refused at write time (NO-COLLECTED-HEADER,
+  rc 3 -- the verifier re-derives the collected count from the persisted
+  header, so an artifact without it is unverifiable by construction); or
+  the run was interrupted mid-stream (SIGINT/SIGTERM) or lost to a write
+  or crash failure before the artifact landed. A run that failed but
+  completed still writes its artifact with pytest's exit code and outcome
+  counts.
 """
 
 from __future__ import annotations
@@ -360,7 +362,10 @@ def _run(args, selection, manifest_path: Path, plugin_root: Path,
         "command": argv,
         "rc": rc,
         "summary_line": parsed["summary_line"] if parsed else None,
-        "collected": int(collected) if parsed and collected is not None else None,
+        # Always an int: the capture above matched this same regex on this
+        # same string, so the re-search cannot miss; when the summary line
+        # is unparseable the header-derived count is still recorded.
+        "collected": int(collected),
         # The first-match header line itself. The verifier re-derives the
         # collected count from this string with the same parse rule, so the
         # count carries its printed provenance instead of resting on the

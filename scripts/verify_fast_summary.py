@@ -477,6 +477,11 @@ def _require_node_identity(canary: dict, summary: dict, record: dict,
     # form; a serial command prints pytest's collected form. A header of the
     # wrong form evidences a different run than the command recorded.
     # _require_commands has already bound run.command to the rebuilt argv.
+    # Coupling note: parallel-ness is read from the command's own workers
+    # flag element, the same marker build_argv emits. If build_argv's
+    # parallel marker ever changes, this line must change with it -- and it
+    # fails in the false-red direction: a changed marker reads every run as
+    # serial and refuses the workers-form header, never silently green.
     is_parallel = "-n" in summary["run"]["command"]
     workers_form = re.search(r"\d+ workers \[\d+ items?\]", header) is not None
     if is_parallel != workers_form:
