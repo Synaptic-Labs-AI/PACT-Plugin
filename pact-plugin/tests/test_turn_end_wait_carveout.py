@@ -160,6 +160,20 @@ def test_partial_invocation_still_counts(tmp_path):
     assert "`w3`" in out["reason"]
 
 
+def test_watcher_spaced_quoted_install_does_not_block_turn_end(tmp_path):
+    """A live install under a path with spaces emits the arm command with a
+    QUOTED path — the classifier must read that command as the scheduled
+    wake, or the lead stays blocked over their own watcher and the
+    filler-loop this mechanism replaces re-forms. Red on the pre-fix
+    charset (which admitted no spaces even inside the quotes), green
+    after."""
+    world = World(tmp_path)
+    frame = stop_frame(jobs=[
+        job("wsp1", _arm_command("/opt/my plugins dir/pact_wait.py"))
+    ])
+    assert world.output(world.run(frame)) == SUPPRESS
+
+
 def test_watcher_exempt_real_job_still_blocks_on_the_real_job(tmp_path):
     """The carve-out removes only the watcher from the must-account-for
     list: a real unowned job beside it still blocks, listing that job and
@@ -257,13 +271,19 @@ def test_is_wait_watcher_command_shape_table():
     nothing after the deadline value — a composed tail (`& sleep 1`) means
     the job is not purely the wake, so it counts. The exempt rows are
     exactly the shapes the arm-supply advisories emit (with their benign
-    prefix variants); every counted row is a mention, a partial, a
-    composition, or a reordered invocation."""
+    prefix variants) INCLUDING a quoted install path with spaces — the
+    emitted command always quotes the path, so a spaced install must
+    classify or its lead stays blocked over their own scheduled wake; every
+    counted row is a mention, a partial, a composition, or a reordered
+    invocation, and a spaced UNQUOTED path still counts (documented
+    over-block: the shell requires quoting there anyway, and the emitted
+    command always quotes)."""
     from shared.turn_end_gate import is_wait_watcher_command
 
     exempt = [
         _arm_command(),
         _arm_command("/opt/x/pact_wait.py"),
+        _arm_command("/opt/my plugins dir/pact_wait.py"),
         f"cd /repo && {_arm_command()}",
         f"FOO=1 {_arm_command()}",
         _arm_command().replace("python3 ", "python3.12 "),
@@ -271,12 +291,21 @@ def test_is_wait_watcher_command_shape_table():
     ]
     counted = [
         "echo 'pact_wait.py --team t --task 1 --predicate h --deadline 5'",
+        # An echo MENTION of the spaced quoted command still counts: the
+        # prefix guard must hold under the widened quoted charset.
+        "echo 'python3 \"/opt/my plugins dir/pact_wait.py\" --team t "
+        "--task 1 --predicate h --deadline 5'",
         "pact_wait.py --team t --task 1 --predicate h",
         "pact_wait.py --task 1 --team t --predicate h --deadline 5",
         "pact_wait.py --team t --task 1 --predicate h --deadline 5 & sleep 1",
         "true; pact_wait.py --team t --task 1 --predicate h --deadline 5",
         "cat pact_wait.py --team t --task 1 --predicate h --deadline 5",
         "pact_wait.py --team t --task 1 --predicate h --deadline 1800 extra",
+        # A spaced path left UNQUOTED is not the emitted shape: the shell
+        # word-splits it, so it cannot be the armed command — counted
+        # (documented over-block lean).
+        "python3 /opt/my plugins dir/pact_wait.py --team t --task 1 "
+        "--predicate h --deadline 5",
         # A shell-wrapper invocation is a composition, not the bare wake:
         # counted (over-block is the deliberate direction — the wrapper
         # costs the lead one advisory, exemption would acquit a real job).
