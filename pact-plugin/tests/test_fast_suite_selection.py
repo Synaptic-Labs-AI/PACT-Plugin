@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 import ci_contract
+from ci_full_run_record import OWNER_ENV
 from helpers import env_without_pytest_vars
 
 SELECTOR = Path("scripts") / "fast_suite_selection.py"
@@ -951,6 +952,27 @@ def test_build_argv_rejects_workers_in_collect_only(core, tmp_path):
     _, plugin, _ = _build_rig(tmp_path)
     with pytest.raises(ValueError):
         core.build_argv(_selection(core, set()), plugin, "collect-only", workers=2)
+
+
+def test_the_runner_pins_four_workers_on_the_real_run_only():
+    """The production call site cannot silently fall back to serial execution."""
+    root = ci_contract.require_root("the fast runner worker pin")
+    tree = ast.parse((root / "scripts" / "run_fast_suite.py").read_text(
+        encoding="utf-8"))
+    run_calls = [
+        node for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "build_argv"
+        and len(node.args) >= 3
+        and isinstance(node.args[2], ast.Constant)
+        and node.args[2].value == "run"
+    ]
+    assert len(run_calls) == 1
+    workers = [keyword.value for keyword in run_calls[0].keywords
+               if keyword.arg == "workers"]
+    assert len(workers) == 1
+    assert isinstance(workers[0], ast.Constant) and workers[0].value == 4
 
 
 def _git(repo, *args):
@@ -2252,6 +2274,7 @@ class TestRunnerArtifactDestinations:
         # No PYTEST_* name from the shell that runs the suite reaches the runner
         # or the pytest it starts.
         env = env_without_pytest_vars()
+        env.pop(OWNER_ENV, None)
         env["GITHUB_WORKSPACE"] = str(workspace)
         return env
 

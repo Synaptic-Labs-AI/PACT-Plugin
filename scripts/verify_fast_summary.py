@@ -1,22 +1,11 @@
-"""Verify the fast-suite artifacts. Fails; never skips; never runs pytest.
+"""Verify fast-suite artifacts and the distributed run record. Never runs pytest.
 
-WHY IT RECOMPUTES INSTEAD OF TRUSTING
-  The two artifacts are the runner's CLAIM. If this verifier read the expected
-  set out of the artifact it is checking, the comparison would be the claim
-  against itself. So it recomputes the expected world from first principles --
-  manifest, discovery, changed paths, select() -- and compares the artifacts
-  to that.
-
-WHAT IT REFUSES TO DO
-  Read a count before proving a summary line exists. An absent summary and a
-  zero count produce the same digits; only one of them means the suite ran.
-  The presence check therefore runs first, and its failure is named
-  NO-SUMMARY rather than folded into a count check.
-
-NO CONSTANT TOTALS. The corpus is checkout-dependent (a clean tree and an
-authoring tree differ by one parametrized node), so every comparison here is
-a SET comparison. Counts appear only in arithmetic identities computed from
-this run's own numbers.
+The selector and workflow base SHA are independent inputs. The serial canary
+proves the exact node IDs that selection collected; the real run and its
+schema-v3 in-band record must prove the same nodes reached terminal outcomes,
+with every xdist worker reporting and all outcome/skip arithmetic intact.
+Absent evidence is a failure, never a zero. Full-suite skip-allowlist findings
+remain advisory because this lane deliberately runs a selected subset.
 """
 
 from __future__ import annotations
@@ -25,6 +14,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -32,24 +22,69 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from fast_suite_selection import (  # noqa: E402  (path must precede import)
     ManifestError,
+    build_argv,
     load_manifest,
     parse_pytest_summary,
     select_for_change,
 )
+# DELIBERATE PRIVATE-IMPORT CONTRACT on verify_full_run: this verifier reuses
+# the full-run verifier's record validation instead of re-implementing it, so
+# both lanes refuse a malformed record identically. The five underscore names
+# below are that contract, per name:
+#   _load               read a JSON-object record; absent/unparseable is
+#                       RunFailure, never None.
+#   _require_int        a field that is an int (bool refused), else
+#                       RunFailure(BAD-FIELD-<KEY>).
+#   _require_keys       every schema-v3 record key present, else
+#                       RunFailure(KEY-MISSING) naming the missing key in
+#                       the detail text (the condition name is bare).
+#   _require_run_identity  under Actions the record's run_id/run_attempt must
+#                       equal the environment, else RunFailure(RUN-IDENTITY).
+#   _require_skip_sites structurally validated (file, reason, count) sites,
+#                       else RunFailure(SKIP-SITES-BAD).
+# An upstream RENAME breaks this module at import time with a loud
+# ImportError before any verification runs — the fail-closed direction — and
+# a semantic drift of any helper is caught by the shared record tests
+# (tests/test_verify_full_run.py) both lanes' verdicts rest on.
+from verify_full_run import (  # noqa: E402  (path must precede import)
+    RunFailure,
+    SKIP_ALLOWLIST,
+    _load as _load_record,
+    _require_int as _require_record_int,
+    _require_keys as _require_record_keys,
+    _require_run_identity,
+    _require_skip_sites,
+    load_skip_allowlist,
+    skip_site_problems,
+)
 
-SCHEMA_VERSION = 1
+# DELIBERATE PRIVATE-IMPORT CONTRACT on run_fast_suite: the verifier
+# re-derives run.collected from the persisted header line with the WRITER's
+# own regex, so the two parse rules cannot drift apart. An upstream rename
+# breaks this module at import time — the fail-closed direction — and a
+# semantic drift of the regex is caught by the header tests in
+# tests/test_verify_fast_summary.py.
+from run_fast_suite import _ITEMS_LINE_RE  # noqa: E402  (path precedes import)
 
+SCHEMA_VERSION = 2
+RECORD_SCHEMA_VERSION = 3
+_OUTCOME_KEYS = (
+    "passed", "failed", "errors", "skipped", "deselected", "xfailed", "xpassed",
+)
 _SELECTION_KEYS = (
     "status", "select_all_reason", "discovered", "excluded", "added_back",
     "included", "included_files", "included_sha256",
 )
 _CANARY_KEYS = (
     "command", "ignore_paths", "rc", "summary_line", "expected_files",
-    "collected_files", "collected_items", "missing", "extra",
+    "collected_files", "collected_items", "collected_node_ids", "missing",
+    "extra", "unresolvable_node_id_bases",
 )
-_RUN_KEYS = (
-    "command", "rc", "summary_line", "collected", "passed", "failed",
-    "errors", "skipped", "deselected",
+_RUN_KEYS = ("command", "rc", "summary_line", "collected",
+             "collected_header", *_OUTCOME_KEYS)
+_COMMON_KEYS = (
+    "manifest", "base_sha", "head_sha", "run_id", "run_attempt", "selection",
+    "mode",
 )
 
 
@@ -75,7 +110,7 @@ def _load_artifact(path: Path, label: str) -> dict:
         raise VerificationFailure(
             f"ARTIFACT-ABSENT-{label.upper()}",
             f"{path} does not exist. A missing artifact is a failure, never "
-            f"'nothing to check'.",
+            "'nothing to check'.",
         )
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -111,29 +146,58 @@ def _require_schema_version(artifact: dict, label: str) -> None:
         )
 
 
-def _require_summary_line(artifact: dict, label: str) -> str:
-    """Condition 6. Runs BEFORE any count is read."""
+def _require_summary_line(artifact: dict, label: str) -> dict:
     line = artifact.get("summary_line")
-    if not isinstance(line, str) or not line.strip():
-        raise VerificationFailure(
-            f"NO-SUMMARY-{label.upper()}",
-            f"{label}: summary_line is absent, null or empty. This is the "
-            f"'the suite never started' case; a zero count cannot "
-            f"distinguish it from a clean run.",
-        )
-    parsed = parse_pytest_summary(line)
+    parsed = parse_pytest_summary(line) if isinstance(line, str) else None
     if parsed is None:
         raise VerificationFailure(
             f"NO-SUMMARY-{label.upper()}",
-            f"{label}: summary_line {line!r} does not parse under the "
-            f"decoration this invocation produces (bare under -q, "
-            f"'='-decorated without it).",
+            f"{label}: summary_line {line!r} is absent or unparseable; counts "
+            "cannot distinguish that from a clean run.",
         )
-    return line
+    return parsed
+
+
+def _positive_int(container: dict, key: str, condition: str, label: str) -> int:
+    value = container.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise VerificationFailure(
+            condition, f"{label}.{key} is {value!r}; expected an integer > 0")
+    return value
+
+
+def _outcome_int(container: dict, key: str, label: str) -> int:
+    value = container.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise VerificationFailure(
+            f"BAD-FIELD-{label.upper()}-{key.upper()}",
+            f"{label}.{key} is {value!r}; expected an integer >= 0")
+    return value
+
+
+def _record_outcome_int(record: dict, key: str) -> int:
+    value = _require_record_int(record, key)
+    if value < 0:
+        raise VerificationFailure(
+            f"BAD-FIELD-{key.upper()}",
+            f"record.{key} is {value!r}; expected an integer >= 0")
+    return value
+
+
+def _require_object(value, label: str) -> dict:
+    if not isinstance(value, dict):
+        raise VerificationFailure(
+            f"BAD-FIELD-{label.upper().replace('.', '-')}",
+            f"{label} is {value!r}; expected a JSON object")
+    return value
 
 
 def _set_difference(expected: list[str], actual: list[str],
                     condition: str, label: str) -> None:
+    if (not isinstance(actual, list)
+            or any(not isinstance(item, str) or not item for item in actual)):
+        raise VerificationFailure(
+            condition, f"{label} must be a list of non-empty file paths")
     expected_set, actual_set = set(expected), set(actual)
     missing = sorted(expected_set - actual_set)
     extra = sorted(actual_set - expected_set)
@@ -144,253 +208,499 @@ def _set_difference(expected: list[str], actual: list[str],
         )
 
 
-def _skip_advisory(record_path: str | None) -> None:
-    """Report the fast run's skips against the full-suite allowlist. Never fails.
-
-    The fast lane is advisory, so a skip the required gate would refuse is
-    surfaced here early, as a warning, and the exit code is unaffected.
+def _require_canary_delta_empty(canary: dict) -> None:
+    """The canary's missing/extra fields are write-time outputs of the same
+    expected/collected comparison main re-derives: a clean canary carries
+    both empty. Type first, then emptiness, per the module's typed-reads
+    convention.
     """
-    if not record_path:
-        print("SKIP-ADVISORY: no --run-record given; skip sites not compared",
-              file=sys.stderr)
-        return
+    for key in ("missing", "extra"):
+        files = canary["canary"][key]
+        if (not isinstance(files, list)
+                or any(not isinstance(item, str) or not item
+                       for item in files)):
+            raise VerificationFailure(
+                f"BAD-FIELD-CANARY-{key.upper()}",
+                f"canary.{key} is {files!r}; expected a list of non-empty "
+                "file-path strings, possibly empty")
+        if files:
+            raise VerificationFailure(
+                f"CANARY-{key.upper()}",
+                f"canary.{key} is {files!r}; the expected and collected file "
+                "sets are checked against the recomputation directly, so a "
+                "delta the recomputation does not corroborate is evidence of "
+                "tampering")
+
+
+def _require_artifact_shape(canary: dict, summary: dict, record: dict) -> tuple[dict, dict, dict]:
+    _require_schema_version(canary, "canary")
+    _require_schema_version(summary, "run")
+    if record.get("schema_version") != RECORD_SCHEMA_VERSION:
+        raise VerificationFailure(
+            "SCHEMA-VERSION-RECORD",
+            f"record schema_version is {record.get('schema_version')!r}; "
+            f"expected {RECORD_SCHEMA_VERSION}")
+    _require_keys(canary, (*_COMMON_KEYS, "canary"), "the canary artifact", "canary")
+    _require_keys(summary, (*_COMMON_KEYS, "run"), "the run artifact", "run")
+    _require_record_keys(record)
+    for artifact, nested, label, expected_mode in (
+            (canary, "canary", "canary", "collect-only"),
+            (summary, "run", "run", "run")):
+        if artifact["mode"] != expected_mode:
+            raise VerificationFailure(
+                "MODE-MISMATCH",
+                f"{label} mode is {artifact['mode']!r}; expected {expected_mode!r}")
+        _require_object(artifact["manifest"], f"{label}.manifest")
+        _require_keys(artifact["manifest"], ("path", "sha256"),
+                      f"{label}.manifest", label)
+        _require_object(artifact["selection"], f"{label}.selection")
+        _require_keys(artifact["selection"], _SELECTION_KEYS,
+                      f"{label}.selection", label)
+        _require_object(artifact[nested], f"{label}.{nested}")
+        _require_keys(artifact[nested],
+                      _CANARY_KEYS if label == "canary" else _RUN_KEYS,
+                      f"{label}.{nested}", label)
+    canary_summary = _require_summary_line(canary["canary"], "canary")
+    run_summary = _require_summary_line(summary["run"], "run")
+    record_summary = _require_summary_line(record, "record")
+    return canary_summary, run_summary, record_summary
+
+
+def _require_identity(canary: dict, summary: dict, record: dict) -> None:
+    for key in ("base_sha", "head_sha"):
+        if canary.get(key) != summary.get(key):
+            raise VerificationFailure(
+                "ARTIFACT-SHA-MISMATCH",
+                f"{key}: canary records {canary.get(key)!r} but run records "
+                f"{summary.get(key)!r}")
+    # Under Actions, head_sha must be THE checkout this job verified, not
+    # merely canary-to-run equal: a stale artifact pair from another head
+    # would otherwise agree with each other. Locally there is no checkout
+    # anchor, so the check stays Actions-gated like the run-identity one.
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        expected_head = os.environ.get("GITHUB_SHA")
+        if (not expected_head or canary.get("head_sha") != expected_head
+                or summary.get("head_sha") != expected_head):
+            raise VerificationFailure(
+                "HEAD-SHA-MISMATCH",
+                f"head_sha is canary={canary.get('head_sha')!r} "
+                f"run={summary.get('head_sha')!r} but GITHUB_SHA is "
+                f"{expected_head!r}")
+    for key, env_name in (("run_id", "GITHUB_RUN_ID"),
+                          ("run_attempt", "GITHUB_RUN_ATTEMPT")):
+        values = (canary.get(key), summary.get(key), record.get(key))
+        if any(value != values[0] for value in values[1:]):
+            raise VerificationFailure(
+                "RUN-IDENTITY", f"{key} differs across canary/run/record: {values!r}")
+        value = values[0]
+        if value is not None and (not isinstance(value, str) or not value):
+            raise VerificationFailure(
+                "RUN-IDENTITY", f"{key} must be a non-empty string or null, got {value!r}")
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            expected = os.environ.get(env_name)
+            if not expected or value != expected:
+                raise VerificationFailure(
+                    "RUN-IDENTITY",
+                    f"{key} is {value!r} but {env_name} is {expected!r}")
+    _require_run_identity(record, "run record")
+
+
+def _require_commands(canary: dict, summary: dict, recomputed, plugin_root: Path) -> None:
+    canary_command = canary["canary"]["command"]
+    run_command = summary["run"]["command"]
+    canary_ignores = canary["canary"]["ignore_paths"]
+    if (not isinstance(canary_command, list)
+            or any(not isinstance(argument, str) for argument in canary_command)):
+        raise VerificationFailure(
+            "CANARY-COMMAND-MISMATCH", "canary command must be a list of strings")
+    if (not isinstance(run_command, list)
+            or any(not isinstance(argument, str) for argument in run_command)):
+        raise VerificationFailure(
+            "RUN-COMMAND-MISMATCH", "run command must be a list of strings")
+    if (not isinstance(canary_ignores, list)
+            or any(not isinstance(argument, str) for argument in canary_ignores)):
+        raise VerificationFailure(
+            "IGNORE-ARGS-MISMATCH", "canary ignore_paths must be a list of strings")
+    run_ignores = [
+        argument.split("=", 1)[1] for argument in run_command
+        if argument.startswith("--ignore=")
+    ]
+    if sorted(canary_ignores or []) != sorted(run_ignores):
+        raise VerificationFailure(
+            "IGNORE-ARGS-MISMATCH",
+            f"canary/run ignore paths differ: {canary_ignores!r} != {run_ignores!r}")
     try:
-        from verify_full_run import (
-            RunFailure, SKIP_ALLOWLIST, load_skip_allowlist,
-            skip_site_problems)
+        expected_canary = build_argv(recomputed, plugin_root, "collect-only")
+        expected_run = build_argv(recomputed, plugin_root, "run", workers=4)
+    except ValueError as exc:
+        # to_pytest_args refuses an excluded path that is missing or escapes
+        # the working directory. In CI the tree cannot change between the
+        # run and this verify, so this names a corrupted recomputation
+        # rather than a live hazard -- but a named condition with the reason
+        # beats an uncaught traceback.
+        raise VerificationFailure(
+            "SELECTION-ARGS-INVALID",
+            f"the recomputed selection could not be converted to pytest "
+            f"arguments ({exc})") from exc
+    if canary_command != expected_canary:
+        raise VerificationFailure(
+            "CANARY-COMMAND-MISMATCH",
+            f"canary command {canary_command!r} != independently constructed {expected_canary!r}")
+    if run_command != expected_run:
+        raise VerificationFailure(
+            "RUN-COMMAND-MISMATCH",
+            f"run command {run_command!r} != independently constructed {expected_run!r}")
+
+
+def _require_selection_identity(canary: dict, summary: dict, selection) -> None:
+    included = sorted(selection.included)
+    included_sha256 = hashlib.sha256()
+    for path in included:
+        included_sha256.update(path.encode("utf-8"))
+        included_sha256.update(b"\n")
+    expected = {
+        "status": selection.status,
+        "select_all_reason": selection.select_all_reason,
+        "discovered": len(selection.discovered),
+        "excluded": len(selection.excluded),
+        "added_back": len(selection.added_back),
+        "included": len(included),
+        "included_files": included,
+        "included_sha256": included_sha256.hexdigest(),
+    }
+    for label, artifact in (("canary", canary), ("run", summary)):
+        actual = artifact["selection"]
+        if actual != expected:
+            differing = sorted(
+                key for key in set(actual) | set(expected)
+                if actual.get(key) != expected.get(key))
+            raise VerificationFailure(
+                "SELECTION-METADATA-MISMATCH",
+                f"{label}.selection differs from the independently recomputed "
+                f"selection; mismatched fields={differing}")
+
+
+def _require_clean_exits_and_collection_identity(canary: dict, summary: dict,
+                                                 record: dict) -> None:
+    """The three exits finished clean and no outcome contradicts zero-failure.
+
+    Checks canary rc, run rc, and record exitstatus are 0; run and record
+    failed/errors/deselected are 0; and the collection-hook identity
+    (after + deselected == before, after == collected) holds. Worker evidence
+    itself is enforced elsewhere: the recorder nulls the collection fields
+    when the worker population is unprovable (refused here as BAD-FIELD),
+    and exact terminal node sets are _require_node_identity's.
+    """
+    # JSON false == 0 in Python, so rc truthiness cannot gate: False passed
+    # an untyped comparison as a clean exit, and True failed only by the
+    # accident that True != 0. Type first, then value.
+    canary_rc = canary["canary"].get("rc")
+    if type(canary_rc) is not int:
+        raise VerificationFailure(
+            "BAD-FIELD-CANARY-RC",
+            f"canary.rc is {canary_rc!r}; expected an integer, not a JSON "
+            "boolean, string, or null")
+    if canary_rc != 0:
+        raise VerificationFailure("CANARY-RC", f"canary rc is {canary_rc}")
+    # Mirror of the runner's write-time token scan: a canary summary that
+    # reports deselection or errors narrows the selection, and only this
+    # re-check sees it -- a deselection leaves the file collected, so the
+    # file-set comparisons stay equal.
+    canary_summary_line = canary["canary"]["summary_line"]
+    if ("deselected" in canary_summary_line
+            or re.search(r"\berrors?\b", canary_summary_line)):
+        raise VerificationFailure(
+            "CANARY-DESELECTED",
+            f"canary summary_line {canary_summary_line!r} reports "
+            "deselection or errors; the serial canary must collect the "
+            "full selection")
+    run_rc = summary["run"].get("rc")
+    if type(run_rc) is not int:
+        raise VerificationFailure(
+            "BAD-FIELD-RUN-RC",
+            f"run.rc is {run_rc!r}; expected an integer, not a JSON "
+            "boolean, string, or null")
+    if run_rc != 0:
+        raise VerificationFailure("RUN-RC", f"run rc is {run_rc}")
+    # Exit status is read BEFORE the deselected null-check: a non-zero exit
+    # reports EXITSTATUS, and the exit-0 late-worker-loss case (null fields)
+    # reports BAD-FIELD-DESELECTED. Both orders fail closed.
+    if _require_record_int(record, "exitstatus") != 0:
+        raise VerificationFailure("EXITSTATUS", f"record exitstatus is {record['exitstatus']}")
+    deselected = _record_outcome_int(record, "deselected")
+    for key in ("failed", "errors", "deselected"):
+        # Type first, then value (the rc checks' rule): JSON false equals 0
+        # in Python, so an untyped comparison let false pass as a clean zero
+        # here and refuse only later at the outcome-summary check under the
+        # same condition name but a distant site.
+        run_value = summary["run"].get(key)
+        if not isinstance(run_value, int) or isinstance(run_value, bool):
+            raise VerificationFailure(
+                f"BAD-FIELD-RUN-{key.upper()}",
+                f"run.{key} is {run_value!r}; expected an integer, not a "
+                "JSON boolean, string, or null")
+        if run_value != 0:
+            raise VerificationFailure(
+                f"RUN-{key.upper()}", f"run.{key} is {run_value!r}; expected 0")
+        if _record_outcome_int(record, key) != 0:
+            raise VerificationFailure(
+                f"RECORD-{key.upper()}", f"record.{key} is {record[key]!r}; expected 0")
+    before = _require_record_int(record, "items_before_modifyitems")
+    after = _require_record_int(record, "items_after_modifyitems")
+    collected = _require_record_int(record, "collected")
+    if after != collected or after + deselected != before:
+        raise VerificationFailure(
+            "COLLECTION-HOOK-NARROWING",
+            f"before={before}, after={after}, deselected={deselected}, collected={collected}")
+
+
+def _require_node_identity(canary: dict, summary: dict, record: dict,
+                           canary_summary: dict) -> None:
+    """The canary's node IDs are the corpus; the run's terminal set equals it.
+
+    run.collected is additionally re-derived from the run's persisted header
+    line (RUN-COLLECTED-HEADER), so the count carries its printed provenance
+    rather than resting on the cross-artifact equalities alone.
+
+    SCOPING (honest blind spot): this binding detects ASYMMETRIC divergence
+    only — a repo-side pytest_collection_modifyitems hook dropping the SAME
+    items from both the serial canary and the parallel run stays
+    self-consistent by construction here. That symmetric blind spot is
+    shared with the required full lane's before/after identity, and this
+    lane remains advisory: it never certifies a merge.
+    """
+    unresolvable = canary["canary"]["unresolvable_node_id_bases"]
+    # Type first, then emptiness: a truthiness-only guard let a falsy
+    # non-list ("", 0, false) read as the honest all-accounted-for case,
+    # against the module's rule that absent or malformed evidence fails.
+    if (not isinstance(unresolvable, list)
+            or any(not isinstance(base, str) or not base
+                   for base in unresolvable)):
+        raise VerificationFailure(
+            "BAD-FIELD-CANARY-UNRESOLVED-BASES",
+            f"canary.unresolvable_node_id_bases is {unresolvable!r}; expected "
+            "a list of non-empty file-path strings, possibly empty")
+    if unresolvable:
+        raise VerificationFailure(
+            "CANARY-UNRESOLVED-BASES",
+            f"canary.unresolvable_node_id_bases is {unresolvable!r}; the "
+            "canary must account for every file it collected")
+    canary_items = _positive_int(
+        canary["canary"], "collected_items", "CANARY-COLLECTED", "canary")
+    run_collected = _positive_int(summary["run"], "collected", "RUN-COLLECTED", "run")
+    # The count above is only as good as its provenance: re-derive it from
+    # the header line the run itself printed, with the writer's own parse
+    # rule (the imported regex). A count inferred from the outcome sum, or
+    # tampered after the fact, moves with every cross-artifact check; the
+    # stored header raises the bar -- it catches the demoted-everywhere
+    # tamper the tests pin -- but it is not tamper-evident: a complete
+    # forgery edits it alongside the rest.
+    header = summary["run"].get("collected_header")
+    if not isinstance(header, str) or not header:
+        raise VerificationFailure(
+            "BAD-FIELD-RUN-COLLECTED-HEADER",
+            f"run.collected_header is {header!r}; expected the captured "
+            "start-of-run header line")
+    header_match = _ITEMS_LINE_RE.search(header)
+    if header_match is None:
+        raise VerificationFailure(
+            "RUN-COLLECTED-HEADER",
+            f"run.collected_header {header!r} matches no known header shape "
+            "(expected 'collected N items' or 'N workers [M items]')")
+    # The header's FORM must match the command's shape: a parallel command
+    # (-n --dist loadfile) is distributed by xdist and prints the workers
+    # form; a serial command prints pytest's collected form. A header of the
+    # wrong form evidences a different run than the command recorded.
+    # _require_commands has already bound run.command to the rebuilt argv.
+    # Coupling note: parallel-ness is read from the command's own workers
+    # flag element, the same marker build_argv emits. If build_argv's
+    # parallel marker ever changes, this line must change with it -- and it
+    # fails in the false-red direction: a changed marker reads every run as
+    # serial and refuses the workers-form header, never silently green.
+    is_parallel = "-n" in summary["run"]["command"]
+    workers_form = re.search(r"\d+ workers \[\d+ items?\]", header) is not None
+    if is_parallel != workers_form:
+        raise VerificationFailure(
+            "RUN-COLLECTED-HEADER-FORM",
+            f"run.collected_header {header!r} does not match the run "
+            f"command's shape: a {'parallel' if is_parallel else 'serial'} "
+            f"command requires the "
+            f"{'workers' if is_parallel else 'collected'} form")
+    header_count = int(header_match.group(1) or header_match.group(2))
+    if header_count != run_collected:
+        raise VerificationFailure(
+            "RUN-COLLECTED-HEADER",
+            f"run.collected ({run_collected}) disagrees with the count "
+            f"re-derived from run.collected_header ({header_count}: "
+            f"{header!r})")
+    record_collected = _require_record_int(record, "collected")
+    if record_collected <= 0:
+        raise VerificationFailure("RECORD-COLLECTED", "record collected must be positive")
+    if canary_summary["collected"] != canary_items:
+        raise VerificationFailure(
+            "CANARY-COLLECTED",
+            f"canary summary collected {canary_summary['collected']} != {canary_items}")
+    if not canary_items == run_collected == record_collected:
+        raise VerificationFailure(
+            "COLLECTED-COUNT-MISMATCH",
+            f"canary/run/record collected counts are {canary_items}/"
+            f"{run_collected}/{record_collected}")
+    node_ids = canary["canary"]["collected_node_ids"]
+    if (not isinstance(node_ids, list)
+            or any(not isinstance(node_id, str) or not node_id for node_id in node_ids)
+            or node_ids != sorted(node_ids)
+            or len(set(node_ids)) != len(node_ids)
+            or len(node_ids) != canary_items):
+        raise VerificationFailure(
+            "CANARY-NODE-IDS",
+            "collected_node_ids must be sorted, unique, non-empty strings "
+            "whose length equals collected_items")
+    terminal = record["terminal_node_ids"]
+    if (not isinstance(terminal, list)
+            or any(not isinstance(node_id, str) or not node_id for node_id in terminal)
+            or len(set(terminal)) != len(terminal)
+            or len(terminal) != record_collected):
+        raise VerificationFailure(
+            "TERMINAL-SET",
+            "terminal_node_ids must be unique, non-empty strings whose length "
+            "equals record collected")
+    missing = sorted(set(node_ids) - set(terminal))
+    extra = sorted(set(terminal) - set(node_ids))
+    if missing or extra:
+        raise VerificationFailure(
+            "NODE-ID-SET-MISMATCH",
+            f"canary/run node-ID sets differ: missing={missing} extra={extra}")
+
+
+def _require_outcomes(summary: dict, record: dict, run_summary: dict,
+                      record_summary: dict) -> None:
+    run_counts = {key: _outcome_int(summary["run"], key, "run") for key in _OUTCOME_KEYS}
+    record_counts = {key: _record_outcome_int(record, key) for key in _OUTCOME_KEYS}
+    for key in _OUTCOME_KEYS:
+        if run_summary[key] != run_counts[key]:
+            raise VerificationFailure(
+                "RUN-SUMMARY-OUTCOME-MISMATCH",
+                f"run summary {key}={run_summary[key]} != run field {run_counts[key]}")
+        if record_summary[key] != record_counts[key]:
+            raise VerificationFailure(
+                "RECORD-SUMMARY-OUTCOME-MISMATCH",
+                f"record summary {key}={record_summary[key]} != record field {record_counts[key]}")
+        if run_counts[key] != record_counts[key]:
+            raise VerificationFailure(
+                "OUTCOME-MISMATCH",
+                f"run/record {key} differ: {run_counts[key]} != {record_counts[key]}")
+    collection_skips = _require_record_int(record, "skipped_at_collection")
+    if not 0 <= collection_skips <= record_counts["skipped"]:
+        raise VerificationFailure(
+            "BAD-FIELD-SKIPPED_AT_COLLECTION",
+            f"skipped_at_collection={collection_skips}, skipped={record_counts['skipped']}")
+    total = sum(record_counts[key] for key in _OUTCOME_KEYS
+                if key != "deselected") - collection_skips
+    if total != record["collected"]:
+        raise VerificationFailure(
+            "ACCOUNTING",
+            f"outcomes minus skipped_at_collection={total}, collected={record['collected']}")
+    sites = _require_skip_sites(record)
+    if sum(site["count"] for site in sites) != record_counts["skipped"]:
+        raise VerificationFailure(
+            "SKIP-SITES-INCOMPLETE",
+            f"skip_sites total {sum(site['count'] for site in sites)} != "
+            f"skipped {record_counts['skipped']}")
+
+
+def _skip_advisory(record_path: str) -> None:
+    """Compare structurally valid skip sites with the full allowlist; never fail."""
+    try:
         record = json.loads(Path(record_path).read_text(encoding="utf-8"))
-        sites = record.get("skip_sites") if isinstance(record, dict) else None
-        if not isinstance(sites, list):
-            raise ValueError("the record carries no skip_sites list")
-        problems = skip_site_problems(sites, load_skip_allowlist(SKIP_ALLOWLIST))
+        problems = skip_site_problems(
+            record["skip_sites"], load_skip_allowlist(SKIP_ALLOWLIST))
+    # json.JSONDecodeError is a ValueError subclass; ValueError covers it.
     except (OSError, ValueError, KeyError, TypeError, RunFailure) as exc:
-        print(f"SKIP-ADVISORY: skip sites not compared ({exc})",
-              file=sys.stderr)
+        print(f"SKIP-ADVISORY: skip sites not compared ({exc})", file=sys.stderr)
         return
     for condition, detail in problems:
         print(f"SKIP-ADVISORY {condition}: {detail}. The required full-suite "
-              f"gate will refuse this; add the allowlist entry in the commit "
-              f"that adds the skip.", file=sys.stderr)
+              "gate will refuse this; add the allowlist entry in the commit "
+              "that adds the skip.", file=sys.stderr)
     if not problems:
         print("SKIP-ADVISORY-OK every skip site is in the allowlist")
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="Verify the fast-suite canary and run artifacts.")
-    parser.add_argument("--summary", required=True,
-                        help="run artifact path, as passed to the runner")
-    parser.add_argument("--canary", required=True,
-                        help="canary artifact path, as passed to the runner")
-    parser.add_argument(
-        "--run-record", default=None,
-        help="the in-band run record the fast run wrote. Its skip sites are "
-             "compared with the full-suite skip allowlist as an ADVISORY: a "
-             "mismatch is printed and never changes the exit code.")
+    parser = argparse.ArgumentParser(description="Verify fast-suite evidence.")
+    parser.add_argument("--summary", required=True)
+    parser.add_argument("--canary", required=True)
+    parser.add_argument("--run-record", required=True,
+                        help="schema-v3 in-band record from this fast run")
     parser.add_argument("--repo-root", default=None)
     parser.add_argument("--manifest", default=None)
-    parser.add_argument(
-        "--base-sha",
-        default=None,
-        help="the base commit the run should have diffed against, taken from "
-             "an INDEPENDENT source (the workflow event). Falls back to the "
-             "BASE_SHA environment variable. The artifact's recorded value is "
-             "only cross-checked against it, never used as the target.",
-    )
+    parser.add_argument("--base-sha", default=None,
+                        help="independent PR base SHA; falls back to BASE_SHA")
     args = parser.parse_args(argv)
     independent_base = (args.base_sha or os.environ.get("BASE_SHA") or "").strip()
-
     repo_root = (Path(args.repo_root).resolve() if args.repo_root
                  else Path(__file__).resolve().parent.parent)
-    # Both paths are explicit, never derived from the environment: the
-    # suite's own tests run the runner in rigs that inherit the workspace.
-    summary_path = Path(args.summary)
-    canary_path = Path(args.canary)
+    plugin_root = repo_root / "pact-plugin"
     manifest_path = (Path(args.manifest) if args.manifest
                      else repo_root / "scripts" / "fast_suite_exclusions.json")
-
     try:
-        # 1, 2, 3: presence and parseability.
-        canary = _load_artifact(canary_path, "canary")
-        summary = _load_artifact(summary_path, "run")
-
-        # 4: schema version.
-        _require_schema_version(canary, "canary")
-        _require_schema_version(summary, "run")
-
-        # 5: required keys.
-        _require_keys(canary, ("manifest", "base_sha", "selection", "canary"),
-                      "the canary artifact", "canary")
-        _require_keys(summary, ("manifest", "base_sha", "selection", "run"),
-                      "the run artifact", "run")
-        _require_keys(canary["selection"], _SELECTION_KEYS,
-                      "canary.selection", "canary")
-        _require_keys(summary["selection"], _SELECTION_KEYS,
-                      "run.selection", "run")
-        _require_keys(canary["canary"], _CANARY_KEYS,
-                      "canary.canary", "canary")
-        _require_keys(summary["run"], _RUN_KEYS, "run.run", "run")
-
-        # 6: summary presence and parseability, BEFORE any count.
-        _require_summary_line(canary["canary"], "canary")
-        _require_summary_line(summary["run"], "run")
-
-        # The canary must have exercised the SAME selection the run used,
-        # and both artifacts must describe the same commit. Without this the
-        # canary could prove a selection nobody ran.
-        canary_ignores = canary["canary"].get("ignore_paths")
-        run_command = summary["run"].get("command")
-        run_ignores = [
-            argument.split("=", 1)[1] for argument in (run_command or [])
-            if isinstance(argument, str) and argument.startswith("--ignore=")
-        ]
-        if sorted(canary_ignores or []) != sorted(run_ignores):
-            raise VerificationFailure(
-                "IGNORE-ARGS-MISMATCH",
-                f"the canary's --ignore paths differ from the run's: "
-                f"canary={sorted(canary_ignores or [])} "
-                f"run={sorted(run_ignores)}",
-            )
-        for key in ("base_sha", "head_sha"):
-            if canary.get(key) != summary.get(key):
-                raise VerificationFailure(
-                    "ARTIFACT-SHA-MISMATCH",
-                    f"{key}: the canary records {canary.get(key)!r} but the "
-                    f"run records {summary.get(key)!r}",
-                )
-
-        # 7: the canary process must have succeeded.
-        if canary["canary"]["rc"] != 0:
-            raise VerificationFailure(
-                "CANARY-RC", f"canary rc is {canary['canary']['rc']}")
-
-        # The comparison target comes from an INDEPENDENT source. Taking
-        # it from the artifact let a self-consistent forged artifact pick the
-        # commit it is compared against, which makes the comparison vacuous.
+        canary = _load_artifact(Path(args.canary), "canary")
+        summary = _load_artifact(Path(args.summary), "run")
+        record = _load_record(Path(args.run_record), "RECORD-ABSENT")
+        canary_summary, run_summary, record_summary = _require_artifact_shape(
+            canary, summary, record)
         if not independent_base:
             raise VerificationFailure(
-                "BASE-SHA-MISSING",
-                "no independent base SHA was supplied (--base-sha or the "
-                "BASE_SHA environment variable). The artifact's own value "
-                "cannot be the comparison target.",
-            )
+                "BASE-SHA-MISSING", "no independent base SHA was supplied")
         for label, artifact in (("canary", canary), ("run", summary)):
-            recorded = artifact.get("base_sha")
-            if recorded != independent_base:
+            if artifact["base_sha"] != independent_base:
                 raise VerificationFailure(
                     "BASE-SHA-MISMATCH",
-                    f"{label}: artifact records base_sha {recorded!r} but the "
-                    f"independent source says {independent_base!r}",
-                )
-
-        # Independent recomputation. Never read from either artifact.
+                    f"{label} base_sha {artifact['base_sha']!r} != {independent_base!r}")
         try:
             manifest = load_manifest(manifest_path)
         except ManifestError as exc:
             raise VerificationFailure(
-                "MANIFEST-INVALID",
-                f"{manifest_path}: " + "; ".join(exc.errors),
-            ) from exc
-        recomputed, _, _ = select_for_change(repo_root, manifest,
-                                             independent_base)
+                "MANIFEST-INVALID", f"{manifest_path}: " + "; ".join(exc.errors)) from exc
+        recomputed, _, _ = select_for_change(repo_root, manifest, independent_base)
+        _require_commands(canary, summary, recomputed, plugin_root)
+        _require_identity(canary, summary, record)
         expected = sorted(recomputed.included)
-
-        # 10: both sets non-empty.
         if not expected:
-            raise VerificationFailure(
-                "EMPTY-EXPECTED", "the recomputed expected set is empty")
+            raise VerificationFailure("EMPTY-EXPECTED", "the recomputed expected set is empty")
         collected_files = canary["canary"]["collected_files"]
         if not collected_files:
-            raise VerificationFailure(
-                "EMPTY-COLLECTED", "the canary collected no files")
-
-        # 8, 9: file-set equality, both directions, named separately.
+            raise VerificationFailure("EMPTY-COLLECTED", "the canary collected no files")
         _set_difference(expected, canary["canary"]["expected_files"],
                         "EXPECTED-SET-MISMATCH", "canary.expected_files")
         _set_difference(expected, collected_files,
                         "COLLECTED-SET-MISMATCH", "canary.collected_files")
-
-        # 11: the manifest the run used is the manifest now.
+        _require_canary_delta_empty(canary)
+        _require_selection_identity(canary, summary, recomputed)
         manifest_sha = _sha256_file(manifest_path)
         for label, artifact in (("canary", canary), ("run", summary)):
-            recorded = artifact["manifest"].get("sha256")
-            if recorded != manifest_sha:
+            if artifact["manifest"].get("sha256") != manifest_sha:
                 raise VerificationFailure(
-                    "MANIFEST-DRIFT",
-                    f"{label}: recorded manifest sha {recorded!r} != current "
-                    f"{manifest_sha!r}",
-                )
-
-        # 12: the suite process must have succeeded.
-        if summary["run"]["rc"] != 0:
-            raise VerificationFailure(
-                "RUN-RC", f"run rc is {summary['run']['rc']}")
-
-        # 13-16: counts. Only reachable after the summary was proven present.
-        # A well-typed-but-wrong value must be a NAMED failure: this verifier's
-        # contract is one named condition per failure, and int("abc") used to
-        # escape as a traceback instead.
-        collected_value = summary["run"]["collected"]
-        if (not isinstance(collected_value, int)
-                or isinstance(collected_value, bool)
-                or collected_value <= 0):
-            raise VerificationFailure(
-                "RUN-COLLECTED",
-                f"run collected {collected_value!r}; expected an integer > 0",
-            )
-        # The run must collect exactly the items the canary collected. A
-        # narrowing that only the run sees (an option or plugin that drops
-        # items without reporting them as deselected) changes this count
-        # and nothing else.
-        canary_items = canary["canary"]["collected_items"]
-        if (not isinstance(canary_items, int)
-                or isinstance(canary_items, bool) or canary_items <= 0):
-            raise VerificationFailure(
-                "CANARY-COLLECTED",
-                f"canary collected_items {canary_items!r}; expected an "
-                f"integer > 0",
-            )
-        if collected_value != canary_items:
-            raise VerificationFailure(
-                "COLLECTED-COUNT-MISMATCH",
-                f"run collected {collected_value} items but the canary "
-                f"collected {canary_items}",
-            )
-        for key in ("failed", "errors", "deselected"):
-            value = summary["run"].get(key)
-            if value != 0:
-                raise VerificationFailure(
-                    f"RUN-{key.upper()}",
-                    f"run.{key} is {value!r}; expected 0",
-                )
-
-        # 17: secondary arithmetic identity, from the recomputation.
-        # `excluded` is the APPLIED set (exclusions minus add-backs), so
-        # included == discovered - excluded already holds. Adding added_back
-        # counted those files twice and failed EVERY pull request that touched
-        # an excluded test or a mapped seam.
+                    "MANIFEST-DRIFT", f"{label} manifest hash differs from the current manifest")
+        _require_clean_exits_and_collection_identity(canary, summary, record)
+        _require_node_identity(canary, summary, record, canary_summary)
+        _require_outcomes(summary, record, run_summary, record_summary)
         identity = len(recomputed.discovered) - len(recomputed.excluded)
         if len(recomputed.included) != identity:
             raise VerificationFailure(
                 "SELECTION-ARITHMETIC",
-                f"set equality is primary; this redundancy check failed: "
                 f"included {len(recomputed.included)} != discovered "
-                f"{len(recomputed.discovered)} - excluded "
-                f"{len(recomputed.excluded)} (= {identity}). 'excluded' is "
-                f"the APPLIED set, so added_back is already accounted for "
-                f"and must not appear in this identity.",
-            )
-    except VerificationFailure as failure:
-        print(f"VERIFY-FAILURE {failure.condition}: {failure.detail}",
-              file=sys.stderr)
+                f"{len(recomputed.discovered)} - excluded {len(recomputed.excluded)}")
+    except (VerificationFailure, RunFailure) as failure:
+        print(f"VERIFY-FAILURE {failure.condition}: {failure.detail}", file=sys.stderr)
+        # The advisory follows the failure line on the same stream, so a
+        # red-lane author keeps the allowlist hint while masking stays
+        # impossible: the advisory can inform a verdict, never flip one.
         _skip_advisory(args.run_record)
         return 1
-
     _skip_advisory(args.run_record)
-    print(f"VERIFY-OK expected={len(expected)} "
-          f"collected={len(collected_files)} "
-          f"status={recomputed.status} "
-          f"select_all={recomputed.select_all_reason}")
+    print(f"VERIFY-OK expected={len(expected)} collected={len(collected_files)} "
+          f"status={recomputed.status} select_all={recomputed.select_all_reason}")
     return 0
 
 
