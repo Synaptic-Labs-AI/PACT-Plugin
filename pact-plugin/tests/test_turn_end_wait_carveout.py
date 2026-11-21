@@ -288,6 +288,12 @@ def test_is_wait_watcher_command_shape_table():
         f"FOO=1 {_arm_command()}",
         _arm_command().replace("python3 ", "python3.12 "),
         _arm_command() + "  ",
+        # A special-char install path (+ is in shlex.quote's no-op set): the
+        # emitted command renders it UNQUOTED, so the classifier must admit
+        # the same set or a +cache-style install stays blocked over its own
+        # scheduled wake (cold round 12).
+        "python3 /opt/pact+cache/hooks/pact_wait.py --team t --task 1 "
+        "--predicate h --deadline 5",
         # GLUED-COMPOSITION SHAPES, PINNED (cold round 5 probe): the shell
         # splits && and ; BEFORE argv, so the unquoted glued form arms a
         # VALID deadline-5 watcher plus a junk second command — the CLI

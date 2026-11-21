@@ -76,21 +76,23 @@ _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 # the watcher (`echo "..."`, a compose string) or runs it PARTIALLY (missing
 # a required flag, reordered flags) does not match and still counts as a job
 # the ending frame must account for. The path token admits a QUOTED path
-# containing any non-quote characters — the emitted arm command always
-# quotes the watcher path, and a live install under a spaced path must
+# containing any non-quote characters, and its UNQUOTED alternative admits
+# exactly shlex.quote's no-op set — the emitted command renders the path
+# unquoted precisely when shlex.quote would, and the classifier admits that
+# same set, so a live install under a spaced or special-char path must
 # classify or its own scheduled wake would block it. Match-order and
 # composition strictness lean deliberately toward over-block: a watcher the
 # carve-out misses only ever costs one advisory block, while a non-watcher
 # the carve-out exempts would acquit the frame of a real unowned job — a
-# spaced path left UNQUOTED still counts (the shell word-splits it, so it
-# cannot be the armed command, and the emitted command always quotes).
+# spaced path left UNQUOTED beyond that no-op set still counts (the shell
+# word-splits it, so it cannot be the armed command).
 _PACT_WAIT_SHAPE = re.compile(
     r"\A\s*"
     r"(?:cd\s+[^\n&]+&&\s*)?"
     r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
     r"(?:python3(?:\.\d+)?\s+)?"
     r"(?:\"[^\"]*pact_wait\.py\"|'[^']*pact_wait\.py'"
-    r"|[A-Za-z0-9_./-]*pact_wait\.py)\s+"
+    r"|[A-Za-z0-9_@%+=:,./-]*pact_wait\.py)\s+"
     r"--team\s+\S+\s+--task\s+\S+\s+"
     r"--predicate\s+\S+\s+--deadline\s+\S+\s*\Z"
 )

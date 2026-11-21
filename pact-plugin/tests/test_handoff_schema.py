@@ -153,6 +153,20 @@ class TestValidatorStaysSilent:
         del handoff["reasoning_chain"]
         assert validate_handoff_schema(handoff) is None
 
+    def test_empty_or_whitespace_produced_fires_too(self):
+        """THE EMPTY-STRING HALF of the write/watch disagreement (cold
+        round 12): "" and whitespace-only `produced` pass the list half of
+        the gate but the watcher reads them ABSENT (membership-grade
+        emptiness with a strip) — the same false-EXPIRED burn. For THIS
+        field the emptiness silence does not apply: empty `produced` is
+        exactly the failure the gate exists to catch. Red on the pre-fix
+        validator, which passed both."""
+        base = dict(VALID_HANDOFF, produced="src/auth.ts")
+        for value in ("", "   "):
+            problem = validate_handoff_schema(dict(base, produced=value))
+            assert problem is not None, repr(value)
+            assert "produced" in problem
+
     def test_non_string_produced_fires_naming_the_watcher_cost(self):
         """TEETH for the produced type gate (cold round 10): a handoff whose
         `produced` is a LIST — the template-shaped failure the array
@@ -162,7 +176,7 @@ class TestValidatorStaysSilent:
         problem = validate_handoff_schema(handoff)
         assert problem is not None
         assert "produced" in problem
-        assert "must be a string" in problem
+        assert "must be a non-empty string" in problem
         assert "ABSENT" in problem
 
     def test_silent_on_extra_keys(self):
@@ -177,13 +191,21 @@ class TestValidatorStaysSilent:
 
     def test_silent_on_present_but_empty_values(self):
         """Emptiness is the norm, not a defect — the templates sanction
-        'No areas of uncertainty flagged' explicitly. The produced type
-        gate (cold round 10) narrows this for ONE field: `produced` must
-        be a string, so its present-but-empty shape is "" — still a
-        string, still silent. The other fields stay [] (empty is
-        sanctioned)."""
+        'No areas of uncertainty flagged' explicitly. SCOPE NARROWED by
+        cold round 12: the emptiness silence now covers every required
+        field EXCEPT `produced` — the field the watcher keys on — where an
+        empty or whitespace-only value is exactly the failure the gate
+        exists to catch (the watcher reads it ABSENT and burns its
+        deadline). `produced`="" therefore FIRES, and the other fields'
+        emptiness stays silent."""
         handoff = {f: [] for f in HANDOFF_REQUIRED_FIELDS}
         handoff["produced"] = ""
+        problem = validate_handoff_schema(handoff)
+        assert problem is not None
+        assert "produced" in problem
+        # The silence survives for the OTHER fields: produced as a real
+        # string, the rest present-but-empty → silent.
+        handoff["produced"] = "src/auth.ts"
         assert validate_handoff_schema(handoff) is None
 
     def test_silent_on_a_fully_canonical_handoff(self):

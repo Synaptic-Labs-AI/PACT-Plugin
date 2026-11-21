@@ -124,16 +124,18 @@ def validate_handoff_schema(handoff: object) -> str | None:
         open_questions / uncertainty fields are the norm in real handoffs.
       - A missing reasoning_chain is never a defect. It is recommended.
 
-    ONE TYPE GATE, on `produced` only: a non-string `produced` fails
-    validation (cold round 10). The deliverable watcher keys on this field
-    and reads a list-typed `produced` as ABSENT — degraded-loud, per
+    ONE TYPE GATE, on `produced` only: a non-string OR
+    empty/whitespace-only `produced` fails validation (cold rounds 10 and
+    12). The deliverable watcher keys on this field and reads a list-typed,
+    empty, or whitespace-only `produced` as ABSENT — degraded-loud, per
     wait_target.handoff_present — so a template-shaped handoff used to pass
     every acceptance gate and still burn the watcher's whole deadline to a
     false EXPIRED. The acceptance-side refusal IS the remedy: the author is
     sent back to re-write, closing the class at write time. The other
     required fields stay presence-only — the watcher does not read them,
     and the emptiness silence above keeps empty uncertainty/open_questions
-    legitimate.
+    legitimate. FOR `produced` the emptiness silence does NOT apply: an
+    empty produced IS the failure this gate exists to catch.
 
     When a missing required key has a legacy spelling present in the same
     handoff, the reason names the alias, because that is the correction the
@@ -148,13 +150,13 @@ def validate_handoff_schema(handoff: object) -> str | None:
     missing = [f for f in HANDOFF_REQUIRED_FIELDS if f not in handoff]
     if not missing:
         produced = handoff.get("produced")
-        if not isinstance(produced, str):
+        if not isinstance(produced, str) or not produced.strip():
             return (
-                "metadata.handoff `produced` must be a string, got "
-                f"{type(produced).__name__} — the deliverable watcher reads "
-                "a list-typed `produced` as ABSENT and would burn its "
-                "deadline to a false EXPIRED (join the items with '; ' "
-                "into one string)"
+                "metadata.handoff `produced` must be a non-empty string, "
+                f"got {type(produced).__name__} — the deliverable watcher "
+                "reads a list-typed, empty, or whitespace-only `produced` "
+                "as ABSENT and would burn its deadline to a false EXPIRED "
+                "(join the items with '; ' into one string)"
             )
         return None
     reason = f"metadata.handoff missing required fields: {', '.join(missing)}"

@@ -1036,6 +1036,11 @@ def test_tier3_subagent_text_pinned_verbatim():
     import wait_filler_gate
 
     assert wait_filler_gate._TIER3_SUBAGENT_REASON == _TIER3_SUBAGENT_REASON_PIN
+    # The neither-predicate alternative, adapted to the subagent's wake
+    # model (cold round 12): a subagent cannot SET intentional_wait on team
+    # tasks, so the honest route is report-and-end, not the teammates'
+    # intentional_wait route.
+    assert "do NOT arm" in wait_filler_gate._TIER3_SUBAGENT_REASON
 
 
 # The Agent-tool subagent's own text, verbatim — the role branch's fourth
@@ -1054,10 +1059,13 @@ _TIER3_SUBAGENT_REASON_PIN = (
     'python3 "{watcher}" --team <team-name> --task <task-id> '
     "--predicate handoff --deadline 900\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). THEN end your turn with no further tool "
-    "calls — the watcher exits 0 when the deliverable lands, 3 when "
-    "the deadline passes without it, 4 when it cannot watch at all — "
-    "and put what the lead needs in your final report."
+    "a teachback submission). If the event you await is not a "
+    "deliverable you can write — do NOT arm — your completion report is "
+    "the lead's information; end your turn. If you DID arm: end your "
+    "turn with no further tool calls — the watcher exits 0 when the "
+    "deliverable lands, 3 when the deadline passes without it, 4 when "
+    "it cannot watch at all — and put what the lead needs in your "
+    "final report."
 )
 
 
