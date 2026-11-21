@@ -2212,10 +2212,7 @@ def test_the_roots_ignore_git_location_variables_in_the_environment(tmp_path, mo
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     wrapper = bin_dir / "git"
-    wrapper.write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{shutil.which("git")}" "$@"\n',
-        encoding="utf-8",
-    )
+    wrapper.write_text(_git_wrapper(log, shutil.which("git")), encoding="utf-8")
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
@@ -2225,10 +2222,10 @@ def test_the_roots_ignore_git_location_variables_in_the_environment(tmp_path, mo
 
     roots = backlog.checkout_roots()
 
-    calls = log.read_text().splitlines()
+    calls = _git_questions(log)
     assert calls, "control: the logging git ran"
     assert sorted(roots) == sorted([str(main.resolve()), str((tmp_path / "wt").resolve())]), roots
-    assert sum(" --git-common-dir" in f" {call}" for call in calls) == 1, calls
+    assert sum(" --git-common-dir" in f" {args}" for _, args in calls) == 1, calls
 
 
 def test_the_writer_records_every_checkout_not_just_the_main_root(tmp_path, monkeypatch):
@@ -2532,9 +2529,44 @@ def test_save_carries_the_separate_git_dir_checkout_it_read(tmp_path, monkeypatc
     assert set(json.loads(path.read_text())["roots"]) == {str(main), str(wt)}
 
 
+def _git_wrapper(log: Path, real_git: str, before_exec: str = "") -> str:
+    """The text of a `git` that appends each command it runs to `log` as its
+    question, one line each: the resolved directory git runs in (the working
+    directory with each leading `-C` applied), a tab, and the rest of its
+    arguments joined by spaces. It then runs `before_exec`, where `$question`
+    holds that line, and then `real_git`. Two commands are one question
+    exactly when both parts are equal."""
+    return (
+        "#!/bin/sh\n"
+        "question=$(where=$(pwd -P)\n"
+        "  while [ $# -ge 2 ] && [ \"$1\" = -C ]; do\n"
+        "    case \"$2\" in /*) next=$2 ;; *) next=$where/$2 ;; esac\n"
+        "    where=$(cd \"$next\" 2>/dev/null && pwd -P || printf '%s' \"$next\")\n"
+        "    shift 2\n"
+        "  done\n"
+        "  printf '%s\\t%s' \"$where\" \"$*\")\n"
+        f'printf \'%s\\n\' "$question" >> "{log}"\n'
+        f"{before_exec}"
+        f'exec "{real_git}" "$@"\n'
+    )
+
+
+def _git_questions(log: Path) -> list:
+    """The questions `_git_wrapper` logged, in order, each a (directory,
+    arguments) pair; an absent log holds none."""
+    if not log.exists():
+        return []
+    return [tuple(line.split("\t", 1)) for line in log.read_text(encoding="utf-8").splitlines()]
+
+
+def _repeated(questions: list) -> list:
+    """The questions asked more than once."""
+    return sorted({q for q in questions if questions.count(q) > 1})
+
+
 def _logging_git(tmp_path, monkeypatch) -> Path:
-    """Put first on PATH a `git` that appends each command it runs to the
-    returned log and then runs the real git."""
+    """Put first on PATH a `git` that logs each command it runs as its
+    question (`_git_wrapper`) and then runs the real git."""
     import os
     import shutil
     import stat
@@ -2543,13 +2575,51 @@ def _logging_git(tmp_path, monkeypatch) -> Path:
     bin_dir = tmp_path / "logging-bin"
     bin_dir.mkdir()
     wrapper = bin_dir / "git"
-    wrapper.write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{shutil.which("git")}" "$@"\n',
-        encoding="utf-8",
-    )
+    wrapper.write_text(_git_wrapper(log, shutil.which("git")), encoding="utf-8")
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return log
+
+
+@pytest.mark.parametrize("asked, repeated", [
+    ([("a", []), ("b", [])], []),
+    ([("a", []), ("a", [])], [("a", "rev-parse --git-dir")]),
+    ([("b", ["-C", "{a}"]), ("a", [])], [("a", "rev-parse --git-dir")]),
+    ([("b", ["-C", "../a"]), ("link", [])], [("a", "rev-parse --git-dir")]),
+    ([("b", ["-C", "{tmp}", "-C", "a"]), ("a", [])], [("a", "rev-parse --git-dir")]),
+], ids=["two directories", "one directory twice", "-C names the directory", "relative -C and a link",
+        "a -C relative to the one before"])
+def test_a_logged_question_is_its_directory_and_its_arguments(tmp_path, asked, repeated):
+    """The question the logging `git` records is the resolved directory git
+    runs in and the rest of its arguments: the same arguments in two
+    directories are two questions, and the same arguments in one directory,
+    however it is named (`-C`, a relative `-C`, a `-C` relative to the one
+    before, a symlink), are one question
+    asked again. Control: every command is logged, from the directory it
+    names.
+
+    Real repos and git, the wrapper run as its own process."""
+    import os
+    import shutil
+    import stat
+
+    for name in ("a", "b"):
+        _repo(tmp_path / name)
+    (tmp_path / "link").symlink_to(tmp_path / "a")
+    log = tmp_path / "git.log"
+    wrapper = tmp_path / "git"
+    wrapper.write_text(_git_wrapper(log, shutil.which("git")), encoding="utf-8")
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    for where, prefix in asked:
+        argv = [a.format(a=tmp_path / "a", tmp=tmp_path) for a in prefix]
+        # PWD as a shell that changed into the directory sets it, so a link is named as itself.
+        subprocess.run([str(wrapper), *argv, "rev-parse", "--git-dir"], cwd=tmp_path / where,
+                       env={**os.environ, "PWD": str(tmp_path / where)}, check=True, capture_output=True)
+
+    questions = _git_questions(log)
+    named = {os.path.realpath(tmp_path / name): name for name in ("a", "b")}
+    assert len(questions) == len(asked), questions  # control
+    assert [(named.get(d, d), args) for d, args in _repeated(questions)] == repeated, questions
 
 
 @pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
@@ -2595,10 +2665,10 @@ def test_one_roots_lookup_lists_the_worktrees_once(
     except Exception as error:  # a refusal is the answer under test, not a harness failure
         roots = error
 
-    calls = log.read_text().splitlines()
+    calls = _git_questions(log)
     assert calls, "control: the logging git ran"
     assert roots == expected, roots
-    assert sum(" worktree list" in f" {call}" for call in calls) == (1 if nul else 2), calls
+    assert sum(" worktree list" in f" {args}" for _, args in calls) == (1 if nul else 2), calls
     assert len(calls) == (commands_with_z if nul else commands_rejecting_z), calls
 
 
@@ -3158,24 +3228,21 @@ def _git_failing_listing(tmp_path: Path, monkeypatch, failing: int) -> Path:
     log, count = tmp_path / "git.log", tmp_path / "list.count"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "git").write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n'
+    (bin_dir / "git").write_text(_git_wrapper(log, shutil.which("git"), (
         'case " $* " in *" worktree list "*)\n'
         f'  n=$(( $(cat "{count}" 2>/dev/null || echo 0) + 1 )); echo $n > "{count}"\n'
         f'  [ "$n" = {failing} ] && exit 1 ;;\nesac\n'
-        f'exec "{shutil.which("git")}" "$@"\n',
-        encoding="utf-8",
-    )
+    )), encoding="utf-8")
     (bin_dir / "git").chmod((bin_dir / "git").stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return log
 
 
 def _git_failing_one_call(tmp_path, monkeypatch, tag, real_git, path, fail=None, on_call=0) -> Path:
-    """Put first on `path` a `git` that appends each command it runs to the
-    returned log and runs `real_git`, except that it exits 1 on the
-    `on_call`-th run of the command `fail` (its arguments joined by spaces,
-    as the log holds them)."""
+    """Put first on `path` a `git` that logs each command it runs as its
+    question (`_git_wrapper`) and runs `real_git`, except that it exits 1 on
+    the `on_call`-th asking of the question `fail`, a (directory, arguments)
+    pair as `_git_questions` reads it."""
     import os
     import shlex
     import stat
@@ -3184,14 +3251,11 @@ def _git_failing_one_call(tmp_path, monkeypatch, tag, real_git, path, fail=None,
     bin_dir = tmp_path / f"{tag}-bin"
     bin_dir.mkdir()
     failing = "" if fail is None else (
-        f'if [ "$*" = {shlex.quote(fail)} ]; then\n'
+        f'if [ "$question" = {shlex.quote(chr(9).join(fail))} ]; then\n'
         f'  n=$(( $(cat "{count}" 2>/dev/null || echo 0) + 1 )); echo $n > "{count}"\n'
         f'  [ "$n" = {on_call} ] && exit 1\nfi\n'
     )
-    (bin_dir / "git").write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n{failing}exec "{real_git}" "$@"\n',
-        encoding="utf-8",
-    )
+    (bin_dir / "git").write_text(_git_wrapper(log, real_git, failing), encoding="utf-8")
     (bin_dir / "git").chmod((bin_dir / "git").stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{path}")
     return log
@@ -3235,27 +3299,27 @@ def test_one_write_decides_the_root_check_once(tmp_path, monkeypatch, on_call):
         store = tmp_path / f"{tag}-store"
         store.mkdir()
         code = backlog.main(["--backlog-dir", str(store), "add", "x"])
-        return code, log.read_text(encoding="utf-8").splitlines(), causes
+        return code, _git_questions(log), causes
 
     clean_code, clean, clean_causes = write("clean")
     questions = list(dict.fromkeys(clean))
     # Control: the questions read from the log hold the four the checks rest on.
-    assert [any(f" {word}" in f" {q}" for q in questions) for word in (
+    assert [any(f" {word}" in f" {args}" for _, args in questions) for word in (
         "rev-parse --git-common-dir", "rev-parse --git-dir", "rev-parse --show-toplevel", "worktree list",
     )] == [True] * 4, questions
 
     # The clean write asks each question once and several checks read the answers.
-    outcomes = {"clean write": (sorted({c for c in clean if clean.count(c) > 1}), len(clean_causes) >= 2,
+    outcomes = {"clean write": (_repeated(clean), len(clean_causes) >= 2,
                                 clean_code, set(clean_causes))}
     expected = {"clean write": ([], True, backlog._EXIT_OK, {None})}
     for index, question in enumerate(questions):
         code, commands, causes = write(f"fail{index}", question)
-        repeated = sorted({c for c in commands if commands.count(c) > 1})
+        repeated = _repeated(commands)
         if on_call == 2:
             outcomes[question] = (repeated, commands == clean, code, set(causes))
             expected[question] = ([], True, backlog._EXIT_OK, {None})
         else:
-            listing = " worktree list " in f" {question} "
+            listing = " worktree list " in f" {question[1]} "
             outcomes[question] = (question in commands, repeated, len(set(causes)) <= 1,
                                   (code, set(causes)) if listing else None)
             expected[question] = (True, [], True,
@@ -3302,8 +3366,8 @@ def test_one_write_reads_a_raised_listing_once(tmp_path, monkeypatch, raising_re
 
     code = backlog.main(["--backlog-dir", str(store), "add", "x"])
 
-    commands = log.read_text(encoding="utf-8").splitlines()
-    repeated = sorted({c for c in commands if commands.count(c) > 1})
+    commands = _git_questions(log)
+    repeated = _repeated(commands)
     expected = ({memory_api.REDIRECT_UNLISTABLE}, backlog._EXIT_REFUSED) if raising_read == 1 \
         else ({None}, backlog._EXIT_OK)
     # One read, no git command asked twice, and every check gives one cause.
@@ -3352,9 +3416,9 @@ def test_a_show_that_opens_the_memory_store_asks_git_each_question_once(tmp_path
 
     code = backlog.main(["--backlog-dir", str(store), "show"])
 
-    commands = log.read_text(encoding="utf-8").splitlines()
-    listings = [c for c in commands if " worktree list " in f" {c} "]
-    repeated = sorted({c for c in commands if commands.count(c) > 1})
+    commands = _git_questions(log)
+    listings = [c for c in commands if " worktree list " in f" {c[1]} "]
+    repeated = _repeated(commands)
     linked = layout == "linked worktree"
     assert memory_api._instance is not None, "control: show opened the memory store"
     expected = {memory_api.REDIRECT_UNLISTABLE} if failing == 1 else {None} if linked else set()

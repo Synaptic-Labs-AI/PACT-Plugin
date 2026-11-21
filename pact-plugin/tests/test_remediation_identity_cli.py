@@ -1930,24 +1930,41 @@ class TestADeclineCausePrintsOneRemedyOnEveryVerb:
 _EVERY_CLI_COMMAND = (
     ("save --no-sync", ["save", "--stdin", "--no-sync"], {"context": "arm two"}),
     ("save", ["save", "--stdin", "--claude-md-root", "START"], {"context": "arm three"}),
+    ("save, default root", ["save", "--stdin"], {"context": "arm four"}),
     ("search", ["search", "arm"], None),
+    ("search --claude-md-root", ["search", "arm", "--claude-md-root", "START"], None),
+    ("search --current-file", ["search", "arm", "--current-file", "START"], None),
     ("list", ["list"], None),
     ("get", ["get", "MEMID"], None),
     ("status", ["status"], None),
     ("update", ["update", "MEMID", "--stdin"], {"context": "arm changed"}),
+    ("update --replace", ["update", "MEMID", "--stdin", "--replace"], {"context": "arm replaced"}),
     ("sync", ["sync", "--claude-md-root", "START"], None),
+    ("sync, default root", ["sync"], None),
     ("project-file", ["project-file"], None),
     ("project-id show", ["project-id", "show"], None),
     ("project-id rekey --dry-run", ["project-id", "rekey", "--from", "a/b", "--to", "c/d", "--dry-run"], None),
+    ("project-id rekey", ["project-id", "rekey", "--from", "a/b", "--to", "c/d"], None),
+    ("project-id rekey --apply", ["project-id", "rekey", "--from", "a/b", "--to", "c/d", "--apply"], None),
+    ("project-id rekey --candidates", ["project-id", "rekey", "--candidates"], None),
+    ("project-id rekey --from only", ["project-id", "rekey", "--from", "a/b"], None),
     ("delete", ["delete", "MEMID"], None),
 )
 
+# The routes that refuse by design, each with its exit code and the message
+# that says why: a canonical bucket moves only with an explicit --to.
+_REFUSED_ROUTES = {
+    "project-id rekey --from only": (1, "a canonical bucket moves only with an explicit --to"),
+}
+
 
 class TestEachCliCommandAsksGitEachQuestionOnce:
-    """Each memory CLI command runs its store's construction and its own work
-    (a save's filing check and CLAUDE.md sync among them) in one detection
-    pass, so it asks git each question once: no two git commands of one
-    command run in the same resolved directory with the same arguments.
+    """Each memory CLI command, by every route its flags choose, runs its
+    store's construction and its own work (a save's filing check and
+    CLAUDE.md sync among them) in one detection pass, so it asks git each
+    question once: no two git commands of one command run in the same
+    resolved directory with the same arguments. A route that refuses by
+    design gives its own exit code and message (`_REFUSED_ROUTES`).
     Catches a command whose work after construction asks git again, as a
     save did with its filing check and its sync.
 
@@ -2009,7 +2026,11 @@ class TestEachCliCommandAsksGitEachQuestionOnce:
         asked, repeated = {}, {}
         for name, argv, document in _EVERY_CLI_COMMAND:
             done, questions = run([{"MEMID": memory_id, "START": str(start)}.get(a, a) for a in argv], document)
-            assert done.returncode == 0, (name, done.stderr)
+            refusal = _REFUSED_ROUTES.get(name)
+            if refusal is None:
+                assert done.returncode == 0, (name, done.stderr)
+            else:
+                assert (done.returncode, refusal[1] in done.stderr) == (refusal[0], True), (name, done.stderr)
             asked[name] = len(questions)
             repeated[name] = sorted({q for q in questions if questions.count(q) > 1})
         # Control: every command asked git something, so a log that stayed
