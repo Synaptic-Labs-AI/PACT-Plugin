@@ -121,7 +121,11 @@ def evaluate_target(
     Reads exactly ``tasks/{team_name}/{task_id}.json`` under the tasks base
     (default the harness config dir). task_id is sanitized to the same
     single-component form read_task_json uses, then joined inside the
-    containment-validated team dir.
+    containment-validated team dir. The team dir resolves under the RAW
+    name only (``task_dir_for``, never folded): a legacy non-lowercase
+    team name reads MISSING here while read-side consumers resolve
+    folded-first candidates — accepted, production team names are minted
+    lowercase.
 
     Args:
         team_name: The {team_name} path component under the tasks root.

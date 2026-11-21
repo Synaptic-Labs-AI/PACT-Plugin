@@ -1667,6 +1667,14 @@ def evaluate_lifecycle(
         #     a closed task from arming a watch that cannot produce a
         #     handoff, and keeps an absent/unreadable record from arming at
         #     all.
+        # DELIBERATE ASYMMETRY between the two shapes above: the teachback
+        # arm (Task A) carries NO owner qualification — the teachback task
+        # is LEAD-OWNED by nature, and the deliverable being watched is the
+        # TEAMMATE's teachback submission landing in the lead's own task
+        # metadata, so the lead arming a watch on its own task is the
+        # intended lead-shaped wait. The lead-rejection conjunct lives only
+        # on the non-teachback sibling, whose watch target is the
+        # specialist-owned work task a lead-owned record must never be.
         # A duplicate arm is safe by construction (the duplicate watcher
         # fast-exits 0 when the deliverable is already present), which is
         # why this needs no dedup marker.

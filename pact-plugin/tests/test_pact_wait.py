@@ -270,7 +270,7 @@ def test_terminal_on_missing_target(tmp_path):
     assert rc == pact_wait.EXIT_TERMINAL
 
 
-def test_terminal_on_persistently_corrupt_file(tmp_path):
+def test_terminal_on_persistently_corrupt_file(tmp_path, capsys):
     team_dir = tmp_path / "team-a"
     team_dir.mkdir()
     (team_dir / "7.json").write_text("{still not json", encoding="utf-8")
@@ -279,6 +279,12 @@ def test_terminal_on_persistently_corrupt_file(tmp_path):
         tasks_base_dir=str(tmp_path), poll_interval=0.05,
     )
     assert rc == pact_wait.EXIT_TERMINAL
+    # The TERMINAL stderr carries the same identity triple as the other
+    # exits — predicate included — so the notice answers "what woke me"
+    # without re-deriving it.
+    captured = capsys.readouterr()
+    assert "predicate 'handoff'" in captured.err
+    assert "task 7" in captured.err and "team-a" in captured.err
 
 
 def test_tolerates_transient_corrupt_read(tmp_path):

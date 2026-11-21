@@ -921,9 +921,22 @@ _TIER3_TEAMMATE_REASON_PIN = (
     "--predicate handoff --deadline 900\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
     "a teachback submission). THEN SET metadata.intentional_wait on "
-    "every task the wait covers, naming this watcher, and end your "
-    "turn with no further tool calls — the lead's wake resumes you."
+    "every task the wait covers — `reason`, `expected_resolver` and "
+    "`since` are the keys validate_wait requires — naming this "
+    "watcher, and end your turn with no further tool calls — the "
+    "lead's wake resumes you."
 )
+
+
+def test_tier3_teammate_text_names_the_wait_keys():
+    """The in-process teammate text names the three keys validate_wait
+    requires (shared/intentional_wait.py is the SSOT): a literal follower
+    who copies the text verbatim must not write a malformed wait and
+    re-enter the filler loop."""
+    import wait_filler_gate
+
+    for key in ("reason", "expected_resolver", "since"):
+        assert key in wait_filler_gate._TIER3_TEAMMATE_REASON, key
 
 
 def test_tier3_teammate_outlet_pinned_verbatim():

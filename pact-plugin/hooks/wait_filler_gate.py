@@ -171,8 +171,10 @@ _TIER3_TEAMMATE_REASON = (
     "--predicate handoff --deadline 900\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
     "a teachback submission). THEN SET metadata.intentional_wait on "
-    "every task the wait covers, naming this watcher, and end your "
-    "turn with no further tool calls — the lead's wake resumes you."
+    "every task the wait covers — `reason`, `expected_resolver` and "
+    "`since` are the keys validate_wait requires — naming this "
+    "watcher, and end your turn with no further tool calls — the "
+    "lead's wake resumes you."
 )
 # The separate-process teammate's own text. Their completion notice DOES
 # start their next turn (shared.background_work.teammate_is_separate_process

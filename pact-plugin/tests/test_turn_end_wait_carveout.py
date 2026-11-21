@@ -288,6 +288,14 @@ def test_is_wait_watcher_command_shape_table():
         f"FOO=1 {_arm_command()}",
         _arm_command().replace("python3 ", "python3.12 "),
         _arm_command() + "  ",
+        # GLUED-COMPOSITION HOLE, PINNED (cold round 5 probe): the deadline
+        # token absorbs glued non-space junk, so both of these classify as
+        # the watcher today — an over-EXEMPT hole. Inert in practice: the
+        # watcher CLI rejects the glued deadline as a usage error and
+        # terminates, so the completion wake still happens. Pinned here so
+        # a future widening cannot silently keep the hole.
+        "pact_wait.py --team t --task 1 --predicate h --deadline 5&&rm-rf-x",
+        "pact_wait.py --team t --task 1 --predicate h --deadline 5;true",
     ]
     counted = [
         "echo 'pact_wait.py --team t --task 1 --predicate h --deadline 5'",

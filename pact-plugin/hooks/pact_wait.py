@@ -170,7 +170,8 @@ def wait_for_deliverable(
             if corrupt_streak >= MAX_CONSECUTIVE_CORRUPT_READS:
                 print(
                     f"pact-wait FAILED: task file for task {task_id} "
-                    f"(team {team_name}) unparseable on "
+                    f"(team {team_name}, predicate '{predicate_name}') "
+                    f"unparseable on "
                     f"{corrupt_streak} consecutive reads — corrupt, "
                     "not mid-rewrite",
                     file=sys.stderr,
