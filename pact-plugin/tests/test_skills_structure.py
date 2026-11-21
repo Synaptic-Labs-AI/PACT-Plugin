@@ -997,8 +997,12 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             # double-encoded entities (memory&amp;#95;saved), an escaped
             # backslash before a separator (memory\\_saved), an escaped
             # space (memory\ saved), a newline entity (memory&#10;saved),
-            # and numeric references without a semicolon (memory&#95saved)
-            # — no general HTML or escape decode happens here.
+            # numeric references without a semicolon (memory&#95saved),
+            # and the whole non-ASCII-joiner family — Unicode dashes
+            # (memory–saved reads as memory-saved to a human), zero-width
+            # joiners, and homoglyph separators, none of which the ASCII
+            # separator class matches or decodes. No general HTML or escape
+            # decode happens here.
             normalized = " ".join(
                 re.sub(
                     r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);",
