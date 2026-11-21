@@ -144,6 +144,12 @@ def evaluate_target(
         raw = task_file.read_text(encoding="utf-8")
     except OSError:
         return EVAL_TARGET_UNREADABLE
+    except ValueError:
+        # UnicodeDecodeError is a ValueError: bytes that are not valid
+        # UTF-8 are an unusable payload — CORRUPT-class, never a crash
+        # (parity with read_task_json's M2 hardening, which catches the
+        # same ValueError family).
+        return EVAL_TARGET_CORRUPT
     try:
         task = json.loads(raw)
     except json.JSONDecodeError:

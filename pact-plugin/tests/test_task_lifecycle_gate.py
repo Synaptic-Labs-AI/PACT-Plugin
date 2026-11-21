@@ -4927,13 +4927,21 @@ def test_bounded_error_text_genuine_str_name_unchanged_by_cycle4():
 #
 # Three shapes supply the ready-to-run pact-wait arm command as an advisory
 # (ADVISORY ONLY — the command text is the whole deliverable; nothing is
-# spawned, the lead launches the watcher with its own Bash frame):
+# spawned, the lead launches the watcher with its own Bash frame). All three
+# are LEAD-shaped: a frame whose agent_type names a non-lead actor is
+# suppressed, so a teammate write never receives the arm instruction:
 #   Task A dispatch — owner-bearing update on a PENDING teachback-subject
 #     task -> predicate teachback_submit on that task;
-#   Task B wiring — the composite owner+addBlockedBy write to a specialist
-#     owner on a non-teachback subject -> predicate handoff on that task;
+#   Task B wiring — an owner-bearing write (the SPLIT wiring real arcs use:
+#     owner in one TaskUpdate, blockers at creation or a separate update)
+#     on a non-completed non-teachback work task with a specialist owner
+#     -> predicate handoff on that task;
 #   teachback acceptance — status=completed on a teachback-subject task
-#     -> predicate handoff on the blocked work task.
+#     -> predicate handoff per QUALIFYING blocked entry (specialist owner,
+#     still pending), one advisory per qualifying entry — a duplicate arm
+#     fast-exits 0, so N arms are safe. blocks[0] is NOT trusted: the
+#     pair-with-parent shape blocks the parent aggregation task FIRST, and
+#     a parent is lead-owned, never a watch target.
 # =============================================================================
 
 
@@ -5019,12 +5027,14 @@ def test_arm_supply_on_work_task_wiring(tmp_path, monkeypatch, pact_context):
     assert "--task B" in arms[0]
 
 
-def test_no_arm_supply_on_plain_owner_update_of_work_task(
+def test_arm_supply_on_split_owner_only_wiring(
     tmp_path, monkeypatch, pact_context
 ):
-    """An owner-only update on a work task (no addBlockedBy — a partial
-    write or a teammate claim) is not the composite wiring shape: no arm
-    advisory."""
+    """The SPLIT wiring write real arcs use (owner lands in one TaskUpdate;
+    blockers landed at creation or a separate update — the shape
+    shared/dispatch_helpers.py measures as the only wiring write that ever
+    occurs) supplies the arm command for the work task's HANDOFF deliverable.
+    An owner-only update is the wiring witness, not a partial write."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     _seed_task_a(
@@ -5033,6 +5043,37 @@ def test_no_arm_supply_on_plain_owner_update_of_work_task(
         "B",
         subject="implement hook core",
         status="pending",
+        owner="backend-coder",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "B", "owner": "backend-coder"},
+        "tool_response": {},
+    }
+    monkeypatch.setattr(tlg, "is_pact_specialist_owner", lambda *_a, **_k: True)
+    advisories = tlg.evaluate_lifecycle(payload)
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, f"expected one arm advisory, got: {advisories}"
+    assert "--predicate handoff" in arms[0]
+    assert "--task B" in arms[0]
+
+
+def test_no_wiring_arm_on_completed_work_task(
+    tmp_path, monkeypatch, pact_context
+):
+    """An owner-bearing write on a COMPLETED work task is not a wiring
+    moment: the handoff either already landed (a duplicate arm would only
+    fast-exit) or the task closed without one, and watching cannot produce
+    it — no arm advisory."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "B",
+        subject="implement hook core",
+        status="completed",
+        owner="backend-coder",
     )
     payload = {
         "tool_name": "TaskUpdate",
@@ -5042,15 +5083,73 @@ def test_no_arm_supply_on_plain_owner_update_of_work_task(
     monkeypatch.setattr(tlg, "is_pact_specialist_owner", lambda *_a, **_k: True)
     advisories = tlg.evaluate_lifecycle(payload)
     assert not any(rule == "wait_arm_supply" for rule, _ in advisories), (
-        f"expected no arm advisory off the wiring shape, got: {advisories}"
+        f"expected no arm advisory on a completed work task, got: {advisories}"
     )
+
+
+def test_no_arm_supply_on_non_lead_frames(tmp_path, monkeypatch, pact_context):
+    """The arm advisories are LEAD-shaped: a frame whose agent_type names a
+    non-lead actor (a teammate claim/reassignment write) is suppressed on
+    both wiring shapes, so a teammate never receives the lead's arm
+    instruction."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "A",
+        subject="preparer: TEACHBACK for foo",
+        status="pending",
+    )
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "B",
+        subject="implement hook core",
+        status="pending",
+        owner="backend-coder",
+    )
+    teachback_dispatch = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "A", "owner": "pact-preparer"},
+        "tool_response": {},
+        "agent_type": "backend-coder",
+    }
+    work_wiring = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "B", "owner": "backend-coder"},
+        "tool_response": {},
+        "agent_type": "backend-coder",
+    }
+    for shape, payload in (
+        ("teachback dispatch", teachback_dispatch),
+        ("work wiring", work_wiring),
+    ):
+        advisories = tlg.evaluate_lifecycle(payload)
+        assert not any(rule == "wait_arm_supply" for rule, _ in advisories), (
+            f"expected no arm advisory on a teammate {shape} frame, "
+            f"got: {advisories}"
+        )
 
 
 def test_arm_supply_on_teachback_acceptance(tmp_path, monkeypatch, pact_context):
     """Accepting a teachback gate supplies the arm command for the gated
-    work task's HANDOFF deliverable — the wait the lead idles on next."""
+    work task's HANDOFF deliverable — the wait the lead idles on next. The
+    blocked entry qualifies via its on-disk record: specialist owner, still
+    pending."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "B",
+        subject="implement hook core",
+        status="pending",
+        owner="backend-coder",
+    )
+    monkeypatch.setattr(
+        tlg, "is_pact_specialist_owner", lambda owner, *_a, **_k: owner == "backend-coder"
+    )
     payload = {
         "tool_name": "TaskUpdate",
         "tool_input": {"taskId": "A", "status": "completed"},
@@ -5080,6 +5179,168 @@ def test_arm_supply_on_teachback_acceptance(tmp_path, monkeypatch, pact_context)
     assert "--predicate handoff" in arms[0]
     assert "--task B" in arms[0]
     assert "--team test-team" in arms[0]
+
+
+def test_acceptance_arm_skips_parent_first_in_blocks(
+    tmp_path, monkeypatch, pact_context
+):
+    """The pair-with-parent shape: a teachback gate blocks the parent
+    aggregation task FIRST (live shape: blocks ['30','36'], '30' the lead's
+    own parent). blocks[0] is not a watch target — the arm names the
+    specialist-owned pending WORK task, and the lead-owned parent gets
+    none."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "30",
+        subject="Review: structural wait mechanism",
+        status="in_progress",
+        owner="team-lead",
+    )
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "36",
+        subject="review structural wait mechanism (PR #1730)",
+        status="pending",
+        owner="backend-coder",
+    )
+    monkeypatch.setattr(
+        tlg, "is_pact_specialist_owner", lambda owner, *_a, **_k: owner == "backend-coder"
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "A", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "A",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "pact-preparer",
+                "blocks": ["30", "36"],
+                "metadata": {
+                    "teachback_submit": {
+                        "understanding": "u",
+                        "most_likely_wrong": "m",
+                        "least_confident_item": "l",
+                        "first_action": "f",
+                        "variety_acknowledgment": {
+                            "rationale_articulates_this_dispatch": "yes",
+                        },
+                    }
+                },
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, f"expected exactly one arm (the work task), got: {advisories}"
+    assert "--task 36" in arms[0]
+    assert "--task 30" not in arms[0]
+
+
+def test_acceptance_arm_skips_completed_blocked_entry(
+    tmp_path, monkeypatch, pact_context
+):
+    """A blocked entry that already COMPLETED is not a wait target: one
+    qualifying sibling still gets its arm, the closed one gets none."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "B",
+        subject="implement hook core",
+        status="pending",
+        owner="backend-coder",
+    )
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "C",
+        subject="write the matrix tests",
+        status="completed",
+        owner="backend-coder",
+    )
+    monkeypatch.setattr(
+        tlg, "is_pact_specialist_owner", lambda owner, *_a, **_k: owner == "backend-coder"
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "A", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "A",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "pact-preparer",
+                "blocks": ["B", "C"],
+                "metadata": {
+                    "teachback_submit": {
+                        "understanding": "u",
+                        "most_likely_wrong": "m",
+                        "least_confident_item": "l",
+                        "first_action": "f",
+                        "variety_acknowledgment": {
+                            "rationale_articulates_this_dispatch": "yes",
+                        },
+                    }
+                },
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, f"expected one arm (the pending entry), got: {advisories}"
+    assert "--task B" in arms[0]
+    assert "--task C" not in arms[0]
+
+
+def test_no_acceptance_arm_on_non_lead_frame(tmp_path, monkeypatch, pact_context):
+    """A teammate's completed write on a teachback task (a self-completion,
+    which the gate separately disputes) never receives the acceptance arm:
+    the advisory is lead-shaped."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "B",
+        subject="implement hook core",
+        status="pending",
+        owner="backend-coder",
+    )
+    monkeypatch.setattr(
+        tlg, "is_pact_specialist_owner", lambda owner, *_a, **_k: owner == "backend-coder"
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "A", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "A",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "pact-preparer",
+                "blocks": ["B"],
+                "metadata": {
+                    "teachback_submit": {
+                        "understanding": "u",
+                        "most_likely_wrong": "m",
+                        "least_confident_item": "l",
+                        "first_action": "f",
+                        "variety_acknowledgment": {
+                            "rationale_articulates_this_dispatch": "yes",
+                        },
+                    }
+                },
+            }
+        },
+        "agent_type": "backend-coder",
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "wait_arm_supply" for rule, _ in advisories), (
+        f"expected no arm advisory on a teammate acceptance frame, got: {advisories}"
+    )
 
 
 def test_no_arm_supply_on_teachback_acceptance_without_blocks(

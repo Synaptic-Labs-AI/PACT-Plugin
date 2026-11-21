@@ -876,6 +876,68 @@ def test_outlet_reason_pinned_verbatim():
     assert wait_filler_gate._TIER3_REASON == _TIER3_REASON_PIN
 
 
+# The TEAMMATE tier-3 outlet, verbatim — the role branch of the same
+# mechanism. A teammate's background completion does NOT start their next
+# turn (in-process teammates collect results; nothing wakes them), so the
+# lead text's "re-invokes you" promise is false for them: their branch
+# carries the arm command TOO, but the guidance is the teammate-side one —
+# SET metadata.intentional_wait naming the watcher; messages from the lead
+# wake them.
+_TIER3_TEAMMATE_REASON_PIN = (
+    "FILLER-LOCK: this exact call has been denied {count} times this "
+    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
+    "re-filling — end this wait structurally instead. As a teammate, "
+    "this watcher's completion will NOT wake you — messages from the "
+    "lead will. FIRST arm the deliverable watcher with ONE `Bash` call "
+    "(`run_in_background: true`), substituting your team name and the "
+    "task id you are waiting on:\n"
+    'python3 "{watcher}" --team <team-name> --task <task-id> '
+    "--predicate handoff --deadline 900\n"
+    "(use --predicate teachback_submit when the awaited deliverable is "
+    "a teachback submission). THEN SET metadata.intentional_wait on "
+    "every task the wait covers, naming this watcher, and end your "
+    "turn with no further tool calls — the lead's wake resumes you."
+)
+
+
+def test_tier3_teammate_outlet_pinned_verbatim():
+    import wait_filler_gate
+
+    assert (
+        wait_filler_gate._TIER3_TEAMMATE_REASON == _TIER3_TEAMMATE_REASON_PIN
+    )
+
+
+def test_tier3_outlet_branches_on_role(tmp_path, monkeypatch, capsys):
+    """The tier-3 text is role-branched: a TEAMMATE frame (agent_type
+    naming a non-lead actor) gets the teammate guidance — intentional_wait
+    naming the watcher, the lead's messages as the wake — alongside the
+    SAME arm command and NEVER the lead-only completion-wakes claim; a
+    lead frame gets the lead text. Same gradient, same deny verdict, both
+    roles."""
+    teammate = _drive(
+        ["true"] * 3, tmp_path, monkeypatch, capsys,
+        session_id="s-mate-outlet", agent_type="pact-backend-coder",
+    )
+    assert [c for c, _p, _e in teammate] == [2, 2, 2]
+    mate_reason = _deny_reason(teammate[2][1])
+    assert "PACT-WAIT-OUTLET" in mate_reason
+    assert "pact_wait.py" in mate_reason
+    assert "--team <team-name>" in mate_reason
+    assert "metadata.intentional_wait" in mate_reason
+    assert "will NOT wake you" in mate_reason
+    assert "re-invokes you" not in mate_reason
+
+    lead = _drive(
+        ["true"] * 3, tmp_path, monkeypatch, capsys,
+        session_id="s-lead-outlet", agent_type="pact-orchestrator",
+    )
+    lead_reason = _deny_reason(lead[2][1])
+    assert "PACT-WAIT-OUTLET" in lead_reason
+    assert "re-invokes you" in lead_reason
+    assert "metadata.intentional_wait" not in lead_reason
+
+
 def test_counts_climb_through_denials_and_budget_field_gone(
     tmp_path, monkeypatch, capsys
 ):

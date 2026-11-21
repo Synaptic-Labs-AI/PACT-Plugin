@@ -301,7 +301,6 @@ try:
     )
     from shared.dispatch_helpers import (
         is_owner_bearing_write,
-        is_owner_wiring_shape,
         is_pact_specialist_owner,
         variety_stamp_as_of_write,
     )
@@ -1456,6 +1455,28 @@ def _wait_arm_advisory(
     return "wait_arm_supply", message
 
 
+def _is_non_lead_frame(input_data: dict) -> bool:
+    """True iff this frame's agent_type positively names a NON-lead actor —
+    a teammate (in-process or separate-process) or an Agent-tool subagent.
+    The wait-arm advisories are lead-shaped, so such frames are suppressed.
+
+    The INVERSE of a lead test on purpose: ``pact_context.is_lead`` returns
+    False for a lead launched with no --agent flag, and gating the supply on
+    it would re-darken the advisory for exactly the plain-lead launch class.
+    Suppression instead keys on the only field that positively identifies a
+    non-lead actor: an agent_type that is present and is not a lead
+    spelling (the same shape wait_filler_gate.is_teammate_frame tests).
+    Pure; never raises on a dict."""
+    agent_type = (
+        input_data.get("agent_type") if isinstance(input_data, dict) else None
+    )
+    return (
+        isinstance(agent_type, str)
+        and bool(agent_type)
+        and agent_type not in pact_context.LEAD_AGENT_TYPES
+    )
+
+
 def evaluate_lifecycle(
     input_data: dict, *, decision: dict | None = None
 ) -> list[tuple[str, str]]:
@@ -1586,24 +1607,33 @@ def evaluate_lifecycle(
         # next stage after wiring a dispatch is idling on a teammate
         # deliverable, so the advisory supplies the ready-to-run watcher
         # arm command. ADVISORY ONLY — the lead launches the watcher with
-        # its own `Bash` frame; this gate never spawns a process. Two
-        # shapes:
+        # its own `Bash` frame; this gate never spawns a process.
+        # LEAD-SHAPED: a frame whose agent_type names a non-lead actor is
+        # suppressed (a teammate claim/reassignment write never receives
+        # the arm instruction). is_lead is deliberately NOT the gate: it
+        # returns False for a lead launched with no --agent flag, which
+        # would re-darken the supply the same way the shape below once was.
+        # Two shapes:
         #   Task A (teachback gate) dispatched — an owner-bearing update on
         #     a teachback-subject task that is still pending: the lead's
         #     wait is the teammate's teachback submission landing in THIS
         #     task's metadata (predicate teachback_submit). Pending-only
         #     keeps a later teammate claim (owner + in_progress) from
         #     re-advising mid-flight.
-        #   Task B (work task) wired — the composite owner + addBlockedBy
-        #     write to a specialist owner on a non-teachback subject (the
-        #     same shape handoff_ordering_gate keys the dispatch-variety
-        #     gate on): the lead's wait is Task B's HANDOFF (predicate
-        #     handoff). Teammate claims carry no addBlockedBy, so only the
-        #     lead's wiring write fires this.
+        #   Task B (work task) wired — an owner-bearing write on a
+        #     non-completed non-teachback task with a specialist owner. The
+        #     SPLIT wiring real arcs use lands `owner` in one TaskUpdate
+        #     while the blockers landed at creation or a separate update —
+        #     shared/dispatch_helpers.py measures the owner+addBlockedBy
+        #     composite as never occurring on a real arc, so keying the
+        #     composite left this supply dark at the exact lead stage it
+        #     names. The owner-bearing write is what actually witnesses the
+        #     dispatch; completed-only keeps a late owner fix on a closed
+        #     task from arming a watch that cannot produce a handoff.
         # A duplicate arm is safe by construction (the duplicate watcher
         # fast-exits 0 when the deliverable is already present), which is
         # why this needs no dedup marker.
-        if team_name:
+        if team_name and not _is_non_lead_frame(input_data):
             wiring_task_id = tool_input.get("taskId", "") or ""
             wiring_owner = tool_input.get("owner")
             if (
@@ -1623,7 +1653,8 @@ def evaluate_lifecycle(
                             "teachback_submit",
                         ))
                 elif (
-                    is_owner_wiring_shape(tool_input)
+                    is_owner_bearing_write(tool_input)
+                    and wired.get("status") != "completed"
                     and is_pact_specialist_owner(wiring_owner, team_name)
                 ):
                     advisories.append(_wait_arm_advisory(
@@ -1879,20 +1910,32 @@ def evaluate_lifecycle(
         # that task (predicate handoff). Duplicates the wiring-shape arm
         # by design — the wiring write may predate the acceptance by
         # hours, and a duplicate watcher fast-exits 0 (deliverable
-        # already present). First block entry: one teachback gate gates
-        # one work task in every shipped workflow shape; extra entries
-        # get their arms from the lead's own follow-up dispatches.
-        if is_teachback and team_name:
+        # already present). Per QUALIFYING blocked entry, NOT blocks[0]:
+        # the pair-with-parent shape blocks the parent aggregation task
+        # FIRST (live shape: blocks ['30','36'], '30' the lead's own
+        # parent), and a parent is lead-owned — watching it burns the
+        # deadline toward a misleading EXPIRED, or false-fires if the
+        # parent ever gains an unrelated handoff. An entry qualifies when
+        # its on-disk record is still pending and carries a specialist
+        # owner; one advisory per qualifying entry (duplicate arms are
+        # safe). LEAD-SHAPED: suppressed on non-lead frames.
+        if is_teachback and team_name and not _is_non_lead_frame(input_data):
             blocks = task.get("blocks")
-            work_id = (
-                blocks[0]
-                if isinstance(blocks, list) and blocks
-                else ""
-            )
-            if isinstance(work_id, str) and work_id.strip():
-                advisories.append(_wait_arm_advisory(
-                    "teachback accepted", team_name, work_id, "handoff"
-                ))
+            if isinstance(blocks, list):
+                for work_id in blocks:
+                    if not isinstance(work_id, str) or not work_id.strip():
+                        continue
+                    blocked = read_task_json(work_id, team_name)
+                    blocked_owner = blocked.get("owner")
+                    if (
+                        blocked.get("status") == "pending"
+                        and isinstance(blocked_owner, str)
+                        and blocked_owner.strip()
+                        and is_pact_specialist_owner(blocked_owner, team_name)
+                    ):
+                        advisories.append(_wait_arm_advisory(
+                            "teachback accepted", team_name, work_id, "handoff"
+                        ))
 
         # RETIRED: the work-task handoff-presence/schema branch (gated on
         # `is_work_task = not is_teachback and owner.startswith("pact-")`,

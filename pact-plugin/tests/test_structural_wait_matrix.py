@@ -118,7 +118,10 @@ def _drive_lifecycle_arm(tmp_path, monkeypatch, pact_context, payload, seed=None
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     if seed is not None:
-        _seed_task(tmp_path, "test-team", seed[0], subject=seed[1], status=seed[2])
+        _seed_task(
+            tmp_path, "test-team", seed[0],
+            subject=seed[1], status=seed[2], owner=seed[3],
+        )
     monkeypatch.setattr(tlg, "is_pact_specialist_owner", lambda *_a, **_k: True)
     advisories = tlg.evaluate_lifecycle(payload)
     arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
@@ -128,7 +131,8 @@ def _drive_lifecycle_arm(tmp_path, monkeypatch, pact_context, payload, seed=None
 def test_acceptance_shape_emits_a_live_predicate(tmp_path, monkeypatch, pact_context):
     """End-to-end at the teachback-acceptance shape: the emitted arm names
     a registry-shipped predicate (the call-site literal is the thing a
-    rename can silently orphan)."""
+    rename can silently orphan). The blocked entry qualifies via its
+    on-disk record — specialist owner, still pending."""
     payload = {
         "tool_name": "TaskUpdate",
         "tool_input": {"taskId": "A", "status": "completed"},
@@ -142,7 +146,10 @@ def test_acceptance_shape_emits_a_live_predicate(tmp_path, monkeypatch, pact_con
             }
         },
     }
-    arms = _drive_lifecycle_arm(tmp_path, monkeypatch, pact_context, payload)
+    arms = _drive_lifecycle_arm(
+        tmp_path, monkeypatch, pact_context, payload,
+        seed=("B", "implement hook core", "pending", "backend-coder"),
+    )
     assert len(arms) == 1, f"expected one arm advisory, got: {arms}"
     for token in re.findall(r"--predicate\s+(\S+)", arms[0]):
         assert token in wait_target.PREDICATES, token
@@ -162,7 +169,7 @@ def test_wiring_shape_emits_a_live_predicate(tmp_path, monkeypatch, pact_context
     }
     arms = _drive_lifecycle_arm(
         tmp_path, monkeypatch, pact_context, payload,
-        seed=("B", "implement hook core", "pending"),
+        seed=("B", "implement hook core", "pending", "backend-coder"),
     )
     assert len(arms) == 1, f"expected one arm advisory, got: {arms}"
     for token in re.findall(r"--predicate\s+(\S+)", arms[0]):
@@ -179,7 +186,7 @@ def test_dispatch_shape_emits_a_live_predicate(tmp_path, monkeypatch, pact_conte
     }
     arms = _drive_lifecycle_arm(
         tmp_path, monkeypatch, pact_context, payload,
-        seed=("A", "preparer: TEACHBACK for foo", "pending"),
+        seed=("A", "preparer: TEACHBACK for foo", "pending", "pact-preparer"),
     )
     assert len(arms) == 1, f"expected one arm advisory, got: {arms}"
     for token in re.findall(r"--predicate\s+(\S+)", arms[0]):

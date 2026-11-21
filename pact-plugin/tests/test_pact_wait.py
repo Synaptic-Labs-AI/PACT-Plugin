@@ -22,6 +22,7 @@ contract — a crash must never masquerade as EXPIRED):
   distinctness, empty/traversal task-id containment, and the anti-dark-key
   arm (a recommended-only field never satisfies the handoff predicate).
 """
+import argparse
 import json
 import os
 import subprocess
@@ -153,6 +154,41 @@ def test_evaluate_corrupt(tmp_path):
         )
         == wait_target.EVAL_TARGET_CORRUPT
     )
+
+
+def test_evaluate_non_utf8_file_is_corrupt_not_crash(tmp_path):
+    """A task file holding bytes that are not valid UTF-8 is CORRUPT-class,
+    never a crash: UnicodeDecodeError is a ValueError, and the module's
+    never-raise contract routes every unusable payload to an explicit
+    outcome (the shared reader's M2 hardening catches the same family)."""
+    team_dir = tmp_path / "team-a"
+    team_dir.mkdir()
+    (team_dir / "7.json").write_bytes(b'{"metadata": {"handoff": "\xff\xfe"}}')
+    assert (
+        wait_target.evaluate_target(
+            "team-a", "7", "handoff", tasks_base_dir=str(tmp_path)
+        )
+        == wait_target.EVAL_TARGET_CORRUPT
+    )
+
+
+# --- deadline argument totality --------------------------------------------
+
+@pytest.mark.parametrize("text", ["nan", "inf", "-inf", "infinity", "NaN"])
+def test_non_finite_deadlines_are_usage_errors(text):
+    """A non-finite deadline can never expire: `nan` fails every
+    remaining <= 0 comparison and `inf` never runs out, so either arms a
+    watcher that can never emit EXPIRED — the wake contract's deadline leg
+    dies. Both are caller bugs and must be usage errors (exit 2), the
+    same class as a negative or zero deadline."""
+    with pytest.raises(argparse.ArgumentTypeError):
+        pact_wait._positive_float(text)
+
+
+def test_finite_positive_deadlines_still_accepted():
+    assert pact_wait._positive_float("1") == 1.0
+    assert pact_wait._positive_float("0.5") == 0.5
+    assert pact_wait._positive_float("1800") == 1800.0
 
 
 @pytest.mark.skipif(

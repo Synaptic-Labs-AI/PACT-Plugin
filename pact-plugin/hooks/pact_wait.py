@@ -37,6 +37,7 @@ owed — the process lifecycle IS the state.
 from __future__ import annotations
 
 import argparse
+import math
 import sys
 import time
 
@@ -49,8 +50,9 @@ POLL_INTERVAL_SECONDS = 5.0
 
 # A task file that fails to parse on CONSECUTIVE polls past this count is
 # corrupt, not mid-rewrite: the platform rewrites task files in milliseconds,
-# so two full poll intervals of parse failure is a broken precondition and
-# exits TERMINAL instead of burning the deadline toward a misleading EXPIRED.
+# so a parse failure persisting to the second consecutive poll is a broken
+# precondition and exits TERMINAL instead of burning the deadline toward a
+# misleading EXPIRED.
 MAX_CONSECUTIVE_CORRUPT_READS = 2
 
 EXIT_FIRED = 0
@@ -60,11 +62,16 @@ EXIT_TERMINAL = 4
 
 def _positive_float(text: str) -> float:
     """argparse type for REQUIRED-nonzero numeric arguments. Rejects
-    non-numbers and any value <= 0 as usage errors (exit 2)."""
+    non-numbers, any value <= 0, and any non-finite value as usage errors
+    (exit 2). Non-finite is load-bearing: `nan` fails every remaining <= 0
+    comparison and `inf` never runs out, so either arms a watcher that can
+    never emit EXPIRED — the deadline leg of the wake contract would die."""
     try:
         value = float(text)
     except ValueError:
         raise argparse.ArgumentTypeError(f"not a number: {text!r}") from None
+    if not math.isfinite(value):
+        raise argparse.ArgumentTypeError(f"must be finite, got {text!r}")
     if value <= 0:
         raise argparse.ArgumentTypeError(f"must be > 0, got {text!r}")
     return value

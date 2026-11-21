@@ -16,10 +16,14 @@ any frame this module does not recognise resolve to no role, and the stop is
 allowed.
 
 CARVE-OUT: a running pact-wait watcher (the structural wait mechanism's
-watcher the lead armed before ending a turn) is EXEMPT from the lead's
-shell-job block — its process completion IS the scheduled wake the block
-exists to demand, so blocking the turn end over it would re-create the very
-wait-loop it replaces. Classified by an anchored command shape
+watcher armed before ending a turn) is EXEMPT from the shell-job block for
+exactly the roles whose own completion notice starts their next turn: the
+LEAD and a SEPARATE-PROCESS teammate. Its process completion IS their
+scheduled wake, so blocking the turn end over it would re-create the very
+wait-loop it replaces. An IN-PROCESS teammate is deliberately NOT exempt:
+its block text is the one that says the completion notice will NOT wake
+them, so its watcher stays accountable and the remedy stays the
+intentional_wait coverage path. Classified by an anchored command shape
 (`is_wait_watcher_command`): a lookalike that merely mentions the watcher
 name, or a partial invocation missing the arm flags, still counts.
 """
@@ -70,10 +74,10 @@ _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 # interpreter, a path-token script name), so a command that merely MENTIONS
 # the watcher (`echo "..."`, a compose string) or runs it PARTIALLY (missing
 # a required flag, reordered flags) does not match and still counts as a job
-# the lead must account for. Match-order and composition strictness lean
-# deliberately toward over-block: a watcher the carve-out misses only ever
-# costs the lead one advisory block, while a non-watcher the carve-out
-# exempts would acquit the lead of a real unowned job.
+# the ending frame must account for. Match-order and composition strictness
+# lean deliberately toward over-block: a watcher the carve-out misses only
+# ever costs one advisory block, while a non-watcher the carve-out exempts
+# would acquit the frame of a real unowned job.
 _PACT_WAIT_SHAPE = re.compile(
     r"\A\s*"
     r"(?:cd\s+[^\n&]+&&\s*)?"
@@ -87,9 +91,10 @@ _PACT_WAIT_SHAPE = re.compile(
 
 def is_wait_watcher_command(command: Any) -> bool:
     """True iff a running job's command IS an armed pact-wait watcher —
-    the lead's own scheduled wake, exempt from the lead shell-job block
-    (see the module docstring's CARVE-OUT). False for anything else,
-    including a lookalike mention or a partial invocation."""
+    the arming frame's own scheduled wake, exempt from the shell-job block
+    for the roles whose completion notice starts their next turn (see the
+    module docstring's CARVE-OUT). False for anything else, including a
+    lookalike mention or a partial invocation."""
     return isinstance(command, str) and bool(_PACT_WAIT_SHAPE.match(command))
 
 LEAD_BLOCK_TEXT = (
@@ -365,6 +370,62 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
             if e["id"] not in teammate_jobs
             and not is_wait_watcher_command(e.get("command"))
         ]
+    if input_data.get("hook_event_name") == "SubagentStop":
+        # The lead process's whole list: only this teammate's recorded jobs count.
+        #
+        # `owner_role` EXCLUDES A NON-TEAMMATE ROW FROM THIS NAME MATCH, and the
+        # reason is semantic rather than defensive: a subagent's row is NOT a
+        # member's row, so matching it by MEMBER NAME is wrong whatever any
+        # member happens to be called. This and `extend_records_for_claim` are
+        # the two reads that compare a row's name with a member's, and both
+        # exclude the row. The store's other name reads, in missed_wake_scan,
+        # are safe for a different reason: they see only rows that
+        # `outstanding_unflagged` passes, and its expiry gate refuses a row
+        # with no task ids unless `anchor_completed` is set, which the recorder
+        # never sets on a subagent's row.
+        #
+        # The test is truthiness, not equality with one role, so a role added
+        # later is excluded here by default. That is the safe direction: a new
+        # owner role must opt IN to being treated as a member.
+        by_job = {
+            r["harness_task_id"]: r for r in records
+            if r.get("agent_name") == name
+            and not r.get("owner_role")
+            and r.get("harness_task_id")
+        }
+        # JOB-ID REUSE HERE FAILS THE OTHER WAY. If a row of THIS teammate still
+        # inside the TTL carries an id that another agent's running job in this
+        # process's list reuses, that job enters this teammate's candidates, and
+        # unless a wait anchored no earlier than that row's launch covers it, the
+        # teammate is refused its turn end over work it did not launch — an
+        # OVER-block.
+        running = [e for e in running if e["id"] in by_job]
+        # NO watcher carve-out here, deliberately: an in-process teammate's
+        # completion notice will NOT wake them (their block text says so),
+        # so their watcher is not a scheduled wake — it stays in the
+        # must-account-for list and the intentional_wait coverage below
+        # remains the remedy.
+        watcher_is_wake = False
+    else:
+        # JOB-ID REUSE HERE ALSO OVER-BLOCKS, BY A DIFFERENT MECHANISM. This
+        # process lists only its own jobs, so no other agent's job can enter its
+        # candidates. Instead, a row of ANY owner still inside the TTL whose id
+        # matches one of this process's running jobs makes that job coverable
+        # only by a wait anchored no earlier than the row's launch, where with no
+        # row any valid wait covers it. A reused id can only raise that bar,
+        # never lower it.
+        by_job = {r["harness_task_id"]: r for r in records if r.get("harness_task_id")}
+        # Separate-process teammate (the only role that reaches this branch):
+        # their own completion notice starts their next turn, so a running
+        # watcher IS their scheduled wake — the same carve-out the lead gets
+        # (see the module docstring's CARVE-OUT).
+        watcher_is_wake = True
+    waiting = _tasks_with_valid_wait(team, name)
+    return [
+        e for e in running
+        if not (watcher_is_wake and is_wait_watcher_command(e.get("command")))
+        and not _covered(waiting, by_job.get(e["id"]))
+    ]
     if input_data.get("hook_event_name") == "SubagentStop":
         # The lead process's whole list: only this teammate's recorded jobs count.
         #

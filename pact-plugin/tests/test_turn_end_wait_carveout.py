@@ -1,8 +1,14 @@
 """
 Tests for the pact-wait carve-out in shared/turn_end_gate.py: a RUNNING
-pact-wait watcher is the lead's own scheduled wake, exempt from the lead
-shell-job block; a lookalike command that merely mentions the watcher, or a
-partial invocation missing an arm flag, still counts.
+pact-wait watcher is the arming frame's own scheduled wake, exempt from the
+turn-end shell-job block; a lookalike command that merely mentions the
+watcher, or a partial invocation missing an arm flag, still counts.
+
+The carve-out applies to exactly the roles whose own completion notice
+starts their next turn: the LEAD and a SEPARATE-PROCESS teammate. An
+IN-PROCESS teammate is deliberately NOT exempt — its block text is the one
+that says the completion notice will NOT wake them, so its watcher stays
+accountable and the remedy stays the intentional_wait coverage path.
 
 Driven through the PRODUCTION hook (stop_background_gate.py) with the same
 hermetic World layout the stop-gate matrix uses, so the carve-out is proven
@@ -25,6 +31,8 @@ HOOK = HOOKS_DIR / "stop_background_gate.py"
 TEAM = "session-stopgate"
 LEAD_SID = "aaaaaaaa-0000-4000-8000-000000000001"
 LEAD_TYPE = "PACT:pact-orchestrator"
+MATE_SID = "bbbbbbbb-0000-4000-8000-000000000002"
+MATE = "backend-coder"
 SUPPRESS = {"suppressOutput": True}
 
 
@@ -73,7 +81,10 @@ class World:
         team_dir.mkdir(parents=True)
         (team_dir / "config.json").write_text(json.dumps({
             "leadSessionId": LEAD_SID,
-            "members": [{"name": "team-lead", "agentType": "pact-orchestrator"}],
+            "members": [
+                {"name": "team-lead", "agentType": "pact-orchestrator"},
+                {"name": MATE, "agentType": "pact-backend-coder"},
+            ],
         }))
         (self.config / "tasks" / TEAM).mkdir(parents=True)
         session_dir = (
@@ -99,6 +110,15 @@ class World:
             input=json.dumps(frame), capture_output=True, text=True,
             env=env, timeout=60, check=False,
         )
+
+    def register_teammate(self, session_id: str, name: str) -> None:
+        path = self.config / "pact-sessions" / ".teammate-registry.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as registry:
+            registry.write(
+                json.dumps({"session_id": session_id, "value": f"{name}@{TEAM}"})
+                + "\n"
+            )
 
     def output(self, proc: subprocess.CompletedProcess):
         assert proc.returncode == 0, proc.stderr
@@ -166,6 +186,68 @@ def test_duplicate_watcher_re_arm_both_exempt(tmp_path):
         job("watcher-rearm", _arm_command()),
     ])
     assert world.output(world.run(frame)) == SUPPRESS
+
+
+# --- the teammate extension -------------------------------------------------
+
+def teammate_stop_frame(jobs=()) -> dict:
+    """A SEPARATE-PROCESS teammate's Stop frame: its own session id, its
+    real agent type, no agent_id, a registry entry, no context file."""
+    return {
+        "hook_event_name": "Stop",
+        "session_id": MATE_SID,
+        "transcript_path": "<transcript_path>",
+        "cwd": "<cwd>",
+        "permission_mode": "bypassPermissions",
+        "last_assistant_message": "done",
+        "background_tasks": list(jobs),
+        "session_crons": [],
+        "stop_hook_active": False,
+        "agent_type": "pact-backend-coder",
+    }
+
+
+def test_watcher_does_not_block_separate_process_teammate_turn_end(tmp_path):
+    """A separate-process teammate that armed a watcher gets the same
+    carve-out as the lead: its own completion notice starts its next turn,
+    so the running watcher IS its scheduled wake and must not block the
+    turn end it was armed to end."""
+    world = World(tmp_path)
+    world.register_teammate(MATE_SID, MATE)
+    frame = teammate_stop_frame(jobs=[job("mw1", _arm_command())])
+    assert world.output(world.run(frame)) == SUPPRESS
+
+
+def test_in_process_teammate_watcher_still_counts(tmp_path, monkeypatch):
+    """The deliberate asymmetry: an IN-PROCESS teammate's watcher does NOT
+    get the carve-out. Its completion notice will not wake them (their
+    block text says so), so the watcher stays in the must-account-for list
+    and the remedy stays the intentional_wait coverage path. Pinned at the
+    _candidates fork, because that is the line the role split lives on."""
+    from shared import turn_end_gate
+
+    records = [
+        {"agent_name": MATE, "harness_task_id": "iw1", "launched_at": "2026-11-21T00:00:00Z"}
+    ]
+    running = [{"id": "iw1", "type": "shell", "command": _arm_command()}]
+    monkeypatch.setattr(
+        turn_end_gate.background_work,
+        "load_records_for_discharge",
+        lambda team: records,
+    )
+
+    subagent_stop = turn_end_gate._candidates(
+        {"hook_event_name": "SubagentStop"}, turn_end_gate.ROLE_TEAMMATE,
+        MATE, TEAM, running,
+    )
+    stop = turn_end_gate._candidates(
+        {"hook_event_name": "Stop"}, turn_end_gate.ROLE_TEAMMATE,
+        MATE, TEAM, running,
+    )
+    # SubagentStop (in-process): the watcher stays accountable.
+    assert [e["id"] for e in subagent_stop] == ["iw1"]
+    # Stop (separate-process): the watcher is exempt.
+    assert stop == []
 
 
 # --- classifier shape table (in-process, fast) ------------------------------
