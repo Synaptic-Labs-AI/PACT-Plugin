@@ -295,6 +295,21 @@ def pytest_report_from_serializable(config, data):
 
 
 def test_real_late_worker_loss_with_exit_zero_is_refused(tmp_path):
+    """A late worker internal error refuses, on whichever xdist branch lands.
+
+    Cold-9 measured this rig racing (~1-in-10): gw1's late internal error
+    can unwind on EITHER branch -- the exit-0 branch (the controller keeps
+    running, the worker fields stay null, the verifier refuses
+    BAD-FIELD-DESELECTED on the ready set) or the abort branch (the error
+    lands in the controller's event loop, INTERNALERROR KeyError at
+    dsession.py worker_internal_error, the session exits non-zero with a
+    partial summary, and the run produced no certifiable artifact -- the
+    verifier refuses RUN-RC on the run's non-zero rc, or RECORD-ABSENT when
+    the in-band record never landed). Both branches fail closed; the test
+    accepts whichever occurred and asserts the right refusal for it. The
+    pre-fix reproduction attempt went 15/15 green, so cold-9's measurement
+    is the recorded red for the abort arm.
+    """
     control = _rig(tmp_path / "control")
     _, _, control_record, _ = _assert_valid(control)
 
@@ -305,15 +320,19 @@ def test_real_late_worker_loss_with_exit_zero_is_refused(tmp_path):
     assert canary_proc.returncode == 0, canary_proc.stdout + canary_proc.stderr
     run_proc = _runner(rig)
     output = run_proc.stdout + run_proc.stderr
-    assert run_proc.returncode == 0, output
     assert "internal error on gw1 after its tests" in output
     assert "LATE-WORKER-SYNCHRONIZATION-FAILURE" not in output
-    record = _read(rig.record)
-    assert record["exitstatus"] == 0
-    assert record["passed"] == control_record["passed"]
-    assert record["items_before_modifyitems"] is None
-    assert record["items_after_modifyitems"] is None
-    assert record["deselected"] is None
     verdict = _verify(rig)
-    assert verdict.returncode == 1, verdict.stdout + verdict.stderr
-    assert "BAD-FIELD-DESELECTED" in verdict.stderr
+    assert verdict.returncode == 1, (
+        verdict.stdout + verdict.stderr + "\n--runner--\n" + output)
+    if run_proc.returncode == 0:
+        record = _read(rig.record)
+        assert record["exitstatus"] == 0
+        assert record["passed"] == control_record["passed"]
+        assert record["items_before_modifyitems"] is None
+        assert record["items_after_modifyitems"] is None
+        assert record["deselected"] is None
+        assert "BAD-FIELD-DESELECTED" in verdict.stderr
+    else:
+        assert ("RUN-RC" in verdict.stderr
+                or "RECORD-ABSENT" in verdict.stderr), verdict.stderr

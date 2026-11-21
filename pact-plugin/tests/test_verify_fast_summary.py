@@ -1593,6 +1593,36 @@ def test_selection_arithmetic_drift_is_refused(tmp_path, rig, monkeypatch,
     assert "VERIFY-OK" not in captured.out
 
 
+def test_an_unbuildable_selection_is_refused_as_selection_args_invalid(
+        tmp_path, rig, monkeypatch, capsys):
+    """SELECTION-ARGS-INVALID: a recomputed selection whose excluded set
+    names a nonexistent path cannot become pytest arguments (to_pytest_args
+    refuses a missing or cwd-escaping exclusion), and the verifier names the
+    condition instead of leaking an uncaught ValueError traceback from
+    build_argv. In CI the tree cannot change between the run and this
+    verify, so the seam guards corrupted recomputation, not a live hazard.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    real, _, _ = select_for_change(root, load_manifest(manifest), base_sha)
+    ghost = _replace_selection(
+        real, excluded=frozenset({*real.excluded, "tests/test_ghost.py"}))
+    # Artifacts are built from the REAL selection: building them from the
+    # ghost would raise inside the fixture (to_pytest_args refuses the
+    # ghost's missing exclusion before the verifier is ever invoked). The
+    # patched recomputation is what _require_commands tries to build from.
+    summary, canary = _artifacts_from_selection(
+        root, plugin, manifest, real, base_sha)
+    rc = _verify_in_process(root, manifest, summary, canary, base_sha,
+                            ghost, monkeypatch)
+    captured = capsys.readouterr()
+    assert rc == 1, captured.out + captured.err
+    assert "SELECTION-ARGS-INVALID" in captured.err
+    assert "VERIFY-FAILURE" in captured.err
+    assert "test_ghost" in captured.err
+    assert "VERIFY-OK" not in captured.out
+
+
 # ---- the skip advisory ---------------------------------------------------
 
 _LISTED_SITE = {"file": "tests/test_plugin_root_allowlist.py",

@@ -305,8 +305,20 @@ def _require_commands(canary: dict, summary: dict, recomputed, plugin_root: Path
         raise VerificationFailure(
             "IGNORE-ARGS-MISMATCH",
             f"canary/run ignore paths differ: {canary_ignores!r} != {run_ignores!r}")
-    expected_canary = build_argv(recomputed, plugin_root, "collect-only")
-    expected_run = build_argv(recomputed, plugin_root, "run", workers=4)
+    try:
+        expected_canary = build_argv(recomputed, plugin_root, "collect-only")
+        expected_run = build_argv(recomputed, plugin_root, "run", workers=4)
+    except ValueError as exc:
+        # to_pytest_args refuses an excluded path that is missing or escapes
+        # the working directory. In CI the tree cannot change between the
+        # run and this verify, so this names a corrupted recomputation
+        # rather than a live hazard -- but a named condition with the reason
+        # beats an uncaught traceback.
+        raise VerificationFailure(
+            "SELECTION-ARGS-INVALID",
+            f"the recomputed selection cannot be turned into pytest "
+            f"arguments ({exc}); the tree changed under the verifier -- "
+            "re-run the lane") from exc
     if canary_command != expected_canary:
         raise VerificationFailure(
             "CANARY-COMMAND-MISMATCH",
@@ -445,7 +457,9 @@ def _require_node_identity(canary: dict, summary: dict, record: dict,
     # the header line the run itself printed, with the writer's own parse
     # rule (the imported regex). A count inferred from the outcome sum, or
     # tampered after the fact, moves with every cross-artifact check; the
-    # stored header is the one witness that does not move with them.
+    # stored header raises the bar -- it catches the demoted-everywhere
+    # tamper the tests pin -- but it is not tamper-evident: a complete
+    # forgery edits it alongside the rest.
     header = summary["run"].get("collected_header")
     if not isinstance(header, str) or not header:
         raise VerificationFailure(
