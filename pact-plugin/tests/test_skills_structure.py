@@ -959,9 +959,10 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             # other entity stays literal. Confirmed out-of-contract misses,
             # all of which stay literal: markup shapes (memory<br>saved),
             # double-encoded entities (memory&amp;#95;saved), an escaped
-            # backslash before a separator (memory\\_saved), and numeric
-            # references without a semicolon (memory&#95saved) — no general
-            # HTML or escape decode happens here.
+            # backslash before a separator (memory\\_saved), an escaped
+            # space (memory\ saved), a newline entity (memory&#10;saved),
+            # and numeric references without a semicolon (memory&#95saved)
+            # — no general HTML or escape decode happens here.
             normalized = " ".join(
                 re.sub(
                     r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);",
