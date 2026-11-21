@@ -181,8 +181,9 @@ _TIER3_TEAMMATE_REASON = (
     "and end your turn — a message or the lead's own wake resolves it. "
     "If you DID arm: SET metadata.intentional_wait on every task the "
     "wait covers — `reason`, `expected_resolver` and `since` are the "
-    "keys validate_wait requires — naming this watcher, and end your "
-    "turn with no further tool calls — the lead's wake resumes you."
+    "keys validate_wait requires — `expected_resolver` naming the "
+    "lead; name the watcher in `reason` — and end your turn with no "
+    "further tool calls — the lead's wake resumes you."
 )
 # The separate-process teammate's own text. Their completion notice DOES
 # start their next turn (shared.background_work.teammate_is_separate_process
@@ -411,11 +412,12 @@ def _escalate(input_data, normalized):
             # sibling launch advisory's resolution): a frame with no PACT
             # team gets the no-command text (nothing to watch); a resolved
             # NON-member non-lead frame — an Agent-tool subagent — gets the
-            # lead text (its completion IS its report; teammate_launch_name
-            # refuses its subagent-shaped id); a separate-process teammate
-            # gets the lead-accurate wake statement; an in-process teammate
-            # gets the teammate guidance; a lead keeps the lead text. All
-            # team-bearing texts carry the same arm command.
+            # dedicated subagent text (its completion IS its report;
+            # teammate_launch_name refuses its subagent-shaped id); a
+            # separate-process teammate gets the lead-accurate wake
+            # statement; an in-process teammate gets the teammate
+            # guidance; a lead keeps the lead text. All team-bearing texts
+            # carry the same arm command.
             team, member, separate = _tier3_frame_identity(input_data)
             if not team:
                 template = _TIER3_NO_TEAM_REASON

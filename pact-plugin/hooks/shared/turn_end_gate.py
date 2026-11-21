@@ -25,7 +25,8 @@ its block text is the one that says the completion notice will NOT wake
 them, so its watcher stays accountable and the remedy stays the
 intentional_wait coverage path. Classified by an anchored command shape
 (`is_wait_watcher_command`): a lookalike that merely mentions the watcher
-name, or a partial invocation missing the arm flags, still counts.
+name, or a partial invocation missing the arm flags, still counts as a
+job to account for.
 """
 
 from __future__ import annotations

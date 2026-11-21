@@ -298,6 +298,30 @@ def test_skillmd_handoff_template_has_no_array_or_object_renders():
         assert f'"{field}": {{' not in block, field
 
 
+def test_handoff_teaching_surfaces_render_no_array_canonical_fields():
+    """Coherence arm (cold round 9): the array-template failure class must
+    be dead on EVERY LLM-loaded surface that teaches handoff metadata —
+    the protocols SSOT, its byte-compared task-hierarchy extract, and the
+    secretary's memory-save example — not only the SKILL.md template. A
+    canonical field rendered with a bracket-opened value is the live
+    false-EXPIRED class: the watcher reads a list-typed `produced` as
+    ABSENT and burns to a loud EXPIRED (degraded-loud, per
+    wait_target.handoff_present)."""
+    surfaces = [
+        PLUGIN / "protocols" / "pact-protocols.md",
+        PLUGIN / "protocols" / "pact-task-hierarchy.md",
+        PLUGIN / "agents" / "pact-secretary.md",
+    ]
+    for surface in surfaces:
+        text = surface.read_text(encoding="utf-8")
+        for field in TEMPLATE_FIELDS:
+            assert f'"{field}": [' not in text, (
+                f"{surface.name}: canonical field {field} is rendered as "
+                "a JSON array — the watcher reads it as ABSENT and burns "
+                "its deadline (the false-EXPIRED class)"
+            )
+
+
 # --- silent skip: no team context, no advisory, no crash --------------------
 
 def _seed_task(tmp_path: Path, team: str, task_id: str, **fields) -> None:

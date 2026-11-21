@@ -931,8 +931,9 @@ _TIER3_TEAMMATE_REASON_PIN = (
     "and end your turn — a message or the lead's own wake resolves it. "
     "If you DID arm: SET metadata.intentional_wait on every task the "
     "wait covers — `reason`, `expected_resolver` and `since` are the "
-    "keys validate_wait requires — naming this watcher, and end your "
-    "turn with no further tool calls — the lead's wake resumes you."
+    "keys validate_wait requires — `expected_resolver` naming the "
+    "lead; name the watcher in `reason` — and end your turn with no "
+    "further tool calls — the lead's wake resumes you."
 )
 
 
@@ -947,6 +948,16 @@ def test_tier3_teammate_text_names_the_wait_keys():
 
     for key in ("reason", "expected_resolver", "since"):
         assert key in wait_filler_gate._TIER3_TEAMMATE_REASON, key
+    # The key-value SPLIT (cold round 9): `expected_resolver` names the
+    # LEAD — a watcher name would leave the resolver vocabulary and drop
+    # the teammate from the resolver-scoped stall scans — while the
+    # watcher's name belongs in `reason`.
+    assert "`expected_resolver` naming the lead" in (
+        wait_filler_gate._TIER3_TEAMMATE_REASON
+    )
+    assert "name the watcher in `reason`" in (
+        wait_filler_gate._TIER3_TEAMMATE_REASON
+    )
     assert "do NOT arm" in wait_filler_gate._TIER3_TEAMMATE_REASON
     assert "instead SET metadata.intentional_wait" in (
         wait_filler_gate._TIER3_TEAMMATE_REASON

@@ -425,6 +425,11 @@ Set a free-form `reason` that names the transferred watch (e.g.
 `awaiting_lead_takeover`), not `awaiting_lead_completion` — that reason names
 the HANDOFF/teachback acceptance wait, and a transferred watch must read as
 the different wait it is on task-file inspection.
+A third form exists for teammate-deliverable waits: arm the structural
+watcher with one background `Bash` call AND flag the wait with
+`intentional_wait` naming the watcher in `reason` — at filler-lock the
+tier-3 outlet supplies the arm command, and the turn-end carve-out treats
+your running watcher as covered.
 
 Silence is uninformative in both directions, and narrating a wait is noise in
 both. Do not emit "still running" or "waiting on the gate" turns while your own
