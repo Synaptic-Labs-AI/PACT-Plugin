@@ -150,7 +150,7 @@ teammate deliverable is pending and no watcher is armed.
 | # | Arm | Date | Plugin version | Patched? | Watcher armed (how observed) | Filler calls in idle window | Wake delivered (latency, clock source, exit code) | Manual interrupt needed? | Verdict |
 |---|-----|------|----------------|----------|------------------------------|-----------------------------|---------------------------------------------------|--------------------------|---------|
 | 1 | 0 | 2026-11-21 | 4.8.35+patch | yes | task 16, deadline 60, `run_in_background: true` transcript row | n/a | ~60-75s (platform hook stamps; launch turn and wake turn both stamped 01:09 UTC), exit 3, loud EXPIRED text carried task/team/predicate | no | PASS — channel confirmed |
-| 2 | A | 2026-11-21 | 4.8.35+patch | yes | tasks 26 (teachback) + 27 (handoff), deadline 1800/1800, two transcript rows; duplicate re-arm on 26 also armed and fired | 0 in both idle windows | both wakes exit 0, notification-driven, ~1-2 min each (armed ≈01:13, wakes ≈01:15 and ≈01:19) | no | PASS — zero fillers, carve-out held, duplicate re-arm held |
+| 2 | A | 2026-11-21 | 4.8.35+patch | yes | tasks 26 (teachback) + 27 (handoff), deadline 1800/1800, two transcript rows; duplicate re-arm on 26 also armed and fired | 0 in both idle windows | both wakes exit 0, notification-driven, ~1-2 min each (armed ≈01:13, wakes ≈01:15 and ≈01:19) | no | PASS at episode level ×3 waits, one team; §6.4 cross-team repeat outstanding — zero fillers, carve-out held, duplicate re-arm held |
 | 3 | B | 2026-11-21 | 4.8.35 stock | no | n/a — deliberately none | 3 no-info calls in ~2 min (2 valve-ALLOWED inert calls with budget 2→0, 1 exhausted-valve FILLER-LOCK denial) | none — nothing armed, no notification-driven wake at any point | n/a | MET — operational loop definition satisfied on stock; deterministic-termination text proven unenforced |
 
 Execution record (2026-11-21, team session-47d94d14, session 47d94d14-b906-4d03-b258-f2af0fa7a212; operator/subject: team-lead; protocol design + audit: test-engineer):
@@ -163,6 +163,21 @@ Execution record (2026-11-21, team session-47d94d14, session 47d94d14-b906-4d03-
 - **Two-episode rule (§6.4)**: three distinct wait episodes ran (tasks 16, 26, 27 — two deliverable types: teachback, handoff; deadlines 60/1800/1800), all one team. A cross-team episode was not run; recorded as a limitation, not silently folded into the PASS.
 - **Filler-state census source**: the session's own `pact-filler-state/47d94d14-….json` counters (count 6, total 10, budget 0 post-episode) corroborate the transcript census.
 - **Probe-worker compliance**: both episodes ran silent as instructed (no SendMessage; handoff writes landed unseen — 27: six string fields; 28: six string fields, 4211B; both audited on disk post-wake). CORRECTION (post-audit, test-engineer finding): the originally recorded task-27 figure "4806B" was a mid-trim instantaneous read — the probe-worker's disclosed size-trim passes raced the lead's acceptance audit; two later independent measurements agree on 4148B (handoff object; 4216B full metadata). The load-bearing claim (six strings, written unseen, present post-wake) verifies at every recorded moment; the task file keeps no history to arbitrate intermediate values.
+
+- **Timing-margin annotation (review cycle 1, 2026-11-21):** the two
+  corrupt-boundary arms in `test_pact_wait.py`
+  (`test_second_consecutive_corrupt_read_is_terminal`, heal timed 0.15s
+  between polls at 0.1s/0.2s; `test_tolerates_transient_corrupt_read`,
+  heal at 0.03s against the next poll at 0.1s) carry ONE-SIDED ~50-70ms
+  margins that are ASSERTED, not measured — no merge-queue history exists
+  for them yet, and this PR's queue run is the first real data point (lead
+  ruling). A flake reds BY DESIGN (poll slips past the heal); the remedy
+  then is widen the margin or move the witness between the polls. The
+  alternating arm (`test_alternating_corrupt_reads_expire_never_turn_terminal`)
+  is structurally safe under load: its corrupt windows (0.12s) are shorter
+  than the sleep-guaranteed poll spacing (0.15s), so two consecutive
+  corrupt polls inside one window cannot occur, and timer jitter can only
+  make a poll MISS a window — which stays green.
 
 Run-dates tracking: `RUNBOOK_RUN_DATES.md` carries the execution ledger
 pointer for this file.
