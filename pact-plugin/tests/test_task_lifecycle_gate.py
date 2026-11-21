@@ -5241,6 +5241,37 @@ def test_acceptance_arm_rejects_lead_owned_parent_real_predicate(
     assert "--task 30" not in arms[0]
 
 
+def test_arm_advisory_quotes_pathological_ids(
+    tmp_path, monkeypatch, pact_context
+):
+    """The emitted arm command shlex.quotes the interpolated identity: a
+    plain id renders byte-unchanged (quote is a no-op on it — every other
+    arm pin depends on that), and a spaced id renders as ONE safely-quoted
+    token instead of splitting into two argv words the watcher would
+    misread. Red on the pre-fix raw interpolation."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path,
+        "test-team",
+        "1 2",
+        subject="implement hook core",
+        status="pending",
+        owner="backend-coder",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "1 2", "owner": "backend-coder"},
+        "tool_response": {},
+    }
+    monkeypatch.setattr(tlg, "is_pact_specialist_owner", lambda *_a, **_k: True)
+    advisories = tlg.evaluate_lifecycle(payload)
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, f"expected one arm advisory, got: {advisories}"
+    assert "--task '1 2'" in arms[0]
+    assert "--team test-team" in arms[0]
+
+
 def test_no_arm_supply_from_a_bare_base_task_file(
     tmp_path, monkeypatch, pact_context
 ):

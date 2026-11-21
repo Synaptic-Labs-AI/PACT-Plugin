@@ -310,6 +310,11 @@ def test_is_wait_watcher_command_shape_table():
         "true; pact_wait.py --team t --task 1 --predicate h --deadline 5",
         "cat pact_wait.py --team t --task 1 --predicate h --deadline 5",
         "pact_wait.py --team t --task 1 --predicate h --deadline 1800 extra",
+        # A shlex-quoted SPACED task id (the emitted arm command's rendering
+        # for a pathological id) is counted: the flag value cannot span the
+        # space, so the classifier's documented over-block lean applies —
+        # visible here so a future widening cannot silently keep it.
+        "pact_wait.py --team t --task '1 2' --predicate h --deadline 5",
         # A spaced path left UNQUOTED is not the emitted shape: the shell
         # word-splits it, so it cannot be the armed command — counted
         # (documented over-block lean).

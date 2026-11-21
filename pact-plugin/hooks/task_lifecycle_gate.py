@@ -76,6 +76,7 @@ from __future__ import annotations
 # ─── stdlib first (used by _emit_load_failure_advisory BEFORE wrapped imports) ─
 import json
 import os
+import shlex
 import sys
 from typing import Any, NoReturn
 
@@ -1439,8 +1440,8 @@ def _wait_arm_advisory(
     shared/wait_target.py registry entry, so re-keying the watcher is a
     command-text change, never schema surgery."""
     command = (
-        f'python3 "{_WAIT_WATCHER_PATH}" --team {team_name} '
-        f"--task {task_id} --predicate {predicate} --deadline 1800"
+        f'python3 "{_WAIT_WATCHER_PATH}" --team {shlex.quote(team_name)} '
+        f"--task {shlex.quote(task_id)} --predicate {predicate} --deadline 1800"
     )
     message = (
         f"PACT task_lifecycle_gate: {shape} — you are about to wait on a "
