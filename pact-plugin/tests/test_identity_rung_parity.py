@@ -50,6 +50,7 @@ from __future__ import annotations
 import ast
 import builtins
 import collections
+import functools
 import os
 import re
 import subprocess
@@ -1414,21 +1415,69 @@ X = lambda M: M
 '''
 
 
+# The scopes a binding is probed in: the module, and each statement that
+# opens a scope of its own (checked against `_SCOPES` below).
+_SCOPE_WRAPPERS = {
+    "Module": "{}",
+    "FunctionDef": "def w():\n{}",
+    "AsyncFunctionDef": "async def w():\n{}",
+    "ClassDef": "class W:\n{}",
+}
+# Each type parameter kind spelled as the parameter `X`, and a statement of
+# each owner of type parameters holding one (both checked against the
+# grammar below).
+_TYPE_PARAM_SPELLINGS = {"TypeVar": "X", "ParamSpec": "**X", "TypeVarTuple": "*X"}
+_TYPE_PARAM_OWNERS = {
+    "FunctionDef": "def f[{}]():\n    pass",
+    "AsyncFunctionDef": "async def f[{}]():\n    pass",
+    "ClassDef": "class C[{}]:\n    pass",
+    "TypeAlias": "type A[{}] = int",
+}
+
+
+def _binding_probes(refused: "list | None" = None) -> list:
+    """(tree, code) for every probe of a binding form the compiler accepts:
+    `_BINDING_PROBE`, and, in each scope of `_SCOPE_WRAPPERS`, each form of
+    the grammar's identifier fields (`_IDENTIFIER_FORMS`, an `as` alias and
+    the dotted imports) and each type parameter kind in each owner. A form
+    the compiler refuses in a scope (a `nonlocal` with nothing to bind)
+    stores nothing there; its source goes in `refused`."""
+    import textwrap
+
+    forms = [*_IDENTIFIER_FORMS.values(), "import y as X", *_DOTTED_FORMS]
+    forms += [owner.format(spelled) for owner in _TYPE_PARAM_OWNERS.values() for spelled in _TYPE_PARAM_SPELLINGS.values()]
+    sources = [_BINDING_PROBE] + [
+        wrapper.format(form if wrapper == "{}" else textwrap.indent(form, "    "))
+        for wrapper in _SCOPE_WRAPPERS.values() for form in forms
+    ]
+    probes = []
+    for source in sources:
+        tree = ast.parse(source)
+        try:
+            probes.append((tree, compile(tree, "<probe>", "exec")))
+        except SyntaxError:
+            if refused is not None:
+                refused.append(source)
+    return probes
+
+
+@functools.lru_cache(maxsize=None)
 def _implicit_bindings() -> frozenset:
     """The names the compiler binds that no source line writes (a class
     body's `__module__`, `__qualname__` and `__doc__`, the `__class__` cell,
-    a generator's `.0`), read from compiling a probe that writes every binding
-    form and subtracting each name the probe's own source spells."""
-    tree = ast.parse(_BINDING_PROBE)
-    spelled = {
-        getattr(node, field) for node in ast.walk(tree)
-        for field in ("id", "arg", "name", "asname", "rest")
-        if isinstance(getattr(node, field, None), str)
-    } | {part for node in ast.walk(tree) if isinstance(node, ast.alias) for part in node.name.split(".")}
-    spelled |= {name for node in ast.walk(tree) if isinstance(node, (ast.Global, ast.Nonlocal)) for name in node.names}
-    return frozenset(
-        name for code in _code_objects(compile(tree, "<probe>", "exec")) for name in _stored_names(code)
-    ) - spelled
+    a generator's `.0`, a generic's `.type_params`), read from compiling
+    every binding probe (`_binding_probes`) and subtracting, per probe, each
+    name its own source spells."""
+    implicit = set()
+    for tree, code in _binding_probes():
+        spelled = {
+            getattr(node, field) for node in ast.walk(tree)
+            for field in ("id", "arg", "name", "asname", "rest")
+            if isinstance(getattr(node, field, None), str)
+        } | {part for node in ast.walk(tree) if isinstance(node, ast.alias) for part in node.name.split(".")}
+        spelled |= {name for node in ast.walk(tree) if isinstance(node, (ast.Global, ast.Nonlocal)) for name in node.names}
+        implicit |= {name for compiled in _code_objects(code) for name in _stored_names(compiled)} - spelled
+    return frozenset(implicit)
 
 
 class _CalleeReader:
@@ -1572,6 +1621,11 @@ class _CalleeReader:
                 self._add(scope, node.name, ("value" if whole else "element", subject))
             elif isinstance(node, ast.MatchMapping) and node.rest:
                 self._add(scope, node.rest, ("element", self._match_subject(node)))
+            elif isinstance(node, (ast.TypeVar, ast.ParamSpec, ast.TypeVarTuple)):
+                # bound in the owner's annotation scope (a def's or class's
+                # own, a type alias's around it), never a class attribute; no
+                # form reads what it holds
+                self.sources[(self._key(scope), node.name)].append(("type_param", node))
 
     def _scopes_by_code(self):
         found = collections.defaultdict(list)
@@ -1581,6 +1635,14 @@ class _CalleeReader:
             if isinstance(node, (*_DEF_NODES, ast.ClassDef)):
                 first = min([node.lineno, *(d.lineno for d in node.decorator_list)])
                 found[(node.name, first)].append(node)
+                if node.type_params:
+                    found[(f"<generic parameters of {node.name}>", first)].append(node)
+            elif isinstance(node, ast.TypeAlias):
+                # its value and its type parameters compile apart from the
+                # scope around it, and bind there
+                outer = self.scope.get(id(node))
+                found[(node.name.id, node.lineno)].append(outer)
+                found[(f"<generic parameters of {node.name.id}>", node.lineno)].append(outer)
             elif type(node) in names:
                 found[(names[type(node)], node.lineno)].append(node)
         return found
@@ -2427,30 +2489,74 @@ class TestEveryIdentityCallerIsCovered:
         assert module_string_constants(ast.parse(source)) == table
 
     def test_the_reader_reads_every_binding_the_compiler_makes(self):
-        """The population is the compiler's: every name a code object of a
-        probe holding each binding form stores is read by some form."""
-        tree = ast.parse(_BINDING_PROBE)
-        reader = _CalleeReader(tree, compile(tree, "<probe>", "exec"))
-        assert reader.unread == set()
+        """The population is the compiler's: every name a code object of each
+        binding probe (`_binding_probes`: every binding form of the grammar,
+        PEP 695 type parameters included, in every scope) stores is read by
+        some form. Control: the forms of each table are compiled."""
+        probes = _binding_probes()
+        assert len(probes) > 100, len(probes)
+        sources = {ast.unparse(tree) for tree, _code in probes}
+        assert {"def f[X]():\n    pass", "type A[*X] = int", "def w():\n    import X"} <= sources, sources
+        unread = [
+            (ast.unparse(tree), sorted(_CalleeReader(tree, code).unread)) for tree, code in probes
+            if _CalleeReader(tree, code).unread
+        ]
+        assert unread == [], unread
+
+    def test_the_binding_probes_cover_the_grammar(self):
+        """The probe tables are the grammar's: each type parameter kind the
+        compiler defines, each node class that owns type parameters, and each
+        statement that opens a scope of its own (`_SCOPES`)."""
+        classes = _compiler_classes()
+        assert set(_TYPE_PARAM_SPELLINGS) == {name for name, c in classes.items() if issubclass(c, ast.type_param)
+                                              and c is not ast.type_param}
+        assert set(_TYPE_PARAM_OWNERS) == {name for name, c in classes.items() if "type_params" in c._fields}
+        assert set(_SCOPE_WRAPPERS) - {"Module"} == {
+            name for name, c in classes.items() if issubclass(c, ast.stmt) and c in _SCOPES
+        }
+        refused = []
+        _binding_probes(refused)
+        # the one form the compiler refuses: a `nonlocal` with no binding to name
+        assert len(refused) == len(_SCOPE_WRAPPERS) and all("nonlocal X" in s for s in refused), refused
+
+    @pytest.mark.parametrize("source", [
+        "def first[T](items: list[T]) -> T:\n    return items[0]\nfirst([1])\n",
+        "def f[**P](g):\n    return g\nf(len)\n",
+        "def f[*Ts](g):\n    return g\nf(len)\n",
+        "def f[T: (int, str)](x: T) -> T:\n    return x\nf(1)\n",
+        "class Box[T]:\n    def __init__(self, v: T):\n        self.v = v\nBox(1)\n",
+        "class K:\n    def m[T](self, v: T) -> T:\n        return v\nK().m(1)\n",
+        "type Pair[T] = tuple[T, T]\n",
+        "import functools\n@functools.cache\ndef f[T](x: T) -> T:\n    return x\nf(1)\n",
+        "def outer():\n    def inner[T](x: T) -> T:\n        return x\n    return inner(1)\nouter()\n",
+    ])
+    def test_a_generic_definition_is_read(self, tmp_path, source):
+        """An honest generic def, class, method or type alias (PEP 695, on the
+        3.12 floor) binds nothing the reader leaves unread, and no call in it
+        is a hit."""
+        path = tmp_path / "scope.py"
+        path.write_text(source, encoding="utf-8")
+        assert unread_bindings([path]) == [] and call_result_callees([path]) == []
 
     def test_a_binding_no_form_reads_is_unread_and_fails_closed(self):
-        """Each name the probe binds, with what the reader read for it taken
-        away, is reported unread, and a call through it is a hit."""
-        tree = ast.parse(_BINDING_PROBE)
-        code = compile(tree, "<probe>", "exec")
-        names = {
-            name for compiled in _code_objects(code) for name in _stored_names(compiled)
-        } - _implicit_bindings()
-        assert len(names) > 30, names
-        for name in sorted(names):
+        """Each name a binding probe binds, with what the reader read for it
+        taken away, is reported unread, and a call through it is a hit."""
+        checked = 0
+        for tree, code in _binding_probes():
+            names = {
+                name for compiled in _code_objects(code) for name in _stored_names(compiled)
+            } - _implicit_bindings()
+            for name in sorted(names):
 
-            class Unread(_CalleeReader):
-                def _collect(self):
-                    super()._collect()
-                    for key in [key for key in self.sources if key[1] == name]:
-                        del self.sources[key]
+                class Unread(_CalleeReader):
+                    def _collect(self):
+                        super()._collect()
+                        for key in [key for key in self.sources if key[1] == name]:
+                            del self.sources[key]
 
-            assert name in {n for _scope, n in Unread(tree, code).unread}, name
+                assert name in {n for _scope, n in Unread(tree, code).unread}, (name, ast.unparse(tree))
+                checked += 1
+        assert checked > 100, checked
         reader = _CalleeReader(ast.parse("get = len\nget(x)\n"), compile("get = len\nget(x)\n", "<t>", "exec"))
         assert not reader.may_be(ast.Name("get"), None)
         reader.unread.add((None, "get"))
