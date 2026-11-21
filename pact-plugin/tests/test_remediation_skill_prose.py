@@ -1519,6 +1519,10 @@ class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
 
 DETECTION_MODULES = ("memory_api", "project_identity")
 DETECTION_ENTRY = ("memory_api", "PACTMemory._detect_project_identity_with_legacy")
+# The pass the detection path runs inside: its setup and the raw git-result
+# pass it opens, each read from its `def` (the join branch included), and every
+# place a memory script opens one (`_pass_openings`).
+PASS_SETUPS = (("memory_api", "detection_pass"), ("shared.git_helpers", "git_results_pass"))
 # Where a module the detection path imports is looked up, by dotted name.
 _PROJECT_ROOTS = (SCRIPTS, PLUGIN_ROOT / "hooks")
 # Mapping methods whose first argument names the variable they read.
@@ -2589,9 +2593,109 @@ def _env_reads(node, module: str, function: str, graph: "_DetectionGraph"):
             yield ast.copy_location(name, template), shown
 
 
+def _pass_openings(graph) -> dict:
+    """Each place a memory script or a hook opens a pass, as a read root: for
+    every function or method of a module in `SCRIPTS` or `hooks/` with a
+    `with` whose item calls one of `PASS_SETUPS` (by name or attribute), a
+    def named `<function> <pass opening>` in `graph.defs` holding every item
+    of those `with` statements and the block each one runs (`cli.main`'s
+    handler call among them), whose own reads the census reports. The rest of
+    the function, such as `cli.main`'s argument parsing, is not part of the
+    opening. Returns {key: the part of the opening whose calls are followed}:
+    the items and block in a memory script; the items alone in a hook, whose
+    block calls the hook command's own work (`backlog.main`'s `_main`). Each
+    project class an item builds goes in `graph.opening_classes` with every
+    method it defines, since `with` runs its code with no call node."""
+    import ast
+
+    setups = {name for _module, name in PASS_SETUPS}
+    openings = {}
+    graph.opening_classes = {}
+    hooks = PLUGIN_ROOT / "hooks"
+    sources = [(path, path.stem, True) for path in sorted(SCRIPTS.glob("*.py"))]
+    sources += [(path, ".".join(path.relative_to(hooks).with_suffix("").parts), False)
+                for path in sorted(hooks.rglob("*.py")) if path.name != "__init__.py"]
+    for path, module, memory_script in sources:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        owners = [(node.name, node) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        owners += [
+            (f"{node.name}.{item.name}", item) for node in tree.body if isinstance(node, ast.ClassDef)
+            for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+        ]
+        for name, function in owners:
+            items, body = [], []
+            for node in ast.walk(function):
+                if isinstance(node, (ast.With, ast.AsyncWith)) and any(
+                    isinstance(item.context_expr, ast.Call)
+                    and (getattr(item.context_expr.func, "id", None)
+                         or getattr(item.context_expr.func, "attr", None)) in setups
+                    for item in node.items
+                ):
+                    items += [ast.Expr(value=item.context_expr) for item in node.items]
+                    body += node.body
+            if not items or not graph.load(module):
+                continue
+
+            def opening_def(statements):
+                made = ast.FunctionDef(
+                    name=f"{name} <pass opening>", args=function.args, decorator_list=[], returns=None,
+                    type_params=[], body=statements,
+                )
+                return ast.copy_location(made, function)
+
+            key = (module, f"{name} <pass opening>")
+            graph.defs[key] = opening_def(items + body)
+            openings[key] = opening_def(items + body if memory_script else items)
+            for item in items:
+                built = item.value.func if isinstance(item.value, ast.Call) else None
+                owned = graph.project_name(built.id, module) if isinstance(built, ast.Name) else None
+                if owned is None or not owned[1] or not graph.load(owned[0]):
+                    continue
+                node = graph.classes.get(owned[0], {}).get(owned[1])
+                if node is not None:
+                    graph.opening_classes[owned] = [
+                        (owned[0], f"{owned[1]}.{method.name}") for method in node.body
+                        if isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    ]
+    return openings
+
+
+def test_the_census_root_holds_every_pass_opening():
+    """Pin for the census root (`route_inputs`): `_pass_openings` finds the
+    places the memory scripts and the hooks open the detection pass,
+    `cli.main`'s, a store's construction and `backlog.main`'s among them, and
+    each of them and both `PASS_SETUPS` is a def the census reads, the block
+    each opening runs included (`cli.main`'s handler call), and every method
+    of the warning holder `backlog.main` builds there is a root. If discovery
+    finds nothing, or drops a block or the holder's methods, an environment
+    read added there would pass unread, so this fails."""
+    import ast
+
+    graph = _DetectionGraph()
+    for module in (*DETECTION_MODULES, *(module for module, _name in PASS_SETUPS)):
+        graph.load(module)
+    openings = _pass_openings(graph)
+    assert {("cli", "main <pass opening>"), ("memory_api", "PACTMemory.__init__ <pass opening>"),
+            ("shared.backlog", "main <pass opening>")} <= set(openings)
+    assert [key for key in [*PASS_SETUPS, *openings] if key not in graph.defs] == []
+    holder = graph.opening_classes.get(("shared.backlog", "_HeldWarnings"), [])
+    assert {name for _module, name in holder} >= {"_HeldWarnings.__init__", "_HeldWarnings.__enter__",
+                                                  "_HeldWarnings.__exit__", "_HeldWarnings.filter"}
+    assert [key for key in holder if key not in graph.defs] == []
+    handler_calls = [node for node in ast.walk(graph.defs[("cli", "main <pass opening>")])
+                     if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "handler"]
+    assert len(handler_calls) == 2  # the handler call in each of cli.main's two pass blocks
+
+
 def route_inputs() -> dict:
     """{condition: sorted sites} for every input the detection path reads, from
-    `_detect_project_identity_with_legacy` through every function it calls in
+    `_detect_project_identity_with_legacy`, the pass it runs inside
+    (`PASS_SETUPS`: `detection_pass`, its join branch included, and
+    `git_results_pass`) and every place a memory script or a hook opens that
+    pass (`_pass_openings`: the `with` statements of `cli.main`,
+    `PACTMemory.__init__` and `backlog.main`, with the blocks they run, and
+    every method of a class one of them builds), through every function
+    they call in
     the project's own modules (the memory scripts and `hooks/`), helpers and
     re-exports included, and the code that runs when the modules it reaches
     are imported (`_import_time_code`: module statements and class bodies,
@@ -2677,9 +2781,11 @@ def route_inputs() -> dict:
     on a function's parameter, or on a local proved a standard-library
     value only by taking a parameter as one, whose type the census cannot
     see; a class statement whose base, keyword value or decorator is a
-    local or a parameter; and a plain attribute read, `with`, `for` or
+    local or a parameter; a plain attribute read, `with`, `for` or
     formatting of an object a project function returned, which runs no code
-    the census sees.
+    the census sees; and the functions a hook's pass block calls
+    (`backlog.main`'s `_main`, the backlog command's own work), whose block
+    is read but not followed.
     Each such object is built somewhere, and every project class build is
     reported, so its origin is a named condition. A condition names a
     callee, not a site: a further call of an already named callee is
@@ -2690,9 +2796,13 @@ def route_inputs() -> dict:
     from fixtures.identity_git import qualified_name
 
     graph = _DetectionGraph()
-    for module in DETECTION_MODULES:
+    for module in (*DETECTION_MODULES, *(module for module, _name in PASS_SETUPS)):
         graph.load(module)
-    reached, pending, outward = set(), [DETECTION_ENTRY], {}
+    openings = _pass_openings(graph)
+    reached, pending, outward = set(), [DETECTION_ENTRY, *PASS_SETUPS, *openings], {}
+    # A class a pass opening builds runs its code with no call node the walk sees
+    # (`__init__`, `__enter__`, `__exit__`, a logging callback): read every method.
+    pending += [method for methods in graph.opening_classes.values() for method in methods]
     imported, importing = set(), []
 
     def read_module(module):
@@ -2745,8 +2855,9 @@ def route_inputs() -> dict:
         if key in reached:
             continue
         reached.add(key)
-        read_module(key[0])
-        follow(key[0], graph.defs[key])
+        if key not in openings:  # an opening is part of its function, not its module's import
+            read_module(key[0])
+        follow(key[0], openings.get(key, graph.defs[key]))  # a hook's pass block is read, not followed
 
     def params(node):
         return [arg.arg for arg in node.args.posonlyargs + node.args.args + node.args.kwonlyargs]
@@ -3059,6 +3170,76 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function project_identity: DETECTION_GIT_DIRS.get>"): (
             "the constructor's per-pass git-dir memo"
         ),
+        ("call", "<name imported from a project module memory_api: project_identity.DETECTION_GIT_DIRS>"): (
+            "detection_pass names the identity layer's per-pass git-dir memo, to start it and to hand "
+            "it back on a join"
+        ),
+        ("call", "<call to no function memory_api: project_identity.DETECTION_GIT_DIRS.get>"): (
+            "detection_pass's join hands back the outer pass's git-dir memo"
+        ),
+        ("call", "<call to no function memory_api: project_identity.DETECTION_GIT_DIRS.set>"): (
+            "detection_pass starts the per-pass git-dir memo empty in an outermost pass"
+        ),
+        ("call", "<call to no function memory_api: _DETECTION_ANSWERS.set>"): (
+            "detection_pass starts the per-pass answer memo empty in an outermost pass"
+        ),
+        ("call", "<call to no function memory_api: _DETECTION_LISTINGS.set>"): (
+            "detection_pass starts the per-pass worktree-listing memo empty in an outermost pass"
+        ),
+        ("call", "git_results_pass"): (
+            "detection_pass opens the pass's memo of git results; git_results_pass is read as a root"
+        ),
+        ("call", "<call to no function shared.git_helpers: PASS_GIT_RESULTS.set>"): (
+            "git_results_pass starts the pass's memo of git results empty in an outermost pass"
+        ),
+        ("call", "<call to no function shared.git_helpers: PASS_GIT_RESULTS.reset>"): (
+            "git_results_pass ends the pass's memo of git results with the block"
+        ),
+        ("call", "<call to no function shared.backlog: _HeldWarnings>"): (
+            "a class a pass opening builds; the census reads every method it defines"
+        ),
+        ("call", "<call to no function shared.backlog: self.logger.addFilter>"): (
+            "the decline-warning holder attaches itself to the memory skill's logger while a backlog "
+            "command runs"
+        ),
+        ("call", "<call to no function shared.backlog: self.logger.removeFilter>"): (
+            "the decline-warning holder detaches itself from the memory skill's logger"
+        ),
+        ("call", "<call to no function shared.backlog: self.records.append>"): (
+            "the decline-warning holder keeps a held record in its own list"
+        ),
+        ("call", "<call to no function shared.backlog: self.logger.handle>"): (
+            "the decline-warning holder hands a held record back to the memory skill's logger"
+        ),
+        ("call", "<call to no function shared.backlog: _memory_api().detection_pass>"): (
+            "backlog.main opens the memory skill's detection_pass through the backlog's lazy import of "
+            "the skill; detection_pass is read as a root"
+        ),
+        ("call", "<call to no function shared.backlog: held.replay>"): (
+            "backlog.main prints the held decline warnings when a command does not succeed; it hands "
+            "logged records to the skill's logger and reads no input"
+        ),
+        ("call", "<class of its own module used as a value shared.backlog: _RefKind in an annotation>"): (
+            "backlog's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
+            "named in an annotation"
+        ),
+        ("call", "<class of its own module used as a value shared.backlog: _HeldWarnings in an annotation>"): (
+            "backlog's logging.Filter-based class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
+            "named in an annotation"
+        ),
+        ("call", "<class of its own module used as a value shared.backlog_store: BacklogFileError>"): (
+            "backlog_store's Exception-based class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
+            "used as a value"
+        ),
+        ("call", "<class of its own module used as a value shared.backlog_store: BacklogNotice in an annotation>"): (
+            "backlog_store's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
+            "named in an annotation"
+        ),
+        ("call", "<class statement on a project name shared.backlog_store: "
+                 "BacklogUnreadableError base BacklogFileError>"): (
+            "a base whose project classes define no __init_subclass__ or __class_getitem__ "
+            "and name no metaclass"
+        ),
         ("call", "<call to no function memory_api: _DetectedIdentity>"): (
             "builds a record class (fields only)"
         ),
@@ -3295,13 +3476,16 @@ class TestEveryRouteEntryConditionIsARoute:
     }
 
     def test_each_named_build_and_pattern_is_what_its_reason_says(self):
-        """Computes the two properties NOT_A_ROUTE's reasons state: an entry
+        """Computes the three properties NOT_A_ROUTE's reasons state: an entry
         whose reason says "builds a record class (fields only)" builds a
         class that is a NamedTuple whose body holds only annotated fields and
-        a docstring (no method, decorator or class keyword), and one that says
-        "a method of a compiled literal pattern" calls a method on a module
+        a docstring (no method, decorator or class keyword); one that says "a
+        class a pass opening builds; the census reads every method it
+        defines" builds a class a pass opening builds (`_pass_openings`),
+        whose methods `route_inputs` reads as roots; and one that says "a
+        method of a compiled literal pattern" calls a method on a module
         name (followed through imports) whose every binding is `re.compile`
-        of literals or `re` flags. Every entry of either shape carries that
+        of literals or `re` flags. Every entry of each shape carries that
         reason, and no other entry does."""
         import ast
         import re as regex
@@ -3347,6 +3531,10 @@ class TestEveryRouteEntryConditionIsARoute:
             )
 
         builds, patterns, wrong = set(), set(), {}
+        for module in (*DETECTION_MODULES, *(module for module, _name in PASS_SETUPS)):
+            graph.load(module)
+        _pass_openings(graph)
+        opening_classes = graph.opening_classes
         for condition, reason in self.NOT_A_ROUTE.items():
             found = shape.fullmatch(condition[1]) if condition[0] == "call" else None
             kind = None
@@ -3358,14 +3546,17 @@ class TestEveryRouteEntryConditionIsARoute:
                     owner, leaf = owned
                     graph.load(owner)
                     node = graph.classes.get(owner, {}).get(leaf)
-                    if method is None and node is not None:
+                    if method is None and node is not None and owned in opening_classes:
+                        kind = "opening class"
+                    elif method is None and node is not None:
                         kind = "build"
                         (builds if fields_only(node) else wrong.setdefault("not fields only", set())).add(condition)
                     elif method is not None and compiled_literal(owner, leaf):
                         kind = "pattern"
                         patterns.add(condition)
             says = (
-                "build" if reason == "builds a record class (fields only)"
+                "opening class" if reason == "a class a pass opening builds; the census reads every method it defines"
+                else "build" if reason == "builds a record class (fields only)"
                 else "pattern" if reason == "a method of a compiled literal pattern"
                 else None
             )
@@ -3377,8 +3568,9 @@ class TestEveryRouteEntryConditionIsARoute:
     def test_each_class_reason_states_the_class_it_names(self):
         """Each NOT_A_ROUTE reason for a class is the text computed from the
         class: for a name used in an annotation, its module, whether it is a
-        NamedTuple, a @dataclass, an Enum or a plain class, and whether its
-        body defines a method; for a class statement on a project base, that
+        NamedTuple, a @dataclass, an Enum, a plain class or a class whose
+        every base is from outside the project (such as Exception), and
+        whether its body defines a method; for a class statement on a project base, that
         the base and every project class it derives from define no
         `__init_subclass__` or `__class_getitem__` and name no metaclass; for
         a class of its own module used as a value, its form as for an
@@ -3406,11 +3598,18 @@ class TestEveryRouteEntryConditionIsARoute:
             the arm does not read."""
             bases = [ast.unparse(base) for base in node.bases]
             decorators = [ast.unparse(decorator) for decorator in node.decorator_list]
+            outside = all(  # every base is a name from outside the project, such as Exception
+                isinstance(base, ast.Name) and graph.project_name(base.id, owner) is None
+                or isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+                and graph.project_name(base.value.id, owner) is None
+                for base in node.bases
+            )
             form = (
                 "NamedTuple " if bases in (["NamedTuple"], ["typing.NamedTuple"]) and not decorators
                 else "Enum " if bases in (["Enum"], ["enum.Enum"]) and not decorators
                 else "@dataclass " if decorators in (["dataclass"], ["dataclasses.dataclass"]) and not bases
                 else "" if not bases and not decorators
+                else f"{' and '.join(bases)}-based " if outside and not decorators
                 else None
             )
             if form is None or node.keywords:
