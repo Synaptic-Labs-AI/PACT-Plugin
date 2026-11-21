@@ -199,16 +199,16 @@ def check_inbox_grace(
     deadline = monotonic() + GRACE_SECONDS - age
     while monotonic() < deadline:
         try:
-            content = state_file.read_text(
+            inbox_json = state_file.read_text(
                 inbox_path, root=teams_root, max_bytes=INBOX_MAX_BYTES
             )
         except (OSError, ValueError):
             return None
         # Invalid UTF-8 is replaced by state_file; decoded replacement is not evidence.
-        if "�" in content:
+        if "�" in inbox_json:
             return None
         try:
-            messages = json.loads(content)
+            messages = json.loads(inbox_json)
         except json.JSONDecodeError:
             pass
         else:
