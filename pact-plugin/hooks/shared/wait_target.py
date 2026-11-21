@@ -35,10 +35,9 @@ Public surface:
 from __future__ import annotations
 
 import json
-import re
 from typing import Any, Callable
 
-from shared.task_utils import task_dir_for
+from shared.task_utils import sanitize_task_id, task_dir_for
 from shared.paths import get_claude_config_dir
 
 
@@ -139,7 +138,7 @@ def evaluate_target(
         return EVAL_UNKNOWN_PREDICATE
     if not isinstance(task_id, str) or not task_id:
         return EVAL_TARGET_MISSING
-    sanitized = re.sub(r"[/\\]|\.\.", "", task_id)
+    sanitized = sanitize_task_id(task_id)
     if not sanitized:
         return EVAL_TARGET_MISSING
     base = tasks_base_dir if tasks_base_dir else str(get_claude_config_dir() / "tasks")

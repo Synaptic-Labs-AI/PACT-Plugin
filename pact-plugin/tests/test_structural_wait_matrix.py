@@ -214,13 +214,16 @@ def test_advisory_message_pinned_verbatim():
     0/3/4 exit contract, the duplicate fast-exit reassurance), so its
     wording is pinned the way the outlet reason is: an edit must be a
     conscious pin update, never a silent drift. Built around the live
-    watcher path so only WORDING drifts redden it."""
+    watcher path so only WORDING drifts redden it. The path renders
+    UNQUOTED here: cold round 11 moved the emission to shlex.quote, which
+    is a no-op on this special-char-free install path (a spaced install
+    path renders safely quoted instead)."""
     expected = (
         "PACT task_lifecycle_gate: teachback accepted — you are about to "
         "wait on a teammate deliverable. Arm the structural wait watcher "
         "BEFORE you end this turn, with ONE `Bash` call (`run_in_background: "
         "true`):\n"
-        f'python3 "{tlg._WAIT_WATCHER_PATH}" --team team-x '
+        f"python3 {tlg._WAIT_WATCHER_PATH} --team team-x "
         "--task 12 --predicate handoff --deadline 1800\n"
         "Its completion notification re-invokes you: exit 0 deliverable "
         "landed, 3 deadline expired with it absent, 4 could not watch at "

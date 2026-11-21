@@ -126,8 +126,14 @@ class TestValidatorFires:
 class TestValidatorStaysSilent:
     def test_silent_on_the_repos_own_valid_fixture(self):
         """VALID_HANDOFF carries the five and NOT reasoning_chain. If this ever
-        fires, the required set has drifted back to six."""
-        assert validate_handoff_schema(VALID_HANDOFF) is None
+        fires, the required set has drifted back to six. The fixture's
+        list-typed `produced` is overridden to a string here: cold round 10
+        added the produced type gate (the watcher reads a list-typed
+        `produced` as ABSENT and burns its deadline), and the fixture itself
+        stays list-typed because five modules pin a content hash built from
+        it."""
+        handoff = dict(VALID_HANDOFF, produced="src/auth.ts")
+        assert validate_handoff_schema(handoff) is None
 
     def test_silent_when_reasoning_chain_absent(self):
         """CONSTRUCTS the absence, rather than naming a fixture that already
@@ -139,24 +145,52 @@ class TestValidatorStaysSilent:
         The earlier form passed dict(VALID_HANDOFF), a plain copy of a fixture
         already missing reasoning_chain, which made it an exact duplicate of
         test_silent_on_the_repos_own_valid_fixture: measured across 29
-        mutations, no mutant separated the two.
+        mutations, no mutant separated the two. Values are strings (not the
+        older ["x"] lists): cold round 10 added the produced type gate, and
+        list values would fire it for a reason this test does not own.
         """
-        handoff = {f: ["x"] for f in HANDOFF_CANONICAL_FIELDS}
+        handoff = {f: "x" for f in HANDOFF_CANONICAL_FIELDS}
         del handoff["reasoning_chain"]
         assert validate_handoff_schema(handoff) is None
 
+    def test_non_string_produced_fires_naming_the_watcher_cost(self):
+        """TEETH for the produced type gate (cold round 10): a handoff whose
+        `produced` is a LIST — the template-shaped failure the array
+        examples taught — now FAILS validation with a reason naming the
+        watcher cost. Red on the pre-fix presence-only validator."""
+        handoff = dict(VALID_HANDOFF, produced=["src/auth.ts"])
+        problem = validate_handoff_schema(handoff)
+        assert problem is not None
+        assert "produced" in problem
+        assert "must be a string" in problem
+        assert "ABSENT" in problem
+
     def test_silent_on_extra_keys(self):
-        handoff = dict(VALID_HANDOFF, memory_saved=["m1"], findings=["f1"])
+        # produced overridden to a string: cold round 10's type gate fires
+        # on the shared fixture's list-typed produced, and extra-keys
+        # silence is the property this test owns.
+        handoff = dict(
+            VALID_HANDOFF, produced="src/auth.ts",
+            memory_saved=["m1"], findings=["f1"],
+        )
         assert validate_handoff_schema(handoff) is None
 
     def test_silent_on_present_but_empty_values(self):
         """Emptiness is the norm, not a defect — the templates sanction
-        'No areas of uncertainty flagged' explicitly."""
+        'No areas of uncertainty flagged' explicitly. The produced type
+        gate (cold round 10) narrows this for ONE field: `produced` must
+        be a string, so its present-but-empty shape is "" — still a
+        string, still silent. The other fields stay [] (empty is
+        sanctioned)."""
         handoff = {f: [] for f in HANDOFF_REQUIRED_FIELDS}
+        handoff["produced"] = ""
         assert validate_handoff_schema(handoff) is None
 
     def test_silent_on_a_fully_canonical_handoff(self):
-        handoff = {f: ["x"] for f in HANDOFF_CANONICAL_FIELDS}
+        # Values are strings: cold round 10's produced type gate fires on
+        # list values, and this test owns full-canonical silence, not the
+        # value-type question.
+        handoff = {f: "x" for f in HANDOFF_CANONICAL_FIELDS}
         assert validate_handoff_schema(handoff) is None
 
 

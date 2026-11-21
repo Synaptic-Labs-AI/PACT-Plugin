@@ -619,6 +619,19 @@ def fold_team_name(team_name: object) -> str:
     return team_name.strip().lower() if isinstance(team_name, str) else ""
 
 
+def sanitize_task_id(task_id: str) -> str:
+    """Strip path machinery from a task id BEFORE any join: removes ``/``
+    and ``\\`` separators and any ``..`` segments, leaving a
+    single-component name ("" when the id was only machinery).
+
+    The ONE sanitizer for task-id joins — ``read_task_json`` and the
+    watcher's ``shared.wait_target`` both delegate here; a byte-identical
+    inline copy previously lived in each. The strengthened traversal pin
+    (seeded files planted exactly where an escaped join would land)
+    proves the delegation equivalent."""
+    return re.sub(r'[/\\]|\.\.', '', task_id)
+
+
 def read_task_json(
     task_id: str,
     team_name: str | None,
@@ -649,7 +662,7 @@ def read_task_json(
     if not task_id:
         return {}
 
-    task_id = re.sub(r'[/\\]|\.\.', '', task_id)
+    task_id = sanitize_task_id(task_id)
     if not task_id:
         return {}
 

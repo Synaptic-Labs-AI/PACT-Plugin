@@ -1440,7 +1440,8 @@ def _wait_arm_advisory(
     shared/wait_target.py registry entry, so re-keying the watcher is a
     command-text change, never schema surgery."""
     command = (
-        f'python3 "{_WAIT_WATCHER_PATH}" --team {shlex.quote(team_name)} '
+        f"python3 {shlex.quote(_WAIT_WATCHER_PATH)} "
+        f"--team {shlex.quote(team_name)} "
         f"--task {shlex.quote(task_id)} --predicate {predicate} --deadline 1800"
     )
     message = (
