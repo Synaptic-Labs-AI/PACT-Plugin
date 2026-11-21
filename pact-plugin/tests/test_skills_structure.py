@@ -689,8 +689,9 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     loads as instruction re-teaches the retired flag wherever it
     appears. The repo-root CHANGELOG's retirement note legitimately
     names the flag and stays out of scope. Backslash-escaped separators
-    (underscore, hyphen, star) are unescaped, separator-only numeric
-    character references are decoded (any other entity stays literal),
+    (underscore, hyphen, star, backtick) are unescaped, separator-only
+    numeric character references are decoded (any other entity stays
+    literal),
     Markdown delimiters are removed and whitespace is collapsed before
     the case-insensitive match, covering markup wrapping, inline
     markup, line wrapping, and spelling variants (memory_saved,
@@ -744,6 +745,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         r"memory\-saved",
         r"memory\*saved",
         r"memory\*\*saved",
+        "memory\\`saved",
         "memory&#95;saved",
         "memory&#x2d;saved",
         "memory&#32;saved",
@@ -795,6 +797,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         message = str(exc_info.value)
         assert "pact-plugin/skills/GUIDE.MD" in message
         assert "pact-plugin/agents/NOTES.markdown" in message
+        assert "The agent memory saved us hours." in message
 
     @pytest.mark.parametrize("surface", SURFACE_FILES)
     @pytest.mark.parametrize("form", PROHIBITED_FORMS)
@@ -916,7 +919,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
                 re.sub(
                     r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);",
                     _separator_entity,
-                    re.sub(r"\\([_*-])", r"\1", text),
+                    re.sub(r"\\([_*`-])", r"\1", text),
                 )
                 .replace("*", "")
                 .replace("`", "")
@@ -931,9 +934,11 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
                 f"re-teach the retired memory_saved flag. The flag was removed "
                 f"in v4.8.36 (zero code readers, unenforced — a task could "
                 f"attest a save no mechanism verified); reintroducing the token "
-                f"in an LLM-loaded surface revives a write-only signal. Update "
-                f"this pin deliberately if the flag ever returns with an "
-                f"enforcer."
+                f"in an LLM-loaded surface revives a write-only signal. "
+                f"Innocent prose is caught too: any 'memory saved'-shaped "
+                f"phrase trips the match (e.g. 'The agent memory saved us "
+                f"hours.') — reword such prose, or update this pin "
+                f"deliberately if the flag ever returns with an enforcer."
             )
         if undecodable:
             diagnostics.append(
