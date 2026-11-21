@@ -18,6 +18,23 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.36: retire the memory_saved flag
+
+### Summary
+
+For a plugin user, one instruction changes: teammates are no longer told to set a `memory_saved` flag in task metadata before completing, so they intentionally stop writing that retired metadata. No runtime or hook code path behaves differently — the flag had zero code readers.
+
+### What landed
+
+- The "Confirm Memory Saved" step is deleted from the pact-agent-teams skill's Before Completing checklist. The flag was self-reported and unenforced: nothing verified a save, and the measured incident behind the change found five tasks flagged true with no `PACT-prompt` pact-memory records created during 07–16 UTC on 2026-11-10. The step was the list's last item; the surviving item was unnumbered so the checklist does not read as having lost a step; the save-discipline prose is untouched — domain learnings still go to agent memory, institutional knowledge still goes in the HANDOFF.
+- The agent-handoff emitter's docstring drops the line documenting that no hook enforces the flag; the flag no longer exists, so the caveat had no referent. No code changes.
+- Two validation-silence tests swap their example extra key to a neutral name; one also drops a comment that misdescribed the old key as a real secretary field. The property under test — extra keys in a HANDOFF stay silent — is unchanged and still positively asserted.
+- A regression pin scans every tracked Markdown file across the six LLM-loaded instruction surfaces — `skills/`, `agents/`, `commands/`, `protocols/`, `reference/`, and `templates/` — for case-insensitive `memory_saved` spelling variants, including repeated separators, separators adjacent to whitespace, Markdown backslash-escaped separators (underscore, hyphen, star, and backtick), numeric character references of the separator characters (`&#95;`-style, decimal or hex), named separator entities (`&lowbar;`-style), and files carrying `.md`, `.markdown`, or `.MD` extensions, and reports offending and non-UTF-8 files together when both occur. Real-temporary-Git self-tests exercise every prohibited form on each surface and verify that non-UTF-8 and mixed failures name every offending file. A known-member control — one per surface, plus the nested-recursion member — fails the real-tree run loudly if the tracked-file population ever drops any known member. Malformed numeric references never match the entity pattern at all; over-long and over-range references stay literal in the decoder instead of raising. The root CHANGELOG's historical retirement note is outside that population.
+
+### Why
+
+A signal nothing reads and nothing enforces is not a signal: it asked agents to attest a save no mechanism could verify, against a referent (the agent's own memory directory) with no task-scoped trace. The durable record of banked HANDOFFs already exists downstream — the `agent_handoff` journal events at lead acceptance and the secretary's harvest ledger — so the flag retired rather than gained an enforcer.
+
 ## v4.8.35: find order-dependent tests and isolate the state tests shared
 
 ### Summary
