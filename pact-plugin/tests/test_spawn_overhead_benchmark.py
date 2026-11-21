@@ -167,8 +167,7 @@ class TestSpawnOverheadRegression:
           - peer_inject.get_peer_context() output (additionalContext
             injected at SubagentStart — the routing prelude + peer list +
             plugin banner + teachback reminder + completion-authority
-            note (including crossed-wake no-echo discipline) + charter
-            cross-ref)
+            note + charter cross-ref)
           - The agent body file (sentinel teammate as representative)
 
         Not measured (by design): lazy-loaded content reachable only via

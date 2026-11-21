@@ -18,21 +18,21 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
-## v4.8.36: reduce crossed-wake acknowledgements and narration
+## v4.8.36: silence crossed-wake lead narration
 
 ### Summary
 
-Teammate and orchestrator instruction prose now separates routine crossed-wake housekeeping from actionable communication. After the required fresh task-file read, teammate instructions define durable state as the complete reply for an already-satisfied directive, a wake with no new work, or an unchanged wait, with no message, assistant text, closing summary, or further tool call. Leads keep routine straggler handling, durable reads, and redundant confirms out of the user channel. No hook, task-state, acceptance, liveness, protocol, or platform behavior changes.
+Orchestrator instruction prose now forbids routine crossed-wake housekeeping in the user channel while preserving durable reads, one required operational confirm for an unresolved crossing, milestone reporting, and genuine-stall escalation. Two teammate-silence instruction revisions were delivered and understood in controlled probes but still failed to prevent tool calls or final text, so they and their dedicated tests are withdrawn. The strict teammate zero-final-text objective remains unmet; the related PR uses `Refs #1197`, not `Closes #1197`, and no teammate-output or platform-turn reduction is claimed.
 
 ### What landed
 
-- The existing shared teammate completion reminder now requires a fresh task-file read after an inbound directive or wake. For an already-satisfied directive, a wake with no new work, or only an unchanged `intentional_wait`, durable state is the complete reply: end silently after the read with no `SendMessage`, assistant text, closing summary, or further tool call. No resolving or `boundary-drain` message is owed merely for that no-op, and a denied filler call gets no report, retry, or replacement. Necessary reconciliation folds into `boundary-drain` only when another protocol-boundary message is already required. New work, blockers, corrections, questions, divergent or actionable state, and every otherwise-required resolving message still require a response. The existing peer-context builder delivers this instruction to in-process teammates and to separate-process teammates at startup and after compaction.
 - The orchestrator's crossed-wake rule now forbids user-facing straggler acknowledgements and narration of the durable read and any required redundant confirm. The durable read, exactly one operational confirm for an unresolved post-directive wait, no action for a pre-directive straggler, milestone reporting, and evidence-based genuine-stall escalation remain unchanged under both teammate modes.
-- Focused composition, negative-role, dark-fallback, clause-mutation, wake-ordering, and spawn-byte controls cover both instruction changes. The spawn total remains strictly below the unchanged 10,000-byte ceiling, and the separate-process subprocess controls prove delivery rather than live model behavior.
+- The shared teammate peer-context builder and its three dedicated C-pin modules are restored to `main`. No new teammate no-echo instruction remains in this change, and existing teammate composition, role, configuration, and protocol behavior stay unchanged.
+- The spawn benchmark retains its generic oversized-completion-note mutation, proving that the shared completion note remains inside the measured spawn budget independently of the withdrawn C instruction. Focused orchestrator, restored peer-context, wake-ordering, and spawn-byte controls cover the final B-only surface. The spawn total remains strictly below the unchanged 10,000-byte ceiling.
 
 ### Why
 
-Routine acknowledgements and housekeeping narration add crossed-wake noise without advancing the work. Keeping those messages conditional preserves required acceptance and stall-recovery communication while leaving platform-generated idle notifications outside the claimed reduction.
+Routine lead housekeeping narration adds crossed-wake noise without advancing the work. Keeping that narration out of the user channel preserves required acceptance and stall-recovery communication. Withdrawing C avoids shipping teammate instructions that two live probes showed did not enforce their intended outcome; available PACT hooks cannot retract assistant text after emission. Platform-generated idle notifications remain outside the claimed reduction.
 
 ## v4.8.35: find order-dependent tests and isolate the state tests shared
 

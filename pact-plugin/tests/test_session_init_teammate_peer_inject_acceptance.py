@@ -102,54 +102,6 @@ _MEMBERS = [
 _ORCH_MARKER = "YOUR PACT ROLE: orchestrator"
 _TEAMMATE_MARKER = "YOUR PACT ROLE: teammate"
 _PEER_LIST_PREFIX = "Active teammates on your team"
-_CROSSED_WAKE_RULE = (
-    "On an inbound directive or wake, fresh-read the referenced task file. If "
-    "the directive is already satisfied, the wake has no new work, or only an "
-    "unchanged `intentional_wait` remains, durable state is the complete reply: "
-    "end silently after the read with no `SendMessage`, assistant text, closing "
-    "summary, or further tool call. No resolving or `boundary-drain` message is "
-    "owed merely for that no-op. A denied filler call is not a correction or "
-    "blocker; do not report, retry, or replace it. Fold necessary reconciliation "
-    "into `boundary-drain` only when another protocol-boundary message is "
-    "already required. Still do new work and report blockers, corrections, "
-    "questions, divergent or actionable state, and every otherwise-required "
-    "resolving message."
-)
-_CROSSED_WAKE_CLAUSES = [
-    (
-        "R1",
-        "On an inbound directive or wake, fresh-read the referenced task file.",
-    ),
-    (
-        "R2",
-        "If the directive is already satisfied, the wake has no new work, or "
-        "only an unchanged `intentional_wait` remains, durable state is the "
-        "complete reply:",
-    ),
-    ("R3-sendmessage", "end silently after the read with no `SendMessage`,"),
-    ("R3-text", "assistant text, closing summary,"),
-    ("R3-tool", "or further tool call."),
-    (
-        "R4",
-        "No resolving or `boundary-drain` message is owed merely for that no-op.",
-    ),
-    (
-        "R5",
-        "A denied filler call is not a correction or blocker; do not report, "
-        "retry, or replace it.",
-    ),
-    (
-        "R6",
-        "Fold necessary reconciliation into `boundary-drain` only when another "
-        "protocol-boundary message is already required.",
-    ),
-    (
-        "R7",
-        "Still do new work and report blockers, corrections, questions, "
-        "divergent or actionable state, and every otherwise-required resolving "
-        "message.",
-    ),
-]
 
 
 def _run_real_session_init(
@@ -238,11 +190,6 @@ class TestTeammateReceivesPeerBodyViaRealResolution:
         assert "pact-communication-charter.md" in additional
         assert "TEACHBACK TIMING" in additional
         assert "COMPLETION AUTHORITY" in additional
-        for clause_id, clause in _CROSSED_WAKE_CLAUSES:
-            assert clause in additional, (
-                f"{clause_id}: missing from real startup SessionStart output"
-            )
-        assert additional.count(_CROSSED_WAKE_RULE) == 1
         # Mis-roling fix: a teammate must NOT be told it is the orchestrator,
         # and session_init does not re-claim the teammate role marker.
         assert _ORCH_MARKER not in additional
@@ -275,26 +222,6 @@ class TestTeammateReceivesPeerBodyViaRealResolution:
         assert _TEAMMATE_MARKER not in additional
 
 
-class TestCompactReinjectsCrossedWakeDiscipline:
-    """A real compact SessionStart must re-deliver every clause once."""
-
-    @pytest.mark.parametrize(
-        "clause_id,clause",
-        _CROSSED_WAKE_CLAUSES,
-        ids=[clause_id for clause_id, _ in _CROSSED_WAKE_CLAUSES],
-    )
-    def test_compact_output_contains_clause(self, clause_id, clause, tmp_path):
-        frame = _teammate_frame("pact-devops-engineer")
-        frame["source"] = "compact"
-        additional, _ = _run_real_session_init(frame, tmp_path)
-        assert clause in additional, (
-            f"{clause_id}: missing from real compact SessionStart output"
-        )
-        assert additional.count(_CROSSED_WAKE_RULE) == 1
-        assert _ORCH_MARKER not in additional
-        assert _TEAMMATE_MARKER not in additional
-
-
 class TestFallbackGoesDarkWithoutResolution:
     """Built-in non-vacuity: when real resolution does NOT find the lead team,
     the generate_team_name fallback looks at the derived name (no config there)
@@ -306,7 +233,6 @@ class TestFallbackGoesDarkWithoutResolution:
             _teammate_frame("pact-devops-engineer"), tmp_path, registry_session_id=None
         )
         assert _PEER_LIST_PREFIX not in additional
-        assert _CROSSED_WAKE_RULE not in additional
         assert _ORCH_MARKER not in additional
 
     def test_non_matching_session_id_falls_back_to_no_body(self, tmp_path):
@@ -317,7 +243,6 @@ class TestFallbackGoesDarkWithoutResolution:
             registry_session_id="some-other-session-id-0000",
         )
         assert _PEER_LIST_PREFIX not in additional
-        assert _CROSSED_WAKE_RULE not in additional
         assert _ORCH_MARKER not in additional
 
     def test_name_not_in_team_members_falls_back_to_no_body(self, tmp_path):
@@ -328,7 +253,6 @@ class TestFallbackGoesDarkWithoutResolution:
             registry_value=f"mallory@{_LEAD_TEAM}",
         )
         assert _PEER_LIST_PREFIX not in additional
-        assert _CROSSED_WAKE_RULE not in additional
         assert _ORCH_MARKER not in additional
 
 
@@ -378,5 +302,4 @@ class TestFailSafeRealComposition:
             _teammate_frame("pact-devops-engineer"), tmp_path, write_team=False
         )
         assert _PEER_LIST_PREFIX not in additional
-        assert _CROSSED_WAKE_RULE not in additional
         assert _ORCH_MARKER not in additional
