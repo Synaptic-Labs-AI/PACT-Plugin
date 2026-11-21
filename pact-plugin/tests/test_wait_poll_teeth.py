@@ -24,6 +24,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 import pact_wait
 
 
@@ -104,3 +106,48 @@ def test_final_sleep_is_truncated_to_the_remaining_deadline(tmp_path, monkeypatc
     assert recorder.requested, "the watch never slept — poll loop broken"
     assert all(d <= 0.3 for d in recorder.requested)
     assert recorder.requested[0] > 0.25
+
+
+# --- S1-test-side (review cycle 1): the live-probed immortal-watcher class --
+#
+# A non-finite --deadline armed a watcher that can never emit EXPIRED (nan
+# fails every remaining <= 0 comparison; inf never runs out) — and a
+# watcher is carve-out-exempt, so the lead idled with a scheduled wake that
+# never fires. Measured live on the real CLI pre-fix (2026-11-21): nan and
+# inf both hung until externally killed while a --deadline 1 control
+# exited 3. f30c7d95 rejects non-finite as a usage error; these arms pin
+# that END-TO-END through the real main() entrypoint — the invocation
+# shape the probe hung on. The _positive_float unit arms live in
+# test_pact_wait.py (fixer lane); the literal-spelling set there does not
+# include the overflow-parse route below.
+
+@pytest.mark.parametrize("text", ["nan", "inf", "1e999"])
+def test_non_finite_deadline_exits_2_before_any_watching(text):
+    """Through the real main(), a non-finite deadline is usage error exit 2
+    raised by the argument parser BEFORE the poll loop starts. `1e999` is
+    the typo route: it parses to inf without spelling anything non-finite,
+    so a rejection keyed on literal spellings instead of isfinite would
+    re-open the immortal watcher through exactly this input. Regression
+    direction: with the rejection removed the arm reds, never hangs — the
+    target below is a team dir that does not exist, so even an unfixed
+    parser returns TERMINAL (4) immediately and the SystemExit assertion
+    fails DID-NOT-RAISE."""
+    with pytest.raises(SystemExit) as excinfo:
+        pact_wait.main([
+            "--team", "no-such-pollteeth-team", "--task", "7",
+            "--predicate", "handoff",
+            "--deadline", text, "--tasks-base-dir", "/tmp",
+        ])
+    assert excinfo.value.code == 2
+
+
+def test_finite_deadline_control_still_runs_the_watch_contract(tmp_path):
+    """Finite control for the S1 rejection: a sane deadline parses, the
+    watch RUNS, and the exit comes through the watch contract (TERMINAL on
+    the missing target) — the rejection must not over-block finite
+    values."""
+    rc = pact_wait.main([
+        "--team", "team-a", "--task", "7", "--predicate", "handoff",
+        "--deadline", "1", "--tasks-base-dir", str(tmp_path),
+    ])
+    assert rc == pact_wait.EXIT_TERMINAL
