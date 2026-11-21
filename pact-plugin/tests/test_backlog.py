@@ -4882,8 +4882,14 @@ _COMMANDS_DIR = HOOKS_DIR.parent / "commands"
 def _tracked_command_files() -> list[Path]:
     repo_root = _COMMANDS_DIR.parent.parent
     relative = _COMMANDS_DIR.relative_to(repo_root).as_posix()
-    return sorted(path for path in _tracked_files(repo_root, relative)
-                  if path.suffix == ".md")
+    files = sorted(path for path in _tracked_files(repo_root, relative)
+                   if path.suffix == ".md")
+    # The listing recurses, and its callers key each file by its name and read
+    # it back as `_COMMANDS_DIR / name`, so a command file in a subdirectory
+    # would be read from the wrong path; it fails here instead.
+    nested = [path.relative_to(_COMMANDS_DIR).as_posix() for path in files if path.parent != _COMMANDS_DIR]
+    assert nested == [], f"command files below commands/, which the name-keyed readers cannot read: {nested}"
+    return files
 # A WRITE site is an invocation of the module with a mutating verb. `show` and
 # a bare `/PACT:next` mention are READS and are deliberately not members: the
 # architect's ruling is about where something FINISHED, not where the backlog
@@ -5106,6 +5112,27 @@ def test_tracked_command_population_ignores_untracked_sites(tmp_path, monkeypatc
         assert _write_carriers() == {"known.md"}
     finally:
         stray.unlink()
+
+
+def test_a_command_file_in_a_subdirectory_fails_the_tracked_listing(tmp_path, monkeypatch):
+    """Row for `_tracked_command_files`: a tracked command file in a
+    subdirectory of commands/ fails the listing, instead of being keyed by
+    its bare name and read from commands/ itself."""
+    repo = tmp_path / "repo"
+    commands = repo / "pact-plugin" / "commands"
+    (commands / "sub").mkdir(parents=True)
+    (commands / "known.md").write_text("python3 scripts/backlog.py show\n", encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(repo)], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(repo), "add", "--", "pact-plugin"], check=True, capture_output=True)
+    monkeypatch.setitem(globals(), "_COMMANDS_DIR", commands)
+    assert _tracked_command_files() == [commands / "known.md"]
+
+    (commands / "sub" / "nested.md").write_text("python3 scripts/backlog.py show\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", "--", "pact-plugin"], check=True, capture_output=True)
+    with pytest.raises(AssertionError, match=r"command files below commands/.*\['sub/nested.md'\]"):
+        _tracked_command_files()
+
+
 # The decision wrap-up's report must precede, quoted as it appears in the file.
 _SESSION_DECISION = "Use `AskUserQuestion` with these exact options:"
 # The clause that makes section 8's missing write-site enumeration safe.

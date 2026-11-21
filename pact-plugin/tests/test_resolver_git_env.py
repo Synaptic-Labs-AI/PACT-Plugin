@@ -448,6 +448,27 @@ def _module_git_calls(source: str):
     return list(seen.values())
 
 
+def _flat_python_files(directory) -> list:
+    """The `*.py` files directly in `directory`, sorted. The scans below list
+    only that level and key each file by its name, so a `.py` file in a
+    subdirectory would go unscanned; it fails here instead."""
+    nested = sorted(path.relative_to(directory).as_posix() for path in directory.rglob("*.py") if path.parent != directory)
+    assert nested == [], f"Python files below {directory.name}/, which the flat scans do not read: {nested}"
+    return sorted(directory.glob("*.py"))
+
+
+def test_a_python_file_in_a_subdirectory_fails_the_flat_listing(tmp_path):
+    """Row for `_flat_python_files`: a top-level module is listed, and a
+    subdirectory holding a `.py` file fails the listing instead of being
+    left out of it."""
+    (tmp_path / "top.py").write_text("", encoding="utf-8")
+    assert _flat_python_files(tmp_path) == [tmp_path / "top.py"]
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "inner.py").write_text("", encoding="utf-8")
+    with pytest.raises(AssertionError, match=r"Python files below .*\['sub/inner.py'\]"):
+        _flat_python_files(tmp_path)
+
+
 def test_every_resolver_git_call_passes_the_location_free_env():
     """Guard arm: every call of a subprocess runner (every public
     subprocess callable that runs a command, `_SUBPROCESS_CALLS`) in every
@@ -474,7 +495,7 @@ def test_every_resolver_git_call_passes_the_location_free_env():
     the environment the partial bound (the partial itself is checked),
     which only adversarial code would write."""
     missing, counts, unread = [], {}, []
-    for path in sorted((_PLUGIN / _SCRIPTS_DIR).glob("*.py")):
+    for path in _flat_python_files(_PLUGIN / _SCRIPTS_DIR):
         source = path.read_text(encoding="utf-8")
         calls = _module_git_calls(source)
         counts[path.name] = len(calls)
@@ -820,7 +841,7 @@ _STATEMENT_TABLES = {"function", "class"}
 
 
 def _scope_sources():
-    for path in sorted((_PLUGIN / _SCRIPTS_DIR).glob("*.py")):
+    for path in _flat_python_files(_PLUGIN / _SCRIPTS_DIR):
         yield f"{_SCRIPTS_DIR}/{path.name}", path.read_text(encoding="utf-8")
     for scanner, shape, source in _parity_cases():
         yield f"parity {scanner} / {shape}", source
