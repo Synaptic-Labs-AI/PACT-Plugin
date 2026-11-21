@@ -2285,6 +2285,56 @@ class TestOneConstructionAsksGitEachQuestionOnce:
         assert (held["common_dirs"] != {}, held["listings"] != {}) == (True, True), held  # control: answers held
         assert (repeats, lost) == ({}, {name: [] for name in held}), calls
 
+    def test_leaving_a_detection_pass_restores_the_memos_it_found(self):
+        """Leaving a detection pass, at the end of its block or by a raise
+        in it, sets each pass memo back to what it held on entry: nothing
+        outside every pass. A pass opened inside another joins it: inside
+        and after it the memos are the outer pass's own. So no answer
+        outlives the outermost pass that asked for it, whatever ran
+        before."""
+        import contextvars
+
+        variables = (
+            memory_api._DETECTION_COMMON_DIRS, memory_api.project_identity.DETECTION_GIT_DIRS,
+            memory_api._DETECTION_ANSWERS, memory_api._DETECTION_LISTINGS,
+        )
+
+        def held():
+            return [var.get() for var in variables]
+
+        def raising_pass():
+            inside = None
+            try:
+                with memory_api.detection_pass():
+                    inside = held()
+                    raise RuntimeError("the block raised")
+            except RuntimeError:
+                pass
+            return inside
+
+        def passes():
+            outside = held()
+            with memory_api.detection_pass():
+                outer = held()
+                with memory_api.detection_pass():
+                    inner = held()
+                after_inner = held()
+                inner_raise = raising_pass()
+                after_inner_raise = held()
+            after_outer = held()
+            raising_pass()
+            return outside, outer, (inner, after_inner, inner_raise, after_inner_raise), after_outer, held()
+
+        # A fresh context, so what earlier code left in the memos cannot
+        # decide this arm.
+        outside, outer, nested, after_outer, after_outer_raise = contextvars.Context().run(passes)
+
+        assert (outside, [type(memo) for memo in outer]) == ([None] * 4, [dict] * 4)  # control
+        assert (
+            [[now is then for now, then in zip(memos, outer)] for memos in nested],
+            after_outer, after_outer_raise,
+        ) == ([[True] * 4] * 4, [None] * 4, [None] * 4)
+
 
 class TestTheGateProseMatchesTheCode:
     """Docstrings and help text state the current admission and rekey rules.

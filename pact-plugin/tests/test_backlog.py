@@ -3171,46 +3171,96 @@ def _git_failing_listing(tmp_path: Path, monkeypatch, failing: int) -> Path:
     return log
 
 
-@pytest.mark.parametrize("failing", [1, 2, 3, 4])
-def test_one_write_decides_the_root_check_once(tmp_path, monkeypatch, failing):
+def _git_failing_one_call(tmp_path, monkeypatch, tag, real_git, path, fail=None, on_call=0) -> Path:
+    """Put first on `path` a `git` that appends each command it runs to the
+    returned log and runs `real_git`, except that it exits 1 on the
+    `on_call`-th run of the command `fail` (its arguments joined by spaces,
+    as the log holds them)."""
+    import os
+    import shlex
+    import stat
+
+    log, count = tmp_path / f"{tag}.log", tmp_path / f"{tag}.count"
+    bin_dir = tmp_path / f"{tag}-bin"
+    bin_dir.mkdir()
+    failing = "" if fail is None else (
+        f'if [ "$*" = {shlex.quote(fail)} ]; then\n'
+        f'  n=$(( $(cat "{count}" 2>/dev/null || echo 0) + 1 )); echo $n > "{count}"\n'
+        f'  [ "$n" = {on_call} ] && exit 1\nfi\n'
+    )
+    (bin_dir / "git").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n{failing}exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    (bin_dir / "git").chmod((bin_dir / "git").stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{path}")
+    return log
+
+
+@pytest.mark.parametrize("on_call", [1, 2], ids=["first call fails", "second call fails"])
+def test_one_write_decides_the_root_check_once(tmp_path, monkeypatch, on_call):
     """One backlog write asks git each question once, so every redirect
     check in it (the memory skill's root guard and root finder, the
-    backlog's root and its refusal) reads the same answers and gives the
-    same cause: a `git worktree list` that fails on its first call refuses the
-    write with the guard's cause, and one that would fail on a later call is
-    never asked again, so the write succeeds and no reader saw a failure.
+    backlog's root and its refusal) reads the same answers and gives one
+    cause. The questions are every command a clean write from a linked
+    worktree runs, read from that write's own log. Each one, failing on its
+    first call, is asked once and every check gives one cause, and a
+    `git worktree list` failing so refuses the write with the guard's cause.
+    Each one, failing on its second call, is never asked again, so the write
+    is the clean write.
 
-    Real repos and git; a `git` that fails the given `worktree list` call
+    Real repos and git; a `git` that fails the given command's given call
     and logs every command."""
+    import os
+    import shutil
+
     main = _repo(tmp_path / "main").resolve()
     subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
                    check=True, capture_output=True)
-    wt = (tmp_path / "wt").resolve()
-    log = _git_failing_listing(tmp_path, monkeypatch, failing)
-    _project_dir_is(monkeypatch, wt)
-    monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+    _project_dir_is(monkeypatch, (tmp_path / "wt").resolve())
+    real_git, path = shutil.which("git"), os.environ["PATH"]
     memory_api = backlog._memory_api()
     check = memory_api._worktree_redirect_cause
-    causes = []
 
-    def recording(*args, **kwargs):
-        causes.append(check(*args, **kwargs))
-        return causes[-1]
+    def write(tag, fail=None):
+        log = _git_failing_one_call(tmp_path, monkeypatch, tag, real_git, path, fail, on_call)
+        monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+        causes = []
 
-    monkeypatch.setattr(memory_api, "_worktree_redirect_cause", recording)
-    store = tmp_path / "store"
-    store.mkdir()
+        def recording(*args, **kwargs):
+            causes.append(check(*args, **kwargs))
+            return causes[-1]
 
-    code = backlog.main(["--backlog-dir", str(store), "add", "x"])
+        monkeypatch.setattr(memory_api, "_worktree_redirect_cause", recording)
+        store = tmp_path / f"{tag}-store"
+        store.mkdir()
+        code = backlog.main(["--backlog-dir", str(store), "add", "x"])
+        return code, log.read_text(encoding="utf-8").splitlines(), causes
 
-    commands = log.read_text(encoding="utf-8").splitlines()
-    listings = [c for c in commands if " worktree list " in f" {c} "]
-    expected = ({memory_api.REDIRECT_UNLISTABLE}, backlog._EXIT_REFUSED) if failing == 1 \
-        else ({None}, backlog._EXIT_OK)
-    repeated = sorted({c for c in commands if commands.count(c) > 1})
-    # Each question asked once, several checks read the answers, and they agree.
-    assert (len(listings), repeated, len(causes) >= 2, set(causes), code) == (1, [], True, *expected), (
-        causes, commands)
+    clean_code, clean, clean_causes = write("clean")
+    questions = list(dict.fromkeys(clean))
+    # Control: the questions read from the log hold the four the checks rest on.
+    assert [any(f" {word}" in f" {q}" for q in questions) for word in (
+        "rev-parse --git-common-dir", "rev-parse --git-dir", "rev-parse --show-toplevel", "worktree list",
+    )] == [True] * 4, questions
+
+    # The clean write asks each question once and several checks read the answers.
+    outcomes = {"clean write": (sorted({c for c in clean if clean.count(c) > 1}), len(clean_causes) >= 2,
+                                clean_code, set(clean_causes))}
+    expected = {"clean write": ([], True, backlog._EXIT_OK, {None})}
+    for index, question in enumerate(questions):
+        code, commands, causes = write(f"fail{index}", question)
+        repeated = sorted({c for c in commands if commands.count(c) > 1})
+        if on_call == 2:
+            outcomes[question] = (repeated, commands == clean, code, set(causes))
+            expected[question] = ([], True, backlog._EXIT_OK, {None})
+        else:
+            listing = " worktree list " in f" {question} "
+            outcomes[question] = (question in commands, repeated, len(set(causes)) <= 1,
+                                  (code, set(causes)) if listing else None)
+            expected[question] = (True, [], True,
+                                  (backlog._EXIT_REFUSED, {memory_api.REDIRECT_UNLISTABLE}) if listing else None)
+    assert outcomes == expected
 
 
 @pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
