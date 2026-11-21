@@ -2264,7 +2264,7 @@ def _main(args: argparse.Namespace, backlog_dir: Optional[Path], held: _HeldWarn
         path = store_path(backlog_dir)
         if args.command == "repair":
             return _handle_repair(path, args.force)
-        return _handle_write_or_show(args, path)
+        return _handle_write_or_show(args, path, held)
     except BacklogFileError as exc:
         held.replay()
         # THE ADVICE DEPENDS ON THE SUBCLASS, because `repair` REFUSES an
@@ -2299,7 +2299,9 @@ def _handle_repair(path: Path, force: bool = False) -> int:
     return _EXIT_OK
 
 
-def _handle_write_or_show(args: argparse.Namespace, path: Path) -> int:
+def _handle_write_or_show(args: argparse.Namespace, path: Path, held: _HeldWarnings) -> int:
+    """Run `show` or a write. A refusal printed here prints the held
+    decline first (`held.replay`), as a refusal raised to `_main` does."""
     data = load_or_create(path)
     # Schema problems are file-local, so they show even with --no-reconcile.
     schema = [f"schema: {problem}" for problem in validate(data)]
@@ -2328,6 +2330,7 @@ def _handle_write_or_show(args: argparse.Namespace, path: Path) -> int:
     else:
         item = find_item(data, args.item_id)
         if item is None:
+            held.replay()
             if any(i.get("id") == args.item_id for i in _archived(data)):
                 print(
                     f"refused: item {args.item_id!r} is archived. "
@@ -2345,6 +2348,7 @@ def _handle_write_or_show(args: argparse.Namespace, path: Path) -> int:
 
     problems = save(data, path)
     if problems:
+        held.replay()
         print("refused, nothing written:", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)

@@ -3312,6 +3312,51 @@ def test_a_show_that_opens_the_memory_store_asks_git_each_question_once(tmp_path
         causes, commands)
 
 
+def _cli_run(start: Path, store: Path, *argv: str) -> "subprocess.CompletedProcess":
+    """`backlog.py <argv>` run as its own process from `start`, declared as
+    the project directory, as `_cli_write` runs `add`."""
+    import os
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env["CLAUDE_PROJECT_DIR"] = str(start)
+    return subprocess.run(
+        [sys.executable, str(Path(backlog.__file__)), "--backlog-dir", str(store), *argv],
+        env=env, cwd=str(start), capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_every_refused_write_prints_the_decline_before_its_refusal(tmp_path):
+    """A write refused after the backlog file is read (no such item, an
+    archived item, a document `save` refuses) prints the memory skill's
+    decline of the canonical id first, then the refusal, as a refusal
+    raised before the read does. The controls show the same checkout's
+    successful writes print nothing.
+
+    Real repositories, real git, the CLI; a submodule with no origin is the
+    layout whose canonical id the memory skill declines."""
+    start = _named_apart_layout(tmp_path, "submodule with no origin")
+    store = tmp_path / "store"
+    store.mkdir()
+    added = _cli_run(start, store, "add", "x")
+    item = added.stdout.split()[2]
+    done = _cli_run(start, store, "set", item, "--status", "done")
+    archived = _cli_run(start, store, "archive", item)
+    assert [(r.returncode, r.stderr) for r in (added, done, archived)] == [(0, "")] * 3, "control: writes succeed"
+
+    refusals = {
+        "refused: no item with id 'zzzz'": _cli_run(start, store, "set", "zzzz"),
+        f"refused: item {item!r} is archived.": _cli_run(start, store, "set", item),
+        "refused, nothing written:": _cli_run(start, store, "add", "y", "--note", "n" * 501),
+    }
+
+    outcomes = {
+        refusal: (run.returncode, 0 <= run.stderr.find("so no project id was derived") < run.stderr.find(refusal))
+        for refusal, run in refusals.items()
+    }
+    assert outcomes == {refusal: (backlog._EXIT_REFUSED, True) for refusal in refusals}, {
+        refusal: run.stderr for refusal, run in refusals.items()}
+
+
 def test_a_bare_repository_refuses_and_its_linked_worktree_writes(tmp_path):
     """A bare repository is not an umbrella: git answers for it and the
     memory skill declines it, so a write there refuses and nothing is
