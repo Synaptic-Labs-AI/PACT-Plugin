@@ -705,6 +705,12 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     memorySaved, memory-saved, "memory saved"). A tracked file that is
     not valid UTF-8 is named by the pin rather than raising a bare
     decode error.
+
+    WHAT THIS CANNOT CATCH, stated so that a green is read no wider than
+    it is: a narrowed population that retains every known member stays
+    green — the known-member control's guarantee is member presence, not
+    full-population size. That residual is the tracked-file fixture's
+    documented PARTIAL-overlap boundary (tests/fixtures/tracked_files.py).
     """
 
     FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]*saved", re.IGNORECASE)
@@ -717,9 +723,12 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "reference/config.md",
         "templates/environment-model.md",
     )
-    # One tracked file per surface, verified present in the real-tree
-    # population; the real-run control asserts all six so a narrowed
-    # population cannot satisfy the control by keeping one surface alive.
+    # One tracked file per surface, plus the nested-recursion member,
+    # each verified present in the real-tree population; the real-run
+    # control asserts all seven so a narrowed population cannot satisfy
+    # the control by keeping one surface alive, and a regression that
+    # stops nested-directory recursion cannot keep the six flat members
+    # while skills/** files silently leave the scan.
     KNOWN_MEMBERS = (
         "skills/pact-agent-teams/SKILL.md",
         "agents/pact-orchestrator.md",
@@ -727,6 +736,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "protocols/pact-protocols.md",
         "reference/config.md",
         "templates/environment-model.md",
+        "skills/pact-testing-strategies/references/test-pyramid.md",
     )
     PROHIBITED_FORMS = (
         "memory_saved",
@@ -932,6 +942,29 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         )
 
         with pytest.raises(AssertionError, match="narrowed"):
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+
+    def test_control_fires_when_nested_recursion_member_missing(
+            self, tmp_path, monkeypatch):
+        """A narrowed world that retains the six per-surface members but
+        loses the nested-recursion member must fire the control: recursion
+        into nested skill directories is what keeps that file scanned."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        six = [
+            plugin / "skills" / "pact-agent-teams" / "SKILL.md",
+            plugin / "agents" / "pact-orchestrator.md",
+            plugin / "commands" / "orchestrate.md",
+            plugin / "protocols" / "pact-protocols.md",
+            plugin / "reference" / "config.md",
+            plugin / "templates" / "environment-model.md",
+        ]
+        monkeypatch.setitem(
+            globals(), "_instruction_surface_population", lambda: six
+        )
+
+        with pytest.raises(AssertionError, match="test-pyramid"):
             self.test_no_memory_saved_in_any_llm_loaded_surface()
 
     def test_no_memory_saved_in_any_llm_loaded_surface(self):
