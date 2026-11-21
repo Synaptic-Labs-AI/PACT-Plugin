@@ -366,6 +366,7 @@ def _git_dir_answers(directory: Path) -> bool:
             timeout=5,
             text=False,
             env=git_env_without_location(),
+            once_per_pass=True,
         )
     except (OSError, ValueError):
         return False
