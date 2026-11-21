@@ -22,7 +22,7 @@ import pytest
 
 import session_init
 from pin_caps_gate import gate_decision
-from shared import claude_md_markers
+from shared import claude_md_manager, claude_md_markers
 from shared.claude_md_markers import Cause, State, parse
 from shared.session_resume import update_session_info
 from staleness import locate_pinned
@@ -126,8 +126,18 @@ OPENERS = {"t1": ("<pre>", "</pre>"), "t3": ("<?xml version=1.0", "?>"), "t4": (
 MEMORY_COMMENTS = (
     "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->",
     "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. "
-    "Keyed by folder name, so another checkout with the same name shares this section. -->",
+    "Keyed by repository identity (from the repository's override file or its origin remote) when one resolves; by folder name when there is no override file and the origin is absent or a local path, except in a submodule; otherwise, including a broken, redirected or bare .git, the identity declines and nothing is written. -->",
 )
+
+
+def test_the_memory_comments_are_the_shipped_constants():
+    """The two comments above are literal copies of the shipped strings, so the
+    documents built here look like real ones. RED WHEN the shipped comment
+    changes and this copy does not."""
+    assert MEMORY_COMMENTS == (
+        claude_md_manager.RETRIEVED_CONTEXT_COMMENT,
+        claude_md_manager.WORKING_MEMORY_COMMENT,
+    )
 
 
 def _pin(n):

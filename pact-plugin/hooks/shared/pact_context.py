@@ -1572,6 +1572,16 @@ def get_session_dir() -> str:
     return str(_build_session_path(slug, session_id))
 
 
+# The prune ledger: one file per project slug, beside its session folders
+# (`<config root>/pact-sessions/<slug>/PRUNE_LEDGER_NAME`). The session reaper
+# appends one JSON line per session folder it deletes, so the legacy-bucket
+# evidence a session folder carried outlives the folder. The reaper iterates
+# directories only, so it never reaps this file. The writer
+# (`session_end._record_pruned_session`) and the memory store's evidence reader
+# both name the file through this constant.
+PRUNE_LEDGER_NAME = "pruned-sessions.jsonl"
+
+
 def reconstruct_session_dir(project_dir: str, session_id: str) -> str:
     """Reconstruct the absolute session directory from explicit context-file
     fields — the off-lead, frame-independent counterpart to get_session_dir().

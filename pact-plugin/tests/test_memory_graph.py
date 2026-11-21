@@ -122,6 +122,45 @@ class TestTrackFile:
         id2 = track_file(db_conn, "/src/app.py", project_id=None)
         assert id1 == id2
 
+    def test_a_nul_path_is_refused_before_any_write(self, db_conn):
+        """SQLite stores an embedded NUL in TEXT, but no platform accepts it
+        as a path, so a stored row could never be resolved by the identity
+        gate (`realpath` raises) or opened. The write seam must refuse it.
+
+        RED WHEN: `track_file` drops the NUL check — this call returns an id
+        and inserts a row that the gate can only ever treat as unreadable.
+        """
+        from scripts.graph import track_file
+
+        with pytest.raises(ValueError, match="NUL"):
+            track_file(db_conn, "/tmp/x\x00y.py")
+
+        assert db_conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0, (
+            "a refused path still reached the store"
+        )
+
+    def test_a_path_object_carrying_a_nul_is_refused(self, db_conn):
+        """The guard tested `isinstance(path, str)`, so a `pathlib.Path`
+        carrying the NUL passed it and reached the INSERT. The check now runs
+        on the normalised spelling, which every accepted input type produces.
+
+        RED WHEN: the guard type-tests the argument again — this call returns
+        an id and stores an unresolvable row.
+        """
+        from pathlib import Path
+
+        from scripts.graph import track_file
+
+        assert "\x00" in str(Path("/tmp/x\x00y.py")), (
+            "fixture control: the Path spelling must carry the NUL"
+        )
+        with pytest.raises(ValueError, match="NUL"):
+            track_file(db_conn, Path("/tmp/x\x00y.py"))
+
+        assert db_conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0, (
+            "a Path-object path reached the store"
+        )
+
 
 # ---------------------------------------------------------------------------
 # get_file_id
@@ -338,6 +377,29 @@ class TestGetMemoriesForFiles:
         mems = get_memories_for_files(db_conn, ["/src/a.py", "/src/b.py"])
         assert mems == ["mem-1"]
 
+    def test_ids_are_sorted_not_set_ordered(self, db_conn):
+        """The ids accumulate in a set, so returning `list(set)` made the
+        order change with the process hash seed. A caller that truncates then
+        keeps a different subset per run.
+
+        RED WHEN: the return is `list(memory_ids)` — the ids here would have
+        to come out in ascending hash order for this to pass.
+        """
+        from scripts.graph import track_file, link_memory_to_file, get_memories_for_files
+        memory_ids = (
+            "m-delta", "m-alpha", "m-foxtrot", "m-charlie", "m-bravo", "m-echo",
+        )
+        for memory_id in memory_ids:
+            _insert_memory(db_conn, memory_id)
+        file_id = track_file(db_conn, "/src/a.py")
+        for memory_id in memory_ids:
+            link_memory_to_file(db_conn, memory_id, file_id)
+        mems = get_memories_for_files(db_conn, ["/src/a.py"])
+        assert mems == sorted(mems), f"set-ordered result: {mems}"
+        assert mems == [
+            "m-alpha", "m-bravo", "m-charlie", "m-delta", "m-echo", "m-foxtrot",
+        ]
+
 
 # ---------------------------------------------------------------------------
 # add_file_relation
@@ -442,6 +504,23 @@ class TestGetRelatedFiles:
         result = get_related_files(db_conn, "/b.py", max_depth=1)
         assert "/a.py" in result
 
+    def test_paths_are_sorted_not_visit_ordered(self, db_conn):
+        """The BFS walks sets, so visit order changed with the process hash
+        seed and a truncating caller kept a different subset per run.
+
+        RED WHEN: the result is returned as accumulated rather than sorted.
+        """
+        from scripts.graph import add_file_relation, get_related_files
+        add_file_relation(db_conn, "/a.py", "/d.py", "imports")
+        add_file_relation(db_conn, "/a.py", "/b.py", "imports")
+        add_file_relation(db_conn, "/d.py", "/c.py", "imports")
+        add_file_relation(db_conn, "/b.py", "/e.py", "imports")
+        result = get_related_files(db_conn, "/a.py", max_depth=2)
+        assert sorted(result) == ["/b.py", "/c.py", "/d.py", "/e.py"], (
+            f"the traversal did not reach the expected neighbours: {result}"
+        )
+        assert result == sorted(result), f"visit-ordered result: {result}"
+
 
 # ---------------------------------------------------------------------------
 # get_related_files_via_memories
@@ -469,6 +548,47 @@ class TestGetRelatedFilesViaMemories:
         from scripts.graph import track_file, get_related_files_via_memories
         track_file(db_conn, "/src/a.py")
         assert get_related_files_via_memories(db_conn, "/src/a.py") == []
+
+    def test_a_foreign_shared_memory_does_not_link_in_scope_files(self, db_conn):
+        """Confirming the RETURNED file is not enough: the memory that joins
+        the two files is another project's, so the caller cannot read it, and
+        calling the pair "memory-related" invents a relation from a row the
+        scope excludes. A path tracked under both buckets makes the returned
+        file in-scope, which is normal inside a union.
+
+        RED WHEN: the JOIN does not confirm m.project_id — the first assertion
+        then returns ['/src/b.py'].
+        """
+        from scripts.graph import (
+            track_file, link_memory_to_file, get_related_files_via_memories,
+        )
+        _insert_memory(db_conn, "m-scope", project_id="ours")
+        _insert_memory(db_conn, "m-foreign", project_id="theirs")
+        start = track_file(db_conn, "/src/a.py", "ours")
+        other = track_file(db_conn, "/src/b.py", "ours")
+        # The ONLY link between the two in-scope files is a foreign memory.
+        link_memory_to_file(db_conn, "m-foreign", start)
+        link_memory_to_file(db_conn, "m-foreign", other)
+        assert get_related_files_via_memories(
+            db_conn, "/src/a.py", "ours"
+        ) == [], "a memory outside the scope linked two in-scope files"
+        # POSITIVE CONTROL: the same pair, now joined by an in-scope memory.
+        link_memory_to_file(db_conn, "m-scope", start)
+        link_memory_to_file(db_conn, "m-scope", other)
+        assert get_related_files_via_memories(
+            db_conn, "/src/a.py", "ours"
+        ) == ["/src/b.py"], "the in-scope memory's pair disappeared"
+        # `None` keeps `get_file_ids`' meaning at the START: the NULL-project
+        # row, not "no filter". A NULL-project pair still resolves — and,
+        # because neither scope clause is emitted, so does every other file
+        # the same memory links anywhere in the store.
+        null_start = track_file(db_conn, "/src/c.py", None)
+        null_other = track_file(db_conn, "/src/d.py", None)
+        link_memory_to_file(db_conn, "m-scope", null_start)
+        link_memory_to_file(db_conn, "m-scope", null_other)
+        assert get_related_files_via_memories(
+            db_conn, "/src/c.py"
+        ) == ["/src/a.py", "/src/b.py", "/src/d.py"]
 
 
 # ---------------------------------------------------------------------------

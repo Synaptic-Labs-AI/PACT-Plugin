@@ -17,7 +17,7 @@ MEM_START = "<!-- PACT_MEMORY_START -->"
 MEM_END = "<!-- PACT_MEMORY_END -->"
 RC = "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->"
 WM = ("<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. "
-      "Keyed by folder name, so another checkout with the same name shares this section. -->")
+      "Keyed by repository identity (from the repository's override file or its origin remote) when one resolves; by folder name when there is no override file and the origin is absent or a local path, except in a submodule; otherwise, including a broken, redirected or bare .git, the identity declines and nothing is written. -->")
 WMH = "## Working Memory"
 
 

@@ -391,10 +391,16 @@ class TestSqliteVecAbsenceIsReportedAsKeyword:
     """
 
     def test_missing_sqlite_vec_reports_keyword_not_semantic(self, mem, conn):
-        with patch.dict("sys.modules", {"sqlite_vec": None}), \
+        # setitem, not patch.dict: patch.dict restores the WHOLE of
+        # sys.modules on exit, so a module first imported inside the window
+        # (numpy, through the embedding backend) is evicted with it, and the
+        # next import of numpy in this process fails. Only the one key is
+        # restored here.
+        with pytest.MonkeyPatch.context() as modules, \
              patch("scripts.memory_api.SQLITE_EXTENSIONS_ENABLED", True), \
              patch("scripts.memory_api.generate_embedding_text", return_value="text"), \
              patch("scripts.memory_api.generate_embedding", return_value=[0.1] * 256):
+            modules.setitem(sys.modules, "sqlite_vec", None)
             result = mem._store_embedding(conn, "mem-1", _memory())
 
         assert result == "degraded:keyword:no-vector-store", (

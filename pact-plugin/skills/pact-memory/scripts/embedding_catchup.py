@@ -18,11 +18,14 @@ import logging
 import platform
 import struct
 import subprocess
+from contextlib import nullcontext
+from pathlib import Path
 from typing import Any, List, Optional
 
 # Configure logging
 logger = logging.getLogger(__name__)
 
+from .config import read_only_scope
 from .database import (
     db_connection,
     ensure_initialized,
@@ -188,14 +191,31 @@ def get_unembedded_memories(
         return UnembeddedResult(reason=UnembeddedResult.NO_EXTENSIONS)
 
     try:
+        # ON AN EXISTING STORE THIS IS A READ, AND IT MUST WRITE NOTHING. The
+        # integrity check runs only after this query finds work, so this
+        # query is what a corrupt store meets first: under the read-only
+        # scope `ensure_initialized` creates no vector table and runs no
+        # migration, and the first embedding's own connection creates the
+        # table (`embed_single_memory`). A store with no `memories` table yet
+        # is a first use, and is still initialised here as before.
         with db_connection() as conn:
-            ensure_initialized(conn)
+            has_schema = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'"
+            ).fetchone() is not None
+            with read_only_scope() if has_schema else nullcontext():
+                ensure_initialized(conn)
 
             # Check if vec_memories table exists
             cursor = conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_memories'"
             )
-            if cursor.fetchone() is None:
+            has_vector_table = cursor.fetchone() is not None
+            try:
+                import sqlite_vec
+            except ImportError:
+                sqlite_vec = None
+            if sqlite_vec is None and not has_vector_table:
+                # No table, and no extension to make one with.
                 logger.debug("vec_memories table doesn't exist, skipping")
                 return UnembeddedResult(
                     reason=UnembeddedResult.NO_VECTOR_TABLE
@@ -217,6 +237,15 @@ def get_unembedded_memories(
                     ON m.id = v.memory_id AND v.project_id IS m.project_id
                 WHERE v.memory_id IS NULL
             """
+            if has_vector_table:
+                # A vec0 virtual table: the read needs the extension that
+                # `_init_vector_table` loads on a writing connection.
+                if sqlite_vec is not None:
+                    conn.enable_load_extension(True)
+                    sqlite_vec.load(conn)
+            else:
+                # No vector table yet: every memory is unembedded.
+                query = "SELECT m.id FROM memories m WHERE 1"
             params: List[Any] = []
 
             if project_id is not None:
@@ -313,6 +342,58 @@ def embed_single_memory(memory_id: str) -> bool:
         return False
 
 
+def _load_vector_extension(connection: Any) -> None:
+    """Load sqlite-vec on `connection` when it can be; never raise.
+
+    A failure to load is not a fault in the store, so it must not read as
+    one: the check then runs without the extension, which `quick_check`
+    does not need (it walks the shadow tables as ordinary b-trees).
+    """
+    try:
+        import sqlite_vec
+
+        connection.enable_load_extension(True)
+        sqlite_vec.load(connection)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(f"sqlite-vec not loaded for the integrity check: {exc}")
+
+
+def _store_integrity_fault() -> Optional[str]:
+    """Why the bound store must not be written, or None when it may be.
+
+    Runs `PRAGMA quick_check` on a READ-ONLY connection, so the check itself
+    writes nothing. A store whose pages are corrupt can still answer the
+    pending-work query, and the catch-up's vector inserts would then write
+    into it. The check reads the whole file, so it runs only once there is
+    work to do, never on the common no-pending path.
+
+    THE STORE'S OWN DRIVER, WITH ITS OWN EXTENSION. The connection comes from
+    the module `database` reads the store with (pysqlite3 when installed),
+    with sqlite-vec loaded as the pending-work query loads it. A check on a
+    different driver can link a different SQLite library and judge the file
+    differently from the engine that writes it.
+    """
+    from .config import resolve_db_path
+    from .database import sqlite3 as store_sqlite3
+
+    store = resolve_db_path()
+    try:
+        connection = store_sqlite3.connect(
+            Path(store).resolve().as_uri() + "?mode=ro", uri=True
+        )
+        try:
+            _load_vector_extension(connection)
+            rows = connection.execute("PRAGMA quick_check").fetchall()
+        finally:
+            connection.close()
+    except store_sqlite3.DatabaseError as exc:
+        return f"the store failed its integrity check ({exc}); catch-up skipped"
+    if rows != [("ok",)]:
+        first = rows[0][0] if rows and rows[0] else "unknown"
+        return f"the store failed its integrity check ({first}); catch-up skipped"
+    return None
+
+
 def embed_pending_memories(
     project_id: Optional[str] = None,
     limit: int = 20,
@@ -375,6 +456,14 @@ def embed_pending_memories(
         result["unembedded_unknown"] = unembedded.reason
         return result
     if not unembedded:
+        return result
+
+    # NO WRITE INTO A CORRUPT STORE. The pending query above can succeed on
+    # a store with corrupt pages, and each embedding below inserts vectors.
+    fault = _store_integrity_fault()
+    if fault is not None:
+        result["failed"] = True
+        result["error"] = fault
         return result
 
     logger.debug(f"Found {len(unembedded)} unembedded memories to process")

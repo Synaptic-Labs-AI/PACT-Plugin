@@ -25,8 +25,9 @@ a warning has to confront the false-positive cost on every ordinary save.
 
 Isolation: these tests construct PACTMemory directly and never call save(), so
 no store and no CLAUDE.md is reachable from here. ``main_repo_root`` is patched
-rather than invoked, so no git subprocess runs and the result does not depend on
-where the suite is executed from.
+rather than invoked, and so is ``main_repo_common_dir`` (the cwd repository's
+common dir, asked from the same start), so no git subprocess runs and the result
+does not depend on where the suite is executed from.
 """
 import logging
 from pathlib import Path
@@ -46,7 +47,8 @@ def _mem(project_id):
 def _warning(project_id, repo_root, filed_as=None):
     """Return the warning for `filed_as` (default: project_id) at `repo_root`."""
     memory = _mem(project_id)
-    with patch("scripts.memory_api.main_repo_root", return_value=repo_root) as m:
+    with patch("scripts.memory_api.main_repo_root", return_value=repo_root) as m, \
+            patch("scripts.memory_api.main_repo_common_dir", return_value=None):
         result = memory._location_divergence_warning(
             project_id if filed_as is None else filed_as
         )
@@ -117,7 +119,8 @@ def test_silent_when_not_inside_any_repository():
 def test_silent_when_no_project_was_resolved_at_all(project_id):
     """Nothing to compare: a different failure with its own HOME/None paths."""
     memory = _mem("placeholder")
-    with patch("scripts.memory_api.main_repo_root", return_value=Path("/x/y")):
+    with patch("scripts.memory_api.main_repo_root", return_value=Path("/x/y")), \
+            patch("scripts.memory_api.main_repo_common_dir", return_value=None):
         assert memory._location_divergence_warning(project_id) is None
 
 
@@ -140,7 +143,7 @@ def test_repo_root_is_resolved_once_per_instance():
     memory = _mem("PACT-prompt")
     with patch(
         "scripts.memory_api.main_repo_root", return_value=Path("/elsewhere/other")
-    ) as m:
+    ) as m, patch("scripts.memory_api.main_repo_common_dir", return_value=None):
         first = memory._location_divergence_warning("PACT-prompt")
         second = memory._location_divergence_warning("PACT-prompt")
     assert first is not None and second is not None, "guard stopped firing"
@@ -194,7 +197,8 @@ class TestTheWarningIsReachedByARealSave:
         with caplog.at_level(logging.WARNING):
             with patch.object(memory_api, "_ensure_ready", lambda: None), \
                  patch.object(PACTMemory, "_store_embedding", return_value=None), \
-                 patch.object(memory_api, "main_repo_root", return_value=repo_root):
+                 patch.object(memory_api, "main_repo_root", return_value=repo_root), \
+                 patch.object(memory_api, "main_repo_common_dir", return_value=None):
                 mem._cwd_repo_root = False  # clear the per-instance cache
                 memory_id = mem.save(payload, sync_to_claude=False)
         return memory_id, caplog.text

@@ -1648,8 +1648,10 @@ def test_an_unresolvable_project_id_refuses_to_write(monkeypatch, tmp_path):
     """
     class _Stub:
         class PACTMemory:
+            # `store_path` asks for the BASENAME deliberately: the canonical
+            # id contains `/` and cannot be a path component.
             @staticmethod
-            def _detect_project_id():
+            def _detect_project_basename():
                 return None
 
     monkeypatch.setattr(backlog, "_memory_api", lambda: _Stub)
@@ -2179,6 +2181,56 @@ def _repo(path, branch=None):
     return path
 
 
+def _root_is(monkeypatch, root: Path, common: "Path | None" = None) -> None:
+    """Make `root` this backlog's project root, with the common dir git gives
+    for it (or `common`, where git is a stand-in), as `_root_and_common_dir`
+    answers both for `checkout_roots`."""
+    if common is None:
+        common = backlog._memory_api().main_repo_common_dir(str(root))
+    monkeypatch.setattr(backlog, "project_root", lambda: root)
+    monkeypatch.setattr(backlog, "_project_anchor", lambda: (str(root), "CLAUDE_PROJECT_DIR", common))
+    monkeypatch.setattr(backlog, "_root_and_common_dir", lambda anchor=None, listing=None: (root, common))
+
+
+def test_the_roots_ignore_git_location_variables_in_the_environment(tmp_path, monkeypatch):
+    """GIT_DIR and GIT_COMMON_DIR in the session's environment name another
+    repository; the roots are still this project's checkouts, asked of git
+    with those variables removed, and git is asked for the common dir once.
+
+    Real repos, real git, a `git` that logs each command it runs."""
+    import os
+    import shutil
+    import stat
+
+    main = _repo(tmp_path / "main")
+    other = _repo(tmp_path / "other")
+    run = lambda repo, *a: subprocess.run(["git", "-C", str(repo), *a], check=True,
+                                          capture_output=True)
+    run(main, "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
+    run(other, "worktree", "add", "-q", str(tmp_path / "other-wt"), "-b", "ow")
+    log = tmp_path / "git.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(main))
+    monkeypatch.chdir(main)
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(other / ".git"))
+
+    roots = backlog.checkout_roots()
+
+    calls = log.read_text().splitlines()
+    assert calls, "control: the logging git ran"
+    assert sorted(roots) == sorted([str(main.resolve()), str((tmp_path / "wt").resolve())]), roots
+    assert sum(" --git-common-dir" in f" {call}" for call in calls) == 1, calls
+
+
 def test_the_writer_records_every_checkout_not_just_the_main_root(tmp_path, monkeypatch):
     """`checkout_roots` records EVERY worktree the porcelain emits.
 
@@ -2194,13 +2246,1398 @@ def test_the_writer_records_every_checkout_not_just_the_main_root(tmp_path, monk
     linked = tmp_path / "wt"
     subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(linked), "-b", "wt"],
                    check=True, capture_output=True)
-    monkeypatch.setattr(backlog, "project_root", lambda: main)
+    _root_is(monkeypatch, main)
 
     roots = backlog.checkout_roots()
 
     assert str(main.resolve()) in roots, "the main root is missing"
     assert str(linked.resolve()) in roots, "a linked worktree was not recorded"
     assert len(roots) == 2, f"expected exactly the two checkouts, got {roots}"
+
+
+@pytest.mark.parametrize("linked_worktree", [False, True], ids=["alone", "with a worktree"])
+def test_a_separate_git_dir_checkout_is_one_of_its_own_roots(tmp_path, monkeypatch, linked_worktree):
+    """With `--separate-git-dir`, git lists the main record at the git
+    directory, so the main checkout is recorded from the project root. The
+    roots are that root and each linked worktree; the git directory, which
+    no session runs in, is not one.
+
+    Real repo, real git: the listing git prints is the thing under test."""
+    main = tmp_path / "main"
+    main.mkdir()
+    store = tmp_path / "store.git"
+    run = lambda *a: subprocess.run(["git", "-C", str(main), *a], check=True,
+                                    capture_output=True)
+    run("init", "-q", f"--separate-git-dir={store}")
+    run("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q",
+        "--allow-empty", "-m", "c")
+    if linked_worktree:
+        run("worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
+    _root_is(monkeypatch, main.resolve())
+
+    listed = {
+        str(Path(record[0][len("worktree "):]).resolve())
+        for record in backlog._memory_api()._worktree_records(["-C", str(main)])
+    }
+    roots = backlog.checkout_roots()
+
+    assert str(main.resolve()) not in listed, "git listed the checkout itself, so this arm tests nothing"
+    assert str(main.resolve()) in roots, roots
+    expected = {str(main.resolve())} | ({str((tmp_path / "wt").resolve())} if linked_worktree else set())
+    assert set(roots) == expected, (roots, listed)
+
+
+def _separate_git_dir_repo(tmp_path):
+    """A `--separate-git-dir` repository: its main checkout, its git dir,
+    and one linked worktree, all real."""
+    main = tmp_path / "main"
+    main.mkdir()
+    store = tmp_path / "store.git"
+    run = lambda *a: subprocess.run(["git", "-C", str(main), *a], check=True,
+                                    capture_output=True)
+    run("init", "-q", f"--separate-git-dir={store}")
+    run("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q",
+        "--allow-empty", "-m", "c")
+    run("worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
+    return main.resolve(), store.resolve(), (tmp_path / "wt").resolve()
+
+
+def test_a_write_from_a_worktree_keeps_the_recorded_separate_git_dir_checkout(tmp_path, monkeypatch):
+    """git lists a `--separate-git-dir` repository's git dir where its main
+    checkout would be, so a write from a linked worktree has no other
+    evidence of that checkout. A root the backlog already holds is kept
+    while its `.git` names this repository's git dir, checked on this
+    write; the control shows git alone gives the worktree only.
+
+    Real repo, real git."""
+    main, store, wt = _separate_git_dir_repo(tmp_path)
+    _root_is(monkeypatch, wt)
+
+    assert backlog.checkout_roots() == [str(wt)], "control: git alone names the main checkout"
+    roots = backlog.checkout_roots([str(main), str(wt)])
+
+    assert set(roots) == {str(main), str(wt)}, roots
+    assert roots[0] == str(wt), roots
+
+
+@pytest.mark.parametrize("change", [
+    "the checkout's .git names another git dir",
+    "the checkout is gone",
+    "the checkout's .git is a directory",
+    "the recorded path is another repository's checkout",
+    "the recorded path is relative",
+])
+def test_a_recorded_root_is_dropped_once_its_git_names_another_repository(tmp_path, monkeypatch, change):
+    """A recorded root is carried only while its `.git` file names this
+    repository's git dir, on every write: once it names another one, or
+    nothing, the next write drops it. The control carries the same root
+    before the change."""
+    import shutil
+
+    main, store, wt = _separate_git_dir_repo(tmp_path)
+    other = _repo(tmp_path / "other")
+    _root_is(monkeypatch, wt)
+    recorded = str(main)
+    assert str(main) in backlog.checkout_roots([recorded, str(wt)]), "control: carried before the change"
+
+    if change == "the checkout's .git names another git dir":
+        (main / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    elif change == "the checkout is gone":
+        shutil.rmtree(main)
+    elif change == "the checkout's .git is a directory":
+        (main / ".git").unlink()
+        (main / ".git").mkdir()
+    elif change == "the recorded path is another repository's checkout":
+        recorded = str(other.resolve())
+    else:
+        recorded = "main"
+        monkeypatch.chdir(tmp_path)
+
+    assert backlog.checkout_roots([recorded, str(wt)]) == [str(wt)]
+
+
+def _shared_git_dir_layout(tmp_path, layout):
+    """(folder, other): a folder whose `.git` file names the `.git`
+    directory of the checkout `other`, hand-written ("forged") or made by
+    git's own `git init --separate-git-dir=<other>/.git` ("twin")."""
+    other = (tmp_path / "other").resolve()
+    folder = (tmp_path / "folder").resolve()
+    if layout == "forged":
+        _repo(other)
+        folder.mkdir()
+        (folder / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    else:
+        other.mkdir()
+        subprocess.run(["git", "init", "-q", f"--separate-git-dir={other / '.git'}", str(folder)],
+                       check=True, capture_output=True)
+        run = lambda *a: subprocess.run(["git", "-C", str(folder), *a], check=True, capture_output=True)
+        run("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "c")
+    return folder, other
+
+
+@pytest.mark.parametrize("where", ["folder", "subfolder"])
+@pytest.mark.parametrize("store_kind", ["empty", "shared"])
+@pytest.mark.parametrize("layout", ["forged", "twin"])
+def test_a_write_from_a_folder_sharing_a_checkouts_git_dir_keeps_that_checkout(
+    tmp_path, layout, store_kind, where,
+):
+    """A folder whose `.git` file names another checkout's `.git` directory
+    writes the backlog file that checkout's writes use. Once that checkout
+    has written it, a write from the folder (or a folder below it) keeps
+    the checkout among the roots beside the folder, and leaves project_path
+    as the file holds it; the checkout is the repository's own main
+    checkout, whose `.git` is the git dir. With no file yet, the folder is
+    the only root. Nothing is printed.
+
+    Real repos, real git, the CLI."""
+    folder, other = _shared_git_dir_layout(tmp_path, layout)
+    store = tmp_path / "store"
+    store.mkdir()
+    first = None
+    if store_kind == "shared":
+        first = _cli_write(other, store)
+        assert first.returncode == 0, first.stderr
+    start = folder if where == "folder" else folder / "sub"
+    start.mkdir(exist_ok=True)
+    before = {f.name: json.loads(f.read_text(encoding="utf-8")) for f in store.glob("*.json")}
+
+    run = _cli_write(start, store)
+
+    files = {f.name: json.loads(f.read_text(encoding="utf-8")) for f in store.glob("*.json")}
+    assert (run.returncode, run.stderr, len(files)) == (0, "", 1), run.stderr
+    (name, doc), = files.items()
+    if store_kind == "shared":
+        assert (name in before, doc["project_path"], doc["roots"]) == (
+            True, before[name]["project_path"], [str(folder), str(other)])
+    else:
+        assert (doc["project_path"], doc["roots"]) == (str(folder), [str(folder)])
+
+
+@pytest.mark.parametrize("recorded_as", [
+    "the main checkout",
+    "the main checkout through a linked parent",
+    "a checkout whose .git is a link to the git dir",
+    "another repository's main checkout",
+])
+def test_a_recorded_main_checkout_is_carried_only_by_its_own_git_dir(tmp_path, monkeypatch, recorded_as):
+    """From a folder whose `.git` file names another checkout's `.git`
+    directory, a recorded root is carried when its `.git` is a directory,
+    not a link, that resolves to the repository's git dir, whatever path it
+    was recorded by, and is stored resolved; a `.git` that is a link to that
+    directory, and another repository's own `.git` directory, are dropped.
+
+    Real repos, real git."""
+    import os
+
+    folder, other = _shared_git_dir_layout(tmp_path, "forged")
+    _root_is(monkeypatch, folder)
+    if recorded_as == "the main checkout":
+        recorded, kept = str(other), True
+    elif recorded_as == "the main checkout through a linked parent":
+        os.symlink(tmp_path, tmp_path / "via")
+        recorded, kept = str(tmp_path / "via" / "other"), True
+    elif recorded_as == "a checkout whose .git is a link to the git dir":
+        linked = tmp_path / "linked"
+        linked.mkdir()
+        os.symlink(other / ".git", linked / ".git")
+        recorded, kept = str(linked), False
+    else:
+        recorded, kept = str(_repo(tmp_path / "stranger").resolve()), False
+
+    roots = backlog.checkout_roots([recorded])
+
+    assert roots == ([str(folder), str(other)] if kept else [str(folder)]), roots
+
+
+@pytest.mark.parametrize("rule", ["a .git directory that is the git dir", "a .git file naming the git dir"])
+def test_a_checkout_recorded_through_a_link_and_directly_is_one_root(tmp_path, monkeypatch, rule):
+    """A carried root is stored resolved, under either carry rule, so a
+    checkout the file holds both through a linked path and directly is one
+    root, its resolved path, and the linked path is not kept.
+
+    Real repos, real git."""
+    import os
+
+    if rule == "a .git directory that is the git dir":
+        start, checkout = _shared_git_dir_layout(tmp_path, "forged")
+    else:
+        checkout, _store, start = _separate_git_dir_repo(tmp_path)
+    os.symlink(tmp_path, tmp_path / "via")
+    alias = str(tmp_path / "via" / checkout.name)
+    _root_is(monkeypatch, start)
+    assert str(checkout) in backlog.checkout_roots([str(checkout)]), "control: the checkout is carried"
+
+    roots = backlog.checkout_roots([alias, str(checkout)])
+
+    assert (roots.count(str(checkout)), alias in roots, len(roots) == len(set(roots))) == (1, False, True), roots
+
+
+def test_a_folder_naming_another_repositorys_git_dir_claims_none_of_its_worktrees(tmp_path, monkeypatch):
+    """A folder whose `.git` file names another repository's `.git`
+    directory gets that repository's worktree listing from git, with that
+    repository's checkout listed first. The folder is not that checkout, so
+    its roots are itself alone; the control shows git lists the worktree.
+
+    Real repos, real git."""
+    other = _repo(tmp_path / "other")
+    subprocess.run(["git", "-C", str(other), "worktree", "add", "-q", str(tmp_path / "other-wt"),
+                    "-b", "ow"], check=True, capture_output=True)
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    _root_is(monkeypatch, folder.resolve())
+    listed = [record[0] for record in backlog._memory_api()._worktree_records(["-C", str(folder)])]
+    assert f"worktree {(tmp_path / 'other-wt').resolve()}" in listed, f"control: {listed}"
+
+    assert backlog.checkout_roots() == [str(folder.resolve())]
+
+
+def test_a_core_worktree_repository_keeps_its_worktrees(tmp_path, monkeypatch):
+    """A repository made with `--git-dir` and `--work-tree` lists its git dir
+    first, as a `--separate-git-dir` one does, so its checkout's roots still
+    hold its linked worktree.
+
+    Real repo, real git."""
+    work = tmp_path / "work"
+    work.mkdir()
+    store = tmp_path / "g.git"
+    subprocess.run(["git", "--git-dir", str(store), "--work-tree", str(work), "init", "-q"],
+                   check=True, capture_output=True)
+    (work / ".git").write_text(f"gitdir: {store}\n")
+    run = lambda *a: subprocess.run(["git", "-C", str(work), *a], check=True, capture_output=True)
+    run("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "c")
+    run("worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt")
+    _root_is(monkeypatch, work.resolve())
+
+    assert set(backlog.checkout_roots()) == {str(work.resolve()), str((tmp_path / "wt").resolve())}
+
+
+def test_save_carries_the_separate_git_dir_checkout_it_read(tmp_path, monkeypatch):
+    """`save` hands the roots the file already holds to `checkout_roots`, so
+    a write from a linked worktree keeps the main checkout an earlier write
+    from there recorded."""
+    main, store, wt = _separate_git_dir_repo(tmp_path)
+    path = tmp_path / "backlog" / "p.json"
+    path.parent.mkdir()
+    monkeypatch.setattr(backlog, "store_path", lambda backlog_dir=None: path)
+
+    _root_is(monkeypatch, main)
+    data = backlog.load_or_create(path)
+    assert backlog.save(data, path) == []
+    assert str(main) in json.loads(path.read_text())["roots"], "control: the first write records main"
+
+    _root_is(monkeypatch, wt)
+    data = backlog.load_or_create(path)
+    assert backlog.save(data, path) == []
+    assert set(json.loads(path.read_text())["roots"]) == {str(main), str(wt)}
+
+
+def _logging_git(tmp_path, monkeypatch) -> Path:
+    """Put first on PATH a `git` that appends each command it runs to the
+    returned log and then runs the real git."""
+    import os
+    import shutil
+    import stat
+
+    log = tmp_path / "git.log"
+    bin_dir = tmp_path / "logging-bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\nexec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return log
+
+
+@pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
+@pytest.mark.parametrize("layout, commands_with_z, commands_rejecting_z", [
+    ("main checkout", 4, 5),
+    ("linked worktree", 4, 5),
+    ("separate-git-dir linked worktree", 4, 5),
+], ids=["main checkout", "linked worktree", "separate-git-dir linked worktree"])
+def test_one_roots_lookup_lists_the_worktrees_once(
+    tmp_path, monkeypatch, layout, commands_with_z, commands_rejecting_z, nul
+):
+    """From any checkout, one roots lookup asks git for the worktree listing
+    once: from a linked worktree the root's redirect check reads it, and the
+    roots reuse that answer. The roots are the ones git's listing gives, and
+    the lookup runs the number of git commands the release notes state: four
+    from a checkout. A git that rejects `-z`, as git before 2.36 does, is
+    asked that one listing twice (`-z`, then without it), one command more in
+    each layout.
+
+    Real repos, real git, a `git` that logs each command it runs."""
+    import os
+
+    if layout == "separate-git-dir linked worktree":
+        main, _store, wt = _separate_git_dir_repo(tmp_path)
+        recorded, expected = [str(main)], [str(wt), str(main)]
+    else:
+        main = _repo(tmp_path / "main").resolve()
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                       check=True, capture_output=True)
+        wt = (tmp_path / "wt").resolve()
+        recorded, expected = None, [str(main), str(wt)]
+    start = main if layout == "main checkout" else wt
+    for name in [n for n in os.environ if n.startswith("CLAUDE_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(start))
+    monkeypatch.chdir(start)
+    if not nul:
+        _git_rejecting_z(tmp_path, monkeypatch)
+    log = _logging_git(tmp_path, monkeypatch)
+
+    try:
+        roots = backlog.checkout_roots(recorded)
+    except Exception as error:  # a refusal is the answer under test, not a harness failure
+        roots = error
+
+    calls = log.read_text().splitlines()
+    assert calls, "control: the logging git ran"
+    assert roots == expected, roots
+    assert sum(" worktree list" in f" {call}" for call in calls) == (1 if nul else 2), calls
+    assert len(calls) == (commands_with_z if nul else commands_rejecting_z), calls
+
+
+def _git_listing(tmp_path, monkeypatch, listing: "bytes | None") -> None:
+    """Put first on PATH a `git` that answers `worktree list` with `listing`
+    (or exits 1 for None, a listing git did not give) and otherwise runs the
+    real git, so the real reader reads exactly these bytes."""
+    import os
+    import shutil
+    import stat
+
+    bin_dir = tmp_path / "listing-bin"
+    bin_dir.mkdir()
+    answer = tmp_path / "listing.out"
+    if listing is None:
+        reply = "exit 1"
+    else:
+        answer.write_bytes(listing)
+        reply = f'cat "{answer}"; exit 0'
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        '#!/bin/sh\nprev=\nfor a in "$@"; do\n'
+        f'  if [ "$prev" = worktree ] && [ "$a" = list ]; then {reply}; fi\n'
+        '  prev=$a\ndone\n'
+        f'exec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+_HEAD = "HEAD " + "0" * 40
+
+# Every listing git can print that leaves the roots no record to read, each
+# as the bytes `git worktree list --porcelain -z` would print. None is a
+# listing git did not give.
+_LISTINGS_WITH_NO_RECORD = {
+    "git gives no listing": None,
+    "a listing holding no record": b"\0",
+    "a listing that is not git's fields": b"worktree /x\0stray\0\0",
+    "the first record's path is empty": f"worktree \0{_HEAD}\0branch refs/heads/main\0\0".encode(),
+    "the first record's path is relative": f"worktree main\0{_HEAD}\0branch refs/heads/main\0\0".encode(),
+}
+
+
+@pytest.mark.parametrize("listing", list(_LISTINGS_WITH_NO_RECORD), ids=list(_LISTINGS_WITH_NO_RECORD))
+def test_a_listing_with_no_record_to_read_gives_one_answer(tmp_path, monkeypatch, listing):
+    """Whatever git printed, a listing that leaves no record to read gives
+    the roots git giving no listing gives: the root, plus each recorded
+    root whose `.git` names this repository's git dir. A listing whose
+    first record is dropped (its path empty or relative) is an empty list,
+    which puts no checkout first.
+
+    Real repos, real reader; git's listing is the stand-in."""
+    main, store, wt = _separate_git_dir_repo(tmp_path)
+    _root_is(monkeypatch, wt)
+    _git_listing(tmp_path, monkeypatch, _LISTINGS_WITH_NO_RECORD[listing])
+
+    read = backlog._memory_api()._worktree_records(["--git-dir", str(store)])
+    try:
+        roots = backlog.checkout_roots([str(main), str(wt)])
+    except Exception as error:  # a raise is the answer under test, not a harness failure
+        roots = error
+
+    assert not (isinstance(read, list) and read), f"control: the reader found a record to read: {read!r}"
+    assert roots == [str(wt), str(main)], roots
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+def test_a_raised_error_keeps_the_carried_roots(tmp_path, monkeypatch, error):
+    """A path that will not resolve while the listing is read gives the
+    roots no listing gives: the root, plus each recorded root whose `.git`
+    names this repository's git dir. The control shows the carried root
+    comes from the record, not from git.
+
+    Real repos, real git; the raise is the stand-in."""
+    main, store, wt = _separate_git_dir_repo(tmp_path)
+    _root_is(monkeypatch, wt)
+    assert backlog.checkout_roots() == [str(wt)], "control: git alone names the main checkout"
+
+    def unresolvable(*_args):
+        raise error("a path that will not resolve")
+
+    monkeypatch.setattr(backlog, "_lists_first", unresolvable)
+
+    assert backlog.checkout_roots([str(main), str(wt)]) == [str(wt), str(main)]
+
+
+def test_without_git_no_recorded_root_is_carried(tmp_path, monkeypatch):
+    """With no git to ask, there is no common dir to check a recorded root
+    against, so none is carried: the roots are the project folder alone.
+    The control shows the recorded root names a git dir, so with git it
+    would be carried.
+
+    Real folders; git's absence is real (an empty PATH)."""
+    import os
+
+    main, store, _wt = _separate_git_dir_repo(tmp_path)
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    assert backlog._names_common_dir(str(main), store), "control: the recorded root names a git dir"
+    empty = tmp_path / "no-git"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(folder))
+    for name in [n for n in os.environ if n.startswith("CLAUDE_") and n != "CLAUDE_PROJECT_DIR"]:
+        monkeypatch.delenv(name)
+
+    assert backlog.checkout_roots([str(main)]) == [str(folder.resolve())]
+
+
+def _project_dir_is(monkeypatch, start: Path) -> None:
+    """Make `start` the declared project directory and the cwd, with no other
+    CLAUDE_* variable set, so the real anchor, root and roots run."""
+    import os
+
+    for name in [n for n in os.environ if n.startswith("CLAUDE_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(start))
+    monkeypatch.chdir(start)
+
+
+def _roots_or_refusal(recorded=None):
+    """`checkout_roots(recorded)`, or the exception it raised: the outcome is
+    what an arm compares, so a raise fails at the arm's own assertion."""
+    try:
+        return backlog.checkout_roots(recorded)
+    except Exception as error:  # the outcome under test, not a harness failure
+        return error
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+@pytest.mark.parametrize("layout", ["main checkout", "separate-git-dir linked worktree"])
+def test_a_listing_read_that_raises_gives_the_answer_no_listing_gives(tmp_path, monkeypatch, layout, error):
+    """The worktree listing read itself raising gives what git giving no
+    listing gives: from a main checkout the root, plus each carried root;
+    from a linked worktree, whose root the memory skill's redirect check
+    confirms in that same listing, a refusal naming that check and its
+    cause. Never the raised error. The control shows the listing, read,
+    gives more roots.
+
+    Real repos, real git; the raise is the stand-in."""
+    if layout == "main checkout":
+        start = _repo(tmp_path / "main").resolve()
+        subprocess.run(["git", "-C", str(start), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                       check=True, capture_output=True)
+        recorded, listed = None, [str(start), str((tmp_path / "wt").resolve())]
+    else:
+        main, _store, start = _separate_git_dir_repo(tmp_path)
+        recorded, listed = [str(main)], [str(start), str(main)]
+    _project_dir_is(monkeypatch, start)
+    memory_api = backlog._memory_api()
+    assert _roots_or_refusal(recorded) == listed, "control: the listing, read, gives these roots"
+
+    def raising(*_args):
+        raise error("the listing read raised")
+
+    monkeypatch.setattr(memory_api, "_worktree_records", raising)
+    outcome = _roots_or_refusal(recorded)
+
+    if layout == "main checkout":
+        assert outcome == [str(start)], outcome
+    else:
+        refusal = memory_api._REDIRECT_CAUSE_DETAILS[memory_api.REDIRECT_UNLISTABLE]
+        assert (type(outcome), refusal in str(outcome)) == (backlog.BacklogWriteError, True), outcome
+
+
+def _first_write_or_refusal(path: Path):
+    """What `load_or_create` gives for a backlog file not yet written: its
+    project_path and roots, or the exception it raised."""
+    try:
+        doc = backlog.load_or_create(path)
+        return {"project_path": doc["project_path"], "roots": doc["roots"]}
+    except Exception as error:  # the outcome under test, not a harness failure
+        return error
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+@pytest.mark.parametrize("layout", ["main checkout", "linked worktree", "separate-git-dir linked worktree"])
+def test_a_first_write_whose_listing_read_raises_gives_a_later_writes_answer(
+    tmp_path, monkeypatch, layout, error
+):
+    """The first write of a backlog file, whose root the memory skill's
+    redirect check confirms with its own listing read, gives the answer a
+    later write's roots lookup gives when that read raises: from a main
+    checkout the root alone, from a linked worktree a refusal naming the
+    check's cause. Never the raised error. The control shows the first
+    write resolves with the read.
+
+    Real repos, real git; the raise is the stand-in."""
+    if layout == "separate-git-dir linked worktree":
+        _main, _store, start = _separate_git_dir_repo(tmp_path)
+    else:
+        main = _repo(tmp_path / "main").resolve()
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                       check=True, capture_output=True)
+        start = main if layout == "main checkout" else (tmp_path / "wt").resolve()
+    _project_dir_is(monkeypatch, start)
+    memory_api = backlog._memory_api()
+    new = tmp_path / "backlog" / "new.json"
+    assert isinstance(_first_write_or_refusal(new), dict), "control: the first write resolves"
+
+    def raising(*_args):
+        raise error("the listing read raised")
+
+    monkeypatch.setattr(memory_api, "_worktree_records", raising)
+    first, later = _first_write_or_refusal(new), _roots_or_refusal()
+
+    if layout == "main checkout":
+        assert (first, later) == ({"project_path": str(start), "roots": [str(start)]}, [str(start)])
+    else:
+        refusal = memory_api._REDIRECT_CAUSE_DETAILS[memory_api.REDIRECT_UNLISTABLE]
+        assert [(type(o), refusal in str(o)) for o in (first, later)] == [
+            (backlog.BacklogWriteError, True)] * 2, (first, later)
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+def test_every_other_listing_read_that_raises_gives_what_no_listing_gives(tmp_path, monkeypatch, error):
+    """The read gate's verified roots and the abandoned-work names read the
+    worktree listing too. A read that raises gives what git giving no
+    listing gives there, never the raised error. The control shows the
+    listing adds a root and a name.
+
+    Real repo, real git; the raise and the absent listing are the stand-ins."""
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    memory_api = backlog._memory_api()
+    common = memory_api.main_repo_common_dir(str(main))
+
+    def readers():
+        outcomes = []
+        for read in (lambda: memory_api._verified_worktree_roots(main, common),
+                     lambda: backlog._branch_and_worktree_names(str(main))):
+            try:
+                outcomes.append(read())
+            except Exception as raised:  # the outcome under test, not a harness failure
+                outcomes.append(raised)
+        return outcomes
+
+    listed = readers()
+    monkeypatch.setattr(memory_api, "_worktree_records", lambda *_args: None)
+    unlisted = readers()
+    assert all(len(a) > len(b) for a, b in zip(listed, unlisted)), "control: the listing adds to each"
+
+    def raising(*_args):
+        raise error("the listing read raised")
+
+    monkeypatch.setattr(memory_api, "_worktree_records", raising)
+    assert readers() == unlisted
+
+
+@pytest.mark.parametrize("outcome", ["success", "refusal", "raise"])
+def test_only_the_identity_decline_is_held_and_only_a_success_drops_it(monkeypatch, caplog, outcome):
+    """While one command runs, the memory skill's identity decline is held
+    and every other warning it logs prints at once. A success drops the
+    decline; a refusal or a raise prints it after them. The holder leaves
+    the memory skill's logger as it found it.
+
+    The command is the stand-in; the decline is the memory skill's own."""
+    import logging
+
+    memory_api = backlog._memory_api()
+    filters = list(memory_api.logger.filters)
+    raised = RuntimeError("the command raised")
+
+    def command(_args, _backlog_dir, _held):
+        memory_api._warn_declined({"reason": "no_working_tree"})
+        memory_api.logger.warning("another warning")
+        if outcome == "raise":
+            raise raised
+        return backlog._EXIT_OK if outcome == "success" else backlog._EXIT_REFUSED
+
+    monkeypatch.setattr(backlog, "_main", command)
+    with caplog.at_level(logging.WARNING, logger=memory_api.logger.name):
+        try:
+            result = backlog.main(["show"])
+        except RuntimeError as error:
+            result = error
+    printed = ["decline" if "so no project id was derived" in r.getMessage() else r.getMessage()
+               for r in caplog.records if r.name == memory_api.logger.name]
+
+    expected = {
+        "success": (backlog._EXIT_OK, ["another warning"]),
+        "refusal": (backlog._EXIT_REFUSED, ["another warning", "decline"]),
+        "raise": (raised, ["another warning", "decline"]),
+    }[outcome]
+    assert (result, printed, memory_api.logger.filters) == (*expected, filters)
+
+
+_HONEST_REFUSALS = [
+    "linked worktree, git gives no listing",
+    "linked worktree, a listing holding no record",
+    "linked worktree, a listing that is not git's fields",
+    "linked worktree, the first record's path is relative",
+    "linked worktree moved with mv",
+    "bare repository inside a checkout",
+    "bare repository",
+    "subdirectory of a bare repository",
+    "main checkout, git absent",
+]
+
+
+def _honest_layout(tmp_path, monkeypatch, row):
+    """Build `row`'s honest layout and its git; return the declared directory."""
+    import os
+
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    wt = (tmp_path / "wt").resolve()
+    listings = {
+        "linked worktree, git gives no listing": "git gives no listing",
+        "linked worktree, a listing holding no record": "a listing holding no record",
+        "linked worktree, a listing that is not git's fields": "a listing that is not git's fields",
+        "linked worktree, the first record's path is relative": "the first record's path is relative",
+    }
+    if row in listings:
+        _git_listing(tmp_path, monkeypatch, _LISTINGS_WITH_NO_RECORD[listings[row]])
+        return wt
+    if row == "linked worktree moved with mv":
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "from"), "-b", "mv"],
+                       check=True, capture_output=True)
+        os.rename(tmp_path / "from", tmp_path / "to")
+        return (tmp_path / "to").resolve()
+    if row == "bare repository inside a checkout":
+        subprocess.run(["git", "init", "-q", "--bare", str(main / "inner.git")], check=True, capture_output=True)
+        return main / "inner.git"
+    if row in ("bare repository", "subdirectory of a bare repository"):
+        bare = (tmp_path / "bare.git").resolve()
+        subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True, capture_output=True)
+        return bare if row == "bare repository" else bare / "hooks"
+    empty = tmp_path / "no-git"
+    empty.mkdir()
+    monkeypatch.setenv("PATH", str(empty))
+    return main
+
+
+@pytest.mark.parametrize("row", _HONEST_REFUSALS)
+def test_a_refusal_inside_a_checkout_names_the_root_checks_cause(tmp_path, monkeypatch, row):
+    """From an honest layout whose root the memory skill's root check
+    refuses, the backlog refusal names that check, its cause and its remedy,
+    the same ones the check itself gives for the directory (`_root_guard`),
+    and gives no advice to set CLAUDE_PROJECT_DIR, which already names it.
+
+    Real repos, real git (or none); a listing git prints is the stand-in."""
+    start = _honest_layout(tmp_path, monkeypatch, row)
+    _project_dir_is(monkeypatch, start)
+    memory_api = backlog._memory_api()
+    common = memory_api.main_repo_common_dir(str(start))
+    guard = memory_api._root_guard(start, common, "probe")
+    assert guard is not None, "control: the memory skill's root check refuses this directory"
+    reason, detail = guard.decline_reason["reason"], guard.decline_detail
+    marker = memory_api.project_identity.find_git_marker(start) if reason != "no_working_tree" else None
+    cause = memory_api._DECLINE_CAUSES[reason] + (f"; {detail}" if detail else "") + (
+        f" (the `.git` marker is {str(marker)!r})" if marker is not None else ""
+    )
+    remedy = memory_api._decline_remedy(guard.decline_reason, detail)
+
+    outcome = _roots_or_refusal()
+
+    text = str(outcome)
+    assert (type(outcome), f"because {cause}." in text, bool(remedy) and text.endswith(remedy)) == (
+        backlog.BacklogWriteError, True, True), text
+    assert "root check refused CLAUDE_PROJECT_DIR=" in text, text
+    assert text.count("CLAUDE_PROJECT_DIR") == 1, text
+
+
+_MARKER_LAYOUTS = ["broken .git directory", "main checkout, git absent", "linked worktree moved with mv"]
+
+
+def _marker_layout(tmp_path, layout):
+    """Build `layout`, a checkout whose `.git` git cannot answer for or will
+    not confirm; return (checkout root, its `.git` marker, extra env)."""
+    import os
+
+    if layout == "broken .git directory":
+        root = (tmp_path / "broken").resolve()
+        (root / ".git").mkdir(parents=True)
+        return root, root / ".git", {}
+    if layout == "main checkout, git absent":
+        root = _repo(tmp_path / "main").resolve()
+        empty = tmp_path / "no-git"
+        empty.mkdir()
+        return root, root / ".git", {"PATH": str(empty)}
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "from"), "-b", "mv"],
+                   check=True, capture_output=True)
+    os.rename(tmp_path / "from", tmp_path / "to")
+    root = (tmp_path / "to").resolve()
+    return root, root / ".git", {}
+
+
+@pytest.mark.parametrize("where", ["root", "subfolder"])
+@pytest.mark.parametrize("layout", _MARKER_LAYOUTS)
+def test_a_refusal_names_where_the_git_marker_is(tmp_path, layout, where):
+    """From a checkout whose `.git` git cannot answer for (a broken `.git`,
+    git absent) or will not confirm (a worktree moved with `mv`), and from a
+    folder below its root, both the memory skill's decline warning and the
+    backlog refusal name the `.git` marker's path: from a subfolder the
+    marker is in a parent, not in the declined directory. Nothing is written.
+
+    Real repos, real git (or none), the CLI."""
+    import os
+
+    root, marker, extra = _marker_layout(tmp_path, layout)
+    start = root if where == "root" else root / "sub" / "deeper"
+    start.mkdir(parents=True, exist_ok=True)
+    store = tmp_path / "store"
+    store.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update(extra, CLAUDE_PROJECT_DIR=str(start))
+    run = subprocess.run(
+        [sys.executable, str(Path(backlog.__file__)), "--backlog-dir", str(store), "add", "x"],
+        env=env, cwd=str(start), capture_output=True, text=True, timeout=60,
+    )
+    lines = [" ".join(line.split()) for line in run.stderr.splitlines() if line.strip()]
+    warnings = [line for line in lines if "so no project id was derived" in line]
+    refusals = [line for line in lines if line.startswith("refused: ")]
+    named = f"the `.git` marker is {str(marker)!r}"
+
+    assert (run.returncode, list(store.iterdir()), len(warnings), len(refusals)) == (
+        backlog._EXIT_REFUSED, [], 1, 1), run.stderr
+    assert (named in warnings[0], named in refusals[0]) == (True, True), run.stderr
+    if layout != "linked worktree moved with mv":
+        wording = "the directory is at or below a `.git` marker git could not answer for"
+        assert (wording in warnings[0], wording in refusals[0]) == (True, True), run.stderr
+
+
+def _git_answering(tmp_path, monkeypatch, replies: dict) -> None:
+    """Put first on PATH a `git` that answers each command in `replies`
+    (the arguments after any `-C <dir>`, `-c <setting>` and `--git-dir
+    <dir>`, joined by spaces) with its shell reply, and otherwise runs the
+    real git."""
+    import os
+    import shutil
+    import stat
+
+    bin_dir = tmp_path / "answer-bin"
+    bin_dir.mkdir()
+    cases = "".join(f'  "{command}") {reply} ;;\n' for command, reply in replies.items())
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        '#!/bin/sh\nstrip() {\n'
+        '  while :; do case "$1" in -C|-c|--git-dir) shift 2 ;; --git-dir=*) shift ;; *) break ;; esac; done\n'
+        '  printf "%s" "$*"\n}\n'
+        f'case "$(strip "$@")" in\n{cases}esac\n'
+        f'exec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+_LIST = "worktree list --porcelain -z"
+
+
+def _guard_cause_layout(tmp_path, monkeypatch, row):
+    """Build `row`, a directory whose root guard arm is the row's, with real
+    git or a stand-in for one of its answers; return the directory."""
+    import os
+
+    reason, cause = row
+    if reason == "broken_git_marker":
+        broken = (tmp_path / "broken").resolve()
+        (broken / ".git").mkdir(parents=True)
+        return broken
+    main = _repo(tmp_path / "main").resolve()
+    if reason == "no_working_tree":
+        bare = (tmp_path / "bare.git").resolve()
+        subprocess.run(["git", "clone", "-q", "--bare", str(main), str(bare)], check=True, capture_output=True)
+        return bare
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    wt = (tmp_path / "wt").resolve()
+    if cause == memory_api_module().REDIRECT_UNLISTED:
+        forged = (tmp_path / "forged").resolve()
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'wt'}\n", encoding="utf-8")
+        return forged
+    if cause == memory_api_module().REDIRECT_MOVED:
+        os.rename(wt, tmp_path / "to")
+        return (tmp_path / "to").resolve()
+    loop = tmp_path / "loop"
+    os.symlink(loop, loop)
+    replies = {
+        memory_api_module().REDIRECT_NO_GIT_DIR: {"rev-parse --git-dir": "exit 1"},
+        memory_api_module().REDIRECT_UNRESOLVABLE: {"rev-parse --git-dir": f"echo '{loop}'; exit 0"},
+        memory_api_module().REDIRECT_UNLISTABLE: {_LIST: "exit 1"},
+        memory_api_module().REDIRECT_EMPTY_LISTING: {_LIST: "printf '\\0'; exit 0"},
+        memory_api_module().REDIRECT_UNREADABLE_LISTING: {_LIST: "printf 'worktree /x\\0stray\\0\\0'; exit 0"},
+        # The arm order: git gives no listing and no toplevel, so the
+        # redirect arm, checked first, declines before the no-working-tree arm.
+        "unlistable, no toplevel": {_LIST: "exit 1", "rev-parse --show-toplevel": "exit 1"},
+    }[cause]
+    _git_answering(tmp_path, monkeypatch, replies)
+    return wt
+
+
+def memory_api_module():
+    """The memory skill's module, as the backlog loads it."""
+    return backlog._memory_api()
+
+
+def _guard_cause_rows() -> list:
+    """(reason, redirect cause) for every arm the root guard can take: each
+    redirect cause in the code's own table, a broken marker, no working
+    tree, and one row for the arm order."""
+    memory_api = memory_api_module()
+    return [
+        ("broken_git_marker", None),
+        *[("gitfile_redirect", cause) for cause in memory_api._REDIRECT_CAUSE_DETAILS],
+        ("gitfile_redirect", "unlistable, no toplevel"),
+        ("no_working_tree", None),
+    ]
+
+
+@pytest.mark.parametrize("row", _guard_cause_rows(), ids=lambda row: f"{row[0]}:{row[1]}")
+def test_both_root_guard_readers_take_the_same_arm_for_every_cause(tmp_path, monkeypatch, row):
+    """For every arm the root guard can take (each redirect cause in the
+    code's own table, a broken marker, no working tree, and a shape where
+    the arm order decides), the memory skill's guard (`_root_guard`) and the
+    backlog's refusal (`root_check_refusal`) both give that arm's reason,
+    its cause with its detail, and the `.git` marker where the arm rests on
+    one. Real repos and git; a stand-in for one git answer where git gives
+    that answer only on another version or a damaged repository."""
+    memory_api = memory_api_module()
+    reason, cause = row
+    start = _guard_cause_layout(tmp_path, monkeypatch, row)
+    common = memory_api.main_repo_common_dir(str(start))
+    expected_cause = memory_api.REDIRECT_UNLISTABLE if cause == "unlistable, no toplevel" else cause
+    detail = memory_api._REDIRECT_CAUSE_DETAILS[expected_cause] if expected_cause is not None else None
+    marker = memory_api.project_identity.find_git_marker(start) if reason != "no_working_tree" else None
+    text = memory_api._DECLINE_CAUSES[reason] + (f"; {detail}" if detail else "") + (
+        f" (the `.git` marker is {str(marker)!r})" if marker is not None else ""
+    )
+
+    guard = memory_api._root_guard(start, common, "probe")
+    refusal = memory_api.root_check_refusal(start, common)
+
+    assert (reason == "broken_git_marker") == (common is None), common  # control: the layout's common dir
+    assert (
+        guard.decline_reason["reason"] if guard is not None else None,
+        guard.decline_detail if guard is not None else None,
+        refusal[0] if refusal is not None else None,
+    ) == (reason, detail, text)
+
+
+def _git_failing_listing(tmp_path: Path, monkeypatch, failing: int) -> Path:
+    """Put first on PATH a `git` that logs every command to the returned
+    file and fails its `failing`-th `git worktree list` call (none when 0),
+    then runs the real git."""
+    import os
+    import shutil
+    import stat
+
+    log, count = tmp_path / "git.log", tmp_path / "list.count"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "git").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n'
+        'case " $* " in *" worktree list "*)\n'
+        f'  n=$(( $(cat "{count}" 2>/dev/null || echo 0) + 1 )); echo $n > "{count}"\n'
+        f'  [ "$n" = {failing} ] && exit 1 ;;\nesac\n'
+        f'exec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    (bin_dir / "git").chmod((bin_dir / "git").stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return log
+
+
+def _git_failing_one_call(tmp_path, monkeypatch, tag, real_git, path, fail=None, on_call=0) -> Path:
+    """Put first on `path` a `git` that appends each command it runs to the
+    returned log and runs `real_git`, except that it exits 1 on the
+    `on_call`-th run of the command `fail` (its arguments joined by spaces,
+    as the log holds them)."""
+    import os
+    import shlex
+    import stat
+
+    log, count = tmp_path / f"{tag}.log", tmp_path / f"{tag}.count"
+    bin_dir = tmp_path / f"{tag}-bin"
+    bin_dir.mkdir()
+    failing = "" if fail is None else (
+        f'if [ "$*" = {shlex.quote(fail)} ]; then\n'
+        f'  n=$(( $(cat "{count}" 2>/dev/null || echo 0) + 1 )); echo $n > "{count}"\n'
+        f'  [ "$n" = {on_call} ] && exit 1\nfi\n'
+    )
+    (bin_dir / "git").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n{failing}exec "{real_git}" "$@"\n',
+        encoding="utf-8",
+    )
+    (bin_dir / "git").chmod((bin_dir / "git").stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{path}")
+    return log
+
+
+@pytest.mark.parametrize("on_call", [1, 2], ids=["first call fails", "second call fails"])
+def test_one_write_decides_the_root_check_once(tmp_path, monkeypatch, on_call):
+    """One backlog write asks git each question once, so every redirect
+    check in it (the memory skill's root guard and root finder, the
+    backlog's root and its refusal) reads the same answers and gives one
+    cause. The questions are every command a clean write from a linked
+    worktree runs, read from that write's own log. Each one, failing on its
+    first call, is asked once and every check gives one cause, and a
+    `git worktree list` failing so refuses the write with the guard's cause.
+    Each one, failing on its second call, is never asked again, so the write
+    is the clean write.
+
+    Real repos and git; a `git` that fails the given command's given call
+    and logs every command."""
+    import os
+    import shutil
+
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    _project_dir_is(monkeypatch, (tmp_path / "wt").resolve())
+    real_git, path = shutil.which("git"), os.environ["PATH"]
+    memory_api = backlog._memory_api()
+    check = memory_api._worktree_redirect_cause
+
+    def write(tag, fail=None):
+        log = _git_failing_one_call(tmp_path, monkeypatch, tag, real_git, path, fail, on_call)
+        monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+        causes = []
+
+        def recording(*args, **kwargs):
+            causes.append(check(*args, **kwargs))
+            return causes[-1]
+
+        monkeypatch.setattr(memory_api, "_worktree_redirect_cause", recording)
+        store = tmp_path / f"{tag}-store"
+        store.mkdir()
+        code = backlog.main(["--backlog-dir", str(store), "add", "x"])
+        return code, log.read_text(encoding="utf-8").splitlines(), causes
+
+    clean_code, clean, clean_causes = write("clean")
+    questions = list(dict.fromkeys(clean))
+    # Control: the questions read from the log hold the four the checks rest on.
+    assert [any(f" {word}" in f" {q}" for q in questions) for word in (
+        "rev-parse --git-common-dir", "rev-parse --git-dir", "rev-parse --show-toplevel", "worktree list",
+    )] == [True] * 4, questions
+
+    # The clean write asks each question once and several checks read the answers.
+    outcomes = {"clean write": (sorted({c for c in clean if clean.count(c) > 1}), len(clean_causes) >= 2,
+                                clean_code, set(clean_causes))}
+    expected = {"clean write": ([], True, backlog._EXIT_OK, {None})}
+    for index, question in enumerate(questions):
+        code, commands, causes = write(f"fail{index}", question)
+        repeated = sorted({c for c in commands if commands.count(c) > 1})
+        if on_call == 2:
+            outcomes[question] = (repeated, commands == clean, code, set(causes))
+            expected[question] = ([], True, backlog._EXIT_OK, {None})
+        else:
+            listing = " worktree list " in f" {question} "
+            outcomes[question] = (question in commands, repeated, len(set(causes)) <= 1,
+                                  (code, set(causes)) if listing else None)
+            expected[question] = (True, [], True,
+                                  (backlog._EXIT_REFUSED, {memory_api.REDIRECT_UNLISTABLE}) if listing else None)
+    assert outcomes == expected
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+@pytest.mark.parametrize("raising_read", [1, 2, 3, 4])
+def test_one_write_reads_a_raised_listing_once(tmp_path, monkeypatch, raising_read, error):
+    """A worktree listing read that raises is that pass's answer, as a git
+    that failed is: one backlog write from a linked worktree reads the
+    listing once, asks git no command twice, and every redirect check in it
+    gives the same cause. A read that raises on its first call refuses the
+    write with the guard's cause; one that would raise on a later call is
+    never made, so the write succeeds.
+
+    Real repos and git; the raise on the given read is the stand-in, and a
+    `git` that logs every command."""
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    log = _logging_git(tmp_path, monkeypatch)
+    _project_dir_is(monkeypatch, (tmp_path / "wt").resolve())
+    monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+    memory_api = backlog._memory_api()
+    read, check = memory_api._worktree_records, memory_api._worktree_redirect_cause
+    reads, causes = [], []
+
+    def raising_on_one_read(*args):
+        reads.append(args)
+        if len(reads) == raising_read:
+            raise error("the listing read raised")
+        return read(*args)
+
+    def recording(*args, **kwargs):
+        causes.append(check(*args, **kwargs))
+        return causes[-1]
+
+    monkeypatch.setattr(memory_api, "_worktree_records", raising_on_one_read)
+    monkeypatch.setattr(memory_api, "_worktree_redirect_cause", recording)
+    store = tmp_path / "store"
+    store.mkdir()
+
+    code = backlog.main(["--backlog-dir", str(store), "add", "x"])
+
+    commands = log.read_text(encoding="utf-8").splitlines()
+    repeated = sorted({c for c in commands if commands.count(c) > 1})
+    expected = ({memory_api.REDIRECT_UNLISTABLE}, backlog._EXIT_REFUSED) if raising_read == 1 \
+        else ({None}, backlog._EXIT_OK)
+    # One read, no git command asked twice, and every check gives one cause.
+    assert (len(reads), repeated, len(causes) >= 2, set(causes), code) == (1, [], True, *expected), (
+        reads, causes, commands)
+
+
+@pytest.mark.parametrize("layout, failing", [
+    ("main checkout", 0), ("linked worktree", 0), ("linked worktree", 1), ("linked worktree", 2),
+    ("linked worktree", 3), ("linked worktree", 4),
+])
+def test_a_show_that_opens_the_memory_store_asks_git_each_question_once(tmp_path, monkeypatch, layout, failing):
+    """`backlog show` with a live item's memory id opens the memory store
+    inside the command, and the store's detection joins the command's
+    pass: no git command runs twice, a linked worktree is listed once, and
+    every redirect check gives one cause, whichever `git worktree list`
+    call fails; a show reads, so it succeeds either way. The control shows
+    the store was opened inside the command.
+
+    Real repos and git; a `git` that fails the given `worktree list` call
+    and logs every command."""
+    main = _repo(tmp_path / "main").resolve()
+    start = main
+    if layout == "linked worktree":
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                       check=True, capture_output=True)
+        start = (tmp_path / "wt").resolve()
+    _project_dir_is(monkeypatch, start)
+    monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+    memory_api = backlog._memory_api()
+    monkeypatch.setattr(memory_api, "_instance", None)
+    store = tmp_path / "store"
+    store.mkdir()
+    assert backlog.main(["--backlog-dir", str(store), "add", "x", "--memory", "a" * 32]) == backlog._EXIT_OK
+    monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+    log = _git_failing_listing(tmp_path, monkeypatch, failing)
+    check = memory_api._worktree_redirect_cause
+    causes = []
+
+    def recording(*args, **kwargs):
+        causes.append(check(*args, **kwargs))
+        return causes[-1]
+
+    monkeypatch.setattr(memory_api, "_worktree_redirect_cause", recording)
+
+    code = backlog.main(["--backlog-dir", str(store), "show"])
+
+    commands = log.read_text(encoding="utf-8").splitlines()
+    listings = [c for c in commands if " worktree list " in f" {c} "]
+    repeated = sorted({c for c in commands if commands.count(c) > 1})
+    linked = layout == "linked worktree"
+    assert memory_api._instance is not None, "control: show opened the memory store"
+    expected = {memory_api.REDIRECT_UNLISTABLE} if failing == 1 else {None} if linked else set()
+    assert (len(listings), repeated, set(causes), code) == (int(linked), [], expected, backlog._EXIT_OK), (
+        causes, commands)
+
+
+def _cli_run(start: Path, store: Path, *argv: str) -> "subprocess.CompletedProcess":
+    """`backlog.py <argv>` run as its own process from `start`, declared as
+    the project directory, as `_cli_write` runs `add`."""
+    import os
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env["CLAUDE_PROJECT_DIR"] = str(start)
+    return subprocess.run(
+        [sys.executable, str(Path(backlog.__file__)), "--backlog-dir", str(store), *argv],
+        env=env, cwd=str(start), capture_output=True, text=True, timeout=60,
+    )
+
+
+def test_every_refused_write_prints_the_decline_before_its_refusal(tmp_path):
+    """A write refused after the backlog file is read (no such item, an
+    archived item, a document `save` refuses) prints the memory skill's
+    decline of the canonical id first, then the refusal, as a refusal
+    raised before the read does. The controls show the same checkout's
+    successful writes print nothing.
+
+    Real repositories, real git, the CLI; a submodule with no origin is the
+    layout whose canonical id the memory skill declines."""
+    start = _named_apart_layout(tmp_path, "submodule with no origin")
+    store = tmp_path / "store"
+    store.mkdir()
+    added = _cli_run(start, store, "add", "x")
+    item = added.stdout.split()[2]
+    done = _cli_run(start, store, "set", item, "--status", "done")
+    archived = _cli_run(start, store, "archive", item)
+    assert [(r.returncode, r.stderr) for r in (added, done, archived)] == [(0, "")] * 3, "control: writes succeed"
+
+    refusals = {
+        "refused: no item with id 'zzzz'": _cli_run(start, store, "set", "zzzz"),
+        f"refused: item {item!r} is archived.": _cli_run(start, store, "set", item),
+        "refused, nothing written:": _cli_run(start, store, "add", "y", "--note", "n" * 501),
+    }
+
+    outcomes = {
+        refusal: (run.returncode, 0 <= run.stderr.find("so no project id was derived") < run.stderr.find(refusal))
+        for refusal, run in refusals.items()
+    }
+    assert outcomes == {refusal: (backlog._EXIT_REFUSED, True) for refusal in refusals}, {
+        refusal: run.stderr for refusal, run in refusals.items()}
+
+
+def test_a_bare_repository_refuses_and_its_linked_worktree_writes(tmp_path):
+    """A bare repository is not an umbrella: git answers for it and the
+    memory skill declines it, so a write there refuses and nothing is
+    written. The remedy it prints, running from a checkout with a working
+    tree, works: a linked worktree of that repository writes, and its file
+    holds that worktree as project_path. Neither run prints a decline on a
+    successful write; the refusal prints the memory skill's decline first,
+    then the refusal naming the root check's cause.
+
+    Real repositories, real git, the CLI."""
+    source = _repo(tmp_path / "source")
+    hub = (tmp_path / "hub.git").resolve()
+    subprocess.run(["git", "clone", "-q", "--bare", str(source), str(hub)], check=True, capture_output=True)
+    worktree = tmp_path / "hubwt"
+    subprocess.run(["git", "-C", str(hub), "worktree", "add", "-q", str(worktree), "-b", "w"],
+                   check=True, capture_output=True)
+    outcomes = {}
+    for start in (hub, worktree.resolve()):
+        store = tmp_path / f"store-{start.name}"
+        store.mkdir()
+        run = _cli_write(start, store)
+        files = list(store.glob("*.json"))
+        paths = [json.loads(f.read_text(encoding="utf-8"))["project_path"] for f in files]
+        decline = run.stderr.find("so no project id was derived")
+        refusal = run.stderr.find("refused: ")
+        outcomes[start.name] = (run.returncode, paths, decline, refusal, decline < refusal)
+
+    assert (outcomes["hub.git"][0], outcomes["hub.git"][1], outcomes["hub.git"][2] >= 0,
+            outcomes["hub.git"][4]) == (backlog._EXIT_REFUSED, [], True, True), outcomes
+    assert outcomes["hubwt"] == (0, [str(worktree.resolve())], -1, -1, False), outcomes
+
+
+def _cli_write(start: Path, store: Path) -> "subprocess.CompletedProcess":
+    """`backlog.py add` run as its own process from `start`, declared as the
+    project directory: the memory skill's warnings reach stderr there as
+    they do for a user, which they do not inside pytest's logging capture."""
+    import os
+
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env["CLAUDE_PROJECT_DIR"] = str(start)
+    return subprocess.run(
+        [sys.executable, str(Path(backlog.__file__)), "--backlog-dir", str(store), "add", "x"],
+        env=env, cwd=str(start), capture_output=True, text=True, timeout=60,
+    )
+
+
+def _named_apart_layout(tmp_path, layout):
+    """Build `layout`, one whose backlog file key and project_path name
+    different folders, and return the directory a session declares."""
+    if layout == "linked worktree of a bare repository":
+        source = _repo(tmp_path / "source")
+        hub = tmp_path / "hub.git"
+        subprocess.run(["git", "clone", "-q", "--bare", str(source), str(hub)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(hub), "worktree", "add", "-q", str(tmp_path / "hubwt"), "-b", "w"],
+                       check=True, capture_output=True)
+        return (tmp_path / "hubwt").resolve()
+    if layout == "submodule with no origin":
+        lib = _repo(tmp_path / "lib")
+        sup = _repo(tmp_path / "super")
+        subprocess.run(["git", "-C", str(sup), "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                        str(lib), "mod"], check=True, capture_output=True)
+        return (sup / "mod").resolve()
+    main, _store, wt = _separate_git_dir_repo(tmp_path)
+    return main if layout == "separate-git-dir main checkout" else wt
+
+
+@pytest.mark.parametrize("layout", [
+    "linked worktree of a bare repository",
+    "separate-git-dir main checkout",
+    "separate-git-dir linked worktree",
+    "submodule with no origin",
+])
+def test_the_file_key_and_project_path_name_different_folders_by_design(tmp_path, monkeypatch, layout):
+    """The backlog file is keyed by the pre-change folder name and
+    project_path is the identity root; on these layouts they name different
+    folders. The write succeeds, prints nothing on stderr (a decline of the
+    canonical id says nothing about a write keyed by the folder name), and
+    stores the identity root under the folder-name key.
+
+    Real repositories, real git, the CLI."""
+    start = _named_apart_layout(tmp_path, layout)
+    store = tmp_path / "store"
+    store.mkdir()
+    run = _cli_write(start, store)
+
+    _project_dir_is(monkeypatch, start)
+    key = backlog._project_name()
+    root = backlog._memory_api().main_repo_root(str(start))
+    assert key and root is not None, "control: both the key and the root resolve"
+    assert key != Path(root).name, "control: the key and the root name different folders"
+    files = sorted(p.name for p in store.glob("*.json"))
+    path = json.loads((store / files[0]).read_text(encoding="utf-8"))["project_path"] if files else None
+    assert (run.returncode, files, path, run.stderr) == (0, [f"{key}.json"], str(root), "")
+
+
+def test_a_refusal_the_root_check_does_not_give_names_what_git_did_not_give(tmp_path, monkeypatch):
+    """A directory under GIT_CEILING_DIRECTORIES sits inside a checkout git
+    will not look into from there; the memory skill's root check finds no
+    marker git would use and passes it, so the refusal says git gave no root
+    for it, names the checkout around it, and points at git's own reason.
+
+    Real repo, real git."""
+    main = _repo(tmp_path / "main").resolve()
+    (main / "sub").mkdir()
+    _project_dir_is(monkeypatch, main / "sub")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(main))
+    memory_api = backlog._memory_api()
+    assert memory_api.main_repo_common_dir(str(main / "sub")) is None, "control: git gives no repository here"
+
+    outcome = _roots_or_refusal()
+
+    text = str(outcome)
+    assert type(outcome) is backlog.BacklogWriteError, text
+    assert f"git gave no root for CLAUDE_PROJECT_DIR={str(main / 'sub')!r}" in text, text
+    assert f"inside the checkout at {str(main)!r}" in text, text
+    assert text.count("CLAUDE_PROJECT_DIR") == 1, text
+
+
+@pytest.mark.parametrize(
+    "listing",
+    [k for k in _LISTINGS_WITH_NO_RECORD if k != "git gives no listing"],
+)
+def test_a_listing_with_no_record_to_read_adds_no_worktree_names(tmp_path, monkeypatch, listing):
+    """The abandoned-work names from a listing that leaves no record to read
+    are the names git giving no listing gives: the branches alone.
+
+    Real repo, real reader; git's listing is the stand-in."""
+    repo = _repo(tmp_path / "repo", branch="feat/1234-thing")
+    expected = backlog._branch_and_worktree_names(str(repo))
+    assert "feat/1234-thing" in (expected or []), "control: git listed the branches"
+    (tmp_path / "bin-none").mkdir()
+    _git_listing(tmp_path / "bin-none", monkeypatch, None)
+    without_listing = backlog._branch_and_worktree_names(str(repo))
+    _git_listing(tmp_path, monkeypatch, _LISTINGS_WITH_NO_RECORD[listing])
+
+    try:
+        names = backlog._branch_and_worktree_names(str(repo))
+    except Exception as error:  # a raise is the answer under test, not a harness failure
+        names = error
+
+    assert without_listing is not None and set(without_listing) < set(expected), (
+        "control: no listing drops the worktree names", without_listing, expected)
+    assert names == without_listing, names
+
+
+def _git_rejecting_z(tmp_path, monkeypatch) -> None:
+    """Put first on PATH a `git` that rejects `-z`, as git before 2.36 does,
+    and otherwise runs the real git."""
+    import os
+    import shutil
+    import stat
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        '#!/bin/sh\nfor a in "$@"; do [ "$a" = "-z" ] && exit 129; done\n'
+        f'exec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+@pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
+@pytest.mark.parametrize("locked", [False, True], ids=["unlocked", "locked"])
+def test_a_listed_worktree_whose_git_does_not_name_it_back_is_not_a_root(
+    tmp_path, monkeypatch, locked, nul
+):
+    """git lists whatever a repository's admin entries name, and an entry
+    can name another repository's checkout (a delivered `.git`, or a path
+    cut at a newline on a git that rejects `-z`). Only a worktree whose
+    `.git` and admin entry name each other is recorded, so that checkout,
+    which another project's sessions run in, is not one of this project's
+    roots, locked or not: an entry is kept unlinked only while its folder
+    is absent.
+
+    Real repos, real git: the listing git prints is the thing under test."""
+    main = _repo(tmp_path / "main")
+    other = _repo(tmp_path / "other")
+    admin = main / ".git" / "worktrees" / "other"
+    admin.mkdir(parents=True)
+    (admin / "gitdir").write_text(f"{other / '.git'}\n")
+    if locked:
+        (admin / "locked").write_text("")
+    (admin / "HEAD").write_text((main / ".git" / "HEAD").read_text())
+    (admin / "commondir").write_text("../..\n")
+    if not nul:
+        _git_rejecting_z(tmp_path, monkeypatch)
+    _root_is(monkeypatch, main.resolve())
+
+    listed = {
+        str(Path(record[0][len("worktree "):]).resolve())
+        for record in backlog._memory_api()._worktree_records(["-C", str(main)])
+    }
+    roots = backlog.checkout_roots()
+
+    assert str(other.resolve()) in listed, "git did not list the entry, so this arm tests nothing"
+    assert roots == [str(main.resolve())], roots
+
+
+@pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
+def test_a_worktree_whose_folder_is_absent_stays_a_root(tmp_path, monkeypatch, nul):
+    """A worktree whose folder is absent keeps its root, locked or not (a
+    drive not mounted now; git before 2.31 cannot say which), so a session
+    there after the drive returns matches this backlog before any write
+    records it again. A worktree whose folder is present but holds no `.git`
+    is not a root, as no `.git` names it back.
+
+    Real repo, real git: the listing git prints is the thing under test."""
+    main = _repo(tmp_path / "main")
+    run = lambda *a: subprocess.run(["git", "-C", str(main), *a], check=True,
+                                    capture_output=True)
+    run("worktree", "add", "-q", str(tmp_path / "usb"), "-b", "usb")
+    run("worktree", "lock", "--reason", "on a usb disk", str(tmp_path / "usb"))
+    run("worktree", "add", "-q", str(tmp_path / "gone"), "-b", "gone")
+    run("worktree", "add", "-q", str(tmp_path / "bare-folder"), "-b", "bare-folder")
+    usb, gone = (tmp_path / "usb").resolve(), (tmp_path / "gone").resolve()
+    folder = (tmp_path / "bare-folder").resolve()
+    (tmp_path / "usb").rename(tmp_path / "unmounted")
+    (tmp_path / "gone").rename(tmp_path / "deleted")
+    (folder / ".git").unlink()
+    if not nul:
+        _git_rejecting_z(tmp_path, monkeypatch)
+    _root_is(monkeypatch, main.resolve())
+
+    roots = backlog.checkout_roots()
+
+    assert str(usb) in roots, roots
+    assert str(gone) in roots, roots
+    assert str(folder) not in roots, roots
 
 
 def test_the_abandoned_heuristic_reads_real_branches(tmp_path, monkeypatch):
@@ -2288,6 +3725,147 @@ def test_the_abandoned_heuristic_ignores_shas_and_path_components(tmp_path, monk
     )
 
 
+def test_an_unreadable_listing_with_no_branches_flags_nothing(tmp_path, monkeypatch):
+    """A worktree listing PACT cannot read whole is no listing, not an empty
+    one. With `git branch` also failing there are no names at all, so the
+    heuristic must stay silent rather than report every stale item as
+    abandoned.
+
+    The control runs the same failing `git branch` with git's real listing:
+    the stale item then flags, so the silence below comes from the unreadable
+    listing and not from a heuristic that never flags.
+
+    RED WHEN the unreadable answer is read as an empty listing.
+    """
+    repo = _repo(tmp_path / "repo", branch="feat/1-thing")
+    monkeypatch.setattr(backlog, "project_root", lambda: repo)
+    real = backlog._run_capture
+    monkeypatch.setattr(
+        backlog, "_run_capture",
+        lambda command, **kwargs: None if "branch" in command else real(command, **kwargs),
+    )
+    stale = [_item(status="active", ref="#9999", touched=_OLD)]
+
+    assert len(backlog._abandoned_flags(stale, str(repo))) == 1, (
+        "control: with a readable listing the stale item no longer flags, so "
+        "the silence asserted below proves nothing"
+    )
+
+    memory_api = backlog._memory_api()
+    monkeypatch.setattr(
+        memory_api, "_worktree_records", lambda at: memory_api.UNREADABLE_LISTING
+    )
+    assert backlog._branch_and_worktree_names(str(repo)) is None
+    assert backlog._abandoned_flags(stale, str(repo)) == [], (
+        "an unreadable listing was read as an empty one, so every stale item "
+        "was reported abandoned"
+    )
+
+
+def test_the_worktree_names_are_this_projects_whatever_git_dir_says(tmp_path, monkeypatch):
+    """GIT_DIR and GIT_COMMON_DIR in the session's environment name another
+    repository; the worktree folders the abandoned-work check reads are
+    still this project's, read by the memory skill's listing reader.
+
+    Real repos, real git."""
+    repo = _repo(tmp_path / "repo")
+    other = _repo(tmp_path / "other")
+    run = lambda at, *a: subprocess.run(["git", "-C", str(at), *a], check=True,
+                                        capture_output=True)
+    run(repo, "worktree", "add", "-q", str(tmp_path / "ours-7"), "-b", "b-ours")
+    run(other, "worktree", "add", "-q", str(tmp_path / "theirs-8"), "-b", "b-theirs")
+    names = backlog._branch_and_worktree_names(str(repo))
+    assert "ours-7" in names and "theirs-8" not in names, f"control: {names}"
+
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(other / ".git"))
+    names = backlog._branch_and_worktree_names(str(repo))
+
+    assert "ours-7" in names, names
+    assert "theirs-8" not in names, names
+
+
+def test_the_branch_names_are_this_projects_whatever_git_dir_says(tmp_path, monkeypatch):
+    """`git branch` runs without GIT_DIR and GIT_COMMON_DIR, so with both
+    naming another repository the branch names are still this project's.
+
+    Real repos, real git."""
+    repo = _repo(tmp_path / "repo", branch="feat/7-ours")
+    other = _repo(tmp_path / "other", branch="feat/8-theirs")
+    names = backlog._branch_and_worktree_names(str(repo))
+    assert "feat/7-ours" in names and "feat/8-theirs" not in names, f"control: {names}"
+
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(other / ".git"))
+    names = backlog._branch_and_worktree_names(str(repo))
+
+    assert "feat/7-ours" in names, names
+    assert "feat/8-theirs" not in names, names
+
+
+def test_the_origin_slug_is_this_projects_whatever_git_dir_says(tmp_path, monkeypatch):
+    """The `origin` URL is read without GIT_DIR and GIT_COMMON_DIR, so with
+    both naming another repository the slug is still this project's.
+
+    Real repos, real git; the remotes are config values only."""
+    repo = _repo(tmp_path / "repo")
+    other = _repo(tmp_path / "other")
+    for path, name in ((repo, "ours"), (other, "theirs")):
+        subprocess.run(["git", "-C", str(path), "remote", "add", "origin",
+                        f"https://github.com/o/{name}.git"], check=True, capture_output=True)
+    assert backlog._origin_repo_slug(str(repo)) == ("o", "ours"), "control"
+
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(other / ".git"))
+
+    assert backlog._origin_repo_slug(str(repo)) == ("o", "ours")
+
+
+def test_gh_repo_view_runs_without_the_sessions_git_location(tmp_path, monkeypatch):
+    """`gh repo view` reads the git remotes of the folder it runs in, so it
+    runs without GIT_DIR and GIT_COMMON_DIR too. A stand-in for the `gh`
+    process records the environment it is given; nothing is contacted."""
+    repo = _repo(tmp_path / "repo")
+    seen = []
+    real = subprocess.run
+
+    def fake_run(command, *args, **kwargs):
+        if command[0] != "gh":
+            return real(command, *args, **kwargs)
+        seen.append(kwargs.get("env"))
+        return subprocess.CompletedProcess(
+            command, 0, '{"nameWithOwner": "o/ours", "url": "https://github.com/o/ours"}', "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "other" / ".git"))
+    monkeypatch.setenv("GIT_COMMON_DIR", str(tmp_path / "other" / ".git"))
+
+    assert backlog._gh_repo_view_slug(str(repo)) == ("o", "ours"), "control: the stand-in ran"
+    assert len(seen) == 1 and seen[0] is not None, seen
+    assert {"GIT_DIR", "GIT_COMMON_DIR"} & set(seen[0]) == set(), sorted(seen[0])
+
+
+def test_a_folder_naming_another_repositorys_git_dir_reads_none_of_its_worktree_names(tmp_path):
+    """A folder whose `.git` file names another repository's `.git`
+    directory reads that repository's worktree listing, and the worktree
+    folder names are not this project's, as its roots are not. The control
+    shows git lists the worktree.
+
+    Real repos, real git."""
+    other = _repo(tmp_path / "other")
+    subprocess.run(["git", "-C", str(other), "worktree", "add", "-q", str(tmp_path / "theirs-8"),
+                    "-b", "b-theirs"], check=True, capture_output=True)
+    folder = tmp_path / "folder"
+    folder.mkdir()
+    (folder / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    listed = [record[0] for record in backlog._memory_api()._worktree_records(["-C", str(folder)])]
+    assert f"worktree {(tmp_path / 'theirs-8').resolve()}" in listed, f"control: {listed}"
+
+    names = backlog._branch_and_worktree_names(str(folder))
+
+    assert "theirs-8" not in (names or []), names
+
+
 def test_staleness_flags_at_the_threshold_not_before(monkeypatch):
     """Exactly `_STALE_AFTER` days is quiet; a day older flags.
 
@@ -2327,7 +3905,7 @@ def test_add_refuses_a_non_list_items_and_leaves_the_file_UNCHANGED(tmp_path, mo
     before = path.read_bytes()
     monkeypatch.setattr(backlog, "store_path", lambda backlog_dir=None: path)
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
 
     code = backlog.main(["add", "a new item"])
 
@@ -2362,7 +3940,7 @@ def test_an_ABSENT_item_list_is_still_allowed_while_an_explicit_null_refuses(tmp
     RED WHEN membership is simplified back to a `.get()` lookup.
     """
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
 
     absent = _backlog(tmp_path)
     absent.pop("items")
@@ -4843,7 +6421,11 @@ def test_an_unset_or_non_directory_project_dir_still_refuses(tmp_path, monkeypat
         PACTMemory = real.PACTMemory
 
         @staticmethod
-        def main_repo_root(start=None):
+        def main_repo_common_dir(start=None):
+            return None
+
+        @staticmethod
+        def main_repo_root(start=None, common=None):
             return None
 
         # The session-record channel, inert: under pytest the real discovery
@@ -4933,7 +6515,11 @@ def test_a_directory_inside_a_repository_git_cannot_read_still_refuses(tmp_path,
         PACTMemory = real.PACTMemory
 
         @staticmethod
-        def main_repo_root(start=None):
+        def main_repo_common_dir(start=None):
+            return None
+
+        @staticmethod
+        def main_repo_root(start=None, common=None):
             return None
 
         # The session-record channel, inert: under pytest the real discovery
@@ -4946,6 +6532,16 @@ def test_a_directory_inside_a_repository_git_cannot_read_still_refuses(tmp_path,
         @staticmethod
         def env_record_project_dir_disagreement():
             return None
+
+        # The refusal's own cause comes from the real root check, which asks
+        # no git when git gave no common dir.
+        root_check_refusal = staticmethod(real.root_check_refusal)
+        _LISTING_UNASKED = real._LISTING_UNASKED
+        # `main` holds the memory skill's decline warnings on its own logger,
+        # and runs the command in one detection pass.
+        logger = real.logger
+        is_decline_record = staticmethod(real.is_decline_record)
+        detection_pass = staticmethod(real.detection_pass)
 
     monkeypatch.setattr(backlog, "_memory_api", lambda: _NoGit)
     for env_path in (sub, linked):
@@ -5109,7 +6705,7 @@ def _backlog_file(tmp_path, monkeypatch, items, archive=None):
     _write(tmp_path, "b.json", payload)
     monkeypatch.setattr(backlog, "store_path", lambda backlog_dir=None: path)
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
     return path
 
 
@@ -5514,7 +7110,7 @@ def test_an_old_shape_file_round_trips_without_gaining_the_archive_key(tmp_path,
     path = tmp_path / "b.json"
     _write(tmp_path, "b.json", _backlog(tmp_path, items=[_item()]))
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
 
     data = backlog.load_or_create(path)
     assert backlog.save(data, path) == []
@@ -5546,7 +7142,7 @@ def test_a_two_list_file_keeps_its_archive_through_a_save(tmp_path, monkeypatch)
     path = tmp_path / "b.json"
     _write(tmp_path, "b.json", payload)
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
 
     data = backlog.load_or_create(path)
     assert backlog.save(data, path) == []
@@ -5886,7 +7482,7 @@ def test_archive_on_a_non_list_archive_key_refuses_cleanly(tmp_path, monkeypatch
     _write(tmp_path, "b.json", payload)
     monkeypatch.setattr(backlog, "store_path", lambda backlog_dir=None: path)
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
     before = path.read_bytes()
 
     code = backlog.main(["archive", "d001"])
@@ -5922,7 +7518,7 @@ def test_archive_with_a_non_dict_items_entry_refuses_cleanly(tmp_path, monkeypat
     _write(tmp_path, "b.json", payload)
     monkeypatch.setattr(backlog, "store_path", lambda backlog_dir=None: path)
     monkeypatch.setattr(backlog, "project_root", lambda: tmp_path)
-    monkeypatch.setattr(backlog, "checkout_roots", lambda: [str(tmp_path)])
+    monkeypatch.setattr(backlog, "checkout_roots", lambda recorded=None: [str(tmp_path)])
     before = path.read_bytes()
 
     code = backlog.main(["archive", "d001"])
@@ -6113,3 +7709,281 @@ class TestBacklogTeachExamples:
         assert r.stdout == ""
         assert "error:" in r.stderr
         assert self._EXAMPLES["show"] in r.stderr
+
+
+# A `git` whose `worktree list` prints a canned listing: the file named by
+# CANNED_Z when `-z` is asked (REJECT: refuse `-z` as git before 2.36 does,
+# exit 129; FAIL: exit 128), else the file named by CANNED_PLAIN.
+_CANNED_GIT = """#!/bin/sh
+z=0
+for argument in "$@"; do
+  [ "$argument" = -z ] && z=1
+done
+if [ "$z" = 1 ]; then
+  case "$CANNED_Z" in
+    REJECT) echo "error: unknown switch \\`z'" >&2; exit 129 ;;
+    FAIL) echo "fatal: cannot list" >&2; exit 128 ;;
+  esac
+  cat "$CANNED_Z"
+  exit 0
+fi
+cat "$CANNED_PLAIN"
+"""
+
+# (name, -z listing or REJECT/FAIL, plain listing, the answer: the paths of
+# the records read, in order, "empty" for a listing with no record or an
+# empty one, "unreadable" for records that are not git's fields in git's
+# order, or None for no listing). `{a}` and `{b}` are checkouts holding a
+# `.git`, `{w}` a path that does not exist, `{d}` a directory with no `.git`.
+_LISTINGS = [
+    ("nul", "worktree {a}\0HEAD 1\0branch refs/heads/main\0\0worktree {b}\nc\0HEAD 2\0detached\0\0",
+     "", ("{a}", "{b}\nc")),
+    ("nul, a lock with a reason and a stale worktree", "worktree {a}\0HEAD 1\0branch refs/heads/main\0\0"
+     "worktree {b}\0HEAD 2\0detached\0locked on a usb disk\0\0worktree {w}\0HEAD 3\0branch refs/heads/x\0"
+     "prunable gitdir file points to non-existent location\0\0", "", ("{a}", "{b}", "{w}")),
+    # With `-z`, a record that is not git's known fields in git's order is
+    # refused as it is without: a listing cut short, one read with newlines
+    # in place of NULs, a known field out of order or in the wrong shape.
+    ("nul, a listing cut short after a path", "worktree {a}\0HEAD 1\0\0worktree {b}", "", "unreadable"),
+    ("nul, newlines in place of NULs", "worktree {a}\nHEAD 1\n\n", "", "unreadable"),
+    ("nul, a field out of order", "worktree {a}\0locked\0HEAD 1\0\0", "", "unreadable"),
+    ("nul, a known flag with a value", "worktree {a}\0bare x\0\0", "", "unreadable"),
+    # With `-z` no path is cut, so a field git added later (as 2.31 added
+    # `locked` and `prunable`) is skipped, keyed or bare, wherever it sits.
+    ("nul, an unknown field", "worktree {a}\0HEAD 1\0foo bar\0\0", "", ("{a}",)),
+    ("nul, an unknown flag between known fields",
+     "worktree {a}\0HEAD 1\0newflag\0branch refs/heads/main\0\0worktree {b}\0HEAD 2\0detached\0\0", "",
+     ("{a}", "{b}")),
+    ("nul, an unknown field leading a record", "foo bar\0worktree {a}\0HEAD 1\0\0", "", ("{a}",)),
+    ("nul, only unknown fields", "foo bar\0newflag\0\0", "", "unreadable"),
+    # A NUL in a worktree's admin `gitdir` file cuts the path git prints, to
+    # nothing or to a relative path; either would resolve against the cwd,
+    # so that record is dropped and the others are kept.
+    ("nul, a worktree whose listed path is empty",
+     "worktree {a}\0HEAD 1\0\0worktree \0HEAD 2\0detached\0\0worktree {b}\0HEAD 3\0detached\0\0", "",
+     ("{a}", "{b}")),
+    ("nul, a worktree whose listed path is relative",
+     "worktree {a}\0HEAD 1\0\0worktree b\0HEAD 2\0detached\0\0", "", ("{a}",)),
+    ("plain, a worktree whose listed path is empty", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree \nHEAD 2\ndetached\n\n", ("{a}",)),
+    # git always lists the main worktree first, so a listing with no record,
+    # or with an empty record anywhere, is not git's, and is told apart from
+    # records that are not git's fields in git's order.
+    ("nul, an empty listing", "", "", "empty"),
+    ("nul, a lone terminator", "\0", "", "empty"),
+    ("nul, an empty record first", "\0worktree {a}\0HEAD 1\0\0", "", "empty"),
+    ("nul, an empty record between two", "worktree {a}\0HEAD 1\0\0\0worktree {b}\0HEAD 2\0\0", "",
+     "empty"),
+    ("nul, an empty record last", "worktree {a}\0HEAD 1\0\0\0", "", "empty"),
+    ("plain, an empty listing", "REJECT", "", "empty"),
+    ("plain, an empty record between two", "REJECT",
+     "worktree {a}\nHEAD 1\n\n\nworktree {b}\nHEAD 2\n\n", "empty"),
+    ("plain", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {b}\nHEAD 2\ndetached\n\n", ("{a}", "{b}")),
+    ("plain, a path holding a newline", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {b}\nc\nHEAD 2\n\n", "unreadable"),
+    ("plain, an unknown field", "REJECT", "worktree {a}\nHEAD 1\nfoo bar\n\n", "unreadable"),
+    ("plain, a repeated field", "REJECT", "worktree {a}\nHEAD 1\nHEAD 2\n\n", "unreadable"),
+    ("plain, a record not led by its path", "REJECT", "HEAD 1\nworktree {a}\n\n", "unreadable"),
+    ("plain, a bare main repository", "REJECT", "worktree {d}\nbare\n\n", ("{d}",)),
+    # A linked worktree whose folder is absent is kept, locked or not, as the
+    # `-z` listing keeps it (a drive not mounted now, or a folder moved or
+    # deleted). One whose folder is present but holds no `.git` is dropped,
+    # not refused: git lists a worktree whose folder lost its `.git`.
+    ("plain, a stale worktree git marks prunable", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nHEAD 2\nprunable gitdir file points to non-existent location\n\n",
+     ("{a}", "{w}")),
+    ("plain, a locked worktree whose folder is gone", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 2\nbranch refs/heads/x\nlocked\n\n",
+     ("{a}", "{w}")),
+    ("plain, a locked worktree with a reason whose folder is gone", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nHEAD 2\nbranch refs/heads/x\nlocked on a usb disk\n\n",
+     ("{a}", "{w}")),
+    ("plain, a locked folder that is present but holds no .git", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nHEAD 2\nbranch refs/heads/x\nlocked\n\n", ("{a}",)),
+    ("plain, a deleted worktree, no prunable line (git before 2.31)", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 2\nbranch refs/heads/x\n\n",
+     ("{a}", "{w}")),
+    ("plain, a worktree folder whose .git was deleted", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nHEAD 2\nbranch refs/heads/x\n"
+     "prunable gitdir file points to non-existent location\n\n", ("{a}",)),
+    ("plain, a worktree folder whose .git was deleted, no prunable line", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nHEAD 2\nbranch refs/heads/x\n\n", ("{a}",)),
+    # With `--separate-git-dir`, git lists the main repository at its git
+    # directory, which holds no `.git`; the main record is kept.
+    ("plain, a separate git dir's main record", "REJECT",
+     "worktree {d}\nHEAD 1\nbranch refs/heads/main\n\nworktree {b}\nHEAD 2\nbranch refs/heads/x\n\n",
+     ("{d}", "{b}")),
+    # A folder named `w`, newline, then a whole record in git's order: the
+    # cut path is kept when absent, as any absent listed path is, and
+    # dropped when it names a present folder with no `.git`. The record the
+    # name spells (`{b}`) is kept, as git's own admin entries could list it.
+    ("plain, a cut path followed by a well-ordered record", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {w}\nHEAD 1\ndetached\n\n"
+     "worktree {b}\nHEAD 2\nbranch refs/heads/x\n\n", ("{a}", "{w}", "{b}")),
+    ("plain, a cut path naming a present folder, followed by a well-ordered record", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\nworktree {d}\nHEAD 1\ndetached\n\n"
+     "worktree {b}\nHEAD 2\nbranch refs/heads/x\n\n", ("{a}", "{b}")),
+    ("plain, a bare record that is not the main repository's", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nbare\n\n", "unreadable"),
+    ("plain, a bare main repository that is not a directory", "REJECT",
+     "worktree {w}\nbare\n\n", "unreadable"),
+    ("plain, a path cut before 'locked'", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nlocked\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'detached'", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\ndetached\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'bare'", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nbare\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'bare', the cut path a directory", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nbare\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'prunable', the cut path a directory", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {d}\nprunable\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'prunable', the cut path absent", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nprunable\nHEAD 2\n\n", "unreadable"),
+    ("plain, a path cut before 'locked', the cut path a checkout", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {b}\nlocked\nHEAD 2\n\n", "unreadable"),
+    ("plain, a record ended after its path", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {b}\n\n", "unreadable"),
+    ("plain, 'prunable' with no reason", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {w}\nHEAD 2\nprunable\n\n", "unreadable"),
+    ("plain, 'prunable' with no reason, on a checkout", "REJECT",
+     "worktree {a}\nHEAD 1\n\nworktree {b}\nHEAD 2\nprunable\n\n", "unreadable"),
+    ("plain, a bare record with a branch", "REJECT",
+     "worktree {d}\nbare\nbranch refs/heads/main\n\n", "unreadable"),
+    ("plain, every field git prints, in git's order", "REJECT",
+     "worktree {a}\nHEAD 1\nbranch refs/heads/main\n\n"
+     "worktree {b}\nHEAD 2\ndetached\nlocked\n\n"
+     "worktree {a}\nHEAD 3\nbranch refs/heads/x\nlocked on a usb disk\n\n"
+     "worktree {w}\nHEAD 4\nbranch refs/heads/y\n"
+     "prunable gitdir file points to non-existent location\n\n", ("{a}", "{b}", "{a}", "{w}")),
+    ("plain, a bare main repository with a worktree", "REJECT",
+     "worktree {d}\nbare\n\nworktree {b}\nHEAD 2\nbranch refs/heads/x\n\n", ("{d}", "{b}")),
+    ("no listing", "FAIL", "", None),
+]
+
+
+def _canned_git(tmp_path, monkeypatch, nul: str, plain: str) -> None:
+    import os
+    import stat
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "git"
+    wrapper.write_text(_CANNED_GIT, encoding="utf-8")
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    if nul not in ("REJECT", "FAIL"):
+        (tmp_path / "nul").write_bytes(nul.encode())
+        nul = str(tmp_path / "nul")
+    (tmp_path / "plain").write_bytes(plain.encode())
+    monkeypatch.setenv("CANNED_Z", nul)
+    monkeypatch.setenv("CANNED_PLAIN", str(tmp_path / "plain"))
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+@pytest.mark.parametrize("name,nul,plain,readable", _LISTINGS, ids=[row[0] for row in _LISTINGS])
+def test_each_worktree_listing_reads_to_its_answer(
+    tmp_path, monkeypatch, name, nul, plain, readable
+):
+    """The memory skill's reader of `git worktree list --porcelain`, the one
+    this module's roots and branch names read, gives each listing its
+    records, or refuses it: one it could not hold whole is no listing."""
+    paths = {name: tmp_path / name for name in "abwd"}
+    for name in "ab":
+        (paths[name] / ".git").mkdir(parents=True)
+    paths["d"].mkdir()
+    nul, plain = (text.format(**paths) for text in (nul, plain))
+    _canned_git(tmp_path, monkeypatch, nul, plain)
+    ours = backlog._memory_api()._worktree_records(["-C", str(tmp_path)])
+    if isinstance(readable, tuple):
+        assert isinstance(ours, list), (name, ours)
+        read = [record[0] for record in ours]
+        assert read == ["worktree " + path.format(**paths) for path in readable], (name, read)
+    else:
+        assert ours == readable, (name, ours)
+
+
+def test_a_worktree_whose_path_holds_a_newline_is_recorded_whole(tmp_path, monkeypatch):
+    """The listing is read with `-z`, so a worktree folder named `w<newline>t`
+    is recorded as itself, and the line before its newline (`w`), another
+    directory, is not."""
+    main = _repo(tmp_path / "main")
+    linked = tmp_path / "w\nt"
+    (tmp_path / "w").mkdir()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(linked), "-b", "wt"],
+                   check=True, capture_output=True)
+    _root_is(monkeypatch, main)
+
+    roots = backlog.checkout_roots()
+    assert str(linked.resolve()) in roots, roots
+    assert str((tmp_path / "w").resolve()) not in roots, roots
+
+
+def test_without_nul_a_path_holding_a_newline_records_no_worktree(tmp_path, monkeypatch):
+    """On a git that rejects `-z`, a listing holding such a path cannot be
+    read whole, so only the project root is recorded, never `w`."""
+    _canned_git(
+        tmp_path, monkeypatch, "REJECT",
+        f"worktree {tmp_path / 'main'}\nHEAD 1\n\nworktree {tmp_path / 'w'}\nt\nHEAD 2\n\n",
+    )
+    (tmp_path / "main").mkdir()
+    (tmp_path / "w").mkdir()
+    _root_is(monkeypatch, tmp_path / "main", tmp_path / "main" / ".git")
+    assert backlog.checkout_roots() == [str(tmp_path / "main")]
+
+
+@pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
+def test_every_layout_git_lists_reads_whole(tmp_path, monkeypatch, nul):
+    """Real listings of every layout git prints read in the memory skill's
+    reader, the one this module uses, with `-z` and on a git that rejects
+    it: a branch, a detached HEAD, a lock with
+    and without a reason, a bare main repository and a `--separate-git-dir`
+    repository's main record (its git directory) are kept, and so is a
+    worktree whose folder is absent (moved away, or locked with its folder
+    gone). A worktree whose folder is present but lost its `.git` is kept
+    with `-z`, where its path is whole, and dropped without it."""
+    import shutil
+
+    from scripts import memory_api
+
+    real_git = shutil.which("git")
+
+    def git(*args, cwd):
+        subprocess.run([real_git, *args], cwd=cwd, check=True, capture_output=True)
+
+    main = _repo(tmp_path / "main")
+    git("worktree", "add", "-q", str(tmp_path / "branch"), "-b", "b1", cwd=main)
+    git("worktree", "add", "-q", "--detach", str(tmp_path / "detached"), cwd=main)
+    git("worktree", "add", "-q", str(tmp_path / "locked"), "-b", "b2", cwd=main)
+    git("worktree", "lock", str(tmp_path / "locked"), cwd=main)
+    git("worktree", "add", "-q", str(tmp_path / "locked-why"), "-b", "b3", cwd=main)
+    git("worktree", "lock", "--reason", "on a usb disk", str(tmp_path / "locked-why"), cwd=main)
+    git("worktree", "add", "-q", str(tmp_path / "moved"), "-b", "b4", cwd=main)
+    (tmp_path / "moved").rename(tmp_path / "moved-away")
+    git("worktree", "add", "-q", str(tmp_path / "locked-gone"), "-b", "b5", cwd=main)
+    git("worktree", "lock", str(tmp_path / "locked-gone"), cwd=main)
+    shutil.rmtree(tmp_path / "locked-gone")
+    git("worktree", "add", "-q", str(tmp_path / "no-dotgit"), "-b", "b6", cwd=main)
+    (tmp_path / "no-dotgit" / ".git").unlink()
+    bare = tmp_path / "bare.git"
+    git("clone", "-q", "--bare", str(main), str(bare), cwd=tmp_path)
+    git("worktree", "add", "-q", str(tmp_path / "bare-wt"), "b1", cwd=bare)
+    separate = tmp_path / "separate"
+    separate.mkdir()
+    git("init", "-q", f"--separate-git-dir={tmp_path / 'store'}", ".", cwd=separate)
+    git("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q",
+        "--allow-empty", "-m", "c", cwd=separate)
+    git("worktree", "add", "-q", str(tmp_path / "separate-wt"), "-b", "s", cwd=separate)
+
+    if not nul:
+        _git_rejecting_z(tmp_path, monkeypatch)
+    gone =("moved", "locked-gone", "no-dotgit") if nul else ("moved", "locked-gone")
+    kept = {
+        main: [main, *(tmp_path / name for name in ("branch", "detached", "locked", "locked-why", *gone))],
+        bare: [bare, tmp_path / "bare-wt"],
+        separate: [tmp_path / "store", tmp_path / "separate-wt"],
+    }
+    for where, paths in kept.items():
+        ours = memory_api._worktree_records(["-C", str(where)])
+        assert isinstance(ours, list), (where, ours)
+        read = [Path(record[0][len("worktree "):]).resolve() for record in ours]
+        assert sorted(read) == sorted(path.resolve() for path in paths), (where, read)

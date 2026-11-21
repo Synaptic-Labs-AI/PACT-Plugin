@@ -1,0 +1,693 @@
+"""Shared target shapes and resolver routes for the identity matrix tests.
+
+Location: pact-plugin/tests/fixtures/identity_routes.py
+
+Used by tests/test_identity_rung_parity.py (every route that reaches a shape
+must answer alike) and by the skill-prose override matrix (the routes the
+skill names as never reading the override file). Neither test imports the
+other; both import this module.
+
+SHAPES maps a name to `builder(base) -> target`. Every target has a `sub/`
+directory. A `home_` shape carries `home`, and its cells run with HOME set to
+`home_for(shape, target)`. Hostile shapes redirect the target's `.git` at a git directory
+that is not its own; the `control_` shapes are genuine checkouts. Each
+`control_own_` builder carries `layout`, its row name in PACTMemory.__init__'s
+git-call table.
+
+ROUTES maps a name to `(fn(monkeypatch, target, elsewhere), sources)`.
+`fn` points one resolver rung at the target and returns the detected
+identity (`_DetectedIdentity`, which carries `override_ignored`). `sources`
+is the set of decline or identity sources that show this route's own rung
+answered. `elsewhere` is a plain folder outside any repository. A route
+named `(forced)` stubs a module attribute through the monkeypatch it is
+given, so pass one that is undone after each cell.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+from typing import Optional
+
+from fixtures.identity_git import make_repo, run_git
+
+from scripts import memory_api
+from scripts.memory_api import PACTMemory
+
+VICTIM = "https://github.com/victim/private.git"
+VICTIM_ID = "github.com/victim/private"
+OWN = "https://github.com/own/project.git"
+UNUSABLE_PIN = "not a canonical id\n"
+USER_SETTING_ID = "github.com/user/chosen"
+INCLUDED = "https://github.com/own/included.git"
+
+
+# --- target shapes ---------------------------------------------------------
+
+
+def _victim(base: Path) -> Path:
+    return make_repo(base / "victim", remote=VICTIM)
+
+
+def _target_with_gitfile(base: Path, gitdir) -> Path:
+    target = base / "target"
+    target.mkdir()
+    (target / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+    return target
+
+
+def _target_with_git_link(base: Path, destination: Path) -> Path:
+    target = base / "target"
+    target.mkdir()
+    (target / ".git").symlink_to(destination)
+    return target
+
+
+def _victim_with_submodule(base: Path) -> Path:
+    upstream = make_repo(base / "upstream-sub", remote=VICTIM)
+    victim = make_repo(base / "victim", remote="https://github.com/victim/super.git")
+    run_git(
+        "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+        str(upstream), "libs/sub", cwd=victim,
+    )
+    run_git("remote", "set-url", "origin", VICTIM, cwd=victim / "libs" / "sub")
+    return victim
+
+
+def _forged_worktree_admin(base: Path) -> Path:
+    victim = _victim(base)
+    run_git("worktree", "add", "-q", str(base / "victim-wt"), "-b", "wt", cwd=victim)
+    return _target_with_gitfile(base, victim / ".git" / "worktrees" / "victim-wt")
+
+
+def _forged_submodule_admin(base: Path) -> Path:
+    victim = _victim_with_submodule(base)
+    return _target_with_gitfile(base, victim / ".git" / "modules" / "libs" / "sub")
+
+
+def _symlinked_submodule_admin(base: Path) -> Path:
+    victim = _victim_with_submodule(base)
+    return _target_with_git_link(base, victim / ".git" / "modules" / "libs" / "sub")
+
+
+def _forged_separate_store_worktree(base: Path) -> Path:
+    run_git("init", "-q", f"--separate-git-dir={base / 'store.git'}", str(base / "victim"), cwd=base)
+    run_git("remote", "add", "origin", VICTIM, cwd=base / "victim")
+    run_git(
+        "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q",
+        "--allow-empty", "-m", "i", cwd=base / "victim",
+    )
+    run_git("worktree", "add", "-q", str(base / "victim-wt"), "-b", "wt", cwd=base / "victim")
+    return _target_with_gitfile(base, base / "store.git" / "worktrees" / "victim-wt")
+
+
+def _foreign_gitdir(base: Path) -> Path:
+    return _target_with_gitfile(base, _victim(base) / ".git")
+
+
+def _relative_foreign_gitdir(base: Path) -> Path:
+    _victim(base)
+    return _target_with_gitfile(base, "../victim/.git")
+
+
+def _symlinked_git(base: Path) -> Path:
+    return _target_with_git_link(base, _victim(base) / ".git")
+
+
+def _dangling_gitfile(base: Path) -> Path:
+    return _target_with_gitfile(base, base / "missing")
+
+
+def _victim_bare(base: Path) -> Path:
+    run_git("init", "-q", "--bare", str(base / "victim.git"), cwd=base)
+    run_git("remote", "add", "origin", VICTIM, cwd=base / "victim.git")
+    return base / "victim.git"
+
+
+def _bare_target(base: Path) -> Path:
+    return _target_with_gitfile(base, _victim_bare(base))
+
+
+def _symlinked_bare(base: Path) -> Path:
+    return _target_with_git_link(base, _victim_bare(base))
+
+
+def _foreign_external_store(base: Path) -> Path:
+    run_git("init", "-q", f"--separate-git-dir={base / 'store.git'}", str(base / "victim"), cwd=base)
+    run_git("remote", "add", "origin", VICTIM, cwd=base / "victim")
+    return _target_with_gitfile(base, base / "store.git")
+
+
+def _own_checkout(base: Path) -> Path:
+    return make_repo(base / "target", remote=OWN)
+
+
+def _own_linked_worktree(base: Path) -> Path:
+    main = make_repo(base / "main", remote=OWN)
+    run_git("worktree", "add", "-q", str(base / "target"), "-b", "wt", cwd=main)
+    return base / "target"
+
+
+def _own_submodule(base: Path) -> Path:
+    upstream = make_repo(base / "upstream", remote=OWN)
+    superproject = make_repo(base / "super", remote="https://github.com/own/super.git")
+    run_git(
+        "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+        str(upstream), "target", cwd=superproject,
+    )
+    run_git("remote", "set-url", "origin", OWN, cwd=superproject / "target")
+    return superproject / "target"
+
+
+def _own_separate_git_dir(base: Path) -> Path:
+    run_git("init", "-q", f"--separate-git-dir={base / 'store.git'}", str(base / "target"), cwd=base)
+    run_git("remote", "add", "origin", OWN, cwd=base / "target")
+    run_git(
+        "-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q",
+        "--allow-empty", "-m", "i", cwd=base / "target",
+    )
+    return base / "target"
+
+
+def _own_committed_superproject(base: Path) -> Path:
+    """A superproject holding the own repository as submodule `target`, with
+    the submodule recorded in a commit so worktrees of either can be added."""
+    upstream = make_repo(base / "upstream", remote=OWN)
+    superproject = make_repo(base / "super", remote="https://github.com/own/super.git")
+    run_git(
+        "-c", "protocol.file.allow=always", "submodule", "add", "-q",
+        str(upstream), "target", cwd=superproject,
+    )
+    run_git("-c", "user.email=a@b", "-c", "user.name=a", "commit", "-q", "-m", "s", cwd=superproject)
+    run_git("remote", "set-url", "origin", OWN, cwd=superproject / "target")
+    return superproject
+
+
+def _own_submodule_worktree(base: Path) -> Path:
+    superproject = _own_committed_superproject(base)
+    run_git("worktree", "add", "-q", str(base / "target"), "-b", "wt", cwd=superproject / "target")
+    return base / "target"
+
+
+def _own_superproject_worktree_submodule(base: Path) -> Path:
+    superproject = _own_committed_superproject(base)
+    run_git("worktree", "add", "-q", str(base / "super-wt"), "-b", "swt", cwd=superproject)
+    run_git(
+        "-c", "protocol.file.allow=always", "submodule", "update", "-q", "--init",
+        cwd=base / "super-wt",
+    )
+    run_git("remote", "set-url", "origin", OWN, cwd=base / "super-wt" / "target")
+    return base / "super-wt" / "target"
+
+
+# THE OWN LAYOUTS' NAMES IN PACTMemory.__init__'s git-call table. Every
+# `control_own_` builder carries one; the git-call floor reads its layouts
+# from these, so a new own layout must state its row there.
+_own_checkout.layout = "checkout"
+def _home_linked_worktree(base: Path) -> Path:
+    """HOME is a linked worktree of a repository stored elsewhere."""
+    main = make_repo(base / "store" / "main", remote=OWN)
+    run_git("worktree", "add", "-q", str(base / "home"), "-b", "wt", cwd=main)
+    return base / "home"
+
+
+def _home_main_checkout(base: Path) -> Path:
+    """HOME is a main checkout; the session is in its linked worktree
+    outside HOME."""
+    main = make_repo(base / "home", remote=OWN)
+    run_git("worktree", "add", "-q", str(base / "outside"), "-b", "wt", cwd=main)
+    return base / "outside"
+
+
+def _home_repository_folder(base: Path) -> Path:
+    """HOME is a repository; the target is a plain folder inside it."""
+    make_repo(base / "home", remote=OWN)
+    (base / "home" / "folder").mkdir()
+    return base / "home" / "folder"
+
+
+def _stray_empty_dotgit(base: Path) -> Path:
+    """An empty `.git` directory, which git skips, in a folder under a home
+    repository."""
+    target = _home_repository_folder(base)
+    (target / ".git").mkdir()
+    return target
+
+
+def _stray_hooks_only_dotgit(base: Path) -> Path:
+    """A `.git` directory holding only a hook, which git skips."""
+    target = _home_repository_folder(base)
+    (target / ".git" / "hooks").mkdir(parents=True)
+    (target / ".git" / "hooks" / "pre-commit").write_text("#!/bin/sh\n", encoding="utf-8")
+    return target
+
+
+def _stray_objectless_dotgit(base: Path) -> Path:
+    """A `.git` repository with its objects directory removed, which git
+    skips."""
+    import shutil
+
+    target = _home_repository_folder(base)
+    run_git("init", "-q", str(target), cwd=base)
+    shutil.rmtree(target / ".git" / "objects")
+    return target
+
+
+def _stray_dangling_dotgit(base: Path) -> Path:
+    """A `.git` symlink to nowhere, which git and the marker walk skip."""
+    target = _home_repository_folder(base)
+    (target / ".git").symlink_to(base / "nowhere")
+    return target
+
+
+def _stray_dotgit_without_repository(base: Path) -> Path:
+    """An empty `.git` directory in a folder with no repository above it.
+    Git gives no answer here, for an empty `.git` and an unreadable one
+    alike, and no answer is no evidence that git looked past the `.git`, so
+    it stays a marker git cannot answer for. Under a repository, git
+    answers for that repository instead, and the `.git` is looked past."""
+    target = base / "folder"
+    (target / ".git").mkdir(parents=True)
+    return target
+
+
+def _stray_dotgit_under_bare_repository(base: Path) -> Path:
+    """An empty `.git` directory in a folder inside a bare repository, which
+    git skips for the bare repository above."""
+    above = base / "above.git"
+    above.mkdir()
+    run_git("init", "-q", "--bare", str(above), cwd=base)
+    run_git("--git-dir", str(above), "remote", "add", "origin", VICTIM, cwd=base)
+    target = above / "folder"
+    (target / ".git").mkdir(parents=True)
+    return target
+
+
+def _no_dotgit_under_bare_repository(base: Path) -> Path:
+    """The same folder inside a bare repository with no `.git` at all."""
+    target = _stray_dotgit_under_bare_repository(base)
+    (target / ".git").rmdir()
+    return target
+
+
+def _forged_worktree_config_dotgit(base: Path) -> Path:
+    """A `.git` DIRECTORY whose `commondir` names the victim's git dir and
+    whose `config.worktree` puts the work tree elsewhere: git uses it as this
+    folder's git dir, with the victim's repository behind it."""
+    victim = _victim(base)
+    run_git("config", "extensions.worktreeConfig", "true", cwd=victim)
+    elsewhere = base / "elsewhere-worktree"
+    elsewhere.mkdir()
+    target = base / "target"
+    (target / ".git").mkdir(parents=True)
+    (target / ".git" / "HEAD").write_text("ref: refs/heads/master\n", encoding="utf-8")
+    (target / ".git" / "commondir").write_text(str(victim / ".git") + "\n", encoding="utf-8")
+    (target / ".git" / "config.worktree").write_text(
+        f"[core]\n\tworktree = {elsewhere}\n", encoding="utf-8"
+    )
+    return target
+
+
+def _repository_with_worktree_at(project: Path, worktree: Path) -> Path:
+    """A repository whose `core.worktree` names `worktree`: git, asked in the
+    repository, answers `worktree` as its top level."""
+    target = make_repo(project, remote=OWN)
+    worktree.mkdir(parents=True, exist_ok=True)
+    run_git("config", "core.worktree", str(worktree), cwd=target)
+    return target
+
+
+def _worktree_inside_home_repository(base: Path) -> Path:
+    """`core.worktree` names a directory inside a pinned home repository
+    whose origin is the victim's."""
+    home = make_repo(base / "home", remote=VICTIM)
+    (home / ".git" / "pact-project-id").write_text("github.com/victim/home\n", encoding="utf-8")
+    return _repository_with_worktree_at(home / "projects" / "project", home / "area" / "wt")
+
+
+def _worktree_inside_another_repository(base: Path) -> Path:
+    """`core.worktree` names a directory inside the victim's repository."""
+    victim = _victim(base)
+    return _repository_with_worktree_at(base / "project", victim / "wt")
+
+
+def _worktree_outside_any_repository(base: Path) -> Path:
+    """`core.worktree` names a directory in no repository."""
+    return _repository_with_worktree_at(base / "project", base / "free" / "wt")
+
+
+# A folder name holding every character `str.splitlines()` splits at, and a
+# trailing space, so git's answers about a repository there hold them too.
+LINE_SEPARATOR_NAME = "a\nb\rc\x0bd\x0ce\x1cf\x1dg\x1eh\x85i\u2028j\u2029k "
+
+
+def _line_separator_folder(base: Path) -> Path:
+    """The repository's own folder is named LINE_SEPARATOR_NAME."""
+    return make_repo(base / LINE_SEPARATOR_NAME, remote=OWN)
+
+
+def _line_separator_parent(base: Path) -> Path:
+    """The repository's parent folder is named LINE_SEPARATOR_NAME."""
+    return make_repo(base / LINE_SEPARATOR_NAME / "target", remote=OWN)
+
+
+def _separate_git_dir_ending_in_a_space(base: Path) -> Path:
+    """A `--separate-git-dir` checkout whose git dir's name ends in a space."""
+    run_git("init", "-q", f"--separate-git-dir={base / 'store '}", str(base / "target"), cwd=base)
+    run_git("remote", "add", "origin", OWN, cwd=base / "target")
+    return base / "target"
+
+
+def _linked_worktree_named(base: Path, name: str) -> Path:
+    main = make_repo(base / "main", remote=OWN)
+    run_git("worktree", "add", "-q", str(base / name), "-b", "wt", cwd=main)
+    return base / name
+
+
+def _worktree_ending_in_a_space(base: Path) -> Path:
+    """A linked worktree whose folder name ends in a space."""
+    return _linked_worktree_named(base, "target ")
+
+
+def _worktree_holding_a_newline(base: Path) -> Path:
+    """A linked worktree whose folder name holds a newline."""
+    return _linked_worktree_named(base, "tar\nget")
+
+
+def _worktree_with_included_origin(
+    base: Path, header: str, own_first: bool = False, own_after: bool = False
+) -> Path:
+    """A linked worktree of a repository whose `remote.origin.url` is set in
+    an included file named under `header` (`{common}` is the common dir and
+    `{branch}` the main checkout's branch). With `own_first`, the
+    repository's own config sets the origin before the include; with
+    `own_after`, after it."""
+    main = make_repo(base / "main", remote=OWN if own_first else None)
+    common = main / ".git"
+    branch = run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=main)
+    (common / "included").write_text(f'[remote "origin"]\n\turl = {INCLUDED}\n', encoding="utf-8")
+    with open(common / "config", "a", encoding="utf-8") as config:
+        config.write(f"[{header.format(common=common, branch=branch)}]\n\tpath = included\n")
+    if own_after:
+        run_git("config", "remote.origin.url", OWN, cwd=main)
+    run_git("worktree", "add", "-q", str(base / "target"), "-b", "wt", cwd=main)
+    return base / "target"
+
+
+def _origin_from_onbranch_include(base: Path) -> Path:
+    return _worktree_with_included_origin(base, 'includeIf "onbranch:{branch}"')
+
+
+def _origin_from_gitdir_include(base: Path) -> Path:
+    return _worktree_with_included_origin(base, 'includeIf "gitdir:{common}"')
+
+
+def _origin_from_plain_include(base: Path) -> Path:
+    return _worktree_with_included_origin(base, "include")
+
+
+def _origin_before_a_gitdir_include(base: Path) -> Path:
+    return _worktree_with_included_origin(base, 'includeIf "gitdir:{common}"', own_first=True)
+
+
+def _origin_after_an_onbranch_include(base: Path) -> Path:
+    """The main checkout's branch includes a file setting another url
+    BEFORE the repository's own config sets its origin."""
+    return _worktree_with_included_origin(base, 'includeIf "onbranch:{branch}"', own_after=True)
+
+
+# A shape whose `home` is set runs with HOME pointed at that directory.
+_home_linked_worktree.home = lambda target: target
+_home_main_checkout.home = lambda target: target.parent / "home"
+_worktree_inside_home_repository.home = lambda target: target.parent.parent
+for _stray in (
+    _stray_empty_dotgit, _stray_hooks_only_dotgit, _stray_objectless_dotgit, _stray_dangling_dotgit,
+):
+    _stray.home = lambda target: target.parent
+
+
+_own_linked_worktree.layout = "linked worktree"
+_own_submodule.layout = "submodule"
+_own_separate_git_dir.layout = "separate-git-dir checkout"
+_own_submodule_worktree.layout = "linked worktree of a submodule"
+_own_superproject_worktree_submodule.layout = "submodule of a superproject worktree"
+
+
+_BUILDERS = {
+    "forged_worktree_admin": _forged_worktree_admin,
+    "forged_submodule_admin": _forged_submodule_admin,
+    "symlinked_submodule_admin": _symlinked_submodule_admin,
+    "forged_separate_store_worktree": _forged_separate_store_worktree,
+    "foreign_gitdir": _foreign_gitdir,
+    "relative_foreign_gitdir": _relative_foreign_gitdir,
+    "symlinked_git": _symlinked_git,
+    "dangling_gitfile": _dangling_gitfile,
+    "bare_target": _bare_target,
+    "symlinked_bare": _symlinked_bare,
+    "foreign_external_store": _foreign_external_store,
+    "control_own_checkout": _own_checkout,
+    "control_own_linked_worktree": _own_linked_worktree,
+    "control_own_submodule": _own_submodule,
+    "control_own_separate_git_dir": _own_separate_git_dir,
+    "control_own_submodule_worktree": _own_submodule_worktree,
+    "control_own_superproject_worktree_submodule": _own_superproject_worktree_submodule,
+    "home_linked_worktree": _home_linked_worktree,
+    "home_main_checkout_session_outside": _home_main_checkout,
+    "home_stray_empty_dotgit": _stray_empty_dotgit,
+    "home_stray_hooks_only_dotgit": _stray_hooks_only_dotgit,
+    "home_stray_objectless_dotgit": _stray_objectless_dotgit,
+    "home_stray_dangling_dotgit": _stray_dangling_dotgit,
+    "stray_dotgit_without_repository": _stray_dotgit_without_repository,
+    "home_worktree_inside_home_repository": _worktree_inside_home_repository,
+    "stray_dotgit_under_bare_repository": _stray_dotgit_under_bare_repository,
+    "no_dotgit_under_bare_repository": _no_dotgit_under_bare_repository,
+    "forged_worktree_config_dotgit": _forged_worktree_config_dotgit,
+    "worktree_inside_another_repository": _worktree_inside_another_repository,
+    "worktree_outside_any_repository": _worktree_outside_any_repository,
+    "control_line_separator_folder": _line_separator_folder,
+    "control_line_separator_parent": _line_separator_parent,
+    "control_path_separate_git_dir_ending_in_a_space": _separate_git_dir_ending_in_a_space,
+    "control_path_worktree_ending_in_a_space": _worktree_ending_in_a_space,
+    "control_path_worktree_holding_a_newline": _worktree_holding_a_newline,
+    "origin_from_onbranch_include": _origin_from_onbranch_include,
+    "origin_from_gitdir_include": _origin_from_gitdir_include,
+    "origin_from_plain_include": _origin_from_plain_include,
+    "control_origin_before_a_gitdir_include": _origin_before_a_gitdir_include,
+    "control_origin_after_an_onbranch_include": _origin_after_an_onbranch_include,
+}
+
+
+# What a forged-pointer builder built, declared by the builder: git's
+# answers about such a target cannot tell it from an honest submodule,
+# separate-git-dir or worktree pointer, so the decline it must get is
+# stated here rather than derived (test_every_declining_shape_answers_
+# its_one_derived_reason).
+_foreign_gitdir.declines = "gitfile_redirect"
+_forged_separate_store_worktree.declines = "gitfile_redirect"
+_forged_submodule_admin.declines = "gitfile_redirect"
+_forged_worktree_admin.declines = "gitfile_redirect"
+_forged_worktree_config_dotgit.declines = "gitfile_redirect"
+_relative_foreign_gitdir.declines = "gitfile_redirect"
+_symlinked_git.declines = "gitfile_redirect"
+_symlinked_submodule_admin.declines = "gitfile_redirect"
+
+
+def _with_sub(build):
+    def builder(base: Path) -> Path:
+        target = build(base)
+        (target / "sub").mkdir(exist_ok=True)
+        return target
+
+    builder.__name__ = build.__name__
+    for attribute in ("layout", "home", "declines"):
+        if hasattr(build, attribute):
+            setattr(builder, attribute, getattr(build, attribute))
+    return builder
+
+
+def home_for(shape: str, target: Path) -> Optional[Path]:
+    """The HOME a shape's cells run with, or None to leave HOME alone."""
+    home = getattr(SHAPES[shape], "home", None)
+    return home(target) if home is not None else None
+
+
+SHAPES = {name: _with_sub(build) for name, build in _BUILDERS.items()}
+
+
+def plant_unusable_pin(target: Path, text: str = UNUSABLE_PIN) -> Optional[Path]:
+    """Write `text` (an unusable id unless given) as the `pact-project-id` in
+    the common dir git reports for `target`. Returns its path, or None when
+    git reports no common dir."""
+    result = subprocess.run(
+        ["git", "-C", str(target), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True, timeout=30, check=False,
+    )
+    # Bytes, with only git's one final newline dropped: the path may hold
+    # line separators and trailing spaces.
+    if result.returncode != 0 or not result.stdout.endswith(b"\n") or result.stdout == b"\n":
+        return None
+    pin = Path(os.fsdecode(result.stdout[:-1])) / "pact-project-id"
+    pin.write_text(text, encoding="utf-8")
+    return pin
+
+
+# --- routes ----------------------------------------------------------------
+
+
+def _clear(monkeypatch):
+    for name in ("CLAUDE_PROJECT_DIR", "GIT_CEILING_DIRECTORIES"):
+        monkeypatch.delenv(name, raising=False)
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+
+
+def _detect():
+    return PACTMemory._detect_project_identity_with_legacy()
+
+
+def _git_root(monkeypatch, target, elsewhere):
+    monkeypatch.chdir(target)
+    return _detect()
+
+
+def _git_root_subdirectory(monkeypatch, target, elsewhere):
+    monkeypatch.chdir(target / "sub")
+    return _detect()
+
+
+def _git_root_via_symlink(monkeypatch, target, elsewhere):
+    link = elsewhere / "cwd-link"
+    if not link.exists():
+        link.symlink_to(target)
+    monkeypatch.chdir(link / "sub")
+    return _detect()
+
+
+def _declared(monkeypatch, target, elsewhere):
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(target))
+    return _detect()
+
+
+def _declared_subdirectory(monkeypatch, target, elsewhere):
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(target / "sub"))
+    return _detect()
+
+
+def _declared_via_symlink(monkeypatch, target, elsewhere):
+    link = elsewhere / "link-to-target"
+    if not link.exists():
+        link.symlink_to(target)
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(link))
+    return _detect()
+
+
+def _session_record(monkeypatch, target, elsewhere):
+    """FORCED: the session record is inert in a test process."""
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(memory_api, "get_project_dir_from_session_record", lambda: str(target))
+    return _detect()
+
+
+def _session_record_subdirectory(monkeypatch, target, elsewhere):
+    """FORCED: as `_session_record`, naming a subdirectory."""
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(
+        memory_api, "get_project_dir_from_session_record", lambda: str(target / "sub")
+    )
+    return _detect()
+
+
+def _worktree_identity_record(monkeypatch, target, elsewhere):
+    """FORCED: a record the record check accepts names a verified main
+    checkout, so the record check is made to return the target."""
+    from shared import project_scope
+
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(elsewhere / "gone-worktree"))
+    monkeypatch.setattr(project_scope, "recorded_main_root", lambda declared, identity: target)
+    return _detect()
+
+
+def _cwd_marker(monkeypatch, target, elsewhere):
+    """A `GIT_CEILING_DIRECTORIES` entry at the checkout root hides it from
+    git and from the marker walk, so resolution reaches the cwd-marker rung."""
+    monkeypatch.chdir(target / "sub")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(target))
+    return _detect()
+
+
+def _cwd_marker_deeper(monkeypatch, target, elsewhere):
+    """As `_cwd_marker`, with the ceiling one level below the root and the
+    cwd one level below the ceiling."""
+    (target / "sub" / "deeper").mkdir(exist_ok=True)
+    monkeypatch.chdir(target / "sub" / "deeper")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(target / "sub"))
+    return _detect()
+
+
+def _user_setting_over_cwd_marker(monkeypatch, target, elsewhere):
+    """FORCED: as `_cwd_marker`, with a user-scope `project_id` set. The
+    setting's directory is stubbed (`get_user_memory_dir`) because the suite
+    points the real one at a shared test directory; the stub replaces no git
+    answer. A repository the cwd marker finds outranks the setting, so the
+    cwd rung answers on every repository it finds and the setting is read
+    only where it finds none."""
+    import json
+
+    setting_dir = elsewhere / "user-memory"
+    setting_dir.mkdir(exist_ok=True)
+    (setting_dir / "config.json").write_text(
+        json.dumps({"project_id": USER_SETTING_ID}), encoding="utf-8"
+    )
+    monkeypatch.setattr(memory_api, "get_user_memory_dir", lambda: setting_dir)
+    return _cwd_marker(monkeypatch, target, elsewhere)
+
+
+ROUTES = {
+    "git root": (_git_root, {"git root", "origin remote"}),
+    "git root (subdirectory)": (_git_root_subdirectory, {"git root", "origin remote"}),
+    "git root (via symlinked cwd)": (_git_root_via_symlink, {"git root", "origin remote"}),
+    "CLAUDE_PROJECT_DIR": (_declared, {"CLAUDE_PROJECT_DIR"}),
+    "CLAUDE_PROJECT_DIR (subdirectory)": (_declared_subdirectory, {"CLAUDE_PROJECT_DIR"}),
+    "CLAUDE_PROJECT_DIR (via symlink)": (_declared_via_symlink, {"CLAUDE_PROJECT_DIR"}),
+    "session record (forced)": (_session_record, {"session record"}),
+    "session record (subdirectory, forced)": (_session_record_subdirectory, {"session record"}),
+    # The guard's decline names the record's rung; an identity-layer decline
+    # names the declaration that asked, as on the declared rung.
+    "worktree identity record (forced)": (
+        _worktree_identity_record, {"worktree identity record", "CLAUDE_PROJECT_DIR"},
+    ),
+    "cwd marker": (_cwd_marker, {"cwd"}),
+    "cwd marker (ceiling one level down)": (_cwd_marker_deeper, {"cwd"}),
+    # The setting answers only where the cwd marker finds no repository.
+    "user setting over a cwd marker (forced)": (
+        _user_setting_over_cwd_marker, {"cwd", "user setting"},
+    ),
+}
+
+FORCED_ROUTES = frozenset(name for name in ROUTES if "(forced)" in name or ", forced)" in name)
+
+
+def _answer(detected) -> tuple:
+    """(answer, answering rung): the decline reason, or the bound id."""
+    record = detected.decline_reason or {}
+    if record:
+        return record.get("reason"), record.get("source")
+    return f"bound:{detected.project_id}", detected.source
+
+
+def _override(detected) -> Optional[tuple]:
+    """(reason, path withheld) of a reported unusable override file, or None
+    when none was reported."""
+    ignored = detected.override_ignored
+    if not ignored:
+        return None
+    return ignored.get("reason"), ignored.get("path") is None
+
+
+# Routes that do not reach a shape, by measurement: {(shape, route): the rung
+# that answered instead}.
+NOT_REACHED: dict = {}

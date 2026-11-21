@@ -18,8 +18,96 @@ deliberately different exception postures.
 
 from __future__ import annotations
 
+import contextvars
+import os
 import subprocess
-from typing import Mapping, Optional, Sequence
+from contextlib import contextmanager
+from typing import Callable, Iterator, Mapping, Optional, Sequence, TypeVar
+
+_Answer = TypeVar("_Answer")
+
+# ONE PASS'S GIT RESULTS: the CompletedProcess, or the exception, each git
+# read gave, keyed by the exact question (`_question`): the resolved directory
+# git runs in (the `-C` targets applied to the cwd), the rest of the argv, the
+# output mode and the environment variables git reads (every GIT_* and LC_*
+# one and `_GIT_READS_FROM_ENV`). Set only by `git_results_pass` (which
+# `memory_api.detection_pass` enters), so readers that parse the same answer
+# differently share one git command and outside a pass every call runs git.
+# A ContextVar, so concurrent passes never share one.
+PASS_GIT_RESULTS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
+    "PASS_GIT_RESULTS", default=None
+)
+
+
+# The environment variables, beside every GIT_* and LC_* one, that can change
+# what git answers: which git runs, where its global and system config live,
+# and its message language. A change to any other variable (a library setting
+# its own, mid-command) is not a different git question.
+_GIT_READS_FROM_ENV = frozenset({"PATH", "HOME", "XDG_CONFIG_HOME", "PREFIX", "LANG", "LANGUAGE"})
+
+
+@contextmanager
+def git_results_pass() -> Iterator[None]:
+    """One pass of `PASS_GIT_RESULTS`: starts empty and ends with the block.
+    A pass opened inside another joins it: it sets and resets nothing."""
+    if PASS_GIT_RESULTS.get() is not None:
+        yield
+        return
+    token = PASS_GIT_RESULTS.set({})
+    try:
+        yield
+    finally:
+        PASS_GIT_RESULTS.reset(token)
+
+
+def _question(argv: Sequence[str], text: bool, env: Optional[Mapping[str, str]]) -> Optional[tuple]:
+    """The memo key of git command `argv`, or None when its directory will
+    not resolve (then it is asked, never shared)."""
+    rest = list(map(str, argv[1:]))
+    try:
+        where = os.getcwd()
+        while len(rest) >= 2 and rest[0] == "-C":
+            where = os.path.join(where, rest[1])
+            rest = rest[2:]
+        where = os.path.realpath(where)
+    except (OSError, ValueError):
+        return None
+    environment = os.environ if env is None else env
+    relevant = tuple(sorted(
+        (name, value) for name, value in environment.items()
+        if name.startswith(("GIT_", "LC_")) or name in _GIT_READS_FROM_ENV
+    ))
+    return where, tuple(rest), bool(text), relevant
+
+
+def answered_once(
+    argv: Sequence[str],
+    run: Callable[[], _Answer],
+    *,
+    text: bool,
+    env: Optional[Mapping[str, str]],
+) -> _Answer:
+    """`run()`, the caller's own call of git command `argv`, made once per
+    `git_results_pass` for each question (`_question`): a later caller asking
+    the same question gets the same CompletedProcess, or the same exception
+    raised again. `text` and `env` must be the ones `run` passes. Outside a
+    pass, `run()` is called every time. Only a READ may come through here: a
+    command that changes the repository must run each time it is asked."""
+    memo = PASS_GIT_RESULTS.get()
+    if memo is None:
+        return run()
+    key = _question(argv, text, env)
+    if key is None:
+        return run()
+    if key not in memo:
+        try:
+            memo[key] = (run(), None)
+        except Exception as exc:  # the answer is the failure, kept for every later reader
+            memo[key] = (None, exc)
+    result, failure = memo[key]
+    if failure is not None:
+        raise failure
+    return result
 
 
 def run_git(
@@ -27,6 +115,8 @@ def run_git(
     timeout: int = 5,
     text: bool = True,
     env: Optional[Mapping[str, str]] = None,
+    *,
+    once_per_pass: bool = False,
 ) -> Optional[subprocess.CompletedProcess]:
     """
     Invoke `git <args...>` with capture_output and a 5-second default timeout.
@@ -46,13 +136,16 @@ def run_git(
         text: decode stdout/stderr as UTF-8 if True (default); return bytes if False.
         env: the git process's ENTIRE environment. None (default) inherits this
              process's environment, which is subprocess's own default.
+        once_per_pass: a READ that `answered_once` asks once per
+             `git_results_pass`; leave False for anything that changes the
+             repository.
 
     Returns:
         CompletedProcess on success-path (regardless of returncode); None on
         (TimeoutExpired, FileNotFoundError). Callers MUST check for None
         before touching result.returncode or result.stdout.
     """
-    try:
+    def run() -> subprocess.CompletedProcess:
         return subprocess.run(
             ["git", *args],
             capture_output=True,
@@ -60,5 +153,10 @@ def run_git(
             timeout=timeout,
             env=env,
         )
+
+    try:
+        if once_per_pass:
+            return answered_once(["git", *args], run, text=text, env=env)
+        return run()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None

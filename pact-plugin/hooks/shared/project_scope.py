@@ -153,6 +153,7 @@ def _git_output(directory: Path, *args: str) -> Optional[str]:
             timeout=5,
             text=False,
             env=git_env_without_location(),
+            once_per_pass=True,
         )
     except (OSError, ValueError):
         # ValueError covers a subprocess-level refusal (an embedded NUL and
@@ -366,6 +367,7 @@ def _git_dir_answers(directory: Path) -> bool:
             timeout=5,
             text=False,
             env=git_env_without_location(),
+            once_per_pass=True,
         )
     except (OSError, ValueError):
         return False
@@ -407,6 +409,7 @@ def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
             timeout=5,
             text=False,
             env=git_env_without_location(),
+            once_per_pass=True,
         )
     except (OSError, ValueError):
         # `run_git` absorbs a timeout and a missing git but NOT a bare OSError
@@ -459,6 +462,7 @@ def _repository_is_bare(common_dir: Path) -> bool:
             timeout=5,
             text=False,
             env=git_env_without_location(),
+            once_per_pass=True,
         )
     except (OSError, ValueError):
         return False
@@ -728,6 +732,7 @@ def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
             timeout=5,
             text=False,
             env=git_env_without_location(),
+            once_per_pass=True,
         )
         if result is None:
             # `run_git` returns None only on a timeout or a missing git. Both

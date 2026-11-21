@@ -315,8 +315,18 @@ class TestHomeScopeWarning:
     def _force_cwd_resolution(self, monkeypatch, resolved_root: Path):
         """Kill the env/record/git legs so Strategy 3 answers `resolved_root`.
         The walk itself is not the thing under test — the warning branch is —
-        so _find_project_root is pinned to the answer directly."""
+        so _find_project_root is pinned to the answer directly.
+
+        THE PROCESS CWD MOVES TO A MARKER-FREE DIRECTORY. The git rung now
+        DECLINES when the process cwd carries a `.git` marker git cannot
+        answer for; leaving the cwd inside the suite's own checkout would make
+        that decline fire first and the Strategy-3 branch unreachable. The
+        resolved root is marker-free by construction, so chdir'ing there
+        isolates the branch under test without changing its subject.
+        """
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        resolved_root.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(resolved_root)
 
         def _no_git(*args, **kwargs):
             raise FileNotFoundError("git unavailable in this arm")
@@ -324,7 +334,7 @@ class TestHomeScopeWarning:
         monkeypatch.setattr("subprocess.run", _no_git)
         monkeypatch.setattr(
             PACTMemory, "_find_project_root",
-            staticmethod(lambda start: resolved_root),
+            staticmethod(lambda start, skipped_git=frozenset(): resolved_root),
         )
 
     def test_home_resolution_warns(self, tmp_path, monkeypatch, caplog):
@@ -787,6 +797,13 @@ class TestCliRefusalEnvelope:
             "project identity is unresolved or the project has no memories"
             in proc.stdout
         )
+        # THE REMEDY, NOT ONLY THE SYMPTOM. An empty result is not proof the
+        # project has no memories: the help must name the verb that shows the
+        # identity and the command that moves an older bucket.
+        assert "project-id show" in proc.stdout
+        # The command names its source AND its target.
+        assert "'--from=<id>'" in proc.stdout
+        assert "'--to=<canonical>'" in proc.stdout
 
     def test_child_env_defaults_delete_the_project_dir_var(self, tmp_path):
         """Guard the env-builder itself: DELETE is the default and the pytest
@@ -1015,9 +1032,10 @@ class TestR4BimodalGit:
 
     def test_r4_control_git_death_changes_the_worktree_answer(self, tmp_path, monkeypatch):
         """CONTROL, not a result row: cwd in a linked worktree, NO record. Git
-        alive answers the MAIN repo (Strategy 2); git dead falls to the marker
-        walk, which names the WORKTREE. The two answers differing is the proof
-        the shim took effect — and the bimodal shape #1600 recorded."""
+        alive answers the MAIN repo (Strategy 2); git dead now DECLINES,
+        because the worktree's `.git` FILE marker cannot be answered for.
+        The answer changing (main-proj -> None) is the proof the shim took
+        effect, and it is the bimodal git-alive / git-dead shape."""
         main, linked = self._worktree_pair(tmp_path)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.chdir(linked)
@@ -1025,7 +1043,7 @@ class TestR4BimodalGit:
 
         shim = git_flake_shim(tmp_path)
         monkeypatch.setenv("PATH", f"{shim}{os.pathsep}{os.environ.get('PATH', '')}")
-        assert PACTMemory._detect_project_id() == "wt", (
+        assert PACTMemory._detect_project_id() is None, (
             "git's death did NOT change the answer — the shim is not live and "
             "the invariant arms below prove nothing"
         )
@@ -1498,6 +1516,10 @@ class TestRetrievedSyncWarnsUnderDisagreement:
             "scripts.memory_api.graph_enhanced_search",
             lambda *a, **kw: [fake_result],
         )
+        # NO EXPLICIT db_path: this is the DERIVED route, where an absent
+        # store bootstraps on the first memory operation (the pinned
+        # exception), so `search()` reaches the projection and its warning.
+        # A CALLER-NAMED absent path would answer empty by design.
         memory = PACTMemory(project_id="proj")
         with caplog.at_level(logging.WARNING):
             results = memory.search("anything", sync_to_claude=True)
@@ -1773,7 +1795,8 @@ class TestDeclinedDeclaration:
         """Criterion (b), swept across every resolution entry point."""
         main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
 
-        name, label = PACTMemory._project_name_for_declared_dir(str(worktree), "probe")
+        detected = PACTMemory._declared_dir_identity(str(worktree), "probe")
+        name, label = detected.project_id, detected.source
         assert name is None, f"the helper derived {name!r} from a removed path"
         assert label == "probe"
 
@@ -1823,7 +1846,7 @@ class TestDeclinedDeclaration:
         # If Strategy 3 ran at all it would land here; the arm proves it is
         # not reached on the declined arm.
         monkeypatch.setattr(
-            PACTMemory, "_find_project_root", staticmethod(lambda start: home)
+            PACTMemory, "_find_project_root", staticmethod(lambda start, skipped_git=frozenset(): home)
         )
         with caplog.at_level(logging.WARNING):
             assert PACTMemory._detect_project_id_with_source() == (None, "unresolved")
@@ -1844,13 +1867,18 @@ class TestDeclinedDeclaration:
         assert pact_session.get_project_dir_from_session_record() == ""
         home = Path.home().resolve()
         # Strategy 2 must not answer from the suite's own checkout, or this
-        # arm measures the harness instead of the HOME path.
+        # arm measures the harness instead of the HOME path. The cwd moves to
+        # the (marker-free) HOME so the broken-marker DECLINE cannot fire
+        # first: the subject here is the ordinary no-declaration HOME branch.
+        home.mkdir(parents=True, exist_ok=True)
+        monkeypatch.chdir(home)
+
         def _no_git(*args, **kwargs):
             raise FileNotFoundError("git unavailable in this arm")
 
         monkeypatch.setattr("subprocess.run", _no_git)
         monkeypatch.setattr(
-            PACTMemory, "_find_project_root", staticmethod(lambda start: home)
+            PACTMemory, "_find_project_root", staticmethod(lambda start, skipped_git=frozenset(): home)
         )
         with caplog.at_level(logging.WARNING):
             name, label = PACTMemory._detect_project_id_with_source()
@@ -1900,9 +1928,8 @@ class TestDeclinedDeclaration:
         """
         main, worktree, umbrella = self._decline(tmp_path, monkeypatch)
         with caplog.at_level(logging.WARNING):
-            name, label = PACTMemory._project_name_for_declared_dir(
-                str(worktree), "probe"
-            )
+            detected = PACTMemory._declared_dir_identity(str(worktree), "probe")
+            name, label = detected.project_id, detected.source
 
         assert name is None and label == "probe"
         messages = " ".join(r.message for r in caplog.records)

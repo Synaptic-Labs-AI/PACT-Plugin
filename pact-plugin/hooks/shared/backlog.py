@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import secrets
@@ -238,13 +239,49 @@ def _memory_api():
     return memory_api
 
 
+# One detection per process per input. Keyed by the location, the declared
+# directory, the session id that selects the session record (written once at
+# session start), and the detector itself, so a different input or detector
+# is a fresh answer.
+_PROJECT_NAMES: Dict[tuple, Optional[str]] = {}
+
+
+def _project_name() -> Optional[str]:
+    """This location's pre-change project name, detected once per input."""
+    detector = _memory_api().PACTMemory._detect_project_basename
+    try:
+        cwd: Optional[str] = os.getcwd()
+    except OSError:
+        cwd = None
+    key = (
+        cwd,
+        os.environ.get("CLAUDE_PROJECT_DIR"),
+        os.environ.get("CLAUDE_CODE_SESSION_ID"),
+        detector,
+    )
+    if key not in _PROJECT_NAMES:
+        _PROJECT_NAMES[key] = detector()
+    return _PROJECT_NAMES[key]
+
+
 def store_path(backlog_dir: Optional[Path] = None) -> Path:
     """Absolute path of this project's backlog file.
 
     Raises BacklogWriteError when the project id will not resolve. A default
     slug would write a backlog nobody can find again.
     """
-    project = _memory_api().PACTMemory._detect_project_id()
+    # THE PRE-CHANGE FOLDER NAME, DELIBERATELY, NOT THE PROJECT ID. This value
+    # is a path component, and the canonical id contains `/`: using it here
+    # would nest the file as `<dir>/host/owner/repo.json` and orphan every
+    # existing `<basename>.json` with no recovery path. It is the pre-change
+    # value, including where the pre-change resolver refused, so this writer
+    # refuses in exactly the states it always did. Do not "fix" this to the
+    # canonical detector. So the file name and the project_path stored in it
+    # can name different folders: project_path is the identity root, which a
+    # linked worktree of a bare repository, a `--separate-git-dir` checkout or
+    # worktree, and a submodule key on themselves, while the file keeps the
+    # pre-change name: that of the folder holding their git directory.
+    project = _project_name()
     if not project:
         raise BacklogWriteError(
             "project id did not resolve, so there is no name to write under. "
@@ -270,8 +307,12 @@ def project_root() -> Path:
        repositories, itself under no `.git` — and it is a stable project key
        in its own right.
     3. Otherwise refuse: the variable is unset, names no directory, or names
-       a directory inside a repository git could not read. Writing under a
-       checkout git failed to resolve would key a second backlog on a
+       a directory inside a checkout whose main root did not resolve, or one
+       git answers for with no root (a bare repository, or a directory inside
+       one). That
+       refusal names the memory skill's root check and its cause when the
+       check refused the directory, and gives that cause's remedy. Writing
+       under a checkout git failed to resolve would key a second backlog on a
        subdirectory or worktree that every git-present session keys on the
        main root; a default would write a backlog nobody can find.
 
@@ -300,6 +341,15 @@ def project_root() -> Path:
       instead of refusing. The refusal itself is unchanged — it stays the
       guard for shells with no session behind them (cron, manual CLI).
     """
+    return _root_and_common_dir()[0]
+
+
+def _project_anchor() -> Tuple[Optional[str], str, Optional[Path]]:
+    """The declared project directory (None when nothing declares one), the
+    name of where it came from, and the common dir git gives for it (None
+    for an umbrella directory that no repository holds). Raises
+    BacklogWriteError when the environment and the session record name
+    different directories."""
     memory_api = _memory_api()
     disagreement = memory_api.env_record_project_dir_disagreement()
     if disagreement is not None:
@@ -308,22 +358,83 @@ def project_root() -> Path:
         )
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     record_dir = "" if env_dir else memory_api.get_project_dir_from_session_record()
-    # `source` names where the anchor came from so the refusal below never
-    # attributes a recorded value to the (unset) variable, or vice versa.
+    # `source` names where the anchor came from so a refusal of it
+    # (`_root_and_common_dir`) never attributes a recorded value to the
+    # (unset) variable, or vice versa.
     project_dir = env_dir or record_dir or None
     source = "CLAUDE_PROJECT_DIR" if env_dir else "the session record's project_dir"
-    root = memory_api.main_repo_root(project_dir)
+    return project_dir, source, memory_api.main_repo_common_dir(project_dir)
+
+
+# `_root_and_common_dir`'s default for `listing`: the caller read no
+# worktree listing, so the root's redirect check asks git itself.
+_LISTING_NOT_READ: Any = object()
+
+
+def _root_and_common_dir(
+    anchor: Optional[tuple] = None, listing: Any = _LISTING_NOT_READ
+) -> Tuple[Path, Optional[Path]]:
+    """`project_root()` and the repository's common dir git gave for it, or
+    None for an umbrella directory that no repository holds. One
+    `--git-common-dir` answer serves both, so `checkout_roots()` lists the
+    same repository the root came from and asks git for it once.
+
+    `anchor`, `_project_anchor()`'s answer, and `listing`, the worktree
+    listing of its common dir, when the caller already holds them, are used
+    instead of asking again: a linked worktree's root is checked against
+    that same listing, and so is a refusal's root check.
+
+    Raises BacklogWriteError when no root resolves. For a directory inside a
+    checkout, or one git answers for with no root, the refusal names the
+    memory skill's root check, its cause and its remedy when that check
+    refused the directory (`root_check_refusal`), and otherwise that git
+    gave no root for it."""
+    memory_api = _memory_api()
+    project_dir, source, common = anchor if anchor is not None else _project_anchor()
+    root = (
+        memory_api.main_repo_root(
+            project_dir, common=common,
+            listing=memory_api._LISTING_UNASKED if listing is _LISTING_NOT_READ else listing,
+        )
+        if common is not None else None
+    )
     if root is not None:
-        return root
+        return root, common
     if project_dir and Path(project_dir).is_dir():
         # _resolved never raises: an unresolvable directory falls back to its
         # unresolved path, the same fallback the detector takes for the name.
         resolved = _resolved(Path(project_dir))
-        if _enclosing_checkout(resolved) is None:
-            return resolved
-        why = (
-            f"{source}={project_dir!r} sits inside a repository git "
-            f"could not read"
+        enclosing = _enclosing_checkout(resolved)
+        # AN UMBRELLA ONLY WHERE NO CHECKOUT ENCLOSES IT AND GIT GIVES NO
+        # COMMON DIR. A bare repository, or a directory inside one, can have
+        # no `.git` above it, but git still gives its common dir, so it is no
+        # umbrella and the memory skill declines it below. Inside a checkout
+        # it has that checkout's `.git` above it as well.
+        if enclosing is None and common is None:
+            return resolved, None
+        # Say what the memory skill's root check observed, with its own
+        # remedy, rather than advising a variable that already names this
+        # directory.
+        refusal = memory_api.root_check_refusal(
+            Path(project_dir), common,
+            listing=memory_api._LISTING_UNASKED if listing is _LISTING_NOT_READ else listing,
+        )
+        if refusal is not None:
+            cause, remedy = refusal
+            raise BacklogWriteError(
+                f"the main repository root did not resolve: the memory skill's "
+                f"root check refused {source}={project_dir!r}, because {cause}. "
+                f"Nothing was written.{f' {remedy}' if remedy else ''}"
+            )
+        inside = (
+            f", which sits inside the checkout at {str(enclosing)!r}"
+            if enclosing is not None else ""
+        )
+        raise BacklogWriteError(
+            f"the main repository root did not resolve: git gave no root for "
+            f"{source}={project_dir!r}{inside}. Nothing was written. `git "
+            f"rev-parse --show-toplevel` run in that directory prints git's "
+            f"own reason."
         )
     elif project_dir:
         why = f"{source}={project_dir!r} does not name an existing directory"
@@ -337,7 +448,7 @@ def project_root() -> Path:
     )
 
 
-def checkout_roots() -> List[str]:
+def checkout_roots(recorded: Any = None) -> List[str]:
     """Every checkout of this project — the main one and each worktree — as
     absolute resolved paths. NEVER empty and never absent.
 
@@ -345,25 +456,122 @@ def checkout_roots() -> List[str]:
     another project's session. A missing entry costs that checkout a loud
     resolution failure UNLESS it sits inside a checkout that IS recorded, in
     which case the read path's enclosing-checkout rung still matches it. The
-    fallback when git cannot answer is the project root alone, which is
-    always right about at least itself.
+    project root is always one of them. With it come the listed worktrees
+    whose `.git` and admin entry name each other, and every listed worktree
+    whose folder is absent (a drive not mounted now, or a folder moved or
+    deleted), but only when the root is the checkout git lists first or git
+    lists the git dir there. The root is the only one, plus any carried root
+    below, when git gives no listing, the listing read raises, git prints a
+    listing that cannot be read whole or holds no record once its unusable
+    paths are dropped, git lists another checkout first, or a path will not
+    resolve: it is always right about at least itself. That holds where the
+    root does not rest on the listing. From a linked worktree it does: the
+    memory skill's redirect check confirms the worktree in that same
+    listing, so a listing that does not show it (none, a read that raises,
+    one that cannot be read whole, or one with no record left) refuses the
+    write with BacklogWriteError, naming the check's cause.
 
-    Deliberately NOT merged with _branch_and_worktree_names, which runs the
-    same porcelain: that caller reduces each `worktree` line to a BASENAME for
-    substring matching, this one resolves it to an absolute path for exact
-    membership — opposite ends of the same string, so one helper serving both
-    still needs a mode flag. It also runs a second git call this one does not
-    need. Two subprocesses per write on a path the design says can afford one.
+    `recorded`, the roots the backlog file already holds, carries forward
+    each one whose `.git` file names this repository's common dir. That is
+    the main checkout of a `--separate-git-dir` repository: git lists its
+    git dir in its place, so a write from one of its linked worktrees finds
+    no other evidence of it. It also carries each one whose `.git` is a
+    directory, not a link, that resolves to the common dir: that directory
+    is the repository's git dir, so the root is its own main checkout, which
+    a write from a folder whose `.git` file names that directory (git's own
+    `git init --separate-git-dir=<checkout>/.git` layout among them) finds
+    no other evidence of either. Each is checked again on every write; any
+    other recorded root is dropped. With no common dir (git is absent, or no
+    repository holds the root) there is nothing to check a recorded root
+    against, so none is carried and the root is the only one.
+
+    Deliberately NOT merged with _branch_and_worktree_names, which reads the
+    same listing with the same reader: that caller reduces each `worktree`
+    line to a BASENAME for substring matching, this one keeps whole paths
+    by the rules above — opposite ends of the same string, so one helper
+    serving both still needs a mode flag.
     """
-    porcelain = _run_capture(
-        ["git", "-C", str(project_root()), "worktree", "list", "--porcelain"]
+    # ONLY TWO-WAY-LINKED worktrees, as the memory skill's read gate keeps
+    # them (`_verified_worktree_roots`): a listed path is what this
+    # repository's admin entries claim, and a path cut at a newline or a
+    # delivered `.git` can name another repository's checkout. A listing git
+    # did not give, or one that cannot be read whole, adds no listed root.
+    # The project root is always the first, unresolved when its path will
+    # not resolve, and then only carried roots follow it.
+    # A listed worktree whose folder is absent is kept too (on a drive not
+    # mounted now; git before 2.31 cannot say whether it is locked): a
+    # session there after the drive returns matches before any write records
+    # it again, and an absent folder names no other repository's checkout.
+    # The listed worktrees join only when the root is the checkout git lists
+    # first, or git lists the git dir there because it cannot name the main
+    # checkout (a `--separate-git-dir` or `core.worktree` repository). A
+    # folder whose `.git` file names another repository's `.git` directory
+    # is neither, so it claims none of that repository's worktrees. One
+    # whose `.git` file names such a listed git dir still claims them: it
+    # reads exactly as that repository's own main checkout does, and only a
+    # hand-written `.git` file makes it.
+    memory_api = _memory_api()
+    # ONE LISTING PER LOOKUP: read here and handed to the root's redirect
+    # check, which a linked worktree runs on the same `--git-dir` listing.
+    # Read through the command's detection pass (`main`), so it is the
+    # listing the memory skill's guard read; a read that raises gives no
+    # listing, as a git that failed does.
+    anchor = _project_anchor()
+    records = (
+        memory_api._listed_worktree_records(None, git_dir=Path(anchor[2]))
+        if anchor[2] is not None else None
     )
-    roots = [
-        str(Path(line[len("worktree "):]).resolve())
-        for line in (porcelain or "").splitlines()
-        if line.startswith("worktree ")
-    ]
-    return roots or [str(project_root())]
+    root, common = _root_and_common_dir(anchor, records)
+    try:
+        if common is None:
+            records = None
+        if not isinstance(records, list) or not _lists_first(records, root, common):
+            roots = [str(Path(root).resolve())]
+        else:
+            roots = [str(path) for path in memory_api._verified_worktree_roots(root, common, records)]
+            for record in records[1:]:
+                path = record[0][len("worktree "):]
+                if not os.path.lexists(path):
+                    roots.append(str(Path(path).resolve()))
+    except (OSError, RuntimeError, ValueError):
+        roots = [str(root)]
+    if common is not None and isinstance(recorded, list):
+        # Stored resolved, as every other root is: a checkout recorded
+        # through a linked path is the same checkout, listed once.
+        roots += [str(_resolved(Path(r))) for r in recorded if _names_common_dir(r, common)]
+    return list(dict.fromkeys(roots))
+
+
+def _lists_first(records: List[List[str]], root: Any, common: Optional[Path]) -> bool:
+    """Whether git's listing `records` puts `root` first, or the git dir
+    `common` first because it cannot name the main checkout: only then are
+    the listed worktrees `root`'s. An empty listing (its first record was
+    dropped) puts nothing first. Raises what `Path.resolve` raises."""
+    if common is None or not records:
+        return False
+    first = Path(records[0][0][len("worktree "):]).resolve()
+    return first in (Path(root).resolve(), Path(common).resolve())
+
+
+def _names_common_dir(checkout: Any, common: Path) -> bool:
+    """Whether `checkout`, an absolute path, holds a `.git` file whose
+    `gitdir:` resolves to `common`, or a `.git` directory, not a link, that
+    resolves to `common`: that directory IS the repository's git dir, so
+    the checkout is its main checkout. Never raises."""
+    if not isinstance(checkout, str) or not os.path.isabs(checkout):
+        return False
+    identity = _memory_api().project_identity
+    dot_git = Path(checkout) / ".git"
+    try:
+        if dot_git.is_dir() and not dot_git.is_symlink():
+            return dot_git.resolve() == Path(common).resolve()
+        text = identity.read_git_file(dot_git)
+        target = identity.gitfile_target(text) if text is not None else None
+        if target is None:
+            return False
+        return (Path(checkout) / target).resolve() == Path(common).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 # Key under which load_or_create stashes the bytes it read, so save() can
@@ -438,7 +646,7 @@ def save(data: Dict[str, Any], path: Path) -> List[str]:
     # since the last write is recorded by the next one. That is what makes the
     # read path's exact-membership rule self-healing: its loud message names
     # /PACT:next, and /PACT:next writes.
-    data["roots"] = checkout_roots()
+    data["roots"] = checkout_roots(data.get("roots"))
     problems = validate(data)
     if problems:
         return problems
@@ -1449,7 +1657,7 @@ def _gh_repo_view_slug(project_path: Optional[str] = None) -> Optional[Tuple[str
 def _is_github_url(url: Any) -> bool:
     """`url` is an http(s) URL on github.com itself (not a subdomain, not GHE).
 
-    A backslash or an `@` is refused outright, as for remotes (S-F6): GitHub's
+    A backslash or an `@` is refused outright, as for remotes: GitHub's
     web URL never carries userinfo, and `urlsplit` reads
     `https://evil.com@github.com/...` as github.com.
     """
@@ -1478,14 +1686,21 @@ def _run_capture(
     Output is decoded with `errors="replace"`, so a non-UTF-8 byte (say in a
     remote URL) cannot raise UnicodeDecodeError out of `show`. `GH_HOST` is
     removed from the child's environment: the tracker is github.com, and
-    `gh repo view` would otherwise resolve against another host.
+    `gh repo view` would otherwise resolve against another host. Every
+    command also runs without GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR, as
+    the roots' git calls do, so `git` and `gh repo view` (which reads the
+    git remotes) answer for the repository they are anchored on, not one
+    the session's environment names.
 
     `timeout` exists for the per-ref REST calls, which share ONE deadline and
     so each get what is left of it. Every other caller takes the default.
     `cwd` anchors a command that reads the repository it runs in
     (`gh repo view`) on the project instead of the process CWD.
     """
-    env = {key: value for key, value in os.environ.items() if key != "GH_HOST"}
+    from shared.project_scope import git_env_without_location
+
+    env = git_env_without_location()
+    env.pop("GH_HOST", None)
     try:
         result = subprocess.run(
             list(command),
@@ -1808,7 +2023,20 @@ def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
     if not at:
         return None
     branches = _run_capture(["git", *at, "branch", "--format=%(refname:short)"])
-    worktrees = _run_capture(["git", *at, "worktree", "list", "--porcelain"])
+    memory_api = _memory_api()
+    # The worktrees are this project's only by the roots' rule: a folder
+    # whose `.git` names another repository's `.git` directory reads that
+    # repository's listing, and its worktree folders are not this project's.
+    # A listing read that raises gives no listing, as a git that failed does.
+    try:
+        worktrees = memory_api._worktree_records(at)
+        ours = isinstance(worktrees, list) and _lists_first(
+            worktrees, project_path, memory_api.main_repo_common_dir(project_path)
+        )
+    except (OSError, RuntimeError, ValueError):
+        ours = False
+    if not ours:
+        worktrees = None
     if branches is None and worktrees is None:
         return None
     # NAMES ONLY. The porcelain also carries `HEAD <sha>` — once PER WORKTREE —
@@ -1818,11 +2046,11 @@ def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
     # silently suppressed. `detached`, `locked`, `bare` and `prunable` carry no
     # name and drop out with them.
     names = (branches or "").splitlines()
-    for line in (worktrees or "").splitlines():
-        if line.startswith("worktree "):
-            names.append(Path(line[len("worktree "):]).name)
-        elif line.startswith("branch "):
-            names.append(line[len("branch "):].removeprefix("refs/heads/"))
+    for field in (field for record in (worktrees or []) for field in record):
+        if field.startswith("worktree "):
+            names.append(Path(field[len("worktree "):]).name)
+        elif field.startswith("branch "):
+            names.append(field[len("branch "):].removeprefix("refs/heads/"))
     return names
 
 
@@ -1976,16 +2204,69 @@ def _add_item_arguments(parser: argparse.ArgumentParser) -> None:
         )
 
 
+class _HeldWarnings(logging.Filter):
+    """Holds the memory skill's identity decline warnings
+    (`is_decline_record`) while one command runs. A command that succeeds
+    drops them: its project name came from the pre-change folder-name key,
+    so a decline of the canonical id says nothing about the write. A command
+    that does not succeed prints them (`replay`), so a refusal still shows
+    the cause the memory skill observed. Every other warning prints when it
+    is logged."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        memory_api = _memory_api()
+        self.records: List[logging.LogRecord] = []
+        self.logger = memory_api.logger
+        self.is_decline = memory_api.is_decline_record
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if self.is_decline(record):
+            self.records.append(record)
+            return False
+        return True
+
+    def __enter__(self) -> "_HeldWarnings":
+        self.logger.addFilter(self)
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.logger.removeFilter(self)
+
+    def replay(self) -> None:
+        """Print the held warnings as the memory skill would have, once."""
+        self.__exit__()
+        records, self.records = self.records, []
+        for record in records:
+            self.logger.handle(record)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     backlog_dir = Path(args.backlog_dir) if args.backlog_dir else None
+    # ONE DETECTION PASS PER COMMAND: the memory skill's guard, the root,
+    # the roots, a refusal's root check and a memory store the command opens
+    # read the same git answers, each asked once, so a refusal names the
+    # cause the guard decided on.
+    with _HeldWarnings() as held, _memory_api().detection_pass():
+        try:
+            code = _main(args, backlog_dir, held)
+        except BaseException:
+            held.replay()
+            raise
+        if code != _EXIT_OK:
+            held.replay()
+    return code
 
+
+def _main(args: argparse.Namespace, backlog_dir: Optional[Path], held: _HeldWarnings) -> int:
     try:
         path = store_path(backlog_dir)
         if args.command == "repair":
             return _handle_repair(path, args.force)
-        return _handle_write_or_show(args, path)
+        return _handle_write_or_show(args, path, held)
     except BacklogFileError as exc:
+        held.replay()
         # THE ADVICE DEPENDS ON THE SUBCLASS, because `repair` REFUSES an
         # unreadable file without --force. Promising a repair that declines is
         # worse than saying nothing: the user runs it, gets a refusal, and
@@ -2003,6 +2284,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"backlog is unreadable: {exc}\n{advice}", file=sys.stderr)
         return _EXIT_UNREADABLE
     except BacklogWriteError as exc:
+        held.replay()
         print(f"refused: {exc}", file=sys.stderr)
         return _EXIT_REFUSED
 
@@ -2017,7 +2299,9 @@ def _handle_repair(path: Path, force: bool = False) -> int:
     return _EXIT_OK
 
 
-def _handle_write_or_show(args: argparse.Namespace, path: Path) -> int:
+def _handle_write_or_show(args: argparse.Namespace, path: Path, held: _HeldWarnings) -> int:
+    """Run `show` or a write. A refusal printed here prints the held
+    decline first (`held.replay`), as a refusal raised to `_main` does."""
     data = load_or_create(path)
     # Schema problems are file-local, so they show even with --no-reconcile.
     schema = [f"schema: {problem}" for problem in validate(data)]
@@ -2046,6 +2330,7 @@ def _handle_write_or_show(args: argparse.Namespace, path: Path) -> int:
     else:
         item = find_item(data, args.item_id)
         if item is None:
+            held.replay()
             if any(i.get("id") == args.item_id for i in _archived(data)):
                 print(
                     f"refused: item {args.item_id!r} is archived. "
@@ -2063,6 +2348,7 @@ def _handle_write_or_show(args: argparse.Namespace, path: Path) -> int:
 
     problems = save(data, path)
     if problems:
+        held.replay()
         print("refused, nothing written:", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)

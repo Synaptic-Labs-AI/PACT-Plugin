@@ -141,23 +141,35 @@ KNOWN_MODULE_PATH_USES = Counter({
     ("hooks/shared/pact_context.py", "set_harness_stamp"): 3,
 })
 
-# (file, enclosing function): count of code strings naming the file. Each one
-# builds the path for a READ, builds the path persist_context writes
-# (build_context_cache), or is message text.
+# (file, enclosing function): count of strings naming the file, docstrings
+# included. Each code string builds the path for a READ, builds the path
+# persist_context writes (build_context_cache), or is message text; each
+# docstring is the function's or module's own description of the file.
 KNOWN_NAME_SITES = Counter({
     ("hooks/dispatch_gate.py", "<module>"): 2,                   # message text
     ("hooks/dispatch_gate.py", "evaluate_dispatch"): 3,          # message text
+    ("hooks/bootstrap_gate.py", "is_marker_set"): 1,             # docstring
     ("hooks/session_init.py", "_saved_context"): 1,              # read
-    ("hooks/session_init.py", "_lead_context_persisted"): 1,     # existence read
-    ("hooks/shared/pact_context.py", "build_context_cache"): 1,  # the writers' path
-    ("hooks/shared/pact_context.py", "init"): 1,                 # read path
+    ("hooks/session_init.py", "_lead_context_persisted"): 2,     # existence read; docstring
+    ("hooks/shared/marker_schema.py", "<module>"): 1,            # module docstring
+    ("hooks/shared/pact_context.py", "build_context_cache"): 2,  # the writers' path; docstring
+    ("hooks/shared/pact_context.py", "persist_context"): 2,  # the writer's own temp-file prefix; docstring
+    ("hooks/shared/pact_context.py", "init"): 2,                 # read path; docstring
     ("hooks/shared/pact_context.py", "_clear_carryover_team"): 1,  # read (earlier sessions' contexts)
     ("hooks/shared/pact_context.py", "_project_session_records"): 1,  # read (this project's session contexts)
-    ("hooks/shared/pact_harvest.py", "main"): 2,                 # CLI help text
-    ("hooks/shared/session_registry.py", "_lead_context_exists_for"): 1,  # existence read
+    ("hooks/shared/pact_context.py", "heal_context_if_missing"): 1,  # docstring
+    ("hooks/shared/pact_context.py", "reconstruct_session_dir"): 1,  # docstring
+    ("hooks/shared/pact_context.py", "reset_for_tests"): 1,      # docstring
+    ("hooks/shared/pact_context.py", "set_harness_stamp"): 1,    # docstring
+    ("hooks/shared/pact_context.py", "write_context"): 1,        # docstring
+    ("hooks/shared/pact_harvest.py", "main"): 3,                 # CLI help text; docstring
+    ("hooks/shared/session_registry.py", "_lead_context_exists_for"): 2,  # existence read; docstring
     ("hooks/shared/session_resume.py", "_saved_team_of"): 1,         # read
-    ("skills/pact-memory/scripts/pact_session.py", "_context_file_path"): 1,       # read
+    ("hooks/shared/session_resume.py", "format_session_substitutions"): 1,  # docstring
+    ("skills/pact-memory/scripts/pact_session.py", "_context_file_path"): 2,       # read; docstring
     ("skills/pact-memory/scripts/pact_session.py", "_context_record_on_disk"): 1,  # read
+    ("skills/pact-memory/scripts/memory_api.py", "_legacy_session_evidence"): 1,  # read (legacy-admission evidence)
+    ("hooks/session_end.py", "_pruned_session_line"): 2,  # read (prune-ledger evidence before a reap); docstring
     ("hooks/shared/project_scope.py", "<module>"): 1,  # read (the record rung's _CONTEXT_FILE)
 })
 
@@ -223,6 +235,48 @@ def _derives_a_session_path(function):
     return any(marker in name for name in names for marker in _SESSION_PATH_NAMES)
 
 
+# ANCHOR of the name census: the context file's name or a piece of it, in
+# any string constant or f-string piece, docstrings included. `pact-sessions`
+# (the sessions root) is another word, and `context.json` counts only as the
+# file's own tail (`context.json`, `-context.json`, `session-context.json`),
+# not inside another name such as `planted-context.json`.
+_NAME_ANCHOR = re.compile(
+    r"pact-session(?![s\w])|session-context|(?:^-?|session-)context\.json"
+)
+# A complete literal file name in the sessions folder other than the context
+# file: `pact-session-<word>.<ext>`, no placeholder.
+_OTHER_SESSION_FILE = re.compile(r"pact-session-(?!context\b)[a-z0-9_]+\.[a-z]+\b")
+
+
+def _unreadable_name(text):
+    """Whether `text` holds an anchor occurrence the census cannot judge.
+
+    Called for a constant `_names_the_file` did not count. An occurrence that
+    is part of a complete other session-file name is read as benign; every
+    other occurrence (a `%`, `{}` or `$` template, a piece such as
+    `"context.json"` or `"pact-session-ctx"` that a join, a replace or a `+`
+    completes) is unreadable, so a context-file name the census cannot see
+    fails the census instead of escaping it."""
+    for match in _NAME_ANCHOR.finditer(text):
+        if match.group().startswith("pact-session") and _OTHER_SESSION_FILE.match(text, match.start()):
+            continue
+        return True
+    return False
+
+
+def _names_the_file(text):
+    """A string piece that names the context file, or the piece of a name
+    assembled from several (`"pact-session-" + "context.json"`, an f-string
+    field after `pact-session-`, a temp name built on `pact-session-context`),
+    so an assembled name counts as a name site rather than escaping the
+    census."""
+    return (
+        FILENAME in text
+        or "session-context" in text
+        or text.endswith(("pact-session-", "pact-session"))
+    )
+
+
 def _write_call(call):
     """The kind of write ``call`` makes on a path, or None."""
     func = call.func
@@ -250,9 +304,9 @@ class _Census(ast.NodeVisitor):
     def __init__(self, rel, tree):
         self.rel = rel
         self.stack = []
-        self.docstrings = set()
         self.api_refs = Counter()
         self.name_sites = Counter()
+        self.unreadable_names = []
         self.path_refs = Counter()
         self.module_path_uses = Counter()
         self.relocations = Counter()
@@ -279,11 +333,6 @@ class _Census(ast.NodeVisitor):
     def _where(self):
         return ".".join(self.stack) or "<module>"
 
-    def _note_docstring(self, node):
-        body = getattr(node, "body", [])
-        if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-            self.docstrings.add(id(body[0].value))
-
     def _note_writes(self, scope):
         for inner in _own_nodes(scope):
             kind = isinstance(inner, ast.Call) and _write_call(inner)
@@ -291,7 +340,6 @@ class _Census(ast.NodeVisitor):
                 self.writes[(self.rel, self._where(), kind)] += 1
 
     def visit_Module(self, node):
-        self._note_docstring(node)
         self._note_writes(node)
         self.generic_visit(node)
 
@@ -314,7 +362,6 @@ class _Census(ast.NodeVisitor):
         return None
 
     def _visit_scope(self, node):
-        self._note_docstring(node)
         self.stack.append(node.name)
         if not isinstance(node, ast.ClassDef):
             self._note_writes(node)
@@ -338,12 +385,12 @@ class _Census(ast.NodeVisitor):
             self.module_path_uses[(self.rel, self._where())] += 1
 
     def visit_Constant(self, node):
-        if (
-            isinstance(node.value, str)
-            and FILENAME in node.value
-            and id(node) not in self.docstrings
-        ):
+        if not isinstance(node.value, str):
+            return
+        if _names_the_file(node.value):
             self.name_sites[(self.rel, self._where())] += 1
+        elif _unreadable_name(node.value):
+            self.unreadable_names.append(f"{self.rel}:{node.lineno}: {node.value[:60]!r}")
 
     def visit_Attribute(self, node):
         if isinstance(node.ctx, ast.Load) and node.attr in self.aliases:
@@ -406,7 +453,7 @@ def _python_census(plugin):
     found = {
         "scanned": {root: 0 for root in _ROOTS}, "write_calls": Counter(),
         "path_builder_calls": Counter(), "path_accessor_refs": Counter(),
-        "name_sites": Counter(), "path_refs": Counter(),
+        "name_sites": Counter(), "unreadable_names": [], "path_refs": Counter(),
         "module_path_uses": Counter(), "relocations": Counter(),
         "direct_writes": Counter(),
     }
@@ -423,6 +470,7 @@ def _python_census(plugin):
                 else:
                     found["path_accessor_refs"][(rel, where)] += count
             found["name_sites"] += census.name_sites
+            found["unreadable_names"] += census.unreadable_names
             found["path_refs"] += census.path_refs
             found["module_path_uses"] += census.module_path_uses
             found["relocations"] += census.relocations
@@ -643,6 +691,61 @@ class TestCensus:
             (_CONTEXT_MODULE, "via_alias"): 1,
         })
 
+    def test_an_assembled_file_name_is_a_name_site(self, tmp_path):
+        """Positive control for `_names_the_file`: a name assembled from
+        pieces is counted where it is built; another session file's name is
+        not."""
+        hooks = tmp_path / "hooks"
+        hooks.mkdir()
+        (hooks / "seeded.py").write_text(
+            "def split(base):\n"
+            "    return base / ('pact-session-' + 'context.json')\n\n"
+            "def formatted(base, kind):\n"
+            "    return base / f'pact-session-{kind}.json'\n\n"
+            "def temp_name():\n"
+            "    return '.pact-session-context-'\n\n"
+            "def unrelated():\n"
+            "    return ('pact-sessions', 'session-journal.jsonl')\n"
+        )
+        assert _python_census(tmp_path)["name_sites"] == Counter({
+            ("hooks/seeded.py", "split"): 1,
+            ("hooks/seeded.py", "formatted"): 1,
+            ("hooks/seeded.py", "temp_name"): 1,
+        })
+
+    def test_a_name_the_census_cannot_read_is_reported_unreadable(self, tmp_path):
+        """Positive control for the census's fail-closed branch: a name built
+        from a `%` template lands in the unreadable list, while a complete
+        name beside it is a name site and another session file's name is
+        neither. A docstring is scanned like any other string, so one holding
+        the template is reported too, whether or not anything reads it."""
+        hooks = tmp_path / "hooks"
+        hooks.mkdir()
+        (hooks / "seeded.py").write_text(
+            "def templated(base, kind):\n"
+            "    return base / ('pact-session-%s.json' % kind)\n\n"
+            "def named(base):\n"
+            "    return base / 'pact-session-context.json'\n\n"
+            "def other(base):\n"
+            "    return base / 'pact-session-journal.json'\n"
+        )
+        (hooks / "documented.py").write_text(
+            "def f():\n"
+            "    \"\"\"pact-session-%s.json\"\"\"\n"
+        )
+        (hooks / "named_doc.py").write_text(
+            "def g():\n"
+            "    \"\"\"Reads pact-session-context.json.\"\"\"\n"
+        )
+        found = _python_census(tmp_path)
+        assert sorted(found["unreadable_names"]) == [
+            "hooks/documented.py:2: 'pact-session-%s.json'",
+            "hooks/seeded.py:2: 'pact-session-%s.json'",
+        ], found["unreadable_names"]
+        assert found["name_sites"] == Counter({
+            ("hooks/seeded.py", "named"): 1, ("hooks/named_doc.py", "g"): 1,
+        })
+
     def test_a_str_replace_is_not_a_relocation(self, tmp_path):
         """Path.replace takes one argument; str.replace takes two."""
         hooks = tmp_path / "hooks"
@@ -745,6 +848,37 @@ class TestCensus:
     def test_every_code_string_naming_the_file_is_known(self):
         name_sites = _shipped_python_census()["name_sites"]
         assert name_sites == KNOWN_NAME_SITES, _differs(name_sites, KNOWN_NAME_SITES)
+
+    def test_each_name_form_is_counted_read_or_reported(self):
+        """Live control for the name census: each form below is a counted
+        name site, read as another file, or unreadable, as written."""
+        cases = {
+            "pact-session-context.json": "site",
+            "pact-session-": "site",
+            ".pact-session-context-": "site",
+            "pact-session-%s.json": "unreadable",
+            "pact-session-{}.json": "unreadable",
+            "pact-session-$kind.json": "unreadable",
+            "context.json": "unreadable",
+            "pact-session-ctx": "unreadable",
+            "pact-session-journal.jsonl": "other",
+            "pact-sessions": "other",
+            "-context.json": "unreadable",
+            "planted-context.json": "other",
+            "the pact-sessions root": "other",
+        }
+        verdicts = {
+            text: "site" if _names_the_file(text) else "unreadable" if _unreadable_name(text) else "other"
+            for text in cases
+        }
+        assert verdicts == cases
+
+    def test_no_string_names_the_file_in_a_form_the_census_cannot_read(self):
+        """FAIL CLOSED: every anchor occurrence (`_NAME_ANCHOR`) is a counted
+        name site, part of another session file's complete name, or
+        reported here."""
+        unreadable = _shipped_python_census()["unreadable_names"]
+        assert unreadable == [], f"the context file named in a form the census cannot read: {unreadable}"
 
     def test_nothing_outside_the_context_module_reaches_its_path_global(self):
         path_refs = _shipped_python_census()["path_refs"]

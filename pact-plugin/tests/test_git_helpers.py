@@ -201,3 +201,64 @@ def test_run_git_env_is_inherited_when_omitted_and_replaced_when_given(
         "with env given, git still saw GIT_DIR, so the mapping did not replace "
         "the inherited environment"
     )
+
+
+def test_a_pass_answers_each_git_question_once_and_no_other(tmp_path, monkeypatch):
+    """Inside one `git_results_pass`, `answered_once` runs a question once and
+    gives every later asker that answer, a raised failure included, and never
+    gives one question's answer to another: a different resolved directory,
+    argv, output mode, or a variable git reads (GIT_*, LC_*, HOME and the
+    rest of `_GIT_READS_FROM_ENV`) is a different question. A change to any
+    other variable is not. Outside a pass every call runs, and a pass ends
+    with its block."""
+    from shared.git_helpers import PASS_GIT_RESULTS, answered_once, git_results_pass
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (tmp_path / "link").symlink_to(a)
+    monkeypatch.chdir(a)
+    runs = []
+
+    def ask(argv, text=False, env=None):
+        def run():
+            runs.append((tuple(argv), text))
+            if argv[-1] == "--raises":
+                raise OSError("could not run")
+            return len(runs)
+        return answered_once(argv, run, text=text, env=env)
+
+    env = {"PATH": "/usr/bin", "HOME": str(tmp_path), "UNRELATED": "1"}
+    outside = (ask(["git", "rev-parse"]), ask(["git", "rev-parse"]))
+    with git_results_pass():
+        first = ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env=env)
+        same = [
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env=env),
+            ask(["git", "rev-parse", "--git-dir"], env=env),  # the cwd is a
+            ask(["git", "-C", str(tmp_path / "link"), "rev-parse", "--git-dir"], env=env),
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env={**env, "UNRELATED": "2"}),
+        ]
+        with git_results_pass():  # a nested pass joins
+            same.append(ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env=env))
+        other = [
+            ask(["git", "-C", str(b), "rev-parse", "--git-dir"], env=env),
+            ask(["git", "-C", str(a), "rev-parse", "--show-toplevel"], env=env),
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], text=True, env=env),
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env={**env, "GIT_DIR": "x"}),
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env={**env, "LC_ALL": "C"}),
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env={**env, "HOME": str(b)}),
+        ]
+        failures = []
+        for _ in range(2):
+            try:
+                ask(["git", "rev-parse", "--raises"])
+            except OSError as exc:
+                failures.append(exc)
+    after = ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env=env)
+
+    assert outside == (1, 2), "outside a pass every call runs"
+    assert same == [first] * 5, (first, same)
+    assert len(set(other)) == len(other) and first not in other, (first, other)
+    assert len(failures) == 2 and failures[0] is failures[1], failures
+    assert [r for r in runs if r[0][-1] == "--raises"] == [(("git", "rev-parse", "--raises"), False)]
+    assert (PASS_GIT_RESULTS.get(), after) == (None, len(runs)), "the pass ended with its block"

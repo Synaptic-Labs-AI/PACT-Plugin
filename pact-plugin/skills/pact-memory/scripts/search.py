@@ -18,7 +18,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import struct
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 # Use the same sqlite3 module as database.py for type consistency
 try:
@@ -30,6 +30,8 @@ from .database import (
     db_connection,
     ensure_initialized,
     get_memory,
+    normalise_project_scopes,
+    project_scope_predicate,
     search_memories_by_text,
     SQLITE_EXTENSIONS_ENABLED
 )
@@ -39,7 +41,7 @@ from .embeddings import (
     check_embedding_availability
 )
 from .graph import (
-    get_file_id,
+    get_file_ids,
     get_memories_for_file,
     get_memories_for_files,
     get_related_files,
@@ -71,22 +73,31 @@ CONFIRMATION_FETCH_CAP = 200
 GRAPH_CONFIRMATION_FETCH_CAP = 50
 
 
-def _scope_or_none(project_id: Optional[str]) -> Optional[str]:
-    """One scope predicate at every public entry: absent and "" both mean ALL.
+def _scope_or_none(
+    project_id: Optional[Union[str, Sequence[str]]],
+) -> Optional[Union[str, Tuple[str, ...]]]:
+    """One scope normalisation at every public entry: only `None` means ALL.
 
-    The SQL legs read the scope by `is not None` (as do the stored-project
-    confirmations), so without this normalisation an empty string would be
-    bound as a filter that matches no row and a whole-store search would
-    answer empty. Normalise ONCE, at each public entry; every later test is
-    `is None`.
+    `None` is the whole store. Every other value is a scope, and an EMPTY
+    one — `""`, `()` or `[]` — is NO ROWS, the same answer
+    `database.normalise_project_scopes` and `graph.get_graph_stats` give.
+    Folding `""` to `None` by truthiness turned an empty scope into a
+    whole-store search, which is the trap this function exists to close.
+    Normalise ONCE, at each public entry; every later test is `is None`.
+
+    A non-empty string is returned as-is; a sequence is returned as a tuple.
     """
-    return project_id or None
+    if project_id is None:
+        return None
+    if isinstance(project_id, str):
+        return project_id if project_id else ()
+    return tuple(project_id)
 
 
 def vector_search(
     conn: sqlite3.Connection,
     query: str,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     limit: int = 10
 ) -> List[Tuple[str, float]]:
     """
@@ -103,10 +114,25 @@ def vector_search(
         limit: Maximum number of results.
 
     Returns:
-        List of (memory_id, distance) tuples, sorted by similarity.
-        Returns empty list if vector search unavailable (falls back to keyword).
+        List of (memory_id, distance) tuples, sorted by similarity. Returns
+        empty list if vector search unavailable (falls back to keyword).
+
+        AT MOST `limit` ROWS, NOT EXACTLY `limit` WHEN THAT MANY EXIST. Every
+        hit is confirmed against the row's STORED project before it is
+        returned (a stale vec partition must not serve another project's
+        memory), and the confirmation widens the fetch until enough hits
+        survive, the scoped partitions are exhausted, or
+        `CONFIRMATION_FETCH_CAP` is reached. The cap is a cost bound: a store
+        whose in-scope partitions are full of rows belonging to other projects
+        can make this return fewer than `limit` — including none — while more
+        matches exist beyond the window. That is the documented trade, not an
+        empty store; a caller that cannot tolerate a short result must read
+        the count it got rather than assume `limit`.
     """
     project_id = _scope_or_none(project_id)
+    scopes = normalise_project_scopes(project_id)
+    if scopes is not None and not scopes:
+        return []
 
     # Check if SQLite extension loading is available
     if not SQLITE_EXTENSIONS_ENABLED:
@@ -132,34 +158,43 @@ def vector_search(
         # Convert embedding to blob for sqlite-vec
         embedding_blob = struct.pack(f'{len(query_embedding)}f', *query_embedding)
 
-        # Build query with optional project filter
-        if project_id is not None:
-            sql = """
-                SELECT memory_id, distance
-                FROM vec_memories
-                WHERE embedding MATCH ?
-                AND project_id = ?
-                ORDER BY distance
-                LIMIT ?
-            """
-            sql_params: Tuple[Any, ...] = (embedding_blob, project_id)
-        else:
-            sql = """
-                SELECT memory_id, distance
-                FROM vec_memories
-                WHERE embedding MATCH ?
-                ORDER BY distance
-                LIMIT ?
-            """
-            sql_params = (embedding_blob,)
-
+        # ONE KNN PER SCOPE, THEN A MERGED TRUNCATION. A vec0 partition is
+        # queried one value at a time; cross-partition `IN` is NOT assumed
+        # here even though it measures as accepted. The id tiebreak is
+        # REQUIRED because two partitions can produce equal distances.
         def _fetch(fetch_limit: int) -> List[Tuple[str, float]]:
-            return [
-                (row[0], row[1])
-                for row in conn.execute(
-                    sql, (*sql_params, fetch_limit)
+            if scopes is None:
+                fetched = conn.execute(
+                    """
+                    SELECT memory_id, distance
+                    FROM vec_memories
+                    WHERE embedding MATCH ?
+                    ORDER BY distance
+                    LIMIT ?
+                    """,
+                    (embedding_blob, fetch_limit)
                 ).fetchall()
-            ]
+                return [(row[0], row[1]) for row in fetched]
+
+            merged: List[Tuple[str, float]] = []
+            for scope in scopes:
+                fetched = conn.execute(
+                    """
+                    SELECT memory_id, distance
+                    FROM vec_memories
+                    WHERE embedding MATCH ?
+                    AND project_id = ?
+                    ORDER BY distance
+                    LIMIT ?
+                    """,
+                    (embedding_blob, scope, fetch_limit)
+                ).fetchall()
+                merged.extend((row[0], row[1]) for row in fetched)
+
+            # TRUNCATE AFTER THE MERGE, never per scope: a per-bucket limit
+            # would return up to len(scopes) * fetch_limit rows.
+            merged.sort(key=lambda item: (item[1], item[0]))
+            return merged[:fetch_limit]
 
         rows = _fetch(limit)
 
@@ -175,7 +210,7 @@ def vector_search(
         # `project_id is None` KEEPS ITS WHOLE-STORE MEANING: an unscoped
         # search asks for every partition, and filtering there would silently
         # narrow a documented scope.
-        if project_id is None or not rows:
+        if scopes is None or not rows:
             return rows
 
         # A DISCARDED HIT MUST NOT COST A SLOT. The SQL LIMIT runs before this
@@ -183,6 +218,9 @@ def vector_search(
         # leave the caller short of results the store can supply. Widen the
         # fetch until enough confirmed hits exist, the store is exhausted, or
         # the cap is reached.
+        scope_predicate, scope_params = project_scope_predicate(
+            "project_id", scopes
+        )
         fetch = limit
         while True:
             ids = [memory_id for memory_id, _ in rows]
@@ -191,8 +229,8 @@ def vector_search(
                 row[0]
                 for row in conn.execute(
                     f"SELECT id FROM memories WHERE id IN ({placeholders}) "
-                    "AND project_id = ?",
-                    (*ids, project_id),
+                    f"AND {scope_predicate}",
+                    (*ids, *scope_params),
                 )
             }
             confirmed = [
@@ -205,6 +243,12 @@ def vector_search(
                 or len(rows) < fetch
                 or fetch >= CONFIRMATION_FETCH_CAP
             ):
+                # THE CAP MEANS THIS EXIT CAN TRUNCATE. A capped fetch that is
+                # also a FULL window means ranked rows existed beyond it, so
+                # this returns fewer than `limit` even though the store holds
+                # more; a capped fetch that is exhausted returns everything
+                # there was. Both exit here, so the return is "at most
+                # `limit`", never "exactly `limit` when that many exist".
                 return confirmed[:limit]
             fetch = min(fetch * 2, CONFIRMATION_FETCH_CAP)
             rows = _fetch(fetch)
@@ -224,7 +268,7 @@ def vector_search(
 def keyword_search(
     conn: sqlite3.Connection,
     query: str,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     limit: int = 10
 ) -> List[str]:
     """
@@ -247,7 +291,7 @@ def keyword_search(
 
 def semantic_search(
     query: str,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     limit: int = 10
 ) -> List[str]:
     """
@@ -283,7 +327,7 @@ def graph_boosted_search(
     conn: sqlite3.Connection,
     query: str,
     current_file: Optional[str] = None,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     limit: int = 10
 ) -> List[Tuple[str, float]]:
     """
@@ -352,7 +396,7 @@ def graph_boosted_search(
 def _get_graph_related_memories(
     conn: sqlite3.Connection,
     file_path: str,
-    project_id: Optional[str] = None
+    project_id: Optional[Union[str, Sequence[str]]] = None
 ) -> Set[str]:
     """
     Get memory IDs related to a file through the graph.
@@ -371,9 +415,10 @@ def _get_graph_related_memories(
     """
     memory_ids: Set[str] = set()
 
-    # Get memories directly linked to this file
-    file_id = get_file_id(conn, file_path, project_id)
-    if file_id:
+    # Get memories directly linked to EVERY scoped file row for this path: a
+    # path can carry one row per bucket, and one of them would miss the other's
+    # links.
+    for file_id in get_file_ids(conn, file_path, project_id):
         direct_memories = get_memories_for_file(conn, file_id, project_id)
         memory_ids.update(direct_memories)
 
@@ -393,7 +438,7 @@ def _get_graph_related_memories(
 def graph_enhanced_search(
     query: str,
     current_file: Optional[str] = None,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     limit: int = 20
 ) -> List[MemoryObject]:
     """
@@ -413,6 +458,7 @@ def graph_enhanced_search(
         List of MemoryObject instances sorted by relevance.
     """
     project_id = _scope_or_none(project_id)
+    scopes = normalise_project_scopes(project_id)
 
     with db_connection() as conn:
         ensure_initialized(conn)
@@ -438,10 +484,11 @@ def graph_enhanced_search(
                     # WITHOUT a project check, and this loop is the last
                     # place an id becomes a returned memory. Confirming here
                     # means no id source can leak a row from another project.
-                    # `project_id is None` unscoped.
+                    # MEMBERSHIP, not equality: the scope is a union, and an
+                    # exact `!=` would drop every legacy row.
                     if (
-                        project_id is not None
-                        and memory_dict.get("project_id") != project_id
+                        scopes is not None
+                        and memory_dict.get("project_id") not in scopes
                     ):
                         continue
                     # Get associated files
@@ -455,7 +502,7 @@ def graph_enhanced_search(
                     memories.append(memory_obj)
 
             if (
-                project_id is None
+                scopes is None
                 or len(memories) >= limit
                 or len(ranked_results) < fetch
                 or fetch >= GRAPH_CONFIRMATION_FETCH_CAP
@@ -466,7 +513,7 @@ def graph_enhanced_search(
 
 def find_similar_memories(
     memory_id: str,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     limit: int = 20
 ) -> List[MemoryObject]:
     """
@@ -509,7 +556,7 @@ def find_similar_memories(
 
 def search_by_file(
     file_path: str,
-    project_id: Optional[str] = None,
+    project_id: Optional[Union[str, Sequence[str]]] = None,
     limit: int = 10
 ) -> List[MemoryObject]:
     """
@@ -527,6 +574,7 @@ def search_by_file(
         List of related MemoryObject instances.
     """
     project_id = _scope_or_none(project_id)
+    scopes = normalise_project_scopes(project_id)
 
     with db_connection() as conn:
         ensure_initialized(conn)
@@ -540,7 +588,14 @@ def search_by_file(
         # window grows until enough confirmed memories exist, the relation set
         # is exhausted, or the scope is unscoped. Its natural cap is the size
         # of the set, so a pathological store cannot spin.
-        ordered = list(memory_ids)
+        #
+        # SORTED, NOT SET ORDER. The ids arrive as a set, so `list(...)` yields
+        # an order that changes with the process hash seed; with more related
+        # memories than `limit`, WHICH subset the window returns was arbitrary
+        # and a re-run answered differently from the same store. This path has
+        # no relevance signal to rank by, so id order is the honest
+        # deterministic choice (same rule as `get_file_ids`).
+        ordered = sorted(memory_ids)
         memories = []
         window = limit
         index = 0
@@ -553,9 +608,11 @@ def search_by_file(
                     # stored project. This is still the last place an id
                     # becomes a returned memory, so a re-keyed row cannot be
                     # served to its old project by any id source.
+                    # MEMBERSHIP, not equality: the scope is a union, and an
+                    # exact `!=` would drop every legacy row.
                     if (
-                        project_id is not None
-                        and memory_dict.get("project_id") != project_id
+                        scopes is not None
+                        and memory_dict.get("project_id") not in scopes
                     ):
                         continue
                     from .graph import get_files_for_memory
@@ -569,7 +626,7 @@ def search_by_file(
 
             index = window
             if (
-                project_id is None
+                scopes is None
                 or len(memories) >= limit
                 or index >= len(ordered)
             ):
