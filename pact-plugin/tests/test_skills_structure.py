@@ -687,6 +687,8 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "memory\n-saved",
         "memory__saved",
         "memory--saved",
+        r"memory\_saved",
+        r"memory\-saved",
     )
 
     @staticmethod
@@ -735,6 +737,22 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             self.test_no_memory_saved_in_any_llm_loaded_surface()
         assert "pact-plugin/agents/pact-orchestrator.md" in str(exc_info.value)
 
+    def test_pin_names_offender_and_undecodable_together(
+            self, tmp_path, monkeypatch):
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "skills" / "pact-agent-teams" / "SKILL.md").write_text(
+            "memory_saved", encoding="utf-8"
+        )
+        (plugin / "agents" / "pact-orchestrator.md").write_bytes(b"\xff")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        with pytest.raises(AssertionError) as exc_info:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        message = str(exc_info.value)
+        assert "pact-plugin/skills/pact-agent-teams/SKILL.md" in message
+        assert "pact-plugin/agents/pact-orchestrator.md" in message
+
     def test_no_memory_saved_in_any_llm_loaded_surface(self):
         offenders = []
         undecodable = []
@@ -745,25 +763,32 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
                 undecodable.append(path)
                 continue
             normalized = " ".join(
-                text.replace("*", "").replace("`", "").split()
+                re.sub(r"\\([_-])", r"\1", text)
+                .replace("*", "")
+                .replace("`", "")
+                .split()
             )
             if self.FORBIDDEN_PATTERN.search(normalized):
                 offenders.append(path)
-        assert not offenders, (
-            f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in offenders]} "
-            f"re-teach the retired memory_saved flag. The flag was removed "
-            f"in v4.8.36 (zero code readers, unenforced — a task could "
-            f"attest a save no mechanism verified); reintroducing the token "
-            f"in an LLM-loaded surface revives a write-only signal. Update "
-            f"this pin deliberately if the flag ever returns with an "
-            f"enforcer."
-        )
-        assert not undecodable, (
-            f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in undecodable]} "
-            f"is not valid UTF-8, so this pin cannot read it to check for "
-            f"the retired memory_saved flag; instruction surfaces must "
-            f"stay UTF-8."
-        )
+        diagnostics = []
+        if offenders:
+            diagnostics.append(
+                f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in offenders]} "
+                f"re-teach the retired memory_saved flag. The flag was removed "
+                f"in v4.8.36 (zero code readers, unenforced — a task could "
+                f"attest a save no mechanism verified); reintroducing the token "
+                f"in an LLM-loaded surface revives a write-only signal. Update "
+                f"this pin deliberately if the flag ever returns with an "
+                f"enforcer."
+            )
+        if undecodable:
+            diagnostics.append(
+                f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in undecodable]} "
+                f"is not valid UTF-8, so this pin cannot read it to check for "
+                f"the retired memory_saved flag; instruction surfaces must "
+                f"stay UTF-8."
+            )
+        assert not diagnostics, "\n".join(diagnostics)
 
 
 class TestOrderingInvariantPhraseCount:
