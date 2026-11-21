@@ -58,8 +58,13 @@ def handoff_present(task: dict[str, Any]) -> bool:
     `produced` field is a non-empty STRING.
 
     Keying per hooks/shared/handoff_schema.py: `produced` is a REQUIRED
-    canonical field and the watch keys on the canonical key only (it has no
-    legacy alias to fall back to). STRING is load-bearing, not pedantry: the
+    canonical field and the watch keys on the canonical key only. It does
+    NOT resolve the legacy alias spellings that read-side consumers
+    (handoff_merge.py, session_resume.py — via resolve_handoff_field)
+    accept: a handoff whose `produced` sits under a legacy spelling passes
+    lead-side reads yet reads as ABSENT here, so the watch burns its
+    deadline to a loud EXPIRED instead of firing. That degraded-loud
+    asymmetry is accepted, not hidden. STRING is load-bearing, not pedantry: the
     live failures this mechanism answers were handoffs whose fields were
     JSON ARRAYS — a list-typed `produced` is not a delivered summary, so it
     must read as absent. Membership-grade emptiness ("" only, since a
