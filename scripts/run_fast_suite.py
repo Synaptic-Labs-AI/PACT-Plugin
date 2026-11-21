@@ -327,8 +327,9 @@ def _run(args, selection, manifest_path: Path, plugin_root: Path,
         # The verifier re-derives run.collected from this stored line, so an
         # artifact without the header is unverifiable by construction, and a
         # headerless run means the suite likely never started printing
-        # collection evidence. Refuse rather than write one: a missing
-        # artifact keeps meaning "never ran", never "failed".
+        # collection evidence. Refuse rather than write one: the count would
+        # carry no printed provenance (and a missing artifact here means the
+        # run never produced collection evidence -- never a failed run).
         print(
             "FAST-SUITE REFUSAL: no collected-items header line was captured "
             "(NO-COLLECTED-HEADER); the run produced no start-of-run "
