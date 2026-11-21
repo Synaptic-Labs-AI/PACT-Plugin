@@ -1941,6 +1941,36 @@ class _DetectionGraph:
                 return False
         return True
 
+    # PROJECT FUNCTIONS WHOSE RESULT IS THEIR CALLABLE ARGUMENT'S RESULT: the
+    # (module, def), the argument's position and its keyword. A call of one
+    # is a standard-library value exactly when that argument is a lambda with
+    # no parameters whose body `_foreign_value` proves, evaluated in the
+    # calling function. `test_a_result_passing_function_returns_its_run_result`
+    # holds each entry to that contract.
+    _RETURNS_ITS_ARGUMENT = {("shared.git_helpers", "answered_once"): (1, "run")}
+
+    def _argument_result(self, call, module: str, function, seen, depth: int, parameters: bool):
+        """True when `call` reaches a `_RETURNS_ITS_ARGUMENT` function and
+        its callable argument is a parameterless lambda whose body is a
+        standard-library value; False when it reaches one otherwise; None
+        when it reaches none."""
+        import ast
+
+        target = self.target(call, module)
+        if target not in self._RETURNS_ITS_ARGUMENT:
+            return None
+        rule = self._RETURNS_ITS_ARGUMENT[target]
+        position, keyword = rule
+        given = [kw.value for kw in call.keywords if kw.arg == keyword]
+        argument = given[0] if given else call.args[position] if len(call.args) > position else None
+        if not isinstance(argument, ast.Lambda):
+            return False
+        lambda_arguments = argument.args
+        if (lambda_arguments.posonlyargs or lambda_arguments.args or lambda_arguments.kwonlyargs
+                or lambda_arguments.vararg or lambda_arguments.kwarg):
+            return False
+        return self._foreign_value(argument.body, module, function, seen, depth + 1, parameters)
+
     def returns_foreign(self, target, seen=frozenset()) -> bool:
         """PROVED: every value the project function `target` returns is a
         standard-library value, so methods called on its result run no
@@ -1979,9 +2009,10 @@ class _DetectionGraph:
         callable (`json.loads(text)`, `p.strip()`) whose receiver is one and
         whose arguments name no project function, class or non-data object
         (a project callable passed in could run); a method of a data object;
-        or a call into a project function that `returns_foreign`. Anything
-        else, a project class build or an unannotated parameter included, is
-        not proved."""
+        or a call into a project function that `returns_foreign`, or of a
+        `_RETURNS_ITS_ARGUMENT` function whose callable argument is a
+        parameterless lambda with a proved body. Anything else, a project
+        class build or an unannotated parameter included, is not proved."""
         import ast
 
         if depth > 12:
@@ -2053,6 +2084,9 @@ class _DetectionGraph:
                 return hasattr(builtins, value.id) or value.id in self.aliases[module]
             return False
         if isinstance(value, ast.Call):
+            passed_through = self._argument_result(value, module, function, seen, depth, parameters)
+            if passed_through is not None:
+                return passed_through
             target = self.target(value, module)
             if target is not None:
                 return self.returns_foreign(target, seen)
@@ -2616,7 +2650,9 @@ def route_inputs() -> dict:
     - a method on a local whose every binding, in every form
       (`_DetectionGraph._bindings`), is a parameter or a value proved to be
       a standard-library one (`_DetectionGraph._foreign_value`, which counts
-      a project function's result only when it `returns_foreign`).
+      a project function's result only when it `returns_foreign`, or, for a
+      function in `_DetectionGraph._RETURNS_ITS_ARGUMENT`, when its callable
+      argument is a parameterless lambda whose body is proved).
     REPORTED, as a condition NOT_A_ROUTE must name with its reason: every
     other call through a project name. That is every build of a project
     class (a nested one included), in a function or at import, whatever
@@ -2870,6 +2906,53 @@ def route_driven_conditions(tmp_path_factory):
         for condition in mp.driven:
             driven.setdefault(condition, set()).add(route)
     return driven
+
+
+def test_a_result_passing_function_returns_its_run_result():
+    """Pin for `_DetectionGraph._RETURNS_ITS_ARGUMENT`: the census types a
+    call of each listed function as its callable argument's result, so each
+    must return exactly what that argument returns, or raise what it raises,
+    on every path. For `answered_once`: outside a pass, inside one on the
+    first ask, and on a later ask of the same question (the memo's path), it
+    returns the very object `run` returned, and a raise is the same
+    exception again. The argument sits where the table says, by position and
+    by keyword. A new entry fails here until it has a pin of its own."""
+    import inspect
+
+    from shared import git_helpers
+
+    assert _DetectionGraph._RETURNS_ITS_ARGUMENT == {("shared.git_helpers", "answered_once"): (1, "run")}
+    position, keyword = _DetectionGraph._RETURNS_ITS_ARGUMENT[("shared.git_helpers", "answered_once")]
+    assert list(inspect.signature(git_helpers.answered_once).parameters)[position] == keyword
+
+    made = []
+
+    def run():
+        made.append(object())
+        return made[-1]
+
+    def raising():
+        made.append(OSError("could not run"))
+        raise made[-1]
+
+    def raised(call):
+        try:
+            call()
+        except OSError as error:
+            return error
+        return None
+
+    argv, env = ["git", "rev-parse", "--git-dir"], {"PATH": "/usr/bin"}
+    outside = git_helpers.answered_once(argv, run, text=False, env=env)
+    assert outside is made[-1]
+    with git_helpers.git_results_pass():
+        first = git_helpers.answered_once(argv, run, text=False, env=env)
+        assert first is made[-1]
+        again = git_helpers.answered_once(argv, run=run, text=False, env=env)
+        failing = ["git", "rev-parse", "--absolute-git-dir"]
+        errors = [raised(lambda: git_helpers.answered_once(failing, raising, text=False, env=env))
+                  for _ in range(2)]
+    assert (again is first, len(made), errors[0] is made[-1], errors[1] is made[-1]) == (True, 3, True, True)
 
 
 class TestEveryRouteEntryConditionIsARoute:
@@ -3198,18 +3281,16 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "validate_identifier_for_write"): "validates an id value",
         ("call", "answered_once"): (
             "runs the reader's own git command once per detection pass and hands later "
-            "askers of the same question its result; the command is the reader's input"
-        ),
-        ("call", "<call to no function project_identity: value.strip>"): (
-            "str.strip on one origin value read_origin split from the git output "
-            "answered_once returned, which the census cannot type"
+            "askers of the same question its result; the command is the reader's input, "
+            "and answered_once's own body is read like any reached function"
         ),
         ("call", "<call to no function shared.git_helpers: PASS_GIT_RESULTS.get>"): (
             "reads the pass's memo of git results, set only by git_results_pass"
         ),
         ("env", "<shared.git_helpers._question: environment.items>"): (
-            "the git-relevant variables of the environment a git command runs with, read "
-            "only to key the pass's memo of that command's result"
+            "the copy of the environment a git command runs with, scanned by prefix "
+            "(git reads arbitrary GIT_* variables) only to key the pass's memo of that "
+            "command's result"
         ),
     }
 
