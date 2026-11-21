@@ -49,36 +49,51 @@ _PROJECT_DIR = "/Users/example/Sites/test-project"
 _ORCH_MARKER = "YOUR PACT ROLE: orchestrator"
 _PEER_SENTINEL = "PEER_CONTEXT_SENTINEL_BODY"
 _CROSSED_WAKE_RULE = (
-    "On a wake carrying an inbound directive, fresh-read the task file; if the "
-    "directive is already satisfied, send no standalone confirmation. Never "
-    "re-announce an unchanged `intentional_wait` state. Fold necessary "
-    "reconciliation into a `boundary-drain` line only when another "
-    "protocol-boundary message is already required. With no new work and no "
-    "exception below, end silently without text or a filler tool call. Still "
-    "report blockers, corrections, questions, divergent or actionable state, "
-    "and every resolving message you owe."
+    "On an inbound directive or wake, fresh-read the referenced task file. If "
+    "the directive is already satisfied, the wake has no new work, or only an "
+    "unchanged `intentional_wait` remains, durable state is the complete reply: "
+    "end silently after the read with no `SendMessage`, assistant text, closing "
+    "summary, or further tool call. No resolving or `boundary-drain` message is "
+    "owed merely for that no-op. A denied filler call is not a correction or "
+    "blocker; do not report, retry, or replace it. Fold necessary reconciliation "
+    "into `boundary-drain` only when another protocol-boundary message is "
+    "already required. Still do new work and report blockers, corrections, "
+    "questions, divergent or actionable state, and every otherwise-required "
+    "resolving message."
 )
 _CROSSED_WAKE_CLAUSES = [
     (
-        "C1",
-        "On a wake carrying an inbound directive, fresh-read the task file; if "
-        "the directive is already satisfied, send no standalone confirmation.",
-    ),
-    ("C2", "Never re-announce an unchanged `intentional_wait` state."),
-    (
-        "C3",
-        "Fold necessary reconciliation into a `boundary-drain` line only when "
-        "another protocol-boundary message is already required.",
+        "R1",
+        "On an inbound directive or wake, fresh-read the referenced task file.",
     ),
     (
-        "C4-no-text",
-        "With no new work and no exception below, end silently without text",
+        "R2",
+        "If the directive is already satisfied, the wake has no new work, or "
+        "only an unchanged `intentional_wait` remains, durable state is the "
+        "complete reply:",
     ),
-    ("C4-no-filler", "or a filler tool call."),
+    ("R3-sendmessage", "end silently after the read with no `SendMessage`,"),
+    ("R3-text", "assistant text, closing summary,"),
+    ("R3-tool", "or further tool call."),
     (
-        "C5",
-        "Still report blockers, corrections, questions, divergent or actionable "
-        "state, and every resolving message you owe.",
+        "R4",
+        "No resolving or `boundary-drain` message is owed merely for that no-op.",
+    ),
+    (
+        "R5",
+        "A denied filler call is not a correction or blocker; do not report, "
+        "retry, or replace it.",
+    ),
+    (
+        "R6",
+        "Fold necessary reconciliation into `boundary-drain` only when another "
+        "protocol-boundary message is already required.",
+    ),
+    (
+        "R7",
+        "Still do new work and report blockers, corrections, questions, "
+        "divergent or actionable state, and every otherwise-required resolving "
+        "message.",
     ),
 ]
 
