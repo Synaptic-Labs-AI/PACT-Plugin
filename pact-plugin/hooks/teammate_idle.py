@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/teammate_idle.py
-Summary: TeammateIdle hook — resource-management for zombie teammates.
+Summary: TeammateIdle hook — resource-management for zombie teammates and a
+         bounded positive-inbox grace gate for fresh lead-completion waits.
          Tracks consecutive idle events for teammates whose task is
          completed; at threshold N=3 suggests shutdown, at N=5 advises the
          team-lead to `TaskStop` the teammate.
@@ -12,8 +13,10 @@ Used by: hooks.json TeammateIdle hook
 # boundaries — not every idle tick. Above IDLE_FORCE_THRESHOLD the stop
 # advisory is re-emitted per tick until the team-lead processes it and the
 # teammate is stopped (safety is protocol-level, not a structural cap).
-# Exits deterministically on every code path. Does NOT consume
-# intentional_wait.
+# A fresh awaiting_lead_completion wait polls for positive inbox evidence at
+# 0.1-second intervals only within 10 seconds of its existing `since`; empty
+# input never blocks, and later idles cannot restart that budget. Exits
+# deterministically on every code path. Does NOT consume intentional_wait.
 
 Idle cleanup: Track consecutive idle events for completed agents. After 3,
 suggest shutdown. After 5, advise the team-lead to `TaskStop` the teammate.
@@ -24,17 +27,11 @@ Output: JSON with systemMessage (shutdown suggestion / stop advisory)
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    # Annotation-only. This file has `from __future__ import annotations`, so
-    # the type below is a string at runtime and this import never executes --
-    # which is what keeps a per-session hook from paying for a type.
-    from datetime import datetime
-
 import json
 import sys
+import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add hooks directory to path for shared package imports
@@ -45,7 +42,9 @@ if str(_hooks_dir) not in sys.path:
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
 from shared.background_work import frame_team_and_name
+from shared.intentional_wait import validate_wait
 from shared.paths import get_claude_config_dir
+from shared.session_state import is_safe_path_component
 from shared.task_utils import iter_team_task_jsons
 from shared import state_file
 
@@ -101,6 +100,88 @@ def find_teammate_task(
                 completed = task
 
     return in_progress or completed
+
+
+GRACE_SECONDS = 10.0
+POLL_SECONDS = 0.1
+INBOX_MAX_BYTES = 1024 * 1024
+INBOX_BLOCK_REASON = (
+    "A valid teammate message is queued. Process the inbox normally now, then "
+    "fresh-read the current task JSON before any completion action. The queued "
+    "message is not proof of acceptance; do not send a redundant confirmation "
+    "merely because this continuation fired."
+)
+
+
+def _has_valid_inbox_message(messages: list) -> bool:
+    """Only minimal positive message shape counts; payload text is never used."""
+    return any(
+        isinstance(message, dict)
+        and isinstance(message.get("from"), str)
+        and bool(message["from"])
+        and isinstance(message.get("text"), str)
+        and bool(message["text"])
+        for message in messages
+    )
+
+
+def check_inbox_grace(
+    tasks: list[dict],
+    teammate_name: str,
+    team_name: str,
+    teams_root: Path,
+    *,
+    now: datetime | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict | None:
+    """Hold a fresh lead-completion idle only for positive inbox evidence."""
+    task = find_teammate_task(tasks, teammate_name)
+    if not task or task.get("status") != "in_progress":
+        return None
+    metadata = task.get("metadata", {})
+    wait = metadata.get("intentional_wait") if isinstance(metadata, dict) else None
+    if not validate_wait(wait) or wait.get("reason") != "awaiting_lead_completion":
+        return None
+    if not (
+        is_safe_path_component(team_name)
+        and is_safe_path_component(teammate_name)
+    ):
+        return None
+
+    since = datetime.fromisoformat(wait["since"].replace("Z", "+00:00"))
+    wall_now = now if now is not None else datetime.now(timezone.utc)
+    age = (wall_now - since).total_seconds()
+    if not 0 <= age < GRACE_SECONDS:
+        return None
+
+    inbox_dir = teams_root / team_name / "inboxes"
+    inbox_path = inbox_dir / f"{teammate_name}.json"
+    deadline = monotonic() + GRACE_SECONDS - age
+    while monotonic() < deadline:
+        try:
+            content = state_file.read_text(
+                inbox_path, root=inbox_dir, max_bytes=INBOX_MAX_BYTES
+            )
+        except (OSError, ValueError):
+            return None
+        # Invalid UTF-8 is replaced by state_file; decoded replacement is not evidence.
+        if "�" in content:
+            return None
+        try:
+            messages = json.loads(content)
+        except json.JSONDecodeError:
+            pass
+        else:
+            if not isinstance(messages, list):
+                return None
+            if _has_valid_inbox_message(messages):
+                return {"decision": "block", "reason": INBOX_BLOCK_REASON}
+
+        remaining = deadline - monotonic()
+        if remaining > 0:
+            sleep(min(POLL_SECONDS, remaining))
+    return None
 
 
 def _state_root(path: Path, root: Path | None) -> Path:
@@ -461,6 +542,16 @@ def main():
 
         teams_root = get_claude_config_dir() / "teams"
         idle_counts_path = str(teams_root / team_name / "idle_counts.json")
+
+        try:
+            grace_decision = check_inbox_grace(
+                tasks, teammate_name, team_name, teams_root
+            )
+        except Exception:
+            grace_decision = None
+        if grace_decision is not None:
+            print(json.dumps(grace_decision))
+            sys.exit(0)
 
         messages = []
         cleanup_msg, should_shutdown = None, False

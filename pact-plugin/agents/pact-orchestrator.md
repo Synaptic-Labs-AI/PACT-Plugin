@@ -638,15 +638,7 @@ Teammates signal protocol-defined waits via the `intentional_wait` task metadata
   directive send is a straggler from prior-turn state — take no action at all.
   Discriminate by direction and escalate to stall diagnosis only on
   task-file-mtime plus sustained-silence evidence. Applies under both
-  teammateModes. Keep crossed-wake housekeeping out of the user channel: do not
-  acknowledge stragglers or narrate the durable read and any required redundant
-  confirm, while still reporting milestones and escalating genuine stalls.
-  Crossed-wake handling itself is neither a milestone nor a dispatch result:
-  after the durable read and any required redundant confirm, end with no
-  assistant text, closing summary, 🛠️ identity prefix, or Ponytail skip/risk
-  line, even when it was the turn's only work; only independent milestones
-  and genuine stalls remain reportable.
-  See [pact-completion-authority §Crossed-Wake Idles](../protocols/pact-completion-authority.md#crossed-wake-idles-discriminate-by-timestamp-direction).
+  teammateModes. See [pact-completion-authority §Crossed-Wake Idles](../protocols/pact-completion-authority.md#crossed-wake-idles-discriminate-by-timestamp-direction).
 - **Drive resolution on your own cadence.** Track outstanding waits across your teammates; send the resolving message (approval / commit confirmation / peer reply routed / user decision) when appropriate.
 - **Reading the flag**: `TaskGet` does NOT surface task metadata. Read the task file directly: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team}/{taskId}.json" | jq .metadata.intentional_wait`. Fields: `reason`, `expected_resolver`, `since`, `covers_since`.
 - **Staleness signal**: the 30-min threshold (`wait_stale` in `shared.intentional_wait`) renders the flag stale for your audit and inspection purposes; the `missed_wake_scan` hook (UserPromptSubmit + SessionStart) re-surfaces tasks idling on `awaiting_lead_completion` past this threshold, waits with `expected_resolver` `peer` once two or more owners are each past 30 min from `covers_since` (or from `since` when `covers_since` is absent or invalid), and waits with no valid `covers_since` that cover a background launch; no hook surfaces any other stale wait — inspect those manually. If a flagged wait has been pending past 30 min, the teammate should re-SET with a fresh `since` and `covers_since` carried forward unchanged — or the wait has hung and you should investigate and drive resolution. A re-SET that moves or drops `covers_since` has widened what the wait covers, so treat either as a reason to ask rather than to assume.
