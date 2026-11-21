@@ -1154,6 +1154,73 @@ class TestInboxGraceGate:
         assert decision is None
         assert clock.sleeps == []
 
+    @pytest.mark.parametrize("payload", [
+        '[{"from":"team-lead","text":"\\ufffd"}]',
+        '[{"from":"\\ufffd","text":"wake"}]',
+        '[{"from":"team-lead","text":"wake","note":"\\ufffd"}]',
+        '[{"\\ufffd":"x","from":"team-lead","text":"wake"}]',
+        '[{"from":"team-lead","text":"wake","meta":{"nested":["ok","\\ufffd"]}}]',
+        '[{"from":"team-lead","text":"\\ud800"}]',
+        '[{"from":"\\udfff","text":"wake"}]',
+        '[{"from":"team-lead","text":"wake","note":"\\ud800"}]',
+        '[{"\\ud800":"x","from":"team-lead","text":"wake"}]',
+        '[{"from":"team-lead","text":"wake","meta":{"\\udfff":"x"}}]',
+    ], ids=[
+        "replacement-text", "replacement-from", "replacement-unrelated-value",
+        "replacement-key", "replacement-nested-value", "surrogate-text",
+        "surrogate-from", "surrogate-unrelated-value", "surrogate-key",
+        "surrogate-nested-key",
+    ])
+    def test_escaped_replacement_and_lone_surrogates_never_block(
+        self, payload, tmp_path
+    ):
+        _write_inbox(tmp_path, payload)
+        clock = _FakeGraceClock()
+
+        decision = _call_grace([_grace_task()], tmp_path, clock)
+
+        assert decision is None
+        assert clock.sleeps == []
+
+    def test_escaped_ordinary_text_and_valid_non_bmp_characters_still_block(
+        self, tmp_path
+    ):
+        _write_inbox(
+            tmp_path,
+            '[{"from":"team-lead","text":"\\u0077ake","note":"\\ud83d\\ude00"}]',
+        )
+        clock = _FakeGraceClock()
+
+        decision = _call_grace([_grace_task()], tmp_path, clock)
+
+        assert decision == _BLOCK_DECISION
+        assert clock.sleeps == []
+
+    @pytest.mark.parametrize("parent", ["team", "inboxes"])
+    def test_symlinked_parent_directory_never_reads_external_inbox(
+        self, parent, tmp_path
+    ):
+        outside = tmp_path / "outside"
+        if parent == "team":
+            external_inbox = outside / "inboxes" / "CoderRaw.json"
+            link = tmp_path / "teams" / "TeamRaw"
+        else:
+            external_inbox = outside / "CoderRaw.json"
+            link = tmp_path / "teams" / "TeamRaw" / "inboxes"
+        external_inbox.parent.mkdir(parents=True)
+        external_inbox.write_text(
+            json.dumps([{"from": "team-lead", "text": "outside"}]),
+            encoding="utf-8",
+        )
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(outside, target_is_directory=True)
+        clock = _FakeGraceClock()
+
+        decision = _call_grace([_grace_task()], tmp_path, clock)
+
+        assert decision is None
+        assert clock.sleeps == []
+
     def test_symlinked_inbox_never_reads_its_external_target(self, tmp_path):
         outside = tmp_path / "outside.json"
         outside.write_text(
@@ -1222,6 +1289,57 @@ class TestInboxGraceGate:
         assert decision is None
         read.assert_not_called()
         assert clock.sleeps == []
+
+    @pytest.mark.parametrize("reverse", [False, True], ids=["wait-first", "wait-last"])
+    def test_eligible_wait_is_found_with_another_active_task_in_any_order(
+        self, reverse, tmp_path
+    ):
+        waiting = _grace_task()
+        waiting["id"] = "1"
+        other = make_task(task_id="2", owner="CoderRaw", status="in_progress")
+        tasks = [waiting, other]
+        if reverse:
+            tasks.reverse()
+        _write_inbox(tmp_path, json.dumps([{"from": "team-lead", "text": "wake"}]))
+        clock = _FakeGraceClock()
+
+        decision = _call_grace(tasks, tmp_path, clock)
+
+        assert decision == _BLOCK_DECISION
+        assert clock.sleeps == []
+
+    def test_completed_eligible_wait_survives_another_active_task(self, tmp_path):
+        waiting = _grace_task(status="completed")
+        waiting["id"] = "1"
+        other = make_task(task_id="2", owner="CoderRaw", status="in_progress")
+        _write_inbox(tmp_path, json.dumps([{"from": "team-lead", "text": "wake"}]))
+        clock = _FakeGraceClock()
+
+        decision = _call_grace([waiting, other], tmp_path, clock)
+
+        assert decision == _BLOCK_DECISION
+        assert clock.sleeps == []
+
+    def test_simultaneous_eligible_waits_use_earliest_since_then_numeric_task_id(self):
+        from teammate_idle import _select_grace_task
+
+        older = _grace_task(age=8)
+        older["id"] = "20"
+        newer = _grace_task(age=2)
+        newer["id"] = "9"
+        for tasks in ([newer, older], [older, newer]):
+            selected, age = _select_grace_task(tasks, "CoderRaw", _GRACE_NOW)
+            assert selected["id"] == "20"
+            assert age == 8
+
+        first = _grace_task(age=5)
+        first["id"] = "20"
+        second = _grace_task(age=5)
+        second["id"] = "9"
+        for tasks in ([first, second], [second, first]):
+            selected, age = _select_grace_task(tasks, "CoderRaw", _GRACE_NOW)
+            assert selected["id"] == "9"
+            assert age == 5
 
     def test_completed_wait_blocks_on_late_positive_evidence_within_grace(
         self, tmp_path

@@ -125,6 +125,53 @@ def _has_valid_inbox_message(messages: list) -> bool:
     )
 
 
+def _select_grace_task(
+    tasks: list[dict], teammate_name: str, wall_now: datetime
+) -> tuple[dict, float] | None:
+    """Select the earliest eligible wait, breaking ties by numeric task ID."""
+    candidates = []
+    for task in tasks:
+        if (
+            task.get("owner") != teammate_name
+            or task.get("status") not in {"in_progress", "completed"}
+        ):
+            continue
+        metadata = task.get("metadata", {})
+        wait = metadata.get("intentional_wait") if isinstance(metadata, dict) else None
+        if not validate_wait(wait) or wait.get("reason") != "awaiting_lead_completion":
+            continue
+        since = datetime.fromisoformat(wait["since"].replace("Z", "+00:00"))
+        age = (wall_now - since).total_seconds()
+        if not 0 <= age < GRACE_SECONDS:
+            continue
+        try:
+            task_id = int(task.get("id", "0"))
+        except (ValueError, TypeError):
+            task_id = 0
+        candidates.append((since, task_id, task, age))
+    if not candidates:
+        return None
+    _since, _task_id, task, age = min(candidates, key=lambda item: (item[0], item[1]))
+    return task, age
+
+
+def _contains_invalid_unicode(value) -> bool:
+    """Reject replacement and surrogate codepoints in decoded JSON containers."""
+    if isinstance(value, str):
+        return any(
+            character == "�" or "\ud800" <= character <= "\udfff"
+            for character in value
+        )
+    if isinstance(value, list):
+        return any(_contains_invalid_unicode(item) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _contains_invalid_unicode(key) or _contains_invalid_unicode(item)
+            for key, item in value.items()
+        )
+    return False
+
+
 def check_inbox_grace(
     tasks: list[dict],
     teammate_name: str,
@@ -136,23 +183,15 @@ def check_inbox_grace(
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict | None:
     """Hold a fresh lead-completion idle only for positive inbox evidence."""
-    task = find_teammate_task(tasks, teammate_name)
-    if not task or task.get("status") not in {"in_progress", "completed"}:
+    wall_now = now if now is not None else datetime.now(timezone.utc)
+    selected = _select_grace_task(tasks, teammate_name, wall_now)
+    if selected is None:
         return None
-    metadata = task.get("metadata", {})
-    wait = metadata.get("intentional_wait") if isinstance(metadata, dict) else None
-    if not validate_wait(wait) or wait.get("reason") != "awaiting_lead_completion":
-        return None
+    _task, age = selected
     if not (
         is_safe_path_component(team_name)
         and is_safe_path_component(teammate_name)
     ):
-        return None
-
-    since = datetime.fromisoformat(wait["since"].replace("Z", "+00:00"))
-    wall_now = now if now is not None else datetime.now(timezone.utc)
-    age = (wall_now - since).total_seconds()
-    if not 0 <= age < GRACE_SECONDS:
         return None
 
     inbox_dir = teams_root / team_name / "inboxes"
@@ -161,7 +200,7 @@ def check_inbox_grace(
     while monotonic() < deadline:
         try:
             content = state_file.read_text(
-                inbox_path, root=inbox_dir, max_bytes=INBOX_MAX_BYTES
+                inbox_path, root=teams_root, max_bytes=INBOX_MAX_BYTES
             )
         except (OSError, ValueError):
             return None
@@ -174,6 +213,8 @@ def check_inbox_grace(
             pass
         else:
             if not isinstance(messages, list):
+                return None
+            if _contains_invalid_unicode(messages):
                 return None
             if _has_valid_inbox_message(messages):
                 return {"decision": "block", "reason": INBOX_BLOCK_REASON}
