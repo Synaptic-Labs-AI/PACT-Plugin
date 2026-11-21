@@ -956,6 +956,56 @@ def test_tier3_teammate_text_names_the_wait_keys():
     )
 
 
+# The separate-process teammate's text, verbatim — its watcher-exit/wake
+# tail is GATED on having armed (the do-NOT-arm route resolves without any
+# watcher, and describing watcher exits to a non-arming follower is the
+# contradiction class the gated tail closes).
+_TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN = (
+    "FILLER-LOCK: this exact call has been denied {count} times this "
+    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
+    "re-filling — end this wait structurally instead. As a "
+    "separate-process teammate, this watcher's completion notice WILL "
+    "start your next turn. FIRST arm the deliverable watcher with ONE "
+    "`Bash` call (`run_in_background: true`), substituting your team "
+    "name and the task id you are waiting on:\n"
+    'python3 "{watcher}" --team <team-name> --task <task-id> '
+    "--predicate handoff --deadline 900\n"
+    "(use --predicate teachback_submit when the awaited deliverable is "
+    "a teachback submission). If the event you await is NOT a "
+    "deliverable you can write — for example the lead's review or "
+    "action — do NOT arm: just end your turn, and a message or your "
+    "next turn boundary resolves it. If you DID arm: end your turn "
+    "with no further tool calls — the watcher exits 0 when the "
+    "deliverable lands, 3 when the deadline passes without it, 4 when "
+    "it cannot watch at all — and its completion notice starts your "
+    "next turn."
+)
+
+
+def test_tier3_sp_text_pinned_verbatim():
+    import wait_filler_gate
+
+    assert (
+        wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
+        == _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN
+    )
+
+
+def test_tier3_sp_text_gates_its_watcher_tail():
+    """CONTRADICTION-CLASS PIN (Bugbot Medium, cold round 8): the SP text's
+    watcher-exit/wake descriptions must be gated on having armed — its
+    do-NOT-arm route resolves without any watcher, and an ungated THEN
+    clause would describe watcher exits for a watcher that was never
+    launched. "If you DID arm" present; the ungated "THEN end your turn"
+    absent. The then-present state is the pre-fix text — this pin was red
+    on it."""
+    import wait_filler_gate
+
+    sp = wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
+    assert "If you DID arm" in sp
+    assert "THEN end your turn" not in sp
+
+
 def test_tier3_lead_text_names_the_no_arm_alternative():
     """The LEAD text carries the same neither-predicate alternative the
     teammate texts do: when the awaited event is not a deliverable the

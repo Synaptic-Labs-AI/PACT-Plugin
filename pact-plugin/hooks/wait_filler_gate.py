@@ -203,10 +203,11 @@ _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON = (
     "a teachback submission). If the event you await is NOT a "
     "deliverable you can write — for example the lead's review or "
     "action — do NOT arm: just end your turn, and a message or your "
-    "next turn boundary resolves it. THEN end your turn with no "
-    "further tool calls — the watcher exits 0 when the deliverable "
-    "lands, 3 when the deadline passes without it, 4 when it cannot "
-    "watch at all — and its completion notice starts your next turn."
+    "next turn boundary resolves it. If you DID arm: end your turn "
+    "with no further tool calls — the watcher exits 0 when the "
+    "deliverable lands, 3 when the deadline passes without it, 4 when "
+    "it cannot watch at all — and its completion notice starts your "
+    "next turn."
 )
 # The Agent-tool subagent's own text. A subagent's turn end RETURNS its
 # report to the caller: nothing wakes it, so this text carries NO wake
