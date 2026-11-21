@@ -2285,6 +2285,78 @@ class TestOneConstructionAsksGitEachQuestionOnce:
         assert (held["common_dirs"] != {}, held["listings"] != {}) == (True, True), held  # control: answers held
         assert (repeats, lost) == ({}, {name: [] for name in held}), calls
 
+    def test_a_construction_joined_on_the_user_setting_leaves_the_pass_its_common_dirs(
+        self, identity_env, monkeypatch
+    ):
+        """A construction inside a caller's pass whose identity records no
+        common dir (the user setting, from a folder outside any repository)
+        takes the folder's common-dir answer for its first legacy read from a
+        copy, so the caller's pass keeps every answer it held. The control
+        shows the route, that the pass held the folder's answer, and that the
+        legacy read ran."""
+        import os
+
+        from scripts.database import create_memory, db_connection
+
+        _fresh_scope_state()
+        memory_dir = identity_env / "mem"
+        memory_dir.mkdir()
+        (memory_dir / "config.json").write_text('{"project_id": "user.example.com/me/pinned"}', encoding="utf-8")
+        folder = identity_env / "my-workspace"
+        folder.mkdir()
+        (folder / "CLAUDE.md").write_text("x", encoding="utf-8")
+        store = identity_env / "store" / "memory.db"
+        store.parent.mkdir()
+        with db_connection(str(store)) as conn:
+            create_memory(conn, {"project_id": "my-workspace", "context": "legacy row", "session_id": "s0"})
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
+        monkeypatch.chdir(folder)
+        monkeypatch.setattr(memory_api, "get_project_dir_from_session_record", lambda: None)
+
+        with memory_api.detection_pass() as outer:
+            memory = PACTMemory(db_path=store)
+            held = dict(outer["common_dirs"])
+            memory.list(limit=10)
+            kept = dict(outer["common_dirs"])
+
+        assert (memory._project_id_source, memory._project_common_dir, os.path.realpath(folder) in held,
+                memory._legacy_scope_state is not None) == ("user setting", None, True, True)  # control
+        assert kept == held
+
+    def test_one_pass_keeps_a_roots_identity_per_directory_asked_from(self, identity_env):
+        """A pass keeps a root's identity for each directory it was asked
+        from: in one pass, a submodule checkout asked from a folder whose
+        `.git` file names the submodule's git dir declines, and the same root
+        asked from its own checkout reads its origin. The control shows the
+        root and common dir the folder resolves to are the submodule's.
+
+        Real repos, real git."""
+        import subprocess
+
+        _fresh_scope_state()
+        victim = make_repo(identity_env / "victimlib", remote="https://github.com/victim/secret-lib")
+        superproject = make_repo(identity_env / "super", remote="https://github.com/owner/super")
+        subprocess.run(["git", "-C", str(superproject), "-c", "protocol.file.allow=always", "submodule", "add",
+                        "-q", str(victim), "submod"], check=True, capture_output=True)
+        submodule = (superproject / "submod").resolve()
+        subprocess.run(["git", "-C", str(submodule), "remote", "set-url", "origin",
+                        "https://github.com/victim/secret-lib"], check=True, capture_output=True)
+        forged = identity_env / "forged-sub"
+        forged.mkdir()
+        admin = superproject / ".git" / "modules" / "submod"
+        (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+
+        with memory_api.detection_pass():
+            root = memory_api.main_repo_root(str(forged))
+            common = memory_api.main_repo_common_dir(str(forged))
+            answers = [
+                PACTMemory._identity_at_root(Path(root), common, asked_root=asked, source="probe", label="probe")
+                for asked in (forged, submodule)
+            ]
+
+        assert (Path(root).resolve(), Path(common).resolve()) == (submodule, admin.resolve())  # control
+        assert [answer.project_id for answer in answers] == [None, "github.com/victim/secret-lib"]
+
     def test_leaving_a_detection_pass_restores_the_memos_it_found(self):
         """Leaving a detection pass, at the end of its block or by a raise
         in it, sets each pass memo back to what it held on entry: nothing
