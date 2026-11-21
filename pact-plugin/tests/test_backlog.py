@@ -2532,7 +2532,8 @@ def test_save_carries_the_separate_git_dir_checkout_it_read(tmp_path, monkeypatc
 def _git_wrapper(log: Path, real_git: str, before_exec: str = "") -> str:
     """The text of a `git` that appends each command it runs to `log` as its
     question, one line each: the resolved directory git runs in (the working
-    directory with each leading `-C` applied), a tab, and the rest of its
+    directory with each leading `-C` applied, each resolved physically as git
+    does, so a `..` after a symlink leaves the link's target), a tab, and the rest of its
     arguments joined by spaces. It then runs `before_exec`, where `$question`
     holds that line, and then `real_git`. Two commands are one question
     exactly when both parts are equal."""
@@ -2541,7 +2542,7 @@ def _git_wrapper(log: Path, real_git: str, before_exec: str = "") -> str:
         "question=$(where=$(pwd -P)\n"
         "  while [ $# -ge 2 ] && [ \"$1\" = -C ]; do\n"
         "    case \"$2\" in /*) next=$2 ;; *) next=$where/$2 ;; esac\n"
-        "    where=$(cd \"$next\" 2>/dev/null && pwd -P || printf '%s' \"$next\")\n"
+        "    where=$(cd -P \"$next\" 2>/dev/null && pwd -P || printf '%s' \"$next\")\n"
         "    shift 2\n"
         "  done\n"
         "  printf '%s\\t%s' \"$where\" \"$*\")\n"
@@ -2587,14 +2588,16 @@ def _logging_git(tmp_path, monkeypatch) -> Path:
     ([("b", ["-C", "{a}"]), ("a", [])], [("a", "rev-parse --git-dir")]),
     ([("b", ["-C", "../a"]), ("link", [])], [("a", "rev-parse --git-dir")]),
     ([("b", ["-C", "{tmp}", "-C", "a"]), ("a", [])], [("a", "rev-parse --git-dir")]),
+    ([("b", ["-C", "{tmp}/xlink/../z"]), ("x/z", [])], [("x/z", "rev-parse --git-dir")]),
 ], ids=["two directories", "one directory twice", "-C names the directory", "relative -C and a link",
-        "a -C relative to the one before"])
+        "a -C relative to the one before", "a .. after a symlink leaves its target"])
 def test_a_logged_question_is_its_directory_and_its_arguments(tmp_path, asked, repeated):
     """The question the logging `git` records is the resolved directory git
     runs in and the rest of its arguments: the same arguments in two
     directories are two questions, and the same arguments in one directory,
     however it is named (`-C`, a relative `-C`, a `-C` relative to the one
-    before, a symlink), are one question
+    before, a symlink, a `..` after a symlink, which git resolves from the
+    link's target), are one question
     asked again. Control: every command is logged, from the directory it
     names.
 
@@ -2603,9 +2606,11 @@ def test_a_logged_question_is_its_directory_and_its_arguments(tmp_path, asked, r
     import shutil
     import stat
 
-    for name in ("a", "b"):
+    for name in ("a", "b", "x/z"):
         _repo(tmp_path / name)
+    (tmp_path / "x" / "y").mkdir()
     (tmp_path / "link").symlink_to(tmp_path / "a")
+    (tmp_path / "xlink").symlink_to(tmp_path / "x" / "y")
     log = tmp_path / "git.log"
     wrapper = tmp_path / "git"
     wrapper.write_text(_git_wrapper(log, shutil.which("git")), encoding="utf-8")
@@ -2617,7 +2622,7 @@ def test_a_logged_question_is_its_directory_and_its_arguments(tmp_path, asked, r
                        env={**os.environ, "PWD": str(tmp_path / where)}, check=True, capture_output=True)
 
     questions = _git_questions(log)
-    named = {os.path.realpath(tmp_path / name): name for name in ("a", "b")}
+    named = {os.path.realpath(tmp_path / name): name for name in ("a", "b", "x/z")}
     assert len(questions) == len(asked), questions  # control
     assert [(named.get(d, d), args) for d, args in _repeated(questions)] == repeated, questions
 

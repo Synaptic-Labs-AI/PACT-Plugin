@@ -1957,6 +1957,20 @@ _REFUSED_ROUTES = {
     "project-id rekey --from only": (1, "a canonical bucket moves only with an explicit --to"),
 }
 
+# Routes a layout cannot run yet, each failing there because of an open
+# production defect: from inside a checkout's .git the identity declines
+# no-working-tree where it should be the checkout's, so a save is refused and
+# rekey --from alone finds no canonical id; and project-file cannot verify a
+# separate-git-dir linked worktree. The arm skips each here; when the defect
+# is fixed, the route comes off this set.
+_AWAITING_A_FIX = {
+    ("inside a checkout's .git", "save --no-sync"),
+    ("inside a checkout's .git", "save"),
+    ("inside a checkout's .git", "save, default root"),
+    ("inside a checkout's .git", "project-id rekey --from only"),
+    ("separate-git-dir linked worktree", "project-file"),
+}
+
 
 class TestEachCliCommandAsksGitEachQuestionOnce:
     """Each memory CLI command, by every route its flags choose, runs its
@@ -1972,16 +1986,37 @@ class TestEachCliCommandAsksGitEachQuestionOnce:
     and Claude config directory, and a `git` first on PATH that logs each
     command with the directory it ran in."""
 
-    @pytest.mark.parametrize("layout", ["main checkout", "linked worktree"])
+    @pytest.mark.parametrize("layout", [
+        "main checkout", "linked worktree", "linked worktree of a bare repository",
+        "separate-git-dir linked worktree", "inside a checkout's .git",
+    ])
     def test_no_command_repeats_a_git_question(self, identity_env, layout):
         import shutil
         import subprocess
         import sys
 
-        from fixtures.identity_git import make_worktree
+        from fixtures.identity_git import make_separate_git_dir_repo, make_worktree, run_git
 
+        # `root` is the checkout a session declares and syncs; `start` is where
+        # each command runs. They differ only inside a checkout's .git, where
+        # the session declares nothing.
         main = make_repo(identity_env / "main", remote="https://example.invalid/o/r.git").resolve()
-        start = main if layout == "main checkout" else make_worktree(main, identity_env / "wt").resolve()
+        if layout == "linked worktree":
+            root = make_worktree(main, identity_env / "wt").resolve()
+        elif layout == "linked worktree of a bare repository":
+            run_git("clone", "-q", "--bare", str(main), str(identity_env / "hub.git"), cwd=identity_env)
+            # A URL origin, as a hub cloned from a server has; a clone of a
+            # local path has a path origin, which resolves to no canonical id.
+            run_git("remote", "set-url", "origin", "https://example.invalid/o/hub.git", cwd=identity_env / "hub.git")
+            run_git("worktree", "add", "-q", str(identity_env / "hubwt"), "-b", "w", cwd=identity_env / "hub.git")
+            root = (identity_env / "hubwt").resolve()
+        elif layout == "separate-git-dir linked worktree":
+            other = make_separate_git_dir_repo(identity_env / "sep", identity_env / "store.git")
+            run_git("remote", "add", "origin", "https://example.invalid/o/sep.git", cwd=other)
+            root = make_worktree(other, identity_env / "sepwt").resolve()
+        else:
+            root = main
+        start = (main / ".git").resolve() if layout == "inside a checkout's .git" else root
         home = identity_env / "home"
         (home / ".claude").mkdir(parents=True)
         log = identity_env / "git.log"
@@ -1997,18 +2032,20 @@ class TestEachCliCommandAsksGitEachQuestionOnce:
         env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_", "PACT_", "GIT_"))}
         env.update(
             PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", HOME=str(home),
-            CLAUDE_CONFIG_DIR=str(home / ".claude"), CLAUDE_PROJECT_DIR=str(start),
+            CLAUDE_CONFIG_DIR=str(home / ".claude"),
             PACT_TEST_MEMORY_DIR=str(identity_env / "memdir"),
         )
+        if start == root:
+            env["CLAUDE_PROJECT_DIR"] = str(root)
         cli = Path(__file__).resolve().parent.parent / "skills" / "pact-memory" / "scripts" / "cli.py"
         db = identity_env / "store.db"
 
-        def run(argv, document=None):
+        def run(argv, document=None, where=None):
             log.unlink(missing_ok=True)
             if argv[0] != "project-file":
                 argv = [*argv, "--db-path", str(db)]
             done = subprocess.run(
-                [sys.executable, str(cli), *argv], env=env, cwd=str(start), capture_output=True,
+                [sys.executable, str(cli), *argv], env=env, cwd=str(where or start), capture_output=True,
                 text=True, timeout=120, input=None if document is None else json.dumps(document),
             )
             questions = []
@@ -2022,13 +2059,16 @@ class TestEachCliCommandAsksGitEachQuestionOnce:
         documents = {p: p.read_bytes() for p in identity_env.rglob("CLAUDE.md")}
         assert run(["setup"])[0].returncode == 0
         # `search --current-file` is given a tracked file of the checkout, as a user passes it.
-        tracked = start / "README"
+        tracked = root / "README"
         assert tracked.is_file()  # control
-        saved, _ = run(["save", "--stdin", "--no-sync"], {"context": "arm one"})
+        # The memory every later route reads is saved from the checkout itself.
+        saved, _ = run(["save", "--stdin", "--no-sync"], {"context": "arm one"}, where=root)
         memory_id = json.loads(saved.stdout)["result"]["memory_id"]
         asked, repeated = {}, {}
         for name, argv, document in _EVERY_CLI_COMMAND:
-            done, questions = run([{"MEMID": memory_id, "START": str(start), "START_FILE": str(tracked)}.get(a, a) for a in argv], document)
+            if (layout, name) in _AWAITING_A_FIX:
+                continue
+            done, questions = run([{"MEMID": memory_id, "START": str(root), "START_FILE": str(tracked)}.get(a, a) for a in argv], document)
             refusal = _REFUSED_ROUTES.get(name)
             if refusal is None:
                 assert done.returncode == 0, (name, done.stderr)
@@ -2039,6 +2079,8 @@ class TestEachCliCommandAsksGitEachQuestionOnce:
         # Control: every command asked git something, so a log that stayed
         # empty cannot pass for one that held no repeat.
         assert all(asked.values()), asked
-        assert repeated == {name: [] for name, _, _ in _EVERY_CLI_COMMAND}, (asked, repeated)
+        assert repeated == {
+            name: [] for name, _, _ in _EVERY_CLI_COMMAND if (layout, name) not in _AWAITING_A_FIX
+        }, (asked, repeated)
         # Control: no command wrote a CLAUDE.md under the test's tree.
         assert {p: p.read_bytes() for p in identity_env.rglob("CLAUDE.md")} == documents
