@@ -650,13 +650,16 @@ def _separator_entity(match):
     denoting a separator-class character (_ - space) and the named
     separator references in _NAMED_SEPARATORS are resolved; any other
     reference — unlisted name, malformed, over-long (past CPython's int
-    digit limit), or out-of-range — is returned unchanged."""
+    digit limit), or over-range (past chr's valid range) — is returned
+    unchanged."""
     token = match.group(1)
     if token.startswith("#"):
         code = token[1:]
         try:
             char = chr(int(code[1:], 16) if code[0] in "xX" else int(code, 10))
-        except ValueError:  # conversion or range failure: leave it literal
+        except (ValueError, OverflowError):
+            # ValueError: digit-limit or malformed digits; OverflowError:
+            # value past chr's range. Either way, leave it literal.
             return match.group(0)
     else:
         char = _NAMED_SEPARATORS.get(token)
@@ -752,6 +755,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "memory\\`saved",
         "memory&#95;saved",
         "memory&#x2d;saved",
+        "memory&#X2D;saved",
         "memory&#32;saved",
         "memory&lowbar;saved",
         "memory&hyphen;saved",
@@ -858,6 +862,42 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         # outside the decoder's try, int() raises ValueError inside re.sub
         # and this call dies instead of leaving the reference literal.
         self.test_no_memory_saved_in_any_llm_loaded_surface()
+
+    @pytest.mark.parametrize(
+        "content,why",
+        [
+            ("memory&#99999999999;saved",
+             "an over-range numeric reference stays literal (chr's range "
+             "failure is caught, not propagated)"),
+            ("memory&UnderBar;saved",
+             "a named reference outside the bounded separator map stays "
+             "literal, even a real HTML5 separator name"),
+            ("memory&#zz;saved",
+             "a malformed reference matches neither the numeric nor the "
+             "named grammar and stays literal (regex never reaches the "
+             "decoder)"),
+        ],
+        ids=["over-range", "unlisted-name", "malformed-ref"],
+    )
+    def test_pin_passes_when_reference_stays_literal(
+            self, content, why, tmp_path, monkeypatch):
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "commands" / "orchestrate.md").write_text(
+            content, encoding="utf-8"
+        )
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        # The file is clean exactly because the reference stays literal:
+        # a decoder that resolved it into a separator (fail-open) or raised
+        # on it makes this run fail, and the contract is what names it.
+        try:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        except BaseException as exc:
+            raise AssertionError(
+                f"decoder must leave {content!r} literal: {why}. "
+                f"Decoder instead: {exc!r}"
+            ) from exc
 
     def test_real_run_names_a_silently_narrowed_population(
             self, tmp_path, monkeypatch):
