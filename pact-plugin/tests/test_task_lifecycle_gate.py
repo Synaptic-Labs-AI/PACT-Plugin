@@ -5272,6 +5272,63 @@ def test_arm_advisory_quotes_pathological_ids(
     assert "--team test-team" in arms[0]
 
 
+def test_wiring_arm_rejects_lead_owned_task_real_predicate(
+    tmp_path, monkeypatch, pact_context
+):
+    """The WIRING shape's mask-killer, driven with the REAL predicate (no
+    stub — every other wiring pin stubs it, which is exactly why this
+    conjunct had no teeth): a lead-owned pending task wired to the lead
+    itself arms NOTHING, while the specialist-owned sibling still arms.
+    is_pact_specialist_owner returns True for the bare lead name, so the
+    conjunct's lead-rejection is the ONLY thing standing between a
+    lead-owned task and a watch target. Red when the conjunct is dropped
+    (mutation-measured), green with it."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(
+        team_name="test-team",
+        session_id="test-session",
+        plugin_root=str(Path(__file__).resolve().parent.parent),
+    )
+    teams_dir = tmp_path / ".claude" / "teams" / "test-team"
+    teams_dir.mkdir(parents=True, exist_ok=True)
+    (teams_dir / "config.json").write_text(json.dumps({
+        "members": [
+            {"name": "team-lead", "agentType": "pact-orchestrator"},
+            {"name": "backend-coder", "agentType": "pact-backend-coder"},
+        ],
+    }), encoding="utf-8")
+    _seed_task_a(
+        tmp_path, "test-team", "30",
+        subject="Review: structural wait mechanism",
+        status="pending", owner="team-lead",
+    )
+    _seed_task_a(
+        tmp_path, "test-team", "36",
+        subject="review structural wait mechanism (PR #1730)",
+        status="pending", owner="backend-coder",
+    )
+    lead_owned_wiring = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "30", "owner": "team-lead"},
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(lead_owned_wiring)
+    assert not any(rule == "wait_arm_supply" for rule, _ in advisories), (
+        f"lead-owned pending parent must not qualify a watch target, "
+        f"got: {advisories}"
+    )
+    specialist_wiring = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "36", "owner": "backend-coder"},
+        "tool_response": {},
+    }
+    advisories = tlg.evaluate_lifecycle(specialist_wiring)
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, f"expected one arm for the specialist task, got: {arms}"
+    assert "--task 36" in arms[0]
+    assert "--task 30" not in arms[0]
+
+
 def test_no_arm_supply_from_a_bare_base_task_file(
     tmp_path, monkeypatch, pact_context
 ):

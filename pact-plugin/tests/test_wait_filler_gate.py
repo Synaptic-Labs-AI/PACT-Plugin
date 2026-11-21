@@ -814,10 +814,14 @@ _TIER3_REASON_PIN = (
     'python3 "{watcher}" --team <team-name> --task <task-id> '
     "--predicate handoff --deadline 900\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). THEN end your turn with no further tool "
-    "calls — the watcher exits 0 when the deliverable lands, 3 when the "
-    "deadline passes without it, 4 when it cannot watch at all — and "
-    "its completion notification re-invokes you."
+    "a teachback submission). If the event you await is not a "
+    "deliverable you can write, do NOT arm — set "
+    "metadata.intentional_wait with `expected_resolver` naming the "
+    "resolver instead, and end your turn; a message or that resolver's "
+    "own wake resolves it. If you DID arm: end your turn with no "
+    "further tool calls — the watcher exits 0 when the deliverable "
+    "lands, 3 when the deadline passes without it, 4 when it cannot "
+    "watch at all — and its completion notification re-invokes you."
 )
 
 
@@ -950,6 +954,18 @@ def test_tier3_teammate_text_names_the_wait_keys():
     assert "do NOT arm" in (
         wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
     )
+
+
+def test_tier3_lead_text_names_the_no_arm_alternative():
+    """The LEAD text carries the same neither-predicate alternative the
+    teammate texts do: when the awaited event is not a deliverable the
+    lead can write, arming burns the deadline — intentional_wait with
+    `expected_resolver` naming the resolver replaces it (cold round 8,
+    bounded-cost: no watcher process, no deadline burn)."""
+    import wait_filler_gate
+
+    assert "do NOT arm" in wait_filler_gate._TIER3_REASON
+    assert "expected_resolver" in wait_filler_gate._TIER3_REASON
 
 
 def test_tier3_subagent_text_pinned_verbatim():
@@ -1121,7 +1137,10 @@ def test_tier3_outlet_branches_on_role(tmp_path, monkeypatch, capsys):
     lead_reason = _deny_reason(lead[2][1])
     assert "PACT-WAIT-OUTLET" in lead_reason
     assert "re-invokes you" in lead_reason
-    assert "metadata.intentional_wait" not in lead_reason
+    # The lead text DOES name metadata.intentional_wait (the do-NOT-arm
+    # alternative, cold round 8) — the mate discriminator is the
+    # wake-model phrasing, not the metadata key.
+    assert "will NOT wake you" not in lead_reason
 
 
 def test_counts_climb_through_denials_and_budget_field_gone(

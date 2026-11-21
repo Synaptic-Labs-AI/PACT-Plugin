@@ -274,8 +274,11 @@ def _store_handoff_block():
 def test_skillmd_handoff_template_values_are_string_typed():
     """Docs-vs-code, imported arm: every canonical handoff field the schema
     ships is rendered in the SKILL.md example as a JSON STRING (the value
-    opens with a quote), matching the acceptance-side schema that requires
-    non-empty strings."""
+    opens with a quote). The STRING gate itself lives in the watcher
+    predicate, not in this acceptance path: validate_handoff_schema is
+    presence-only, while wait_target.handoff_present reads a non-string
+    `produced` — e.g. the list-typed failures this mechanism answers — as
+    ABSENT, degraded-loud per its docstring."""
     block = _store_handoff_block()
     for field in HANDOFF_CANONICAL_FIELDS:
         assert f'"{field}": "' in block, (
