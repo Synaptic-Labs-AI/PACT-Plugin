@@ -1547,6 +1547,18 @@ def _env_anchors() -> tuple:
 _ENV_MAPPINGS, _ENV_FUNCTIONS = _env_anchors()
 
 
+def _script_module(name: str) -> str:
+    """`name` with the `scripts.` package prefix taken off when it names a
+    memory script: the scripts import one another both relatively
+    (`from .config import ...`) and through the package
+    (`from scripts.memory_api import PACTMemory` in `cli`), and the census
+    names each script by its file stem."""
+    head, _, rest = name.partition(".")
+    if head == "scripts" and rest and (SCRIPTS / (rest.split(".")[0] + ".py")).is_file():
+        return rest
+    return name
+
+
 class _DetectionGraph:
     """The project modules the detection path reaches, parsed on demand: each
     module's top-level functions and methods, its import aliases and its
@@ -1595,7 +1607,7 @@ class _DetectionGraph:
         if path is None:
             return False
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        aliases = import_aliases(tree)
+        aliases = {bound: _script_module(target) for bound, target in import_aliases(tree).items()}
         # A relative import names a module in the importing module's own
         # package (`from .paths import f` in `shared.project_scope` is
         # `shared.paths.f`), which `import_aliases` records without its dots.
@@ -1660,7 +1672,7 @@ class _DetectionGraph:
 
     def follow(self, qualified: str, depth: int = 0):
         """The (module, def) a dotted name refers to, through re-exports."""
-        owner, _, name = qualified.rpartition(".")
+        owner, _, name = _script_module(qualified).rpartition(".")
         if not owner or depth > 8 or not self.load(owner):
             return None
         if (owner, name) in self.defs:
@@ -1675,6 +1687,164 @@ class _DetectionGraph:
         (`shared.project_scope.f()` after `import shared.project_scope`).
         None for anything else."""
         return self.refers_to(call.func, module)
+
+    def plain_class(self, func, module: str, depth: int = 0):
+        """(owning module, class name) when `func`, as `module` sees it, names
+        a top-level project class whose building runs only code the census
+        reads: no class keyword (`metaclass=`), no decorator, no
+        `__new__`, `__init_subclass__` or `__class_getitem__`, and every base
+        either from outside the project (`Exception`,
+        `sqlite3.OperationalError`; `NamedTuple` is left to the record-class
+        reason) or itself a plain class. Building one runs the `__init__`
+        `init_of` names, if any, and nothing else of the project's. None for
+        anything else."""
+        import ast
+
+        if not isinstance(func, (ast.Name, ast.Attribute)):
+            return None
+        head = func.id if isinstance(func, ast.Name) else None
+        owned = self.project_name(head, module) if head else None
+        if owned is None and isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
+            base = self.aliases[module].get(func.value.id, "")
+            owned = (base, func.attr) if base and self._path(base) is not None else None
+        if owned is None or not owned[1] or depth > 8 or not self.load(owned[0]):
+            return None
+        node = self.classes.get(owned[0], {}).get(owned[1])
+        if node is None or node.keywords or node.decorator_list:
+            return None
+        for base in node.bases:
+            text = ast.unparse(base)
+            root = base.id if isinstance(base, ast.Name) else (
+                base.value.id if isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name) else None)
+            if root is None or text in ("NamedTuple", "typing.NamedTuple"):
+                return None
+            if self.project_name(root, owned[0]) is not None and self.plain_class(base, owned[0], depth + 1) is None:
+                return None
+        if any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+               and item.name in ("__new__", "__init_subclass__", "__class_getitem__") for item in node.body):
+            return None
+        return owned
+
+    def project_bases(self, owned) -> list:
+        """(module, class) of each base of the class `owned` that is a project
+        class (`plain_class` of the base, in the class's own module)."""
+        node = self.classes.get(owned[0], {}).get(owned[1])
+        return [found for found in (self.plain_class(base, owned[0]) for base in (node.bases if node else []))
+                if found is not None] if node is not None else []
+
+    def init_of(self, owned):
+        """The (module, `<class>.__init__`) a build of the `plain_class`
+        `owned` runs: its own `__init__`, else the first project base's, in
+        base order. None when no class of the chain defines one."""
+        key = (owned[0], f"{owned[1]}.__init__")
+        if key in self.defs:
+            return key
+        for base in self.project_bases(owned):
+            found = self.init_of(base)
+            if found is not None:
+                return found
+        return None
+
+    def callee(self, call, module: str, function=None):
+        """The (module, def) a call runs, as `target`, and also the
+        `__init__` of a `plain_class` it builds and an `instance_target`.
+        Kept apart from `target`, which the standard-library typing uses: a
+        build's result is the instance, not what `__init__` returns."""
+        found = self.target(call, module)
+        if found is not None:
+            return found
+        built = self.plain_class(call.func, module)
+        if built is not None and self.init_of(built) is not None:
+            return self.init_of(built)
+        return self.instance_target(call, module, function)
+
+    def instance_target(self, call, module: str, function=None):
+        """The (module, method) a method call on a built object runs, when the
+        census can type the object as a build of one `plain_class`
+        (`value_class`) and that class defines the method: a build
+        (`PACTMemory(...).save()`), a local of `function` whose every
+        binding is such a build (`memory = PACTMemory(); memory.save()`), or
+        a parameter of a top-level function whose every call the census
+        finds passes such a value (`parameter_class`). None otherwise (a
+        method on an attribute of `self`, on an untyped parameter, or on a
+        local bound any other way)."""
+        import ast
+
+        func = call.func
+        if not isinstance(func, ast.Attribute):
+            return None
+        owned = self.value_class(func.value, module, function)
+        if owned is None:
+            return None
+        method = (owned[0], f"{owned[1]}.{func.attr}")
+        return method if method in self.defs else None
+
+    def value_class(self, value, module: str, function=None, depth: int = 0):
+        """The (module, class) of the one `plain_class` `value` is a build
+        of: a call building it, a local of `function` whose every binding
+        (`_bindings`) is a call building that same class, or a parameter
+        typed by `parameter_class`. None for anything else."""
+        import ast
+
+        if isinstance(value, ast.Call):
+            return self.plain_class(value.func, module)
+        if not isinstance(value, ast.Name) or function is None:
+            return None
+        found = self._bindings(function, name=value.id)
+        if found and all(kind == "param" for kind, _expression in found):
+            return self.parameter_class(function, value.id, depth)
+        if not found or not all(kind == "value" and isinstance(expression, ast.Call)
+                                for kind, expression in found):
+            return None
+        classes = {self.plain_class(expression.func, module) for _kind, expression in found}
+        return classes.pop() if len(classes) == 1 and None not in classes else None
+
+    def parameter_class(self, function, name: str, depth: int = 0):
+        """The (module, class) parameter `name` of the top-level function
+        `function` holds: the one `plain_class` every call of `function` in
+        the loaded modules passes there (`value_class` at the caller, a
+        caller's own parameter followed the same way, to a depth of four),
+        by position or keyword. None for a method's parameter, a variadic
+        function, a function no loaded code calls, a call that passes
+        nothing there by name or position or unpacks arguments at or before
+        it, or callers that pass anything else."""
+        import ast
+
+        if depth > 3:
+            return None
+        if getattr(self, "_callers_size", None) != len(self.defs):
+            # {def key: [(caller module, caller def, call)]} and {id(def): key},
+            # rebuilt whenever a load adds a def.
+            self._callers, self._keys, self._parameter_classes = {}, {}, {}
+            for (owner, qualified), node in list(self.defs.items()):
+                self._keys[id(node)] = (owner, qualified)
+                for call in ast.walk(node):
+                    if isinstance(call, ast.Call):
+                        found = self.target(call, owner)
+                        if found is not None:
+                            self._callers.setdefault(found, []).append((owner, node, call))
+            self._callers_size = len(self.defs)
+        key = self._keys.get(id(function))
+        if key is None or "." in key[1]:
+            return None
+        if (key, name, depth) in self._parameter_classes:
+            return self._parameter_classes[(key, name, depth)]
+        self._parameter_classes[(key, name, depth)] = None  # a call cycle types nothing
+        positional = [argument.arg for argument in function.args.posonlyargs + function.args.args]
+        keywords = positional + [argument.arg for argument in function.args.kwonlyargs]
+        if name not in keywords or function.args.vararg is not None or function.args.kwarg is not None:
+            return None
+        index = positional.index(name) if name in positional else None
+        classes = set()
+        for owner, node, call in self._callers.get(key, ()):
+            value = next((keyword.value for keyword in call.keywords if keyword.arg == name), None)
+            if value is None and index is not None and index < len(call.args) and not any(
+                    isinstance(argument, ast.Starred) for argument in call.args[:index + 1]):
+                value = call.args[index]
+            classes.add(None if value is None else self.value_class(value, owner, node, depth + 1))
+        found = classes.pop() if len(classes) == 1 and None not in classes else None
+        self._parameter_classes[(key, name, depth)] = found
+        return found
 
     def refers_to(self, func, module: str):
         """The (module, def) the expression `func` names, as `target`."""
@@ -1851,11 +2021,13 @@ class _DetectionGraph:
     def instance_method(self, call, module: str, function) -> str:
         """How the census treats a method called on an object it cannot name
         at the call: a LOCAL of `function` (`reader = make(); reader.read()`)
-        or an attribute of `self` (`self.reader.read()`). No such method is
-        followed into a class.
+        or an attribute of `self` (`self.reader.read()`). A method
+        `instance_target` follows into a class never reaches this rule, and
+        this rule follows none.
 
         "skip" (not this rule's to report): a local that is a parameter only
-        (a method on a parameter is not covered), a name the module rule
+        (a method on a parameter `parameter_class` cannot type is not
+        covered), a name the module rule
         reads (an import, a `global`, a module-level or builtin name with no
         binding here), or a local whose every binding (`_bindings`, every
         form) is a parameter or a value proved to be a standard-library one
@@ -2213,7 +2385,7 @@ class _DetectionGraph:
         instance's method, and a function pulled from a table."""
         import ast
 
-        if self.target(call, module) is not None:
+        if self.target(call, module) is not None or self.instance_target(call, module, function) is not None:
             return False
         verdict = self.instance_method(call, module, function)
         if verdict != "skip":
@@ -2313,9 +2485,10 @@ class _DetectionGraph:
                 callees.add(id(sub.func))
             elif isinstance(sub, ast.Attribute):
                 bases.add(id(sub.value))
+        function = node if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) else None
         for sub in ast.walk(node):
             if isinstance(sub, ast.Call):
-                found = self.target(sub, module)
+                found = self.callee(sub, module, function)
                 if found is not None:
                     yield sub.func, found
             elif (
@@ -2679,15 +2852,68 @@ def _pass_with_statements(tree, setups) -> list:
     return found
 
 
+def _table_callees(graph, module: str, function, call):
+    """The project functions a call of a LOCAL of `function` can reach, when
+    every binding of that local (`_DetectionGraph._bindings`) is a project
+    function (`run = _reader`) or looks one up in a module-level dict
+    display of project functions (`handler = _COMMANDS.get(args.command)`,
+    or `_COMMANDS[...]`), each value of which resolves (`refers_to`), and
+    every module-level binding of the table is that display. None when the
+    call is not of a local; [] when it is of a local the census cannot
+    resolve this way, which `route_inputs` reports."""
+    import ast
+    import builtins
+
+    func = call.func
+    if not isinstance(func, ast.Name) or graph.project_name(func.id, module) is not None or (
+            func.id in graph.aliases[module] or hasattr(builtins, func.id)):
+        return None
+    found = graph._bindings(function, name=func.id)
+    if not found:
+        return None
+    targets = []
+    for kind, expression in found:
+        if kind == "value" and isinstance(expression, (ast.Name, ast.Attribute)) and (
+                graph.refers_to(expression, module) is not None):
+            targets.append(expression)  # `run = _reader`: the function itself
+            continue
+        lookup = expression.func.value if (
+            kind == "value" and isinstance(expression, ast.Call) and isinstance(expression.func, ast.Attribute)
+            and expression.func.attr == "get"
+        ) else expression.value if kind == "value" and isinstance(expression, ast.Subscript) else None
+        values = graph.bindings[module].get(lookup.id, []) if isinstance(lookup, ast.Name) else []
+        if not values or not all(isinstance(value, ast.Dict) for value in values) or any(
+                value is not values[0] for value in values):
+            return []
+        for value in values[0].values:
+            if value is None or graph.refers_to(value, module) is None:
+                return []
+            targets.append(value)
+    return targets
+
+
+def _unresolved_opening_locals(graph) -> list:
+    """[(condition, site)] for each call in a pass opening of a local that
+    `_table_callees` cannot resolve, which `route_inputs` reports."""
+    return [
+        (("call", f"<call of a local no table resolves {module}: {_callee_text(call.func)}>"),
+         f"{module}.py:{call.lineno}")
+        for (module, _name), calls in graph.opening_locals.items() for call, targets in calls if not targets
+    ]
+
+
 def _pass_openings(graph) -> dict:
     """Each place a memory script or a hook opens a pass, as a read root: for
     every function or method of a module in `SCRIPTS` or `hooks/` with a
     `with` whose item calls one of `PASS_SETUPS` (by name or attribute), a
     def named `<function> <pass opening>` in `graph.defs` holding every item
-    of those `with` statements and the block each one runs (`cli.main`'s
-    handler call among them), whose own reads the census reports. The rest of
-    the function, such as `cli.main`'s argument parsing, is not part of the
-    opening. Returns {key: the part of the opening whose calls are followed}:
+    of those `with` statements and the block each one runs, whose own reads
+    the census reports. A call in the block of a local bound before the
+    `with` is read as a call of each function `_table_callees` resolves it
+    to (`cli.main`'s `handler`, every command in `_COMMANDS`); one it
+    cannot resolve is kept in `graph.opening_locals` and reported. The rest
+    of the function, such as `cli.main`'s argument parsing, is not part of
+    the opening. Returns {key: the part of the opening whose calls are followed}:
     the items and block in a memory script; the items alone in a hook, whose
     block calls the hook command's own work (`backlog.main`'s `_main`). Each
     project class an item builds goes in `graph.opening_classes` with every
@@ -2696,9 +2922,11 @@ def _pass_openings(graph) -> dict:
     this way."""
     import ast
 
+    import copy
+
     setups = {name for _module, name in PASS_SETUPS}
     openings = {}
-    graph.opening_classes = {}
+    graph.opening_classes, graph.opening_locals = {}, {}
     hooks = PLUGIN_ROOT / "hooks"
     sources = [(path, path.stem, True) for path in sorted(SCRIPTS.glob("*.py"))]
     sources += [(path, ".".join(path.relative_to(hooks).with_suffix("").parts), False)
@@ -2719,8 +2947,21 @@ def _pass_openings(graph) -> dict:
                 return ast.copy_location(made, function)
 
             key = (module, f"{name} <pass opening>")
-            graph.defs[key] = opening_def(items + body)
-            openings[key] = opening_def(items + body if memory_script else items)
+            # A call of a local bound before the `with` (`cli.main`'s `handler`) is
+            # read as a call of each function its table holds; one the census cannot
+            # resolve is reported (`graph.opening_locals`).
+            resolved = []
+            for statement in body:
+                for call in [node for node in ast.walk(statement) if isinstance(node, ast.Call)]:
+                    targets = _table_callees(graph, module, function, call)
+                    if targets is None:
+                        continue
+                    graph.opening_locals.setdefault(key, []).append((call, targets))
+                    resolved += [ast.copy_location(ast.Expr(value=ast.copy_location(
+                        ast.Call(func=copy.deepcopy(target), args=call.args, keywords=call.keywords), call)), call)
+                        for target in targets]
+            graph.defs[key] = opening_def(items + body + resolved)
+            openings[key] = opening_def(items + body + resolved if memory_script else items)
             for item in items:
                 built = item.value.func if isinstance(item.value, ast.Call) else None
                 owned = graph.project_name(built.id, module) if isinstance(built, ast.Name) else None
@@ -2740,10 +2981,14 @@ def test_the_census_root_holds_every_pass_opening():
     places the memory scripts and the hooks open the detection pass,
     `cli.main`'s, a store's construction and `backlog.main`'s among them, and
     each of them and both `PASS_SETUPS` is a def the census reads, the block
-    each opening runs included (`cli.main`'s handler call), and every method
-    of the warning holder `backlog.main` builds there is a root. If discovery
-    finds nothing, or drops a block or the holder's methods, an environment
-    read added there would pass unread, so this fails."""
+    each opening runs included, and every method of the warning holder
+    `backlog.main` builds there is a root. Each of `cli.main`'s two handler
+    calls resolves, through the `_COMMANDS` table bound before the `with`
+    (`_table_callees`), to every command function, and each of those is a
+    def the opening's followed part calls, so the census reads the command
+    work. If discovery finds nothing, drops a block or the holder's
+    methods, or leaves a handler call unresolved, an environment read added
+    there would pass unread, so this fails."""
     import ast
 
     graph = _DetectionGraph()
@@ -2757,9 +3002,168 @@ def test_the_census_root_holds_every_pass_opening():
     assert {name for _module, name in holder} >= {"_HeldWarnings.__init__", "_HeldWarnings.__enter__",
                                                   "_HeldWarnings.__exit__", "_HeldWarnings.filter"}
     assert [key for key in holder if key not in graph.defs] == []
-    handler_calls = [node for node in ast.walk(graph.defs[("cli", "main <pass opening>")])
+    key = ("cli", "main <pass opening>")
+    handler_calls = [node for node in ast.walk(graph.defs[key])
                      if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "handler"]
     assert len(handler_calls) == 2  # the handler call in each of cli.main's two pass blocks
+    resolved = {id(call): targets for call, targets in graph.opening_locals.get(key, [])}
+    commands = graph.values["cli"]["_COMMANDS"]
+    expected = sorted(graph.refers_to(value, "cli") for value in commands.values)
+    assert len(expected) == len(set(expected)) >= 11 and None not in expected, expected  # control: the table
+    for call in handler_calls:
+        assert sorted(graph.refers_to(target, "cli") for target in resolved.get(id(call), [])) == expected
+    followed = {graph.target(node, "cli") for node in ast.walk(openings[key]) if isinstance(node, ast.Call)}
+    assert set(expected) <= followed and all(command in graph.defs for command in expected)
+
+
+@pytest.mark.parametrize("prelude, binding, resolved", [
+    ("TABLE = {'a': first, 'b': second}\n", "handler = TABLE.get(name)", ["first", "second"]),
+    ("TABLE = {'a': first}\n", "handler = TABLE[name]", ["first"]),
+    ("", "handler = first", ["first"]),
+    ("TABLE = {'a': first}\nTABLE['b'] = second\n", "handler = TABLE.get(name)", []),
+    ("TABLE = {'a': first, 'b': len}\n", "handler = TABLE.get(name)", []),
+    ("TABLE = {'a': first}\n", "handler = make()", []),
+    ("TABLE = {'a': first}\n", "handler = TABLE.get(name) or first", []),
+], ids=[
+    "table get", "table subscript", "a project function", "a table changed after its display",
+    "a table holding a non-project function", "a local bound to a call", "a local bound to an expression",
+])
+def test_a_local_called_in_a_pass_block_resolves_through_its_table(tmp_path, monkeypatch, prelude, binding, resolved):
+    """Rows for `_table_callees`: a call of a local bound before the `with`
+    resolves to each project function a module-level dict display of them
+    holds when the local looks the table up, or to the function itself;
+    any other binding, and a table changed after its display, resolve to
+    nothing, which `route_inputs` reports as a call of a local no table
+    resolves."""
+    import ast
+    import sys
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "m.py").write_text(
+        "def first(args):\n    return args\n\ndef second(args):\n    return args\n\n"
+        "def make():\n    return first\n\n" + prelude
+        + f"\ndef main(name, args):\n    {binding}\n    return handler(args)\n"
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path, PLUGIN_ROOT / "hooks"))
+    graph = _DetectionGraph()
+    assert graph.load("pkg.m")
+    main = graph.defs[("pkg.m", "main")]
+    call = next(node for node in ast.walk(main) if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "handler")
+    targets = _table_callees(graph, "pkg.m", main, call)
+    assert [graph.refers_to(target, "pkg.m")[1] for target in targets] == resolved
+    graph.opening_locals = {("pkg.m", "main <pass opening>"): [(call, targets)]}
+    reported = [condition for condition, _site in _unresolved_opening_locals(graph)]
+    assert reported == ([] if resolved else [("call", "<call of a local no table resolves pkg.m: handler>")])
+
+
+def test_a_scripts_package_import_names_the_script():
+    """Row for `_script_module`: the memory scripts import one another through
+    the `scripts` package (`from scripts.memory_api import PACTMemory` in
+    `cli`), and the census names each by its file stem, so the package
+    prefix is taken off a name that names a script, and kept on any other."""
+    assert _script_module("scripts.memory_api.PACTMemory") == "memory_api.PACTMemory"
+    assert _script_module("scripts.config") == "config"
+    assert _script_module("scripts.no_such_script.f") == "scripts.no_such_script.f"
+    assert _script_module("shared.backlog") == "shared.backlog"
+    graph = _DetectionGraph()
+    assert graph.load("cli")
+    assert graph.project_name("PACTMemory", "cli") == ("memory_api", "PACTMemory")  # cli's own import
+
+
+@pytest.mark.parametrize("source, init", [
+    ("class Store:\n    def __init__(self):\n        pass\n", "Store.__init__"),
+    ("class Store(Exception):\n    def __init__(self):\n        pass\n", "Store.__init__"),
+    ("class Store:\n    pass\n", None),
+    ("class Base:\n    pass\n\nclass Store(Base):\n    def __init__(self):\n        pass\n", "Store.__init__"),
+    ("class Base:\n    def __init__(self):\n        pass\n\nclass Store(Base):\n    pass\n", "Base.__init__"),
+    ("class Meta(type):\n    pass\n\nclass Base(metaclass=Meta):\n    pass\n\n"
+     "class Store(Base):\n    def __init__(self):\n        pass\n", None),
+    ("class Meta(type):\n    pass\n\nclass Store(metaclass=Meta):\n    def __init__(self):\n        pass\n", None),
+    ("import functools\n\n@functools.total_ordering\nclass Store:\n    def __init__(self):\n        pass\n", None),
+    ("class Store:\n    def __new__(cls):\n        return object.__new__(cls)\n"
+     "    def __init__(self):\n        pass\n", None),
+], ids=[
+    "a plain class", "a plain class on an outside base", "no __init__ to follow", "a plain project base",
+    "an __init__ on a plain project base", "a project base with a metaclass",
+    "a metaclass", "a decorator", "a __new__",
+])
+def test_a_plain_class_build_is_followed_into_its_init(tmp_path, monkeypatch, source, init):
+    """Rows for `_DetectionGraph.callee`: a build of a `plain_class` is
+    followed into the `__init__` its chain defines (`init_of`), its own or
+    a plain project base's; a class with a class keyword, a decorator or a
+    `__new__`, or a project base that has one, or one whose chain defines
+    no `__init__`, is not followed. The build is reported either way
+    (`_DetectionGraph.unread_call`), since a method called on an instance
+    the census cannot type is not followed into the class."""
+    import ast
+    import sys
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "m.py").write_text(source + "\n\ndef build():\n    return Store()\n")
+    monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path, PLUGIN_ROOT / "hooks"))
+    graph = _DetectionGraph()
+    assert graph.load("pkg.m")
+    build = graph.defs[("pkg.m", "build")]
+    call = next(node for node in ast.walk(build) if isinstance(node, ast.Call))
+    assert graph.callee(call, "pkg.m") == (None if init is None else ("pkg.m", init))
+    assert graph.target(call, "pkg.m") is None and graph.unread_call(call, "pkg.m", build)  # still reported
+
+
+_STORE = "class Store:\n    def read(self):\n        return 1\n\n"
+
+
+@pytest.mark.parametrize("source, followed", [
+    ("def helper(store):\n    return store.read()\n\ndef entry():\n    memory = Store()\n    helper(memory)\n", True),
+    ("def helper(store):\n    return store.read()\n\ndef entry():\n    helper(store=Store())\n", True),
+    ("def helper(store):\n    return store.read()\n\ndef middle(store):\n    helper(store)\n\n"
+     "def entry():\n    middle(Store())\n", True),
+    ("def helper(store):\n    return store.read()\n\ndef entry():\n    helper(Store())\n    helper(object())\n", False),
+    ("def helper(store):\n    return store.read()\n\ndef make():\n    return Store()\n\n"
+     "def entry():\n    helper(make())\n", False),
+    ("def helper(store):\n    return store.read()\n\ndef entry():\n    helper(*[Store()])\n", False),
+    ("def helper(first, store, last=None):\n    return store.read()\n\n"
+     "def entry():\n    helper(*[1, object()], Store())\n", False),
+    ("class Other:\n    def read(self):\n        return 2\n\ndef helper(store):\n    return store.read()\n\n"
+     "def entry(flag):\n    memory = Store()\n    if flag:\n        memory = Other()\n    helper(memory)\n", False),
+    ("def make():\n    return Store()\n\ndef helper(store):\n    return store.read()\n\n"
+     "def entry(flag):\n    memory = Store()\n    if flag:\n        memory = make()\n    helper(memory)\n", False),
+    ("def helper(store):\n    return store.read()\n\ndef entry():\n    helper(**{'store': Store()})\n", False),
+    ("def helper(store):\n    return store.read()\n", False),
+    ("def helper(store, *rest):\n    return store.read()\n\ndef entry():\n    helper(Store())\n", False),
+    ("def helper(store):\n    return store.read()\n\ndef entry():\n    helper()\n", False),
+    ("def helper(store):\n    return store.read()\n\ndef entry(store):\n    helper(store)\n", False),
+], ids=[
+    "a local built from the class", "a keyword build", "through a caller's typed parameter",
+    "a caller passes another value", "a project function's result", "a starred argument",
+    "a starred argument before it", "a local bound to two classes", "a local also bound to a result",
+    "unpacked keywords", "no caller", "a variadic helper", "a caller passes nothing",
+    "an untyped caller parameter",
+])
+def test_a_parameter_every_caller_passes_one_plain_class_is_followed(tmp_path, monkeypatch, source, followed):
+    """Rows for `_DetectionGraph.parameter_class`: a method on a parameter of
+    a top-level function is followed into the class when every call of the
+    function passes a build of one `plain_class`, by position or keyword,
+    directly, through a local or through a caller's parameter typed the
+    same way. Any other caller, a starred or unpacked argument, a variadic
+    helper, a missing argument or no caller at all leaves it untyped."""
+    import ast
+    import sys
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "m.py").write_text(_STORE + source)
+    monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path, PLUGIN_ROOT / "hooks"))
+    graph = _DetectionGraph()
+    assert graph.load("pkg.m")
+    helper = graph.defs[("pkg.m", "helper")]
+    call = next(node for node in ast.walk(helper) if isinstance(node, ast.Call))
+    assert (graph.instance_target(call, "pkg.m", helper) == ("pkg.m", "Store.read")) is followed
+    assert ({target for _node, target in graph.references(helper, "pkg.m")} == {("pkg.m", "Store.read")}) is followed
 
 
 def _pass_entry_problems(trees: dict) -> tuple:
@@ -2864,11 +3268,13 @@ def route_inputs() -> dict:
     (`PASS_SETUPS`: `detection_pass`, its join branch included, and
     `git_results_pass`) and every place a memory script or a hook opens that
     pass (`_pass_openings`: the `with` statements of `cli.main`,
-    `PACTMemory.__init__` and `backlog.main`, with the blocks they run, and
-    every method of a class one of them builds), through every function
-    they call in
-    the project's own modules (the memory scripts and `hooks/`), helpers and
-    re-exports included, and the code that runs when the modules it reaches
+    `PACTMemory.__init__` and `backlog.main`, with the blocks they run, the
+    memory CLI's command handler read as every command `_COMMANDS` holds,
+    and every method of a class one of them builds), through every function
+    they call in the project's own modules (the memory scripts and
+    `hooks/`, a `scripts.<module>` import included), helpers and re-exports
+    included, and the `__init__` of every `plain_class` a reached function
+    builds, and the code that runs when the modules it reaches
     are imported (`_import_time_code`: module statements and class bodies,
     with decorators, defaults and lambda bodies). The modules read at import are every
     module holding a reached function, every project module one of them
@@ -2932,13 +3338,19 @@ def route_inputs() -> dict:
     REPORTED, as a condition NOT_A_ROUTE must name with its reason: every
     other call through a project name. That is every build of a project
     class (a nested one included), in a function or at import, whatever
-    the class defines; a method
+    the class defines, a `plain_class` build included although its
+    `__init__` is read; a call in a pass opening of a local no table
+    resolves (`_table_callees`); a method
     of any other project object (a compiled pattern, a logger, a context
     variable, an instance); a method on any `self` attribute; and a method
     on a local holding anything else; every class statement on a project
     name; and every use of a class the same module defines, at any depth,
-    as a value. No method
-    is followed into a class.
+    as a value. A method called on a build of a `plain_class`, on a local
+    every binding of which is such a build (`memory = PACTMemory();
+    memory.save(...)`), or on a parameter of a top-level function every
+    call of which passes such a value (`_DetectionGraph.parameter_class`:
+    `cli._project_candidates(memory, db_path)`), is followed into the class
+    (`_DetectionGraph.instance_target`); no other method is.
 
     The process and home directories are each ONE condition, `("cwd",)` and
     `("home",)`, whichever function reads them, so a new reader of either is
@@ -2950,7 +3362,8 @@ def route_inputs() -> dict:
     outside the plugin (the standard library, third-party packages); an
     environment read reached only through such a call; a read through a
     C extension (`ctypes`), which no source anchor can see; a method called
-    on a function's parameter, or on a local proved a standard-library
+    on a parameter `parameter_class` cannot type (a method's parameter, or
+    one a caller passes anything else to), or on a local proved a standard-library
     value only by taking a parameter as one, whose type the census cannot
     see; a class statement whose base, keyword value or decorator is a
     local or a parameter; a plain attribute read, `with`, `for` or
@@ -3009,7 +3422,7 @@ def route_inputs() -> dict:
                     base = package[: len(package) - (node.level - 1)]
                     owner = ".".join([*base, *([node.module] if node.module else [])])
                 else:
-                    owner = node.module or ""
+                    owner = _script_module(node.module or "")
                 named.add(owner)
                 named.update(f"{owner}.{alias.name}" if owner else alias.name for alias in node.names)
         return {name for name in named if name and graph._path(name) is not None}
@@ -3118,6 +3531,8 @@ def route_inputs() -> dict:
             else:
                 add(("env", f"<{target[0]}.{target[1]}: argument at {key[0]}.py:{node.lineno}>"),
                     f"{key[0]}.py:{node.lineno}", target)
+    for condition, site in _unresolved_opening_locals(graph):
+        add(condition, site, None)
     for condition, sites in outward.items():
         found.setdefault(condition, set()).update(sites)
     return {condition: sorted(sites) for condition, sites in found.items()}
@@ -3274,18 +3689,72 @@ def test_files_that_share_a_basename_are_each_read(tmp_path):
     assert [problem.partition(":")[0] for problem in problems] == ["a/m.py", "b/m.py"], problems
 
 
+_GIT_OPTIONS_WITH_A_VALUE = frozenset({"-C", "--git-dir", "--work-tree", "-c"})
+
+
+def _question_signature(argv, function):
+    """The literal git words of `argv` after its leading option pairs (`-C
+    <dir>`, `--git-dir <dir>`, `-c <name=value>`), up to the first word that
+    is not a string constant: `("rev-parse", "--git-dir")` for `["git", "-C",
+    str(root), "rev-parse", "--git-dir"]`. Two calls whose signatures differ
+    ask different questions. None when the census cannot tell: an argv
+    that is not a list display, or a local of `function` bound other than
+    once to one."""
+    import ast
+
+    if isinstance(argv, ast.Name) and function is not None:
+        found = _DetectionGraph._bindings(function, name=argv.id)
+        argv = found[0][1] if len(found) == 1 and found[0][0] == "value" else None
+    if not isinstance(argv, ast.List):
+        return None
+    words = list(argv.elts)
+    if words and isinstance(words[0], ast.Constant) and words[0].value == "git":
+        words = words[1:]
+    while len(words) >= 2 and isinstance(words[0], ast.Constant) and words[0].value in _GIT_OPTIONS_WITH_A_VALUE:
+        words = words[2:]
+    while words and isinstance(words[0], ast.Constant) and isinstance(words[0].value, str) and (
+            words[0].value.startswith("--git-dir=")):
+        words = words[1:]
+    signature = []
+    for word in words:
+        if not (isinstance(word, ast.Constant) and isinstance(word.value, str)):
+            break
+        signature.append(word.value)
+    return tuple(signature) or None
+
+
+def _module_number(tree, name):
+    """The int or float every module-level binding of `name` in `tree` assigns,
+    or None when it is bound any other way or to different values."""
+    import ast
+
+    values = _module_bindings(tree).get(name, [])
+    numbers = {value.value for value in values if isinstance(value, ast.Constant)
+               and isinstance(value.value, (int, float)) and not isinstance(value.value, bool)}
+    return numbers.pop() if values and len(numbers) == 1 and all(
+        isinstance(value, ast.Constant) for value in values) else None
+
+
 def _one_runner_problems(trees: dict) -> tuple:
     """(sites, problems, timeouts, forms) for every call of `answered_once`
     in `trees` ({file path: parsed module}). A call's runner must be
     `subprocess.run(<the argv it is keyed by>, capture_output=True,
     text=<its text>, timeout=<a timeout>, env=<its env>)`, read from a
-    parameterless lambda or a nested def that returns it; a runner that
-    passes `cwd=` is valid only when that same call passes `answered_once`
-    the same `cwd=`, and a runner with no `cwd=` must not pass one. Each
-    argument is compared as written, so an argv, text, env or cwd the
-    runner reaches by another expression fails, even when it holds the same
-    value. A timeout that is a parameter of the enclosing def is resolved at
-    each caller that asks once per pass (`run_git`'s)."""
+    parameterless lambda or a nested def that returns it, with any further
+    keyword arguments (`stdin=subprocess.DEVNULL`, `check=False`); a runner
+    that passes `cwd=` is valid only when that same call passes
+    `answered_once` the same `cwd=`, and a runner with no `cwd=` must not
+    pass one. Each argument is compared as written, so an argv, text, env
+    or cwd the runner reaches by another expression fails, even when it
+    holds the same value. A timeout is a number, a module-level name bound
+    only to one number, or a parameter of the enclosing def resolved at each
+    caller that asks once per pass (`run_git`'s).
+
+    The sites of one question must then run it the same way: the same
+    further keyword arguments, as written, and the same timeout. Two sites
+    ask different questions when their `_question_signature`s differ; a
+    site whose signature the census cannot tell is compared with every
+    other site, so it fails closed."""
     import ast
 
     def called(func):
@@ -3294,7 +3763,7 @@ def _one_runner_problems(trees: dict) -> tuple:
     def is_def(node):
         return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
 
-    sites, problems, timeouts, forms = [], [], set(), set()
+    sites, problems, timeouts, forms, asked = [], [], set(), set(), []
     for path, tree in trees.items():
         parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
         calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and called(node.func) == "answered_once"]
@@ -3333,7 +3802,7 @@ def _one_runner_problems(trees: dict) -> tuple:
             if not (isinstance(runner, ast.Call) and ast.unparse(runner.func) == "subprocess.run"
                     and len(runner.args) == 1 and not isinstance(runner.args[0], ast.Starred)
                     and len(keywords) == len(runner.keywords)
-                    and set(keywords) - {"cwd"} == {"capture_output", "text", "timeout", "env"}
+                    and {"capture_output", "text", "timeout", "env"} <= set(keywords)
                     and isinstance(keywords["capture_output"], ast.Constant)
                     and keywords["capture_output"].value is True
                     and argv is not None and "text" in given and "env" in given
@@ -3346,9 +3815,18 @@ def _one_runner_problems(trees: dict) -> tuple:
                 continue
             forms.add(form)
             timeout = keywords["timeout"]
+            extras = tuple(sorted(
+                (name, ast.unparse(value)) for name, value in keywords.items()
+                if name not in ("capture_output", "text", "timeout", "env", "cwd")
+            ))
+            signature = _question_signature(argv, function)
             parameters = [*function.args.posonlyargs, *function.args.args] if function is not None else []
-            if isinstance(timeout, ast.Constant):
-                timeouts.add(timeout.value)
+            number = _module_number(tree, timeout.id) if isinstance(timeout, ast.Name) and timeout.id not in [
+                parameter.arg for parameter in parameters] else None
+            if isinstance(timeout, ast.Constant) or number is not None:
+                value = timeout.value if isinstance(timeout, ast.Constant) else number
+                timeouts.add(value)
+                asked.append((f"{path}:{call.lineno}", signature, extras, value))
             elif isinstance(timeout, ast.Name) and timeout.id in [parameter.arg for parameter in parameters]:
                 # A parameter: the timeout each caller that asks once per pass gives.
                 index = [parameter.arg for parameter in parameters].index(timeout.id)
@@ -3367,11 +3845,28 @@ def _one_runner_problems(trees: dict) -> tuple:
                             value = flags.get(timeout.id, caller.args[index] if len(caller.args) > index else default)
                             if isinstance(value, ast.Constant):
                                 timeouts.add(value.value)
+                                words = caller.args[0] if caller.args else flags.get("args")
+                                asked.append((
+                                    f"{function.name} call at line {caller.lineno}",
+                                    _question_signature(
+                                        ast.List(elts=[ast.Constant("git"), *words.elts]) if isinstance(words, ast.List)
+                                        else None, None),
+                                    extras, value.value,
+                                ))
                             else:
                                 problems.append(f"{function.name} call at line {caller.lineno}: timeout is not a constant")
             else:
                 problems.append(f"{path}:{call.lineno}: the timeout is neither a constant nor a parameter")
-    return sites, problems, timeouts, forms
+    known = sorted({signature for _site, signature, _extras, _timeout in asked if signature is not None})
+    unknown = [entry for entry in asked if entry[1] is None]
+    for group in [*([entry for entry in asked if entry[1] == signature] + unknown for signature in known), unknown]:
+        ways = {(extras, timeout) for _site, _signature, extras, timeout in group}
+        if len(ways) > 1:
+            problems.append(
+                f"{', '.join(site for site, *_rest in group)}: sites of one question run it different ways: "
+                f"{sorted(ways)}"
+            )
+    return sites, sorted(set(problems), key=problems.index), timeouts, forms
 
 
 def test_each_git_question_has_one_runner():
@@ -3381,18 +3876,19 @@ def test_each_git_question_has_one_runner():
     The census still types each call as its own runner's result
     (`_DetectionGraph._RETURNS_ITS_ARGUMENT`), and that is sound because
     each question has one runner: every call site's runner is the question's
-    own git command (`_one_runner_problems`), with one timeout across them
-    all, so two sites that ask one question run one command the same way.
+    own git command (`_one_runner_problems`), and the sites of one question
+    carry the same further keyword arguments and the same timeout, so two
+    sites that ask one question run one command the same way.
     The argv is matched as an expression, not resolved to its constant parts:
     the runner must pass the very expression the call is keyed on, a rule
     that is decidable and fails closed on any other spelling of the same
-    value. A runner of any other shape, a second timeout (a `run_git`
-    caller's included), an alias of `answered_once` or any use of it but a
-    call fails here."""
+    value. A runner of any other shape, two sites of one question run
+    differently (a `run_git` caller's timeout included), an alias of
+    `answered_once` or any use of it but a call fails here."""
     files = sorted({*SCRIPTS.glob("*.py"), *(PLUGIN_ROOT / "hooks").rglob("*.py")})
     sites, problems, timeouts, forms = _one_runner_problems(_parse_files(files, PLUGIN_ROOT))
-    assert problems == [] and len(timeouts) == 1, (problems, timeouts)
-    assert sites and forms == {"lambda", "nested def"}  # control: both runner forms were read
+    assert problems == [], problems
+    assert sites and timeouts and forms == {"lambda", "nested def"}  # control: both runner forms were read
 
 
 _ASK = "answered_once(argv, {run}, text=False, env=None{cwd})"
@@ -3435,6 +3931,55 @@ def test_a_runner_is_its_questions_own_command(body, honest):
               "def reader(where, other):\n" + body)
     sites, problems, _timeouts, _forms = _one_runner_problems({"m.py": ast.parse(source)})
     assert len(sites) == 1  # control: the call was read
+    assert (problems == []) is honest, problems
+
+
+def _two_askers(first, second, prelude=""):
+    """A module with two readers, each asking `answered_once` its own argv
+    (`first` and `second` are (argv display, extra runner keywords,
+    timeout))."""
+    def reader(name, argv, extra, timeout):
+        return (f"def {name}():\n    argv = {argv}\n"
+                f"    return answered_once(argv, lambda: subprocess.run(argv, capture_output=True, text=False, "
+                f"timeout={timeout}, env=None{extra}), text=False, env=None)\n\n")
+    return ("import subprocess\nfrom shared.git_helpers import answered_once\n\n" + prelude
+            + reader("first", *first) + reader("second", *second))
+
+
+_GIT_DIR = "['git', 'rev-parse', '--git-dir']"
+_WORKTREE = "['git', 'config', '--get', 'core.worktree']"
+
+
+@pytest.mark.parametrize("source, honest", [
+    (_two_askers((_GIT_DIR, ", stdin=subprocess.DEVNULL", 5), (_GIT_DIR, ", stdin=subprocess.DEVNULL", 5)), True),
+    (_two_askers((_GIT_DIR, ", check=False", 5), (_GIT_DIR, ", check=False", 5)), True),
+    (_two_askers((_GIT_DIR, "", "_TIMEOUT"), (_GIT_DIR, "", 5), "_TIMEOUT = 5\n\n"), True),
+    (_two_askers((_GIT_DIR, "", 5), (_WORKTREE, "", 10)), True),
+    (_two_askers(("['git', '-C', str(1), 'rev-parse', '--git-dir']", "", 5),
+                 ("['git', '-C', str(1), 'config', '--get', 'core.worktree']", "", 10)), True),
+    (_two_askers((_GIT_DIR, ", stdin=subprocess.DEVNULL", 5), (_GIT_DIR, "", 5)), False),
+    (_two_askers((_GIT_DIR, "", 5), (_GIT_DIR, "", 10)), False),
+    (_two_askers((_GIT_DIR, "", 5), ("list(_GIT_DIR_ARGV)", "", 10), "_GIT_DIR_ARGV = ['git']\n\n"), False),
+    (_two_askers((_GIT_DIR, "", "_TIMEOUT"), (_GIT_DIR, "", 5), "_TIMEOUT = 5\nif True:\n    _TIMEOUT = 10\n\n"),
+     False),
+], ids=[
+    "stdin on every site of one question", "check=False on every site of one question",
+    "a module-constant timeout", "two questions with two timeouts", "two questions behind one -C",
+    "stdin on one site of a question", "two timeouts for one question",
+    "a site whose question cannot be told, with another timeout", "a name bound to two timeouts",
+])
+def test_runners_are_compared_per_question(source, honest):
+    """Rows for `_one_runner_problems`' per-question comparison: further
+    keyword arguments every site of one question carries, a module-level
+    timeout constant, and two different questions with two timeouts are
+    honest. A keyword one site of a question carries and another does not,
+    two timeouts for one question, a site whose question the census cannot
+    tell (compared with every other site) with another timeout, and a
+    timeout name bound to two values each fail."""
+    import ast
+
+    sites, problems, _timeouts, _forms = _one_runner_problems({"m.py": ast.parse(source)})
+    assert len(sites) == 2  # control: both calls were read
     assert (problems == []) is honest, problems
 
 
@@ -3534,6 +4079,13 @@ def test_a_context_read_through_copy_context_is_listed_not_reported(tmp_path, mo
                 if isinstance(call, ast.Call) and graph.unread_call(call, "pkg.m", function)]
 
     assert (reported("honest"), reported("by_get"), reported("by_subscript")) == (["VAR.get()"], [], [])
+
+
+# The second half of each NOT_A_ROUTE reason for a memory CLI command's store work.
+_AFTER_DETECTION = (
+    "; it runs after PACTMemory.__init__ has detected the identity, which only __init__ sets, "
+    "and no git question takes its value"
+)
 
 
 class TestEveryRouteEntryConditionIsARoute:
@@ -3943,6 +4495,552 @@ class TestEveryRouteEntryConditionIsARoute:
             "(git reads arbitrary GIT_* variables) only to key the pass's memo of that "
             "command's result"
         ),
+        # The memory CLI's command work, run inside cli.main's detection pass.
+        ("call", "<call to no function cli: r.to_dict>"): (
+            "renders a search result the store returned for the command's envelope"
+        ),
+        ("call", "<call to no function cli: result.to_dict>"): (
+            "renders the record the store returned for the command's envelope"
+        ),
+        ("call", "<call to no function cli: state.get>"): (
+            "reads the legacy-bucket state the store recorded at construction, for the rekey verdict"
+        ),
+        ("call", "<call to no function cli: store.exists>"): (
+            "a method of the store path rekey resolves (resolve_db_path), checked before the store "
+            "is opened"
+        ),
+        ("call", "<call to no function config: _READ_ONLY_SCOPE.set>"): (
+            "read_only_scope declares the block read-only"
+        ),
+        ("call", "<call to no function config: _READ_ONLY_SCOPE.reset>"): (
+            "read_only_scope restores the read-only declaration"
+        ),
+        ("call", "<call to no function config: _READ_ONLY_SCOPE.get>"): (
+            "read_only_scope_active reads the read-only declaration"
+        ),
+        ("call", "<call to no function database: a method of what get_db_path returns>"): (
+            "a method of the store path get_db_path returns, checked when the store is created"
+        ),
+        ("call", "<call to no function database: logger.debug>"): "database's module logger",
+        ("call", "<call to no function database: logger.info>"): "database's module logger",
+        ("call", "<call to no function database: logger.warning>"): "database's module logger",
+        ("call", "<call to no function pact_session: _context_record_on_disk(...).get>"): (
+            "reads the session id from the session's context record"
+        ),
+        ("call", "<call to no function pact_session: a method of what _context_file_path returns>"): (
+            "reads the session's context file, for the session id a saved memory records"
+        ),
+        ("call", "<call to no function setup_memory: a method of what get_memory_dir returns>"): (
+            "a method of the memory directory get_memory_dir returns, for the setup status"
+        ),
+        ("call", "<call to no function setup_memory: get_memory_dir().mkdir>"): (
+            "creates the memory directory during setup"
+        ),
+        ("call", "<call to no function setup_memory: logger.error>"): "setup_memory's module logger",
+        ("call", "<call to no function setup_memory: logger.info>"): "setup_memory's module logger",
+        ("call", "<call to no function shared.claude_md_manager: ManagedDocument>"): (
+            "builds a record class (fields only)"
+        ),
+        ("call", "<call to no function shared.claude_md_manager: a method of what managed_document_paths returns>"): (
+            "a method of a candidate CLAUDE.md path, to find the session's managed document for a sync"
+        ),
+        ("call", "<call to no function shared.claude_md_manager: a method of what session_memory_root returns>"): (
+            "_replace on the session-root record session_memory_root returned"
+        ),
+        ("call", "<call to no function shared.pact_context: _UNSAFE_SLUG_CHARS_RE.sub>"): (
+            "a method of a compiled literal pattern"
+        ),
+        ("call", "<call to no function shared.pact_context: candidate.resolve>"): (
+            "a method of a session-directory path built from get_claude_config_dir(), which the "
+            "census cannot type"
+        ),
+        ("call", "<call to no function shared.pact_context: sessions_root.resolve>"): (
+            "a method of the sessions directory built from get_claude_config_dir(), which the "
+            "census cannot type"
+        ),
+        ("call", "<call to no function shared.project_scope: SessionRoot>"): (
+            "builds a record class (fields only)"
+        ),
+        ("call", "<call to no function shared.project_scope: _fsdecode(...).split>"): (
+            "splits the text _fsdecode decodes from git's output"
+        ),
+        ("call", "<call to no function shared.project_scope: _fsdecode(...).strip>"): (
+            "strips the text _fsdecode decodes from git's output"
+        ),
+        ("call", "<call to no function shared.project_scope: _fsdecode(...).strip().lower>"): (
+            "lowercases the text _fsdecode decodes from git's output"
+        ),
+        ("call", "<call to no function shared.project_scope: a method of what get_claude_config_dir returns>"): (
+            "a method of the config directory get_claude_config_dir returns, which the census "
+            "cannot type"
+        ),
+        ("call", "<call to no function shared.project_scope: forms.append>"): (
+            "adds a path form to a local list of one located document's forms"
+        ),
+        ("call", "<call to no function shared.project_scope: located.absolute>"): (
+            "a method of a located document path, which the census cannot type"
+        ),
+        ("call", "<name imported from a project module cli: AmbiguousPrefixError>"): (
+            "database's error class, caught by a command"
+        ),
+        ("call", "<name imported from a project module cli: PrefixTooShortError>"): (
+            "database's error class, caught by a command"
+        ),
+        ("call", "<name imported from a project module cli: ProjectIdentityUnresolvedError>"): (
+            "memory_api's error class, caught by a command"
+        ),
+        ("call", "<name imported from a project module cli: ProjectScopeDisagreementError>"): (
+            "pact_session's error class, caught by a command"
+        ),
+        ("call", "<name imported from a project module cli: CALLER_FACING_CREATE_FIELDS>"): (
+            "the field names a caller may set on a save, shown in an error envelope"
+        ),
+        ("call", "<name imported from a project module cli: CALLER_FACING_UPDATE_FIELDS>"): (
+            "the field names a caller may set on an update, shown in an error envelope"
+        ),
+        ("call", "<name imported from a project module cli: db_sqlite3>"): (
+            "database's sqlite3 module, whose DatabaseError a command catches"
+        ),
+        ("call", "<name imported from a project module database: DERIVED_STORE_ORIGINS>"): (
+            "the store-path origins config derives, a constant set"
+        ),
+        ("call", "<name imported from a project module shared.backlog: memory_api.logger>"): (
+            "the memory skill's logger, which the decline-warning holder attaches to"
+        ),
+        ("call", "<name imported from a project module shared.claude_md_manager: ROOT_CAUSE_USER_GLOBAL>"): (
+            "a root-cause constant project_scope names"
+        ),
+        ("call", "<name imported from a project module staleness: PACT_BOUNDARY_PREFIXES>"): (
+            "a CLAUDE.md boundary-marker prefix constant"
+        ),
+        ("call", "<name imported from a project module staleness: SESSION_BOUNDARY_PREFIX>"): (
+            "a CLAUDE.md boundary-marker prefix constant"
+        ),
+        ("call", "<name imported from a project module staleness: CapViolation in an annotation>"): (
+            "pin_caps' NamedTuple class, named in an annotation"
+        ),
+        ("call", "<class of its own module used as a value memory_api: StoreFaultError>"): (
+            "memory_api's sqlite3.OperationalError-based class, with no __init_subclass__, "
+            "__class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ("call", "<class of its own module used as a value shared.claude_md_manager: UserGlobalDocumentRefused>"): (
+            "claude_md_manager's RuntimeError-based class, with no __init_subclass__, "
+            "__class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ("call", "_unusable_identifier"): "validates an id value",
+        ("call", "get_session_id_from_context_file"): (
+            "detects the session id a saved memory records, not a project identity"
+        ),
+        ("call", "project_bucket_counts"): "counts the store's rows per project bucket for the census",
+        ("env", "PWD"): (
+            "session_anchor's fallback when the process directory is gone; it locates the session's "
+            "CLAUDE.md for a sync, not a memory identity"
+        ),
+        ("call", "<call to no function cli: PACTMemory>"): (
+            'builds a plain class; the census follows the build into its __init__, and a method the class '
+            'defines into the class wherever it types the object as that build (instance_target)'
+        ),
+        ("call", "<call to no function embeddings: EmbeddingService>"): (
+            'builds a plain class; the census follows the build into its __init__, and a method the class '
+            'defines into the class wherever it types the object as that build (instance_target)'
+        ),
+        ("call", "<call to no function memory_api: StoreFaultError>"): (
+            'builds a method-free class whose chain ends in outside bases, so neither the '
+            'build nor an instance runs project code'
+        ),
+        ("call", "<call to no function shared.claude_md_manager: UserGlobalDocumentRefused>"): (
+            'builds a method-free class whose chain ends in outside bases, so neither the '
+            'build nor an instance runs project code'
+        ),
+        # The store work a memory CLI command runs (`_DetectionGraph.instance_target`):
+        # each runs after PACTMemory.__init__ has detected the identity, and the two git
+        # questions that work asks (the read scope's common dir and worktree listing) take
+        # their argv from the identity's root and common dir.
+        ('call', 'bucket_session_ids'): (
+            "lists the session ids a legacy bucket's rows carry, as evidence for the read scope; it reads the store, not git or the identity" + _AFTER_DETECTION
+        ),
+        ('call', 'count_project_file_paths'): (
+            "counts a bucket's tracked file paths in the store for the bucket census" + _AFTER_DETECTION
+        ),
+        ('call', 'count_project_memories'): (
+            "counts a bucket's rows in the store for the bucket census" + _AFTER_DETECTION
+        ),
+        ('call', 'create_memory'): (
+            "writes a saved memory's row to the store" + _AFTER_DETECTION
+        ),
+        ('call', 'db_connection'): (
+            'opens a connection to the store' + _AFTER_DETECTION
+        ),
+        ('call', 'delete_memory'): (
+            "deletes a memory's row from the store" + _AFTER_DETECTION
+        ),
+        ('call', 'ensure_initialized'): (
+            "creates the store's schema if it is missing" + _AFTER_DETECTION
+        ),
+        ('call', 'ensure_memory_ready'): (
+            'prepares the memory system (dependencies, migration, embedding catch-up) before the store is used' + _AFTER_DETECTION
+        ),
+        ('call', 'env_record_project_dir_disagreement'): (
+            "compares CLAUDE_PROJECT_DIR with the session record's project directory so a write can refuse when they disagree; it changes no answer the identity reads" + _AFTER_DETECTION
+        ),
+        ('call', 'format_project_dir_disagreement'): (
+            'formats that disagreement for the refusal' + _AFTER_DETECTION
+        ),
+        ('call', 'generate_embedding'): (
+            "computes a memory's embedding vector" + _AFTER_DETECTION
+        ),
+        ('call', 'generate_embedding_text'): (
+            "builds the text a memory's embedding is computed from" + _AFTER_DETECTION
+        ),
+        ('call', 'get_db_path'): (
+            "names the store's database file" + _AFTER_DETECTION
+        ),
+        ('call', 'get_embedding_catchup_status'): (
+            "reports the embedding catch-up's state for the status command" + _AFTER_DETECTION
+        ),
+        ('call', 'get_files_for_memory'): (
+            'reads the file paths linked to a memory from the store' + _AFTER_DETECTION
+        ),
+        ('call', 'get_graph_stats'): (
+            "counts the store's file-graph rows for the status command" + _AFTER_DETECTION
+        ),
+        ('call', 'get_memory'): (
+            "reads a memory's row from the store" + _AFTER_DETECTION
+        ),
+        ('call', 'get_memory_count'): (
+            "counts the store's rows in the read scope for the status command" + _AFTER_DETECTION
+        ),
+        ('call', 'get_search_capabilities'): (
+            'reports which search modes the installed extensions allow' + _AFTER_DETECTION
+        ),
+        ('call', 'graph_enhanced_search'): (
+            "searches the store's rows" + _AFTER_DETECTION
+        ),
+        ('call', 'legacy_candidate_plausibility'): (
+            "judges from the store's rows whether a legacy bucket belongs to this project, for the read scope; it asks git nothing" + _AFTER_DETECTION
+        ),
+        ('call', 'link_memory_to_paths'): (
+            'links a saved memory to its file paths in the store' + _AFTER_DETECTION
+        ),
+        ('call', 'list_memories'): (
+            "lists the store's rows in the read scope" + _AFTER_DETECTION
+        ),
+        ('call', 'memory_from_db_row'): (
+            'builds a memory object from a store row' + _AFTER_DETECTION
+        ),
+        ('call', 'project_memories_to_claude_md'): (
+            "writes the project's memories to the session's CLAUDE.md" + _AFTER_DETECTION
+        ),
+        ('call', 'read_only_scope'): (
+            'declares a block that must not write the store' + _AFTER_DETECTION
+        ),
+        ('call', 'reconstruct_session_dir'): (
+            "rebuilds a session's directory path from the config directory, to read the session's context record" + _AFTER_DETECTION
+        ),
+        ('call', 'resolve_db_path'): (
+            "names the store's database file" + _AFTER_DETECTION
+        ),
+        ('call', 'resolve_memory_id_prefix'): (
+            "resolves a memory id prefix against the store's rows" + _AFTER_DETECTION
+        ),
+        ('call', 'store_path_origin'): (
+            "names where the store's path came from (an override, the environment, the home)" + _AFTER_DETECTION
+        ),
+        ('call', 'sync_retrieved_to_claude_md'): (
+            "writes retrieved memories to the session's CLAUDE.md" + _AFTER_DETECTION
+        ),
+        ('call', 'sync_to_claude_md'): (
+            "writes a saved memory to the session's CLAUDE.md" + _AFTER_DETECTION
+        ),
+        ('call', 'track_file'): (
+            "records a file path in the store's file graph" + _AFTER_DETECTION
+        ),
+        ('call', 'update_memory'): (
+            "updates a memory's row in the store" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function database: AmbiguousPrefixError>'): (
+            'builds a plain class; the census follows the build into its __init__, and a method the class defines into the class wherever it types the object as that build (instance_target)'
+        ),
+        ('call', '<call to no function database: PrefixTooShortError>'): (
+            'builds a plain class; the census follows the build into its __init__, and a method the class defines into the class wherever it types the object as that build (instance_target)'
+        ),
+        ('call', '<call to no function database: a method of what _serialize_json_fields returns>'): (
+            'reads the fields of the row dict _serialize_json_fields builds for an insert' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function database: current.get>'): (
+            "reads an update's current list fields, to merge new items into them" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function database: normalized.items>'): (
+            "iterates an update's normalized fields" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function database: normalized.keys>'): (
+            "lists an update's normalized fields" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function database: working.items>'): (
+            "iterates an update's fields to normalize them" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module database: Decision>'): (
+            "models' record class, registered as the class of a decisions field" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module database: Entity>'): (
+            "models' record class, registered as the class of an entities field" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module database: TaskItem>'): (
+            "models' record class, registered as the class of an active_tasks field" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function embedding_catchup: UnembeddedResult>'): (
+            'builds a plain class; the census follows the build into its __init__, and a method the class defines into the class wherever it types the object as that build (instance_target)'
+        ),
+        ('call', '<class of its own module used as a value embedding_catchup: UnembeddedResult>'): (
+            "embedding_catchup's list-based class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ('call', '<call to no function embedding_catchup: a method of what get_memory returns>'): (
+            'reads a field of a memory row the store returned, to re-embed it' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function embedding_catchup: store_sqlite3.connect>'): (
+            'opens a read-only connection to the store for its integrity check' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function embedding_catchup: a method of what store_sqlite3.connect returns>'): (
+            "runs the store's integrity check on that connection and closes it" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function embedding_catchup: logger.debug>'): (
+            "embedding_catchup's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function embedding_catchup: sqlite_vec.load>'): (
+            'loads the vector extension into a store connection' + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module embedding_catchup: MIN_CATCHUP_RAM_MB>'): (
+            'the memory floor below which the embedding catch-up does not run, a constant' + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module embedding_catchup: SQLITE_EXTENSIONS_ENABLED>'): (
+            "whether this Python's sqlite3 can load extensions, a constant" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module embedding_catchup: store_sqlite3>'): (
+            "database's sqlite3 module, used to open the store and catch its errors" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function embeddings: MemoryObject.from_dict>'): (
+            'builds a memory object from a memory dict, to read its searchable text' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function embeddings: a method of what MemoryObject.from_dict returns>'): (
+            "reads a memory object's searchable text" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function embeddings: get_embedding_service().generate>'): (
+            'computes an embedding vector with the embedding service' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function embeddings: a method of what get_embedding_service returns>'): (
+            'asks the embedding service whether it is available' + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module embeddings: MemoryObject>'): (
+            "models' memory class, whose from_dict builds the object a memory dict describes" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function graph: logger.debug>'): (
+            "graph's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: ProjectIdentityUnresolvedError>'): (
+            'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
+        ),
+        ('call', '<call to no function memory_api: ProjectScopeDisagreementError>'): (
+            'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
+        ),
+        ('call', '<call to no function memory_api: _UNSAFE_SLUG_CHARS_RE.sub>'): (
+            'a method of a compiled literal pattern'
+        ),
+        ('call', '<call to no function memory_api: a method of what get_memory returns>'): (
+            'reads a field of a memory row the store returned' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: a method of what get_search_capabilities returns>'): (
+            'reads the search mode the extensions allow' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: a method of what project_bucket_counts returns>'): (
+            "reads a bucket's row count from the bucket census" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: back.is_absolute>'): (
+            "a method of the path a worktree's gitdir file names, which the census cannot type; it checks that a listed worktree points back at its marker, for the read scope" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: back.resolve>'): (
+            "a method of the path a worktree's gitdir file names, which the census cannot type; it checks that a listed worktree points back at its marker, for the read scope" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: before_snapshot.get>'): (
+            "reads a field of a memory's row from before an update" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: bucket.casefold>'): (
+            'compares a bucket name with the legacy name, ignoring case' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: context.read_text>'): (
+            "reads a session's context record, as evidence that a legacy bucket's session belongs to this project; it decides the read scope, not the identity" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: logger.info>'): (
+            "memory_api's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: memory_dict.get>'): (
+            'reads a field of a memory row the store listed' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: read_project_bucket_census(...).get>'): (
+            "reads a bucket's row count from the bucket census" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module memory_api: AmbientSyncRefused>'): (
+            "working_memory's error class, caught when a CLAUDE.md sync is refused" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module memory_api: DERIVED_STORE_ORIGINS>'): (
+            'the store-path origins config derives, a constant set' + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module memory_api: MAX_WORKING_MEMORIES>'): (
+            'how many memories the Working Memory section holds, a constant' + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module memory_api: MEMORY_ID_LENGTH>'): (
+            'the length of a full memory id, a constant' + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module memory_api: PRUNE_LEDGER_NAME>'): (
+            "the prune ledger's file name, a constant" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module memory_api: SQLITE_EXTENSIONS_ENABLED>'): (
+            "whether this Python's sqlite3 can load extensions, a constant" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module memory_api: SyncResult>'): (
+            "working_memory's sync-result class, whose status constants a save records" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module memory_api: _UNSAFE_SLUG_CHARS_RE>'): (
+            "pact_context's compiled literal pattern for unsafe slug characters" + _AFTER_DETECTION
+        ),
+        ('env', 'CI'): (
+            "memory_init's CI check, which skips installing dependencies in CI; it changes no answer the identity reads" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_init: _UNSAFE_SLUG_CHARS_RE.sub>'): (
+            'a method of a compiled literal pattern'
+        ),
+        ('call', '<call to no function memory_init: a method of what _UNSAFE_SLUG_CHARS_RE.sub returns>'): (
+            "encodes the slug that pattern's substitution returns, to hash it" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_init: a method of what get_embedding_service returns>'): (
+            'computes an embedding vector with the embedding service, to re-embed a memory' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_init: logger.debug>'): (
+            "memory_init's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_init: logger.info>'): (
+            "memory_init's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_init: logger.warning>'): (
+            "memory_init's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module memory_init: EMBEDDING_DIM>'): (
+            "the embedding vector's dimension, a constant" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module memory_init: _UNSAFE_SLUG_CHARS_RE>'): (
+            "pact_context's compiled literal pattern for unsafe slug characters" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function models: a method of what _validate_from_dict_keys returns>'): (
+            'reads a field of the dict _validate_from_dict_keys checked' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function models: logger.warning>'): (
+            "models' module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<class of its own module used as a value models: MemoryObject>'): (
+            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ('call', '<call to no function search: a method of what check_embedding_availability returns>'): (
+            "reads the embedding backend's status for the search capabilities" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function search: a method of what get_memory returns>'): (
+            'reads a field of a memory row the store returned' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function search: logger.debug>'): (
+            "search's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function search: logger.warning>'): (
+            "search's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module search: SQLITE_EXTENSIONS_ENABLED>'): (
+            "whether this Python's sqlite3 can load extensions, a constant" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function shared.claude_md_markers: Document>'): (
+            'builds a plain class; the census follows the build into its __init__, and a method the class defines into the class wherever it types the object as that build (instance_target)'
+        ),
+        ('call', '<call to no function shared.claude_md_markers: Line>'): (
+            'builds a record class (fields only)'
+        ),
+        ('call', '<call to no function shared.claude_md_markers: _COMMENT_START_RE.match>'): (
+            'a method of the HTML comment start pattern, a compiled literal taken from the _HTML_BLOCKS '
+            'table, matched against a CLAUDE.md line' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function shared.claude_md_markers: _CONTAINER_FENCE_RE.fullmatch>'): (
+            'a method of a compiled literal pattern'
+        ),
+        ('call', '<call to no function shared.claude_md_markers: _LINE_RE.finditer>'): (
+            'a method of a compiled literal pattern'
+        ),
+        ('call', '<call to no function shared.claude_md_markers: _OPENER_RE.fullmatch>'): (
+            'a method of a compiled literal pattern'
+        ),
+        ('call', '<call to no function shared.claude_md_markers: a method of what _LINE_RE.finditer returns>'): (
+            "a method of that pattern's match" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function shared.claude_md_markers: a method of what _OPENER_RE.fullmatch returns>'): (
+            "a method of that pattern's match" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function shared.claude_md_markers: content.startswith>'): (
+            "tests a CLAUDE.md line's text for a byte-order mark" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function shared.claude_md_markers: end_re.search>'): (
+            "a method of a CLAUDE.md fence's end pattern, built from the fence it closes" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function shared.claude_md_markers: html_end.search>'): (
+            'a method of the HTML comment end pattern, built for the line scan' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function shared.claude_md_markers: start_re.match>'): (
+            "a method of a CLAUDE.md fence's start pattern" + _AFTER_DETECTION
+        ),
+        ('call', '<class of its own module used as a value shared.claude_md_markers: Kind>'): (
+            "claude_md_markers' Enum class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ('call', '<call to no function working_memory: AmbientSyncRefused>'): (
+            'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
+        ),
+        ('call', '<call to no function working_memory: ContainmentError>'): (
+            'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
+        ),
+        ('call', '<call to no function working_memory: ProjectScopeDisagreementError>'): (
+            'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
+        ),
+        ('call', '<call to no function working_memory: SyncResult>'): (
+            'builds a plain class; the census follows the build into its __init__, and a method the class defines into the class wherever it types the object as that build (instance_target)'
+        ),
+        ('call', '<class of its own module used as a value working_memory: SyncResult>'): (
+            "working_memory's class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
+        ),
+        ('call', '<call to no function working_memory: _PROMPT_CONTROL_CHARS_RE.sub>'): (
+            'a method of a compiled literal pattern'
+        ),
+        ('call', '<call to no function working_memory: a method of what _resolve_display_claude_md_with_base returns>'): (
+            'a method of the CLAUDE.md path a sync writes to, which the census cannot type' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function working_memory: a method of what parse returns>'): (
+            'a method of the parsed CLAUDE.md document a sync edits' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function working_memory: after_section.startswith>'): (
+            'tests the CLAUDE.md text after a section for a leading newline' + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function working_memory: content.endswith>'): (
+            "tests a section's text for a final newline" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function working_memory: logger.debug>'): (
+            "working_memory's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function working_memory: logger.info>'): (
+            "working_memory's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function working_memory: logger.warning>'): (
+            "working_memory's module logger" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function working_memory: trimmed_entries.pop>'): (
+            'drops the last retrieved-context entry to keep the section under its token budget' + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module working_memory: STORE_ORIGIN_HOME>'): (
+            'the store-path origin that names the home directory, a constant' + _AFTER_DETECTION
+        ),
+        ('call', '<name imported from a project module working_memory: State>'): (
+            "claude_md_markers' section-state constants, compared with a found section's state" + _AFTER_DETECTION
+        ),
     }
 
     def test_each_named_build_and_pattern_is_what_its_reason_says(self):
@@ -3952,11 +5050,16 @@ class TestEveryRouteEntryConditionIsARoute:
         a docstring (no method, decorator or class keyword); one that says "a
         class a pass opening builds; the census reads every method it
         defines" builds a class a pass opening builds (`_pass_openings`),
-        whose methods `route_inputs` reads as roots; and one that says "a
-        method of a compiled literal pattern" calls a method on a module
-        name (followed through imports) whose every binding is `re.compile`
-        of literals or `re` flags. Every entry of each shape carries that
-        reason, and no other entry does."""
+        whose methods `route_inputs` reads as roots; one that says "builds
+        a method-free class whose chain ends in outside bases" builds a `plain_class` that
+        defines no method, nor does any project base of it; one that says
+        "builds a plain class; the census follows the build into its
+        __init__" builds a `plain_class` with an `__init__` in its chain
+        (`init_of`); and one that says "a method of a compiled
+        literal pattern" calls a method on a module name (followed through
+        imports) whose every binding is `re.compile` of literals or `re`
+        flags. Every entry of each shape carries that reason, and no other
+        entry does."""
         import ast
         import re as regex
 
@@ -4016,11 +5119,24 @@ class TestEveryRouteEntryConditionIsARoute:
                     owner, leaf = owned
                     graph.load(owner)
                     node = graph.classes.get(owner, {}).get(leaf)
+                    plain = graph.plain_class(ast.Name(id=name, ctx=ast.Load()), module) == owned
+                    methods = [item for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))] if (
+                        node is not None) else []
                     if method is None and node is not None and owned in opening_classes:
                         kind = "opening class"
+                    elif method is None and node is not None and fields_only(node):
+                        kind = "build"
+                        builds.add(condition)
+                    elif method is None and node is not None and plain and not methods and all(
+                            not [item for item in graph.classes[base[0]][base[1]].body
+                                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))]
+                            for base in graph.project_bases(owned)):
+                        kind = "method-free build"
+                    elif method is None and node is not None and plain and graph.init_of(owned) is not None:
+                        kind = "followed build"
                     elif method is None and node is not None:
                         kind = "build"
-                        (builds if fields_only(node) else wrong.setdefault("not fields only", set())).add(condition)
+                        wrong.setdefault("not fields only", set()).add(condition)
                     elif method is not None and compiled_literal(owner, leaf):
                         kind = "pattern"
                         patterns.add(condition)
@@ -4028,6 +5144,11 @@ class TestEveryRouteEntryConditionIsARoute:
                 "opening class" if reason == "a class a pass opening builds; the census reads every method it defines"
                 else "build" if reason == "builds a record class (fields only)"
                 else "pattern" if reason == "a method of a compiled literal pattern"
+                else "method-free build" if reason == 'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
+                else "followed build" if reason == (
+                    'builds a plain class; the census follows the build into its __init__, and a method the class '
+                    'defines into the class wherever it types the object as that build (instance_target)'
+                )
                 else None
             )
             if says != kind:
@@ -4279,6 +5400,58 @@ class TestEveryRouteEntryConditionIsARoute:
         driven = set(self.NOT_A_ROUTE) & set(route_driven_conditions)
         assert driven == set(), f"an exclusion names an input a route drives: {driven}"
 
+    def test_only_pact_memory_init_sets_the_identity_store_work_reads(self):
+        """The pin under `_AFTER_DETECTION`: of the attributes
+        `PACTMemory.__init__` sets, only the cwd repository's memo, the
+        last-operation statuses and the read-scope disclosure are set again
+        by another method, and nothing sets a `PACTMemory` attribute by
+        `setattr`. So the detected identity a command's store work reads is
+        the one `__init__` detected. An identity attribute set anywhere else
+        in the memory scripts, on any object, fails here too."""
+        import ast
+
+        tree = ast.parse((SCRIPTS / "memory_api.py").read_text())
+        memory = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "PACTMemory")
+
+        def assigned(node):
+            for sub in ast.walk(node):
+                targets = (
+                    sub.targets if isinstance(sub, ast.Assign)
+                    else [sub.target] if isinstance(sub, (ast.AugAssign, ast.AnnAssign, ast.NamedExpr))
+                    else [item.optional_vars for item in sub.items] if isinstance(sub, (ast.With, ast.AsyncWith))
+                    else [sub.target] if isinstance(sub, (ast.For, ast.AsyncFor))
+                    else []
+                )
+                for target in targets:
+                    for part in ast.walk(target) if target is not None else ():
+                        if isinstance(part, ast.Attribute):
+                            yield part
+
+        methods = [item for item in memory.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        init = next(item for item in methods if item.name == "__init__")
+        identity = {part.attr for part in assigned(init)
+                    if isinstance(part.value, ast.Name) and part.value.id == "self"}
+        again = {part.attr for item in methods if item is not init for part in assigned(item)
+                 if isinstance(part.value, ast.Name) and part.value.id == "self"}
+        assert again & identity == {
+            "_cwd_cache_dir", "_cwd_repo_id", "_cwd_repo_root",
+            "_last_cascade_skipped", "_last_embedding_status", "_last_project_scope", "_last_sync_status",
+            "_legacy_scope_state",
+        }, again & identity
+        identity -= again
+        assert {"_project_id", "_project_identity_root", "_project_common_dir",
+                "_detection_common_dirs", "_detection_listings"} <= identity, identity  # control
+        setters = [ast.unparse(node) for node in ast.walk(memory) if isinstance(node, ast.Call)
+                   and ast.unparse(node.func) in ("setattr", "object.__setattr__", "vars", "self.__dict__.update")]
+        assert setters == [], setters
+        elsewhere = []
+        for path in sorted(SCRIPTS.rglob("*.py")):
+            module = tree if path == SCRIPTS / "memory_api.py" else ast.parse(path.read_text())
+            skip = {id(part) for part in assigned(init)} if module is tree else set()
+            elsewhere += [f"{path.name}:{part.lineno} {ast.unparse(part)}" for part in assigned(module)
+                          if part.attr in identity and id(part) not in skip]
+        assert elsewhere == [], elsewhere
+
     def test_the_census_reads_the_declaration_routes(self, route_driven_conditions):
         """Control: the known declaration inputs are found on both sides."""
         conditions = route_entry_conditions()
@@ -4400,8 +5573,9 @@ class TestEveryRouteEntryConditionIsARoute:
         environment or rebound or captured, a compiled pattern (a literal one
         included), any project class build (a dataclass, a plain class, a
         class with a method), a method on a local or a `self` attribute that
-        holds a project object, and a method on what a project function
-        made. No method is followed into a class."""
+        holds a project object otherwise, and a method on what a project
+        function made. A method the class defines, called on a local whose every
+        binding builds that plain class, is followed into the class."""
         import ast
         import sys
 
@@ -4464,10 +5638,10 @@ class TestEveryRouteEntryConditionIsARoute:
         )
         assert unread == [
             "Box", "CAPTURED.get", "CLEAN_RE.match", "PATTERN.match", "Plain", "REBOUND.get",
-            "Reader", "TABLE.get", "made.read", "reader.read",
+            "Reader", "TABLE.get", "made.read",
         ], unread
         followed = {target for _node, target in graph.references(entry, "pkg.m")}
-        assert followed == {("pkg.m", "make")}, followed
+        assert followed == {("pkg.m", "make"), ("pkg.m", "Reader.read")}, followed
         go = graph.defs[("pkg.m", "Holder.go")]
         assert [ast.unparse(call.func) for call in ast.walk(go)
                 if isinstance(call, ast.Call) and graph.unread_call(call, "pkg.m", go)] == ["self.reader.read"]
@@ -4481,7 +5655,9 @@ class TestEveryRouteEntryConditionIsARoute:
         project function made is reported, as is one on a name with no
         binding at all, one on any `self` attribute, and every build of a
         project class; the same forms over standard-library values, a
-        parameter and an import are not."""
+        parameter and an import are not, and neither is a method on a local
+        whose one binding builds the plain class that defines it, which
+        `instance_target` follows into the class."""
         import ast
         import sys
 
@@ -4612,13 +5788,13 @@ class TestEveryRouteEntryConditionIsARoute:
             **{name: ["Reader"] for name in builds},
             "unbound": ["nowhere.read"],
             **{f"{holder}.go": ["self.reader.read"] for holder in ("WithHolder", "PairHolder", "AnnotatedHolder")},
-            "controls": ["Reader", "reader.read"],
+            "controls": ["Reader"],
         }, reported
         followed = {
-            target for (owner, _qualified), node in graph.defs.items() if owner == "pkg.forms"
-            for _node, target in graph.references(node, "pkg.forms")
+            qualified for (owner, qualified), node in graph.defs.items() if owner == "pkg.forms"
+            and ("pkg.forms", "Reader.read") in {target for _node, target in graph.references(node, "pkg.forms")}
         }
-        assert ("pkg.forms", "Reader.read") not in followed, followed
+        assert followed == {"controls"}, followed
 
     def test_a_module_object_is_data_only_when_every_binding_is(self, tmp_path, monkeypatch):
         """Control for `_is_data`: a module-level name is a data object only
