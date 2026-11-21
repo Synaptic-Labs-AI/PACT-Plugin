@@ -475,8 +475,13 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     each one whose `.git` file names this repository's common dir. That is
     the main checkout of a `--separate-git-dir` repository: git lists its
     git dir in its place, so a write from one of its linked worktrees finds
-    no other evidence of it. Each is checked again on every write; any other
-    recorded root is dropped. With no common dir (git is absent, or no
+    no other evidence of it. It also carries each one whose `.git` is a
+    directory, not a link, that resolves to the common dir: that directory
+    is the repository's git dir, so the root is its own main checkout, which
+    a write from a folder whose `.git` file names that directory (git's own
+    `git init --separate-git-dir=<checkout>/.git` layout among them) finds
+    no other evidence of either. Each is checked again on every write; any
+    other recorded root is dropped. With no common dir (git is absent, or no
     repository holds the root) there is nothing to check a recorded root
     against, so none is carried and the root is the only one.
 
@@ -531,7 +536,9 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     except (OSError, RuntimeError, ValueError):
         roots = [str(root)]
     if common is not None and isinstance(recorded, list):
-        roots += [r for r in recorded if _names_common_dir(r, common)]
+        # Stored resolved, as every other root is: a checkout recorded
+        # through a linked path is the same checkout, listed once.
+        roots += [str(_resolved(Path(r))) for r in recorded if _names_common_dir(r, common)]
     return list(dict.fromkeys(roots))
 
 
@@ -548,12 +555,17 @@ def _lists_first(records: List[List[str]], root: Any, common: Optional[Path]) ->
 
 def _names_common_dir(checkout: Any, common: Path) -> bool:
     """Whether `checkout`, an absolute path, holds a `.git` file whose
-    `gitdir:` resolves to `common`. Never raises."""
+    `gitdir:` resolves to `common`, or a `.git` directory, not a link, that
+    resolves to `common`: that directory IS the repository's git dir, so
+    the checkout is its main checkout. Never raises."""
     if not isinstance(checkout, str) or not os.path.isabs(checkout):
         return False
     identity = _memory_api().project_identity
+    dot_git = Path(checkout) / ".git"
     try:
-        text = identity.read_git_file(Path(checkout) / ".git")
+        if dot_git.is_dir() and not dot_git.is_symlink():
+            return dot_git.resolve() == Path(common).resolve()
+        text = identity.read_git_file(dot_git)
         target = identity.gitfile_target(text) if text is not None else None
         if target is None:
             return False

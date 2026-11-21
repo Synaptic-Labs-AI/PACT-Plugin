@@ -2356,6 +2356,122 @@ def test_a_recorded_root_is_dropped_once_its_git_names_another_repository(tmp_pa
     assert backlog.checkout_roots([recorded, str(wt)]) == [str(wt)]
 
 
+def _shared_git_dir_layout(tmp_path, layout):
+    """(folder, other): a folder whose `.git` file names the `.git`
+    directory of the checkout `other`, hand-written ("forged") or made by
+    git's own `git init --separate-git-dir=<other>/.git` ("twin")."""
+    other = (tmp_path / "other").resolve()
+    folder = (tmp_path / "folder").resolve()
+    if layout == "forged":
+        _repo(other)
+        folder.mkdir()
+        (folder / ".git").write_text(f"gitdir: {other / '.git'}\n")
+    else:
+        other.mkdir()
+        subprocess.run(["git", "init", "-q", f"--separate-git-dir={other / '.git'}", str(folder)],
+                       check=True, capture_output=True)
+        run = lambda *a: subprocess.run(["git", "-C", str(folder), *a], check=True, capture_output=True)
+        run("-c", "user.email=t@example.com", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "c")
+    return folder, other
+
+
+@pytest.mark.parametrize("where", ["folder", "subfolder"])
+@pytest.mark.parametrize("store_kind", ["empty", "shared"])
+@pytest.mark.parametrize("layout", ["forged", "twin"])
+def test_a_write_from_a_folder_sharing_a_checkouts_git_dir_keeps_that_checkout(
+    tmp_path, layout, store_kind, where,
+):
+    """A folder whose `.git` file names another checkout's `.git` directory
+    writes the backlog file that checkout's writes use. Once that checkout
+    has written it, a write from the folder (or a folder below it) keeps
+    the checkout among the roots beside the folder, and leaves project_path
+    as the file holds it; the checkout is the repository's own main
+    checkout, whose `.git` is the git dir. With no file yet, the folder is
+    the only root. Nothing is printed.
+
+    Real repos, real git, the CLI."""
+    folder, other = _shared_git_dir_layout(tmp_path, layout)
+    store = tmp_path / "store"
+    store.mkdir()
+    first = None
+    if store_kind == "shared":
+        first = _cli_write(other, store)
+        assert first.returncode == 0, first.stderr
+    start = folder if where == "folder" else folder / "sub"
+    start.mkdir(exist_ok=True)
+    before = {f.name: json.loads(f.read_text(encoding="utf-8")) for f in store.glob("*.json")}
+
+    run = _cli_write(start, store)
+
+    files = {f.name: json.loads(f.read_text(encoding="utf-8")) for f in store.glob("*.json")}
+    assert (run.returncode, run.stderr, len(files)) == (0, "", 1), run.stderr
+    (name, doc), = files.items()
+    if store_kind == "shared":
+        assert (name in before, doc["project_path"], doc["roots"]) == (
+            True, before[name]["project_path"], [str(folder), str(other)])
+    else:
+        assert (doc["project_path"], doc["roots"]) == (str(folder), [str(folder)])
+
+
+@pytest.mark.parametrize("recorded_as", [
+    "the main checkout",
+    "the main checkout through a linked parent",
+    "a checkout whose .git is a link to the git dir",
+    "another repository's main checkout",
+])
+def test_a_recorded_main_checkout_is_carried_only_by_its_own_git_dir(tmp_path, monkeypatch, recorded_as):
+    """From a folder whose `.git` file names another checkout's `.git`
+    directory, a recorded root is carried when its `.git` is a directory,
+    not a link, that resolves to the repository's git dir, whatever path it
+    was recorded by, and is stored resolved; a `.git` that is a link to that
+    directory, and another repository's own `.git` directory, are dropped.
+
+    Real repos, real git."""
+    import os
+
+    folder, other = _shared_git_dir_layout(tmp_path, "forged")
+    _root_is(monkeypatch, folder)
+    if recorded_as == "the main checkout":
+        recorded, kept = str(other), True
+    elif recorded_as == "the main checkout through a linked parent":
+        os.symlink(tmp_path, tmp_path / "via")
+        recorded, kept = str(tmp_path / "via" / "other"), True
+    elif recorded_as == "a checkout whose .git is a link to the git dir":
+        linked = tmp_path / "linked"
+        linked.mkdir()
+        os.symlink(other / ".git", linked / ".git")
+        recorded, kept = str(linked), False
+    else:
+        recorded, kept = str(_repo(tmp_path / "stranger").resolve()), False
+
+    roots = backlog.checkout_roots([recorded])
+
+    assert roots == ([str(folder), str(other)] if kept else [str(folder)]), roots
+
+
+@pytest.mark.parametrize("rule", ["a .git directory that is the git dir", "a .git file naming the git dir"])
+def test_a_checkout_recorded_through_a_link_and_directly_is_one_root(tmp_path, monkeypatch, rule):
+    """A carried root is stored resolved, under either carry rule, so a
+    checkout the file holds both through a linked path and directly is one
+    root, its resolved path, and the linked path is not kept.
+
+    Real repos, real git."""
+    import os
+
+    if rule == "a .git directory that is the git dir":
+        start, checkout = _shared_git_dir_layout(tmp_path, "forged")
+    else:
+        checkout, _store, start = _separate_git_dir_repo(tmp_path)
+    os.symlink(tmp_path, tmp_path / "via")
+    alias = str(tmp_path / "via" / checkout.name)
+    _root_is(monkeypatch, start)
+    assert str(checkout) in backlog.checkout_roots([str(checkout)]), "control: the checkout is carried"
+
+    roots = backlog.checkout_roots([alias, str(checkout)])
+
+    assert (roots.count(str(checkout)), alias in roots, len(roots) == len(set(roots))) == (1, False, True), roots
+
+
 def test_a_folder_naming_another_repositorys_git_dir_claims_none_of_its_worktrees(tmp_path, monkeypatch):
     """A folder whose `.git` file names another repository's `.git`
     directory gets that repository's worktree listing from git, with that
