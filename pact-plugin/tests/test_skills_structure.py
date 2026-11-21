@@ -738,6 +738,9 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "templates/environment-model.md",
         "skills/pact-testing-strategies/references/test-pyramid.md",
     )
+    # Drift pin: a surface seeded in SURFACE_FILES without a KNOWN_MEMBERS
+    # entry would pass every arm while getting no known-member control.
+    assert set(SURFACE_FILES) == set(KNOWN_MEMBERS)
     PROHIBITED_FORMS = (
         "memory_saved",
         "memorySaved",
