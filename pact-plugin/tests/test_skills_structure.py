@@ -626,12 +626,13 @@ class TestNoFirstActionFossilInSkillBodies:
 def _separator_entity(match):
     """Bounded numeric-entity decoder for the memory_saved pin: only
     separator-class characters (_ - space) are resolved; any other
-    reference is returned unchanged."""
+    reference — malformed, over-long (past CPython's int digit limit),
+    or out-of-range — is returned unchanged."""
     code = match.group(1)
-    n = int(code[1:], 16) if code[0] in "xX" else int(code, 10)
     try:
+        n = int(code[1:], 16) if code[0] in "xX" else int(code, 10)
         char = chr(n)
-    except ValueError:  # out-of-range reference: leave it literal
+    except ValueError:  # conversion or range failure: leave it literal
         return match.group(0)
     return char if char in "_- " else match.group(0)
 
@@ -796,10 +797,54 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         assert "pact-plugin/skills/pact-agent-teams/SKILL.md" in message
         assert "pact-plugin/agents/pact-orchestrator.md" in message
 
+    def test_pin_survives_over_long_numeric_reference(
+            self, tmp_path, monkeypatch):
+        """A numeric reference past CPython's 4300-digit int limit must fall
+        through to the literal-stays path, not kill the pin with a
+        traceback raised from inside re.sub."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "commands" / "orchestrate.md").write_text(
+            "memory&#" + "9" * 5000 + ";saved", encoding="utf-8"
+        )
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        # Completing without raising IS the assertion: with the conversion
+        # outside the decoder's try, int() raises ValueError inside re.sub
+        # and this call dies instead of leaving the reference literal.
+        self.test_no_memory_saved_in_any_llm_loaded_surface()
+
+    def test_real_run_names_a_silently_narrowed_population(
+            self, tmp_path, monkeypatch):
+        """If the tracked-file fixture narrows to a strict subset (the
+        documented PARTIAL-overlap boundary in tests/fixtures/tracked_files.py),
+        the real-tree run must fail loudly instead of passing green over a
+        narrowed world."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        monkeypatch.setitem(
+            globals(),
+            "_instruction_surface_population",
+            lambda: [plugin / "agents" / "pact-orchestrator.md"],
+        )
+
+        with pytest.raises(AssertionError, match="narrowed"):
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+
     def test_no_memory_saved_in_any_llm_loaded_surface(self):
+        population = _instruction_surface_population()
+        known = PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md"
+        assert known in population, (
+            f"{known.relative_to(PLUGIN_ROOT.parent)} is no longer in the "
+            f"pin's enumerated population ({len(population)} files): the "
+            f"tracked-file fixture can answer a strict subset (PARTIAL "
+            f"overlap, tests/fixtures/tracked_files.py) and this run would "
+            f"go green vacuously over a narrowed world"
+        )
         offenders = []
         undecodable = []
-        for path in _instruction_surface_population():
+        for path in population:
             try:
                 text = path.read_bytes().decode("utf-8")
             except UnicodeDecodeError:
