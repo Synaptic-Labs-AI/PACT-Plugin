@@ -17,10 +17,10 @@ wake/idle delivery-ordering race:
   lead-side (protocols/pact-completion-authority.md + its byte-mirrored
   region in protocols/pact-protocols.md, and agents/pact-orchestrator.md):
     - "Crossed-Wake Idles: Discriminate by Timestamp Direction" — including
-      the behavioral non-goal note that synchronous wake/send detection is
-      dead-by-construction, and the pre-directive idle-straggler
-      discrimination (a tick predating the directive send is a straggler,
-      never a stall signal).
+      the behavioral non-goal for synchronous SEND-SIDE wake/send detection,
+      the bounded RECEIVE-SIDE TeammateIdle grace contract, and the
+      pre-directive idle-straggler discrimination (a tick predating the
+      directive send is a straggler, never a stall signal).
     - "Directive-Reflection Check" — mid-turn directives verified against
       boundary-message deliverables before acting.
   stall-detection (protocols/pact-agent-stall.md + its byte-mirrored
@@ -255,14 +255,13 @@ PHRASE_PINS = [
     (SKILL, "revise it on the same task without waiting to be asked"),
     # --- lead-side completion-authority (+ byte-mirrored SSOT region) ---
     (COMPLETION_AUTHORITY, "exactly ONE redundant confirm"),
-    # The behavioral no-hook non-goal note: PreToolUse fires, but inbox
+    # The behavioral SEND-SIDE non-goal note: PreToolUse fires, but inbox
     # delivery is asynchronous and PostToolUse remains unmeasured, so no
-    # synchronous hook can close the delivery-ordering race.
+    # synchronous hook on the lead's send path can close the race.
     (COMPLETION_AUTHORITY, "SendMessage does fire PreToolUse"),
     (COMPLETION_AUTHORITY, "that hook runs before delivery, so it cannot observe the wake"),
     (COMPLETION_AUTHORITY, "PostToolUse remains unmeasured, not refuted"),
     (COMPLETION_AUTHORITY, "inbox files are written asynchronously on delivery"),
-    (COMPLETION_AUTHORITY, "Synchronous wake/send detection is therefore dead-by-construction"),
     (COMPLETION_AUTHORITY, "in-process and tmux teammateMode"),
     (COMPLETION_AUTHORITY, "boundary-drain: inbox empty"),
     # The evidence bar for escalating an idle to stall diagnosis.
@@ -319,7 +318,6 @@ PHRASE_PINS = [
     (PROTOCOLS_SSOT, "that hook runs before delivery, so it cannot observe the wake"),
     (PROTOCOLS_SSOT, "PostToolUse remains unmeasured, not refuted"),
     (PROTOCOLS_SSOT, "inbox files are written asynchronously on delivery"),
-    (PROTOCOLS_SSOT, "Synchronous wake/send detection is therefore dead-by-construction"),
     (PROTOCOLS_SSOT, "in-process and tmux teammateMode"),
     (PROTOCOLS_SSOT, "boundary-drain: inbox empty"),
     (PROTOCOLS_SSOT, "task-file-mtime plus sustained-silence"),
@@ -371,6 +369,25 @@ PHRASE_PINS = [
 ]
 
 
+GRACE_CONTRACT_PINS = [
+    (SKILL, "synchronous SEND-SIDE wake-detection hook remains prohibited"),
+    (SKILL, "bounded RECEIVE-SIDE TeammateIdle grace gate"),
+    (COMPLETION_AUTHORITY, "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction"),
+    (COMPLETION_AUTHORITY, "Bounded RECEIVE-SIDE exception — TeammateIdle grace"),
+    (COMPLETION_AUTHORITY, "positive valid queued-message evidence"),
+    (COMPLETION_AUTHORITY, "never infers acceptance, sends no message, and writes no task or inbox state"),
+    (COMPLETION_AUTHORITY, "original ten-second budget"),
+    (COMPLETION_AUTHORITY, "fails open to the existing fallback"),
+    (PROTOCOLS_SSOT, "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction"),
+    (PROTOCOLS_SSOT, "Bounded RECEIVE-SIDE exception — TeammateIdle grace"),
+    (PROTOCOLS_SSOT, "positive valid queued-message evidence"),
+    (PROTOCOLS_SSOT, "never infers acceptance, sends no message, and writes no task or inbox state"),
+    (PROTOCOLS_SSOT, "original ten-second budget"),
+    (PROTOCOLS_SSOT, "fails open to the existing fallback"),
+]
+PHRASE_PINS.extend(GRACE_CONTRACT_PINS)
+
+
 @pytest.mark.parametrize(
     "doc_path, phrase",
     PHRASE_PINS,
@@ -390,6 +407,63 @@ def test_rule_phrase_present(doc_path: Path, phrase: str):
         f"wake-ordering rule this phrase carries is missing from a "
         f"runtime-loaded surface."
     )
+
+
+@pytest.mark.parametrize(
+    "doc_path, phrase",
+    GRACE_CONTRACT_PINS,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in GRACE_CONTRACT_PINS],
+)
+def test_grace_contract_pin_fails_when_phrase_is_removed(
+    doc_path: Path, phrase: str, monkeypatch
+):
+    """Removing each new or narrowed contract phrase must redden its pin."""
+    original = _normalized(doc_path)
+    needle = _phrase(phrase)
+    assert needle in original
+    monkeypatch.setitem(
+        globals(), "_normalized", lambda _path: original.replace(needle, "", 1)
+    )
+    with pytest.raises(AssertionError, match="rule phrase"):
+        test_rule_phrase_present(doc_path, phrase)
+
+
+RETIRED_ABSOLUTE_WAKE_PINS = [
+    (COMPLETION_AUTHORITY, "Non-goal — no synchronous hook-based detection"),
+    (PROTOCOLS_SSOT, "Non-goal — no synchronous hook-based detection"),
+    (SKILL, "a synchronous wake-detection hook cannot exist"),
+]
+
+
+@pytest.mark.parametrize(
+    "doc_path, retired",
+    RETIRED_ABSOLUTE_WAKE_PINS,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in RETIRED_ABSOLUTE_WAKE_PINS],
+)
+def test_retired_absolute_wake_prohibition_absent(doc_path: Path, retired: str):
+    """The retired wording prohibits the permitted receive-side gate too."""
+    assert _phrase(retired) not in _normalized(doc_path), (
+        f"{doc_path.name}: retired absolute wake prohibition {retired!r} "
+        "reappeared; prohibit only synchronous SEND-SIDE detection."
+    )
+
+
+@pytest.mark.parametrize(
+    "doc_path, retired",
+    RETIRED_ABSOLUTE_WAKE_PINS,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in RETIRED_ABSOLUTE_WAKE_PINS],
+)
+def test_retired_absolute_wake_absence_fails_when_injected(
+    doc_path: Path, retired: str, monkeypatch
+):
+    """Injecting each retired absolute phrase must redden its absence pin."""
+    original = _normalized(doc_path)
+    assert _phrase(retired) not in original
+    monkeypatch.setitem(
+        globals(), "_normalized", lambda _path: original + " " + _phrase(retired)
+    )
+    with pytest.raises(AssertionError, match="retired absolute wake prohibition"):
+        test_retired_absolute_wake_prohibition_absent(doc_path, retired)
 
 
 # ---------------------------------------------------------------------------

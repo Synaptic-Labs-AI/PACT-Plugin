@@ -2254,18 +2254,24 @@ have acted on it yet — apply the redundant-confirm procedure:
    AND no inbound `SendMessage` from the teammate across multiple idle cycles well
    past your directive send.
 
-**Non-goal — no synchronous hook-based detection.** Do not attempt to close this race with a
-synchronous hook, and reject future proposals to reintroduce one: `SendMessage`
+**Non-goal — no synchronous SEND-SIDE wake detection.** Do not attempt to close this race with a
+synchronous hook on the lead's send path, and reject future proposals to reintroduce one: `SendMessage`
 does fire `PreToolUse`, but that hook runs before delivery, so it cannot observe
 the wake; `PostToolUse` remains unmeasured, not refuted; inbox files are written
-asynchronously on delivery; TeammateIdle notifications fire at turn-end regardless of what has just
-landed in the recipient's inbox. Synchronous wake/send detection is therefore
-dead-by-construction and historically produced near-100% false positives. The
-mitigation layer is: redundant-by-design wake handling on both sides (this rule
+asynchronously on delivery; unblocked TeammateIdle notifications fire at turn-end regardless of what has just
+landed in the recipient's inbox. Synchronous SEND-SIDE wake/send detection is therefore
+dead-by-construction and historically produced near-100% false positives.
+
+**Bounded RECEIVE-SIDE exception — TeammateIdle grace.** The `TeammateIdle` hook may hold a fresh
+`awaiting_lead_completion` idle only on positive valid queued-message evidence within the original ten-second budget.
+The gate never infers acceptance, sends no message, and writes no task or inbox state. It preserves that budget
+when the task becomes `completed` and fails open to the existing fallback after timeout or on missing or unreadable inbox input.
+
+The receive-side gate supplements, and does not replace, the existing mitigation layer: redundant-by-design wake handling on both sides (this rule
 plus the teammate-side disk-first re-read in
 [pact-agent-teams §On Wake](../skills/pact-agent-teams/SKILL.md#on-wake-disk-first-re-read-seam-agnostic))
 plus the duration-keyed `missed_wake_scan` hook that re-surfaces stale
-`awaiting_lead_completion` waits at your next user prompt or session start. The same construction bars hook-based content comparison for the deferred audit: the delivered message drains from disk on recipient consumption and survives only in the recipient's conversation context, so no hook running at a later turn boundary can read the message bytes — the deferred disk-vs-message audit is instruction-layer by necessity; reject future proposals to mechanize it. The
+`awaiting_lead_completion` waits at your next user prompt or session start. Deferred-audit content comparison remains a non-goal: the delivered message drains from disk on recipient consumption and survives only in the recipient's conversation context, so no hook running at a later turn boundary can read the message bytes — the deferred disk-vs-message audit is instruction-layer by necessity; reject future proposals to mechanize it. The
 two-call atomic pairs above are unchanged by this rule — TaskUpdate-first ordering
 stays load-bearing.
 
