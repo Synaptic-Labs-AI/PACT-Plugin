@@ -623,17 +623,39 @@ class TestNoFirstActionFossilInSkillBodies:
         )
 
 
+# Named references of the separator class, exhaustively: hyphen/dash/minus
+# canonically denote non-ASCII dashes but are decoded to ASCII "-" so the
+# matcher sees them; NBSP keeps its HTML legacy uppercase alias. Any name
+# outside this map stays literal, the same contract as numeric references.
+_NAMED_SEPARATORS = {
+    "lowbar": "_",
+    "underbar": "_",
+    "under": "_",
+    "hyphen": "-",
+    "dash": "-",
+    "minus": "-",
+    "nbsp": " ",
+    "NBSP": " ",
+}
+
+
 def _separator_entity(match):
-    """Bounded numeric-entity decoder for the memory_saved pin: only
-    separator-class characters (_ - space) are resolved; any other
-    reference — malformed, over-long (past CPython's int digit limit),
-    or out-of-range — is returned unchanged."""
-    code = match.group(1)
-    try:
-        n = int(code[1:], 16) if code[0] in "xX" else int(code, 10)
-        char = chr(n)
-    except ValueError:  # conversion or range failure: leave it literal
-        return match.group(0)
+    """Bounded entity decoder for the memory_saved pin: numeric references
+    denoting a separator-class character (_ - space) and the named
+    separator references in _NAMED_SEPARATORS are resolved; any other
+    reference — unlisted name, malformed, over-long (past CPython's int
+    digit limit), or out-of-range — is returned unchanged."""
+    token = match.group(1)
+    if token.startswith("#"):
+        code = token[1:]
+        try:
+            char = chr(int(code[1:], 16) if code[0] in "xX" else int(code, 10))
+        except ValueError:  # conversion or range failure: leave it literal
+            return match.group(0)
+    else:
+        char = _NAMED_SEPARATORS.get(token)
+        if char is None:
+            return match.group(0)
     return char if char in "_- " else match.group(0)
 
 
@@ -712,6 +734,9 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "memory&#95;saved",
         "memory&#x2d;saved",
         "memory&#32;saved",
+        "memory&lowbar;saved",
+        "memory&hyphen;saved",
+        "memory&NBSP;saved",
     )
 
     @staticmethod
@@ -851,13 +876,14 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
                 undecodable.append(path)
                 continue
             # Bounded decode: numeric character references are resolved only
-            # when they denote a separator-class char (_ - space); every
+            # when they denote a separator-class char (_ - space), and named
+            # references only when they are in _NAMED_SEPARATORS; every
             # other entity stays literal. Arbitrary-markup evasion shapes
             # (e.g. memory<br>saved) are ruled out-of-contract, so no
             # general HTML decode happens here.
             normalized = " ".join(
                 re.sub(
-                    r"&#([xX][0-9a-fA-F]+|\d+);",
+                    r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);",
                     _separator_entity,
                     re.sub(r"\\([_*-])", r"\1", text),
                 )
