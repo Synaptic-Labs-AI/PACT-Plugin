@@ -2847,6 +2847,11 @@ def route_inputs() -> dict:
     reported, so its origin is a named condition. A condition names a
     callee, not a site: a further call of an already named callee is
     absorbed by that name.
+
+    ADVERSARIAL-ONLY, and so not reported: a context variable read through
+    `contextvars.copy_context()` (`.get(...)` or a subscript) in the module
+    that defines it. Honest code reads one with its own `.get()`, which is
+    reported (`test_a_context_read_through_copy_context_is_listed_not_reported`).
     """
     import ast
 
@@ -3352,6 +3357,42 @@ def test_a_named_runner_is_read_through_its_returns(tmp_path, monkeypatch, body,
     )
     assert graph.target(call, "pkg.m") == ("shared.git_helpers", "answered_once")  # control: the rule's target
     assert graph._foreign_value(call, "pkg.m", reader, frozenset()) is typed
+
+
+def test_a_context_read_through_copy_context_is_listed_not_reported(tmp_path, monkeypatch):
+    """Pin for `route_inputs`' ADVERSARIAL-ONLY list: a context variable read
+    through `contextvars.copy_context()`, by `.get(...)` or a subscript, in
+    the module that defines it, is not reported, and the list names it. The
+    honest read, the variable's own `.get()`, is reported (control). If the
+    census comes to report the listed forms, or the list drops them, this
+    fails."""
+    import ast
+    import sys
+
+    doc = route_inputs.__doc__
+    assert "ADVERSARIAL-ONLY" in doc
+    listed = " ".join(doc[doc.index("ADVERSARIAL-ONLY"):].split())
+    assert listed.startswith("ADVERSARIAL-ONLY, and so not reported: a context variable read through "
+                             "`contextvars.copy_context()` (`.get(...)` or a subscript) in the module that defines it.")
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "m.py").write_text(
+        "import contextvars\n\nVAR = contextvars.ContextVar('v', default=None)\n\n"
+        "def honest():\n    return VAR.get()\n\n"
+        "def by_get():\n    return contextvars.copy_context().get(VAR)\n\n"
+        "def by_subscript():\n    return contextvars.copy_context()[VAR]\n"
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path,))
+    graph = _DetectionGraph()
+    assert graph.load("pkg.m")
+
+    def reported(name):
+        function = graph.defs[("pkg.m", name)]
+        return [ast.unparse(call) for call in ast.walk(function)
+                if isinstance(call, ast.Call) and graph.unread_call(call, "pkg.m", function)]
+
+    assert (reported("honest"), reported("by_get"), reported("by_subscript")) == (["VAR.get()"], [], [])
 
 
 class TestEveryRouteEntryConditionIsARoute:
