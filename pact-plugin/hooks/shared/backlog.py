@@ -2245,8 +2245,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     backlog_dir = Path(args.backlog_dir) if args.backlog_dir else None
     # ONE DETECTION PASS PER COMMAND: the memory skill's guard, the root,
-    # the roots and a refusal's root check read the same git answers, each
-    # asked once, so a refusal names the cause the guard decided on.
+    # the roots, a refusal's root check and a memory store the command opens
+    # read the same git answers, each asked once, so a refusal names the
+    # cause the guard decided on.
     with _HeldWarnings() as held, _memory_api().detection_pass():
         try:
             code = _main(args, backlog_dir, held)

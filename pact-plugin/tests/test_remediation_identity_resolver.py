@@ -2209,6 +2209,82 @@ class TestOneConstructionAsksGitEachQuestionOnce:
         PACTMemory(session_id="s", db_path=identity_env / "store.db")
         assert memory_api._DETECTION_COMMON_DIRS.get() is None
 
+    def test_a_construction_takes_its_answers_from_detection_pass(self, identity_env, monkeypatch):
+        """A construction detects inside one `detection_pass`, the only setup
+        of the pass memos: the detection reads exactly the memos that pass
+        set, and the instance keeps that pass's own common dirs and listings,
+        not copies, for its first legacy read."""
+        import contextlib
+
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        real_pass = memory_api.detection_pass
+        detect = PACTMemory._detect_project_identity_with_legacy
+        passes, seen = [], []
+
+        @contextlib.contextmanager
+        def recording():
+            with real_pass() as memos:
+                passes.append(memos)
+                yield memos
+
+        def watching():
+            seen.append(tuple(id(var.get()) for var in (
+                memory_api._DETECTION_COMMON_DIRS, memory_api.project_identity.DETECTION_GIT_DIRS,
+                memory_api._DETECTION_ANSWERS, memory_api._DETECTION_LISTINGS,
+            )))
+            return detect()
+
+        monkeypatch.setattr(memory_api, "detection_pass", recording)
+        monkeypatch.setattr(PACTMemory, "_detect_project_identity_with_legacy", staticmethod(watching))
+        memory = PACTMemory(session_id="s", db_path=identity_env / "store.db")
+
+        memos = passes[0] if len(passes) == 1 else {}
+        names = ("common_dirs", "git_dirs", "answers", "listings")
+        assert (len(passes), seen) == (1, [tuple(id(memos.get(name)) for name in names)]), (passes, seen)
+        assert (memory._detection_common_dirs is memos["common_dirs"], memory._detection_listings is memos["listings"]) \
+            == (True, True)
+
+    def test_a_construction_inside_a_pass_joins_it(self, identity_env, monkeypatch):
+        """A construction inside a caller's pass (a backlog command) joins
+        it: no git command runs twice across the caller's detection, the
+        construction and its first legacy read, and the caller's pass keeps
+        every answer it held, though that read takes the answers it reuses.
+        A linked worktree declared by CLAUDE_PROJECT_DIR, so the pass holds
+        a common dir and a worktree listing."""
+        import collections
+        import subprocess
+
+        _fresh_scope_state()
+        main = make_repo(identity_env / "proj", remote=REMOTE)
+        worktree = make_worktree(main, identity_env / "wt")
+        monkeypatch.chdir(identity_env)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(worktree))
+        store = identity_env / "store.db"
+        _seed(store, "proj")
+        calls = []
+        real = subprocess.run
+
+        def counting(argv, *args, **kwargs):
+            if argv and Path(str(argv[0])).name == "git":
+                calls.append((tuple(map(str, argv)), str(kwargs.get("cwd") or Path.cwd())))
+            return real(argv, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", counting)
+        with memory_api.detection_pass() as outer:
+            PACTMemory._detect_project_identity_with_legacy()
+            held = {name: dict(memo) for name, memo in outer.items()}
+            memory = PACTMemory(session_id="s", db_path=store)
+            memory._read_project_scopes()
+            kept = {name: dict(memo) for name, memo in outer.items()}
+
+        repeats = {call: n for call, n in collections.Counter(calls).items() if n > 1}
+        lost = {name: sorted(set(held[name]) - set(kept[name])) for name in held}
+        assert memory._legacy_scope_state is not None  # control: the gate ran
+        assert (held["common_dirs"] != {}, held["listings"] != {}) == (True, True), held  # control: answers held
+        assert (repeats, lost) == ({}, {name: [] for name in held}), calls
+
 
 class TestTheGateProseMatchesTheCode:
     """Docstrings and help text state the current admission and rekey rules.

@@ -1606,18 +1606,19 @@ def _with_store_scope(method):
 
 
 # ONE DETECTION PASS'S git common-dir answers, keyed by the resolved start.
-# Set only while a constructor detects its identity (a fresh dict per
-# construction), and handed to that instance's FIRST legacy read, which asks
-# the same question about the same directory. Nothing survives into another
-# construction. A ContextVar, so concurrent constructions never share one.
+# Set only by `detection_pass` (a fresh dict per pass: one backlog command,
+# or one `PACTMemory` construction outside any pass), and handed by a
+# construction to its FIRST legacy read, which asks the same question about
+# the same directory. Nothing survives the pass. A ContextVar, so concurrent
+# passes never share one.
 _DETECTION_COMMON_DIRS: "contextvars.ContextVar[Optional[Dict[str, Optional[Path]]]]" = (
     contextvars.ContextVar("_DETECTION_COMMON_DIRS", default=None)
 )
 
 # THE PASS'S OTHER GIT ANSWERS (`rev-parse` questions and worktree listings),
-# keyed by the question and the resolved directory it is asked in. Set beside
-# `_DETECTION_COMMON_DIRS` as a fresh dict for each construction's detection
-# pass and reset when it ends; unlike that memo it is not handed to the first
+# keyed by the question and the resolved directory it is asked in, a failed
+# answer included. Set by `detection_pass` beside `_DETECTION_COMMON_DIRS` and
+# reset when the pass ends; unlike that memo it is not handed to the first
 # legacy read. A forged worktree pointer is checked twice in one pass, by the
 # root finder and by the rung's guard, and without this each check lists the
 # worktrees and asks the toplevel again.
@@ -1628,10 +1629,9 @@ _DETECTION_ANSWERS: "contextvars.ContextVar[Optional[dict]]" = contextvars.Conte
 
 # THE PASS'S WORKTREE LISTINGS, keyed by the `--git-dir` argument exactly as
 # git was given it, each the records `_worktree_records` read. Only a listing
-# git gave is kept. Set beside `_DETECTION_ANSWERS` as a fresh dict for each
-# construction's detection pass and handed to that instance's FIRST legacy
-# read, whose gate asks for the same listing of the same common dir; every
-# later read asks git afresh.
+# git gave is kept. Set by `detection_pass` beside `_DETECTION_ANSWERS`, and
+# handed by a construction to its FIRST legacy read, whose gate asks for the
+# same listing of the same common dir; every later read asks git afresh.
 _DETECTION_LISTINGS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "_DETECTION_LISTINGS", default=None
 )
@@ -1639,19 +1639,34 @@ _DETECTION_LISTINGS: "contextvars.ContextVar[Optional[dict]]" = contextvars.Cont
 
 @contextmanager
 def detection_pass():
-    """One detection pass for a caller outside a `PACTMemory` construction:
-    inside it every git question (`--git-common-dir`, `--git-dir`, the other
-    `rev-parse` answers, worktree listings) is asked once and its answer is
-    reused, so every check in the pass reads the same answers. Each pass
-    starts empty and ends with the block."""
+    """One detection pass, the only setup of the pass memos: inside it every
+    git question (`--git-common-dir`, `--git-dir`, the other `rev-parse`
+    answers, worktree listings) is asked once and its answer is reused, so
+    every check in the pass reads the same answers. Each pass starts empty
+    and ends with the block. Yields the pass's own memos by name
+    (`common_dirs`, `git_dirs`, `answers`, `listings`), so a caller can
+    keep what the pass filled; a `PACTMemory` construction keeps its common
+    dirs and listings for its first legacy read. A pass opened inside another
+    (a `PACTMemory` construction during a backlog command) joins it: it
+    yields the outer pass's memos, sets nothing and resets nothing, so one
+    command asks each question once and every check in it reads one answer."""
+    if _DETECTION_ANSWERS.get() is not None:
+        yield {
+            "common_dirs": _DETECTION_COMMON_DIRS.get(),
+            "git_dirs": project_identity.DETECTION_GIT_DIRS.get(),
+            "answers": _DETECTION_ANSWERS.get(),
+            "listings": _DETECTION_LISTINGS.get(),
+        }
+        return
+    memos = {"common_dirs": {}, "git_dirs": {}, "answers": {}, "listings": {}}
     tokens = (
-        (_DETECTION_COMMON_DIRS, _DETECTION_COMMON_DIRS.set({})),
-        (project_identity.DETECTION_GIT_DIRS, project_identity.DETECTION_GIT_DIRS.set({})),
-        (_DETECTION_ANSWERS, _DETECTION_ANSWERS.set({})),
-        (_DETECTION_LISTINGS, _DETECTION_LISTINGS.set({})),
+        (_DETECTION_COMMON_DIRS, _DETECTION_COMMON_DIRS.set(memos["common_dirs"])),
+        (project_identity.DETECTION_GIT_DIRS, project_identity.DETECTION_GIT_DIRS.set(memos["git_dirs"])),
+        (_DETECTION_ANSWERS, _DETECTION_ANSWERS.set(memos["answers"])),
+        (_DETECTION_LISTINGS, _DETECTION_LISTINGS.set(memos["listings"])),
     )
     try:
-        yield
+        yield memos
     finally:
         for var, token in reversed(tokens):
             var.reset(token)
@@ -1779,13 +1794,16 @@ def _listed_worktree_records(
     listing that is no record list (`_worktree_records`).
     """
     target = ("--git-dir", _where(git_dir)) if git_dir is not None else ("-C", _where(start))
-    try:
-        return _detection_answer(
-            ("worktree list", target), lambda: _ask_worktree_records(start, git_dir)
-        )
-    except (OSError, RuntimeError, ValueError):
-        # A read that raises gives no listing, as a git that failed does.
-        return None
+
+    def ask():
+        # A read that raises gives no listing, as a git that failed does, and
+        # that answer is the pass's: every later reader sees the same failure.
+        try:
+            return _ask_worktree_records(start, git_dir)
+        except (OSError, RuntimeError, ValueError):
+            return None
+
+    return _detection_answer(("worktree list", target), ask)
 
 
 def _worktree_toplevels(records) -> "Optional[set | str]":
@@ -2638,11 +2656,8 @@ class PACTMemory:
             self._legacy_suppressed = None
             self._legacy_suppressed_name = None
         else:
-            detection_pass = _DETECTION_COMMON_DIRS.set({})
-            git_dir_pass = project_identity.DETECTION_GIT_DIRS.set({})
-            answers_pass = _DETECTION_ANSWERS.set({})
-            listings_pass = _DETECTION_LISTINGS.set({})
-            try:
+            joined = _DETECTION_ANSWERS.get() is not None
+            with detection_pass() as memos:
                 detected = self._detect_project_identity_with_legacy()
                 # THE SUPPRESSION DISCLOSURE ASKS INSIDE THE SAME PASS: its
                 # common-dir question is the one detection just answered for
@@ -2652,13 +2667,12 @@ class PACTMemory:
                     if detected.legacy_basename is None
                     else (None, None)
                 )
-            finally:
-                self._detection_common_dirs = _DETECTION_COMMON_DIRS.get()
-                _DETECTION_COMMON_DIRS.reset(detection_pass)
-                project_identity.DETECTION_GIT_DIRS.reset(git_dir_pass)
-                _DETECTION_ANSWERS.reset(answers_pass)
-                self._detection_listings = _DETECTION_LISTINGS.get()
-                _DETECTION_LISTINGS.reset(listings_pass)
+            # The pass's own memos, not copies: the first legacy read asks
+            # the same questions of the same directories. A joined pass's
+            # memos are the outer caller's, and that read pops what it takes,
+            # so it takes from copies and the caller keeps its answers.
+            self._detection_common_dirs = dict(memos["common_dirs"]) if joined else memos["common_dirs"]
+            self._detection_listings = dict(memos["listings"]) if joined else memos["listings"]
             self._project_id = detected.project_id
             self._project_id_source = detected.source
             # The name the PRE-change resolver produced for this location.
@@ -3110,7 +3124,11 @@ class PACTMemory:
                 override_ignored=None,
                 identity_root=landing,
             )
-        identity = detect_id_for_root(root, common_dir, asked_root=asked_root)
+        # One pass reads a root's identity (override and origin) once.
+        identity = _detection_answer(
+            ("identity", _where(root), str(common_dir), str(asked_root)),
+            lambda: detect_id_for_root(root, common_dir, asked_root=asked_root),
+        )
         PACTMemory._warn_override_ignored(identity)
         if identity.project_id is not None:
             logger.debug(
@@ -4186,6 +4204,9 @@ class PACTMemory:
             return None
         self._refresh_cwd_cache()
         if self._cwd_repo_root is False:
+            # Asked afresh, not from detection's pass: this is the process's
+            # directory at filing time, which can differ from the directory
+            # detection read and can change after construction.
             self._cwd_repo_root = main_repo_root()
         root = self._cwd_repo_root
         if root is None:

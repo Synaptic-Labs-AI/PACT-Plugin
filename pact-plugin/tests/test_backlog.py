@@ -3147,25 +3147,14 @@ def test_both_root_guard_readers_take_the_same_arm_for_every_cause(tmp_path, mon
     ) == (reason, detail, text)
 
 
-@pytest.mark.parametrize("failing", [1, 2, 3, 4])
-def test_one_write_decides_the_root_check_once(tmp_path, monkeypatch, failing):
-    """One backlog write asks git each question once, so every redirect
-    check in it (the memory skill's root guard and root finder, the
-    backlog's root and its refusal) reads the same answers and gives the
-    same cause: a `git worktree list` that fails on its first call refuses the
-    write with the guard's cause, and one that would fail on a later call is
-    never asked again, so the write succeeds and no reader saw a failure.
-
-    Real repos and git; a `git` that fails the given `worktree list` call
-    and logs every command."""
+def _git_failing_listing(tmp_path: Path, monkeypatch, failing: int) -> Path:
+    """Put first on PATH a `git` that logs every command to the returned
+    file and fails its `failing`-th `git worktree list` call (none when 0),
+    then runs the real git."""
     import os
     import shutil
     import stat
 
-    main = _repo(tmp_path / "main").resolve()
-    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
-                   check=True, capture_output=True)
-    wt = (tmp_path / "wt").resolve()
     log, count = tmp_path / "git.log", tmp_path / "list.count"
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -3179,6 +3168,25 @@ def test_one_write_decides_the_root_check_once(tmp_path, monkeypatch, failing):
     )
     (bin_dir / "git").chmod((bin_dir / "git").stat().st_mode | stat.S_IXUSR)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    return log
+
+
+@pytest.mark.parametrize("failing", [1, 2, 3, 4])
+def test_one_write_decides_the_root_check_once(tmp_path, monkeypatch, failing):
+    """One backlog write asks git each question once, so every redirect
+    check in it (the memory skill's root guard and root finder, the
+    backlog's root and its refusal) reads the same answers and gives the
+    same cause: a `git worktree list` that fails on its first call refuses the
+    write with the guard's cause, and one that would fail on a later call is
+    never asked again, so the write succeeds and no reader saw a failure.
+
+    Real repos and git; a `git` that fails the given `worktree list` call
+    and logs every command."""
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    wt = (tmp_path / "wt").resolve()
+    log = _git_failing_listing(tmp_path, monkeypatch, failing)
     _project_dir_is(monkeypatch, wt)
     monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
     memory_api = backlog._memory_api()
@@ -3202,6 +3210,105 @@ def test_one_write_decides_the_root_check_once(tmp_path, monkeypatch, failing):
     repeated = sorted({c for c in commands if commands.count(c) > 1})
     # Each question asked once, several checks read the answers, and they agree.
     assert (len(listings), repeated, len(causes) >= 2, set(causes), code) == (1, [], True, *expected), (
+        causes, commands)
+
+
+@pytest.mark.parametrize("error", [OSError, RuntimeError, ValueError])
+@pytest.mark.parametrize("raising_read", [1, 2, 3, 4])
+def test_one_write_reads_a_raised_listing_once(tmp_path, monkeypatch, raising_read, error):
+    """A worktree listing read that raises is that pass's answer, as a git
+    that failed is: one backlog write from a linked worktree reads the
+    listing once, asks git no command twice, and every redirect check in it
+    gives the same cause. A read that raises on its first call refuses the
+    write with the guard's cause; one that would raise on a later call is
+    never made, so the write succeeds.
+
+    Real repos and git; the raise on the given read is the stand-in, and a
+    `git` that logs every command."""
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    log = _logging_git(tmp_path, monkeypatch)
+    _project_dir_is(monkeypatch, (tmp_path / "wt").resolve())
+    monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+    memory_api = backlog._memory_api()
+    read, check = memory_api._worktree_records, memory_api._worktree_redirect_cause
+    reads, causes = [], []
+
+    def raising_on_one_read(*args):
+        reads.append(args)
+        if len(reads) == raising_read:
+            raise error("the listing read raised")
+        return read(*args)
+
+    def recording(*args, **kwargs):
+        causes.append(check(*args, **kwargs))
+        return causes[-1]
+
+    monkeypatch.setattr(memory_api, "_worktree_records", raising_on_one_read)
+    monkeypatch.setattr(memory_api, "_worktree_redirect_cause", recording)
+    store = tmp_path / "store"
+    store.mkdir()
+
+    code = backlog.main(["--backlog-dir", str(store), "add", "x"])
+
+    commands = log.read_text(encoding="utf-8").splitlines()
+    repeated = sorted({c for c in commands if commands.count(c) > 1})
+    expected = ({memory_api.REDIRECT_UNLISTABLE}, backlog._EXIT_REFUSED) if raising_read == 1 \
+        else ({None}, backlog._EXIT_OK)
+    # One read, no git command asked twice, and every check gives one cause.
+    assert (len(reads), repeated, len(causes) >= 2, set(causes), code) == (1, [], True, *expected), (
+        reads, causes, commands)
+
+
+@pytest.mark.parametrize("layout, failing", [
+    ("main checkout", 0), ("linked worktree", 0), ("linked worktree", 1), ("linked worktree", 2),
+    ("linked worktree", 3), ("linked worktree", 4),
+])
+def test_a_show_that_opens_the_memory_store_asks_git_each_question_once(tmp_path, monkeypatch, layout, failing):
+    """`backlog show` with a live item's memory id opens the memory store
+    inside the command, and the store's detection joins the command's
+    pass: no git command runs twice, a linked worktree is listed once, and
+    every redirect check gives one cause, whichever `git worktree list`
+    call fails; a show reads, so it succeeds either way. The control shows
+    the store was opened inside the command.
+
+    Real repos and git; a `git` that fails the given `worktree list` call
+    and logs every command."""
+    main = _repo(tmp_path / "main").resolve()
+    start = main
+    if layout == "linked worktree":
+        subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                       check=True, capture_output=True)
+        start = (tmp_path / "wt").resolve()
+    _project_dir_is(monkeypatch, start)
+    monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path / "memory"))
+    monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+    memory_api = backlog._memory_api()
+    monkeypatch.setattr(memory_api, "_instance", None)
+    store = tmp_path / "store"
+    store.mkdir()
+    assert backlog.main(["--backlog-dir", str(store), "add", "x", "--memory", "a" * 32]) == backlog._EXIT_OK
+    monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+    log = _git_failing_listing(tmp_path, monkeypatch, failing)
+    check = memory_api._worktree_redirect_cause
+    causes = []
+
+    def recording(*args, **kwargs):
+        causes.append(check(*args, **kwargs))
+        return causes[-1]
+
+    monkeypatch.setattr(memory_api, "_worktree_redirect_cause", recording)
+
+    code = backlog.main(["--backlog-dir", str(store), "show"])
+
+    commands = log.read_text(encoding="utf-8").splitlines()
+    listings = [c for c in commands if " worktree list " in f" {c} "]
+    repeated = sorted({c for c in commands if commands.count(c) > 1})
+    linked = layout == "linked worktree"
+    assert memory_api._instance is not None, "control: show opened the memory store"
+    expected = {memory_api.REDIRECT_UNLISTABLE} if failing == 1 else {None} if linked else set()
+    assert (len(listings), repeated, set(causes), code) == (int(linked), [], expected, backlog._EXIT_OK), (
         causes, commands)
 
 

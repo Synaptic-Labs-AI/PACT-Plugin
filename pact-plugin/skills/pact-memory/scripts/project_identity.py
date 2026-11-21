@@ -1263,11 +1263,12 @@ def _submodule_admin_dir(path: Optional[Path]) -> bool:
 
 
 # ONE DETECTION PASS'S `git rev-parse --git-dir` answers, keyed by the
-# resolved start directory. The resolver sets a fresh dict for the length of
-# one construction's detection (beside its common-dir answers), so the root
+# resolved start directory. `memory_api.detection_pass` sets a fresh dict for
+# the length of one pass (one backlog command, or one construction's
+# detection outside any pass), beside its common-dir answers, so the root
 # finder, the redirect check and the submodule check ask git once per
 # directory. Outside a pass every call runs git. A ContextVar, so concurrent
-# constructions never share one.
+# passes never share one.
 DETECTION_GIT_DIRS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "DETECTION_GIT_DIRS", default=None
 )
