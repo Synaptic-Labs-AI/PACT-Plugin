@@ -1933,7 +1933,7 @@ _EVERY_CLI_COMMAND = (
     ("save, default root", ["save", "--stdin"], {"context": "arm four"}),
     ("search", ["search", "arm"], None),
     ("search --claude-md-root", ["search", "arm", "--claude-md-root", "START"], None),
-    ("search --current-file", ["search", "arm", "--current-file", "START"], None),
+    ("search --current-file", ["search", "arm", "--current-file", "START_FILE"], None),
     ("list", ["list"], None),
     ("get", ["get", "MEMID"], None),
     ("status", ["status"], None),
@@ -2021,11 +2021,14 @@ class TestEachCliCommandAsksGitEachQuestionOnce:
 
         documents = {p: p.read_bytes() for p in identity_env.rglob("CLAUDE.md")}
         assert run(["setup"])[0].returncode == 0
+        # `search --current-file` is given a tracked file of the checkout, as a user passes it.
+        tracked = start / "README"
+        assert tracked.is_file()  # control
         saved, _ = run(["save", "--stdin", "--no-sync"], {"context": "arm one"})
         memory_id = json.loads(saved.stdout)["result"]["memory_id"]
         asked, repeated = {}, {}
         for name, argv, document in _EVERY_CLI_COMMAND:
-            done, questions = run([{"MEMID": memory_id, "START": str(start)}.get(a, a) for a in argv], document)
+            done, questions = run([{"MEMID": memory_id, "START": str(start), "START_FILE": str(tracked)}.get(a, a) for a in argv], document)
             refusal = _REFUSED_ROUTES.get(name)
             if refusal is None:
                 assert done.returncode == 0, (name, done.stderr)

@@ -2622,6 +2622,37 @@ def test_a_logged_question_is_its_directory_and_its_arguments(tmp_path, asked, r
     assert [(named.get(d, d), args) for d, args in _repeated(questions)] == repeated, questions
 
 
+def test_a_logged_question_names_a_missing_directory_by_its_joined_text(tmp_path):
+    """A `-C` target that does not exist cannot be resolved, so the logging
+    `git` names it by joining the text to the directory before it: a
+    relative target to the resolved working directory, an absolute one as
+    given, and a `-C` after it to that joined text. git itself refuses such
+    a command; the log still records it. Control: git refused each one."""
+    import os
+    import shutil
+    import stat
+
+    _repo(tmp_path / "b")
+    log = tmp_path / "git.log"
+    wrapper = tmp_path / "git"
+    wrapper.write_text(_git_wrapper(log, shutil.which("git")), encoding="utf-8")
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    missing = tmp_path / "missing-abs"
+    codes = [
+        subprocess.run([str(wrapper), *prefix, "rev-parse", "--git-dir"], cwd=tmp_path / "b",
+                       env={**os.environ, "PWD": str(tmp_path / "b")}, capture_output=True).returncode
+        for prefix in (["-C", "missing"], ["-C", str(missing)], ["-C", "missing", "-C", "deeper"])
+    ]
+
+    here = os.path.realpath(tmp_path / "b")
+    assert all(code != 0 for code in codes), codes  # control: git refused each one
+    assert _git_questions(log) == [
+        (f"{here}/missing", "rev-parse --git-dir"),
+        (str(missing), "rev-parse --git-dir"),
+        (f"{here}/missing/deeper", "rev-parse --git-dir"),
+    ]
+
+
 @pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
 @pytest.mark.parametrize("layout, commands_with_z, commands_rejecting_z", [
     ("main checkout", 4, 5),
