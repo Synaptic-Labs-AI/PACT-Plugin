@@ -2135,6 +2135,10 @@ def _callee_readers(paths) -> list:
     """(path, tree, reader) for each file at `paths`, each reader told which
     module-level names of the other files may hold a call result, so a name
     imported from one of them is read too."""
+    stems = sorted(Path(path).stem for path in paths)
+    # An import names a module by its last component, which is how `imported`
+    # is looked up; two files of one stem would make that lookup ambiguous.
+    assert len(set(stems)) == len(stems), f"two files share a module stem, so an import cannot name one: {stems}"
     parsed = []
     for path in paths:
         text = Path(path).read_text(encoding="utf-8")
@@ -2147,6 +2151,20 @@ def _callee_readers(paths) -> list:
             if key is None and any(reader.source_may_be(s) for s in sources)
         }
     return [(path, tree, _CalleeReader(tree, code, imported)) for path, tree, code in parsed]
+
+
+def test_the_callee_reader_refuses_two_files_of_one_stem(tmp_path):
+    """Row for `_callee_readers`: two files named `m.py` in different
+    directories would share one entry of the imported-names map, so an
+    import of `m` could not say which it means. The reader refuses the
+    population instead of reading one file's names as the other's."""
+    import pytest
+
+    for folder in ("a", "b"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "m.py").write_text("VALUE = 1\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="share a module stem"):
+        _callee_readers(sorted(tmp_path.rglob("m.py")))
 
 
 def unread_bindings(paths) -> list:

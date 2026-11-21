@@ -2763,7 +2763,7 @@ def test_the_census_root_holds_every_pass_opening():
 
 
 def _pass_entry_problems(trees: dict) -> tuple:
-    """(entries, problems) for the pass-entry ban over `trees` ({file name:
+    """(entries, problems) for the pass-entry ban over `trees` ({file path:
     parsed module}). "The pass" is `detection_pass` or `git_results_pass`
     (`PASS_SETUPS`): a name spelled as either, or as a local alias an
     `import ... as` gives either, and any attribute named either, whatever
@@ -2816,12 +2816,8 @@ def test_the_passes_are_entered_only_as_with_items_the_census_reads():
     opening, so an opening entered any other way cannot escape the census
     root. Control: cli.main's, the store construction's, backlog.main's and
     detection_pass's own entries are found."""
-    import ast
-
-    hooks = PLUGIN_ROOT / "hooks"
-    files = [*sorted(SCRIPTS.glob("*.py")), *sorted(hooks.rglob("*.py"))]
-    trees = {str(path.relative_to(PLUGIN_ROOT)): ast.parse(path.read_text(encoding="utf-8")) for path in files}
-    entries, problems = _pass_entry_problems(trees)
+    files = [*sorted(SCRIPTS.glob("*.py")), *sorted((PLUGIN_ROOT / "hooks").rglob("*.py"))]
+    entries, problems = _pass_entry_problems(_parse_files(files, PLUGIN_ROOT))
     assert problems == []
     assert {entry.rpartition(":")[0] for entry in entries} >= {
         "skills/pact-memory/scripts/cli.py", "skills/pact-memory/scripts/memory_api.py", "hooks/shared/backlog.py",
@@ -3249,9 +3245,38 @@ def test_a_result_passing_function_returns_its_run_result():
     assert (again is first, len(made), errors[0] is made[-1], errors[1] is made[-1]) == (True, 3, True, True)
 
 
+def _parse_files(paths, root) -> dict:
+    """{path relative to `root`: parsed module} for each file at `paths`. A
+    file's path is its identity: `hooks/__init__.py`, `hooks/shared/__init__.py`
+    and the memory scripts' `__init__.py` share a basename, so a map keyed by
+    the basename would keep one and drop the others unread."""
+    import ast
+
+    return {path.relative_to(root).as_posix(): ast.parse(path.read_text(encoding="utf-8")) for path in paths}
+
+
+def test_files_that_share_a_basename_are_each_read(tmp_path):
+    """Row for `_parse_files`: two files named `m.py` in different
+    directories, each holding a runner that is not its question's own
+    command, are both parsed and both reported, so neither hides the other."""
+    for folder in ("a", "b"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "m.py").write_text(
+            "import subprocess\nfrom shared.git_helpers import answered_once\n\n"
+            "def reader(argv):\n"
+            "    return answered_once(argv, lambda: subprocess.run(list(argv), capture_output=True,"
+            " text=False, timeout=5, env=None), text=False, env=None)\n",
+            encoding="utf-8",
+        )
+    trees = _parse_files(sorted(tmp_path.rglob("m.py")), tmp_path)
+    sites, problems, _timeouts, _forms = _one_runner_problems(trees)
+    assert sorted(trees) == ["a/m.py", "b/m.py"] and len(sites) == 2
+    assert [problem.partition(":")[0] for problem in problems] == ["a/m.py", "b/m.py"], problems
+
+
 def _one_runner_problems(trees: dict) -> tuple:
     """(sites, problems, timeouts, forms) for every call of `answered_once`
-    in `trees` ({file name: parsed module}). A call's runner must be
+    in `trees` ({file path: parsed module}). A call's runner must be
     `subprocess.run(<the argv it is keyed by>, capture_output=True,
     text=<its text>, timeout=<a timeout>, env=<its env>)`, read from a
     parameterless lambda or a nested def that returns it; a runner that
@@ -3364,11 +3389,8 @@ def test_each_git_question_has_one_runner():
     value. A runner of any other shape, a second timeout (a `run_git`
     caller's included), an alias of `answered_once` or any use of it but a
     call fails here."""
-    import ast
-
     files = sorted({*SCRIPTS.glob("*.py"), *(PLUGIN_ROOT / "hooks").rglob("*.py")})
-    trees = {path.name: ast.parse(path.read_text(encoding="utf-8")) for path in files}
-    sites, problems, timeouts, forms = _one_runner_problems(trees)
+    sites, problems, timeouts, forms = _one_runner_problems(_parse_files(files, PLUGIN_ROOT))
     assert problems == [] and len(timeouts) == 1, (problems, timeouts)
     assert sites and forms == {"lambda", "nested def"}  # control: both runner forms were read
 

@@ -500,9 +500,8 @@ class TestTheReportTemplatesRenderTheProject:
         # with a census that lost a FILE. The per-file counts are pinned there;
         # the number of files is not, so pin it here.
         assert len(_SLOT_SITES) == 2, sorted(p.name for p in _SLOT_SITES)
-        counts = {path.name: path.read_text(encoding="utf-8").count(_REPORT_SLOT)
-                  for path in _SLOT_SITES}
-        assert counts == {path.name: n for path, n in _SLOT_SITES.items()}
+        counts = {path: path.read_text(encoding="utf-8").count(_REPORT_SLOT) for path in _SLOT_SITES}
+        assert counts == dict(_SLOT_SITES)
 
     def test_no_slot_renders_the_status_without_the_project(self):
         """Control: the count above cannot tell a dropped slot from a slot

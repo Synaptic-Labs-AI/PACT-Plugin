@@ -3725,10 +3725,14 @@ def _answer_passers(tree) -> dict:
 
 
 def _listing_answer_modules() -> dict:
-    """{file name: tree} for the two modules that read or pass a worktree
-    listing: the memory skill's and the backlog's."""
+    """{path relative to the plugin root: tree} for the two modules that read
+    or pass a worktree listing: the memory skill's and the backlog's. Keyed by
+    path, not file name, so two modules of one name could not hide each
+    other."""
+    plugin = Path(__file__).resolve().parent.parent
     return {
-        Path(module.__file__).name: ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        Path(module.__file__).resolve().relative_to(plugin).as_posix():
+            ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
         for module in (memory_api, backlog)
     }
 
@@ -4869,7 +4873,7 @@ class TestARedirectRefusalNamesWhatWasObserved:
         a docstring, names there every answer that is no record list
         (`_listing_sentinels`, read from the readers)."""
         passers, _taking = _walk_answers(_listing_answer_modules())
-        assert ("memory_api.py", "_worktree_records") in passers, sorted(passers)  # control
+        assert ("skills/pact-memory/scripts/memory_api.py", "_worktree_records") in passers, sorted(passers)  # control
         named = [f"`{sentinel}`" for sentinel in sorted(_listing_sentinels())]
         wrong = {
             key: (ast.unparse(function.returns) if function.returns else None, ast.get_docstring(function))
