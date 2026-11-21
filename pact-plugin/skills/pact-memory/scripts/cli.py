@@ -63,6 +63,7 @@ from scripts.memory_api import (
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
     _invalidate_legacy_scope_cache,
+    detection_pass,
     main_repo_root,
     present_store_fault,
     project_candidate_rows,
@@ -1807,8 +1808,12 @@ def main(argv=None):
             f"Unknown command: {escape_for_envelope(str(args.command))}",
         )
 
+    # ONE DETECTION PASS PER COMMAND: the store's construction and the
+    # command's own work (a save's filing check and CLAUDE.md sync among
+    # them) read one set of git answers, each question asked once.
     if args.command in _COMMANDS_WITHOUT_A_STORE:
-        handler(args)
+        with detection_pass():
+            handler(args)
 
     db_path = Path(args.db_path) if args.db_path else None
 
@@ -1912,7 +1917,7 @@ def main(argv=None):
                     f"path, run: setup --db-path '{shown}'",
                 )
 
-            with store_scope(db_path):
+            with store_scope(db_path), detection_pass():
                 handler(args, db_path=db_path)
     except SystemExit:
         raise  # Let _success/_error exits propagate

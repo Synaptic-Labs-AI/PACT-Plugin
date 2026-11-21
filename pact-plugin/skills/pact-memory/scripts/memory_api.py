@@ -1607,17 +1607,18 @@ def _with_store_scope(method):
 
 # ONE DETECTION PASS'S git common-dir answers, keyed by the resolved start.
 # Set only by `detection_pass` (a fresh dict per pass: one backlog command,
-# or one `PACTMemory` construction outside any pass), and handed by a
-# construction to its FIRST legacy read, which asks the same question about
-# the same directory. Nothing survives the pass. A ContextVar, so concurrent
-# passes never share one.
+# one memory CLI command, or one `PACTMemory` construction outside any pass),
+# and handed by a construction to its FIRST legacy read, which asks the same
+# question about the same directory. Nothing survives the pass. A
+# ContextVar, so concurrent passes never share one.
 _DETECTION_COMMON_DIRS: "contextvars.ContextVar[Optional[Dict[str, Optional[Path]]]]" = (
     contextvars.ContextVar("_DETECTION_COMMON_DIRS", default=None)
 )
 
-# THE PASS'S OTHER GIT ANSWERS (`rev-parse` questions and worktree listings),
-# keyed by the question and the resolved directory it is asked in, a failed
-# answer included. Set by `detection_pass` beside `_DETECTION_COMMON_DIRS` and
+# THE PASS'S OTHER GIT ANSWERS (`rev-parse` questions and worktree listings,
+# keyed by the question and the resolved directory it is asked in, and a
+# root's identity read, keyed ('identity', root, common dir, asked root)), a
+# failed answer included. Set by `detection_pass` beside `_DETECTION_COMMON_DIRS` and
 # reset when the pass ends; unlike that memo it is not handed to the first
 # legacy read. A forged worktree pointer is checked twice in one pass, by the
 # root finder and by the rung's guard, and without this each check lists the
@@ -1631,7 +1632,9 @@ _DETECTION_ANSWERS: "contextvars.ContextVar[Optional[dict]]" = contextvars.Conte
 # git was given it, each the records `_worktree_records` read. Only a listing
 # git gave is kept. Set by `detection_pass` beside `_DETECTION_ANSWERS`, and
 # handed by a construction to its FIRST legacy read, whose gate asks for the
-# same listing of the same common dir; every later read asks git afresh.
+# same listing of the same common dir; a later read lists again, answered
+# from an open pass's git results (`git_helpers.PASS_GIT_RESULTS`) when that
+# pass already listed the same common dir, and by git otherwise.
 _DETECTION_LISTINGS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "_DETECTION_LISTINGS", default=None
 )
@@ -1642,14 +1645,20 @@ def detection_pass():
     """One detection pass, the only setup of the pass memos: inside it every
     git question (`--git-common-dir`, `--git-dir`, the other `rev-parse`
     answers, worktree listings) is asked once and its answer is reused, so
-    every check in the pass reads the same answers. Each pass starts empty
-    and ends with the block. Yields the pass's own memos by name
+    every check in the pass reads the same answers. An outermost pass starts
+    empty and ends with the block. Yields the pass's own memos by name
     (`common_dirs`, `git_dirs`, `answers`, `listings`), so a caller can
     keep what the pass filled; a `PACTMemory` construction keeps its common
-    dirs and listings for its first legacy read. A pass opened inside another
-    (a `PACTMemory` construction during a backlog command) joins it: it
-    yields the outer pass's memos, sets nothing and resets nothing, so one
-    command asks each question once and every check in it reads one answer."""
+    dirs and listings for its first legacy read. The pass also opens
+    `git_helpers.git_results_pass`, so readers outside this module (the
+    project-memory root and CLAUDE.md resolvers in `shared.project_scope`)
+    share each git command with the readers here. A pass opened inside
+    another (a `PACTMemory` construction during a backlog command or a memory
+    CLI command) joins it: it yields the outer pass's memos, sets nothing and
+    resets nothing, so one command asks each question once and every check in
+    it reads one answer."""
+    from shared.git_helpers import git_results_pass
+
     if _DETECTION_ANSWERS.get() is not None:
         yield {
             "common_dirs": _DETECTION_COMMON_DIRS.get(),
@@ -1666,7 +1675,8 @@ def detection_pass():
         (_DETECTION_LISTINGS, _DETECTION_LISTINGS.set(memos["listings"])),
     )
     try:
-        yield memos
+        with git_results_pass():
+            yield memos
     finally:
         for var, token in reversed(tokens):
             var.reset(token)
@@ -1734,14 +1744,20 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
     command += ["rev-parse", "--git-common-dir"]
     # Function-level: the shared package is importable once pact_session's
     # sys.path bootstrap has run, which this module's import of it does.
+    from shared.git_helpers import answered_once
     from shared.project_scope import git_env_without_location
 
     try:
-        result = subprocess.run(
+        result = answered_once(
             command,
-            capture_output=True,
+            lambda: subprocess.run(
+                command,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
             text=False,
-            timeout=5,
             env=git_env_without_location(),
         )
         # os.fsdecode (in `one_git_answer`), never subprocess's locale
@@ -1871,12 +1887,18 @@ def _worktree_records(prefix: list) -> "Optional[List[List[str]] | str]":
     (`_plain_records_kept`). None is a failed or timed-out git. A caller
     reads neither string as an empty listing.
     """
+    from shared.git_helpers import answered_once
     from shared.project_scope import git_env_without_location
 
     def ask(extra: list):
-        return subprocess.run(
-            ["git", *prefix, "worktree", "list", "--porcelain", *extra],
-            capture_output=True, text=False, timeout=5,
+        argv = ["git", *prefix, "worktree", "list", "--porcelain", *extra]
+        return answered_once(
+            argv,
+            lambda: subprocess.run(
+                argv, capture_output=True, text=False, timeout=5,
+                env=git_env_without_location(),
+            ),
+            text=False,
             env=git_env_without_location(),
         )
 
@@ -2300,14 +2322,20 @@ def _ask_git_dir_and_toplevel(start: Optional[str]) -> "tuple[Optional[str], Opt
     if start is not None:
         command += ["-C", str(start)]
     command += ["rev-parse", "--absolute-git-dir", "--show-toplevel"]
+    from shared.git_helpers import answered_once
     from shared.project_scope import git_env_without_location
 
     try:
-        result = subprocess.run(
+        result = answered_once(
             command,
-            capture_output=True,
+            lambda: subprocess.run(
+                command,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
             text=False,
-            timeout=5,
             env=git_env_without_location(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
@@ -2371,14 +2399,20 @@ def _ask_rev_parse(start: Optional[str], args: tuple) -> Optional[str]:
     if start is not None:
         command += ["-C", str(start)]
     command += ["rev-parse", *args]
+    from shared.git_helpers import answered_once
     from shared.project_scope import git_env_without_location
 
     try:
-        result = subprocess.run(
+        result = answered_once(
             command,
-            capture_output=True,
+            lambda: subprocess.run(
+                command,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
             text=False,
-            timeout=5,
             env=git_env_without_location(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
@@ -3760,8 +3794,10 @@ class PACTMemory:
                         # rung recorded one, so the listing and the exemption
                         # describe the repository the id came from. Otherwise
                         # the detection pass's answer for the same directory
-                        # is taken ONCE, by the first read, and every later
-                        # read asks git afresh.
+                        # is taken ONCE, by the first read; a later read asks
+                        # `main_repo_common_dir`, answered from an open pass
+                        # when it already asked about that directory, and by
+                        # git otherwise.
                         passed = getattr(self, "_detection_common_dirs", None) or {}
                         key = os.path.realpath(str(repo_root))
                         gate_common = (
@@ -3777,7 +3813,9 @@ class PACTMemory:
                     # delivered `.git` can claim another project's checkout.
                     # The detection pass's listing of the same common dir,
                     # spelled as git was given it, is taken ONCE, by the first
-                    # read; every later read lists afresh.
+                    # read; a later read lists again, answered from an open
+                    # pass's git results when it already listed that common
+                    # dir, and by git otherwise.
                     try:
                         listings = getattr(self, "_detection_listings", None) or {}
                         gate_roots.extend(
@@ -4204,9 +4242,11 @@ class PACTMemory:
             return None
         self._refresh_cwd_cache()
         if self._cwd_repo_root is False:
-            # Asked afresh, not from detection's pass: this is the process's
-            # directory at filing time, which can differ from the directory
-            # detection read and can change after construction.
+            # The process's directory at filing time: inside a command's
+            # detection pass it is answered from the pass when the pass already
+            # asked about that same resolved directory, and asked afresh
+            # otherwise, because the pass's answers are keyed by path and one
+            # directory's answer cannot serve another.
             self._cwd_repo_root = main_repo_root()
         root = self._cwd_repo_root
         if root is None:

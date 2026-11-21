@@ -1059,24 +1059,31 @@ def read_origin(git_dir: Path) -> OriginRead:
     `detect_id_for_root` therefore gates on `common_dir` rather than using
     this call to discover repo-ness.
     """
+    from shared.git_helpers import answered_once
     from shared.project_scope import git_env_without_location
 
+    argv = [
+        "git", "--git-dir", str(git_dir), "config", "--local", "--includes",
+        "--show-origin", "-z", "--get-all", "remote.origin.url",
+    ]
     try:
-        result = subprocess.run(
-            [
-                "git", "--git-dir", str(git_dir), "config", "--local", "--includes",
-                "--show-origin", "-z", "--get-all", "remote.origin.url",
-            ],
-            capture_output=True,
+        result = answered_once(
+            argv,
+            lambda: subprocess.run(
+                argv,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                # Inline, so the resolver git-env guard can check the shape: a
+                # pure key filter over the location-free environment.
+                env={
+                    name: setting
+                    for name, setting in git_env_without_location().items()
+                    if name != "GIT_CONFIG"
+                },
+            ),
             text=False,
-            timeout=5,
-            # Inline, so the resolver git-env guard can check the shape: a
-            # pure key filter over the location-free environment.
-            env={
-                key: value
-                for key, value in git_env_without_location().items()
-                if key != "GIT_CONFIG"
-            },
+            env={name: setting for name, setting in git_env_without_location().items() if name != "GIT_CONFIG"},
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return OriginRead(ORIGIN_UNAVAILABLE, None)
@@ -1264,11 +1271,11 @@ def _submodule_admin_dir(path: Optional[Path]) -> bool:
 
 # ONE DETECTION PASS'S `git rev-parse --git-dir` answers, keyed by the
 # resolved start directory. `memory_api.detection_pass` sets a fresh dict for
-# the length of one pass (one backlog command, or one construction's
-# detection outside any pass), beside its common-dir answers, so the root
-# finder, the redirect check and the submodule check ask git once per
-# directory. Outside a pass every call runs git. A ContextVar, so concurrent
-# passes never share one.
+# the length of one pass (one backlog command, one memory CLI command, or one
+# construction's detection outside any pass), beside its common-dir answers,
+# so the root finder, the redirect check and the submodule check ask git once
+# per directory. Outside a pass every call runs git. A ContextVar, so
+# concurrent passes never share one.
 DETECTION_GIT_DIRS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "DETECTION_GIT_DIRS", default=None
 )
@@ -1345,6 +1352,7 @@ def git_dir_answer(start) -> Optional[str]:
             key = None
         if key is not None and key in memo:
             return memo[key]
+    from shared.git_helpers import answered_once
     from shared.project_scope import git_env_without_location
 
     command = ["git"]
@@ -1352,11 +1360,16 @@ def git_dir_answer(start) -> Optional[str]:
         command += ["-C", str(start)]
     command += ["rev-parse", "--git-dir"]
     try:
-        result = subprocess.run(
+        result = answered_once(
             command,
-            capture_output=True,
+            lambda: subprocess.run(
+                command,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
             text=False,
-            timeout=5,
             env=git_env_without_location(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
@@ -1517,13 +1530,20 @@ def _admin_dir_refusal(admin_dir: Path, asked_root: Path) -> Optional[str]:
     so treating it as innocent bound another repository's id.
     """
     try:
+        from shared.git_helpers import answered_once
         from shared.project_scope import git_env_without_location
 
-        result = subprocess.run(
-            ["git", "--git-dir", str(admin_dir), "config", "--get", "core.worktree"],
-            capture_output=True,
+        argv = ["git", "--git-dir", str(admin_dir), "config", "--get", "core.worktree"]
+        result = answered_once(
+            argv,
+            lambda: subprocess.run(
+                argv,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
             text=False,
-            timeout=5,
             env=git_env_without_location(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):

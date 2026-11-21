@@ -1920,3 +1920,101 @@ class TestADeclineCausePrintsOneRemedyOnEveryVerb:
         assert prefix["message"].split("still resolves. ", 1)[1] == message.split(
             "Nothing was written. ", 1
         )[1], (prefix, message)
+
+
+# Every memory CLI command, with the arguments it needs; MEMID is the id of
+# the record the arm saves first, and START the checkout it runs in. A save
+# and a sync name START as their CLAUDE.md root: a CLI the suite starts
+# refuses an ambient sync, and a declared root keeps the sync, and the git
+# questions it asks, inside the test's checkout.
+_EVERY_CLI_COMMAND = (
+    ("save --no-sync", ["save", "--stdin", "--no-sync"], {"context": "arm two"}),
+    ("save", ["save", "--stdin", "--claude-md-root", "START"], {"context": "arm three"}),
+    ("search", ["search", "arm"], None),
+    ("list", ["list"], None),
+    ("get", ["get", "MEMID"], None),
+    ("status", ["status"], None),
+    ("update", ["update", "MEMID", "--stdin"], {"context": "arm changed"}),
+    ("sync", ["sync", "--claude-md-root", "START"], None),
+    ("project-file", ["project-file"], None),
+    ("project-id show", ["project-id", "show"], None),
+    ("project-id rekey --dry-run", ["project-id", "rekey", "--from", "a/b", "--to", "c/d", "--dry-run"], None),
+    ("delete", ["delete", "MEMID"], None),
+)
+
+
+class TestEachCliCommandAsksGitEachQuestionOnce:
+    """Each memory CLI command runs its store's construction and its own work
+    (a save's filing check and CLAUDE.md sync among them) in one detection
+    pass, so it asks git each question once: no two git commands of one
+    command run in the same resolved directory with the same arguments.
+    Catches a command whose work after construction asks git again, as a
+    save did with its filing check and its sync.
+
+    Real repositories and git, the CLI as its own process with its own HOME
+    and Claude config directory, and a `git` first on PATH that logs each
+    command with the directory it ran in."""
+
+    @pytest.mark.parametrize("layout", ["main checkout", "linked worktree"])
+    def test_no_command_repeats_a_git_question(self, identity_env, layout):
+        import shutil
+        import subprocess
+        import sys
+
+        from fixtures.identity_git import make_worktree
+
+        main = make_repo(identity_env / "main", remote="https://example.invalid/o/r.git").resolve()
+        start = main if layout == "main checkout" else make_worktree(main, identity_env / "wt").resolve()
+        home = identity_env / "home"
+        (home / ".claude").mkdir(parents=True)
+        log = identity_env / "git.log"
+        bin_dir = identity_env / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").write_text(
+            "#!/bin/sh\n"
+            f"{{ printf '%s\\t' \"$PWD\" \"$@\"; printf '\\n'; }} >> '{log}'\n"
+            f"exec '{shutil.which('git')}' \"$@\"\n",
+            encoding="utf-8",
+        )
+        (bin_dir / "git").chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_", "PACT_", "GIT_"))}
+        env.update(
+            PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", HOME=str(home),
+            CLAUDE_CONFIG_DIR=str(home / ".claude"), CLAUDE_PROJECT_DIR=str(start),
+            PACT_TEST_MEMORY_DIR=str(identity_env / "memdir"),
+        )
+        cli = Path(__file__).resolve().parent.parent / "skills" / "pact-memory" / "scripts" / "cli.py"
+        db = identity_env / "store.db"
+
+        def run(argv, document=None):
+            log.unlink(missing_ok=True)
+            if argv[0] != "project-file":
+                argv = [*argv, "--db-path", str(db)]
+            done = subprocess.run(
+                [sys.executable, str(cli), *argv], env=env, cwd=str(start), capture_output=True,
+                text=True, timeout=120, input=None if document is None else json.dumps(document),
+            )
+            questions = []
+            for line in (log.read_text(encoding="utf-8").splitlines() if log.exists() else []):
+                where, *args = line.rstrip("\t").split("\t")
+                while len(args) >= 2 and args[0] == "-C":
+                    where, args = os.path.join(where, args[1]), args[2:]
+                questions.append((os.path.realpath(where), tuple(args)))
+            return done, questions
+
+        documents = {p: p.read_bytes() for p in identity_env.rglob("CLAUDE.md")}
+        assert run(["setup"])[0].returncode == 0
+        saved, _ = run(["save", "--stdin", "--no-sync"], {"context": "arm one"})
+        memory_id = json.loads(saved.stdout)["result"]["memory_id"]
+        asked, repeated = {}, {}
+        for name, argv, document in _EVERY_CLI_COMMAND:
+            done, questions = run([{"MEMID": memory_id, "START": str(start)}.get(a, a) for a in argv], document)
+            assert done.returncode == 0, (name, done.stderr)
+            asked[name] = len(questions)
+            repeated[name] = sorted({q for q in questions if questions.count(q) > 1})
+        # Control: every command asked git something, so a log that stayed
+        # empty cannot pass for one that held no repeat.
+        assert all(asked.values()), asked
+        assert repeated == {name: [] for name, _, _ in _EVERY_CLI_COMMAND}, (asked, repeated)
+        # Control: no command wrote a CLAUDE.md under the test's tree.
+        assert {p: p.read_bytes() for p in identity_env.rglob("CLAUDE.md")} == documents

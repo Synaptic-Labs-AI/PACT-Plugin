@@ -3196,6 +3196,21 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "is_canonical_id"): "validates an id value",
         ("call", "validate_identifier_for_write"): "validates an id value",
+        ("call", "answered_once"): (
+            "runs the reader's own git command once per detection pass and hands later "
+            "askers of the same question its result; the command is the reader's input"
+        ),
+        ("call", "<call to no function project_identity: value.strip>"): (
+            "str.strip on one origin value read_origin split from the git output "
+            "answered_once returned, which the census cannot type"
+        ),
+        ("call", "<call to no function shared.git_helpers: PASS_GIT_RESULTS.get>"): (
+            "reads the pass's memo of git results, set only by git_results_pass"
+        ),
+        ("env", "<shared.git_helpers._question: environment.items>"): (
+            "the git-relevant variables of the environment a git command runs with, read "
+            "only to key the pass's memo of that command's result"
+        ),
     }
 
     def test_each_named_build_and_pattern_is_what_its_reason_says(self):
