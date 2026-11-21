@@ -120,13 +120,78 @@ def _unresolved_rung_references() -> list:
     ]
 
 
+def _own_returns(function) -> list:
+    """The `return` statements of `function` itself, not of a def, lambda
+    or class nested in it."""
+    found, stack = [], list(ast.iter_child_nodes(function))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+            continue
+        if isinstance(node, ast.Return):
+            found.append(node)
+        stack.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def chooser_elements(tree, node) -> tuple:
+    """(texts, unresolved) for `node`, an expression of the module `tree`
+    read as `name[i]`: element `i` of what a function of the module returns,
+    where every binding of `name` (`_CalleeReader`, every binding form the
+    compiler defines) is a call to such a function. Each `return` of that
+    function is None (the root passes: no element) or a tuple whose element
+    `i` is a string, which is one text, or None, which is none.
+
+    FAIL CLOSED: any other expression, a binding of the name that is not
+    such a call, and a return or element of any other form are listed in
+    `unresolved` as source text, so a reader of this census never takes an
+    arm it cannot see for one that does not exist."""
+    if not (
+        isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name)
+        and isinstance(node.slice, ast.Constant) and type(node.slice.value) is int
+    ):
+        return set(), [ast.unparse(node)]
+    reader = _reader_for(tree)
+    functions = {
+        definition.name: definition for definition in tree.body
+        if isinstance(definition, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    sources = reader.held(node.value.id, reader.scope.get(id(node)))
+    texts, unresolved = set(), []
+    if not sources:
+        return set(), [ast.unparse(node)]
+    for kind, value in sources:
+        if not (
+            kind == "value" and isinstance(value, ast.Call) and isinstance(value.func, ast.Name)
+            and value.func.id in functions
+        ):
+            unresolved.append(f"{ast.unparse(node)}: {kind} {ast.unparse(value) if value is not None else None}")
+            continue
+        for returned in _own_returns(functions[value.func.id]):
+            result = returned.value
+            if result is None or (isinstance(result, ast.Constant) and result.value is None):
+                continue
+            if not isinstance(result, ast.Tuple) or any(isinstance(e, ast.Starred) for e in result.elts) \
+                    or node.slice.value >= len(result.elts):
+                unresolved.append(f"{returned.lineno}: return {ast.unparse(result)}")
+                continue
+            element = result.elts[node.slice.value]
+            if isinstance(element, ast.Constant) and (element.value is None or isinstance(element.value, str)):
+                texts |= {element.value} - {None}
+            else:
+                unresolved.append(f"{returned.lineno}: {ast.unparse(element)}")
+    return texts, unresolved
+
+
 def _guard_reason_forms() -> tuple:
     """(reasons, unresolved): every decline reason `_root_guard` can return,
     read from its body, and every form that census cannot read.
 
-    FAIL CLOSED: a `_decline` call whose reason is not a string literal
-    (positional or `reason=`), a `_decline` used other than as a called
-    name, and a `return` that is neither None nor such a call are listed as
+    A reason read from the arm chooser's result (`_root_guard_arm`) is each
+    reason its returns name (`chooser_elements`). FAIL CLOSED: a `_decline`
+    call whose reason is neither a string literal (positional or `reason=`)
+    nor such an element, a `_decline` used other than as a called name, and
+    a `return` that is neither None nor such a call are listed as
     unresolved, so a guard arm the census cannot see fails the arm instead
     of passing it."""
     tree = ast.parse(Path(memory_api.__file__).read_text(encoding="utf-8"))
@@ -147,7 +212,11 @@ def _guard_reason_forms() -> tuple:
         )
         if isinstance(reason, ast.Constant) and isinstance(reason.value, str):
             reasons.add(reason.value)
-        else:
+            continue
+        found, more = chooser_elements(tree, reason) if reason is not None else (set(), ["no reason"])
+        reasons |= found
+        unresolved += [f"{call.lineno}: {ast.unparse(call)} ({form})" for form in more]
+        if not found and not more:
             unresolved.append(f"{call.lineno}: {ast.unparse(call)}")
     for node in ast.walk(guard):
         if isinstance(node, ast.Name) and node.id == "_decline" and id(node) not in called:

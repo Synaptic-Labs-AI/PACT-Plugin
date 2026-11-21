@@ -639,7 +639,7 @@ _DECLINE_CAUSES = {
         "no single project id can be read from the repository's origin"
     ),
     "broken_git_marker": (
-        "the directory carries a `.git` marker but git could not answer for it"
+        "the directory is at or below a `.git` marker git could not answer for"
     ),
     "no_working_tree": "git gives no working tree for the repository",
     "submodule_checkout": (
@@ -833,6 +833,10 @@ def _decline_detected(
     )
 
 
+# Where the `.git` marker a decline rests on is, the marker's path following:
+# it may sit in a parent of the declined directory, so the decline names it.
+_MARKER_CLAUSE = "the `.git` marker is "
+
 # `_root_guard`'s default for `toplevel`: the caller holds no answer, so the
 # guard asks git itself.
 _TOPLEVEL_UNASKED: Any = object()
@@ -871,18 +875,57 @@ def _root_guard(
     once, which only the rungs that reach the guard with a common dir pay.
     `no_working_tree_detail` keeps a rung's own wording for arm 3.
 
-    Returns the decline, or None when the root passes.
+    Returns the decline, or None when the root passes. The arm is chosen by
+    `_root_guard_arm`, which `root_check_refusal` asks too.
     """
-    if common_dir is None:
-        if asked_root is not None and _unanswerable_repository(asked_root) is not None:
-            return _decline(
-                source,
-                "broken_git_marker",
-                label=label,
-                root=root,
-                detail=f"{source}: {str(asked_root)!r}",
-            )
+    arm = _root_guard_arm(asked_root, common_dir, toplevel=toplevel)
+    if arm is None:
         return None
+    # No override path for a redirect: the common dir is the TARGET
+    # repository's.
+    return _decline(
+        source,
+        arm[0],
+        label=label,
+        root=root,
+        detail=(
+            no_working_tree_detail or (
+                f"{source}: {str(asked_root)!r} is a bare repository, or git "
+                "cannot describe its working tree"
+            )
+            if arm[0] == "no_working_tree"
+            else f"{source}: {str(asked_root)!r}; {_MARKER_CLAUSE}{str(arm[2])!r}"
+            if arm[2] is not None
+            else f"{source}: {str(asked_root)!r}"
+        ),
+        cause_detail=_REDIRECT_CAUSE_DETAILS[arm[1]] if arm[1] is not None else None,
+    )
+
+
+def _root_guard_arm(
+    asked_root: Optional[Path],
+    common_dir: Optional[Path],
+    *,
+    toplevel: Any = _TOPLEVEL_UNASKED,
+    listing: Any = _LISTING_UNASKED,
+) -> Optional[Tuple[str, Optional[str], Optional[Path]]]:
+    """THE ONE PLACE the root guard's arm is chosen, in the order
+    `_root_guard` lists them, for `_root_guard` and `root_check_refusal`
+    alike: (reason,
+    redirect cause, `.git` marker) for the arm that declines `asked_root`,
+    or None when the root passes.
+
+    The redirect cause is `_worktree_redirect_cause`'s answer, None for the
+    other arms. The marker is the `.git` git's discovery reaches from
+    `asked_root` (`find_git_marker`), at or above it, for the two arms that
+    rest on one (a broken marker and a redirect), else None. `toplevel` and
+    `listing` are the caller's answers when it holds them, as in
+    `_root_guard` and `_worktree_redirect_cause`."""
+    if common_dir is None:
+        marker = _unanswerable_repository(asked_root) if asked_root is not None else None
+        if marker is None:
+            return None
+        return "broken_git_marker", None, marker
     # ONE TOPLEVEL QUESTION per guard: arm 2 needs it for a linked-worktree
     # shape and arm 3 needs it always, so it is asked here once and shared.
     if toplevel is _TOPLEVEL_UNASKED:
@@ -893,32 +936,16 @@ def _root_guard(
         )
     cause = (
         _worktree_redirect_cause(
-            asked_root, common_dir, toplevel=Path(toplevel) if toplevel else None,
+            asked_root, common_dir,
+            toplevel=Path(toplevel) if toplevel else None, listing=listing,
         )
         if asked_root is not None
         else None
     )
     if cause is not None:
-        # No override path: the common dir is the TARGET repository's.
-        return _decline(
-            source,
-            "gitfile_redirect",
-            label=label,
-            root=root,
-            detail=f"{source}: {str(asked_root)!r}",
-            cause_detail=_REDIRECT_CAUSE_DETAILS[cause],
-        )
+        return "gitfile_redirect", cause, find_git_marker(asked_root)
     if toplevel is None:
-        return _decline(
-            source,
-            "no_working_tree",
-            label=label,
-            root=root,
-            detail=no_working_tree_detail or (
-                f"{source}: {str(asked_root)!r} is a bare repository, or git "
-                "cannot describe its working tree"
-            ),
-        )
+        return "no_working_tree", None, None
     return None
 
 
@@ -927,33 +954,21 @@ def root_check_refusal(
 ) -> Optional[Tuple[str, Optional[str]]]:
     """The cause and the remedy `_root_guard` gives when it declines
     `asked_root`, as one sentence each, or None when the root passes. The
-    arms and their order are `_root_guard`'s; nothing is logged.
+    arm is `_root_guard_arm`'s, as for `_root_guard`; nothing is logged.
 
     `listing` is the caller's `_worktree_records` answer for `--git-dir
     <common_dir>`, when it holds one, for the redirect check; left out, the
     check asks git."""
-    cause_detail = None
-    if common_dir is None:
-        if _unanswerable_repository(asked_root) is None:
-            return None
-        reason = "broken_git_marker"
-    else:
-        toplevel = _git_rev_parse(str(asked_root), "--show-toplevel")
-        redirect = _worktree_redirect_cause(
-            asked_root, common_dir,
-            toplevel=Path(toplevel) if toplevel else None, listing=listing,
-        )
-        if redirect is not None:
-            reason = "gitfile_redirect"
-            cause_detail = _REDIRECT_CAUSE_DETAILS[redirect]
-        elif toplevel is None:
-            reason = "no_working_tree"
-        else:
-            return None
-    cause = _DECLINE_CAUSES[reason]
+    arm = _root_guard_arm(asked_root, common_dir, listing=listing)
+    if arm is None:
+        return None
+    cause_detail = _REDIRECT_CAUSE_DETAILS[arm[1]] if arm[1] is not None else None
+    cause = _DECLINE_CAUSES[arm[0]]
     if cause_detail:
         cause = f"{cause}; {cause_detail}"
-    return cause, _decline_remedy(decline_record(reason, None, None), cause_detail)
+    if arm[2] is not None:
+        cause = f"{cause} ({_MARKER_CLAUSE}{str(arm[2])!r})"
+    return cause, _decline_remedy(decline_record(arm[0], None, None), cause_detail)
 
 
 def _is_live_decline(detected: "_DetectedIdentity") -> bool:
@@ -1620,6 +1635,26 @@ _DETECTION_ANSWERS: "contextvars.ContextVar[Optional[dict]]" = contextvars.Conte
 _DETECTION_LISTINGS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
     "_DETECTION_LISTINGS", default=None
 )
+
+
+@contextmanager
+def detection_pass():
+    """One detection pass for a caller outside a `PACTMemory` construction:
+    inside it every git question (`--git-common-dir`, `--git-dir`, the other
+    `rev-parse` answers, worktree listings) is asked once and its answer is
+    reused, so every check in the pass reads the same answers. Each pass
+    starts empty and ends with the block."""
+    tokens = (
+        (_DETECTION_COMMON_DIRS, _DETECTION_COMMON_DIRS.set({})),
+        (project_identity.DETECTION_GIT_DIRS, project_identity.DETECTION_GIT_DIRS.set({})),
+        (_DETECTION_ANSWERS, _DETECTION_ANSWERS.set({})),
+        (_DETECTION_LISTINGS, _DETECTION_LISTINGS.set({})),
+    )
+    try:
+        yield
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
 
 
 def _detection_answer(question: tuple, ask):
@@ -3215,7 +3250,8 @@ class PACTMemory:
         # `.git`, or a timeout all take this arm; a genuinely non-git umbrella
         # has no marker and keeps its designed basename fallback.
         broken_start = _cwd_or_none()
-        if _unanswerable_repository(broken_start) is not None:
+        broken_marker = _unanswerable_repository(broken_start)
+        if broken_marker is not None:
             # With no declaration the pre-change resolver fell through to the
             # cwd marker and named it; with one, it refused.
             return _decline(
@@ -3226,7 +3262,10 @@ class PACTMemory:
                     if not declined_declaration and broken_start is not None
                     else None
                 ),
-                detail="the working directory is inside that work tree",
+                detail=(
+                    "the working directory is inside that work tree; "
+                    f"{_MARKER_CLAUSE}{str(broken_marker)!r}"
+                ),
             )
         # git not installed, not a repo, or command timed out
         logger.debug("Git detection failed, falling back to cwd")
@@ -3302,12 +3341,17 @@ class PACTMemory:
                     # the marker (it failed, or printed back an option it
                     # predates): a marker git could not answer for, not one
                     # without a working tree.
+                    cwd_marker = find_git_marker(cwd_root)
                     return _decline(
                         "cwd",
                         "broken_git_marker",
                         root=cwd_root,
                         pre_change_name=cwd_root.name,
-                        detail=f"cwd: {str(cwd_root)!r} gave no git dir",
+                        detail=(
+                            f"cwd: {str(cwd_root)!r} gave no git dir; {_MARKER_CLAUSE}{str(cwd_marker)!r}"
+                            if cwd_marker is not None
+                            else f"cwd: {str(cwd_root)!r} gave no git dir"
+                        ),
                     )
                 guarded = _root_guard(
                     cwd_root, cwd_common_dir, "cwd", root=cwd_root, toplevel=marker_toplevel,

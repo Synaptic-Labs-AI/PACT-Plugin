@@ -2836,7 +2836,10 @@ def test_a_refusal_inside_a_checkout_names_the_root_checks_cause(tmp_path, monke
     guard = memory_api._root_guard(start, common, "probe")
     assert guard is not None, "control: the memory skill's root check refuses this directory"
     reason, detail = guard.decline_reason["reason"], guard.decline_detail
-    cause = memory_api._DECLINE_CAUSES[reason] + (f"; {detail}" if detail else "")
+    marker = memory_api.project_identity.find_git_marker(start) if reason != "no_working_tree" else None
+    cause = memory_api._DECLINE_CAUSES[reason] + (f"; {detail}" if detail else "") + (
+        f" (the `.git` marker is {str(marker)!r})" if marker is not None else ""
+    )
     remedy = memory_api._decline_remedy(guard.decline_reason, detail)
 
     outcome = _roots_or_refusal()
@@ -2846,6 +2849,244 @@ def test_a_refusal_inside_a_checkout_names_the_root_checks_cause(tmp_path, monke
         backlog.BacklogWriteError, True, True), text
     assert "root check refused CLAUDE_PROJECT_DIR=" in text, text
     assert text.count("CLAUDE_PROJECT_DIR") == 1, text
+
+
+_MARKER_LAYOUTS = ["broken .git directory", "main checkout, git absent", "linked worktree moved with mv"]
+
+
+def _marker_layout(tmp_path, layout):
+    """Build `layout`, a checkout whose `.git` git cannot answer for or will
+    not confirm; return (checkout root, its `.git` marker, extra env)."""
+    import os
+
+    if layout == "broken .git directory":
+        root = (tmp_path / "broken").resolve()
+        (root / ".git").mkdir(parents=True)
+        return root, root / ".git", {}
+    if layout == "main checkout, git absent":
+        root = _repo(tmp_path / "main").resolve()
+        empty = tmp_path / "no-git"
+        empty.mkdir()
+        return root, root / ".git", {"PATH": str(empty)}
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "from"), "-b", "mv"],
+                   check=True, capture_output=True)
+    os.rename(tmp_path / "from", tmp_path / "to")
+    root = (tmp_path / "to").resolve()
+    return root, root / ".git", {}
+
+
+@pytest.mark.parametrize("where", ["root", "subfolder"])
+@pytest.mark.parametrize("layout", _MARKER_LAYOUTS)
+def test_a_refusal_names_where_the_git_marker_is(tmp_path, layout, where):
+    """From a checkout whose `.git` git cannot answer for (a broken `.git`,
+    git absent) or will not confirm (a worktree moved with `mv`), and from a
+    folder below its root, both the memory skill's decline warning and the
+    backlog refusal name the `.git` marker's path: from a subfolder the
+    marker is in a parent, not in the declined directory. Nothing is written.
+
+    Real repos, real git (or none), the CLI."""
+    import os
+
+    root, marker, extra = _marker_layout(tmp_path, layout)
+    start = root if where == "root" else root / "sub" / "deeper"
+    start.mkdir(parents=True, exist_ok=True)
+    store = tmp_path / "store"
+    store.mkdir()
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+    env.update(extra, CLAUDE_PROJECT_DIR=str(start))
+    run = subprocess.run(
+        [sys.executable, str(Path(backlog.__file__)), "--backlog-dir", str(store), "add", "x"],
+        env=env, cwd=str(start), capture_output=True, text=True, timeout=60,
+    )
+    lines = [" ".join(line.split()) for line in run.stderr.splitlines() if line.strip()]
+    warnings = [line for line in lines if "so no project id was derived" in line]
+    refusals = [line for line in lines if line.startswith("refused: ")]
+    named = f"the `.git` marker is {str(marker)!r}"
+
+    assert (run.returncode, list(store.iterdir()), len(warnings), len(refusals)) == (
+        backlog._EXIT_REFUSED, [], 1, 1), run.stderr
+    assert (named in warnings[0], named in refusals[0]) == (True, True), run.stderr
+    if layout != "linked worktree moved with mv":
+        wording = "the directory is at or below a `.git` marker git could not answer for"
+        assert (wording in warnings[0], wording in refusals[0]) == (True, True), run.stderr
+
+
+def _git_answering(tmp_path, monkeypatch, replies: dict) -> None:
+    """Put first on PATH a `git` that answers each command in `replies`
+    (the arguments after any `-C <dir>`, `-c <setting>` and `--git-dir
+    <dir>`, joined by spaces) with its shell reply, and otherwise runs the
+    real git."""
+    import os
+    import shutil
+    import stat
+
+    bin_dir = tmp_path / "answer-bin"
+    bin_dir.mkdir()
+    cases = "".join(f'  "{command}") {reply} ;;\n' for command, reply in replies.items())
+    wrapper = bin_dir / "git"
+    wrapper.write_text(
+        '#!/bin/sh\nstrip() {\n'
+        '  while :; do case "$1" in -C|-c|--git-dir) shift 2 ;; --git-dir=*) shift ;; *) break ;; esac; done\n'
+        '  printf "%s" "$*"\n}\n'
+        f'case "$(strip "$@")" in\n{cases}esac\n'
+        f'exec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+
+_LIST = "worktree list --porcelain -z"
+
+
+def _guard_cause_layout(tmp_path, monkeypatch, row):
+    """Build `row`, a directory whose root guard arm is the row's, with real
+    git or a stand-in for one of its answers; return the directory."""
+    import os
+
+    reason, cause = row
+    if reason == "broken_git_marker":
+        broken = (tmp_path / "broken").resolve()
+        (broken / ".git").mkdir(parents=True)
+        return broken
+    main = _repo(tmp_path / "main").resolve()
+    if reason == "no_working_tree":
+        bare = (tmp_path / "bare.git").resolve()
+        subprocess.run(["git", "clone", "-q", "--bare", str(main), str(bare)], check=True, capture_output=True)
+        return bare
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    wt = (tmp_path / "wt").resolve()
+    if cause == memory_api_module().REDIRECT_UNLISTED:
+        forged = (tmp_path / "forged").resolve()
+        forged.mkdir()
+        (forged / ".git").write_text(f"gitdir: {main / '.git' / 'worktrees' / 'wt'}\n", encoding="utf-8")
+        return forged
+    if cause == memory_api_module().REDIRECT_MOVED:
+        os.rename(wt, tmp_path / "to")
+        return (tmp_path / "to").resolve()
+    loop = tmp_path / "loop"
+    os.symlink(loop, loop)
+    replies = {
+        memory_api_module().REDIRECT_NO_GIT_DIR: {"rev-parse --git-dir": "exit 1"},
+        memory_api_module().REDIRECT_UNRESOLVABLE: {"rev-parse --git-dir": f"echo '{loop}'; exit 0"},
+        memory_api_module().REDIRECT_UNLISTABLE: {_LIST: "exit 1"},
+        memory_api_module().REDIRECT_EMPTY_LISTING: {_LIST: "printf '\\0'; exit 0"},
+        memory_api_module().REDIRECT_UNREADABLE_LISTING: {_LIST: "printf 'worktree /x\\0stray\\0\\0'; exit 0"},
+        # The arm order: git gives no listing and no toplevel, so the
+        # redirect arm, checked first, declines before the no-working-tree arm.
+        "unlistable, no toplevel": {_LIST: "exit 1", "rev-parse --show-toplevel": "exit 1"},
+    }[cause]
+    _git_answering(tmp_path, monkeypatch, replies)
+    return wt
+
+
+def memory_api_module():
+    """The memory skill's module, as the backlog loads it."""
+    return backlog._memory_api()
+
+
+def _guard_cause_rows() -> list:
+    """(reason, redirect cause) for every arm the root guard can take: each
+    redirect cause in the code's own table, a broken marker, no working
+    tree, and one row for the arm order."""
+    memory_api = memory_api_module()
+    return [
+        ("broken_git_marker", None),
+        *[("gitfile_redirect", cause) for cause in memory_api._REDIRECT_CAUSE_DETAILS],
+        ("gitfile_redirect", "unlistable, no toplevel"),
+        ("no_working_tree", None),
+    ]
+
+
+@pytest.mark.parametrize("row", _guard_cause_rows(), ids=lambda row: f"{row[0]}:{row[1]}")
+def test_both_root_guard_readers_take_the_same_arm_for_every_cause(tmp_path, monkeypatch, row):
+    """For every arm the root guard can take (each redirect cause in the
+    code's own table, a broken marker, no working tree, and a shape where
+    the arm order decides), the memory skill's guard (`_root_guard`) and the
+    backlog's refusal (`root_check_refusal`) both give that arm's reason,
+    its cause with its detail, and the `.git` marker where the arm rests on
+    one. Real repos and git; a stand-in for one git answer where git gives
+    that answer only on another version or a damaged repository."""
+    memory_api = memory_api_module()
+    reason, cause = row
+    start = _guard_cause_layout(tmp_path, monkeypatch, row)
+    common = memory_api.main_repo_common_dir(str(start))
+    expected_cause = memory_api.REDIRECT_UNLISTABLE if cause == "unlistable, no toplevel" else cause
+    detail = memory_api._REDIRECT_CAUSE_DETAILS[expected_cause] if expected_cause is not None else None
+    marker = memory_api.project_identity.find_git_marker(start) if reason != "no_working_tree" else None
+    text = memory_api._DECLINE_CAUSES[reason] + (f"; {detail}" if detail else "") + (
+        f" (the `.git` marker is {str(marker)!r})" if marker is not None else ""
+    )
+
+    guard = memory_api._root_guard(start, common, "probe")
+    refusal = memory_api.root_check_refusal(start, common)
+
+    assert (reason == "broken_git_marker") == (common is None), common  # control: the layout's common dir
+    assert (
+        guard.decline_reason["reason"] if guard is not None else None,
+        guard.decline_detail if guard is not None else None,
+        refusal[0] if refusal is not None else None,
+    ) == (reason, detail, text)
+
+
+@pytest.mark.parametrize("failing", [1, 2, 3, 4])
+def test_one_write_decides_the_root_check_once(tmp_path, monkeypatch, failing):
+    """One backlog write asks git each question once, so every redirect
+    check in it (the memory skill's root guard and root finder, the
+    backlog's root and its refusal) reads the same answers and gives the
+    same cause: a `git worktree list` that fails on its first call refuses the
+    write with the guard's cause, and one that would fail on a later call is
+    never asked again, so the write succeeds and no reader saw a failure.
+
+    Real repos and git; a `git` that fails the given `worktree list` call
+    and logs every command."""
+    import os
+    import shutil
+    import stat
+
+    main = _repo(tmp_path / "main").resolve()
+    subprocess.run(["git", "-C", str(main), "worktree", "add", "-q", str(tmp_path / "wt"), "-b", "wt"],
+                   check=True, capture_output=True)
+    wt = (tmp_path / "wt").resolve()
+    log, count = tmp_path / "git.log", tmp_path / "list.count"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "git").write_text(
+        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n'
+        'case " $* " in *" worktree list "*)\n'
+        f'  n=$(( $(cat "{count}" 2>/dev/null || echo 0) + 1 )); echo $n > "{count}"\n'
+        f'  [ "$n" = {failing} ] && exit 1 ;;\nesac\n'
+        f'exec "{shutil.which("git")}" "$@"\n',
+        encoding="utf-8",
+    )
+    (bin_dir / "git").chmod((bin_dir / "git").stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    _project_dir_is(monkeypatch, wt)
+    monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
+    memory_api = backlog._memory_api()
+    check = memory_api._worktree_redirect_cause
+    causes = []
+
+    def recording(*args, **kwargs):
+        causes.append(check(*args, **kwargs))
+        return causes[-1]
+
+    monkeypatch.setattr(memory_api, "_worktree_redirect_cause", recording)
+    store = tmp_path / "store"
+    store.mkdir()
+
+    code = backlog.main(["--backlog-dir", str(store), "add", "x"])
+
+    commands = log.read_text(encoding="utf-8").splitlines()
+    listings = [c for c in commands if " worktree list " in f" {c} "]
+    expected = ({memory_api.REDIRECT_UNLISTABLE}, backlog._EXIT_REFUSED) if failing == 1 \
+        else ({None}, backlog._EXIT_OK)
+    repeated = sorted({c for c in commands if commands.count(c) > 1})
+    # Each question asked once, several checks read the answers, and they agree.
+    assert (len(listings), repeated, len(causes) >= 2, set(causes), code) == (1, [], True, *expected), (
+        causes, commands)
 
 
 def test_a_bare_repository_refuses_and_its_linked_worktree_writes(tmp_path):
@@ -5978,9 +6219,11 @@ def test_a_directory_inside_a_repository_git_cannot_read_still_refuses(tmp_path,
         # no git when git gave no common dir.
         root_check_refusal = staticmethod(real.root_check_refusal)
         _LISTING_UNASKED = real._LISTING_UNASKED
-        # `main` holds the memory skill's decline warnings on its own logger.
+        # `main` holds the memory skill's decline warnings on its own logger,
+        # and runs the command in one detection pass.
         logger = real.logger
         is_decline_record = staticmethod(real.is_decline_record)
+        detection_pass = staticmethod(real.detection_pass)
 
     monkeypatch.setattr(backlog, "_memory_api", lambda: _NoGit)
     for env_path in (sub, linked):

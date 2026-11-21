@@ -1463,6 +1463,19 @@ class TestACeilingStartDirectoryIsExamined:
         assert detected.project_id is None
         assert detected.decline_reason["reason"] == "broken_git_marker"
 
+    def test_a_broken_marker_decline_names_where_the_marker_is(self, identity_env, monkeypatch, caplog):
+        """From a folder below a broken `.git` marker, with nothing declared,
+        the decline names the marker's path, which is in a parent."""
+        broken = self._broken(identity_env)
+        (broken / "sub").mkdir()
+        monkeypatch.chdir(broken / "sub")
+        with caplog.at_level(logging.WARNING):
+            detected = PACTMemory._detect_project_identity_with_legacy()
+        warnings = [r.getMessage() for r in caplog.records if "so no project id was derived" in r.getMessage()]
+
+        assert (detected.decline_reason["reason"], len(warnings)) == ("broken_git_marker", 1), warnings
+        assert f"the `.git` marker is {str(broken / '.git')!r}" in warnings[0], warnings
+
     def test_a_marker_in_a_ceiling_parent_is_not_found(
         self, identity_env, monkeypatch
     ):
@@ -2899,6 +2912,26 @@ class TestTheCwdMarkerDeclinesAMarkerGitCannotAnswerFor:
         }
         assert wrong == {}, f"a marker git gave no git dir for: {wrong}"
 
+    def test_no_git_dir_names_where_the_marker_is(self, tmp_path, caplog):
+        """The cwd-marker rung's decline for a marker git gave no git dir for
+        names that marker's path."""
+        from fixtures.identity_routes import ROUTES, SHAPES, _clear
+
+        assert_outside_repository(tmp_path)
+        run, _sources = ROUTES["cwd marker"]
+        target = SHAPES["control_own_checkout"](tmp_path)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        with pytest.MonkeyPatch.context() as cell, caplog.at_level(logging.WARNING):
+            _clear(cell)
+            _git_on_path(cell, tmp_path / "bin", "ECHO--absolute-git-dir")
+            detected = run(cell, target, elsewhere)
+        warnings = [r.getMessage() for r in caplog.records if "so no project id was derived" in r.getMessage()]
+        named = f"the `.git` marker is {str(Path(target) / '.git')!r}"
+
+        assert ((detected.decline_reason or {}).get("reason"), len(warnings)) == ("broken_git_marker", 1), warnings
+        assert "gave no git dir" in warnings[0] and named in warnings[0], warnings
+
     def test_a_bare_repository_still_has_no_working_tree(self, tmp_path):
         assert_outside_repository(tmp_path)
         answers = self._cwd_routes(_route_answers(tmp_path, "bare_target", "PASS"))
@@ -3958,8 +3991,10 @@ _DESCRIBED_PRINTED_CLAUSES = {
     "or set CLAUDE_PROJECT_DIR to another project root":
         "names a file to create inside the git directory; the marker is unchanged",
     "X does not exist and no verified worktree identity record names it": _DETAIL,
+    "X gave no git dir": _DETAIL,
     "X gave no git dir)": _DETAIL,
     "X is a bare repository, or git cannot describe its working tree)": _DETAIL,
+    "X": _DETAIL,
     "X)": _DETAIL,
     "`git config --get remote.origin.url` run here prints git's own reason":
         "names a read-only git command",
@@ -4005,12 +4040,13 @@ _DESCRIBED_PRINTED_CLAUSES = {
     "the checkout is a submodule": _OBSERVED,
     "the declared directory could not be resolved": _OBSERVED,
     "the declared directory could not be resolved (declared via X": _OBSERVED,
-    "the directory carries a `.git` marker but git could not answer for it":
-        "reports that the marker is there and git did not answer",
-    "the directory carries a `.git` marker but git could not answer for it (X": _OBSERVED,
-    "the directory carries a `.git` marker but git could not answer for it (cwd": _OBSERVED,
-    "the directory carries a `.git` marker but git could not answer for it (the working "
-    "directory is inside that work tree)": _OBSERVED,
+    "the directory is at or below a `.git` marker git could not answer for":
+        "reports that the marker is there, at or above the directory, and git did not answer",
+    "the directory is at or below a `.git` marker git could not answer for (X": _OBSERVED,
+    "the directory is at or below a `.git` marker git could not answer for (cwd": _OBSERVED,
+    "the directory is at or below a `.git` marker git could not answer for (the working "
+    "directory is inside that work tree": _OBSERVED,
+    "the `.git` marker is X)": "names where the marker is",
     "the repository at '/home/u/repo' has an origin remote that could not be read or "
     "represented as a project id": _OBSERVED,
     "the user runs that, not an agent": "says who runs the repair",
@@ -4071,26 +4107,50 @@ def _sentences(text: str) -> list:
     return sentences
 
 
-def _rendered(node) -> "str | None":
+def _rendered(node, constants=None) -> "str | None":
     """The text a string expression prints, each formatted value shown as
-    `X`; None for any other expression."""
+    `X`, except a plain module string constant in `constants` (name: text),
+    which prints its text; None for any other expression."""
+    constants = constants or {}
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
     if isinstance(node, ast.JoinedStr):
         return "".join(
-            part.value if isinstance(part, ast.Constant) else "X" for part in node.values
+            part.value if isinstance(part, ast.Constant)
+            else constants[part.value.id]
+            if isinstance(part.value, ast.Name) and part.value.id in constants
+            and part.conversion == -1 and part.format_spec is None
+            else "X"
+            for part in node.values
         )
     return None
+
+
+def _detail_alternatives(node) -> list:
+    """The expressions a detail can be: each operand of an `or` and each
+    branch of a conditional expression, followed through both."""
+    if isinstance(node, ast.BoolOp):
+        return [leaf for value in node.values for leaf in _detail_alternatives(value)]
+    if isinstance(node, ast.IfExp):
+        return [*_detail_alternatives(node.body), *_detail_alternatives(node.orelse)]
+    return [node]
 
 
 def _rung_details() -> tuple:
     """((reason, detail), ...) for every rung detail a decline prints, read
     from memory_api's source: each `detail=` of a `_decline` call, with the
     call's reason, and each `no_working_tree_detail=` (the
-    `no_working_tree` decline's wording). Also every such expression that is
-    not a string, as (line, source), so a form this reader cannot render is
-    named, never skipped."""
+    `no_working_tree` decline's wording). A reason read from the root
+    guard's arm chooser is each reason it returns (`chooser_elements`), and
+    a detail is each operand of an `or` and each branch of a conditional
+    (`_detail_alternatives`); a formatted module string constant
+    (`module_string_constants`) prints its text. Also every such expression
+    that is not a string, as (line, source), so a form this reader cannot
+    render is named, never skipped."""
+    from test_identity_rung_parity import chooser_elements, module_string_constants
+
     tree = ast.parse(Path(memory_api.__file__).read_text(encoding="utf-8"))
+    constants = module_string_constants(tree)
     pairs, unrendered = set(), []
     for call in ast.walk(tree):
         if not isinstance(call, ast.Call):
@@ -4098,19 +4158,22 @@ def _rung_details() -> tuple:
         callee = call.func.id if isinstance(call.func, ast.Name) else getattr(call.func, "attr", None)
         for keyword in call.keywords:
             if keyword.arg == "no_working_tree_detail":
-                reason = "no_working_tree"
+                reasons = {"no_working_tree"}
             elif keyword.arg == "detail" and callee == "_decline":
                 first = call.args[1] if len(call.args) > 1 else None
-                reason = first.value if isinstance(first, ast.Constant) else None
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    reasons = {first.value}
+                else:
+                    reasons, more = chooser_elements(tree, first) if first is not None else (set(), ["no reason"])
+                    unrendered += more
             else:
                 continue
-            values = keyword.value.values if isinstance(keyword.value, ast.BoolOp) else [keyword.value]
-            for value in values:
-                text = _rendered(value)
-                if text is None or reason is None:
+            for value in _detail_alternatives(keyword.value):
+                text = _rendered(value, constants)
+                if text is None or not reasons:
                     unrendered.append(ast.unparse(value))
                 else:
-                    pairs.add((reason, text))
+                    pairs |= {(reason, text) for reason in reasons}
     return pairs, unrendered
 
 

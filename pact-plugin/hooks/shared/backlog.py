@@ -508,15 +508,14 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     memory_api = _memory_api()
     # ONE LISTING PER LOOKUP: read here and handed to the root's redirect
     # check, which a linked worktree runs on the same `--git-dir` listing.
+    # Read through the command's detection pass (`main`), so it is the
+    # listing the memory skill's guard read; a read that raises gives no
+    # listing, as a git that failed does.
     anchor = _project_anchor()
-    try:
-        records = (
-            memory_api._worktree_records(["--git-dir", str(anchor[2])])
-            if anchor[2] is not None else None
-        )
-    except (OSError, RuntimeError, ValueError):
-        # A read that raises gives no listing, as a git that failed does.
-        records = None
+    records = (
+        memory_api._listed_worktree_records(None, git_dir=Path(anchor[2]))
+        if anchor[2] is not None else None
+    )
     root, common = _root_and_common_dir(anchor, records)
     try:
         if common is None:
@@ -2233,7 +2232,10 @@ class _HeldWarnings(logging.Filter):
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     backlog_dir = Path(args.backlog_dir) if args.backlog_dir else None
-    with _HeldWarnings() as held:
+    # ONE DETECTION PASS PER COMMAND: the memory skill's guard, the root,
+    # the roots and a refusal's root check read the same git answers, each
+    # asked once, so a refusal names the cause the guard decided on.
+    with _HeldWarnings() as held, _memory_api().detection_pass():
         try:
             code = _main(args, backlog_dir, held)
         except BaseException:
