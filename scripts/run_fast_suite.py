@@ -31,7 +31,10 @@ INVARIANTS
   No inherited PYTEST_* or recorder-owner variables, no env overrides, no
   shell: a direct subprocess.run. Artifacts are written atomically and are
   written even when pytest fails -- a missing artifact must mean "never ran",
-  never "failed".
+  never "failed". A run that never printed its collection header writes no
+  artifact at all (NO-COLLECTED-HEADER refusal): the verifier re-derives the
+  collected count from that persisted header, so an artifact without it is
+  unverifiable by construction.
 """
 
 from __future__ import annotations
@@ -318,16 +321,28 @@ def _run(args, selection, manifest_path: Path, plugin_root: Path,
             collected_header.append(line.strip())
 
     rc, tail = _stream(argv, plugin_root, note_collected)
+    if not collected_header:
+        # The verifier re-derives run.collected from this stored line, so an
+        # artifact without the header is unverifiable by construction, and a
+        # headerless run means the suite likely never started printing
+        # collection evidence. Refuse rather than write one: a missing
+        # artifact keeps meaning "never ran", never "failed".
+        print(
+            "FAST-SUITE REFUSAL: no collected-items header line was captured "
+            "(NO-COLLECTED-HEADER); the run produced no start-of-run "
+            "collection evidence",
+            file=sys.stderr,
+        )
+        return 3
     parsed = parse_pytest_summary(
         "\n".join([*collected_header, *tail]))
     collected = parsed["collected"] if parsed else None
-    if collected_header:
-        # xdist reports `N workers [M items]`, not pytest's serial
-        # `collected M items` header. The explicit item count is authoritative:
-        # outcome-sum inference counts a module-level collection skip as a node.
-        match = _ITEMS_LINE_RE.search(collected_header[0])
-        if match is not None:
-            collected = int(match.group(1) or match.group(2))
+    # xdist reports `N workers [M items]`, not pytest's serial
+    # `collected M items` header. The explicit item count is authoritative:
+    # outcome-sum inference counts a module-level collection skip as a node.
+    match = _ITEMS_LINE_RE.search(collected_header[0])
+    if match is not None:
+        collected = int(match.group(1) or match.group(2))
 
     payload = _base_payload(selection, manifest_path, args.base_sha,
                             repo_root, "run")
@@ -336,6 +351,11 @@ def _run(args, selection, manifest_path: Path, plugin_root: Path,
         "rc": rc,
         "summary_line": parsed["summary_line"] if parsed else None,
         "collected": int(collected) if parsed and collected is not None else None,
+        # The first-match header line itself. The verifier re-derives the
+        # collected count from this string with the same parse rule, so the
+        # count carries its printed provenance instead of resting on the
+        # cross-artifact equality checks alone.
+        "collected_header": collected_header[0],
         "passed": int(parsed["passed"]) if parsed else None,
         "failed": int(parsed["failed"]) if parsed else None,
         "errors": int(parsed["errors"]) if parsed else None,

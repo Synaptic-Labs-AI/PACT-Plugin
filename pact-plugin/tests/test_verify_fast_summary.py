@@ -222,6 +222,7 @@ def _artifacts(root, plugin, manifest, *, summary_line=None,
         "rc": 0,
         "summary_line": summary_line,
         "collected": count,
+        "collected_header": f"collected {count} items",
         "passed": count,
         "failed": 0,
         "errors": 0,
@@ -943,6 +944,154 @@ def test_the_runner_captures_the_first_collected_header_only(tmp_path, rig):
     artifact = json.loads(summary.read_text(encoding="utf-8"))
     assert artifact["run"]["collected"] == count, artifact["run"]
     assert artifact["run"]["collected"] != 999
+    # The captured line itself is persisted, not just the count parsed from
+    # it: the verifier re-derives the count from this string, so the
+    # first-match rule is load-bearing evidence, not an implementation detail.
+    assert artifact["run"]["collected_header"] == f"4 workers [{count} items]"
+
+
+def test_the_runner_refuses_to_write_without_a_collected_header(tmp_path, rig):
+    """No captured header, no artifact: the count would lack printed provenance.
+
+    A run whose output never contains a collected-items header line (here a
+    fake pytest that prints only node IDs and a summary) cannot produce an
+    artifact the verifier can re-derive a count from, so the runner refuses
+    at write time instead of writing an artifact whose count is only
+    inferred.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    discovered = _discovered(plugin)
+    fake = "\n".join(f'print("{rel}::test_ok")' for rel in discovered)
+    fake += f'\nprint("{len(discovered)} passed in 0.01s")\n'
+    (plugin / "pytest.py").write_text(fake, encoding="utf-8")
+    summary = tmp_path / "summary.json"
+    runner = ROOT / "scripts" / "run_fast_suite.py"
+    env = env_without_pytest_vars()
+    env.pop(OWNER_ENV, None)
+    proc = subprocess.run(
+        [sys.executable, str(runner), "--base-sha", base_sha,
+         "--repo-root", str(root), "--manifest", str(manifest),
+         "--summary", str(summary),
+         "--canary", str(summary.with_name(".fast-suite-canary.json"))],
+        capture_output=True, text=True, timeout=120, env=env)
+    assert proc.returncode == 3, proc.stdout + proc.stderr
+    assert "NO-COLLECTED-HEADER" in proc.stderr
+    assert not summary.exists()
+
+
+def _demote_collected_everywhere(root):
+    """Demote the collected count by one in EVERY cross-checked field.
+
+    run.collected, canary.collected_items and its node list and its own
+    summary parity, record.collected and the terminal list and the
+    before/after identity and the outcome sum, and both outcome summary
+    lines all move together -- every pre-existing cross-check stays
+    satisfied. Only the persisted header still says the original count.
+    """
+    summary_path = root / ".fast-suite-summary.json"
+    canary_path = root / ".fast-suite-canary.json"
+    record_path = root / ".full-run-record.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    canary = json.loads(canary_path.read_text(encoding="utf-8"))
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    count = summary["run"]["collected"]
+    demoted = count - 1
+    node_ids = canary["canary"]["collected_node_ids"][:-1]
+    demoted_line = f"{demoted} passed in 0.01s"
+    summary["run"].update(
+        collected=demoted, passed=demoted, summary_line=demoted_line,
+        collected_header=f"collected {count} items")
+    canary["canary"].update(
+        collected_items=demoted,
+        collected_node_ids=node_ids,
+        summary_line=f"{demoted} tests collected in 0.01s")
+    record.update(
+        collected=demoted, passed=demoted, summary_line=demoted_line,
+        terminal_node_ids=node_ids,
+        items_before_modifyitems=demoted,
+        items_after_modifyitems=demoted)
+    for path, data in ((summary_path, summary), (canary_path, canary),
+                       (record_path, record)):
+        path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    return demoted
+
+
+def test_a_count_demoted_everywhere_but_the_header_is_refused(tmp_path, rig):
+    """The gap the persisted header closes: the cross-checks move together.
+
+    A count tampered in all cross-checked fields (run, canary, record --
+    including node lists and arithmetic) satisfies every pre-existing check;
+    before the header was persisted, nothing anchored the number to what the
+    run actually printed. The stored header is that anchor. Control arm
+    first: the unmutated artifacts verify green.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    control = _run(summary, canary, base_sha, root, manifest)
+    assert control.returncode == 0, control.stdout + control.stderr
+    demoted = _demote_collected_everywhere(root)
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "RUN-COLLECTED-HEADER" in proc.stderr
+    assert "disagrees" in proc.stderr
+    assert str(demoted) in proc.stderr
+    assert str(demoted + 1) in proc.stderr
+
+
+def test_a_missing_collected_header_is_refused_as_key_missing(tmp_path, rig):
+    """The key is required, not optional: an artifact written before the key
+    existed, or with it stripped, refuses at the shape gate, fail-closed."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    control = _run(summary, canary, base_sha, root, manifest)
+    assert control.returncode == 0, control.stdout + control.stderr
+    _mutate(summary, lambda d: d["run"].pop("collected_header"))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "KEY-MISSING-RUN" in proc.stderr
+    assert "'collected_header'" in proc.stderr
+
+
+@pytest.mark.parametrize("value", [None, ""])
+def test_a_non_string_collected_header_is_refused_as_bad_field(
+        tmp_path, rig, value):
+    """A present-but-unusable header is a bad field, not a count disagreement."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate(summary, _set(("run", "collected_header"), value))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "BAD-FIELD-RUN-COLLECTED-HEADER" in proc.stderr
+
+
+def test_an_unparseable_collected_header_is_refused(tmp_path, rig):
+    """A header line no known shape matches cannot witness any count."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate(summary, _set(("run", "collected_header"), "beginning of session"))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "RUN-COLLECTED-HEADER" in proc.stderr
+    assert "matches no known header shape" in proc.stderr
+
+
+def test_a_workers_form_header_re_derives_to_the_same_count(tmp_path, rig):
+    """Positive control for the xdist shape: `4 workers [N items]` re-derives
+    N through group(2) and verifies green."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    count = len(_discovered(plugin))
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate(summary, _set(("run", "collected_header"),
+                          f"4 workers [{count} items]"))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "VERIFY-OK" in proc.stdout
 
 
 def test_an_unparseable_canary_artifact_is_refused(tmp_path, rig):
@@ -1147,6 +1296,7 @@ def _artifacts_from_selection(root, plugin, manifest, selection, base_sha):
         "rc": 0,
         "summary_line": f"{count} passed in 0.01s",
         "collected": count,
+        "collected_header": f"collected {count} items",
         "passed": count,
         "failed": 0,
         "errors": 0,

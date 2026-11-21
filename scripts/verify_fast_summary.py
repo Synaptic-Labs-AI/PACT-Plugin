@@ -56,6 +56,14 @@ from verify_full_run import (  # noqa: E402  (path must precede import)
     skip_site_problems,
 )
 
+# DELIBERATE PRIVATE-IMPORT CONTRACT on run_fast_suite: the verifier
+# re-derives run.collected from the persisted header line with the WRITER's
+# own regex, so the two parse rules cannot drift apart. An upstream rename
+# breaks this module at import time — the fail-closed direction — and a
+# semantic drift of the regex is caught by the header tests in
+# tests/test_verify_fast_summary.py.
+from run_fast_suite import _ITEMS_LINE_RE  # noqa: E402  (path precedes import)
+
 SCHEMA_VERSION = 2
 RECORD_SCHEMA_VERSION = 3
 _OUTCOME_KEYS = (
@@ -70,7 +78,8 @@ _CANARY_KEYS = (
     "collected_files", "collected_items", "collected_node_ids", "missing",
     "extra", "unresolvable_node_id_bases",
 )
-_RUN_KEYS = ("command", "rc", "summary_line", "collected", *_OUTCOME_KEYS)
+_RUN_KEYS = ("command", "rc", "summary_line", "collected",
+             "collected_header", *_OUTCOME_KEYS)
 _COMMON_KEYS = (
     "manifest", "base_sha", "head_sha", "run_id", "run_attempt", "selection",
     "mode",
@@ -390,6 +399,10 @@ def _require_node_identity(canary: dict, summary: dict, record: dict,
                            canary_summary: dict) -> None:
     """The canary's node IDs are the corpus; the run's terminal set equals it.
 
+    run.collected is additionally re-derived from the run's persisted header
+    line (RUN-COLLECTED-HEADER), so the count carries its printed provenance
+    rather than resting on the cross-artifact equalities alone.
+
     SCOPING (honest blind spot): this binding detects ASYMMETRIC divergence
     only — a repo-side pytest_collection_modifyitems hook dropping the SAME
     items from both the serial canary and the parallel run stays
@@ -406,6 +419,30 @@ def _require_node_identity(canary: dict, summary: dict, record: dict,
     canary_items = _positive_int(
         canary["canary"], "collected_items", "CANARY-COLLECTED", "canary")
     run_collected = _positive_int(summary["run"], "collected", "RUN-COLLECTED", "run")
+    # The count above is only as good as its provenance: re-derive it from
+    # the header line the run itself printed, with the writer's own parse
+    # rule (the imported regex). A count inferred from the outcome sum, or
+    # tampered after the fact, moves with every cross-artifact check; the
+    # stored header is the one witness that does not move with them.
+    header = summary["run"].get("collected_header")
+    if not isinstance(header, str) or not header:
+        raise VerificationFailure(
+            "BAD-FIELD-RUN-COLLECTED-HEADER",
+            f"run.collected_header is {header!r}; expected the captured "
+            "start-of-run header line")
+    header_match = _ITEMS_LINE_RE.search(header)
+    if header_match is None:
+        raise VerificationFailure(
+            "RUN-COLLECTED-HEADER",
+            f"run.collected_header {header!r} matches no known header shape "
+            "(expected 'collected N items' or 'N workers [M items]')")
+    header_count = int(header_match.group(1) or header_match.group(2))
+    if header_count != run_collected:
+        raise VerificationFailure(
+            "RUN-COLLECTED-HEADER",
+            f"run.collected ({run_collected}) disagrees with the count "
+            f"re-derived from run.collected_header ({header_count}: "
+            f"{header!r})")
     record_collected = _require_record_int(record, "collected")
     if record_collected <= 0:
         raise VerificationFailure("RECORD-COLLECTED", "record collected must be positive")

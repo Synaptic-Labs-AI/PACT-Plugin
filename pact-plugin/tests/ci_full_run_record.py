@@ -188,8 +188,11 @@ def aggregate_worker_collection_counts(triples_by_node, collected,
       session exits non-zero. Either no record is written and the verifier
       fails RECORD-ABSENT, or it fails the record: on EXITSTATUS when the
       exit status is non-zero, otherwise on BAD-FIELD-DESELECTED when a
-      ready node did not report. The exit status is read first; both
-      orders fail closed.
+      ready node did not report. That order is the fast lane's
+      (verify_fast_summary reads exitstatus before deselected); the full
+      lane's verifier reads deselected before the exit status, so the same
+      record names BAD-FIELD-DESELECTED first there. Both orders fail
+      closed.
 
     EXITSTATUS is what a non-zero exit prints only when every ready node
     reported. Any refusal leaves the collection fields and ``deselected``
