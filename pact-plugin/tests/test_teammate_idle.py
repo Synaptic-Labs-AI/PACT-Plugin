@@ -975,7 +975,7 @@ def _grace_task(
     status="in_progress",
     owner="CoderRaw",
     reason="awaiting_lead_completion",
-    age=0,
+    age: float = 0,
 ):
     return make_task(
         status=status,
@@ -1189,7 +1189,6 @@ class TestInboxGraceGate:
         assert clock.sleeps == []
 
     @pytest.mark.parametrize("case", [
-        "completed",
         "pending",
         "other-owner",
         "other-reason",
@@ -1201,7 +1200,7 @@ class TestInboxGraceGate:
     def test_ineligible_wait_does_no_inbox_read_or_sleep(self, case, tmp_path):
         """Counter-test: broadening the wait predicate reaches this read."""
         task = _grace_task()
-        if case in ("completed", "pending"):
+        if case == "pending":
             task["status"] = case
         elif case == "other-owner":
             task["owner"] = "someone-else"
@@ -1224,6 +1223,41 @@ class TestInboxGraceGate:
         read.assert_not_called()
         assert clock.sleeps == []
 
+    def test_completed_wait_blocks_on_late_positive_evidence_within_grace(
+        self, tmp_path
+    ):
+        """TaskUpdate-first completion must not discard the remaining grace."""
+        task = _grace_task(status="completed", age=5.216)
+        secret = "resolution payload is not acceptance evidence"
+        valid = json.dumps([{"from": "team-lead", "text": secret}])
+        clock = _FakeGraceClock()
+        # The measured 3.112-second message is first visible to the 3.2-second poll.
+        with patch(
+            "teammate_idle.state_file.read_text",
+            side_effect=["[]"] * 32 + [valid],
+        ) as read:
+            decision = _call_grace([task], tmp_path, clock)
+
+        assert decision == _BLOCK_DECISION
+        assert read.call_count == 33
+        assert clock.sleeps == pytest.approx([0.1] * 32)
+        assert clock.monotonic() == pytest.approx(3.2)
+        assert secret not in decision["reason"]
+        assert "not proof of acceptance" in decision["reason"]
+
+    def test_completed_wait_timeout_uses_original_remaining_budget(self, tmp_path):
+        """Completed status neither restarts grace nor blocks without evidence."""
+        task = _grace_task(status="completed", age=5.216)
+        clock = _FakeGraceClock()
+        with patch("teammate_idle.state_file.read_text", return_value="[]") as read:
+            decision = _call_grace([task], tmp_path, clock)
+
+        assert decision is None
+        assert read.call_count == 48
+        assert len(clock.sleeps) == 48
+        assert clock.sleeps[:-1] == pytest.approx([0.1] * 47)
+        assert clock.sleeps[-1] == pytest.approx(0.084)
+
     def test_second_idle_with_expired_wait_starts_no_new_grace(self, tmp_path):
         clock = _FakeGraceClock()
         task = _grace_task()
@@ -1239,11 +1273,11 @@ class TestInboxGraceGate:
 
 
 class TestMainInboxGrace:
-    def _run(self, gate, capsys):
+    def _run(self, gate, capsys, task=None):
         import io
         from teammate_idle import main
 
-        tasks = [_grace_task()]
+        tasks = [task or _grace_task()]
         with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
              patch("teammate_idle.iter_team_task_jsons", return_value=tasks), \
@@ -1271,6 +1305,17 @@ class TestMainInboxGrace:
         from unittest.mock import Mock
 
         grace, cleanup, output = self._run(Mock(return_value=None), capsys)
+
+        assert output == {"suppressOutput": True}
+        grace.assert_called_once()
+        cleanup.assert_called_once()
+
+    def test_main_completed_timeout_preserves_ordinary_cleanup(self, capsys):
+        from unittest.mock import Mock
+
+        grace, cleanup, output = self._run(
+            Mock(return_value=None), capsys, task=_grace_task(status="completed")
+        )
 
         assert output == {"suppressOutput": True}
         grace.assert_called_once()

@@ -137,7 +137,7 @@ def check_inbox_grace(
 ) -> dict | None:
     """Hold a fresh lead-completion idle only for positive inbox evidence."""
     task = find_teammate_task(tasks, teammate_name)
-    if not task or task.get("status") != "in_progress":
+    if not task or task.get("status") not in {"in_progress", "completed"}:
         return None
     metadata = task.get("metadata", {})
     wait = metadata.get("intentional_wait") if isinstance(metadata, dict) else None
