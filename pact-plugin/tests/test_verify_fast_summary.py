@@ -1638,7 +1638,7 @@ def _record_with_sites(summary_path, sites):
     skipped = sum(site["count"] for site in sites)
     passed = record["collected"] - skipped
     summary_line = f"{passed} passed, {skipped} skipped in 0.01s"
-    for artifact, nested in ((summary["run"], "run"), (record, "record")):
+    for artifact in (summary["run"], record):
         artifact["passed"] = passed
         artifact["skipped"] = skipped
         artifact["summary_line"] = summary_line
