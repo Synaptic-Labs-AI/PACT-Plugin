@@ -14,6 +14,14 @@ job's one-time report.
 Identification is positive-only. A plain session, an Agent-tool subagent and
 any frame this module does not recognise resolve to no role, and the stop is
 allowed.
+
+CARVE-OUT: a running pact-wait watcher (the structural wait mechanism's
+watcher the lead armed before ending a turn) is EXEMPT from the lead's
+shell-job block — its process completion IS the scheduled wake the block
+exists to demand, so blocking the turn end over it would re-create the very
+wait-loop it replaces. Classified by an anchored command shape
+(`is_wait_watcher_command`): a lookalike that merely mentions the watcher
+name, or a partial invocation missing the arm flags, still counts.
 """
 
 from __future__ import annotations
@@ -54,6 +62,35 @@ MAX_LISTED_JOBS = 5
 JOB_LABEL_MAX_CHARS = 80
 
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
+
+# The command shape of an armed structural wait watcher: the pact_wait.py
+# entrypoint with the FULL arm flag set (--team/--task/--predicate/--deadline,
+# the surface its own CLI makes required). ANCHORED at the command start with
+# a closed prefix set (optional `cd ... &&`, env assignments, a python3
+# interpreter, a path-token script name), so a command that merely MENTIONS
+# the watcher (`echo "..."`, a compose string) or runs it PARTIALLY (missing
+# a required flag, reordered flags) does not match and still counts as a job
+# the lead must account for. Match-order and composition strictness lean
+# deliberately toward over-block: a watcher the carve-out misses only ever
+# costs the lead one advisory block, while a non-watcher the carve-out
+# exempts would acquit the lead of a real unowned job.
+_PACT_WAIT_SHAPE = re.compile(
+    r"\A\s*"
+    r"(?:cd\s+[^\n&]+&&\s*)?"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"(?:python3(?:\.\d+)?\s+)?"
+    r"[\"']?[A-Za-z0-9_./-]*pact_wait\.py[\"']?\s+"
+    r"--team\s+\S+\s+--task\s+\S+\s+"
+    r"--predicate\s+\S+\s+--deadline\s+\S+\s*\Z"
+)
+
+
+def is_wait_watcher_command(command: Any) -> bool:
+    """True iff a running job's command IS an armed pact-wait watcher —
+    the lead's own scheduled wake, exempt from the lead shell-job block
+    (see the module docstring's CARVE-OUT). False for anything else,
+    including a lookalike mention or a partial invocation."""
+    return isinstance(command, str) and bool(_PACT_WAIT_SHAPE.match(command))
 
 LEAD_BLOCK_TEXT = (
     "Background work is still running in this session and nothing is "
@@ -320,7 +357,14 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
         # candidates, so a reused id can only UNDER-block: it acquits the lead of
         # that job.
         teammate_jobs = {r["harness_task_id"] for r in records if r.get("harness_task_id")}
-        return [e for e in running if e["id"] not in teammate_jobs]
+        # The carve-out: a running pact-wait watcher is the lead's own
+        # scheduled wake, not unowned work (see the module docstring's
+        # CARVE-OUT). It never enters the lead's must-account-for list.
+        return [
+            e for e in running
+            if e["id"] not in teammate_jobs
+            and not is_wait_watcher_command(e.get("command"))
+        ]
     if input_data.get("hook_event_name") == "SubagentStop":
         # The lead process's whole list: only this teammate's recorded jobs count.
         #
