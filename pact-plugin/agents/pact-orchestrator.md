@@ -641,6 +641,11 @@ Teammates signal protocol-defined waits via the `intentional_wait` task metadata
   teammateModes. Keep crossed-wake housekeeping out of the user channel: do not
   acknowledge stragglers or narrate the durable read and any required redundant
   confirm, while still reporting milestones and escalating genuine stalls.
+  Crossed-wake handling itself is neither a milestone nor a dispatch result:
+  after the durable read and any required redundant confirm, end with no
+  assistant text, closing summary, 🛠️ identity prefix, or Ponytail skip/risk
+  line, even when it was the turn's only work; only independent milestones
+  and genuine stalls remain reportable.
   See [pact-completion-authority §Crossed-Wake Idles](../protocols/pact-completion-authority.md#crossed-wake-idles-discriminate-by-timestamp-direction).
 - **Drive resolution on your own cadence.** Track outstanding waits across your teammates; send the resolving message (approval / commit confirmation / peer reply routed / user decision) when appropriate.
 - **Reading the flag**: `TaskGet` does NOT surface task metadata. Read the task file directly: `cat "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/tasks/{team}/{taskId}.json" | jq .metadata.intentional_wait`. Fields: `reason`, `expected_resolver`, `since`, `covers_since`.

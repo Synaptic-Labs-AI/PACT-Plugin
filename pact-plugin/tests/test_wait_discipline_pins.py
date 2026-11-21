@@ -83,7 +83,12 @@ SECTION_HEADINGS = [WAIT_IN_SILENCE, INTENTIONAL_WAITING]
 _CROSSED_WAKE_SENTENCE = (
     "Keep crossed-wake housekeeping out of the user channel: do not acknowledge "
     "stragglers or narrate the durable read and any required redundant confirm, "
-    "while still reporting milestones and escalating genuine stalls."
+    "while still reporting milestones and escalating genuine stalls. "
+    "Crossed-wake handling itself is neither a milestone nor a dispatch result: "
+    "after the durable read and any required redundant confirm, end with no "
+    "assistant text, closing summary, 🛠️ identity prefix, or Ponytail skip/risk "
+    "line, even when it was the turn's only work; only independent milestones "
+    "and genuine stalls remain reportable."
 )
 _CROSSED_WAKE_PHRASE_PINS = [
     (
@@ -97,6 +102,24 @@ _CROSSED_WAKE_PHRASE_PINS = [
     ),
     (INTENTIONAL_WAITING, "while still reporting milestones"),
     (INTENTIONAL_WAITING, "and escalating genuine stalls."),
+    (
+        INTENTIONAL_WAITING,
+        "Crossed-wake handling itself is neither a milestone nor a dispatch result",
+    ),
+    (
+        INTENTIONAL_WAITING,
+        "after the durable read and any required redundant confirm",
+    ),
+    (INTENTIONAL_WAITING, "end with no assistant text"),
+    (
+        INTENTIONAL_WAITING,
+        "closing summary, 🛠️ identity prefix, or Ponytail skip/risk line",
+    ),
+    (INTENTIONAL_WAITING, "even when it was the turn's only work"),
+    (
+        INTENTIONAL_WAITING,
+        "only independent milestones and genuine stalls remain reportable",
+    ),
 ]
 
 
@@ -302,7 +325,7 @@ def test_rule_phrase_present(heading: str, phrase: str):
 @pytest.mark.parametrize(
     "heading,phrase",
     _CROSSED_WAKE_PHRASE_PINS,
-    ids=[f"B{index}" for index in range(1, 5)],
+    ids=[f"B{index}" for index in range(1, len(_CROSSED_WAKE_PHRASE_PINS) + 1)],
 )
 def test_crossed_wake_pin_rejects_clause_deletion(
     tmp_path, heading: str, phrase: str
