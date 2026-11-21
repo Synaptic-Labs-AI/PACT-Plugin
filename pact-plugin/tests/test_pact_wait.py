@@ -271,6 +271,11 @@ def test_terminal_on_missing_target(tmp_path):
 
 
 def test_terminal_on_persistently_corrupt_file(tmp_path, capsys):
+    """TIMING-SENSITIVE FLAKE CANDIDATE (CI scheduler load): the two-poll
+    corrupt window here and its sibling transient arm below place their
+    heal/expire points 0.03-0.15s from the bracketing polls — on a loaded
+    CI runner a poll can overshoot the window. On flake, widen the margin
+    or add a witness between polls; do not delete the arm."""
     team_dir = tmp_path / "team-a"
     team_dir.mkdir()
     (team_dir / "7.json").write_text("{still not json", encoding="utf-8")
@@ -289,6 +294,11 @@ def test_terminal_on_persistently_corrupt_file(tmp_path, capsys):
 
 
 def test_tolerates_transient_corrupt_read(tmp_path):
+    """TIMING-SENSITIVE FLAKE CANDIDATE (CI scheduler load): this is the
+    second corrupt-boundary arm — the 0.03s heal timer lands 0.03-0.15s
+    from the bracketing polls, and a loaded runner can push a poll past
+    it. On flake, widen the margin or add a witness between polls; do not
+    delete the arm."""
     # A rewrite landing between polls must not kill the watch: corrupt on
     # the first poll, healed (deliverable written) well before the second.
     team_dir = tmp_path / "team-a"
