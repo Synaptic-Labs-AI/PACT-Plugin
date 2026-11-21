@@ -602,6 +602,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"{len(recomputed.discovered)} - excluded {len(recomputed.excluded)}")
     except (VerificationFailure, RunFailure) as failure:
         print(f"VERIFY-FAILURE {failure.condition}: {failure.detail}", file=sys.stderr)
+        # The advisory follows the failure line on the same stream, so a
+        # red-lane author keeps the allowlist hint while masking stays
+        # impossible: the advisory can inform a verdict, never flip one.
+        _skip_advisory(args.run_record)
         return 1
     _skip_advisory(args.run_record)
     print(f"VERIFY-OK expected={len(expected)} collected={len(collected_files)} "

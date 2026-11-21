@@ -30,11 +30,13 @@ ARTIFACTS
 INVARIANTS
   No inherited PYTEST_* or recorder-owner variables, no env overrides, no
   shell: a direct subprocess.run. Artifacts are written atomically and are
-  written even when pytest fails -- a missing artifact must mean "never ran",
-  never "failed". A run that never printed its collection header writes no
-  artifact at all (NO-COLLECTED-HEADER refusal): the verifier re-derives the
-  collected count from that persisted header, so an artifact without it is
-  unverifiable by construction.
+  written even when pytest fails, so a missing artifact never means "ran and
+  failed". Two refusal paths write no artifact: a contaminated environment
+  or a bad manifest refuses before the run ("never ran"), and a run that
+  never printed its collection header refuses at write time
+  (NO-COLLECTED-HEADER, rc 3) because the verifier re-derives the collected
+  count from that persisted header -- an artifact without it is unverifiable
+  by construction.
 """
 
 from __future__ import annotations

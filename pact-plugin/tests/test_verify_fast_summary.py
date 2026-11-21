@@ -1467,15 +1467,36 @@ def test_an_absent_run_record_is_a_hard_failure(tmp_path, rig):
     assert "RECORD-ABSENT" in proc.stderr
 
 
-def test_the_advisory_does_not_mask_a_real_failure(tmp_path, rig):
+def test_the_advisory_follows_the_failure_line_and_never_masks_it(
+        tmp_path, rig):
+    """On a refused verification the advisory still prints — strictly after.
+
+    The failure line leads and the advisory follows on the same stream, so a
+    red-lane author keeps the "this skip will be refused by the full gate"
+    hint while masking stays impossible: the advisory can inform but never
+    turn a failure green. Control arm first: the same unlisted site with no
+    failure is green with the advisory warning present.
+    """
     root, plugin, manifest = rig
-    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    unlisted = {"file": "tests/test_new.py", "reason": "brand new skip",
+                "count": 1}
+    record = _record_with_sites(summary, [unlisted])
+    control = _run(summary, canary, base, root, manifest, run_record=record)
+    assert control.returncode == 0, control.stderr
+    assert "VERIFY-OK" in control.stdout
+    assert "SKIP-ADVISORY SKIP-UNLISTED" in control.stderr
+    # Failure arm: the same record, canary artifact removed. Still red with
+    # the advisory printed, and on the shared stream the failure line comes
+    # first — presence after the verdict, never instead of it.
     canary.unlink()
-    proc = _run(summary, canary, base_sha, root, manifest,
-                run_record=_record_with_sites(summary, [_LISTED_SITE]))
+    proc = _run(summary, canary, base, root, manifest, run_record=record)
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "VERIFY-FAILURE" in proc.stderr
-    assert "SKIP-ADVISORY" not in proc.stdout + proc.stderr
+    assert "SKIP-ADVISORY SKIP-UNLISTED" in proc.stderr
+    assert (proc.stderr.index("VERIFY-FAILURE")
+            < proc.stderr.index("SKIP-ADVISORY SKIP-UNLISTED"))
 
 
 def test_the_artifact_paths_have_no_environment_default(tmp_path, rig):
