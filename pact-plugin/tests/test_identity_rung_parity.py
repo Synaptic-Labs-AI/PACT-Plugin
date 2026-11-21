@@ -1101,7 +1101,11 @@ def module_string_constants(tree) -> dict:
     """{name: text} for each module-level name of `tree` whose every
     binding, by every binding form the compiler defines (`_CalleeReader`),
     assigns the same string constant. A name with any other binding is left
-    out, so no reader of the table takes it for that constant."""
+    out, so no reader of the table takes it for that constant.
+
+    ADVERSARIAL-ONLY, not read: a rebinding through the module object
+    (`sys.modules[__name__].X = ...`), which sets a module's own constant
+    by attribute so that no binding of the name shows it."""
     reader = _reader_for(tree)
     found = {}
     for (key, name), sources in reader.sources.items():
@@ -1119,7 +1123,8 @@ def name_values(node, function, tree, seen=frozenset()):
     the code: a constant; or a name each of whose bindings, by every
     binding form the compiler defines (`_CalleeReader`), holds only such
     values: an assignment of one, an element of a literal container of
-    them (a `for` target, an unpacking), a parameter whose default and
+    them that nothing changes after its literal (a `for` target, an
+    unpacking; `_changed_containers`), a parameter whose default and
     every value a call in the module passes are such values. FAIL CLOSED:
     any other binding (a call result, a `with` target, an augmented
     assignment, an import, an unread binding) makes the name unreadable.
@@ -1178,6 +1183,8 @@ def _element_values(container, tree, seen=frozenset()):
         return values
     if isinstance(container, ast.Name) and id(container) not in seen:
         reader = _reader_for(tree)
+        if reader.changes(container.id, reader.scope.get(id(container))):
+            return None  # its contents can change after its literal
         sources = reader.held(container.id, reader.scope.get(id(container)))
         if not sources:
             return None
@@ -1510,6 +1517,7 @@ class _CalleeReader:
         self.wrappers = _wrapper_types()
         self._collect()
         self.unread = self._unread(code)
+        self.changed, self.changed_attrs = self._changed_containers()
         self._active = set()
 
     def _index(self, node, scope):
@@ -1686,6 +1694,70 @@ class _CalleeReader:
                 for scope in scopes or [None]:
                     unread.add((self._key(scope), name))
         return unread
+
+    def _holder_key(self, name, scope):
+        """The key of the scope whose binding of `name` a read in `scope`
+        finds, as `held` walks to it (the module's when none binds it)."""
+        current, first = scope, True
+        while current is not None:
+            if (self._key(current), name) in self.sources and (first or not isinstance(current, ast.ClassDef)):
+                return self._key(current)
+            first = False
+            current = self.scope.get(id(current))
+        return None
+
+    def _read_in_place(self, node):
+        """Whether the container `node` (a name or attribute) is only read
+        where it stands: subscripted for a value, its `.get` called,
+        iterated, compared, tested for truth, or handed to a builtin.
+        Anything else (a method call, a subscript store or delete, handing it
+        to a call that is not a builtin, binding, returning or formatting it)
+        may change what it holds, or let other code change it."""
+        parent = self.parent.get(id(node))
+        if isinstance(parent, ast.Subscript) and parent.value is node:
+            return isinstance(parent.ctx, ast.Load)
+        if isinstance(parent, ast.Attribute) and parent.attr == "get":
+            call = self.parent.get(id(parent))
+            return isinstance(call, ast.Call) and call.func is parent
+        if isinstance(parent, ast.Starred):
+            node, parent = parent, self.parent.get(id(parent))
+        if isinstance(parent, ast.keyword):
+            node, parent = parent, self.parent.get(id(parent))
+        if isinstance(parent, ast.Call) and parent.func is not node:
+            # a builtin changes no container handed to it, except the two that
+            # run code in it (which the dynamic-access rule bans in scope)
+            func = parent.func
+            return (
+                isinstance(func, ast.Name) and hasattr(builtins, func.id) and func.id not in ("exec", "eval")
+                and not self.held(func.id, self.scope.get(id(parent)))
+            )
+        if isinstance(parent, (ast.For, ast.AsyncFor, ast.comprehension)):
+            return parent.iter is node
+        if isinstance(parent, (ast.If, ast.While, ast.IfExp, ast.Assert)):
+            return parent.test is node
+        return isinstance(parent, (ast.Compare, ast.BoolOp)) or (
+            isinstance(parent, ast.UnaryOp) and isinstance(parent.op, ast.Not)
+        )
+
+    def _changed_containers(self):
+        """((scope key, name) set, attribute name set) of every container
+        whose contents can change after the value it was bound to: one used
+        anywhere other than read in place (`_read_in_place`), such as
+        `rows.append(x)`, `table[k] = v`, `table.update(...)` or a store inside
+        a function. FAIL CLOSED: what such a container holds is not read
+        from its literal."""
+        names, attributes = set(), set()
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load) and not self._read_in_place(node):
+                names.add((self._holder_key(node.id, self.scope.get(id(node))), node.id))
+            elif isinstance(node, ast.Attribute) and isinstance(node.ctx, ast.Load) and not self._read_in_place(node):
+                attributes.add(node.attr)
+        return names, attributes
+
+    def changes(self, name, scope):
+        """Whether the container `name`, read in `scope`, can change after
+        its binding (`_changed_containers`)."""
+        return (self._holder_key(name, scope), name) in self.changed
 
     def held(self, name, scope):
         """The sources of `name` read where `scope` reads it: its own scope's,
@@ -1928,8 +2000,12 @@ class _CalleeReader:
             elif isinstance(container, ast.DictComp):
                 return self.may_be(container.value, container) or self.may_be(container.key, container)
             elif isinstance(container, ast.Name):
+                if self.changes(container.id, scope):
+                    return True
                 return any(self._source_elements_may_be(s) for s in self.held(container.id, scope))
             elif isinstance(container, ast.Attribute):
+                if container.attr in self.changed_attrs:
+                    return True
                 return any(self._source_elements_may_be(s) for s in self.attribute_sources(container, scope))
             elif isinstance(container, (ast.Subscript, ast.Starred)):
                 return self.element_may_be(container.value, scope)
@@ -2022,7 +2098,10 @@ class _CalleeReader:
                 return self.may_be(node.args[0], scope)
             if self._is_partial(func, scope) and node.args:
                 return self.may_be(node.args[0], scope)  # calling the partial calls its first argument
-            if isinstance(func, ast.Attribute) and func.attr == "get" and isinstance(func.value, ast.Name):
+            if (
+                isinstance(func, ast.Attribute) and func.attr == "get" and isinstance(func.value, ast.Name)
+                and not self.changes(func.value.id, scope)
+            ):
                 held = self.held(func.value.id, scope)
                 if held and all(kind == "value" and isinstance(value, ast.Dict) for kind, value in held):
                     return any(self.may_be(v, self.scope.get(id(v))) for _k, d in held for v in d.values) or any(
@@ -2080,12 +2159,14 @@ def call_result_callees(paths) -> list:
     a call; a name bound by any binding form the compiler defines; an
     attribute target or class-body name of that name anywhere in the file,
     or a module-level name of another file in scope it is imported from; an element of a literal container, with `.get` on a
-    literal dict read as its values and default; a builtin wrapper made from
+    literal dict read as its values and default, when nothing changes the
+    container after its literal (`_changed_containers`); a builtin wrapper made from
     one callable (`staticmethod(f)`), and `functools.partial(f, ...)`, as
     that callable; a decorated def as
     what its decorators return; an element of what a plain function of the
     file returns, read from its returns. FAIL CLOSED: an element of another
-    container, a parameter no call in the file passes or of a function the
+    container or of one filled after its literal (`rows.append(...)`, a
+    subscript store, `.update`), a parameter no call in the file passes or of a function the
     file hands elsewhere, a `with` target, and a binding no form reads are
     taken to be one.
 
@@ -2417,6 +2498,24 @@ class TestEveryIdentityCallerIsCovered:
         ("from functools import partial\nget = partial(operator.methodcaller('a', n))\nget(x)\n", True),
         ("def partial(f):\n    return operator.methodcaller('a', n)\npartial(int)(x)\n", True),
         ("import functools\nfunctools.partial()(x)\n", True),
+        # a container filled after its literal holds what the filling put in
+        ("rows = []\nrows.append(operator.methodcaller('a', n))\nrows[0](x)\n", True),
+        ("rows = []\nrows.append(operator.methodcaller('a', n))\nfor get in rows:\n    get(x)\n", True),
+        ("rows = []\nrows.extend([operator.methodcaller('a', n)])\nrows[0](x)\n", True),
+        ("rows = []\nrows.insert(0, operator.methodcaller('a', n))\nrows[0](x)\n", True),
+        ("table = {}\ntable['k'] = operator.methodcaller('a', n)\ntable['k'](x)\n", True),
+        ("table = {}\ntable['k'] = operator.methodcaller('a', n)\nhandler = table.get('k')\nhandler(x)\n", True),
+        ("table = {}\ntable.update(k=operator.methodcaller('a', n))\ntable['k'](x)\n", True),
+        ("table = {}\ntable.setdefault('k', operator.methodcaller('a', n))\ntable['k'](x)\n", True),
+        ("table = {}\ntable |= {'k': operator.methodcaller('a', n)}\ntable['k'](x)\n", True),
+        ("table = {}\ndef register():\n    table['k'] = operator.methodcaller('a', n)\ntable['k'](x)\n", True),
+        ("def fill(t):\n    t['k'] = operator.methodcaller('a', n)\ntable = {}\nfill(table)\ntable['k'](x)\n", True),
+        ("class H:\n    rows = []\nH.rows.append(operator.methodcaller('a', n))\nH.rows[0](x)\n", True),
+        # read in place only: the literal is what it holds
+        ("def a():\n    pass\nrows = [a]\nif rows and len(rows) > 0:\n    rows[0](x)\n", False),
+        ("def a():\n    pass\nrows = [a]\nfor fn in rows:\n    fn(x)\n", False),
+        ("def a():\n    pass\ntable = {'k': a}\nif 'k' in table:\n    table.get('k')(x)\n", False),
+        ("def a():\n    pass\nrows = []\nrows.append(a)\nrows[0](x)\n", True),
     ])
     def test_a_callee_is_followed_to_where_it_comes_from(self, tmp_path, source, held):
         path = tmp_path / "scope.py"
@@ -2459,6 +2558,9 @@ class TestEveryIdentityCallerIsCovered:
         ("def f(c):\n    n = 'O_A'\n    def n():\n        pass\n    return getattr(os, n)\n", None),
         ('def f(n):\n    return getattr(os, n)\n', None),
         ("def f(n='O_A'):\n    return getattr(os, n)\nf(g())\n", None),
+        ("NAMES = ['O_A']\ndef f():\n    for n in NAMES:\n        getattr(os, n)\n", ['O_A']),
+        ("NAMES = ['O_A']\nNAMES.append(g())\ndef f():\n    for n in NAMES:\n        getattr(os, n)\n", None),
+        ("NAMES = ['O_A']\ndef add():\n    NAMES[0] = g()\ndef f():\n    for n in NAMES:\n        getattr(os, n)\n", None),
     ])
     def test_a_name_handed_to_a_lookup_is_read_from_every_binding(self, source, held):
         """A name is read as the strings it holds only when every binding of
@@ -2487,6 +2589,14 @@ class TestEveryIdentityCallerIsCovered:
         binding of it, by any binding form, assigns that one string; a
         function's own local of the same name is not one of them."""
         assert module_string_constants(ast.parse(source)) == table
+
+    def test_a_rebinding_through_the_module_object_is_listed_not_read(self):
+        """The constant tables' one adversarial-only form: the docstring names
+        it, and the table does not read it."""
+        listed = module_string_constants.__doc__.split("ADVERSARIAL-ONLY")
+        assert len(listed) == 2 and "sys.modules[__name__]" in listed[1], module_string_constants.__doc__
+        source = "import sys\nA = 'a'\nsys.modules[__name__].A = 'b'\n"
+        assert module_string_constants(ast.parse(source)) == {"A": "a"}
 
     def test_the_reader_reads_every_binding_the_compiler_makes(self):
         """The population is the compiler's: every name a code object of each

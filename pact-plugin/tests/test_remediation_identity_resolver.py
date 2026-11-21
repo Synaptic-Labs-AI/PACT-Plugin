@@ -3866,6 +3866,13 @@ class TestTheListingAnswerWalkFollowsEveryForm:
         ("DETAIL = 'a'\nDETAIL += 'b'\ndef f():\n    return DETAIL\n", {"a"}, False),
         ("def f(detail):\n    if detail:\n        detail = 'a'\n    return detail\n", {"a"}, False),
         ("def f():\n    detail = 'a'\n    match 'b':\n        case [detail]:\n            pass\n    return detail\n", {"a", "b"}, False),
+        # a table filled after its literal holds what the filling put in
+        ("TABLE = {'k': 'a'}\nTABLE['j'] = 'b'\ndef f(k):\n    return TABLE[k]\n", set(), False),
+        ("TABLE = {'k': 'a'}\nTABLE.update(j='b')\ndef f(k):\n    return TABLE[k]\n", set(), False),
+        ("TABLE = {'k': 'a'}\nTABLE.setdefault('j', 'b')\ndef f(k):\n    return TABLE[k]\n", set(), False),
+        ("TABLE = {'k': 'a'}\nTABLE |= {'j': 'b'}\ndef f(k):\n    return TABLE[k]\n", set(), False),
+        ("TABLE = {'k': 'a'}\ndef f(k):\n    return TABLE[k]\ndef add():\n    TABLE['j'] = 'b'\n", set(), False),
+        ("TABLE = {'k': 'a'}\ndef f(k):\n    if k in TABLE:\n        return TABLE[k]\n    return 'a'\n", {"a"}, True),
     ])
     def test_a_detail_name_is_read_from_every_binding(self, source, texts, resolved):
         """A detail name is followed only when every binding of it, by any
@@ -4316,8 +4323,10 @@ def _detail_values(expression, function, module_tree, seen=frozenset()) -> tuple
     expressions, f-strings, calls to the module's own functions (their
     returns), and names and dict lookups whose every binding, by each
     binding form the compiler defines (the rung parity `_CalleeReader`), is
-    an assignment. Any other form, a name with any other binding included,
-    is returned in `unresolved` as source text."""
+    an assignment, a table only when nothing changes it after its literal
+    (`_changed_containers`). Any other form, a name with any other binding
+    or a table filled later included, is returned in `unresolved` as source
+    text."""
     from test_identity_rung_parity import _reader_for
 
     reader = _reader_for(module_tree)
@@ -4347,7 +4356,9 @@ def _detail_values(expression, function, module_tree, seen=frozenset()) -> tuple
             return texts, unresolved
         if isinstance(node, ast.Subscript) and isinstance(node.value, ast.Name):
             tables = held(node.value)
-            if tables and all(kind == "value" and isinstance(table, ast.Dict) for kind, table in tables):
+            if tables and all(kind == "value" and isinstance(table, ast.Dict) for kind, table in tables) and not (
+                reader.changes(node.value.id, reader.scope.get(id(node.value)))  # filled after its literal
+            ):
                 parts = [values(value, scope, seen) for _kind, table in tables for value in table.values]
                 return set().union(*(p[0] for p in parts)), [u for p in parts for u in p[1]]
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in functions:
