@@ -1949,15 +1949,21 @@ class _DetectionGraph:
     # (module, def), the argument's position and its keyword. A call of one
     # is a standard-library value exactly when that argument is a lambda with
     # no parameters whose body `_foreign_value` proves, evaluated in the
-    # calling function. `test_a_result_passing_function_returns_its_run_result`
-    # holds each entry to that contract.
+    # calling function, or a function passed by name whose returns it proves
+    # (`_named_runner_result`). Inside a pass, a later asker of the same
+    # question gets the first asker's result, not its own runner's: the typing
+    # holds because each question has one runner
+    # (`test_each_git_question_has_one_runner`).
+    # `test_a_result_passing_function_returns_its_run_result` holds each entry
+    # to that contract.
     _RETURNS_ITS_ARGUMENT = {("shared.git_helpers", "answered_once"): (1, "run")}
 
     def _argument_result(self, call, module: str, function, seen, depth: int, parameters: bool):
         """True when `call` reaches a `_RETURNS_ITS_ARGUMENT` function and
         its callable argument is a parameterless lambda whose body is a
-        standard-library value; False when it reaches one otherwise; None
-        when it reaches none."""
+        standard-library value, or a function passed by name whose returns
+        are (`_named_runner_result`); False when it reaches one otherwise;
+        None when it reaches none."""
         import ast
 
         target = self.target(call, module)
@@ -1967,6 +1973,8 @@ class _DetectionGraph:
         position, keyword = rule
         given = [kw.value for kw in call.keywords if kw.arg == keyword]
         argument = given[0] if given else call.args[position] if len(call.args) > position else None
+        if isinstance(argument, ast.Name):
+            return self._named_runner_result(argument, module, function, seen, depth, parameters)
         if not isinstance(argument, ast.Lambda):
             return False
         lambda_arguments = argument.args
@@ -1974,6 +1982,54 @@ class _DetectionGraph:
                 or lambda_arguments.vararg or lambda_arguments.kwarg):
             return False
         return self._foreign_value(argument.body, module, function, seen, depth + 1, parameters)
+
+    def _named_runner_result(self, name, module: str, function, seen, depth: int, parameters: bool) -> bool:
+        """A function passed by name as the callable argument of a
+        `_RETURNS_ITS_ARGUMENT` function: True when it is a def of the calling
+        function (the only binding of the name there, directly in its body,
+        with no parameters and no decorator) whose body is a docstring and
+        returns, each return value proved in the calling function, the scope
+        it reads (`git_helpers.run_git`'s `run`); or a project function with no
+        parameters that `returns_foreign`. False for anything else: a def that
+        binds a local, takes a parameter, is decorated or has no return value,
+        a name with another binding, or a name the census cannot resolve."""
+        import ast
+
+        def bare(definition):
+            arguments = definition.args
+            return not (arguments.posonlyargs or arguments.args or arguments.kwonlyargs
+                        or arguments.vararg or arguments.kwarg or definition.decorator_list)
+
+        if function is not None and self._bindings(function, name.id):
+            own, pending = [], list(function.body)
+            while pending:
+                item = pending.pop()
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == name.id:
+                    own.append(item)
+                elif not isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                    pending.extend(ast.iter_child_nodes(item))
+            if len(own) != 1 or self._bindings(function, name.id) != [("unknown", None)]:
+                return False
+            definition = own[0]
+            if not isinstance(definition, ast.FunctionDef) or not bare(definition):
+                return False
+            statements = [
+                statement for statement in definition.body
+                if not (isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant)
+                        and isinstance(statement.value.value, str))
+            ]
+            if not statements or not all(
+                isinstance(statement, ast.Return) and statement.value is not None for statement in statements
+            ):
+                return False
+            return all(
+                self._foreign_value(statement.value, module, function, seen, depth + 1, parameters)
+                for statement in statements
+            )
+        target = self.refers_to(name, module)
+        if target is None or target not in self.defs or not bare(self.defs[target]):
+            return False
+        return self.returns_foreign(target, seen)
 
     def returns_foreign(self, target, seen=frozenset()) -> bool:
         """PROVED: every value the project function `target` returns is a
@@ -2756,7 +2812,8 @@ def route_inputs() -> dict:
       a standard-library one (`_DetectionGraph._foreign_value`, which counts
       a project function's result only when it `returns_foreign`, or, for a
       function in `_DetectionGraph._RETURNS_ITS_ARGUMENT`, when its callable
-      argument is a parameterless lambda whose body is proved).
+      argument is a parameterless lambda whose body is proved or a function
+      passed by name whose returns are (`_named_runner_result`)).
     REPORTED, as a condition NOT_A_ROUTE must name with its reason: every
     other call through a project name. That is every build of a project
     class (a nested one included), in a function or at import, whatever
@@ -3023,11 +3080,13 @@ def test_a_result_passing_function_returns_its_run_result():
     """Pin for `_DetectionGraph._RETURNS_ITS_ARGUMENT`: the census types a
     call of each listed function as its callable argument's result, so each
     must return exactly what that argument returns, or raise what it raises,
-    on every path. For `answered_once`: outside a pass, inside one on the
-    first ask, and on a later ask of the same question (the memo's path), it
-    returns the very object `run` returned, and a raise is the same
-    exception again. The argument sits where the table says, by position and
-    by keyword. A new entry fails here until it has a pin of its own."""
+    on every path. For `answered_once`: outside a pass and on the first ask
+    inside one, it returns the very object `run` returned. A later ask of the
+    same question in the pass gets the first asker's object, and its own
+    runner never runs; a raise is the same exception again. That is sound
+    because each question has one runner (`test_each_git_question_has_one_runner`).
+    The argument sits where the table says, by position and by keyword. A
+    new entry fails here until it has a pin of its own."""
     import inspect
 
     from shared import git_helpers
@@ -3059,11 +3118,240 @@ def test_a_result_passing_function_returns_its_run_result():
     with git_helpers.git_results_pass():
         first = git_helpers.answered_once(argv, run, text=False, env=env)
         assert first is made[-1]
-        again = git_helpers.answered_once(argv, run=run, text=False, env=env)
+        again = git_helpers.answered_once(argv, run=lambda: made.append(object()) or made[-1], text=False, env=env)
         failing = ["git", "rev-parse", "--absolute-git-dir"]
         errors = [raised(lambda: git_helpers.answered_once(failing, raising, text=False, env=env))
                   for _ in range(2)]
     assert (again is first, len(made), errors[0] is made[-1], errors[1] is made[-1]) == (True, 3, True, True)
+
+
+def _one_runner_problems(trees: dict) -> tuple:
+    """(sites, problems, timeouts, forms) for every call of `answered_once`
+    in `trees` ({file name: parsed module}). A call's runner must be
+    `subprocess.run(<the argv it is keyed by>, capture_output=True,
+    text=<its text>, timeout=<a timeout>, env=<its env>)`, read from a
+    parameterless lambda or a nested def that returns it; a runner that
+    passes `cwd=` is valid only when that same call passes `answered_once`
+    the same `cwd=`, and a runner with no `cwd=` must not pass one. Each
+    argument is compared as written, so an argv, text, env or cwd the
+    runner reaches by another expression fails, even when it holds the same
+    value. A timeout that is a parameter of the enclosing def is resolved at
+    each caller that asks once per pass (`run_git`'s)."""
+    import ast
+
+    def called(func):
+        return func.id if isinstance(func, ast.Name) else func.attr if isinstance(func, ast.Attribute) else None
+
+    def is_def(node):
+        return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+
+    sites, problems, timeouts, forms = [], [], set(), set()
+    for path, tree in trees.items():
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and called(node.func) == "answered_once"]
+        heads = {call.func for call in calls}
+        for node in ast.walk(tree):
+            named = (isinstance(node, ast.Name) and node.id == "answered_once"
+                     or isinstance(node, ast.Attribute) and node.attr == "answered_once")
+            if named and node not in heads or isinstance(node, ast.alias) and node.name == "answered_once" and node.asname:
+                problems.append(f"{path}:{getattr(node, 'lineno', '?')}: answered_once used but not called")
+        for call in calls:
+            sites.append(f"{path}:{call.lineno}")
+            function = parents.get(call)
+            while function is not None and not is_def(function):
+                function = parents.get(function)
+            given = {keyword.arg: keyword.value for keyword in call.keywords}
+            argv = call.args[0] if call.args else given.get("argv")
+            run = call.args[1] if len(call.args) > 1 else given.get("run")
+            runner = None
+            if isinstance(run, ast.Lambda):
+                arguments = run.args
+                if not (arguments.posonlyargs or arguments.args or arguments.kwonlyargs
+                        or arguments.vararg or arguments.kwarg):
+                    runner, form = run.body, "lambda"
+            elif isinstance(run, ast.Name) and function is not None:
+                found = [node for node in ast.walk(function) if is_def(node) and node.name == run.id]
+                body = [statement for statement in found[0].body if not (
+                    isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant)
+                    and isinstance(statement.value.value, str))] if len(found) == 1 else []
+                arguments = found[0].args if found else None
+                if (len(body) == 1 and isinstance(body[0], ast.Return) and isinstance(found[0], ast.FunctionDef)
+                        and not found[0].decorator_list
+                        and not (arguments.posonlyargs or arguments.args or arguments.kwonlyargs
+                                 or arguments.vararg or arguments.kwarg)):
+                    runner, form = body[0].value, "nested def"
+            keywords = {keyword.arg: keyword.value for keyword in getattr(runner, "keywords", [])}
+            if not (isinstance(runner, ast.Call) and ast.unparse(runner.func) == "subprocess.run"
+                    and len(runner.args) == 1 and not isinstance(runner.args[0], ast.Starred)
+                    and len(keywords) == len(runner.keywords)
+                    and set(keywords) - {"cwd"} == {"capture_output", "text", "timeout", "env"}
+                    and isinstance(keywords["capture_output"], ast.Constant)
+                    and keywords["capture_output"].value is True
+                    and argv is not None and "text" in given and "env" in given
+                    and ast.unparse(runner.args[0]) == ast.unparse(argv)
+                    and ast.unparse(keywords["text"]) == ast.unparse(given["text"])
+                    and ast.unparse(keywords["env"]) == ast.unparse(given["env"])
+                    and ("cwd" in keywords) == ("cwd" in given)
+                    and ("cwd" not in keywords or ast.unparse(keywords["cwd"]) == ast.unparse(given["cwd"]))):
+                problems.append(f"{path}:{call.lineno}: the runner is not the question's own git command")
+                continue
+            forms.add(form)
+            timeout = keywords["timeout"]
+            parameters = [*function.args.posonlyargs, *function.args.args] if function is not None else []
+            if isinstance(timeout, ast.Constant):
+                timeouts.add(timeout.value)
+            elif isinstance(timeout, ast.Name) and timeout.id in [parameter.arg for parameter in parameters]:
+                # A parameter: the timeout each caller that asks once per pass gives.
+                index = [parameter.arg for parameter in parameters].index(timeout.id)
+                defaults = function.args.defaults
+                default = defaults[index - (len(parameters) - len(defaults))] if index >= len(parameters) - len(defaults) else None
+                for other in trees.values():
+                    for caller in ast.walk(other):
+                        if not (isinstance(caller, ast.Call) and called(caller.func) == function.name):
+                            continue
+                        flags = {keyword.arg: keyword.value for keyword in caller.keywords}
+                        if "once_per_pass" not in flags:
+                            continue
+                        if not isinstance(flags["once_per_pass"], ast.Constant):
+                            problems.append(f"{function.name} call at line {caller.lineno}: once_per_pass is not a constant")
+                        elif flags["once_per_pass"].value is True:
+                            value = flags.get(timeout.id, caller.args[index] if len(caller.args) > index else default)
+                            if isinstance(value, ast.Constant):
+                                timeouts.add(value.value)
+                            else:
+                                problems.append(f"{function.name} call at line {caller.lineno}: timeout is not a constant")
+            else:
+                problems.append(f"{path}:{call.lineno}: the timeout is neither a constant nor a parameter")
+    return sites, problems, timeouts, forms
+
+
+def test_each_git_question_has_one_runner():
+    """`answered_once` keys a question on its argv, `text`, `env` and `cwd`
+    (`git_helpers._question`). Inside a pass, a later asker of the same
+    question gets the first asker's result, and its own runner never runs.
+    The census still types each call as its own runner's result
+    (`_DetectionGraph._RETURNS_ITS_ARGUMENT`), and that is sound because
+    each question has one runner: every call site's runner is the question's
+    own git command (`_one_runner_problems`), with one timeout across them
+    all, so two sites that ask one question run one command the same way.
+    The argv is matched as an expression, not resolved to its constant parts:
+    the runner must pass the very expression the call is keyed on, a rule
+    that is decidable and fails closed on any other spelling of the same
+    value. A runner of any other shape, a second timeout (a `run_git`
+    caller's included), an alias of `answered_once` or any use of it but a
+    call fails here."""
+    import ast
+
+    files = sorted({*SCRIPTS.glob("*.py"), *(PLUGIN_ROOT / "hooks").rglob("*.py")})
+    trees = {path.name: ast.parse(path.read_text(encoding="utf-8")) for path in files}
+    sites, problems, timeouts, forms = _one_runner_problems(trees)
+    assert problems == [] and len(timeouts) == 1, (problems, timeouts)
+    assert sites and forms == {"lambda", "nested def"}  # control: both runner forms were read
+
+
+_ASK = "answered_once(argv, {run}, text=False, env=None{cwd})"
+_GIT = "subprocess.run({argv}, capture_output=True, text=False, timeout=5, env=None{cwd})"
+
+
+@pytest.mark.parametrize("body, honest", [
+    (f"    argv = ['git', 'rev-parse']\n    return {_ASK.format(run='lambda: ' + _GIT.format(argv='argv', cwd=''), cwd='')}\n",
+     True),
+    (f"    argv = ['git', 'rev-parse']\n    def run():\n        return {_GIT.format(argv='argv', cwd='')}\n"
+     f"    return {_ASK.format(run='run', cwd='')}\n", True),
+    (f"    argv = ['git', 'rev-parse']\n"
+     f"    return {_ASK.format(run='lambda: ' + _GIT.format(argv='argv', cwd=', cwd=where'), cwd=', cwd=where')}\n",
+     True),
+    (f"    argv = ['git', 'rev-parse']\n"
+     f"    return {_ASK.format(run='lambda: ' + _GIT.format(argv='argv', cwd=', cwd=where'), cwd='')}\n", False),
+    (f"    argv = ['git', 'rev-parse']\n"
+     f"    return {_ASK.format(run='lambda: ' + _GIT.format(argv='argv', cwd=''), cwd=', cwd=where')}\n", False),
+    (f"    argv = ['git', 'rev-parse']\n"
+     f"    return {_ASK.format(run='lambda: ' + _GIT.format(argv='argv', cwd=', cwd=where'), cwd=', cwd=other')}\n",
+     False),
+    (f"    argv = ['git', 'rev-parse']\n    copied = argv\n"
+     f"    return {_ASK.format(run='lambda: ' + _GIT.format(argv='copied', cwd=''), cwd='')}\n", False),
+    (f"    argv = ['git', 'rev-parse']\n"
+     f"    return {_ASK.format(run='lambda: ' + _GIT.format(argv='list(argv)', cwd=''), cwd='')}\n", False),
+], ids=[
+    "argv in a variable", "nested def", "same cwd on both", "cwd on the runner only", "cwd on the call only",
+    "two different cwds", "argv the runner reads through a copy", "argv the runner rebuilds",
+])
+def test_a_runner_is_its_questions_own_command(body, honest):
+    """Rows for `_one_runner_problems`: an argv built in a variable and passed
+    to both is the question's own command, and so is a runner that passes
+    the same `cwd=` the call passes. A runner whose `cwd=` the call does not
+    pass, a call whose `cwd=` the runner does not pass, two different cwds,
+    and an argv the runner reaches by another expression each fail; an argv
+    the census cannot show to be the one keyed fails closed."""
+    import ast
+
+    source = ("import subprocess\nfrom shared.git_helpers import answered_once\n\n"
+              "def reader(where, other):\n" + body)
+    sites, problems, _timeouts, _forms = _one_runner_problems({"m.py": ast.parse(source)})
+    assert len(sites) == 1  # control: the call was read
+    assert (problems == []) is honest, problems
+
+
+_RUN = "subprocess.run(['git', 'rev-parse'], capture_output=True)"
+
+
+@pytest.mark.parametrize("body, typed", [
+    (f"    return answered_once(['git'], lambda: {_RUN}, text=True, env=None)\n", True),
+    (f"    def run():\n        return {_RUN}\n    return answered_once(['git'], run, text=True, env=None)\n", True),
+    (f"    def run():\n        \"\"\"The command.\"\"\"\n        return {_RUN}\n"
+     "    return answered_once(['git'], run=run, text=True, env=None)\n", True),
+    (f"    return answered_once(['git'], _module_run, text=True, env=None)\n", True),
+    (f"    def run(flag):\n        return {_RUN}\n    return answered_once(['git'], run, text=True, env=None)\n", False),
+    (f"    @functools.cache\n    def run():\n        return {_RUN}\n"
+     "    return answered_once(['git'], run, text=True, env=None)\n", False),
+    (f"    def run():\n        done = {_RUN}\n        return done\n"
+     "    return answered_once(['git'], run, text=True, env=None)\n", False),
+    ("    def run():\n        return Thing()\n    return answered_once(['git'], run, text=True, env=None)\n", False),
+    (f"    def run():\n        return {_RUN}\n    run = _module_run\n"
+     "    return answered_once(['git'], run, text=True, env=None)\n", False),
+    ("    return answered_once(['git'], _module_run_with_flag, text=True, env=None)\n", False),
+    ("    return answered_once(['git'], _module_build, text=True, env=None)\n", False),
+    ("    return answered_once(['git'], missing, text=True, env=None)\n", False),
+    (f"    return answered_once(['git'], lambda c=1: {_RUN}, text=True, env=None)\n", False),
+    ("    return answered_once(['git'], functools.partial(subprocess.run, ['git']), text=True, env=None)\n", False),
+], ids=[
+    "lambda", "nested def", "nested def with a docstring, by keyword", "module function",
+    "nested def with a parameter", "decorated nested def", "nested def binding a local",
+    "nested def returning a project build", "nested def rebound", "module function with a parameter",
+    "module function returning a project build",
+    "unbound name", "lambda with a default", "functools.partial",
+])
+def test_a_named_runner_is_read_through_its_returns(tmp_path, monkeypatch, body, typed):
+    """`_DetectionGraph._argument_result` types a call of `answered_once` as
+    its runner's result when the runner is a parameterless lambda or a
+    function passed by name whose returns are proved (`git_helpers.run_git`
+    passes its nested `run`); a runner the census cannot prove (a parameter,
+    a decorator, a local binding, a project build, another binding of the
+    name, an unbound name) is not typed, so the census reports the value."""
+    import ast
+    import sys
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "m.py").write_text(
+        "import functools\nimport subprocess\nfrom shared.git_helpers import answered_once\n\n"
+        "class Thing:\n    pass\n\n"
+        f"def _module_run():\n    return {_RUN}\n\n"
+        f"def _module_run_with_flag(flag):\n    return {_RUN}\n\n"
+        "def _module_build():\n    return Thing()\n\n"
+        "def reader():\n" + body
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path, PLUGIN_ROOT / "hooks"))
+    graph = _DetectionGraph()
+    assert graph.load("pkg.m")
+    reader = graph.defs[("pkg.m", "reader")]
+    call = next(
+        node for node in ast.walk(reader)
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "answered_once"
+    )
+    assert graph.target(call, "pkg.m") == ("shared.git_helpers", "answered_once")  # control: the rule's target
+    assert graph._foreign_value(call, "pkg.m", reader, frozenset()) is typed
 
 
 class TestEveryRouteEntryConditionIsARoute:
