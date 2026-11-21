@@ -30,14 +30,19 @@ ARTIFACTS
 INVARIANTS
   No inherited PYTEST_* or recorder-owner variables, no env overrides, no
   shell: a direct subprocess.run. Artifacts are written atomically and are
-  written even when pytest fails, so a missing artifact never means "ran and
-  failed". Four ways an artifact can be missing: a contaminated environment
-  refuses before the run (rc 3); a bad manifest refuses before the run
-  (rc 2); a run that never printed its collection header refuses at write
-  time (NO-COLLECTED-HEADER, rc 3) because the verifier re-derives the
-  collected count from that persisted header -- an artifact without it is
-  unverifiable by construction; and an interrupted run (SIGINT/SIGTERM
-  mid-stream) dies before the write.
+  written even when pytest fails.
+
+  Artifact ABSENCE certifies nothing: pass/fail is decided by the verifier
+  from evidence, never from an artifact existing. A missing run artifact
+  means exactly one of four cases: the run never started (contaminated
+  environment, rc 3); selection refused (bad manifest, rc 2); the run
+  started but produced no collection evidence and refused at write time
+  (NO-COLLECTED-HEADER, rc 3 -- the verifier re-derives the collected count
+  from the persisted header, so an artifact without it is unverifiable by
+  construction); or the run was interrupted mid-stream (SIGINT/SIGTERM) and
+  died before the write. No case means "ran to completion and failed": a
+  completed run's exit code and outcome counts are always recorded in an
+  artifact.
 """
 
 from __future__ import annotations
@@ -327,10 +332,11 @@ def _run(args, selection, manifest_path: Path, plugin_root: Path,
     if not collected_header:
         # The verifier re-derives run.collected from this stored line, so an
         # artifact without the header is unverifiable by construction, and a
-        # headerless run means the suite likely never started printing
-        # collection evidence. Refuse rather than write one: the count would
-        # carry no printed provenance (and a missing artifact here means the
-        # run never produced collection evidence -- never a failed run).
+        # headerless run means the suite started but produced no collection
+        # evidence. Refuse rather than write one: the count would carry no
+        # printed provenance, and artifact absence certifies nothing -- the
+        # verifier decides pass/fail from evidence, never from an artifact
+        # existing.
         print(
             "FAST-SUITE REFUSAL: no collected-items header line was captured "
             "(NO-COLLECTED-HEADER); the run produced no start-of-run "

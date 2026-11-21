@@ -1370,6 +1370,68 @@ def test_a_missing_canary_rc_takes_the_missing_key_path(tmp_path, rig):
     assert "BAD-FIELD" not in proc.stderr
 
 
+@pytest.mark.parametrize("key", ["failed", "errors", "deselected"])
+def test_a_false_run_outcome_refuses_at_the_local_zero_check(
+        tmp_path, rig, key):
+    """Site proof, not just name proof: JSON false equals 0 in Python, so the
+    untyped zero-check passed it locally and a distant site (the outcome
+    summary check) refused under the same condition name. run.collected=0 is
+    co-mutated because node identity would refuse it first: whichever check
+    names its condition is the one that saw the false. Post-fix the local
+    zero-check is type-first and fires first; pre-fix RUN-COLLECTED fired.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate(summary, _set(("run", key), False))
+    _mutate(summary, _set(("run", "collected"), 0))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"BAD-FIELD-RUN-{key.upper()}" in proc.stderr
+    assert "RUN-COLLECTED" not in proc.stderr
+
+
+@pytest.mark.parametrize("key", ["failed", "errors", "deselected"])
+def test_a_false_run_outcome_refuses_with_the_local_detail(
+        tmp_path, rig, key):
+    """The local refusal names the type expectation; the distant site's
+    message ('expected an integer >= 0') must not leak into the output."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate(summary, _set(("run", key), False))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"BAD-FIELD-RUN-{key.upper()}" in proc.stderr
+    assert "expected an integer >= 0" not in proc.stderr
+
+
+@pytest.mark.parametrize("key", ["failed", "errors", "deselected"])
+def test_a_false_record_outcome_keeps_its_typed_local_refusal(
+        tmp_path, rig, key):
+    """The record side was already type-first (_require_record_int); these
+    pins lock the typed local refusal so the run-side fix cannot drift the
+    two sides apart."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate_record(root, _set((key,), False))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"BAD-FIELD-{key.upper()}" in proc.stderr
+
+
+def test_integer_zero_outcomes_pass_the_typed_checks(tmp_path, rig):
+    """Control arm for the typed zero-checks: real integer zeros (the honest
+    clean-run case) must stay green, not be over-blocked."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "VERIFY-OK" in proc.stdout
+
+
 def _selection_block_of(selection):
     """The selection block the verifier's _require_selection_identity expects."""
     included = sorted(selection.included)

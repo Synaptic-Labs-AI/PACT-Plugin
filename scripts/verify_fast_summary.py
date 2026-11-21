@@ -382,9 +382,19 @@ def _require_clean_exits_and_collection_identity(canary: dict, summary: dict,
         raise VerificationFailure("EXITSTATUS", f"record exitstatus is {record['exitstatus']}")
     deselected = _record_outcome_int(record, "deselected")
     for key in ("failed", "errors", "deselected"):
-        if summary["run"].get(key) != 0:
+        # Type first, then value (the rc checks' rule): JSON false equals 0
+        # in Python, so an untyped comparison let false pass as a clean zero
+        # here and refuse only later at the outcome-summary check under the
+        # same condition name but a distant site.
+        run_value = summary["run"].get(key)
+        if not isinstance(run_value, int) or isinstance(run_value, bool):
             raise VerificationFailure(
-                f"RUN-{key.upper()}", f"run.{key} is {summary['run'].get(key)!r}; expected 0")
+                f"BAD-FIELD-RUN-{key.upper()}",
+                f"run.{key} is {run_value!r}; expected an integer, not a "
+                "JSON boolean, string, or null")
+        if run_value != 0:
+            raise VerificationFailure(
+                f"RUN-{key.upper()}", f"run.{key} is {run_value!r}; expected 0")
         if _record_outcome_int(record, key) != 0:
             raise VerificationFailure(
                 f"RECORD-{key.upper()}", f"record.{key} is {record[key]!r}; expected 0")
