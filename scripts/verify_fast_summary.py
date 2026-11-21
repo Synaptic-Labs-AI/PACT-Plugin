@@ -316,9 +316,8 @@ def _require_commands(canary: dict, summary: dict, recomputed, plugin_root: Path
         # beats an uncaught traceback.
         raise VerificationFailure(
             "SELECTION-ARGS-INVALID",
-            f"the recomputed selection cannot be turned into pytest "
-            f"arguments ({exc}); the tree changed under the verifier -- "
-            "re-run the lane") from exc
+            f"the recomputed selection could not be converted to pytest "
+            f"arguments ({exc})") from exc
     if canary_command != expected_canary:
         raise VerificationFailure(
             "CANARY-COMMAND-MISMATCH",
