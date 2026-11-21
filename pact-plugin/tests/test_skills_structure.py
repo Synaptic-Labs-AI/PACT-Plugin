@@ -7,6 +7,10 @@ Tests cover:
 3. SKILL.md has valid YAML frontmatter with required fields
 4. Skill names and descriptions are present
 5. SKILL.md body contains substantive content
+6. The retired memory_saved flag stays absent from every tracked Markdown
+   file across the six LLM-loaded instruction surfaces (bounded entity
+   and escape decoding, per-surface known-member control, real
+   temporary-Git self-tests)
 """
 import ast
 import re
@@ -912,9 +916,12 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             # Bounded decode: numeric character references are resolved only
             # when they denote a separator-class char (_ - space), and named
             # references only when they are in _NAMED_SEPARATORS; every
-            # other entity stays literal. Arbitrary-markup evasion shapes
-            # (e.g. memory<br>saved) are ruled out-of-contract, so no
-            # general HTML decode happens here.
+            # other entity stays literal. Confirmed out-of-contract misses,
+            # all of which stay literal: markup shapes (memory<br>saved),
+            # double-encoded entities (memory&amp;#95;saved), an escaped
+            # backslash before a separator (memory\\_saved), and numeric
+            # references without a semicolon (memory&#95saved) — no general
+            # HTML or escape decode happens here.
             normalized = " ".join(
                 re.sub(
                     r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);",
