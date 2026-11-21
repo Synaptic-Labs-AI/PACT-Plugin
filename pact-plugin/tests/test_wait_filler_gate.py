@@ -814,11 +814,13 @@ _TIER3_REASON_PIN = (
     'python3 "{watcher}" --team <team-name> --task <task-id> '
     "--predicate handoff --deadline 900\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). If the event you await is not a "
-    "deliverable you can write, do NOT arm — set "
+    "a teachback submission). A teammate's handoff or teachback "
+    "submission is precisely the deliverable to arm on, even though you "
+    "cannot write it. If the event you await is something only YOU can "
+    "write — your own notes or a summary — do NOT arm: instead set "
     "metadata.intentional_wait with `expected_resolver` naming the "
-    "resolver instead, and end your turn; a message or that resolver's "
-    "own wake resolves it. If you DID arm: end your turn with no "
+    "resolver, and end your turn; a message or that resolver's own "
+    "wake resolves it. If you DID arm: end your turn with no "
     "further tool calls — the watcher exits 0 when the deliverable "
     "lands, 3 when the deadline passes without it, 4 when it cannot "
     "watch at all — and its completion notification re-invokes you."
@@ -1027,6 +1029,15 @@ def test_tier3_lead_text_names_the_no_arm_alternative():
 
     assert "do NOT arm" in wait_filler_gate._TIER3_REASON
     assert "expected_resolver" in wait_filler_gate._TIER3_REASON
+    # THE LEAD-SIDE DISAMBIGUATION (Bugbot Medium, cold round 12): the
+    # lead's PRIMARY wait is a teammate's handoff or teachback — a
+    # deliverable the lead cannot write — so a "not a deliverable you can
+    # write" clause read literally makes the lead skip arming for the
+    # exact case the watcher exists for. The text must name the
+    # teammate-written deliverable as the ARM-ON case and scope the
+    # do-NOT-arm route to what only the lead can write.
+    assert "something only YOU can write" in wait_filler_gate._TIER3_REASON
+    assert "even though you cannot write it" in wait_filler_gate._TIER3_REASON
 
 
 def test_tier3_subagent_text_pinned_verbatim():

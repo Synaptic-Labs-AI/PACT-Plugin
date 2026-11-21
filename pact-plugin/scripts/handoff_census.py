@@ -36,10 +36,16 @@ ONE ADAPTATION, STATED BECAUSE IT BOUNDS THE RESULT: a real journal event
 carries the FULL HANDOFF inline, so the journal arm validates it directly. A
 `handoff` that is the LIST OF KEY NAMES is the defensive/historical shape the
 validator must still accept -- not the shape real events carry. The arm keeps
-it countable by reconstructing {key: None}. That reconstruction is exact for a
-presence-only validator and would stop being exact the moment the validator
-inspects VALUES. assert_presence_only() below fails loudly if that ever
-changes, rather than letting the census silently drift into a wrong answer.
+it countable by reconstructing {key: None}. COLD ROUND 12 / cycle 11: the
+validator now INSPECTS VALUES by design (the produced type gate -- a
+list-typed, empty, or whitespace-only `produced` is the false-EXPIRED class
+it exists to refuse), so the reconstruction is no longer validation-exact: a
+{key: None} row FIRES where the real inline handoff it stood in for may not.
+The journal arm's `fires` rate is therefore a keyed-PRESENCE rate for those
+historical rows, and the guard below is INVERTED to fail loudly if the
+validator ever drifts back to presence-only -- at which point the
+distinction this documentation rests on would silently vanish and the
+census would drift into a wrong answer with nothing signalling it.
 Nothing here makes journal content unrecoverable: a real event carries its
 handoff inline, so the content is one read away.
 """
@@ -61,17 +67,27 @@ from shared.handoff_schema import (  # noqa: E402
 )
 
 
-def assert_presence_only() -> None:
-    """The key-set reconstruction is only faithful while the validator is
-    presence-only. Same keys, different values, must give the same verdict."""
+def assert_values_are_inspected() -> None:
+    """INVERTED GUARD (cold round 12; replaces assert_presence_only). The
+    validator now inspects values BY DESIGN -- the produced type gate
+    (cycle 11) refuses a list-typed, empty, or whitespace-only `produced`,
+    the false-EXPIRED class the write side exists to close. Consequence for
+    this census: the key-list reconstruction {key: None} FIRES under the
+    gate, so the journal arm's `fires` rate for historical rows is a
+    keyed-PRESENCE rate, not a validation verdict on the original handoff.
+
+    The guard fails loudly if the validator ever drifts BACK to
+    presence-only -- at that point {key: None} and a fully-valued handoff
+    validate identically again, the reconstruction becomes exact once more,
+    and the fires-rate distinction documented above would silently vanish."""
     keys = {f: None for f in HANDOFF_CANONICAL_FIELDS}
-    values = {f: ["x"] for f in HANDOFF_CANONICAL_FIELDS}
-    if validate_handoff_schema(keys) != validate_handoff_schema(values):
+    values = {f: "x" for f in HANDOFF_CANONICAL_FIELDS}
+    if validate_handoff_schema(keys) == validate_handoff_schema(values):
         raise SystemExit(
-            "ABORT: validate_handoff_schema now inspects VALUES, so a journal "
-            "event's key list can no longer stand in for the handoff. The "
-            "journal arm of this census would report a wrong answer. Fix the "
-            "reconstruction before trusting any number below."
+            "ABORT: validate_handoff_schema no longer inspects VALUES -- "
+            "the key-list reconstruction is validation-exact again and the "
+            "fires-rate distinction this census documents has collapsed. "
+            "Re-read the produced type gate before trusting any number below."
         )
 
 
@@ -175,7 +191,7 @@ def main() -> int:
                         help="directory to scan for .claude* roots (default: $HOME)")
     args = parser.parse_args()
 
-    assert_presence_only()
+    assert_values_are_inspected()
     roots = config_roots(args.home)
     if not roots:
         print(f"No .claude* roots under {args.home} -- nothing to census.")
