@@ -623,10 +623,12 @@ class TestNoFirstActionFossilInSkillBodies:
         )
 
 
-# Named references of the separator class, exhaustively: hyphen/dash/minus
-# canonically denote non-ASCII dashes but are decoded to ASCII "-" so the
-# matcher sees them; NBSP keeps its HTML legacy uppercase alias. Any name
-# outside this map stays literal, the same contract as numeric references.
+# Named references of the separator class — the bounded separator-class
+# set: hyphen/dash/minus canonically denote non-ASCII dashes but are
+# decoded to ASCII "-" so the matcher sees them; NBSP keeps its HTML
+# legacy uppercase alias. Any name outside this map (including real
+# HTML5 separator names not listed, e.g. &UnderBar;) stays literal, the
+# same contract as numeric references.
 _NAMED_SEPARATORS = {
     "lowbar": "_",
     "underbar": "_",
@@ -701,6 +703,17 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     SURFACE_FILES = (
         "skills/pact-agent-teams/SKILL.md",
         "skills/pact-testing-strategies/references/test-pyramid.md",
+        "agents/pact-orchestrator.md",
+        "commands/orchestrate.md",
+        "protocols/pact-protocols.md",
+        "reference/config.md",
+        "templates/environment-model.md",
+    )
+    # One tracked file per surface, verified present in the real-tree
+    # population; the real-run control asserts all six so a narrowed
+    # population cannot satisfy the control by keeping one surface alive.
+    KNOWN_MEMBERS = (
+        "skills/pact-agent-teams/SKILL.md",
         "agents/pact-orchestrator.md",
         "commands/orchestrate.md",
         "protocols/pact-protocols.md",
@@ -857,12 +870,30 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         with pytest.raises(AssertionError, match="narrowed"):
             self.test_no_memory_saved_in_any_llm_loaded_surface()
 
+    def test_control_fires_when_only_one_surface_survives(
+            self, tmp_path, monkeypatch):
+        """A population narrowed to exactly one surface's known member must
+        still fire the control: the single known member of the pre-widening
+        control satisfied it while the other five surfaces went unsanctioned."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        monkeypatch.setitem(
+            globals(),
+            "_instruction_surface_population",
+            lambda: [plugin / "skills" / "pact-agent-teams" / "SKILL.md"],
+        )
+
+        with pytest.raises(AssertionError, match="narrowed"):
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+
     def test_no_memory_saved_in_any_llm_loaded_surface(self):
         population = _instruction_surface_population()
-        known = PLUGIN_ROOT / "skills" / "pact-agent-teams" / "SKILL.md"
-        assert known in population, (
-            f"{known.relative_to(PLUGIN_ROOT.parent)} is no longer in the "
-            f"pin's enumerated population ({len(population)} files): the "
+        present = {p.relative_to(PLUGIN_ROOT).as_posix() for p in population}
+        missing = [m for m in self.KNOWN_MEMBERS if m not in present]
+        assert not missing, (
+            f"{missing} missing from the pin's enumerated population "
+            f"({len(population)} files), one known member per surface: the "
             f"tracked-file fixture can answer a strict subset (PARTIAL "
             f"overlap, tests/fixtures/tracked_files.py) and this run would "
             f"go green vacuously over a narrowed world"
