@@ -160,7 +160,7 @@ def wait_for_deliverable(
             wait_target.EVAL_UNKNOWN_PREDICATE,
         ):
             print(
-                f"pact-wait FAILED: cannot watch task {task_id} "
+                f"pact-wait TERMINAL: cannot watch task {task_id} "
                 f"(team {team_name}, predicate '{predicate_name}'): {outcome}",
                 file=sys.stderr,
             )
@@ -169,7 +169,7 @@ def wait_for_deliverable(
             corrupt_streak += 1
             if corrupt_streak >= MAX_CONSECUTIVE_CORRUPT_READS:
                 print(
-                    f"pact-wait FAILED: task file for task {task_id} "
+                    f"pact-wait TERMINAL: task file for task {task_id} "
                     f"(team {team_name}, predicate '{predicate_name}') "
                     f"unparseable on "
                     f"{corrupt_streak} consecutive reads — corrupt, "

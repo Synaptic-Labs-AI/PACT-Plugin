@@ -279,10 +279,11 @@ def test_terminal_on_persistently_corrupt_file(tmp_path, capsys):
         tasks_base_dir=str(tmp_path), poll_interval=0.05,
     )
     assert rc == pact_wait.EXIT_TERMINAL
-    # The TERMINAL stderr carries the same identity triple as the other
-    # exits — predicate included — so the notice answers "what woke me"
-    # without re-deriving it.
+    # The TERMINAL stderr carries the exit-class name and the same identity
+    # triple as the other exits — predicate included — so the notice answers
+    # "what woke me" without re-deriving it.
     captured = capsys.readouterr()
+    assert "pact-wait TERMINAL" in captured.err
     assert "predicate 'handoff'" in captured.err
     assert "task 7" in captured.err and "team-a" in captured.err
 

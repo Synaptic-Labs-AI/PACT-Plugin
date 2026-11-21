@@ -170,11 +170,15 @@ _TIER3_TEAMMATE_REASON = (
     'python3 "{watcher}" --team <team-name> --task <task-id> '
     "--predicate handoff --deadline 900\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). THEN SET metadata.intentional_wait on "
-    "every task the wait covers — `reason`, `expected_resolver` and "
-    "`since` are the keys validate_wait requires — naming this "
-    "watcher, and end your turn with no further tool calls — the "
-    "lead's wake resumes you."
+    "a teachback submission). If the event you await is NOT a "
+    "deliverable you can write — for example the lead's review or "
+    "action — do NOT arm: instead SET metadata.intentional_wait on the "
+    "task the wait covers with `expected_resolver` naming the lead, "
+    "and end your turn — a message or the lead's own wake resolves it. "
+    "If you DID arm: SET metadata.intentional_wait on every task the "
+    "wait covers — `reason`, `expected_resolver` and `since` are the "
+    "keys validate_wait requires — naming this watcher, and end your "
+    "turn with no further tool calls — the lead's wake resumes you."
 )
 # The separate-process teammate's own text. Their completion notice DOES
 # start their next turn (shared.background_work.teammate_is_separate_process
@@ -192,10 +196,33 @@ _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON = (
     'python3 "{watcher}" --team <team-name> --task <task-id> '
     "--predicate handoff --deadline 900\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
+    "a teachback submission). If the event you await is NOT a "
+    "deliverable you can write — for example the lead's review or "
+    "action — do NOT arm: just end your turn, and a message or your "
+    "next turn boundary resolves it. THEN end your turn with no "
+    "further tool calls — the watcher exits 0 when the deliverable "
+    "lands, 3 when the deadline passes without it, 4 when it cannot "
+    "watch at all — and its completion notice starts your next turn."
+)
+# The Agent-tool subagent's own text. A subagent's turn end RETURNS its
+# report to the caller: nothing wakes it, so this text carries NO wake
+# promise of any kind — only the arm command and the completion phrasing.
+_TIER3_SUBAGENT_REASON = (
+    "FILLER-LOCK: this exact call has been denied {count} times this "
+    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
+    "re-filling — end this wait structurally instead. As an Agent-tool "
+    "subagent, nothing wakes you when your turn ends: your final report "
+    "is your completion, and the lead reads it when it returns. FIRST "
+    "arm the deliverable watcher with ONE `Bash` call "
+    "(`run_in_background: true`), substituting your team name and the "
+    "task id you are waiting on:\n"
+    'python3 "{watcher}" --team <team-name> --task <task-id> '
+    "--predicate handoff --deadline 900\n"
+    "(use --predicate teachback_submit when the awaited deliverable is "
     "a teachback submission). THEN end your turn with no further tool "
-    "calls — the watcher exits 0 when the deliverable lands, 3 when the "
-    "deadline passes without it, 4 when it cannot watch at all — and "
-    "its completion notice starts your next turn."
+    "calls — the watcher exits 0 when the deliverable lands, 3 when "
+    "the deadline passes without it, 4 when it cannot watch at all — "
+    "and put what the lead needs in your final report."
 )
 # The no-team text: a frame with NO resolvable PACT team has no deliverable
 # store for a <team-name> placeholder to name, so it gets the loop-breaking
@@ -387,8 +414,14 @@ def _escalate(input_data, normalized):
             team, member, separate = _tier3_frame_identity(input_data)
             if not team:
                 template = _TIER3_NO_TEAM_REASON
-            elif not member or not is_teammate_frame(input_data):
+            elif not is_teammate_frame(input_data):
                 template = _TIER3_REASON
+            elif not member:
+                # agent_type present and non-lead, but member resolution
+                # refused: an Agent-tool subagent (its subagent-shaped id
+                # is refused by teammate_launch_name). Its completion IS
+                # its report — no wake promise of any kind.
+                template = _TIER3_SUBAGENT_REASON
             elif separate:
                 template = _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
             else:
