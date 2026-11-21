@@ -1370,6 +1370,57 @@ def test_a_missing_canary_rc_takes_the_missing_key_path(tmp_path, rig):
     assert "BAD-FIELD" not in proc.stderr
 
 
+@pytest.mark.parametrize("key", ["missing", "extra"])
+def test_a_nonempty_canary_delta_field_is_refused(tmp_path, rig, key):
+    """The canary's missing/extra fields are write-time outputs of the same
+    comparison the verifier re-derives from the file sets, so a clean canary
+    always carries both empty; a tampered canary claiming a delta the
+    recomputation does not corroborate refuses. Control arm first.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    control = _run(summary, canary, base_sha, root, manifest)
+    assert control.returncode == 0, control.stdout + control.stderr
+    _mutate(canary, _set(("canary", key), ["tests/test_not_collected.py"]))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"CANARY-{key.upper()}" in proc.stderr
+
+
+def test_a_non_string_canary_delta_element_is_refused(tmp_path, rig):
+    """A delta field with a non-string element is malformed evidence under
+    the typed-reads convention, before any emptiness question."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate(canary, _set(("canary", "missing"), ["tests/test_ok.py", 7]))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "BAD-FIELD-CANARY-MISSING" in proc.stderr
+
+
+def test_a_deselection_claiming_canary_summary_is_refused(tmp_path, rig):
+    """Verifier-side mirror of the runner's write-time token scan: a canary
+    summary reporting deselection or errors narrows the selection, and only
+    this re-check sees it (a deselection leaves the file collected, so the
+    file-set comparisons stay equal). Control arm first: the same parseable
+    summary without the token is green.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    count = len(_discovered(plugin))
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    control = _run(summary, canary, base_sha, root, manifest)
+    assert control.returncode == 0, control.stdout + control.stderr
+    _mutate(canary, _set(("canary", "summary_line"),
+                         f"{count} tests collected, 2 deselected in 0.01s"))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "CANARY-DESELECTED" in proc.stderr
+    assert "2 deselected" in proc.stderr
+
+
 @pytest.mark.parametrize("key", ["failed", "errors", "deselected"])
 def test_a_false_run_outcome_refuses_at_the_local_zero_check(
         tmp_path, rig, key):

@@ -208,6 +208,30 @@ def _set_difference(expected: list[str], actual: list[str],
         )
 
 
+def _require_canary_delta_empty(canary: dict) -> None:
+    """The canary's missing/extra fields are write-time outputs of the same
+    expected/collected comparison main re-derives: a clean canary carries
+    both empty. Type first, then emptiness, per the module's typed-reads
+    convention.
+    """
+    for key in ("missing", "extra"):
+        files = canary["canary"][key]
+        if (not isinstance(files, list)
+                or any(not isinstance(item, str) or not item
+                       for item in files)):
+            raise VerificationFailure(
+                f"BAD-FIELD-CANARY-{key.upper()}",
+                f"canary.{key} is {files!r}; expected a list of non-empty "
+                "file-path strings, possibly empty")
+        if files:
+            raise VerificationFailure(
+                f"CANARY-{key.upper()}",
+                f"canary.{key} is {files!r}; the expected and collected file "
+                "sets are checked against the recomputation directly, so a "
+                "delta the recomputation does not corroborate is evidence of "
+                "tampering")
+
+
 def _require_artifact_shape(canary: dict, summary: dict, record: dict) -> tuple[dict, dict, dict]:
     _require_schema_version(canary, "canary")
     _require_schema_version(summary, "run")
@@ -378,6 +402,18 @@ def _require_clean_exits_and_collection_identity(canary: dict, summary: dict,
             "boolean, string, or null")
     if canary_rc != 0:
         raise VerificationFailure("CANARY-RC", f"canary rc is {canary_rc}")
+    # Mirror of the runner's write-time token scan: a canary summary that
+    # reports deselection or errors narrows the selection, and only this
+    # re-check sees it -- a deselection leaves the file collected, so the
+    # file-set comparisons stay equal.
+    canary_summary_line = canary["canary"]["summary_line"]
+    if ("deselected" in canary_summary_line
+            or re.search(r"\berrors?\b", canary_summary_line)):
+        raise VerificationFailure(
+            "CANARY-DESELECTED",
+            f"canary summary_line {canary_summary_line!r} reports "
+            "deselection or errors; the serial canary must collect the "
+            "full selection")
     run_rc = summary["run"].get("rc")
     if type(run_rc) is not int:
         raise VerificationFailure(
@@ -578,8 +614,8 @@ def _skip_advisory(record_path: str) -> None:
         record = json.loads(Path(record_path).read_text(encoding="utf-8"))
         problems = skip_site_problems(
             record["skip_sites"], load_skip_allowlist(SKIP_ALLOWLIST))
-    except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError,
-            RunFailure) as exc:
+    # json.JSONDecodeError is a ValueError subclass; ValueError covers it.
+    except (OSError, ValueError, KeyError, TypeError, RunFailure) as exc:
         print(f"SKIP-ADVISORY: skip sites not compared ({exc})", file=sys.stderr)
         return
     for condition, detail in problems:
@@ -639,6 +675,7 @@ def main(argv: list[str] | None = None) -> int:
                         "EXPECTED-SET-MISMATCH", "canary.expected_files")
         _set_difference(expected, collected_files,
                         "COLLECTED-SET-MISMATCH", "canary.collected_files")
+        _require_canary_delta_empty(canary)
         _require_selection_identity(canary, summary, recomputed)
         manifest_sha = _sha256_file(manifest_path)
         for label, artifact in (("canary", canary), ("run", summary)):
