@@ -222,7 +222,7 @@ def _artifacts(root, plugin, manifest, *, summary_line=None,
         "rc": 0,
         "summary_line": summary_line,
         "collected": count,
-        "collected_header": f"collected {count} items",
+        "collected_header": f"4 workers [{count} items]",
         "passed": count,
         "failed": 0,
         "errors": 0,
@@ -1001,7 +1001,7 @@ def _demote_collected_everywhere(root):
     demoted_line = f"{demoted} passed in 0.01s"
     summary["run"].update(
         collected=demoted, passed=demoted, summary_line=demoted_line,
-        collected_header=f"collected {count} items")
+        collected_header=f"4 workers [{count} items]")
     canary["canary"].update(
         collected_items=demoted,
         collected_node_ids=node_ids,
@@ -1092,6 +1092,95 @@ def test_a_workers_form_header_re_derives_to_the_same_count(tmp_path, rig):
     proc = _run(summary, canary, base_sha, root, manifest)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "VERIFY-OK" in proc.stdout
+
+
+def test_a_collected_form_header_beside_a_parallel_command_is_refused(
+        tmp_path, rig):
+    """The persisted header's FORM is bound to the run command's shape.
+
+    A parallel command (`-n 4 --dist loadfile`) is distributed by xdist and
+    prints the workers form; a serial header beside it would evidence a
+    different run than the command recorded. Measured cold-7 hole: this
+    verified green before the binding. Control arm first: the workers-form
+    header beside the same command is green (the builders' default).
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    count = len(_discovered(plugin))
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    control = _run(summary, canary, base_sha, root, manifest)
+    assert control.returncode == 0, control.stdout + control.stderr
+    _mutate(summary, _set(("run", "collected_header"),
+                          f"collected {count} items"))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "RUN-COLLECTED-HEADER-FORM" in proc.stderr
+    assert "parallel" in proc.stderr
+
+
+def _strip_workers_from_run_command(root):
+    summary_path = root / ".fast-suite-summary.json"
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    summary["run"]["command"] = [
+        argument for argument in summary["run"]["command"]
+        if argument not in ("-n", "--dist", "loadfile", "4")]
+    summary_path.write_text(json.dumps(summary, indent=1), encoding="utf-8")
+
+
+def _serial_form_verification(root, manifest, monkeypatch, header):
+    """Verify with the recomputed EXPECTED run command forced serial.
+
+    The patched build_argv strips the workers flags from run mode only, so
+    the rebuilt expected command is serial and the artifact's (stripped)
+    command matches it; _verify_in_process patches the selection seam as in
+    the degenerate-selection tests. Returns the verifier's rc.
+    """
+    real = selector.build_argv
+
+    def serial_argv(selection, cwd, mode, workers=None):
+        argv = real(selection, cwd, mode, workers=workers)
+        if mode == "run":
+            argv = [argument for argument in argv
+                    if argument not in ("-n", "--dist", "loadfile", "4")]
+        return argv
+
+    root_path, plugin, manifest_path = root, root / "pact-plugin", manifest
+    base_sha = _git(root_path, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root_path, plugin, manifest_path)
+    _strip_workers_from_run_command(root_path)
+    _mutate(summary, _set(("run", "collected_header"), header))
+    monkeypatch.setattr(verifier, "build_argv", serial_argv)
+    selection, _, _ = select_for_change(
+        root_path, load_manifest(manifest_path), base_sha)
+    return _verify_in_process(root_path, manifest_path, summary, canary,
+                              base_sha, selection, monkeypatch)
+
+
+def test_a_serial_run_command_takes_the_collected_form(tmp_path, rig,
+                                                       monkeypatch, capsys):
+    """The other binding cell: a serial command prints pytest's collected
+    form, so a collected-form header beside a serial command is green."""
+    root, plugin, manifest = rig
+    count = len(_discovered(plugin))
+    rc = _serial_form_verification(root, manifest, monkeypatch,
+                                   f"collected {count} items")
+    captured = capsys.readouterr()
+    assert rc == 0, captured.out + captured.err
+    assert "VERIFY-OK" in captured.out
+
+
+def test_a_serial_run_command_refuses_the_workers_form(tmp_path, rig,
+                                                       monkeypatch, capsys):
+    """Mirror refusal: a workers-form header beside a serial command
+    evidences a distributed run that the recorded command did not run."""
+    root, plugin, manifest = rig
+    count = len(_discovered(plugin))
+    rc = _serial_form_verification(root, manifest, monkeypatch,
+                                   f"4 workers [{count} items]")
+    captured = capsys.readouterr()
+    assert rc == 1, captured.out + captured.err
+    assert "RUN-COLLECTED-HEADER-FORM" in captured.err
+    assert "serial" in captured.err
 
 
 def test_an_unparseable_canary_artifact_is_refused(tmp_path, rig):
@@ -1191,6 +1280,48 @@ def test_canary_unresolvable_node_id_bases_are_refused(tmp_path, rig):
     assert proc.returncode == 1, proc.stdout + proc.stderr
     assert "CANARY-UNRESOLVED-BASES" in proc.stderr
     assert "test_unaccounted" in proc.stderr
+
+
+@pytest.mark.parametrize("value", ["", 0, False])
+def test_a_falsy_unresolvable_field_is_refused_as_bad_field(
+        tmp_path, rig, value):
+    """Measured cold-7 hole: the guard was truthiness-only, so a falsy
+    non-list slipped through green against the module's rule that absent or
+    malformed evidence fails. Type first, then emptiness -- every sibling
+    guard type-checks its input.
+    """
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate(canary, _set(("canary", "unresolvable_node_id_bases"), value))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "BAD-FIELD-CANARY-UNRESOLVED-BASES" in proc.stderr
+
+
+def test_an_empty_unresolvable_list_still_verifies_green(tmp_path, rig):
+    """Control arm for the new type check: a proper empty list (the honest
+    all-accounted-for case) must stay green, not be over-blocked."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "VERIFY-OK" in proc.stdout
+
+
+def test_a_non_string_unresolvable_base_is_refused_as_bad_field(
+        tmp_path, rig):
+    """A list with a non-string element is malformed evidence, not a
+    accounted-for canary."""
+    root, plugin, manifest = rig
+    base_sha = _git(root, "rev-parse", "HEAD")
+    summary, canary, base = _artifacts(root, plugin, manifest)
+    _mutate(canary, _set(("canary", "unresolvable_node_id_bases"),
+                         ["tests/test_ok.py", 7]))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "BAD-FIELD-CANARY-UNRESOLVED-BASES" in proc.stderr
 
 
 @pytest.mark.parametrize("artifact_name, nested_key, condition", [
@@ -1296,7 +1427,7 @@ def _artifacts_from_selection(root, plugin, manifest, selection, base_sha):
         "rc": 0,
         "summary_line": f"{count} passed in 0.01s",
         "collected": count,
-        "collected_header": f"collected {count} items",
+        "collected_header": f"4 workers [{count} items]",
         "passed": count,
         "failed": 0,
         "errors": 0,

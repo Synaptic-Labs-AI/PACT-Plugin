@@ -14,6 +14,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -35,7 +36,8 @@ from fast_suite_selection import (  # noqa: E402  (path must precede import)
 #   _require_int        a field that is an int (bool refused), else
 #                       RunFailure(BAD-FIELD-<KEY>).
 #   _require_keys       every schema-v3 record key present, else
-#                       RunFailure(KEY-MISSING-<KEY>).
+#                       RunFailure(KEY-MISSING) naming the missing key in
+#                       the detail text (the condition name is bare).
 #   _require_run_identity  under Actions the record's run_id/run_attempt must
 #                       equal the environment, else RunFailure(RUN-IDENTITY).
 #   _require_skip_sites structurally validated (file, reason, count) sites,
@@ -411,6 +413,16 @@ def _require_node_identity(canary: dict, summary: dict, record: dict,
     lane remains advisory: it never certifies a merge.
     """
     unresolvable = canary["canary"]["unresolvable_node_id_bases"]
+    # Type first, then emptiness: a truthiness-only guard let a falsy
+    # non-list ("", 0, false) read as the honest all-accounted-for case,
+    # against the module's rule that absent or malformed evidence fails.
+    if (not isinstance(unresolvable, list)
+            or any(not isinstance(base, str) or not base
+                   for base in unresolvable)):
+        raise VerificationFailure(
+            "BAD-FIELD-CANARY-UNRESOLVED-BASES",
+            f"canary.unresolvable_node_id_bases is {unresolvable!r}; expected "
+            "a list of non-empty file-path strings, possibly empty")
     if unresolvable:
         raise VerificationFailure(
             "CANARY-UNRESOLVED-BASES",
@@ -436,6 +448,20 @@ def _require_node_identity(canary: dict, summary: dict, record: dict,
             "RUN-COLLECTED-HEADER",
             f"run.collected_header {header!r} matches no known header shape "
             "(expected 'collected N items' or 'N workers [M items]')")
+    # The header's FORM must match the command's shape: a parallel command
+    # (-n --dist loadfile) is distributed by xdist and prints the workers
+    # form; a serial command prints pytest's collected form. A header of the
+    # wrong form evidences a different run than the command recorded.
+    # _require_commands has already bound run.command to the rebuilt argv.
+    is_parallel = "-n" in summary["run"]["command"]
+    workers_form = re.search(r"\d+ workers \[\d+ items?\]", header) is not None
+    if is_parallel != workers_form:
+        raise VerificationFailure(
+            "RUN-COLLECTED-HEADER-FORM",
+            f"run.collected_header {header!r} does not match the run "
+            f"command's shape: a {'parallel' if is_parallel else 'serial'} "
+            f"command requires the "
+            f"{'workers' if is_parallel else 'collected'} form")
     header_count = int(header_match.group(1) or header_match.group(2))
     if header_count != run_collected:
         raise VerificationFailure(
