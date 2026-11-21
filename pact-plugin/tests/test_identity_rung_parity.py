@@ -141,7 +141,8 @@ def chooser_elements(tree, node) -> tuple:
     where every binding of `name` (`_CalleeReader`, every binding form the
     compiler defines) is a call to such a function. Each `return` of that
     function is None (the root passes: no element) or a tuple whose element
-    `i` is a string, which is one text, or None, which is none.
+    `i` is a string, which is one text, None, which is none, or a name every
+    binding of which holds a string (`name_values`), each of them a text.
 
     FAIL CLOSED: any other expression, a binding of the name that is not
     such a call, and a return or element of any other form are listed in
@@ -179,6 +180,10 @@ def chooser_elements(tree, node) -> tuple:
             element = result.elts[node.slice.value]
             if isinstance(element, ast.Constant) and (element.value is None or isinstance(element.value, str)):
                 texts |= {element.value} - {None}
+                continue
+            held = name_values(element, None, tree) if isinstance(element, ast.Name) else None
+            if held:
+                texts |= held
             else:
                 unresolved.append(f"{returned.lineno}: {ast.unparse(element)}")
     return texts, unresolved
@@ -1606,6 +1611,9 @@ class _CalleeReader:
                         self.methods[id(member)] = node
         for node in ast.walk(self.tree):
             scope = self.scope.get(id(node))
+            target = self.parent.get(id(node))
+            if isinstance(target, ast.AnnAssign) and target.value is None and node is target.target:
+                continue  # an annotation alone declares a name and binds nothing
             if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
                 kind, value = self._target_source(node)
                 self._add(scope, node.id, (kind, value), walrus=isinstance(self.parent[id(node)], ast.NamedExpr))
@@ -2559,6 +2567,8 @@ class TestEveryIdentityCallerIsCovered:
         ('def f(n):\n    return getattr(os, n)\n', None),
         ("def f(n='O_A'):\n    return getattr(os, n)\nf(g())\n", None),
         ("NAMES = ['O_A']\ndef f():\n    for n in NAMES:\n        getattr(os, n)\n", ['O_A']),
+        ("def f():\n    n: str\n    n = 'O_A'\n    return getattr(os, n)\n", ['O_A']),
+        ("def f(c):\n    n: str\n    n = c()\n    return getattr(os, n)\n", None),
         ("NAMES = ['O_A']\nNAMES.append(g())\ndef f():\n    for n in NAMES:\n        getattr(os, n)\n", None),
         ("NAMES = ['O_A']\ndef add():\n    NAMES[0] = g()\ndef f():\n    for n in NAMES:\n        getattr(os, n)\n", None),
     ])
@@ -2583,12 +2593,34 @@ class TestEveryIdentityCallerIsCovered:
         ("A = 'a'\nfrom m import A\n", {}),
         ("A = 'a'\nA, B = g()\n", {}),
         ("A = 'a'\ndef f():\n    A = g()\n", {"A": "a"}),
+        ("A: str\nA = 'a'\n", {"A": "a"}),
+        ("A: str\n", {}),
+        ("A: str\nA = g()\n", {}),
     ])
     def test_a_module_string_constant_is_read_from_every_binding(self, source, table):
         """A module name is a string constant only when every module-level
         binding of it, by any binding form, assigns that one string; a
         function's own local of the same name is not one of them."""
         assert module_string_constants(ast.parse(source)) == table
+
+    @pytest.mark.parametrize("arm, texts, resolved", [
+        ("def arm():\n    return 'a', None\n", {"a"}, True),
+        ("A = 'a'\ndef arm():\n    return A, None\n", {"a"}, True),
+        ("def arm():\n    r = 'a'\n    return r, None\n", {"a"}, True),
+        ("A = 'a'\nB = 'b'\ndef arm(c):\n    if c:\n        return A, None\n    return B, None\n", {"a", "b"}, True),
+        ("A = 'a'\nA = g()\ndef arm():\n    return A, None\n", set(), False),
+        ("def arm():\n    return UNBOUND, None\n", set(), False),
+        ("A = None\ndef arm():\n    return A, None\n", set(), False),
+        ("def arm():\n    return str('a'), None\n", set(), False),
+    ])
+    def test_a_chosen_reason_is_read_from_every_binding(self, arm, texts, resolved):
+        """`chooser_elements` reads a reason the chooser returns as a string
+        or as a name each of whose bindings holds one; any other form is
+        unresolved."""
+        tree = ast.parse(arm + "def g2():\n    x = arm(1)\n    use(x[0])\n")
+        node = next(n for n in ast.walk(tree) if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "use").args[0]
+        found, unresolved = chooser_elements(tree, node)
+        assert found == texts and (not unresolved) is resolved, (found, unresolved)
 
     def test_a_rebinding_through_the_module_object_is_listed_not_read(self):
         """The constant tables' one adversarial-only form: the docstring names
