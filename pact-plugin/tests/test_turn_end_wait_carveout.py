@@ -195,6 +195,10 @@ def test_is_wait_watcher_command_shape_table():
         "true; pact_wait.py --team t --task 1 --predicate h --deadline 5",
         "cat pact_wait.py --team t --task 1 --predicate h --deadline 5",
         "pact_wait.py --team t --task 1 --predicate h --deadline 1800 extra",
+        # A shell-wrapper invocation is a composition, not the bare wake:
+        # counted (over-block is the deliberate direction — the wrapper
+        # costs the lead one advisory, exemption would acquit a real job).
+        "bash -c 'pact_wait.py --team t --task 1 --predicate h --deadline 5'",
         "sleep 300",
         None,
         123,

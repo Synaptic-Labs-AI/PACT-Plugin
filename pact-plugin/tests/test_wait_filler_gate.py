@@ -128,6 +128,17 @@ match its prediction exactly — counts and witnesses):
       test_saturation_boost_escalates_a_fresh_command,
       test_saturation_boundary_armed_both_sides.
 
+Structural-wait retirement annotations (2026-11-21, recorded without
+re-measuring — the dated rows above are as-executed history):
+  - The _INSTANT_FILLER loosen row is RETIRED: the instant-form
+    predicate was deleted with the valve, so that mutation is no longer
+    runnable and the row is a record, not a live spec.
+  - test_valve_instant_grammar_edges (cited above) was renamed to
+    test_tier3_outlet_uniform_across_duration_spellings; the other
+    cited names are unchanged. Eight further valve-era arms were
+    renamed in the same retirement (map in the TEST-phase HANDOFF);
+    none is cited in these tables.
+
 Counter-test record (measured at authoring time): this module was run
 against the repo BEFORE hooks/wait_filler_gate.py existed (TDD red-first):
 56 failed, 1 passed — every hook-dependent case red, the single green
@@ -594,7 +605,11 @@ def test_valve_never_opens_for_nonzero_or_infinite_sleep(
     tmp_path, monkeypatch, capsys
 ):
     """`sleep 1` and `sleep infinity` are never instant forms: three calls
-    deny all three times, third at tier 3, and the exit code is never 0."""
+    deny all three times, third at tier 3, and the exit code is never 0.
+
+    Name kept although the valve mechanism it guarded against is retired:
+    this arm is a cited witness in the dated gradient/valve ablation table
+    above, and renaming would orphan that as-executed record."""
     for command in ("sleep 1", "sleep infinity"):
         results = _drive([command] * 3, tmp_path, monkeypatch, capsys)
         assert [c for c, _p, _e in results] == [2, 2, 2], command
@@ -625,12 +640,14 @@ def test_tier3_outlet_uniform_across_duration_spellings(
         assert "PACT-WAIT-OUTLET" in _deny_reason(results[2][1]), command
 
 
-def test_state_failure_degrades_to_tier1_and_closes_valve(
+def test_state_failure_degrades_to_frozen_tier1_deny(
     tmp_path, monkeypatch, capsys
 ):
     """Fail-direction invariant: with the state channel unavailable the
     hook still denies every filler at the frozen tier-1 advisory — never
-    allows, never harder, valve closed (V2 UNKNOWN = DENY)."""
+    allows, never harder (V2 UNKNOWN = DENY). Renamed at the valve
+    retirement: the closed mechanism it used to name no longer exists,
+    and no dated record cites this arm."""
     import wait_filler_gate
 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))

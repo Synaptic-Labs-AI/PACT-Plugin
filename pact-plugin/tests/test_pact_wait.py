@@ -16,6 +16,11 @@ contract — a crash must never masquerade as EXPIRED):
 - main(): usage errors exit 2 (argparse), happy path returns 0.
 - one subprocess smoke: the script runs standalone from an arbitrary cwd
   (its shared.* import resolves via the script directory).
+- TEST-phase matrix (trailing section): duplicate-watcher re-arm (named
+  scenario), corrupt-streak boundary (second consecutive read terminal;
+  streak resets on a good read), terminal immediacy, exit-1 crash
+  distinctness, empty/traversal task-id containment, and the anti-dark-key
+  arm (a recommended-only field never satisfies the handoff predicate).
 """
 import json
 import os
@@ -321,3 +326,165 @@ def test_subprocess_standalone_smoke(tmp_path):
     proc = subprocess.run(cmd, capture_output=True, text=True, cwd="/", timeout=30)
     assert proc.returncode == pact_wait.EXIT_EXPIRED
     assert "EXPIRED" in proc.stderr
+
+
+# --- TEST-phase matrix (watcher-unit arms) ----------------------------------
+#
+# The arms below bind the boundary behaviors the CODE-phase verification
+# suite left open. No dated ablation tables live in this file (census at
+# TEST intake), so extending it trips no re-measure obligation.
+
+def test_duplicate_watcher_re_arm_fast_exits_fired(tmp_path):
+    """NAMED SCENARIO — duplicate-watcher re-arm: the tier-3 outlet and a
+    lead who missed the first arm can arm a SECOND watcher whose
+    deliverable already landed. The duplicate resolves on its FIRST
+    evaluation, before any sleep, and must not burn its deadline (this is
+    why re-arming needs no dedup marker)."""
+    _write_task(tmp_path, "team-a", "7", _handoff_task("delivered earlier"))
+    start = time.monotonic()
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=60,
+        tasks_base_dir=str(tmp_path), poll_interval=0.2,
+    )
+    assert rc == pact_wait.EXIT_FIRED
+    assert time.monotonic() - start < 0.2
+
+
+def test_second_consecutive_corrupt_read_is_terminal(tmp_path):
+    """Corrupt-tolerance boundary: the window is ONE corrupt poll. A file
+    still unparseable on the SECOND consecutive read is corrupt, not
+    mid-rewrite — TERMINAL immediately, and a deliverable landing just
+    past that second read does not resurrect the watch. The heal lands
+    BETWEEN the second poll (t=0.1) and the third (t=0.2) deliberately: a
+    loosened tolerance (terminal only on a third consecutive read) would
+    flip this arm to FIRED instead of staying green."""
+    team_dir = tmp_path / "team-a"
+    team_dir.mkdir()
+    task_file = team_dir / "7.json"
+    task_file.write_text("{still corrupt", encoding="utf-8")
+    timer = threading.Timer(
+        0.15,
+        lambda: task_file.write_text(
+            json.dumps(_handoff_task("delivered")), encoding="utf-8"
+        ),
+    )
+    timer.start()
+    try:
+        rc = pact_wait.wait_for_deliverable(
+            "team-a", "7", "handoff", deadline=30,
+            tasks_base_dir=str(tmp_path), poll_interval=0.1,
+        )
+    finally:
+        timer.join()
+    assert rc == pact_wait.EXIT_TERMINAL
+
+
+def test_alternating_corrupt_reads_expire_never_turn_terminal(tmp_path):
+    """The corrupt streak RESETS on every good read: corrupt, good, corrupt,
+    good stays a live watch and ends at the deadline (EXPIRED), never
+    TERMINAL — tolerance is per-CONSECUTIVE-run, not per-file history.
+    Timing: one poll_interval of poll clock (0.15s) against ~0.12s corrupt
+    windows, so each window covers at most one poll."""
+    team_dir = tmp_path / "team-a"
+    team_dir.mkdir()
+    task_file = team_dir / "7.json"
+    task_file.write_text(json.dumps({"metadata": {}}), encoding="utf-8")
+    schedule = [
+        (0.20, "{corrupt"),
+        (0.32, json.dumps({"metadata": {}})),
+        (0.50, "{corrupt again"),
+        (0.62, json.dumps({"metadata": {}})),
+    ]
+    timers = [
+        threading.Timer(at, lambda body=body: task_file.write_text(body, encoding="utf-8"))
+        for at, body in schedule
+    ]
+    for timer in timers:
+        timer.start()
+    try:
+        rc = pact_wait.wait_for_deliverable(
+            "team-a", "7", "handoff", deadline=1.0,
+            tasks_base_dir=str(tmp_path), poll_interval=0.15,
+        )
+    finally:
+        for timer in timers:
+            timer.join()
+    assert rc == pact_wait.EXIT_EXPIRED
+
+
+def test_terminal_outcomes_surface_well_before_the_deadline(tmp_path):
+    """Terminal is IMMEDIATE (the docstring's contract): a watch that
+    cannot do its job at all must not silently burn its deadline before
+    saying so — the lead's re-arm decision depends on learning this fast."""
+    start = time.monotonic()
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=30,
+        tasks_base_dir=str(tmp_path), poll_interval=0.05,
+    )
+    assert rc == pact_wait.EXIT_TERMINAL
+    assert time.monotonic() - start < 5.0
+
+
+def test_unexpected_runtime_error_never_masquerades_as_a_watch_outcome(
+    tmp_path, monkeypatch
+):
+    """Exit 1 is RESERVED for crashes: an unexpected exception propagates
+    OUT of wait_for_deliverable (to the traceback + exit 1 the uncaught
+    __main__ path produces) and is never mapped onto EXPIRED (3) or
+    TERMINAL (4). Exercised at the one seam that can raise; the mapping
+    simply does not exist in the CLI, and this arm reds if anyone adds it."""
+    def _boom(*_args, **_kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(pact_wait.wait_target, "evaluate_target", _boom)
+    with pytest.raises(RuntimeError):
+        pact_wait.wait_for_deliverable(
+            "team-a", "7", "handoff", deadline=30,
+            tasks_base_dir=str(tmp_path), poll_interval=0.05,
+        )
+
+
+def test_empty_task_id_is_terminal_not_usage_or_crash(tmp_path):
+    """A malformed TARGET (empty task id, supplied but useless) is the
+    terminal class per the batch-1 ruling: exit 4, loudly unwatchable —
+    not a usage error (the argument WAS supplied) and never a crash."""
+    rc = pact_wait.main(
+        [
+            "--team", "team-a", "--task", "",
+            "--predicate", "handoff", "--deadline", "5",
+            "--tasks-base-dir", str(tmp_path),
+        ]
+    )
+    assert rc == pact_wait.EXIT_TERMINAL
+
+
+def test_traversal_shaped_task_id_stays_contained(tmp_path):
+    """Path machinery inside a task id is stripped BEFORE the join, so the
+    lookup stays inside the containment-validated team dir: a traversal
+    shape resolves to a file that does not exist there (MISSING), never a
+    read outside the store."""
+    outcome = wait_target.evaluate_target(
+        "team-a", "../../../etc/passwd", "handoff", tasks_base_dir=str(tmp_path)
+    )
+    assert outcome == wait_target.EVAL_TARGET_MISSING
+    # "../7" sanitizes to "7" — still joined INSIDE the team dir, never
+    # resolved against the parent.
+    outcome = wait_target.evaluate_target(
+        "team-a", "../7", "handoff", tasks_base_dir=str(tmp_path)
+    )
+    assert outcome == wait_target.EVAL_TARGET_MISSING
+
+
+def test_handoff_predicate_never_keys_on_a_recommended_only_field():
+    """The registry's NEVER rule, bound for the shipped pair: a handoff
+    carrying only the RECOMMENDED reasoning_chain is NOT a delivered
+    summary. Keying a predicate on a recommended-only field would go dark
+    on legitimate handoffs and silently burn the whole deadline."""
+    assert not wait_target.handoff_present(
+        {"metadata": {"handoff": {"reasoning_chain": "a long chain"}}}
+    )
+    # And the required field alone still fires regardless of what else is
+    # present (keying is on `produced`, never on a required superset).
+    assert wait_target.handoff_present(
+        {"metadata": {"handoff": {"produced": "p", "reasoning_chain": "r"}}}
+    )
