@@ -711,6 +711,10 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     green — the known-member control's guarantee is member presence, not
     full-population size. That residual is the tracked-file fixture's
     documented PARTIAL-overlap boundary (tests/fixtures/tracked_files.py).
+    The six-surface enumeration is itself a curated judgment: a new
+    instruction-surface directory would not be scanned until added to the
+    population, and surface completeness is reviewed per-PR rather than
+    machine-checked.
     """
 
     FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]*saved", re.IGNORECASE)
@@ -1017,9 +1021,11 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
                 offenders.append(path)
         diagnostics = []
         if offenders:
+            names = ", ".join(
+                str(p.relative_to(PLUGIN_ROOT.parent)) for p in offenders
+            )
             diagnostics.append(
-                f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in offenders]} "
-                f"re-teach the retired memory_saved flag. The flag was removed "
+                f"{names} re-teach the retired memory_saved flag. The flag was removed "
                 f"in v4.8.36 (zero code readers, unenforced — a task could "
                 f"attest a save no mechanism verified); reintroducing the token "
                 f"in an LLM-loaded surface revives a write-only signal. "
@@ -1029,9 +1035,11 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
                 f"deliberately if the flag ever returns with an enforcer."
             )
         if undecodable:
+            names = ", ".join(
+                str(p.relative_to(PLUGIN_ROOT.parent)) for p in undecodable
+            )
             diagnostics.append(
-                f"{[str(p.relative_to(PLUGIN_ROOT.parent)) for p in undecodable]} "
-                f"is not valid UTF-8, so this pin cannot read it to check for "
+                f"{names} is not valid UTF-8, so this pin cannot read it to check for "
                 f"the retired memory_saved flag; instruction surfaces must "
                 f"stay UTF-8."
             )
