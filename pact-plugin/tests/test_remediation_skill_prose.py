@@ -2649,6 +2649,36 @@ def _env_reads(node, module: str, function: str, graph: "_DetectionGraph"):
             yield ast.copy_location(name, template), shown
 
 
+def _pass_with_statements(tree, setups) -> list:
+    """[(owner name, owner def, [with statements])] for every function or
+    method of the parsed module `tree` (a top-level def, or a method of a
+    top-level class) holding a `with` or `async with`, at any depth, one of
+    whose items calls a name in `setups` by name or attribute. This is the
+    set of pass openings `_pass_openings` reads and the pass-entry ban
+    (`_pass_entry_problems`) admits."""
+    import ast
+
+    owners = [(node.name, node) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    owners += [
+        (f"{node.name}.{item.name}", item) for node in tree.body if isinstance(node, ast.ClassDef)
+        for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+    ]
+    found = []
+    for name, function in owners:
+        statements = [
+            node for node in ast.walk(function)
+            if isinstance(node, (ast.With, ast.AsyncWith)) and any(
+                isinstance(item.context_expr, ast.Call)
+                and (getattr(item.context_expr.func, "id", None)
+                     or getattr(item.context_expr.func, "attr", None)) in setups
+                for item in node.items
+            )
+        ]
+        if statements:
+            found.append((name, function, statements))
+    return found
+
+
 def _pass_openings(graph) -> dict:
     """Each place a memory script or a hook opens a pass, as a read root: for
     every function or method of a module in `SCRIPTS` or `hooks/` with a
@@ -2661,7 +2691,9 @@ def _pass_openings(graph) -> dict:
     the items and block in a memory script; the items alone in a hook, whose
     block calls the hook command's own work (`backlog.main`'s `_main`). Each
     project class an item builds goes in `graph.opening_classes` with every
-    method it defines, since `with` runs its code with no call node."""
+    method it defines, since `with` runs its code with no call node.
+    `_pass_entry_problems` holds production code to entering a pass only
+    this way."""
     import ast
 
     setups = {name for _module, name in PASS_SETUPS}
@@ -2673,23 +2705,10 @@ def _pass_openings(graph) -> dict:
                 for path in sorted(hooks.rglob("*.py")) if path.name != "__init__.py"]
     for path, module, memory_script in sources:
         tree = ast.parse(path.read_text(encoding="utf-8"))
-        owners = [(node.name, node) for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        owners += [
-            (f"{node.name}.{item.name}", item) for node in tree.body if isinstance(node, ast.ClassDef)
-            for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-        ]
-        for name, function in owners:
-            items, body = [], []
-            for node in ast.walk(function):
-                if isinstance(node, (ast.With, ast.AsyncWith)) and any(
-                    isinstance(item.context_expr, ast.Call)
-                    and (getattr(item.context_expr.func, "id", None)
-                         or getattr(item.context_expr.func, "attr", None)) in setups
-                    for item in node.items
-                ):
-                    items += [ast.Expr(value=item.context_expr) for item in node.items]
-                    body += node.body
-            if not items or not graph.load(module):
+        for name, function, statements in _pass_with_statements(tree, setups):
+            items = [ast.Expr(value=item.context_expr) for node in statements for item in node.items]
+            body = [statement for node in statements for statement in node.body]
+            if not graph.load(module):
                 continue
 
             def opening_def(statements):
@@ -2741,6 +2760,106 @@ def test_the_census_root_holds_every_pass_opening():
     handler_calls = [node for node in ast.walk(graph.defs[("cli", "main <pass opening>")])
                      if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "handler"]
     assert len(handler_calls) == 2  # the handler call in each of cli.main's two pass blocks
+
+
+def _pass_entry_problems(trees: dict) -> tuple:
+    """(entries, problems) for the pass-entry ban over `trees` ({file name:
+    parsed module}). "The pass" is `detection_pass` or `git_results_pass`
+    (`PASS_SETUPS`): a name spelled as either, or as a local alias an
+    `import ... as` gives either, and any attribute named either, whatever
+    object it is read from. Each such reference must be the callee of a
+    `with` item that `_pass_with_statements` records, which is exactly where
+    `_pass_openings` reads a pass opening; that use is an entry. Every other
+    reference is a problem: an `ExitStack().enter_context(...)` or other call
+    of the pass's result, a manual `__enter__`, an assignment or rebinding of
+    the pass object or its result, a return of either, passing either as an
+    argument, an aliased name in a `with`, and a `with` outside a top-level
+    function or a top-level class's method. The defining `def` and an import
+    statement are not references, so they pass.
+
+    ADVERSARIAL-ONLY, and so not reported: a pass reached through its name
+    spelled as data (`getattr(module, "detection_pass")`, `globals()[...]`,
+    `importlib`). It needs the name written as a string, which no honest
+    caller does: every production entry today spells the call."""
+    import ast
+
+    setups = {name for _module, name in PASS_SETUPS}
+    entries, problems = [], []
+    for path, tree in trees.items():
+        admitted = {
+            id(item.context_expr)
+            for _name, _function, statements in _pass_with_statements(tree, setups)
+            for statement in statements for item in statement.items
+        }
+        names = setups | {
+            alias.asname for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+            for alias in node.names if alias.name in setups and alias.asname
+        }
+        parents = {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+        for node in ast.walk(tree):
+            if not (isinstance(node, ast.Name) and node.id in names
+                    or isinstance(node, ast.Attribute) and node.attr in setups):
+                continue
+            parent = parents.get(node)
+            if isinstance(parent, ast.Call) and parent.func is node and id(parent) in admitted:
+                entries.append(f"{path}:{node.lineno}")
+            else:
+                problems.append(f"{path}:{node.lineno}: {ast.unparse(parent if parent is not None else node)}")
+    return entries, problems
+
+
+def test_the_passes_are_entered_only_as_with_items_the_census_reads():
+    """Pin for the pass-entry ban over production code: every module in the
+    memory scripts (`SCRIPTS`) and in `hooks/`, the population
+    `_pass_openings` scans. Production code enters `detection_pass` and
+    `git_results_pass` only as a `with` item the census reads as a pass
+    opening, so an opening entered any other way cannot escape the census
+    root. Control: cli.main's, the store construction's, backlog.main's and
+    detection_pass's own entries are found."""
+    import ast
+
+    hooks = PLUGIN_ROOT / "hooks"
+    files = [*sorted(SCRIPTS.glob("*.py")), *sorted(hooks.rglob("*.py"))]
+    trees = {str(path.relative_to(PLUGIN_ROOT)): ast.parse(path.read_text(encoding="utf-8")) for path in files}
+    entries, problems = _pass_entry_problems(trees)
+    assert problems == []
+    assert {entry.rpartition(":")[0] for entry in entries} >= {
+        "skills/pact-memory/scripts/cli.py", "skills/pact-memory/scripts/memory_api.py", "hooks/shared/backlog.py",
+    }, entries
+
+
+@pytest.mark.parametrize("source, honest", [
+    ("from m import detection_pass\n\ndef f():\n    with detection_pass():\n        pass\n", True),
+    ("def f():\n    with other(), mod.detection_pass() as memos:\n        pass\n", True),
+    ("class C:\n    def m(self):\n        if x:\n            with git_results_pass():\n                pass\n", True),
+    ("from m import detection_pass\n\ndef f():\n    with ExitStack() as stack:\n"
+     "        stack.enter_context(detection_pass())\n", False),
+    ("def f():\n    detection_pass().__enter__()\n", False),
+    ("def f():\n    entered = detection_pass()\n", False),
+    ("def f():\n    opener = detection_pass\n    with opener():\n        pass\n", False),
+    ("def f():\n    return git_results_pass()\n", False),
+    ("def f():\n    run(detection_pass)\n", False),
+    ("def f():\n    run(mod.detection_pass())\n", False),
+    ("from m import detection_pass as dp\n\ndef f():\n    with dp():\n        pass\n", False),
+    ("with detection_pass():\n    pass\n", False),
+    ("class Outer:\n    class Inner:\n        def m(self):\n            with detection_pass():\n                pass\n", False),
+], ids=[
+    "with by name", "with by attribute beside another item", "with in a method, nested in a branch",
+    "ExitStack.enter_context", "manual __enter__", "assigned result", "rebound and entered", "returned",
+    "passed as an argument", "result passed as an argument", "aliased name in a with", "with at module level",
+    "with in a nested class's method",
+])
+def test_a_pass_is_entered_only_as_a_with_item(source, honest):
+    """Rows for `_pass_entry_problems`: a `with` item calling the pass by
+    name or attribute, in a top-level function or a top-level class's method
+    at any depth, is an entry. Every other way of entering or handing on the
+    pass is a problem, and so is a `with` the census does not read as an
+    opening (an aliased name, module level, a nested class)."""
+    import ast
+
+    entries, problems = _pass_entry_problems({"m.py": ast.parse(source)})
+    assert entries or problems  # control: the pass was seen
+    assert (problems == []) is honest, problems
 
 
 def route_inputs() -> dict:
