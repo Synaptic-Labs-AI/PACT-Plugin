@@ -20,7 +20,15 @@ from pathlib import Path
 import pytest
 
 import task_lifecycle_gate as tlg  # noqa: E402
-from fixtures.emitter import VALID_HANDOFF  # noqa: E402
+from fixtures.emitter import VALID_HANDOFF as EMITTER_VALID_HANDOFF  # noqa: E402
+
+# Cold round 10 added the produced TYPE gate to validate_handoff_schema (the
+# watcher reads a list-typed `produced` as ABSENT and burns its whole
+# deadline to a false EXPIRED), so this module's silence arms need a
+# string-typed `produced`. The shared fixture keeps its list because five
+# modules pin a content hash built from it — these arms use this derived
+# string-typed view instead.
+VALID_HANDOFF = {**EMITTER_VALID_HANDOFF, "produced": "src/auth.ts"}
 
 TEAM = "pact-test"
 LEAD = "PACT:pact-orchestrator"

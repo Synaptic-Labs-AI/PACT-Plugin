@@ -218,12 +218,12 @@ If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "
 1. **Store HANDOFF in task metadata**:
    ```
    TaskUpdate(taskId, metadata={"handoff": {
-     "produced": [...],
-     "decisions": [...],
-     "reasoning_chain": "...",  // recommended — include unless task is trivial
-     "uncertainty": [...],
-     "integration": [...],
-     "open_questions": [...]
+     "produced": "What the task delivered — files changed, artifacts written, measurements taken — in 1-3 sentences.",
+     "decisions": "Each key decision and its rationale, '; '-joined when there are several.",
+     "reasoning_chain": "How the decisions connect — 'X because Y, which required Z.'",  // recommended — include unless task is trivial
+     "uncertainty": "What could be wrong, prioritized, '; '-joined; write 'No areas of uncertainty flagged.' when none.",
+     "integration": "What downstream agents need to build on this work.",
+     "open_questions": "What is still unresolved, '; '-joined; write 'None.' when none."
    }})
    ```
    If the metadata write fails, still send the payload-carrying notify and state the write failure in it; the lead treats the missing disk copy as an integrity finding, never as a reason to skip your submission.
@@ -231,7 +231,7 @@ If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "
 2. **Notify the team-lead**:
    ```
    SendMessage(to="team-lead",
-     message="[{sender}→team-lead] Task complete. HANDOFF-PAYLOAD-BEGIN produced: [<files/deliverables>] decisions: [<key decisions>] reasoning_chain: <chain, when written> uncertainty: [<prioritized items>] integration: [<integration notes>] open_questions: [<questions>] HANDOFF-PAYLOAD-END The payload above is a verbatim copy of metadata.handoff. boundary-drain: [inbox empty | reconciled <n> directive(s) — <one-line summary>]",
+     message="[{sender}→team-lead] Task complete. HANDOFF-PAYLOAD-BEGIN produced: <what the task delivered> decisions: <each key decision and its rationale> reasoning_chain: <how the decisions connect, when written> uncertainty: <what could be wrong, prioritized> integration: <what downstream agents need> open_questions: <what is still unresolved> HANDOFF-PAYLOAD-END The payload above is a verbatim copy of metadata.handoff. boundary-drain: [inbox empty | reconciled <n> directive(s) — <one-line summary>]",
      summary="Task complete: [brief]")
    ```
 
@@ -425,6 +425,12 @@ Set a free-form `reason` that names the transferred watch (e.g.
 `awaiting_lead_takeover`), not `awaiting_lead_completion` — that reason names
 the HANDOFF/teachback acceptance wait, and a transferred watch must read as
 the different wait it is on task-file inspection.
+A third form exists for teammate-deliverable waits: arm the structural
+watcher with one background `Bash` call AND flag the wait with
+`intentional_wait` naming the watcher in `reason` — at filler-lock the
+tier-3 outlet supplies the arm command, and the turn-end carve-out covers
+lead and separate-process teammates while an in-process teammate's
+coverage is this `intentional_wait` flag itself.
 
 Silence is uninformative in both directions, and narrating a wait is noise in
 both. Do not emit "still running" or "waiting on the gate" turns while your own

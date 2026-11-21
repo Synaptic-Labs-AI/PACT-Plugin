@@ -54,19 +54,20 @@ test_hooks_json.py::TestReferencedScriptsExist once registered.
 
 TEST-phase acceptance matrix (issue #1657, appended below the CODE-phase
 smoke arms): frozen-literal pins (tier-1 byte-identity vs the 18aea673
-blob; valve payload verbatim), tier-3 count/total rendered DISTINCTLY,
-channel discipline at tiers 2-3, verdict invariance through deep
-escalation, budget-exhaustion persistence + post-valve count
-non-regression, session isolation, normalization-coupled counting (one
-content address across decorated spellings), instant-predicate
-derivation from the normalized string, saturation boundary armed both
-sides (totals 6/7, re-fire shape), corrupt-budget V2, growth caps,
-unset-env degrade (O4), allow fast-path emitted-byte identity (O2),
-docstring no-raw-tabs (O1), CROSS-PROCESS subprocess probes (gradient,
-valve budget), concurrency no-lost-update, and a writer->reaper
-integration close-out. The two ablation-table entries below close the
-matrix; O3 (reaper silent skip) is pinned in
-test_session_end_filler_state_reaper.py.
+blob; tier-3 outlet reason verbatim + the absence pin on the retired
+allowance mechanism), tier-3 count/total rendered DISTINCTLY, channel
+discipline at tiers 2-3, verdict invariance through deep escalation,
+count non-regression through consecutive denials + no budget field in
+state, session isolation, normalization-coupled counting (one content
+address across decorated spellings), uniform tier-3 outlet verdict
+across duration spellings and decorated forms, saturation boundary
+armed both sides (totals 6/7, re-fire shape), stale-budget field
+ignored not degrading, growth caps, unset-env degrade (O4), allow
+fast-path emitted-byte identity (O2), docstring no-raw-tabs (O1),
+CROSS-PROCESS subprocess probes (gradient, tier-3 outlet), concurrency
+no-lost-update, and a writer->reaper integration close-out. The two
+ablation-table entries below close the matrix; O3 (reaper silent skip)
+is pinned in test_session_end_filler_state_reaper.py.
 
 Mutation-ablation table (the TEST-phase verification spec; each ablation
 predicts the flipped arms before running, and an ablation whose prediction
@@ -126,6 +127,17 @@ match its prediction exactly — counts and witnesses):
   drop the saturation boost (tier = min(3, count))   -> observed 2:
       test_saturation_boost_escalates_a_fresh_command,
       test_saturation_boundary_armed_both_sides.
+
+Structural-wait retirement annotations (2026-11-21, recorded without
+re-measuring — the dated rows above are as-executed history):
+  - The _INSTANT_FILLER loosen row is RETIRED: the instant-form
+    predicate was deleted with the valve, so that mutation is no longer
+    runnable and the row is a record, not a live spec.
+  - test_valve_instant_grammar_edges (cited above) was renamed to
+    test_tier3_outlet_uniform_across_duration_spellings; the other
+    cited names are unchanged. Eight further valve-era arms were
+    renamed in the same retirement (map in the TEST-phase HANDOFF);
+    none is cited in these tables.
 
 Counter-test record (measured at authoring time): this module was run
 against the repo BEFORE hooks/wait_filler_gate.py existed (TDD red-first):
@@ -566,62 +578,102 @@ def test_gradient_stderr_mirrors_the_deny_reason(tmp_path, monkeypatch, capsys):
     assert err.strip() == _deny_reason(payload)
 
 
-def test_valve_allows_instant_form_at_tier3_twice_then_denies(
+def _seed_team_registry(tmp_path, session_id, value):
+    """Seed the session-registry route (a teammate's `name@team` entry) so
+    frame_team_and_name resolves this session's team in the hermetic
+    config root — the measured separate-process shape."""
+    registry_dir = tmp_path / "pact-sessions"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    with (registry_dir / ".teammate-registry.jsonl").open("a") as registry:
+        registry.write(json.dumps({"session_id": session_id, "value": value}) + "\n")
+
+
+def _seed_team_config(tmp_path, team="tm-team", tmux_member=None):
+    """Seed a team config with one member; `tmux_member` names a member
+    that runs backendType tmux (the separate-process shape)."""
+    config_dir = tmp_path / "teams" / team
+    config_dir.mkdir(parents=True, exist_ok=True)
+    members = [{"name": "backend-coder", "agentType": "pact-backend-coder"}]
+    if tmux_member:
+        members.append({"name": tmux_member, "agentType": "pact-backend-coder",
+                        "backendType": "tmux"})
+    (config_dir / "config.json").write_text(
+        json.dumps({"members": members}), encoding="utf-8"
+    )
+
+
+def test_tier3_outlet_denies_instant_form_every_time(
     tmp_path, monkeypatch, capsys
 ):
-    """The circuit-breaker fires exactly at computed tier 3 for an instant
-    form, twice per session (budget 2), then closes back to the tier-3
-    deny. Attempt counts keep growing through valve allows so the gradient
-    never regresses."""
+    """The retired instant-form allowance is gone: at computed tier 3 an
+    instant form denies EVERY time, and from the third call the reason
+    carries the PACT-WAIT-OUTLET arm command (watcher path, --team/--task
+    placeholders, the background-launch instruction). Attempt counts keep
+    climbing through the denials so the gradient never regresses."""
+    _seed_team_registry(tmp_path, "s-grad", "backend-coder@tm-team")
+    _seed_team_config(tmp_path)
     results = _drive(["true"] * 5, tmp_path, monkeypatch, capsys)
     codes = [code for code, _p, _e in results]
-    assert codes == [2, 2, 0, 0, 2]
-    valve1 = results[2][1]["hookSpecificOutput"]["additionalContext"]
-    valve2 = results[3][1]["hookSpecificOutput"]["additionalContext"]
-    assert "CIRCUIT-BREAKER" in valve1 and "CIRCUIT-BREAKER" in valve2
-    assert "remaining: 1" in valve1 and "remaining: 0" in valve2
-    assert "FILLER-LOCK" in _deny_reason(results[4][1])
+    assert codes == [2, 2, 2, 2, 2]
+    for _c, payload, _e in results[2:]:
+        reason = _deny_reason(payload)
+        assert "PACT-WAIT-OUTLET" in reason
+        assert "pact_wait.py" in reason
+        assert "run_in_background" in reason
+        assert "--team <team-name>" in reason and "--task <task-id>" in reason
+    assert (
+        "denied 5 times this session (5 filler calls in total)"
+        in _deny_reason(results[4][1])
+    )
 
 
 def test_valve_never_opens_for_nonzero_or_infinite_sleep(
     tmp_path, monkeypatch, capsys
 ):
     """`sleep 1` and `sleep infinity` are never instant forms: three calls
-    deny all three times, third at tier 3, and the exit code is never 0."""
+    deny all three times, third at tier 3, and the exit code is never 0.
+
+    Name kept although the valve mechanism it guarded against is retired:
+    this arm is a cited witness in the dated gradient/valve ablation table
+    above, and renaming would orphan that as-executed record."""
     for command in ("sleep 1", "sleep infinity"):
         results = _drive([command] * 3, tmp_path, monkeypatch, capsys)
         assert [c for c, _p, _e in results] == [2, 2, 2], command
         assert "FILLER-LOCK" in _deny_reason(results[2][1]), command
 
 
-def test_valve_instant_grammar_edges(tmp_path, monkeypatch, capsys):
-    """Every all-zero duration spelling (`0`, `0.0`, `.0`, `0s`) is
-    valve-eligible at tier 3; `0.1` is not. Fresh session per form so the
-    shared budget does not couple the arms (explicit safe-shape sids: a
-    derived id containing `.` would itself fail the gate's safe-sid
-    fullmatch and pass this arm for the wrong reason)."""
-    for session_id, command, expect_valve in (
-        ("s-zero", "sleep 0", True),
-        ("s-zero-dot-zero", "sleep 0.0", True),
-        ("s-dot-zero", "sleep .0", True),
-        ("s-zero-s", "sleep 0s", True),
-        ("s-zero-dot-one", "sleep 0.1", False),
+def test_tier3_outlet_uniform_across_duration_spellings(
+    tmp_path, monkeypatch, capsys
+):
+    """The retired instant/non-instant verdict split is gone: every
+    filler spelling reaches the SAME tier-3 outlet deny. All-zero
+    duration spellings (`0`, `0.0`, `.0`, `0s`), a nonzero duration,
+    and `infinity` all deny with the outlet text at the third attempt.
+    Fresh session per form so counters do not couple the arms (explicit
+    safe-shape sids: a derived id containing `.` would itself fail the
+    gate's safe-sid fullmatch and pass this arm for the wrong reason)."""
+    for session_id, command in (
+        ("s-zero", "sleep 0"),
+        ("s-zero-dot-zero", "sleep 0.0"),
+        ("s-dot-zero", "sleep .0"),
+        ("s-zero-s", "sleep 0s"),
+        ("s-zero-dot-one", "sleep 0.1"),
+        ("s-infinity", "sleep infinity"),
     ):
         results = _drive([command] * 3, tmp_path, monkeypatch, capsys,
                          session_id=session_id)
-        third_code = results[2][0]
-        if expect_valve:
-            assert third_code == 0, command
-        else:
-            assert third_code == 2, command
+        assert results[2][0] == 2, command
+        assert "PACT-WAIT-OUTLET" in _deny_reason(results[2][1]), command
 
 
-def test_state_failure_degrades_to_tier1_and_closes_valve(
+def test_state_failure_degrades_to_frozen_tier1_deny(
     tmp_path, monkeypatch, capsys
 ):
     """Fail-direction invariant: with the state channel unavailable the
     hook still denies every filler at the frozen tier-1 advisory — never
-    allows, never harder, valve closed (V2 UNKNOWN = DENY)."""
+    allows, never harder (V2 UNKNOWN = DENY). Renamed at the valve
+    retirement: the closed mechanism it used to name no longer exists,
+    and no dated record cites this arm."""
     import wait_filler_gate
 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
@@ -733,10 +785,11 @@ def test_agent_type_sections_are_distinct(tmp_path, monkeypatch, capsys):
 # are the plan's own named P0: the hook runs as a fresh interpreter per
 # Bash call, so in-process main() calls cannot prove persistence.
 #
-# Frozen-literal pins below are embedded MECHANICALLY (ast.literal_eval of
-# the 18aea673 blob for tier 1, of the module source for the valve text) —
-# never hand-transcribed: the strings carry an em-dash, where char-count
-# and byte-count diverge.
+# Frozen-literal pins below: the tier-1 blob pin was embedded
+# MECHANICALLY at its authoring time (ast.literal_eval of the 18aea673
+# blob — the strings carry an em-dash, where char-count and byte-count
+# diverge); the tier-3 outlet pin is the full module constant hand-copied
+# at the outlet's introduction and must be updated consciously.
 # ---------------------------------------------------------------------------
 
 # The historical advisory, byte-identical (245 chars, verified against the
@@ -748,15 +801,29 @@ _FROZEN_TIER1 = (
     "compose it with real work or end the turn."
 )
 
-# The valve payload, verbatim (wording is CODE-owned; the pin is
-# deliberate — this text IS the loop-breaking mechanism, so a wording
-# edit must be a conscious pin update, never a silent drift).
-_VALVE_PAYLOAD_TEMPLATE = (
-    "CIRCUIT-BREAKER: this no-op filler call was allowed as your "
-    "sanctioned terminal wait — it produced no new information, and "
-    "nothing will come of it. Your turn ends NOW: do not call any tool "
-    "again this turn. Teammate messages arrive as their own turns. "
-    "(Circuit-breaker budget remaining: {budget}.)"
+# The tier-3 outlet reason, verbatim — this text IS the loop-breaking
+# mechanism now (it carries the ready-to-run watcher arm command), so a
+# wording edit must be a conscious pin update, never a silent drift.
+_TIER3_REASON_PIN = (
+    "FILLER-LOCK: this exact call has been denied {count} times this "
+    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
+    "re-filling — end this wait structurally instead. FIRST arm the "
+    "deliverable watcher with ONE `Bash` call (`run_in_background: "
+    "true`), substituting your team name and the task id you are "
+    "waiting on:\n"
+    'python3 "{watcher}" --team <team-name> --task <task-id> '
+    "--predicate handoff --deadline 900\n"
+    "(use --predicate teachback_submit when the awaited deliverable is "
+    "a teachback submission). A teammate's handoff or teachback "
+    "submission is precisely the deliverable to arm on, even though you "
+    "cannot write it. If the event you await is something only YOU can "
+    "write — your own notes or a summary — do NOT arm: instead set "
+    "metadata.intentional_wait with `expected_resolver` naming the "
+    "resolver, and end your turn; a message or that resolver's own "
+    "wake resolves it. If you DID arm: end your turn with no "
+    "further tool calls — the watcher exits 0 when the deliverable "
+    "lands, 3 when the deadline passes without it, 4 when it cannot "
+    "watch at all — and its completion notification re-invokes you."
 )
 
 
@@ -802,10 +869,11 @@ def test_tier2_tier3_keep_channel_discipline(tmp_path, monkeypatch, capsys):
 def test_verdict_invariance_through_deep_escalation(
     tmp_path, monkeypatch, capsys
 ):
-    """P0 verdict invariance: a NON-instant filler is denied on every one
-    of 8 consecutive attempts — escalation changes text, never the
-    verdict. Only the bounded valve (instant form, tier 3, budget) may
-    exit 0, and this command can never reach it."""
+    """P0 verdict invariance: a filler command is denied on every one of
+    8 consecutive attempts — escalation changes text, never the verdict.
+    Nothing on the filler branch exits 0: the tier-3 outlet is itself a
+    denial (its productivity is the arm command in the reason, not an
+    allowance)."""
     results = _drive(["sleep 30"] * 8, tmp_path, monkeypatch, capsys)
     assert [c for c, _p, _e in results] == [2] * 8
     for payload in (p for _c, p, _e in results):
@@ -813,32 +881,359 @@ def test_verdict_invariance_through_deep_escalation(
         assert envelope["permissionDecision"] == "deny"
 
 
-def test_valve_payload_is_pinned_verbatim(tmp_path, monkeypatch, capsys):
-    """P0 valve payload pin: the circuit-breaker text, full-string, with
-    the live budget rendered — this text is the mechanism the plan says
-    must be pinned, not just its 'CIRCUIT-BREAKER' head."""
-    results = _drive(["true"] * 3, tmp_path, monkeypatch, capsys)
-    code, payload, _err = results[2]
-    assert code == 0
-    envelope = payload["hookSpecificOutput"]
-    assert envelope["additionalContext"] == _VALVE_PAYLOAD_TEMPLATE.format(
-        budget=1
+def test_valve_mechanism_absent_from_module():
+    """Absence pin for the retired allowance mechanism: the payload
+    constant, the budget constant and the instant-form predicate are
+    gone from the module, and neither the payload head, the budget
+    render string, nor the mechanism's name appears anywhere in the
+    source — the mechanism left no live trace."""
+    import wait_filler_gate
+
+    assert not hasattr(wait_filler_gate, "_VALVE_PAYLOAD")
+    assert not hasattr(wait_filler_gate, "_INITIAL_VALVE_BUDGET")
+    assert not hasattr(wait_filler_gate, "_INSTANT_FILLER")
+    source = HOOK_PATH.read_text(encoding="utf-8")
+    assert "CIRCUIT-BREAKER" not in source
+    assert "remaining:" not in source
+    assert "valve" not in source.lower()
+
+
+def test_outlet_reason_pinned_verbatim():
+    """P0 outlet pin: the tier-3 reason, full-string — this text now
+    carries the loop-breaking mechanism (the ready-to-run arm command),
+    so a wording edit must be a conscious pin update, never a silent
+    drift."""
+    import wait_filler_gate
+
+    assert wait_filler_gate._TIER3_REASON == _TIER3_REASON_PIN
+
+
+# The TEAMMATE tier-3 outlet, verbatim — the role branch of the same
+# mechanism. A teammate's background completion does NOT start their next
+# turn (in-process teammates collect results; nothing wakes them), so the
+# lead text's "re-invokes you" promise is false for them: their branch
+# carries the arm command TOO, but the guidance is the teammate-side one —
+# SET metadata.intentional_wait naming the watcher; messages from the lead
+# wake them.
+_TIER3_TEAMMATE_REASON_PIN = (
+    "FILLER-LOCK: this exact call has been denied {count} times this "
+    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
+    "re-filling — end this wait structurally instead. As a teammate, "
+    "this watcher's completion will NOT wake you — messages from the "
+    "lead will. FIRST arm the deliverable watcher with ONE `Bash` call "
+    "(`run_in_background: true`), substituting your team name and the "
+    "task id you are waiting on:\n"
+    'python3 "{watcher}" --team <team-name> --task <task-id> '
+    "--predicate handoff --deadline 900\n"
+    "(use --predicate teachback_submit when the awaited deliverable is "
+    "a teachback submission). If the event you await is NOT a "
+    "deliverable you can write — for example the lead's review or "
+    "action — do NOT arm: instead SET metadata.intentional_wait on the "
+    "task the wait covers with `expected_resolver` naming the lead, "
+    "and end your turn — a message or the lead's own wake resolves it. "
+    "If you DID arm: SET metadata.intentional_wait on every task the "
+    "wait covers — `reason`, `expected_resolver` and `since` are the "
+    "keys validate_wait requires — `expected_resolver` naming the "
+    "lead; name the watcher in `reason` — and end your turn with no "
+    "further tool calls — the lead's wake resumes you."
+)
+
+
+def test_tier3_teammate_text_names_the_wait_keys():
+    """The in-process teammate text names the three keys validate_wait
+    requires (shared/intentional_wait.py is the SSOT): a literal follower
+    who copies the text verbatim must not write a malformed wait and
+    re-enter the filler loop. It also carries the neither-predicate
+    alternative route — "do NOT arm" with `expected_resolver` naming the
+    lead — for waits no shipped predicate can witness (cold round 6)."""
+    import wait_filler_gate
+
+    for key in ("reason", "expected_resolver", "since"):
+        assert key in wait_filler_gate._TIER3_TEAMMATE_REASON, key
+    # The key-value SPLIT (cold round 9): `expected_resolver` names the
+    # LEAD — a watcher name would leave the resolver vocabulary and drop
+    # the teammate from the resolver-scoped stall scans — while the
+    # watcher's name belongs in `reason`.
+    assert "`expected_resolver` naming the lead" in (
+        wait_filler_gate._TIER3_TEAMMATE_REASON
     )
-    # envelope shape: advisory-style allow, no deny keys
-    assert "permissionDecision" not in envelope
+    assert "name the watcher in `reason`" in (
+        wait_filler_gate._TIER3_TEAMMATE_REASON
+    )
+    assert "do NOT arm" in wait_filler_gate._TIER3_TEAMMATE_REASON
+    assert "instead SET metadata.intentional_wait" in (
+        wait_filler_gate._TIER3_TEAMMATE_REASON
+    )
+    assert "do NOT arm" in (
+        wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
+    )
 
 
-def test_exhausted_budget_persists_and_post_valve_count_never_regresses(
+# The separate-process teammate's text, verbatim — its watcher-exit/wake
+# tail is GATED on having armed (the do-NOT-arm route resolves without any
+# watcher, and describing watcher exits to a non-arming follower is the
+# contradiction class the gated tail closes).
+_TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN = (
+    "FILLER-LOCK: this exact call has been denied {count} times this "
+    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
+    "re-filling — end this wait structurally instead. As a "
+    "separate-process teammate, this watcher's completion notice WILL "
+    "start your next turn. FIRST arm the deliverable watcher with ONE "
+    "`Bash` call (`run_in_background: true`), substituting your team "
+    "name and the task id you are waiting on:\n"
+    'python3 "{watcher}" --team <team-name> --task <task-id> '
+    "--predicate handoff --deadline 900\n"
+    "(use --predicate teachback_submit when the awaited deliverable is "
+    "a teachback submission). If the event you await is NOT a "
+    "deliverable you can write — for example the lead's review or "
+    "action — do NOT arm: just end your turn, and a message or your "
+    "next turn boundary resolves it. If you DID arm: end your turn "
+    "with no further tool calls — the watcher exits 0 when the "
+    "deliverable lands, 3 when the deadline passes without it, 4 when "
+    "it cannot watch at all — and its completion notice starts your "
+    "next turn."
+)
+
+
+def test_tier3_sp_text_pinned_verbatim():
+    import wait_filler_gate
+
+    assert (
+        wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
+        == _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN
+    )
+
+
+def test_tier3_sp_text_gates_its_watcher_tail():
+    """CONTRADICTION-CLASS PIN (Bugbot Medium, cold round 8): the SP text's
+    watcher-exit/wake descriptions must be gated on having armed — its
+    do-NOT-arm route resolves without any watcher, and an ungated THEN
+    clause would describe watcher exits for a watcher that was never
+    launched. "If you DID arm" present; the ungated "THEN end your turn"
+    absent. The then-present state is the pre-fix text — this pin was red
+    on it."""
+    import wait_filler_gate
+
+    sp = wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
+    assert "If you DID arm" in sp
+    assert "THEN end your turn" not in sp
+
+
+def test_tier3_lead_text_names_the_no_arm_alternative():
+    """The LEAD text carries the same neither-predicate alternative the
+    teammate texts do: when the awaited event is not a deliverable the
+    lead can write, arming burns the deadline — intentional_wait with
+    `expected_resolver` naming the resolver replaces it (cold round 8,
+    bounded-cost: no watcher process, no deadline burn)."""
+    import wait_filler_gate
+
+    assert "do NOT arm" in wait_filler_gate._TIER3_REASON
+    assert "expected_resolver" in wait_filler_gate._TIER3_REASON
+    # THE LEAD-SIDE DISAMBIGUATION (Bugbot Medium, cold round 12): the
+    # lead's PRIMARY wait is a teammate's handoff or teachback — a
+    # deliverable the lead cannot write — so a "not a deliverable you can
+    # write" clause read literally makes the lead skip arming for the
+    # exact case the watcher exists for. The text must name the
+    # teammate-written deliverable as the ARM-ON case and scope the
+    # do-NOT-arm route to what only the lead can write.
+    assert "something only YOU can write" in wait_filler_gate._TIER3_REASON
+    assert "even though you cannot write it" in wait_filler_gate._TIER3_REASON
+
+
+def test_tier3_subagent_text_pinned_verbatim():
+    """The Agent-tool subagent branch's own text, verbatim: NO wake
+    promise — nothing wakes a subagent whose turn ends — and the
+    completion phrasing the lead's ruling requires."""
+    import wait_filler_gate
+
+    assert wait_filler_gate._TIER3_SUBAGENT_REASON == _TIER3_SUBAGENT_REASON_PIN
+    # The neither-predicate alternative, adapted to the subagent's wake
+    # model (cold round 12): a subagent cannot SET intentional_wait on team
+    # tasks, so the honest route is report-and-end, not the teammates'
+    # intentional_wait route.
+    assert "do NOT arm" in wait_filler_gate._TIER3_SUBAGENT_REASON
+
+
+# The Agent-tool subagent's own text, verbatim — the role branch's fourth
+# arm. A subagent's turn end returns its report to the caller: nothing wakes
+# it, so the text carries NO wake promise of any kind — only the arm command
+# and the completion phrasing.
+_TIER3_SUBAGENT_REASON_PIN = (
+    "FILLER-LOCK: this exact call has been denied {count} times this "
+    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
+    "re-filling — end this wait structurally instead. As an Agent-tool "
+    "subagent, nothing wakes you when your turn ends: your final report "
+    "is your completion, and the lead reads it when it returns. FIRST "
+    "arm the deliverable watcher with ONE `Bash` call "
+    "(`run_in_background: true`), substituting your team name and the "
+    "task id you are waiting on:\n"
+    'python3 "{watcher}" --team <team-name> --task <task-id> '
+    "--predicate handoff --deadline 900\n"
+    "(use --predicate teachback_submit when the awaited deliverable is "
+    "a teachback submission). If the event you await is not a "
+    "deliverable you can write — do NOT arm — your completion report is "
+    "the lead's information; end your turn. If you DID arm: end your "
+    "turn with no further tool calls — the watcher exits 0 when the "
+    "deliverable lands, 3 when the deadline passes without it, 4 when "
+    "it cannot watch at all — and put what the lead needs in your "
+    "final report."
+)
+
+
+def test_tier3_teammate_outlet_pinned_verbatim():
+    import wait_filler_gate
+
+    assert (
+        wait_filler_gate._TIER3_TEAMMATE_REASON == _TIER3_TEAMMATE_REASON_PIN
+    )
+
+
+def test_tier3_no_team_frame_gets_no_command(tmp_path, monkeypatch, capsys):
+    """A frame with NO resolvable PACT team gets the loop-breaking
+    instruction WITHOUT the arm command: there is no deliverable store for
+    a <team-name> placeholder to name, so handing it a ready-to-run
+    command would point at a store that does not exist for it."""
+    results = _drive(
+        ["true"] * 3, tmp_path, monkeypatch, capsys,
+        session_id="s-noteam-outlet", agent_type="pact-backend-coder",
+    )
+    assert [c for c, _p, _e in results] == [2, 2, 2]
+    reason = _deny_reason(results[2][1])
+    assert "FILLER-LOCK" in reason
+    assert "PACT-WAIT-OUTLET" in reason
+    assert "pact_wait.py" not in reason
+    assert "--team <team-name>" not in reason
+    assert "No PACT team is resolvable" in reason
+
+
+def test_tier3_agent_tool_subagent_gets_completion_report_text(
     tmp_path, monkeypatch, capsys
 ):
-    """Budget exhaustion persists in the state file (valve_budget 0), and
-    the count keeps climbing through valve allows, so the re-fire after
-    exhaustion lands at tier 3 with the THROUGH-valve count rendered —
-    never regresses to tier 2."""
+    """An Agent-tool subagent is neither teammate: its subagent-shaped
+    agent_id refuses member resolution — the sibling launch advisory's own
+    rule, via the same teammate_launch_name — so it gets its OWN text: the
+    arm command plus the completion phrasing, and NO wake promise (nothing
+    wakes a subagent whose turn ends; its final report is its completion)."""
+    _seed_team_registry(tmp_path, "s-sub-outlet", "backend-coder@tm-team")
+    _seed_team_config(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    frame = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "true"},
+        "session_id": "s-sub-outlet",
+        "agent_type": "general-purpose",
+        "agent_id": "ad2b1261fdd77c958",
+    })
+    results = [_invoke(frame, capsys) for _ in range(3)]
+    assert [c for c, _p, _e in results] == [2, 2, 2]
+    reason = _deny_reason(results[2][1])
+    assert "PACT-WAIT-OUTLET" in reason
+    assert "pact_wait.py" in reason
+    assert "your final report is your completion" in reason
+    assert "re-invokes" not in reason
+    assert "will NOT wake you" not in reason
+    assert "metadata.intentional_wait" not in reason
+    assert "starts your next turn" not in reason
+
+
+def test_tier3_outlet_three_way_role_branch(tmp_path, monkeypatch, capsys):
+    """The outlet is THREE-way, resolved through the REAL member record: a
+    separate-process teammate (backendType tmux, resolved via the frame's
+    team_name/teammate_name) gets the arm command with the ACCURATE wake
+    statement — their completion notice starts their next turn, so the
+    in-process text's "will NOT wake you" would be false for them; an
+    in-process teammate keeps the intentional_wait guidance; a lead keeps
+    the lead text. Same gradient, same deny verdict, all three roles."""
+    config = tmp_path / "teams" / "tm-team"
+    config.mkdir(parents=True)
+    (config / "config.json").write_text(json.dumps({
+        "members": [{
+            "name": "backend-coder",
+            "agentType": "pact-backend-coder",
+            "backendType": "tmux",
+        }],
+    }), encoding="utf-8")
+    # The measured separate-process frame resolves its member through the
+    # session REGISTRY (no team_name/teammate_name fields, no agent_id) —
+    # seed that route, not a fabricated field shape.
+    registry_dir = tmp_path / "pact-sessions"
+    registry_dir.mkdir(parents=True)
+    (registry_dir / ".teammate-registry.jsonl").write_text(
+        json.dumps({"session_id": "s-sp-outlet",
+                    "value": "backend-coder@tm-team"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    def sp_frame(session_id):
+        return json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+            "session_id": session_id,
+            "agent_type": "pact-backend-coder",
+        })
+
+    results = [
+        _invoke(sp_frame("s-sp-outlet"), capsys) for _n in range(3)
+    ]
+    assert [c for c, _p, _e in results] == [2, 2, 2]
+    sp_reason = _deny_reason(results[2][1])
+    assert "PACT-WAIT-OUTLET" in sp_reason
+    assert "pact_wait.py" in sp_reason
+    assert "--team <team-name>" in sp_reason
+    assert "starts your next turn" in sp_reason
+    assert "will NOT wake you" not in sp_reason
+    assert "metadata.intentional_wait" not in sp_reason
+
+
+def test_tier3_outlet_branches_on_role(tmp_path, monkeypatch, capsys):
+    """The tier-3 text is role-branched: a TEAMMATE frame (agent_type
+    naming a non-lead actor) gets the teammate guidance — intentional_wait
+    naming the watcher, the lead's messages as the wake — alongside the
+    SAME arm command and NEVER the lead-only completion-wakes claim; a
+    lead frame gets the lead text. Same gradient, same deny verdict, both
+    roles. Both arms resolve a team through the seeded registry so the
+    command is on for both (the no-team case is pinned separately)."""
+    _seed_team_registry(tmp_path, "s-mate-outlet", "backend-coder@tm-team")
+    _seed_team_registry(tmp_path, "s-lead-outlet", "backend-coder@tm-team")
+    _seed_team_config(tmp_path)
+    teammate = _drive(
+        ["true"] * 3, tmp_path, monkeypatch, capsys,
+        session_id="s-mate-outlet", agent_type="pact-backend-coder",
+    )
+    assert [c for c, _p, _e in teammate] == [2, 2, 2]
+    mate_reason = _deny_reason(teammate[2][1])
+    assert "PACT-WAIT-OUTLET" in mate_reason
+    assert "pact_wait.py" in mate_reason
+    assert "--team <team-name>" in mate_reason
+    assert "metadata.intentional_wait" in mate_reason
+    assert "will NOT wake you" in mate_reason
+    assert "re-invokes you" not in mate_reason
+
+    lead = _drive(
+        ["true"] * 3, tmp_path, monkeypatch, capsys,
+        session_id="s-lead-outlet", agent_type="pact-orchestrator",
+    )
+    lead_reason = _deny_reason(lead[2][1])
+    assert "PACT-WAIT-OUTLET" in lead_reason
+    assert "re-invokes you" in lead_reason
+    # The lead text DOES name metadata.intentional_wait (the do-NOT-arm
+    # alternative, cold round 8) — the mate discriminator is the
+    # wake-model phrasing, not the metadata key.
+    assert "will NOT wake you" not in lead_reason
+
+
+def test_counts_climb_through_denials_and_budget_field_gone(
+    tmp_path, monkeypatch, capsys
+):
+    """The budget bookkeeping is retired: counts climb through DENIALS
+    (no call ever exits 0), the persisted section carries NO budget
+    field at all, and the re-fire lands at tier 3 with the count
+    rendered — the gradient never regresses, and nothing is allowed."""
     results = _drive(["true"] * 5, tmp_path, monkeypatch, capsys)
-    assert [c for c, _p, _e in results] == [2, 2, 0, 0, 2]
+    assert [c for c, _p, _e in results] == [2, 2, 2, 2, 2]
     state = json.loads(_state_path(tmp_path).read_text(encoding="utf-8"))
-    assert state[""]["valve_budget"] == 0
+    assert "valve_budget" not in state[""]
     _code, payload, _err = _invoke(_gradient_frame("true"), capsys)
     reason = _deny_reason(payload)
     assert "FILLER-LOCK" in reason
@@ -878,16 +1273,17 @@ def test_normalized_forms_share_one_counter(tmp_path, monkeypatch, capsys):
     assert "FILLER-LOCK" in reasons[2]  # count 3 -> tier 3
 
 
-def test_instant_predicate_derives_from_normalized_string(
+def test_decorated_instant_forms_take_the_same_outlet_deny(
     tmp_path, monkeypatch, capsys
 ):
-    """V1's derivation pin: the instant-form test sees the SAME normalized
-    string that produced the verdict — a decorated instant filler
-    (env-assignment or wrapper prefix) is valve-eligible, not just the
-    bare spelling."""
+    """The retired derivation pin's coverage, re-homed: a decorated
+    instant filler (env-assignment or wrapper prefix) normalizes to the
+    same command and takes the SAME tier-3 outlet deny the bare spelling
+    takes — decoration changes nothing about the verdict."""
     for decorated in ("FOO=1 sleep 0", "builtin true"):
         results = _drive([decorated] * 3, tmp_path, monkeypatch, capsys)
-        assert [c for c, _p, _e in results] == [2, 2, 0], decorated
+        assert [c for c, _p, _e in results] == [2, 2, 2], decorated
+        assert "PACT-WAIT-OUTLET" in _deny_reason(results[2][1]), decorated
 
 
 def test_saturation_boundary_armed_both_sides(tmp_path, monkeypatch, capsys):
@@ -910,14 +1306,13 @@ def test_saturation_boundary_armed_both_sides(tmp_path, monkeypatch, capsys):
     assert "FILLER-LOCK" in _deny_reason(payload)
 
 
-def test_corrupt_budget_denies_tier1_with_valve_closed(
+def test_stale_budget_value_is_ignored_not_degrading(
     tmp_path, monkeypatch, capsys
 ):
-    """V2 arm: well-formed JSON whose valve_budget is not an int is
-    UNKNOWN = DENY at the frozen tier 1, file untouched (no rewrite on
-    the degrade path)."""
-    import wait_filler_gate
-
+    """A stale non-int budget field (written by an older hook version)
+    is an IGNORED unknown field now, not a degrade trigger: the gradient
+    escalates normally off pairs/total, and the field survives the
+    writes untouched (version-skew preserve)."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     state = _state_path(tmp_path)
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -925,14 +1320,19 @@ def test_corrupt_budget_denies_tier1_with_valve_closed(
         json.dumps({"": {"pairs": {}, "total": 9, "valve_budget": "two"}}),
         encoding="utf-8",
     )
-    # 'true' three times: with total 9 every attempt would be tier 3 and
-    # valve-eligible were the budget readable — it is not, so all deny
-    # at tier 1.
-    for _ in range(3):
-        code, payload, _err = _invoke(_gradient_frame("true"), capsys)
-        assert code == 2
-        assert _deny_reason(payload) == wait_filler_gate._DENY_REASON
-    assert json.loads(state.read_text(encoding="utf-8"))[""]["valve_budget"] == "two"
+    # total 9 > 6 -> boost: a first-seen command enters at tier 2, its
+    # re-fire at tier 3 — the escalation the old V2 degrade suppressed.
+    _code, payload, _err = _invoke(_gradient_frame("sleep 30"), capsys)
+    assert (
+        "denied 1 time this session (10 filler calls in total)"
+        in _deny_reason(payload)
+    )
+    _code, payload, _err = _invoke(_gradient_frame("sleep 30"), capsys)
+    assert "FILLER-LOCK" in _deny_reason(payload)
+    assert (
+        json.loads(state.read_text(encoding="utf-8"))[""]["valve_budget"]
+        == "two"
+    )
 
 
 def test_nondict_agent_section_degrades_tier1_untouched(
@@ -1017,16 +1417,16 @@ def test_version_skew_unknown_section_key_survives_write(
     ] == "keep-me"
 
 
-def test_valve_write_preserves_unknown_keys_and_decrements(
+def test_tier3_outlet_write_preserves_unknown_keys(
     tmp_path, monkeypatch, capsys
 ):
-    """Bugbot-2 arm: version-skew preserve through the VALVE write, not
-    just the deny write — the budget decrement is a different _apply
-    rewrite (new_budget = budget - 1 on the valve branch), and it must
-    merge-preserve unknown section keys exactly as the deny branch does.
-    Seeded at count 2 so this instant form's third attempt is a tier-3
-    valve ALLOW; assert the allow fired, the key survived, AND the
-    budget and count both landed their new values in the same write."""
+    """Bugbot-2 arm, re-homed: version-skew preserve through the TIER-3
+    outlet write (every filler write is a deny write now — the retired
+    budget decrement no longer has its own rewrite shape). Seeded at
+    count 2 so this instant form's third attempt is a tier-3 outlet
+    deny; assert the deny fired with the outlet text, the unknown keys
+    survived (including the stale budget field, preserved untouched),
+    and pairs/total landed their new values in the same write."""
     import wait_filler_gate
 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
@@ -1045,13 +1445,11 @@ def test_valve_write_preserves_unknown_keys_and_decrements(
         encoding="utf-8",
     )
     code, payload, _err = _invoke(_gradient_frame("true"), capsys)
-    assert code == 0
-    assert "CIRCUIT-BREAKER" in payload["hookSpecificOutput"][
-        "additionalContext"
-    ]
+    assert code == 2
+    assert "PACT-WAIT-OUTLET" in _deny_reason(payload)
     section = json.loads(state.read_text(encoding="utf-8"))[""]
     assert section["future_field"] == "keep-me"
-    assert section["valve_budget"] == 1
+    assert section["valve_budget"] == 2
     assert section["pairs"] == {true_key: 3}
     assert section["total"] == 3
 
@@ -1247,26 +1645,22 @@ def test_cross_process_gradient_persists(tmp_path, monkeypatch):
     assert "FILLER-LOCK" in reasons[2]
 
 
-def test_cross_process_valve_budget_survives(tmp_path, monkeypatch):
-    """P0 subprocess probe: five separate interpreters fire the valve
-    exactly twice (attempts 3 and 4), and the exhaustion persists — the
-    6th interpreter's instant form is denied at tier 3 with the budget
-    rendered at 0 on the last allow."""
+def test_cross_process_tier3_outlet_persists(tmp_path, monkeypatch):
+    """P0 subprocess probe: six separate interpreters deny every time —
+    no interpreter ever exits 0 — and the count persists across
+    processes: from the third interpreter the reason carries the outlet
+    arm command, and the 6th renders the through-denial count."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
-    codes, allows = [], []
-    for _ in range(5):
+    reason = ""
+    for i in range(1, 7):
         code, out, _err = _run_hook_script(json.loads(_gradient_frame("true")))
-        codes.append(code)
-        if code == 0:
-            allows.append(
-                json.loads(out)["hookSpecificOutput"]["additionalContext"]
-            )
-    assert codes == [2, 2, 0, 0, 2]
-    assert "remaining: 1" in allows[0]
-    assert "remaining: 0" in allows[1]
-    code, out, _err = _run_hook_script(json.loads(_gradient_frame("true")))
-    assert code == 2
-    assert "FILLER-LOCK" in _probe_reason(out)
+        assert code == 2, i
+        reason = _probe_reason(out)
+        if i >= 3:
+            assert "PACT-WAIT-OUTLET" in reason, i
+    assert (
+        "denied 6 times this session (6 filler calls in total)" in reason
+    )
 
 
 def test_concurrent_updates_lose_nothing(tmp_path, monkeypatch):

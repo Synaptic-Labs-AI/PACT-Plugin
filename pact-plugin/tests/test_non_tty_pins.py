@@ -383,9 +383,12 @@ class TestCurrentAgentDispatchContract:
 class TestNoTouchSurfacesSurvive:
     """Pre-decided dispositions (spec §6) pinned affirmatively."""
 
-    def test_persona_bash_watcher_flag_survives_exactly_once(self):
+    def test_persona_bash_watcher_flag_survives_exactly_twice(self):
         persona = _read(_PERSONA)
-        assert persona.count("run_in_background: true") == 1
+        # Two canonical homes: the watcher-launch instruction in §5
+        # "Instrument the wait", and the teammate-deliverable arming sentence
+        # appended to that same paragraph.
+        assert persona.count("run_in_background: true") == 2
         # And it is NOT inside any dispatch site (different semantic).
         for _, block in _agent_dispatch_sites(persona):
             assert "run_in_background: true" not in block

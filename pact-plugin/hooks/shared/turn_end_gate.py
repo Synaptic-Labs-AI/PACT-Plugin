@@ -14,6 +14,19 @@ job's one-time report.
 Identification is positive-only. A plain session, an Agent-tool subagent and
 any frame this module does not recognise resolve to no role, and the stop is
 allowed.
+
+CARVE-OUT: a running pact-wait watcher (the structural wait mechanism's
+watcher armed before ending a turn) is EXEMPT from the shell-job block for
+exactly the roles whose own completion notice starts their next turn: the
+LEAD and a SEPARATE-PROCESS teammate. Its process completion IS their
+scheduled wake, so blocking the turn end over it would re-create the very
+wait-loop it replaces. An IN-PROCESS teammate is deliberately NOT exempt:
+its block text is the one that says the completion notice will NOT wake
+them, so its watcher stays accountable and the remedy stays the
+intentional_wait coverage path. Classified by an anchored command shape
+(`is_wait_watcher_command`): a lookalike that merely mentions the watcher
+name, or a partial invocation missing the arm flags, still counts as a
+job to account for.
 """
 
 from __future__ import annotations
@@ -54,6 +67,44 @@ MAX_LISTED_JOBS = 5
 JOB_LABEL_MAX_CHARS = 80
 
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
+
+# The command shape of an armed structural wait watcher: the pact_wait.py
+# entrypoint with the FULL arm flag set (--team/--task/--predicate/--deadline,
+# the surface its own CLI makes required). ANCHORED at the command start with
+# a closed prefix set (optional `cd ... &&`, env assignments, a python3
+# interpreter, a path-token script name), so a command that merely MENTIONS
+# the watcher (`echo "..."`, a compose string) or runs it PARTIALLY (missing
+# a required flag, reordered flags) does not match and still counts as a job
+# the ending frame must account for. The path token admits a QUOTED path
+# containing any non-quote characters, and its UNQUOTED alternative admits
+# exactly shlex.quote's no-op set — the emitted command renders the path
+# unquoted precisely when shlex.quote would, and the classifier admits that
+# same set, so a live install under a spaced or special-char path must
+# classify or its own scheduled wake would block it. Match-order and
+# composition strictness lean deliberately toward over-block: a watcher the
+# carve-out misses only ever costs one advisory block, while a non-watcher
+# the carve-out exempts would acquit the frame of a real unowned job — a
+# spaced path left UNQUOTED beyond that no-op set still counts (the shell
+# word-splits it, so it cannot be the armed command).
+_PACT_WAIT_SHAPE = re.compile(
+    r"\A\s*"
+    r"(?:cd\s+[^\n&]+&&\s*)?"
+    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
+    r"(?:python3(?:\.\d+)?\s+)?"
+    r"(?:\"[^\"]*pact_wait\.py\"|'[^']*pact_wait\.py'"
+    r"|[A-Za-z0-9_@%+=:,./-]*pact_wait\.py)\s+"
+    r"--team\s+\S+\s+--task\s+\S+\s+"
+    r"--predicate\s+\S+\s+--deadline\s+\S+\s*\Z"
+)
+
+
+def is_wait_watcher_command(command: Any) -> bool:
+    """True iff a running job's command IS an armed pact-wait watcher —
+    the arming frame's own scheduled wake, exempt from the shell-job block
+    for the roles whose completion notice starts their next turn (see the
+    module docstring's CARVE-OUT). False for anything else, including a
+    lookalike mention or a partial invocation."""
+    return isinstance(command, str) and bool(_PACT_WAIT_SHAPE.match(command))
 
 LEAD_BLOCK_TEXT = (
     "Background work is still running in this session and nothing is "
@@ -320,7 +371,14 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
         # candidates, so a reused id can only UNDER-block: it acquits the lead of
         # that job.
         teammate_jobs = {r["harness_task_id"] for r in records if r.get("harness_task_id")}
-        return [e for e in running if e["id"] not in teammate_jobs]
+        # The carve-out: a running pact-wait watcher is the lead's own
+        # scheduled wake, not unowned work (see the module docstring's
+        # CARVE-OUT). It never enters the lead's must-account-for list.
+        return [
+            e for e in running
+            if e["id"] not in teammate_jobs
+            and not is_wait_watcher_command(e.get("command"))
+        ]
     if input_data.get("hook_event_name") == "SubagentStop":
         # The lead process's whole list: only this teammate's recorded jobs count.
         #
@@ -351,6 +409,12 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
         # teammate is refused its turn end over work it did not launch — an
         # OVER-block.
         running = [e for e in running if e["id"] in by_job]
+        # NO watcher carve-out here, deliberately: an in-process teammate's
+        # completion notice will NOT wake them (their block text says so),
+        # so their watcher is not a scheduled wake — it stays in the
+        # must-account-for list and the intentional_wait coverage below
+        # remains the remedy.
+        watcher_is_wake = False
     else:
         # JOB-ID REUSE HERE ALSO OVER-BLOCKS, BY A DIFFERENT MECHANISM. This
         # process lists only its own jobs, so no other agent's job can enter its
@@ -360,8 +424,17 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
         # row any valid wait covers it. A reused id can only raise that bar,
         # never lower it.
         by_job = {r["harness_task_id"]: r for r in records if r.get("harness_task_id")}
+        # Separate-process teammate (the only role that reaches this branch):
+        # their own completion notice starts their next turn, so a running
+        # watcher IS their scheduled wake — the same carve-out the lead gets
+        # (see the module docstring's CARVE-OUT).
+        watcher_is_wake = True
     waiting = _tasks_with_valid_wait(team, name)
-    return [e for e in running if not _covered(waiting, by_job.get(e["id"]))]
+    return [
+        e for e in running
+        if not (watcher_is_wake and is_wait_watcher_command(e.get("command")))
+        and not _covered(waiting, by_job.get(e["id"]))
+    ]
 
 
 def _tasks_with_valid_wait(team: str, name: str) -> list:

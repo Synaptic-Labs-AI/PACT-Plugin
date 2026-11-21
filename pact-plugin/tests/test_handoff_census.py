@@ -8,8 +8,8 @@ expected counts are known by construction, and assert the instrument reports
 what was planted.
 
 The arms that touch the shipped code rather than the fixture guard what the
-journal arm's confidence rests on: the presence-only reconstruction, and the
-inline handoff passing through unchanged.
+journal arm's confidence rests on: the value-inspecting validator (cold round
+12's inverted guard), and the inline handoff passing through unchanged.
 """
 
 from __future__ import annotations
@@ -19,12 +19,16 @@ from pathlib import Path
 
 import handoff_census as hc  # noqa: E402
 
+# produced is STRING-TYPED (cold round 12, the same reshaping the templates
+# got): the validator's produced type gate fires on list values, and the
+# census's planted corpus must produce handoffs that PASS the gate so the
+# tallies keep their by-construction meanings.
 CANONICAL = {
-    "produced": ["a"], "decisions": ["b"], "reasoning_chain": "c",
+    "produced": "a", "decisions": "b", "reasoning_chain": "c",
     "uncertainty": [], "integration": [], "open_questions": [],
 }
 NO_REASONING = {k: v for k, v in CANONICAL.items() if k != "reasoning_chain"}
-LEGACY = {**NO_REASONING, "key_decisions": ["x"]}
+LEGACY = {**NO_REASONING, "key_decisions": "x"}
 del LEGACY["decisions"]
 
 
@@ -62,12 +66,23 @@ def _corpus(home: Path) -> None:
     (tasks / "5.json").write_text("{ broken", encoding="utf-8")
 
 
-def test_key_set_reconstruction_is_faithful():
-    """The historical list-of-keys shape is reconstructed as {key: None}. That
-    is exact only while the validator is presence-only, and this is the guard
-    that fails loudly rather than letting the census drift into a wrong
-    answer."""
-    hc.assert_presence_only()  # raises SystemExit if the validator inspects values
+def test_validator_inspects_values_inverted_guard_holds():
+    """The INVERTED guard (cold round 12; replaces the old presence-only
+    abort): the validator now inspects values BY DESIGN — a {key: None}
+    key-list reconstruction FIRES where a fully-valued handoff is silent —
+    and the guard fails loudly only if the validator drifts BACK to
+    presence-only, at which point the fires-rate distinction the census
+    documents would silently vanish. Citing cycle 11: the produced type
+    gate exists to refuse the false-EXPIRED class at write time."""
+    hc.assert_values_are_inspected()  # raises SystemExit if the validator drifts back
+    keys = {f: None for f in (
+        "produced", "decisions", "reasoning_chain",
+        "uncertainty", "integration", "open_questions",
+    )}
+    valued = {k: "x" for k in keys}
+    from shared.handoff_schema import validate_handoff_schema
+    assert validate_handoff_schema(keys) is not None
+    assert validate_handoff_schema(valued) is None
 
 
 def test_journal_reader_passes_an_inline_handoff_through_unchanged(tmp_path):

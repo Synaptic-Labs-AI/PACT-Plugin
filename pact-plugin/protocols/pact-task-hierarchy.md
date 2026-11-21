@@ -66,8 +66,8 @@ Agent tasks include metadata for context:
   "domain": "backend",
   "feature": "user-auth",
   "handoff": {
-    "produced": ["src/auth.ts"],
-    "uncertainty": ["token refresh edge cases"]
+    "produced": "src/auth.ts",
+    "uncertainty": "token refresh edge cases"
   }
 }
 ```
