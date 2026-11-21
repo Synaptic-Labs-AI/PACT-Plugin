@@ -1477,6 +1477,40 @@ def _is_non_lead_frame(input_data: dict) -> bool:
     )
 
 
+def _owner_resolves_to_lead(owner: str, team_name: str) -> bool:
+    """True iff this owner resolves through team config to a LEAD agentType
+    (``shared.pact_context.LEAD_AGENT_TYPES`` is the SSOT), so a lead-owned
+    task never qualifies as a watch target at either arm-supply shape.
+
+    Why this exists beside ``is_pact_specialist_owner``: the registry check
+    that predicate composes admits ANY ``agents/pact-*.md`` definition —
+    including the orchestrator a lead member resolves to — so it returns
+    True for the bare lead name, and a lead-owned pending parent passed
+    qualification at both shapes (cold round 2, measured live). The
+    specialist leg answers "is this owner a pact-* agent"; this one answers
+    "is this owner THE lead", and a watch target needs the first WITHOUT the
+    second. Fail-closed to False on every unresolvable path (empty inputs,
+    missing/malformed config, member-not-found, non-string agentType, any
+    unexpected exception): an owner that does not positively resolve to a
+    lead agentType is not a lead, and the specialist leg beside this one
+    fail-closes the same way."""
+    if not isinstance(owner, str) or not owner:
+        return False
+    if not isinstance(team_name, str) or not team_name:
+        return False
+    try:
+        for member in pact_context.iter_team_members(team_name):
+            if member.get("name") == owner:
+                agent_type = member.get("agentType")
+                return (
+                    isinstance(agent_type, str)
+                    and agent_type in pact_context.LEAD_AGENT_TYPES
+                )
+        return False
+    except Exception:
+        return False
+
+
 def evaluate_lifecycle(
     input_data: dict, *, decision: dict | None = None
 ) -> list[tuple[str, str]]:
@@ -1621,15 +1655,18 @@ def evaluate_lifecycle(
         #     keeps a later teammate claim (owner + in_progress) from
         #     re-advising mid-flight.
         #   Task B (work task) wired — an owner-bearing write on a
-        #     non-completed non-teachback task with a specialist owner. The
-        #     SPLIT wiring real arcs use lands `owner` in one TaskUpdate
-        #     while the blockers landed at creation or a separate update —
+        #     live (pending/in_progress) non-teachback task with a
+        #     specialist owner that is not the lead. The SPLIT wiring real
+        #     arcs use lands `owner` in one TaskUpdate while the blockers
+        #     landed at creation or a separate update —
         #     shared/dispatch_helpers.py measures the owner+addBlockedBy
         #     composite as never occurring on a real arc, so keying the
         #     composite left this supply dark at the exact lead stage it
         #     names. The owner-bearing write is what actually witnesses the
-        #     dispatch; completed-only keeps a late owner fix on a closed
-        #     task from arming a watch that cannot produce a handoff.
+        #     dispatch; the live-status whitelist keeps a late owner fix on
+        #     a closed task from arming a watch that cannot produce a
+        #     handoff, and keeps an absent/unreadable record from arming at
+        #     all.
         # A duplicate arm is safe by construction (the duplicate watcher
         # fast-exits 0 when the deliverable is already present), which is
         # why this needs no dedup marker.
@@ -1642,7 +1679,9 @@ def evaluate_lifecycle(
                 and isinstance(wiring_owner, str)
                 and wiring_owner.strip()
             ):
-                wired = read_task_json(wiring_task_id, team_name)
+                wired = read_task_json(
+                    wiring_task_id, team_name, base_fallback=False
+                )
                 wired_subject = wired.get("subject") or ""
                 if _is_teachback_subject(wired_subject):
                     if wired.get("status") == "pending":
@@ -1654,9 +1693,20 @@ def evaluate_lifecycle(
                         ))
                 elif (
                     is_owner_bearing_write(tool_input)
-                    and wired.get("status") != "completed"
+                    and wired.get("status") in ("pending", "in_progress")
                     and is_pact_specialist_owner(wiring_owner, team_name)
+                    and not _owner_resolves_to_lead(wiring_owner, team_name)
                 ):
+                    # The live-status whitelist is load-bearing twice over:
+                    # it rejects a COMPLETED task (a late owner fix on a
+                    # closed one cannot produce a handoff) AND an empty
+                    # record — the named-store read with base_fallback=False
+                    # returns {} for a task that is not this store's, and
+                    # {}'s status (None) would pass a not-completed test.
+                    # The lead-rejection conjunct is load-bearing too: the
+                    # registry glob admits the orchestrator, so the
+                    # specialist leg ALONE returns True for the bare lead
+                    # name and a lead-owned pending task would qualify.
                     advisories.append(_wait_arm_advisory(
                         "work task wired",
                         team_name,
@@ -1918,20 +1968,29 @@ def evaluate_lifecycle(
         # parent ever gains an unrelated handoff. An entry qualifies when
         # its on-disk record is still pending and carries a specialist
         # owner; one advisory per qualifying entry (duplicate arms are
-        # safe). LEAD-SHAPED: suppressed on non-lead frames.
+        # safe). An entry qualifies when its on-disk record is still
+        # pending and carries a specialist owner that is NOT the lead
+        # (the registry glob admits the orchestrator, so the specialist
+        # leg alone would admit lead-owned parents). LEAD-SHAPED:
+        # suppressed on non-lead frames.
         if is_teachback and team_name and not _is_non_lead_frame(input_data):
             blocks = task.get("blocks")
             if isinstance(blocks, list):
                 for work_id in blocks:
                     if not isinstance(work_id, str) or not work_id.strip():
                         continue
-                    blocked = read_task_json(work_id, team_name)
+                    blocked = read_task_json(
+                        work_id, team_name, base_fallback=False
+                    )
                     blocked_owner = blocked.get("owner")
                     if (
                         blocked.get("status") == "pending"
                         and isinstance(blocked_owner, str)
                         and blocked_owner.strip()
                         and is_pact_specialist_owner(blocked_owner, team_name)
+                        and not _owner_resolves_to_lead(
+                            blocked_owner, team_name
+                        )
                     ):
                         advisories.append(_wait_arm_advisory(
                             "teachback accepted", team_name, work_id, "handoff"

@@ -174,6 +174,27 @@ _TIER3_TEAMMATE_REASON = (
     "every task the wait covers, naming this watcher, and end your "
     "turn with no further tool calls — the lead's wake resumes you."
 )
+# The separate-process teammate's own text. Their completion notice DOES
+# start their next turn (shared.background_work.teammate_is_separate_process
+# is the one tmux-reader), so the in-process text's "will NOT wake you"
+# would be false for them — they get the lead-accurate wake statement with
+# the same arm command, no intentional_wait step.
+_TIER3_TEAMMATE_SEPARATE_PROCESS_REASON = (
+    "FILLER-LOCK: this exact call has been denied {count} times this "
+    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
+    "re-filling — end this wait structurally instead. As a "
+    "separate-process teammate, this watcher's completion notice WILL "
+    "start your next turn. FIRST arm the deliverable watcher with ONE "
+    "`Bash` call (`run_in_background: true`), substituting your team "
+    "name and the task id you are waiting on:\n"
+    'python3 "{watcher}" --team <team-name> --task <task-id> '
+    "--predicate handoff --deadline 900\n"
+    "(use --predicate teachback_submit when the awaited deliverable is "
+    "a teachback submission). THEN end your turn with no further tool "
+    "calls — the watcher exits 0 when the deliverable lands, 3 when the "
+    "deadline passes without it, 4 when it cannot watch at all — and "
+    "its completion notice starts your next turn."
+)
 
 
 def _pair_key(normalized_command: str) -> str:
@@ -341,15 +362,19 @@ def _escalate(input_data, normalized):
             return _DENY_REASON
         tier, new_count, new_total = result
         if tier >= _MAX_TIER:
-            # Role-branched text (B3): an in-process teammate's background
-            # completion does NOT wake them, so the lead text's completion
-            # claim is false there. Teammates get the same arm command with
-            # the teammate-side guidance; leads keep the lead text.
-            template = (
-                _TIER3_TEAMMATE_REASON
-                if is_teammate_frame(input_data)
-                else _TIER3_REASON
-            )
+            # Three-way role branch: an in-process teammate's background
+            # completion does NOT wake them (teammate guidance); a
+            # separate-process teammate's completion notice DOES start
+            # their next turn (lead-accurate wake statement); a lead keeps
+            # the lead text. All three carry the same arm command.
+            if is_teammate_frame(input_data):
+                template = (
+                    _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
+                    if _separate_process_teammate_frame(input_data)
+                    else _TIER3_TEAMMATE_REASON
+                )
+            else:
+                template = _TIER3_REASON
             return template.format(
                 watcher=_WATCHER_PATH, count=new_count, total=new_total
             )
@@ -489,6 +514,31 @@ def launch_advisory_applies(input_data) -> bool:
         team_name, _name = frame_team_and_name(input_data)
         member = teammate_launch_name(input_data, team_name) if team_name else ""
         return bool(member) and not teammate_is_separate_process(team_name, member)
+    except Exception:
+        return False
+
+
+def _separate_process_teammate_frame(input_data) -> bool:
+    """True iff this teammate frame's member is a separate-process (tmux)
+    teammate — their own background completion starts their next turn
+    (shared.background_work.teammate_is_separate_process, FALSE on every
+    doubt). False for leads (callers gate on is_teammate_frame first) and
+    in-process teammates; an unresolvable team or member reads in-process,
+    which is the safe answer for the tier-3 text.
+
+    The same lazy-import posture as launch_advisory_applies: `shared` is
+    imported only here, on the tier-3 deny path — never on the allow fast
+    path every non-filler Bash call takes."""
+    try:
+        from shared.background_work import (
+            frame_team_and_name,
+            teammate_is_separate_process,
+            teammate_launch_name,
+        )
+
+        team_name, _name = frame_team_and_name(input_data)
+        member = teammate_launch_name(input_data, team_name) if team_name else ""
+        return bool(member) and teammate_is_separate_process(team_name, member)
     except Exception:
         return False
 

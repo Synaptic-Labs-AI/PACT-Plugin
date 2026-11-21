@@ -5181,6 +5181,95 @@ def test_arm_supply_on_teachback_acceptance(tmp_path, monkeypatch, pact_context)
     assert "--team test-team" in arms[0]
 
 
+def test_acceptance_arm_rejects_lead_owned_parent_real_predicate(
+    tmp_path, monkeypatch, pact_context
+):
+    """THE MASK-KILLER, driven with the REAL is_pact_specialist_owner — no
+    stub. Every earlier arm pin stubbed that predicate, which masked the
+    defect the cold round measured live: the registry glob admits
+    pact-orchestrator.md, so is_pact_specialist_owner returns True for the
+    bare lead name and a lead-owned pending parent passed qualification.
+    With both members resolved through a real team config against the real
+    agents registry, the pair-with-parent shape must arm the specialist
+    work task ONLY: pre-fix this arms BOTH tasks (red), post-fix exactly
+    one (green)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(
+        team_name="test-team",
+        session_id="test-session",
+        plugin_root=str(Path(__file__).resolve().parent.parent),
+    )
+    teams_dir = tmp_path / ".claude" / "teams" / "test-team"
+    teams_dir.mkdir(parents=True, exist_ok=True)
+    (teams_dir / "config.json").write_text(json.dumps({
+        "members": [
+            {"name": "team-lead", "agentType": "pact-orchestrator"},
+            {"name": "backend-coder", "agentType": "pact-backend-coder"},
+        ],
+    }), encoding="utf-8")
+    _seed_task_a(
+        tmp_path, "test-team", "30",
+        subject="Review: structural wait mechanism",
+        status="pending", owner="team-lead",
+    )
+    _seed_task_a(
+        tmp_path, "test-team", "36",
+        subject="review structural wait mechanism (PR #1730)",
+        status="pending", owner="backend-coder",
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "A", "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": "A",
+                "subject": "preparer: TEACHBACK for foo",
+                "owner": "pact-preparer",
+                "blocks": ["30", "36"],
+                "metadata": {
+                    "teachback_submit": {"understanding": "u"}
+                },
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, (
+        f"expected exactly one arm (the specialist work task), got: {arms}"
+    )
+    assert "--task 36" in arms[0]
+    assert "--task 30" not in arms[0]
+
+
+def test_no_arm_supply_from_a_bare_base_task_file(
+    tmp_path, monkeypatch, pact_context
+):
+    """The arm-supply task reads are NAMED-STORE reads (base_fallback=False,
+    matching the sibling completion-time read): a task file planted at the
+    BARE base — tasks/B.json with no team dir — is not this store's task
+    and must never qualify a watch target."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    bare_base = tmp_path / ".claude" / "tasks"
+    bare_base.mkdir(parents=True, exist_ok=True)
+    (bare_base / "B.json").write_text(json.dumps({
+        "id": "B",
+        "subject": "implement hook core",
+        "status": "pending",
+        "owner": "backend-coder",
+    }), encoding="utf-8")
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "B", "owner": "backend-coder"},
+        "tool_response": {},
+    }
+    monkeypatch.setattr(tlg, "is_pact_specialist_owner", lambda *_a, **_k: True)
+    advisories = tlg.evaluate_lifecycle(payload)
+    assert not any(rule == "wait_arm_supply" for rule, _ in advisories), (
+        f"expected no arm advisory off a bare-base record, got: {advisories}"
+    )
+
+
 def test_acceptance_arm_skips_parent_first_in_blocks(
     tmp_path, monkeypatch, pact_context
 ):

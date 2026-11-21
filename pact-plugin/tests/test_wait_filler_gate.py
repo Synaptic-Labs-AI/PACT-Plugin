@@ -908,6 +908,56 @@ def test_tier3_teammate_outlet_pinned_verbatim():
     )
 
 
+def test_tier3_outlet_three_way_role_branch(tmp_path, monkeypatch, capsys):
+    """The outlet is THREE-way, resolved through the REAL member record: a
+    separate-process teammate (backendType tmux, resolved via the frame's
+    team_name/teammate_name) gets the arm command with the ACCURATE wake
+    statement — their completion notice starts their next turn, so the
+    in-process text's "will NOT wake you" would be false for them; an
+    in-process teammate keeps the intentional_wait guidance; a lead keeps
+    the lead text. Same gradient, same deny verdict, all three roles."""
+    config = tmp_path / "teams" / "tm-team"
+    config.mkdir(parents=True)
+    (config / "config.json").write_text(json.dumps({
+        "members": [{
+            "name": "backend-coder",
+            "agentType": "pact-backend-coder",
+            "backendType": "tmux",
+        }],
+    }), encoding="utf-8")
+    # The measured separate-process frame resolves its member through the
+    # session REGISTRY (no team_name/teammate_name fields, no agent_id) —
+    # seed that route, not a fabricated field shape.
+    registry_dir = tmp_path / "pact-sessions"
+    registry_dir.mkdir(parents=True)
+    (registry_dir / ".teammate-registry.jsonl").write_text(
+        json.dumps({"session_id": "s-sp-outlet",
+                    "value": "backend-coder@tm-team"}) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+
+    def sp_frame(session_id):
+        return json.dumps({
+            "tool_name": "Bash",
+            "tool_input": {"command": "true"},
+            "session_id": session_id,
+            "agent_type": "pact-backend-coder",
+        })
+
+    results = [
+        _invoke(sp_frame("s-sp-outlet"), capsys) for _n in range(3)
+    ]
+    assert [c for c, _p, _e in results] == [2, 2, 2]
+    sp_reason = _deny_reason(results[2][1])
+    assert "PACT-WAIT-OUTLET" in sp_reason
+    assert "pact_wait.py" in sp_reason
+    assert "--team <team-name>" in sp_reason
+    assert "starts your next turn" in sp_reason
+    assert "will NOT wake you" not in sp_reason
+    assert "metadata.intentional_wait" not in sp_reason
+
+
 def test_tier3_outlet_branches_on_role(tmp_path, monkeypatch, capsys):
     """The tier-3 text is role-branched: a TEAMMATE frame (agent_type
     naming a non-lead actor) gets the teammate guidance — intentional_wait

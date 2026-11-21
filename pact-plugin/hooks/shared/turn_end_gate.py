@@ -426,47 +426,6 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
         if not (watcher_is_wake and is_wait_watcher_command(e.get("command")))
         and not _covered(waiting, by_job.get(e["id"]))
     ]
-    if input_data.get("hook_event_name") == "SubagentStop":
-        # The lead process's whole list: only this teammate's recorded jobs count.
-        #
-        # `owner_role` EXCLUDES A NON-TEAMMATE ROW FROM THIS NAME MATCH, and the
-        # reason is semantic rather than defensive: a subagent's row is NOT a
-        # member's row, so matching it by MEMBER NAME is wrong whatever any
-        # member happens to be called. This and `extend_records_for_claim` are
-        # the two reads that compare a row's name with a member's, and both
-        # exclude the row. The store's other name reads, in missed_wake_scan,
-        # are safe for a different reason: they see only rows that
-        # `outstanding_unflagged` passes, and its expiry gate refuses a row
-        # with no task ids unless `anchor_completed` is set, which the recorder
-        # never sets on a subagent's row.
-        #
-        # The test is truthiness, not equality with one role, so a role added
-        # later is excluded here by default. That is the safe direction: a new
-        # owner role must opt IN to being treated as a member.
-        by_job = {
-            r["harness_task_id"]: r for r in records
-            if r.get("agent_name") == name
-            and not r.get("owner_role")
-            and r.get("harness_task_id")
-        }
-        # JOB-ID REUSE HERE FAILS THE OTHER WAY. If a row of THIS teammate still
-        # inside the TTL carries an id that another agent's running job in this
-        # process's list reuses, that job enters this teammate's candidates, and
-        # unless a wait anchored no earlier than that row's launch covers it, the
-        # teammate is refused its turn end over work it did not launch — an
-        # OVER-block.
-        running = [e for e in running if e["id"] in by_job]
-    else:
-        # JOB-ID REUSE HERE ALSO OVER-BLOCKS, BY A DIFFERENT MECHANISM. This
-        # process lists only its own jobs, so no other agent's job can enter its
-        # candidates. Instead, a row of ANY owner still inside the TTL whose id
-        # matches one of this process's running jobs makes that job coverable
-        # only by a wait anchored no earlier than the row's launch, where with no
-        # row any valid wait covers it. A reused id can only raise that bar,
-        # never lower it.
-        by_job = {r["harness_task_id"]: r for r in records if r.get("harness_task_id")}
-    waiting = _tasks_with_valid_wait(team, name)
-    return [e for e in running if not _covered(waiting, by_job.get(e["id"]))]
 
 
 def _tasks_with_valid_wait(team: str, name: str) -> list:
