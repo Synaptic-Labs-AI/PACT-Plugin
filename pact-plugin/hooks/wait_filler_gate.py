@@ -195,6 +195,17 @@ _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON = (
     "deadline passes without it, 4 when it cannot watch at all — and "
     "its completion notice starts your next turn."
 )
+# The no-team text: a frame with NO resolvable PACT team has no deliverable
+# store for a <team-name> placeholder to name, so it gets the loop-breaking
+# instruction WITHOUT the arm command.
+_TIER3_NO_TEAM_REASON = (
+    "FILLER-LOCK: this exact call has been denied {count} times this "
+    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
+    "re-filling — end this wait structurally instead. No PACT team is "
+    "resolvable for this frame, so there is no deliverable store to "
+    "watch and no arm command to run: end your turn with no further "
+    "tool calls — teammate messages arrive as their own turns."
+)
 
 
 def _pair_key(normalized_command: str) -> str:
@@ -362,19 +373,24 @@ def _escalate(input_data, normalized):
             return _DENY_REASON
         tier, new_count, new_total = result
         if tier >= _MAX_TIER:
-            # Three-way role branch: an in-process teammate's background
-            # completion does NOT wake them (teammate guidance); a
-            # separate-process teammate's completion notice DOES start
-            # their next turn (lead-accurate wake statement); a lead keeps
-            # the lead text. All three carry the same arm command.
-            if is_teammate_frame(input_data):
-                template = (
-                    _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
-                    if _separate_process_teammate_frame(input_data)
-                    else _TIER3_TEAMMATE_REASON
-                )
-            else:
+            # Role-branched text, resolved through ONE identity pass (the
+            # sibling launch advisory's resolution): a frame with no PACT
+            # team gets the no-command text (nothing to watch); a resolved
+            # NON-member non-lead frame — an Agent-tool subagent — gets the
+            # lead text (its completion IS its report; teammate_launch_name
+            # refuses its subagent-shaped id); a separate-process teammate
+            # gets the lead-accurate wake statement; an in-process teammate
+            # gets the teammate guidance; a lead keeps the lead text. All
+            # team-bearing texts carry the same arm command.
+            team, member, separate = _tier3_frame_identity(input_data)
+            if not team:
+                template = _TIER3_NO_TEAM_REASON
+            elif not member or not is_teammate_frame(input_data):
                 template = _TIER3_REASON
+            elif separate:
+                template = _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
+            else:
+                template = _TIER3_TEAMMATE_REASON
             return template.format(
                 watcher=_WATCHER_PATH, count=new_count, total=new_total
             )
@@ -518,13 +534,18 @@ def launch_advisory_applies(input_data) -> bool:
         return False
 
 
-def _separate_process_teammate_frame(input_data) -> bool:
-    """True iff this teammate frame's member is a separate-process (tmux)
-    teammate — their own background completion starts their next turn
-    (shared.background_work.teammate_is_separate_process, FALSE on every
-    doubt). False for leads (callers gate on is_teammate_frame first) and
-    in-process teammates; an unresolvable team or member reads in-process,
-    which is the safe answer for the tier-3 text.
+def _tier3_frame_identity(input_data):
+    """(team, member, separate_process) for the tier-3 text choice — the
+    sibling launch advisory's identity path, resolved ONCE:
+
+    - ``team``: ``frame_team_and_name``, "" when no PACT team is
+      resolvable for this frame (the no-command text's trigger).
+    - ``member``: ``teammate_launch_name``, "" for a lead (callers pre-gate
+      on ``is_teammate_frame``), a plain frame, or an Agent-tool subagent —
+      whose subagent-shaped ``agent_id`` is refused there, the SAME rule
+      that keeps the launch advisory off subagent frames.
+    - ``separate_process``: ``teammate_is_separate_process(team, member)``,
+      FALSE on every doubt.
 
     The same lazy-import posture as launch_advisory_applies: `shared` is
     imported only here, on the tier-3 deny path — never on the allow fast
@@ -537,10 +558,14 @@ def _separate_process_teammate_frame(input_data) -> bool:
         )
 
         team_name, _name = frame_team_and_name(input_data)
-        member = teammate_launch_name(input_data, team_name) if team_name else ""
-        return bool(member) and teammate_is_separate_process(team_name, member)
+        if not team_name:
+            return "", "", False
+        member = teammate_launch_name(input_data, team_name)
+        if not member:
+            return team_name, "", False
+        return team_name, member, teammate_is_separate_process(team_name, member)
     except Exception:
-        return False
+        return "", "", False
 
 
 def _normalize_filler(command: str) -> "str | None":

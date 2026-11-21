@@ -1692,8 +1692,7 @@ def evaluate_lifecycle(
                             "teachback_submit",
                         ))
                 elif (
-                    is_owner_bearing_write(tool_input)
-                    and wired.get("status") in ("pending", "in_progress")
+                    wired.get("status") in ("pending", "in_progress")
                     and is_pact_specialist_owner(wiring_owner, team_name)
                     and not _owner_resolves_to_lead(wiring_owner, team_name)
                 ):
@@ -1967,12 +1966,10 @@ def evaluate_lifecycle(
         # deadline toward a misleading EXPIRED, or false-fires if the
         # parent ever gains an unrelated handoff. An entry qualifies when
         # its on-disk record is still pending and carries a specialist
-        # owner; one advisory per qualifying entry (duplicate arms are
-        # safe). An entry qualifies when its on-disk record is still
-        # pending and carries a specialist owner that is NOT the lead
-        # (the registry glob admits the orchestrator, so the specialist
-        # leg alone would admit lead-owned parents). LEAD-SHAPED:
-        # suppressed on non-lead frames.
+        # owner that is NOT the lead (the registry glob admits the
+        # orchestrator, so the specialist leg alone would admit lead-owned
+        # parents); one advisory per qualifying entry (duplicate arms are
+        # safe). LEAD-SHAPED: suppressed on non-lead frames.
         if is_teachback and team_name and not _is_non_lead_frame(input_data):
             blocks = task.get("blocks")
             if isinstance(blocks, list):

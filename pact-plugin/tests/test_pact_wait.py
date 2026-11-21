@@ -496,17 +496,49 @@ def test_empty_task_id_is_terminal_not_usage_or_crash(tmp_path):
 
 def test_traversal_shaped_task_id_stays_contained(tmp_path):
     """Path machinery inside a task id is stripped BEFORE the join, so the
-    lookup stays inside the containment-validated team dir: a traversal
-    shape resolves to a file that does not exist there (MISSING), never a
-    read outside the store."""
-    outcome = wait_target.evaluate_target(
-        "team-a", "../../../etc/passwd", "handoff", tasks_base_dir=str(tmp_path)
+    lookup stays inside the containment-validated team dir. STRENGTHENED
+    (cold round 3): with team-a/7.json seeded, "../7" sanitizes to "7" and
+    the contained join FINDS it (PRESENT) — an escaped join would read the
+    bare canary beside the team dir instead, whose payload is built to FAIL
+    the predicate, so a sanitizer-removal mutation flips this arm red. A
+    fully traversal-shaped id with its own reachable satisfying canary
+    reads MISSING with the sanitizer intact."""
+    team_dir = tmp_path / "team-a"
+    team_dir.mkdir()
+    (team_dir / "7.json").write_text(
+        json.dumps({"metadata": {"handoff": {"produced": "contained",
+                                             "decisions": "d"}}}),
+        encoding="utf-8",
     )
-    assert outcome == wait_target.EVAL_TARGET_MISSING
-    # "../7" sanitizes to "7" — still joined INSIDE the team dir, never
-    # resolved against the parent.
+    # The escaped join's target: tasks/7.json, OUTSIDE the team dir. Its
+    # handoff is deliberately predicate-FAILING (list-typed produced), so a
+    # mutation that drops the sanitizer reads THIS file and flips the arm
+    # to NOT_PRESENT.
+    (tmp_path / "7.json").write_text(
+        json.dumps({"metadata": {"handoff": ["escaped-canary"]}}),
+        encoding="utf-8",
+    )
     outcome = wait_target.evaluate_target(
         "team-a", "../7", "handoff", tasks_base_dir=str(tmp_path)
+    )
+    assert outcome == wait_target.EVAL_PRESENT
+    # Fully traversal-shaped id: "../outside" sanitizes to "outside" —
+    # joined INSIDE the team dir, where nothing exists (MISSING). The
+    # mutation's target — tasks/outside.json, seeded predicate-SATISFYING —
+    # sits beside the team dir and must never be read.
+    (tmp_path / "outside.json").write_text(
+        json.dumps({"metadata": {"handoff": {"produced": "escaped-canary",
+                                             "decisions": "d"}}}),
+        encoding="utf-8",
+    )
+    outcome = wait_target.evaluate_target(
+        "team-a", "../outside", "handoff", tasks_base_dir=str(tmp_path)
+    )
+    assert outcome == wait_target.EVAL_TARGET_MISSING
+    # The deep-hostile shape stays MISSING: it sanitizes to etcpasswd —
+    # still inside the team dir, still absent.
+    outcome = wait_target.evaluate_target(
+        "team-a", "../../../etc/passwd", "handoff", tasks_base_dir=str(tmp_path)
     )
     assert outcome == wait_target.EVAL_TARGET_MISSING
 

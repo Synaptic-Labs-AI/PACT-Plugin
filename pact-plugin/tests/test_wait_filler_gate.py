@@ -578,6 +578,30 @@ def test_gradient_stderr_mirrors_the_deny_reason(tmp_path, monkeypatch, capsys):
     assert err.strip() == _deny_reason(payload)
 
 
+def _seed_team_registry(tmp_path, session_id, value):
+    """Seed the session-registry route (a teammate's `name@team` entry) so
+    frame_team_and_name resolves this session's team in the hermetic
+    config root — the measured separate-process shape."""
+    registry_dir = tmp_path / "pact-sessions"
+    registry_dir.mkdir(parents=True, exist_ok=True)
+    with (registry_dir / ".teammate-registry.jsonl").open("a") as registry:
+        registry.write(json.dumps({"session_id": session_id, "value": value}) + "\n")
+
+
+def _seed_team_config(tmp_path, team="tm-team", tmux_member=None):
+    """Seed a team config with one member; `tmux_member` names a member
+    that runs backendType tmux (the separate-process shape)."""
+    config_dir = tmp_path / "teams" / team
+    config_dir.mkdir(parents=True, exist_ok=True)
+    members = [{"name": "backend-coder", "agentType": "pact-backend-coder"}]
+    if tmux_member:
+        members.append({"name": tmux_member, "agentType": "pact-backend-coder",
+                        "backendType": "tmux"})
+    (config_dir / "config.json").write_text(
+        json.dumps({"members": members}), encoding="utf-8"
+    )
+
+
 def test_tier3_outlet_denies_instant_form_every_time(
     tmp_path, monkeypatch, capsys
 ):
@@ -586,6 +610,8 @@ def test_tier3_outlet_denies_instant_form_every_time(
     carries the PACT-WAIT-OUTLET arm command (watcher path, --team/--task
     placeholders, the background-launch instruction). Attempt counts keep
     climbing through the denials so the gradient never regresses."""
+    _seed_team_registry(tmp_path, "s-grad", "backend-coder@tm-team")
+    _seed_team_config(tmp_path)
     results = _drive(["true"] * 5, tmp_path, monkeypatch, capsys)
     codes = [code for code, _p, _e in results]
     assert codes == [2, 2, 2, 2, 2]
@@ -908,6 +934,50 @@ def test_tier3_teammate_outlet_pinned_verbatim():
     )
 
 
+def test_tier3_no_team_frame_gets_no_command(tmp_path, monkeypatch, capsys):
+    """A frame with NO resolvable PACT team gets the loop-breaking
+    instruction WITHOUT the arm command: there is no deliverable store for
+    a <team-name> placeholder to name, so handing it a ready-to-run
+    command would point at a store that does not exist for it."""
+    results = _drive(
+        ["true"] * 3, tmp_path, monkeypatch, capsys,
+        session_id="s-noteam-outlet", agent_type="pact-backend-coder",
+    )
+    assert [c for c, _p, _e in results] == [2, 2, 2]
+    reason = _deny_reason(results[2][1])
+    assert "FILLER-LOCK" in reason
+    assert "PACT-WAIT-OUTLET" in reason
+    assert "pact_wait.py" not in reason
+    assert "--team <team-name>" not in reason
+    assert "No PACT team is resolvable" in reason
+
+
+def test_tier3_agent_tool_subagent_gets_neither_teammate_text(
+    tmp_path, monkeypatch, capsys
+):
+    """An Agent-tool subagent is neither teammate: its subagent-shaped
+    agent_id refuses member resolution — the sibling launch advisory's own
+    rule, via the same teammate_launch_name — so it falls to the lead text
+    (its completion IS its report) and never the teammate guidance."""
+    _seed_team_registry(tmp_path, "s-sub-outlet", "backend-coder@tm-team")
+    _seed_team_config(tmp_path)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    frame = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "true"},
+        "session_id": "s-sub-outlet",
+        "agent_type": "general-purpose",
+        "agent_id": "ad2b1261fdd77c958",
+    })
+    results = [_invoke(frame, capsys) for _ in range(3)]
+    assert [c for c, _p, _e in results] == [2, 2, 2]
+    reason = _deny_reason(results[2][1])
+    assert "re-invokes you" in reason
+    assert "will NOT wake you" not in reason
+    assert "metadata.intentional_wait" not in reason
+    assert "starts your next turn" not in reason
+
+
 def test_tier3_outlet_three_way_role_branch(tmp_path, monkeypatch, capsys):
     """The outlet is THREE-way, resolved through the REAL member record: a
     separate-process teammate (backendType tmux, resolved via the frame's
@@ -964,7 +1034,11 @@ def test_tier3_outlet_branches_on_role(tmp_path, monkeypatch, capsys):
     naming the watcher, the lead's messages as the wake — alongside the
     SAME arm command and NEVER the lead-only completion-wakes claim; a
     lead frame gets the lead text. Same gradient, same deny verdict, both
-    roles."""
+    roles. Both arms resolve a team through the seeded registry so the
+    command is on for both (the no-team case is pinned separately)."""
+    _seed_team_registry(tmp_path, "s-mate-outlet", "backend-coder@tm-team")
+    _seed_team_registry(tmp_path, "s-lead-outlet", "backend-coder@tm-team")
+    _seed_team_config(tmp_path)
     teammate = _drive(
         ["true"] * 3, tmp_path, monkeypatch, capsys,
         session_id="s-mate-outlet", agent_type="pact-backend-coder",

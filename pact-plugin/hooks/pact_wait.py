@@ -147,6 +147,13 @@ def wait_for_deliverable(
                 f"for task {task_id} (team {team_name})"
             )
             return EXIT_FIRED
+        # MISSING stays IMMEDIATE while corrupt gets the two-poll window —
+        # a deliberate asymmetry. A mid-rewrite absence is bounded by the
+        # platform's millisecond rewrites, and a MISSING that persists is a
+        # broken precondition (wrong task id, wrong team): fail fast to
+        # TERMINAL rather than burn the whole deadline toward an EXPIRED
+        # that would read as "the deliverable never came" when the truth is
+        # "the watch was aimed at nothing".
         if outcome in (
             wait_target.EVAL_TARGET_MISSING,
             wait_target.EVAL_TARGET_UNREADABLE,
