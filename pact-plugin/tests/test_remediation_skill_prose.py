@@ -3166,6 +3166,52 @@ def test_a_parameter_every_caller_passes_one_plain_class_is_followed(tmp_path, m
     assert ({target for _node, target in graph.references(helper, "pkg.m")} == {("pkg.m", "Store.read")}) is followed
 
 
+
+_STORE_READ = "def read_row():\n    return 'row'\n\n"
+
+
+@pytest.mark.parametrize("source, reaches", [
+    ("def ask(directory):\n    return run(['git', '-C', directory])\n\n"
+     "def entry():\n    value = read_row()\n    return ask(value)\n", True),
+    ("def ask(directory):\n    command = ['git', '-C', directory]\n    return run(command)\n\n"
+     "def entry():\n    return ask(read_row())\n", True),
+    ("class Store:\n    def load(self):\n        self.seen = read_row()\n\n"
+     "    def ask(self):\n        return run(['git', '-C', self.seen])\n", True),
+    ("def ask(directory):\n    return run(['git', '-C', directory])\n\n"
+     "def entry():\n    value = read_row()\n    return ask(directory=value)\n", True),
+    ("def ask(directory):\n    return run(['git', '-C', directory])\n\n"
+     "def entry(root):\n    read_row()\n    return ask(root)\n", False),
+    ("class Store:\n    def load(self):\n        self.seen = 'constant'\n        read_row()\n\n"
+     "    def ask(self):\n        return run(['git', '-C', self.seen])\n", False),
+], ids=[
+    "through a caller's local", "through the callee's own local", "through a self attribute",
+    "through a keyword argument", "a read beside the question", "an attribute bound to a constant",
+])
+def test_a_git_argument_is_traced_to_every_value_that_reaches_it(tmp_path, monkeypatch, source, reaches):
+    """Rows for `_value_sources`: the calls whose result can reach an
+    argument of a git command are found through a local of the asking
+    function, a caller's argument by position or keyword and the caller's
+    local behind it, and a `self` attribute's assignments in the class; a
+    read that only sits beside the question, and an attribute bound to a
+    constant, are not."""
+    import ast
+    import sys
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "m.py").write_text("from subprocess import run\n\n" + _STORE_READ + source)
+    monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path, PLUGIN_ROOT / "hooks"))
+    graph = _DetectionGraph()
+    assert graph.load("pkg.m")
+    key = next(key for key in graph.defs if key[1].rpartition(".")[2] == "ask")
+    asking = graph.defs[key]
+    question = next(node for node in ast.walk(asking) if isinstance(node, ast.Call)
+                    and ast.unparse(node.func) == "run")
+    sources = {ast.unparse(call.func) for _owner, call in _value_sources(graph, "pkg.m", asking, question.args[0])}
+    assert ("read_row" in sources) is reaches, sources
+
+
 def _pass_entry_problems(trees: dict) -> tuple:
     """(entries, problems) for the pass-entry ban over `trees` ({file path:
     parsed module}). "The pass" is `detection_pass` or `git_results_pass`
@@ -4081,7 +4127,142 @@ def test_a_context_read_through_copy_context_is_listed_not_reported(tmp_path, mo
     assert (reported("honest"), reported("by_get"), reported("by_subscript")) == (["VAR.get()"], [], [])
 
 
+_GIT_RUNNERS = frozenset({"answered_once", "run_git"})
+_SUBPROCESS_RUNNERS = frozenset({"subprocess.run", "subprocess.check_output", "subprocess.Popen", "subprocess.call"})
+
+
+def _store_work_git_questions(graph) -> tuple:
+    """(questions, reached) for the memory CLI's command work: `reached` is
+    every def the census graph reaches from each PACTMemory method other than
+    `__init__` and each `cli` command handler (`cmd_*`), loading modules as it
+    goes; `questions` is each call there that runs git, as (module, def key,
+    call): a call of `answered_once`, `run_git` or a subprocess runner."""
+    import ast
+
+    from fixtures.identity_git import qualified_name
+
+    def calls(key):
+        node = graph.defs[key]
+        by_func = {id(call.func): call for call in ast.walk(node) if isinstance(call, ast.Call)}
+        for func, target in graph.references(node, key[0]):
+            if id(func) in by_func:
+                yield by_func[id(func)], target
+
+    def runs_git(call, module):
+        name = qualified_name(call.func, graph.aliases.get(module, {})) or ast.unparse(call.func)
+        return name.rpartition(".")[2] in _GIT_RUNNERS or name in _SUBPROCESS_RUNNERS
+
+    roots = [key for key in list(graph.defs) if key[0] == "memory_api"
+             and key[1].startswith("PACTMemory.") and key[1] != "PACTMemory.__init__"]
+    roots += [key for key in list(graph.defs) if key[0] == "cli" and key[1].startswith("cmd_")]
+    reached, pending = set(), list(roots)
+    while pending:
+        key = pending.pop()
+        if key in reached or not graph.load(key[0]) or key not in graph.defs:
+            continue
+        reached.add(key)
+        pending += [target for _call, target in calls(key)]
+    questions = []
+    for key in sorted(reached):
+        for call in ast.walk(graph.defs[key]):
+            if isinstance(call, ast.Call) and runs_git(call, key[0]):
+                questions.append((key[0], key, call))
+    return questions, reached
+
+
+def _value_sources(graph, module: str, function, expression, depth: int = 0, seen=None) -> set:
+    """{(module, call)} for every call whose result can reach `expression`
+    in `function`: the calls inside it, and, followed to a depth of eight,
+    the calls behind each local it names (every binding, `_bindings`), each
+    `self` attribute it reads (every assignment of that attribute in the
+    class's methods) and each parameter (every argument a caller passes
+    there, by position or keyword, `parameter_class`'s callers index)."""
+    import ast
+
+    seen = set() if seen is None else seen
+    if depth > 8 or id(expression) in seen:
+        return set()
+    seen.add(id(expression))
+    found = set()
+    for sub in ast.walk(expression):
+        if isinstance(sub, ast.Call):
+            found.add((module, sub))
+        elif isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load) and function is not None:
+            for kind, bound in graph._bindings(function, name=sub.id):
+                if bound is not None and kind in ("value", "from", "unknown"):
+                    found |= _value_sources(graph, module, function, bound, depth + 1, seen)
+                elif kind == "param":
+                    for owner, caller, argument in _arguments_for(graph, function, sub.id):
+                        found |= _value_sources(graph, owner, caller, argument, depth + 1, seen)
+        elif (isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name) and sub.value.id == "self"
+              and isinstance(sub.ctx, ast.Load)):
+            owner = graph._owner_class(module, function) if function is not None else None
+            node = graph.classes.get(module, {}).get(owner) if owner else None
+            for method in (item for item in (node.body if node else [])
+                           if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))):
+                for kind, bound in graph._bindings(method, attribute=("self", sub.attr)):
+                    if bound is not None:
+                        found |= _value_sources(graph, module, method, bound, depth + 1, seen)
+    return found
+
+
+def _arguments_for(graph, function, name: str) -> list:
+    """(module, caller def, argument) for each argument a call of `function`
+    in the loaded modules passes to its parameter `name`, by position or
+    keyword (a method's position counts `self` when called on an
+    attribute)."""
+    import ast
+
+    graph.parameter_class(function, name)  # builds the callers index
+    key = graph._keys.get(id(function))
+    if key is None:
+        return []
+    positional = [argument.arg for argument in function.args.posonlyargs + function.args.args]
+    method = "." in key[1]
+    found = []
+    for owner, caller, call in graph._callers.get(key, ()):
+        value = next((keyword.value for keyword in call.keywords if keyword.arg == name), None)
+        if value is None and name in positional:
+            index = positional.index(name) - (1 if method and isinstance(call.func, ast.Attribute) else 0)
+            if 0 <= index < len(call.args) and not any(
+                    isinstance(argument, ast.Starred) for argument in call.args[:index + 1]):
+                value = call.args[index]
+        if value is not None:
+            found.append((owner, caller, value))
+    return found
+
+
+def _store_work_git_taint(not_a_route: dict, inputs: dict) -> tuple:
+    """(questions, problems): each git question the memory CLI's command
+    work asks (`_store_work_git_questions`), and each one an argument of
+    which a store-work value can reach: a call at a site (`route_inputs`'
+    `module.py:line`) of a condition whose NOT_A_ROUTE reason ends with
+    `_AFTER_DETECTION`."""
+    graph = _DetectionGraph()
+    for module in (*DETECTION_MODULES, *(module for module, _name in PASS_SETUPS)):
+        graph.load(module)
+    _pass_openings(graph)
+    questions, _reached = _store_work_git_questions(graph)
+    store_work = {condition for condition, reason in not_a_route.items() if reason.endswith(_AFTER_DETECTION)}
+    tainted_sites = {}
+    for condition, sites in inputs.items():
+        if condition in store_work:
+            for site in sites:
+                tainted_sites.setdefault(site, set()).add(condition)
+    problems = []
+    for module, key, call in questions:
+        arguments = [*call.args, *(keyword.value for keyword in call.keywords)]
+        for argument in arguments:
+            for owner, source in _value_sources(graph, module, graph.defs[key], argument):
+                hit = tainted_sites.get(f"{owner}.py:{source.lineno}")
+                if hit:
+                    problems.append((f"{module}.py:{call.lineno}", f"{owner}.py:{source.lineno}", sorted(hit)))
+    return questions, sorted(set((a, b, tuple(c)) for a, b, c in problems))
+
+
 # The second half of each NOT_A_ROUTE reason for a memory CLI command's store work.
+# Each half is pinned: `test_only_pact_memory_init_sets_the_identity_store_work_reads`
+# and `test_no_git_question_takes_a_store_work_value`.
 _AFTER_DETECTION = (
     "; it runs after PACTMemory.__init__ has detected the identity, which only __init__ sets, "
     "and no git question takes its value"
@@ -4658,9 +4839,10 @@ class TestEveryRouteEntryConditionIsARoute:
             'build nor an instance runs project code'
         ),
         # The store work a memory CLI command runs (`_DetectionGraph.instance_target`):
-        # each runs after PACTMemory.__init__ has detected the identity, and the two git
-        # questions that work asks (the read scope's common dir and worktree listing) take
-        # their argv from the identity's root and common dir.
+        # each runs after PACTMemory.__init__ has detected the identity
+        # (`test_only_pact_memory_init_sets_the_identity_store_work_reads`), and no git
+        # command that work runs takes a value one of these reads
+        # (`test_no_git_question_takes_a_store_work_value`).
         ('call', 'bucket_session_ids'): (
             "lists the session ids a legacy bucket's rows carry, as evidence for the read scope; it reads the store, not git or the identity" + _AFTER_DETECTION
         ),
@@ -5456,6 +5638,38 @@ class TestEveryRouteEntryConditionIsARoute:
             elsewhere += [f"{path.name}:{part.lineno} {ast.unparse(part)}" for part in assigned(module)
                           if part.attr in identity and id(part) not in skip]
         assert elsewhere == [], elsewhere
+
+    def test_no_git_question_takes_a_store_work_value(self):
+        """The pin under the second half of `_AFTER_DETECTION`: no argument
+        of a git command the memory CLI's command work runs (argv, cwd or
+        env, traced back through locals, `self` attributes and callers'
+        arguments, `_value_sources`) is reached by a value a store-work
+        condition reads, that is, by a call at a site of a condition whose
+        NOT_A_ROUTE reason carries `_AFTER_DETECTION`. The git questions
+        the store work asks take the identity's root and common dir, the
+        process directory, the environment or a command's own arguments."""
+        import ast
+
+        questions, problems = _store_work_git_taint(self.NOT_A_ROUTE, route_entry_conditions())
+        assert problems == [], problems
+        # Control: the git commands are found, and the read scope's question
+        # traces back to its call in `_read_project_scopes`.
+        graph = _DetectionGraph()
+        for module in (*DETECTION_MODULES, *(module for module, _name in PASS_SETUPS)):
+            graph.load(module)
+        _pass_openings(graph)
+        found, _reached = _store_work_git_questions(graph)
+        assert len(found) >= 10 and len(questions) == len(found), (len(found), len(questions))
+        common = [(module, key, call) for module, key, call in found
+                  if key == ("memory_api", "main_repo_common_dir") and ast.unparse(call.func) == "subprocess.run"]
+        assert len(common) == 1, common
+        module, key, call = common[0]
+        caller = next(node for (owner, name), node in graph.defs.items()
+                      if (owner, name) == ("memory_api", "PACTMemory._read_project_scopes"))
+        site = next(sub.lineno for sub in ast.walk(caller) if isinstance(sub, ast.Call)
+                    and ast.unparse(sub.func) == "main_repo_common_dir")
+        sources = {f"{owner}.py:{source.lineno}" for owner, source in _value_sources(graph, module, graph.defs[key], call.args[0])}
+        assert f"memory_api.py:{site}" in sources, sorted(sources)
 
     def test_the_census_reads_the_declaration_routes(self, route_driven_conditions):
         """Control: the known declaration inputs are found on both sides."""

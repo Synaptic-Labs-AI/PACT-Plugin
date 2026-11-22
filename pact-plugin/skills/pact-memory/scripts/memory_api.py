@@ -193,9 +193,20 @@ class _DetectedIdentity(NamedTuple):
     identity_common_dir: Optional[Path] = None
 
 
-# `_read_project_scopes` result cache: (store, mtime_ns, size, canonical,
-# legacy) -> scope tuple. Keying on the store's stat is what makes a rekey
-# performed by ANOTHER process observable instead of cached forever.
+# `_read_project_scopes` result cache, held for ONE DETECTION PASS: (store,
+# store stat, identity root, canonical, legacy) -> (scope tuple, scope state).
+# It is read and written only while a pass is open, and the outermost pass
+# empties it when it ends, so a read scope lives exactly as
+# long as the command that computed it, like every other answer the pass
+# holds, and the next command computes it afresh from the files it depends on
+# (the store, the worktree listing and links, session records, prune ledgers,
+# the repository's `description`, row paths). Keying on the store's stat is
+# what makes a rekey performed by ANOTHER process during the pass observable;
+# an in-process write clears it (`_invalidate_legacy_scope_cache`).
+# ponytail: one module dict, so two passes running at once in threads would
+# share it; no production caller runs passes concurrently (the memory CLI and
+# the backlog command each run one pass per process). A ContextVar like the
+# other pass memos if that changes.
 _LEGACY_SCOPE_CACHE: Dict[tuple, tuple] = {}
 
 # Exclusion notices already emitted, keyed by (store, candidate). A warning
@@ -1646,7 +1657,9 @@ def detection_pass():
     git question (`--git-common-dir`, `--git-dir`, the other `rev-parse`
     answers, worktree listings) is asked once and its answer is reused, so
     every check in the pass reads the same answers. An outermost pass starts
-    empty and ends with the block. Yields the pass's own memos by name
+    empty and ends with the block; the read-scope cache
+    (`_LEGACY_SCOPE_CACHE`), consulted only while a pass is open, is emptied
+    when the outermost pass ends. Yields the pass's own memos by name
     (`common_dirs`, `git_dirs`, `answers`, `listings`), so a caller can
     keep what the pass filled; a `PACTMemory` construction keeps its common
     dirs and listings for its first legacy read. The pass also opens
@@ -1680,6 +1693,7 @@ def detection_pass():
     finally:
         for var, token in reversed(tokens):
             var.reset(token)
+        _LEGACY_SCOPE_CACHE.clear()
 
 
 def _detection_answer(question: tuple, ask):
@@ -3654,12 +3668,17 @@ class PACTMemory:
         RAISES `StoreFaultError` with the remedy named: reporting the
         canonical scope alone for it would hide every legacy row it holds.
 
+        THE RESULT IS CACHED FOR THE OPEN DETECTION PASS ONLY
+        (`_LEGACY_SCOPE_CACHE`): one command reads one answer, and the next
+        command, or a read outside any pass, computes it afresh from the files
+        it depends on.
+
         THE CACHE KEY STATS BOTH THE DATABASE AND ITS `-wal` SIBLING. The
         store runs in WAL mode, and another process's commit can land only in
         the `-wal` file, leaving the main file's `(mtime_ns, size)` unchanged
-        — a long-lived session would then keep serving a stale legacy
-        membership after a rekey elsewhere, which is the silent-loss class
-        this change exists to remove. `-shm` is deliberately EXCLUDED: it is
+        — a pass would then keep serving a stale legacy membership after a
+        rekey elsewhere during it, which is the silent-loss class this change
+        exists to remove. `-shm` is deliberately EXCLUDED: it is
         shared-memory churn and would defeat the cache with spurious
         recomputes. When the `-wal` is absent, the key lets a read-only open
         create it before stamping, so the read itself cannot move the key (see
@@ -3699,7 +3718,8 @@ class PACTMemory:
         # while gating against DIFFERENT roots. Omitting it serves one root's
         # include/exclude verdict for the other.
         cache_key = (store, stat_key, str(self._project_identity_root), scope, legacy)
-        cached = _LEGACY_SCOPE_CACHE.get(cache_key)
+        in_pass = _DETECTION_ANSWERS.get() is not None
+        cached = _LEGACY_SCOPE_CACHE.get(cache_key) if in_pass else None
         if cached is not None:
             self._legacy_scope_state = cached[1]
             return cached[0]
@@ -3748,11 +3768,11 @@ class PACTMemory:
                 return (scope,)
             buckets = project_bucket_counts(connection)
             # The canonical count is what lets a SAVE disclose that it landed
-            # in a bucket with no prior rows. The in-process cache makes a
-            # second READ cheap, but on a saving process every save/update/
-            # delete clears `_LEGACY_SCOPE_CACHE`, so both COUNTs and the
-            # `git worktree list` below re-run after each write — that is the
-            # accepted cost, not a once-per-process constant.
+            # in a bucket with no prior rows. The pass's cache makes a second
+            # READ in one command cheap, but every save/update/delete clears
+            # `_LEGACY_SCOPE_CACHE`, so both COUNTs and the `git worktree list`
+            # below re-run after each write — that is the accepted cost, not a
+            # once-per-command constant.
             canonical_count = count_project_memories(connection, scope)
             # THE FOLD IS GATED ON THE FILESYSTEM, NOT ON `verified`: see
             # `_match_legacy_candidate`. The predicate is called as a module
@@ -3925,13 +3945,14 @@ class PACTMemory:
         self._legacy_scope_state = state
         # PRUNE superseded stamps for this same store/scope/legacy pair: the
         # key carries the store's stat, so every write leaves the old entry
-        # behind and the dict would grow for the process's lifetime.
-        for stale in [
-            key for key in _LEGACY_SCOPE_CACHE
-            if key != cache_key and key[:1] == (store,) and key[3:] == (scope, legacy)
-        ]:
-            _LEGACY_SCOPE_CACHE.pop(stale, None)
-        _LEGACY_SCOPE_CACHE[cache_key] = (result, state)
+        # behind and the dict would grow with each write in the pass.
+        if in_pass:
+            for stale in [
+                key for key in _LEGACY_SCOPE_CACHE
+                if key != cache_key and key[:1] == (store,) and key[3:] == (scope, legacy)
+            ]:
+                _LEGACY_SCOPE_CACHE.pop(stale, None)
+            _LEGACY_SCOPE_CACHE[cache_key] = (result, state)
         return result
 
     def _detected_identity_is_canonical(self) -> bool:

@@ -1154,18 +1154,21 @@ class TestReadScopeCacheKeyIncludesTheIdentityRoot:
             memory._legacy_project_basename = "PACT-prompt"
             return memory._read_project_scopes()
 
-        # Warm the cache from the FIRST root, then ask with the second.
-        assert verdict(left) == ("github.com/o/PACT-prompt", "PACT-prompt")
-        # The identity root is a KEY COMPONENT, not merely used in the verdict:
-        # asserted directly so the arm does not depend on which entry survives.
-        assert any(
-            str(left.resolve()) in key for key in memory_api._LEGACY_SCOPE_CACHE
-        ), memory_api._LEGACY_SCOPE_CACHE
-        assert verdict(right) == ("github.com/o/PACT-prompt",)
-        # SAME-ROOT CONTROL: asking again with the first root must include,
-        # so the exclusion above is the ROOT's verdict and not "the second
-        # call always excludes".
-        assert verdict(left) == ("github.com/o/PACT-prompt", "PACT-prompt")
+        # ONE PASS, as one command: the cache lives for the pass. Warm it from
+        # the FIRST root, then ask with the second.
+        with memory_api.detection_pass():
+            assert verdict(left) == ("github.com/o/PACT-prompt", "PACT-prompt")
+            # The identity root is a KEY COMPONENT, not merely used in the
+            # verdict: asserted directly so the arm does not depend on which
+            # entry survives.
+            assert any(
+                str(left.resolve()) in key for key in memory_api._LEGACY_SCOPE_CACHE
+            ), memory_api._LEGACY_SCOPE_CACHE
+            assert verdict(right) == ("github.com/o/PACT-prompt",)
+            # SAME-ROOT CONTROL: asking again with the first root must include,
+            # so the exclusion above is the ROOT's verdict and not "the second
+            # call always excludes".
+            assert verdict(left) == ("github.com/o/PACT-prompt", "PACT-prompt")
 
 
 class TestProjectIdShowRoots:

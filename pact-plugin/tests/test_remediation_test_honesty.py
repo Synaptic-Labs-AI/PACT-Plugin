@@ -203,7 +203,13 @@ class TestTheReadScopeCacheServesTheSecondRead:
     therefore lets a read-only open create the `-wal` first and stamps after
     it, keeping the `-wal`'s own stamp, so the journal being deleted,
     recreated or emptied still moves the key and a write is never served
-    from the cache."""
+    from the cache. The cache lives for one detection pass, so each arm reads
+    inside one, as a command does."""
+
+    @pytest.fixture(autouse=True)
+    def _one_pass(self):
+        with memory_api.detection_pass():
+            yield
 
     def _count_decisions(self, monkeypatch):
         from scripts import database

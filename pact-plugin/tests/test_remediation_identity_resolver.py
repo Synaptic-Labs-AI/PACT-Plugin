@@ -1076,6 +1076,178 @@ class TestTheSessionMustPostdateTheRepository:
         assert scopes == (CANONICAL,) and state["unproven"], state
 
 
+class TestTheReadScopeCacheEndsWithItsPass:
+    """A read scope is cached for one detection pass only: a later pass, the
+    next command, computes it afresh, so it sees an input of its gate or its
+    session evidence that changed in between (a linked worktree or its
+    links, a session's context file or folder, a prune ledger, the
+    repository's `description`, or the config root that names the session
+    folders), and none of them needs a key of its own.
+
+    Catches a cached admission (or refusal) of an unverified legacy bucket
+    outliving the command that decided it.
+    """
+
+    @staticmethod
+    def _scopes(identity_env):
+        """The read scope one command reads: a construction and a read in
+        one pass."""
+        with memory_api.detection_pass():
+            return PACTMemory(session_id="s", db_path=identity_env / "store.db")._read_project_scopes()
+
+    @staticmethod
+    def _context_created(identity_env, repo, context):
+        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+
+    @staticmethod
+    def _context_rewritten(identity_env, repo, context):
+        import json
+
+        record = json.loads(context.read_text(encoding="utf-8"))
+        elsewhere = identity_env / "elsewhere"
+        elsewhere.mkdir()
+        record["project_dir"] = str(elsewhere)
+        context.write_text(json.dumps(record), encoding="utf-8")
+
+    @staticmethod
+    def _folder_removed(identity_env, repo, context):
+        import shutil
+
+        shutil.rmtree(context.parent)
+
+    @staticmethod
+    def _ledger_added(identity_env, repo, context):
+        """Append the reaped session's line to a ledger that already
+        exists, so only the ledger changes."""
+        import json
+
+        from shared.pact_context import PRUNE_LEDGER_NAME
+
+        record = json.loads((identity_env / "held.json").read_text(encoding="utf-8"))
+        with (context.parent.parent / PRUNE_LEDGER_NAME).open("a", encoding="utf-8") as ledger:
+            ledger.write(json.dumps(record) + "\n")
+
+    @staticmethod
+    def _description_recreated(identity_env, repo, context):
+        description = repo / ".git" / "description"
+        text = description.read_text(encoding="utf-8")
+        description.unlink()
+        description.write_text(text, encoding="utf-8")
+
+    @staticmethod
+    def _config_root_moved(identity_env, repo, context):
+        import os
+
+        # The test's monkeypatch set this variable, so its teardown restores it.
+        other = identity_env / "other-config"
+        other.mkdir()
+        os.environ["CLAUDE_CONFIG_DIR"] = str(other)
+
+    @pytest.mark.parametrize("change, admitted_before", [
+        ("_context_created", False),
+        ("_context_rewritten", True),
+        ("_folder_removed", True),
+        ("_ledger_added", False),
+        ("_description_recreated", True),
+        ("_config_root_moved", True),
+    ], ids=[
+        "a context file created", "a context file naming another folder", "the session folder removed",
+        "a prune ledger line added", "the description recreated", "the config root moved",
+    ])
+    def test_a_changed_evidence_input_is_read_again(self, identity_env, monkeypatch, change, admitted_before):
+        import shutil
+
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        _seed(identity_env / "store.db", "proj")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(_config_root(identity_env)))
+        context = seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        if not admitted_before:
+            # The session is absent at the first read. For `_ledger_added` its
+            # record is kept for the ledger line, and the ledger already holds
+            # another session's line.
+            if change == "_ledger_added":
+                import json
+
+                from shared.pact_context import PRUNE_LEDGER_NAME
+
+                recorded = json.loads(context.read_text(encoding="utf-8"))
+                line = {"session_id": "legacy-session", "project_dir": recorded["project_dir"],
+                        "started_at": recorded["started_at"]}
+                (identity_env / "held.json").write_text(json.dumps(line), encoding="utf-8")
+                other = {"session_id": "other", "project_dir": "/nowhere", "started_at": recorded["started_at"]}
+                (context.parent.parent / PRUNE_LEDGER_NAME).write_text(json.dumps(other) + "\n", encoding="utf-8")
+            shutil.rmtree(context.parent)
+        first = self._scopes(identity_env)
+        assert first == ((CANONICAL, "proj") if admitted_before else (CANONICAL,)), first
+        getattr(self, change)(identity_env, repo, context)
+        second = self._scopes(identity_env)
+        _fresh_scope_state()
+        assert second == self._scopes(identity_env) == ((CANONICAL,) if admitted_before else (CANONICAL, "proj"))
+
+    def test_a_worktree_added_after_a_read_is_seen(self, identity_env, monkeypatch):
+        """A linked worktree added after a read that excluded the bucket (its
+        absolute row lies under the worktree's path) widens the gate on the
+        next read: the gate roots are stamped too."""
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        worktree = identity_env / "wt"
+        _seed(identity_env / "store.db", "proj", path=str(worktree / "a.py"))
+        assert self._scopes(identity_env) == (CANONICAL,)
+        run_git("worktree", "add", "-q", str(worktree), cwd=repo)
+        second = self._scopes(identity_env)
+        _fresh_scope_state()
+        assert second == self._scopes(identity_env) == (CANONICAL, "proj")
+
+    @pytest.mark.parametrize("unlink", ["the worktree's .git", "the admin dir's gitdir"])
+    def test_a_worktree_link_broken_after_a_read_is_seen(self, identity_env, monkeypatch, unlink):
+        """A listed worktree whose link breaks after a read that admitted the
+        bucket through it (its `.git` file removed, or its admin dir's
+        `gitdir` pointed elsewhere) narrows the gate on the next read."""
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        worktree = identity_env / "wt"
+        run_git("worktree", "add", "-q", str(worktree), cwd=repo)
+        _seed(identity_env / "store.db", "proj", path=str(worktree / "a.py"))
+        assert self._scopes(identity_env) == (CANONICAL, "proj")
+        if unlink == "the worktree's .git":
+            (worktree / ".git").unlink()
+        else:
+            (repo / ".git" / "worktrees" / "wt" / "gitdir").write_text(
+                str(identity_env / "elsewhere" / ".git") + "\n", encoding="utf-8")
+        second = self._scopes(identity_env)
+        _fresh_scope_state()
+        assert second == self._scopes(identity_env) == (CANONICAL,)
+
+    def test_the_cache_serves_one_pass_and_no_other(self, identity_env, monkeypatch):
+        """Two reads in one pass decide the scope once; a second pass, and
+        each read outside any pass, decides it again; and the cache is empty
+        once the pass ends."""
+        _fresh_scope_state()
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
+        _seed(identity_env / "store.db", "proj")
+        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        calls = []
+        real = memory_api._legacy_session_evidence
+        monkeypatch.setattr(
+            memory_api, "_legacy_session_evidence",
+            lambda *args, **kwargs: calls.append(1) or real(*args, **kwargs),
+        )
+        with memory_api.detection_pass():
+            memory = PACTMemory(session_id="s", db_path=identity_env / "store.db")
+            assert memory._read_project_scopes() == memory._read_project_scopes() == (CANONICAL, "proj")
+        assert len(calls) == 1 and len(memory_api._LEGACY_SCOPE_CACHE) == 0, calls
+        assert self._scopes(identity_env) == (CANONICAL, "proj")
+        assert len(calls) == 2, calls
+        memory = PACTMemory(session_id="s", db_path=identity_env / "store.db")
+        assert memory._read_project_scopes() == memory._read_project_scopes() == (CANONICAL, "proj")
+        assert len(calls) == 4, calls
+
+
 class TestLegacyScopeHasOneKeySet:
     """`legacy_scope` carries the same keys in every state.
 
@@ -1994,8 +2166,8 @@ class TestUpdateFindsTheRowBeforeItRefuses:
 
 
 class TestTheEvidenceCheckScansEachRootOnce:
-    """The session-evidence check lists each root's session folder once and
-    parses an unchanged prune ledger once per process.
+    """The session-evidence check lists each root's session folder once per
+    command and parses an unchanged prune ledger once per process.
 
     Catches the evidence check building and resolving a session path for
     every writing session, and re-reading the ledger on every read while a
@@ -2075,12 +2247,13 @@ class TestTheEvidenceCheckScansEachRootOnce:
         PACTMemory(session_id="s", db_path=store)._read_project_scopes()
         assert len(parses) == 2, "an appended line must be seen on the next read"
 
-    def test_each_session_folder_is_listed_once_per_process(
+    def test_each_session_folder_is_listed_once_per_pass(
         self, identity_env, monkeypatch
     ):
-        """Repeated reads and instances in one process list the root's session
-        folder exactly once: never zero (each session checked on its own) and
-        never again for an unchanged store."""
+        """Repeated reads and instances in one detection pass (one command)
+        list the root's session folder exactly once: never zero (each session
+        checked on its own) and never again for an unchanged store. The next
+        pass lists it again."""
         import os
 
         _repo, store, slug_dir, _ledger = self._rig(identity_env, monkeypatch)
@@ -2092,11 +2265,15 @@ class TestTheEvidenceCheckScansEachRootOnce:
             return real(path)
 
         monkeypatch.setattr(memory_api.os, "listdir", spy)
-        for _ in range(3):
-            memory = PACTMemory(session_id="s", db_path=store)
+        with memory_api.detection_pass():
             for _ in range(3):
-                memory._read_project_scopes()
+                memory = PACTMemory(session_id="s", db_path=store)
+                for _ in range(3):
+                    memory._read_project_scopes()
         assert listed == [os.path.realpath(str(slug_dir))], listed
+        with memory_api.detection_pass():
+            PACTMemory(session_id="s", db_path=store)._read_project_scopes()
+        assert listed == [os.path.realpath(str(slug_dir))] * 2, listed
 
     def test_a_present_entry_is_a_live_folder_not_a_reaped_one(
         self, identity_env, monkeypatch
