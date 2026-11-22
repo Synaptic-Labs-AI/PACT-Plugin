@@ -134,36 +134,6 @@ def _fsdecode(data: bytes | str) -> str:
     return data if isinstance(data, str) else os.fsdecode(data)
 
 
-def _git_output(directory: Path, *args: str) -> Optional[str]:
-    """Return the stripped stdout of `git -C <directory> <args>`, or None.
-
-    None on a git error, a timeout, a non-repo directory or an OSError, so
-    every rule built on it fails toward refusal.
-
-    Output is decoded with `_fsdecode`, never by `subprocess`, so a path git
-    prints is not locale-decoded (#1653).
-    """
-    # `run_git` absorbs TimeoutExpired and FileNotFoundError only. The original
-    # predicate caught OSError entire, and that breadth is load-bearing here:
-    # a PermissionError reaching a caller as an exception instead of a refusal
-    # would turn a fail-safe into a crash on a write path.
-    try:
-        result = run_git(
-            ["-C", str(directory), *args],
-            timeout=5,
-            text=False,
-            env=git_env_without_location(),
-        )
-    except (OSError, ValueError):
-        # ValueError covers a subprocess-level refusal (an embedded NUL and
-        # the like): "could not answer", not a crash on the write path.
-        return None
-    if result is None or result.returncode != 0:
-        return None
-    stdout = _fsdecode(result.stdout).strip()
-    return stdout or None
-
-
 def _rev_parse_path(directory: Path, flag: str) -> Optional[Path]:
     """Return `git -C <directory> rev-parse <flag>` as a resolved path, or None.
 
@@ -376,7 +346,7 @@ def _git_dir_answers(directory: Path) -> bool:
 def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
     """`git -C <directory> rev-parse <flag>` as (resolved path, git RAN).
 
-    THE OUTPUT IS NOT STRIPPED, unlike `_git_output`. A path can end in
+    THE OUTPUT IS NOT STRIPPED. A path can end in
     whitespace, and the worktree listing preserves it, so comparing a
     strip()ped value against the listing fails in BOTH directions: it rejects
     a legitimate worktree at `.../wt ` and it admits a forged directory at
@@ -449,11 +419,9 @@ def _repository_is_bare(common_dir: Path) -> bool:
     """Whether the repository whose common dir this is has no checkout.
 
     A linked worktree of a BARE repository is a real checkout and legitimately
-    owns its project memory. A worktree of a NON-bare repository whose git dir
-    lives elsewhere (`--separate-git-dir`) is not the main checkout, and a
-    forged gitfile names a repository the asking directory does not belong to
-    -- neither may be treated as the project's root. Read only after candidate
-    verification has already failed.
+    owns its project memory. A forged gitfile names a repository the asking
+    directory does not belong to, and may not be treated as the project's
+    root. Read only after candidate verification has already failed.
     """
     try:
         result = run_git(
@@ -469,6 +437,104 @@ def _repository_is_bare(common_dir: Path) -> bool:
     return _fsdecode(result.stdout).strip().lower() == "true"
 
 
+def git_dir_checkout(start: str | os.PathLike[str]) -> tuple[bool, Optional[Path]]:
+    """`(inside, checkout)` for a start inside a git dir.
+
+    `inside` is True when `start` is the git dir git reports for it, or a
+    folder inside that git dir (a submodule's git dir counts, though git,
+    reading its `core.worktree`, does not call it inside one). `checkout` is
+    then the checkout that git dir belongs to, or None when there is none to
+    name:
+
+    1. A linked worktree's admin dir (its git dir is not the common dir):
+       the worktree its `gitdir` file names, when git, asked from that
+       worktree, answers with this same git dir.
+    2. Otherwise the git dir's parent, when git, asked from the parent,
+       answers with this same git dir (a main checkout's `.git`).
+    3. Otherwise None: a bare repository and a separate-git-dir store, whose
+       parent is no checkout of them, and a submodule's git dir (its
+       `core.worktree` is config, which is not read here). A bare repository
+       kept at `<folder>/.git` names `<folder>`, as a start in `<folder>`
+       does, and git gives it no working tree there.
+
+    `(False, None)` when `start` is not inside a git dir or git gives no git
+    dir; the caller then reads `start` as it always did. The memory
+    skill's resolver and the project-memory root both decide by this rule
+    (`_checkout_of_git_dir`), so a start inside `.git` names the same
+    checkout for both, and neither answers a path inside a git dir.
+    """
+    directory = Path(start)
+    common_dir, ran = _raw_rev_parse(directory, "--git-common-dir")
+    if not ran or common_dir is None:
+        return False, None
+    git_dir, ran = _raw_rev_parse(directory, "--git-dir")
+    if not ran or git_dir is None:
+        return False, None
+    return _checkout_of_git_dir(directory, git_dir, common_dir)
+
+
+def _checkout_of_git_dir(
+    directory: Path, git_dir: Path, common_dir: Path
+) -> tuple[bool, Optional[Path]]:
+    """`git_dir_checkout` from the git dir and common dir git already gave
+    for `directory`, so a caller that has asked them asks nothing again."""
+    try:
+        where = directory.resolve()
+    except (OSError, RuntimeError):
+        return False, None
+    if where != git_dir and git_dir not in where.parents:
+        return False, None
+    if git_dir != common_dir:
+        try:
+            raw = os.fsdecode((git_dir / "gitdir").read_bytes())
+        except (OSError, ValueError):
+            return True, None
+        if raw.endswith("\n"):
+            raw = raw[:-1]
+        marker = Path(raw)
+        if not marker.is_absolute():
+            marker = git_dir / marker
+        candidate = marker.parent
+    else:
+        candidate = git_dir.parent
+    named, ran = _raw_rev_parse(candidate, "--git-dir")
+    if not ran or named != git_dir:
+        return True, None
+    try:
+        return True, candidate.resolve()
+    except (OSError, RuntimeError):
+        return True, None
+
+
+def _unnamed_main_worktree_root(
+    given: Path, common_dir: Path, candidate: Path
+) -> Optional[Path]:
+    """The linked worktree's own top level, for a repository that is not
+    bare, when git can name no main checkout for it and git's worktree
+    listing holds that top level; else None.
+
+    "No main checkout" is the filesystem fact behind `git init
+    --separate-git-dir`: the common dir is not `<candidate>/.git`, so no
+    folder holds it as its `.git` (git then lists the main worktree at the
+    git dir). A `<candidate>/.git` that IS the common dir is a main checkout
+    git could not describe, and stays unverified. The listing check is the
+    same anti-forgery check as the main-checkout path: a `.git` file naming
+    another repository's worktree admin dir is not listed."""
+    marker = candidate / ".git"
+    try:
+        if marker.exists() and marker.resolve() == common_dir:
+            return None
+    except (OSError, RuntimeError):
+        return None
+    toplevel, ran = _raw_rev_parse(given, "--show-toplevel")
+    if not ran or toplevel is None:
+        return None
+    listed = _listed_worktrees_result(given, resolve_against=toplevel)
+    if listed is None or toplevel not in listed:
+        return None
+    return toplevel
+
+
 def _failed_verification_root(
     given: Path, common_dir: Path
 ) -> tuple[Path, str]:
@@ -477,9 +543,10 @@ def _failed_verification_root(
     A bare repository's worktree is a genuine checkout, so it stays a KNOWN
     root (the input) and the cause is ROOT_CAUSE_OK -- NOT "unverified", which
     would make the message false for a legitimate checkout. Every other
-    unverified linked worktree is ROOT_CAUSE_UNVERIFIED: a
-    `--separate-git-dir` worktree has no resolvable main checkout, and a
-    forged gitfile names a repository this directory is not part of. Writers
+    unverified linked worktree is ROOT_CAUSE_UNVERIFIED: a forged gitfile
+    names a repository this directory is not part of (a listed worktree of a
+    repository with no main checkout git can name is its own root, decided
+    before this, by `_unnamed_main_worktree_root`). Writers
     must skip on it rather than target the worktree copy, which is the whole
     point of the distinction.
     """
@@ -509,6 +576,24 @@ def _project_memory_root_cause(
     common_dir, ran = _raw_rev_parse(given, "--git-common-dir")
     if not ran:
         return given, _unanswered_cause(given)
+    if git_dir is not None and common_dir is not None:
+        # A START INSIDE A GIT DIR IS ITS CHECKOUT, or no root at all: the
+        # project memory never lives inside `.git`. git, asked from the
+        # checkout, answered this same git dir, so the checkout's git dir and
+        # common dir are the ones in hand.
+        inside, checkout = _checkout_of_git_dir(given, git_dir, common_dir)
+        if inside:
+            if checkout is None:
+                return given, ROOT_CAUSE_UNVERIFIED
+            return _root_cause_from(checkout, git_dir, common_dir)
+    return _root_cause_from(given, git_dir, common_dir)
+
+
+def _root_cause_from(
+    given: Path, git_dir: Optional[Path], common_dir: Optional[Path]
+) -> tuple[Path, str]:
+    """`_project_memory_root_cause` for a start whose git dir and common
+    dir git has already given."""
     if git_dir is None or common_dir is None or git_dir == common_dir:
         return given, ROOT_CAUSE_OK
     candidate = common_dir.parent
@@ -516,7 +601,18 @@ def _project_memory_root_cause(
     if not ran:
         return given, _unanswered_cause(given)
     if toplevel_at_candidate != candidate:
-        return _failed_verification_root(given, common_dir)
+        # NO MAIN CHECKOUT GIT CAN NAME: a non-bare repository whose git dir
+        # is not `<checkout>/.git` (`git init --separate-git-dir`) lists its
+        # main worktree at the git dir itself. A linked worktree git lists
+        # is then its own project root. A bare repository's worktree is a
+        # genuine checkout and keeps the root it is given, as
+        # `_failed_verification_root` answers it; git is asked once.
+        if _repository_is_bare(common_dir):
+            return given, ROOT_CAUSE_OK
+        own = _unnamed_main_worktree_root(given, common_dir, candidate)
+        if own is not None:
+            return own, ROOT_CAUSE_OK
+        return given, ROOT_CAUSE_UNVERIFIED
     # DEFENCE IN DEPTH: the candidate must report OUR common dir. It refuses a
     # candidate checkout whose own `.git` is another repository (a common dir
     # relocated beside an unrelated checkout). The worktree-listing check below
@@ -662,8 +758,8 @@ def _worktree_paths_from_admin_gitdirs(checkout: Path) -> Optional[list[str]]:
     worktree root is its parent -- the record terminator follows `/.git`, not
     the path, which is why an internal newline survives.
 
-    Returns None when git cannot answer at all (the caller keeps the line
-    parser as the last resort). An empty repository returns its own root.
+    Returns None when git cannot answer at all, and the listing then has no
+    answer. An empty repository returns its own root.
     A relative recorded path (`worktree.useRelativePaths`) is resolved against
     the admin dir that holds it, which is where git writes it relative to.
     """
@@ -716,13 +812,12 @@ def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
     truncates the path, which a membership check would then refuse -- falling
     back to the worktree and reopening the write this guard exists to stop.
 
-    When `-z` is unavailable the admin `gitdir` files are the next choice:
-    they hold each linked worktree's full path and are not line-quoted. The
-    line parser remains only as the last resort, for a git that cannot answer
-    either; on it a newline-containing path is still truncated. That residue
-    is stated, not hidden: it needs a pre-2.36 git AND an unreadable admin
-    enumeration. A timeout or a missing git on the first call answers None at
-    once: the fallbacks would only wait on the same git again.
+    When `-z` is unavailable the admin `gitdir` files are the source: they
+    hold each linked worktree's full path and are not line-quoted. When they
+    cannot be read either, git could not answer `rev-parse` for the
+    directory, so it cannot list its worktrees and the answer is None. A
+    timeout or a missing git on the first call answers None at once: the
+    admin records would only wait on the same git again.
     """
     try:
         result = run_git(
@@ -746,17 +841,7 @@ def _worktree_list_paths(checkout: Path) -> Optional[list[str]]:
         # Fall through to the admin-dir records: a subprocess refusal is
         # "could not answer" here, and the next source may still answer.
         pass
-    recorded = _worktree_paths_from_admin_gitdirs(checkout)
-    if recorded is not None:
-        return recorded
-    output = _git_output(checkout, "worktree", "list", "--porcelain")
-    if output is None:
-        return None
-    return [
-        line[len("worktree "):]
-        for line in output.splitlines()
-        if line.startswith("worktree ")
-    ]
+    return _worktree_paths_from_admin_gitdirs(checkout)
 
 
 def _listed_worktrees_result(

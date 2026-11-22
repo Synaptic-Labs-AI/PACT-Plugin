@@ -5069,3 +5069,107 @@ class TestAnUnreadableCoreWorktreeIsNamed:
         assert_outside_repository(tmp_path)
         answers = _route_answers(tmp_path, "control_own_submodule", "PASS")
         assert not [a for a in answers.values() if a[1] == "gitfile_redirect"], answers
+
+
+def _git_dir_layouts(root: Path) -> dict:
+    """Each start inside a git dir, and the separate-git-dir linked worktree:
+    {name: (start, expected checkout or None)}. Real repositories with fake
+    origins; nothing is fetched."""
+    main = make_repo(root / "main", remote="https://example.invalid/o/main.git")
+    make_worktree(main, root / "wt")
+    hub = root / "hub.git"
+    run_git("clone", "-q", "--bare", str(main), str(hub), cwd=root)
+    sep = make_separate_git_dir_repo(root / "sep", root / "store" / "repo.git")
+    run_git("remote", "add", "origin", "https://example.invalid/o/sep.git", cwd=sep)
+    make_worktree(sep, root / "sepwt")
+    other = root / "other"
+    other.mkdir()
+    twin = make_separate_git_dir_repo(root / "twin", other / ".git")
+    run_git("remote", "add", "origin", "https://example.invalid/o/twin.git", cwd=twin)
+    superproject = make_repo(root / "super", remote="https://example.invalid/o/super.git")
+    run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(main), "sub", cwd=superproject)
+    forged = root / "forged"
+    forged.mkdir()
+    (forged / ".git").write_text(f"gitdir: {root / 'store' / 'repo.git' / 'worktrees' / 'sepwt'}\n",
+                                 encoding="utf-8")
+    return {
+        "main/.git": (main / ".git", main),
+        "main/.git/refs": (main / ".git" / "refs", main),
+        "a linked worktree's admin dir": (main / ".git" / "worktrees" / "wt", root / "wt"),
+        "the twin's other/.git": (other / ".git", other),
+        "the bare hub": (hub, None),
+        "a separate-git-dir store": (root / "store" / "repo.git", None),
+        "a submodule's git dir": (superproject / ".git" / "modules" / "sub", None),
+        "a separate-git-dir linked worktree": (root / "sepwt", None),
+        "a .git file naming that worktree's admin dir": (forged, None),
+    }
+
+
+class TestAStartInsideAGitDirIsItsCheckout:
+    """A start inside a non-bare checkout's git dir resolves to that checkout
+    for the memory skill and for the project-memory root alike; a git dir with
+    no checkout git can name declines, and the project memory never lives
+    inside `.git`. A separate-git-dir repository's linked worktree, whose main
+    checkout git cannot name, is its own project root; a `.git` file naming
+    that worktree's admin dir is not.
+
+    Real repositories and git."""
+
+    def test_each_start_names_its_checkout_or_declines(self, identity_env, monkeypatch):
+        from shared import project_scope
+
+        layouts = _git_dir_layouts(identity_env)
+        answers, expected = {}, {}
+        for name, (start, checkout) in layouts.items():
+            _fresh_scope_state()
+            monkeypatch.chdir(start)
+            mapped = project_scope.git_dir_checkout(start)
+            detected = PACTMemory._detect_project_identity_with_legacy()
+            root, cause = project_scope.memory_root_of(start)
+            answers[name] = (mapped, detected.project_id, detected.decline_reason and detected.decline_reason["reason"],
+                             root, cause)
+        main_id, sep_id = "example.invalid/o/main", "example.invalid/o/sep"
+        main, unverified = identity_env / "main", project_scope.ROOT_CAUSE_UNVERIFIED
+        expected = {
+            "main/.git": ((True, main.resolve()), main_id, None, main.resolve(), None),
+            "main/.git/refs": ((True, main.resolve()), main_id, None, main.resolve(), None),
+            "a linked worktree's admin dir": ((True, (identity_env / "wt").resolve()), main_id, None,
+                                              main.resolve(), None),
+            "the twin's other/.git": ((True, (identity_env / "other").resolve()), "example.invalid/o/twin", None,
+                                      (identity_env / "other").resolve(), None),
+            "the bare hub": ((True, None), None, "no_working_tree", None, unverified),
+            "a separate-git-dir store": ((True, None), None, "no_working_tree", None, unverified),
+            "a submodule's git dir": ((True, None), None, "submodule_checkout", None, unverified),
+            "a separate-git-dir linked worktree": ((False, None), sep_id, None,
+                                                   (identity_env / "sepwt").resolve(), None),
+            "a .git file naming that worktree's admin dir": ((False, None), None, "gitfile_redirect", None,
+                                                             unverified),
+        }
+        assert answers == expected
+
+    def test_a_declared_start_names_its_checkout_or_declines(self, identity_env, monkeypatch):
+        """The declared rung maps a CLAUDE_PROJECT_DIR inside a git dir the
+        same way, from a working directory outside any repository."""
+        layouts = _git_dir_layouts(identity_env)
+        outside = identity_env / "outside"
+        outside.mkdir()
+        answers = {}
+        for name, (start, _checkout) in layouts.items():
+            _fresh_scope_state()
+            monkeypatch.chdir(outside)
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(start))
+            detected = PACTMemory._detect_project_identity_with_legacy()
+            answers[name] = (detected.project_id,
+                             detected.decline_reason and detected.decline_reason["reason"])
+        main_id = "example.invalid/o/main"
+        assert answers == {
+            "main/.git": (main_id, None),
+            "main/.git/refs": (main_id, None),
+            "a linked worktree's admin dir": (main_id, None),
+            "the twin's other/.git": ("example.invalid/o/twin", None),
+            "the bare hub": (None, "no_working_tree"),
+            "a separate-git-dir store": (None, "no_working_tree"),
+            "a submodule's git dir": (None, "submodule_checkout"),
+            "a separate-git-dir linked worktree": ("example.invalid/o/sep", None),
+            "a .git file naming that worktree's admin dir": (None, "gitfile_redirect"),
+        }

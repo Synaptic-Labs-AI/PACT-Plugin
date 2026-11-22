@@ -8,7 +8,7 @@ Used by: pytest. Exercises hooks/shared/project_scope.py `_rev_parse_path`
          `stays_in_declared_project`, with a real `git init` repository and a
          real `git worktree add` under tmp_path (no remote).
 
-Reverting `_rev_parse_path` to the stripped `_git_output` reader turns every
+Reverting `_rev_parse_path` to a reader that strips git's output turns every
 arm here red: the toplevel loses its trailing space, is not in the listing,
 the identity record is never written, and the scope guard refuses the
 worktree's own root.

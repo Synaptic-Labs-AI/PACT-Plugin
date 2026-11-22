@@ -1957,21 +1957,6 @@ _REFUSED_ROUTES = {
     "project-id rekey --from only": (1, "a canonical bucket moves only with an explicit --to"),
 }
 
-# Routes a layout cannot run yet, each failing there because of an open
-# production defect: from inside a checkout's .git the identity declines
-# no-working-tree where it should be the checkout's, so a save is refused and
-# rekey --from alone finds no canonical id; and project-file cannot verify a
-# separate-git-dir linked worktree. The arm skips each here; when the defect
-# is fixed, the route comes off this set.
-_AWAITING_A_FIX = {
-    ("inside a checkout's .git", "save --no-sync"),
-    ("inside a checkout's .git", "save"),
-    ("inside a checkout's .git", "save, default root"),
-    ("inside a checkout's .git", "project-id rekey --from only"),
-    ("separate-git-dir linked worktree", "project-file"),
-}
-
-
 class TestEachCliCommandAsksGitEachQuestionOnce:
     """Each memory CLI command, by every route its flags choose, runs its
     store's construction and its own work (a save's filing check and
@@ -2066,8 +2051,6 @@ class TestEachCliCommandAsksGitEachQuestionOnce:
         memory_id = json.loads(saved.stdout)["result"]["memory_id"]
         asked, repeated = {}, {}
         for name, argv, document in _EVERY_CLI_COMMAND:
-            if (layout, name) in _AWAITING_A_FIX:
-                continue
             done, questions = run([{"MEMID": memory_id, "START": str(root), "START_FILE": str(tracked)}.get(a, a) for a in argv], document)
             refusal = _REFUSED_ROUTES.get(name)
             if refusal is None:
@@ -2079,8 +2062,6 @@ class TestEachCliCommandAsksGitEachQuestionOnce:
         # Control: every command asked git something, so a log that stayed
         # empty cannot pass for one that held no repeat.
         assert all(asked.values()), asked
-        assert repeated == {
-            name: [] for name, _, _ in _EVERY_CLI_COMMAND if (layout, name) not in _AWAITING_A_FIX
-        }, (asked, repeated)
+        assert repeated == {name: [] for name, _, _ in _EVERY_CLI_COMMAND}, (asked, repeated)
         # Control: no command wrote a CLAUDE.md under the test's tree.
         assert {p: p.read_bytes() for p in identity_env.rglob("CLAUDE.md")} == documents

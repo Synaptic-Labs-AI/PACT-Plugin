@@ -1,19 +1,17 @@
-"""A `--separate-git-dir` worktree is a linked worktree, not its own root.
+"""A `--separate-git-dir` worktree is its own project root.
 
 Ordinary git, no attacker: `git init --separate-git-dir=<sep> work` then
 `git worktree add <wt>`. In the worktree, `--git-dir` differs from
-`--git-common-dir`, so the resolver knows it is a linked worktree -- but the
-candidate main root (common-dir's parent) is not a checkout, so verification
-fails and the fail-safe returned the INPUT as a KNOWN root. Every writer then
-targeted the worktree copy.
+`--git-common-dir`, so the resolver knows it is a linked worktree, but git
+names no main checkout for it: it lists the main worktree at the git dir
+itself, and no folder holds the git dir as its `.git`. The worktree is then
+its own project root, and every writer acts on its own CLAUDE.md, at
+`<wt>/.claude`.
 
-The fix is in the shared resolver, not at each site: an UNVERIFIED linked
-worktree is UNKNOWN unless the repository is BARE (a bare repo's worktree is
-a genuine checkout and legitimately owns its project memory). These arms drive
-every writer the security lane measured, plus the archive, plus a forged
-gitfile and the bare control.
-
-Each arm is RED on the previous head and green after the resolver fix.
+A worktree whose main checkout exists but cannot be verified (a moved
+worktree) and a forged gitfile stay UNKNOWN, and a bare repository's worktree
+stays its own root. These arms drive every writer the security lane
+measured, plus the archive, plus a forged gitfile and the bare control.
 """
 from __future__ import annotations
 
@@ -75,31 +73,29 @@ def sep_worktree(tmp_path):
     return work, wt, wt_md
 
 
-def test_the_resolver_reports_unknown_while_the_reader_fails_open(sep_worktree):
+def test_the_resolver_reports_the_worktree_as_its_own_root(sep_worktree):
     from helpers import known_root, root_or_input
 
     _work, wt, _md = sep_worktree
-    assert known_root(wt) is None, (
-        "an unverified non-bare linked worktree must be UNKNOWN to writers"
+    assert known_root(wt) == wt.resolve(), (
+        "a listed worktree whose main checkout git cannot name is its own root"
     )
-    assert root_or_input(wt) == wt, (
-        "the reader fail-open answer must stay the input"
-    )
+    assert root_or_input(wt) == wt.resolve()
 
 
-def test_the_session_start_writers_skip(sep_worktree, monkeypatch):
+def test_the_session_start_writers_write_the_worktree_copy(sep_worktree, monkeypatch):
     _work, wt, wt_md = sep_worktree
     before = wt_md.read_bytes()
 
     _context, system_message = _run(monkeypatch, wt)
 
-    assert "Project CLAUDE.md skipped" in system_message, system_message[:300]
-    assert wt_md.read_bytes() == before, (
-        "the session-start writers targeted the worktree copy"
+    assert "Project CLAUDE.md skipped" not in system_message, system_message[:300]
+    assert wt_md.read_bytes() != before, (
+        "the session-start writers did not write the worktree's own copy"
     )
 
 
-def test_the_pin_marker_writer_skips(sep_worktree, monkeypatch):
+def test_the_pin_marker_writer_writes(sep_worktree, monkeypatch):
     from test_pin_marker_writer import build_claude_md
 
     import pin_marker_writer
@@ -113,13 +109,12 @@ def test_the_pin_marker_writer_skips(sep_worktree, monkeypatch):
 
     outcome = pin_marker_writer._plan_and_write()
 
-    assert outcome == "noop_memory_root_unknown", (
-        f"the pin writer targeted the worktree copy: {outcome}"
+    assert outcome == "written", (
+        f"the pin writer did not write the worktree's own copy: {outcome}"
     )
-    assert wt_md.read_text(encoding="utf-8") == original
 
 
-def test_the_realign_team_line_writes_nothing(sep_worktree, monkeypatch, capsys):
+def test_the_realign_team_line_writes_the_worktree_copy(sep_worktree, monkeypatch, capsys):
     from shared.realign_team import _write_team_line
 
     work, wt, wt_md = sep_worktree
@@ -131,13 +126,13 @@ def test_the_realign_team_line_writes_nothing(sep_worktree, monkeypatch, capsys)
     _write_team_line("sid", "session-new", str(session_dir), "/plugin")
 
     err = capsys.readouterr().err
-    assert "project CLAUDE.md skipped" in err, err
-    assert wt_md.read_text(encoding="utf-8") == original, (
-        "the realign line was written to the worktree copy"
+    assert "project CLAUDE.md skipped" not in err, err
+    assert wt_md.read_text(encoding="utf-8") != original, (
+        "the realign line was not written to the worktree's own copy"
     )
 
 
-def test_the_sync_writers_name_an_unknown_root(sep_worktree, monkeypatch):
+def test_the_sync_writers_write_the_worktree_copy(sep_worktree, monkeypatch):
     import scripts.working_memory as wm
 
     work, wt, wt_md = sep_worktree
@@ -153,36 +148,21 @@ def test_the_sync_writers_name_an_unknown_root(sep_worktree, monkeypatch):
         [{"id": "0" * 32, "context": "external entry"}], query="q"
     )
 
-    assert wrote.reason == wm.SyncResult.ROOT_UNKNOWN, wrote.reason
-    assert retrieved.reason == wm.SyncResult.ROOT_UNKNOWN, retrieved.reason
-    assert wt_md.read_text(encoding="utf-8") == original
+    assert wrote.reason == wm.SyncResult.WROTE, wrote.reason
+    assert retrieved.reason == wm.SyncResult.WROTE, retrieved.reason
+    assert wt_md.read_text(encoding="utf-8") != original
 
 
-def test_the_archive_refuses(sep_worktree, monkeypatch):
+def test_the_archive_resolves_the_worktree_copy(sep_worktree, monkeypatch):
     import archive_pin
 
     _work, wt, wt_md = sep_worktree
-    original = wt_md.read_text(encoding="utf-8")
     monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(wt))
     monkeypatch.chdir(wt)
 
-    with pytest.raises(archive_pin._Unevaluable) as excinfo:
-        archive_pin.resolve_claude_md()
+    path, _base = archive_pin.resolve_claude_md()
 
-    reason = excinfo.value.reason
-    assert "project memory root unknown" in reason
-    # THE ANCHOR REFUSAL, NOT ITS BASE SIBLING. Both begin with the same
-    # prefix, so a prefix-only assertion passes when the anchor refusal is
-    # removed and the fall-through reaches the base refusal instead.
-    assert (
-        "exists but could not be verified as a checkout of a repository"
-        in reason
-    ), reason
-    # NOT the git-failure text: on these three shapes git RAN and answered.
-    assert "git could not answer" not in reason, reason
-    assert "cannot be identified" in reason, reason
-    assert "could not classify" not in reason, reason
-    assert wt_md.read_text(encoding="utf-8") == original
+    assert os.path.realpath(path) == os.path.realpath(wt_md), path
 
 
 def test_a_bare_repository_worktree_stays_a_known_root(tmp_path, monkeypatch):
@@ -205,6 +185,12 @@ def test_a_bare_repository_worktree_stays_a_known_root(tmp_path, monkeypatch):
     assert added.returncode == 0, added.stderr
 
     assert known_root(wt) == wt
+    # The separate-git-dir rule (the worktree's top level is its root) is for
+    # a non-bare repository only: a start below a bare repository's worktree
+    # keeps the root it is given, as a start below a main checkout does.
+    sub = wt / "sub"
+    sub.mkdir()
+    assert known_root(sub) == sub
 
     # Behavioural half of the statement: KNOWN means writers still act here.
     wt_md = wt / ".claude" / "CLAUDE.md"
@@ -276,9 +262,7 @@ def test_a_moved_worktree_is_unknown_and_the_archive_refuses(
 
     Every rev-parse still answers from the moved directory, but
     `git worktree list` names the OLD path, so the listing verification
-    fails. The separate-git-dir fix (unverified non-bare linked worktree =
-    UNKNOWN) closes this too -- MEASURED, not assumed: the same predicate
-    branch decides both. RED before that fix, green with it.
+    fails, and the worktree stays UNKNOWN rather than becoming its own root.
     """
     import archive_pin
     from helpers import known_root

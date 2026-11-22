@@ -4139,6 +4139,11 @@ class TestEveryRouteEntryConditionIsARoute:
             "route replaces"
         ),
         ("call", "git_env_without_location"): "builds the environment of every git call",
+        ("call", "git_dir_checkout"): (
+            "the checkout a start inside a git dir belongs to, from git's answers about that "
+            "start; it replaces the start the git rung and the declared rungs ask from, and "
+            "its own body is read like any reached function"
+        ),
         ("call", "<call to no function project_identity: git_env_without_location().items>"): (
             "iterates the environment copy git_env_without_location builds for a git "
             "subprocess"

@@ -2255,6 +2255,19 @@ def _entry_listed_as_moved(git_dir: Path, records: List[List[str]]) -> bool:
         return False
 
 
+def _git_dir_start(start: Optional[Path]) -> Optional[Path]:
+    """The checkout a start inside a git dir belongs to
+    (`project_scope.git_dir_checkout`), or None when `start` is not inside
+    one or its git dir has no checkout to name; the caller then asks from
+    `start` itself. Callers ask it only of a start git gives a common dir
+    but no top level for, as it gives a start inside a git dir."""
+    if start is None:
+        return None
+    from shared.project_scope import git_dir_checkout
+
+    return git_dir_checkout(start)[1]
+
+
 def _cwd_or_none() -> Optional[Path]:
     """`Path.cwd()`, or None when the process cwd no longer exists.
 
@@ -2976,14 +2989,10 @@ class PACTMemory:
         declines: never a basename for a real but unrepresentable remote,
         because a basename there is a silently different bucket. A decline
         keeps the declaration's own label as `source`.
+
+        A declared directory inside a git dir stands for the checkout that git
+        dir belongs to (`_git_dir_start`).
         """
-        try:
-            declared_root = Path(declared_dir).resolve()
-        except (OSError, RuntimeError, ValueError):
-            # ValueError: a NUL byte (or another embedded invalid value) in a
-            # session record must read as "cannot resolve", not crash the
-            # resolver.
-            declared_root = None
         declared_common_dir = main_repo_common_dir(declared_dir)
         # The toplevel is asked once and handed to the root lookup and to the
         # home check, which both need it.
@@ -2992,6 +3001,18 @@ class PACTMemory:
             if declared_common_dir is not None
             else None
         )
+        if declared_common_dir is not None and declared_toplevel is None:
+            checkout = _git_dir_start(Path(declared_dir))
+            if checkout is not None:
+                declared_dir = str(checkout)
+                declared_toplevel = _git_rev_parse(declared_dir, "--show-toplevel")
+        try:
+            declared_root = Path(declared_dir).resolve()
+        except (OSError, RuntimeError, ValueError):
+            # ValueError: a NUL byte (or another embedded invalid value) in a
+            # session record must read as "cannot resolve", not crash the
+            # resolver.
+            declared_root = None
         declared_main_root = main_repo_root(
             declared_dir, declared_common_dir, toplevel=declared_toplevel
         )
@@ -3251,14 +3272,25 @@ class PACTMemory:
             declined_root = declined_root or detected.identity_root
             declined_declaration = True
 
-        # Strategy 2: Git repository root (worktree-safe)
+        # Strategy 2: Git repository root (worktree-safe). A process inside
+        # a git dir (git gives a common dir but no top level) asks from the
+        # checkout that git dir belongs to; one with no such checkout (a bare
+        # repository, a separate-git-dir store) asks from where it is. A
+        # submodule's git dir gets its top level from git and is asked as is.
+        start_arg: Optional[str] = None
+        asked_start = _cwd_or_none()
         cwd_common_dir = main_repo_common_dir()
         if cwd_common_dir is not None:
             # The pre-change resolver named every repository it reached here,
             # bare and redirected included, by its common dir's parent.
             git_pre_change = cwd_common_dir.parent.name or None
             cwd_toplevel = _git_rev_parse(None, "--show-toplevel")
-            repo_root = main_repo_root(common=cwd_common_dir, toplevel=cwd_toplevel)
+            if cwd_toplevel is None:
+                git_start = _git_dir_start(asked_start)
+                if git_start is not None:
+                    start_arg, asked_start = str(git_start), git_start
+                    cwd_toplevel = _git_rev_parse(start_arg, "--show-toplevel")
+            repo_root = main_repo_root(common=cwd_common_dir, toplevel=cwd_toplevel, start=start_arg)
             if repo_root is None:
                 # NO ROOT: a forged worktree pointer, or git gave no toplevel
                 # (a bare repository gives none). The guard tells them apart,
@@ -3267,7 +3299,7 @@ class PACTMemory:
                 # common dir and `toplevel=None` the guard always declines,
                 # so the result is never None here.
                 guarded = cast("_DetectedIdentity", _root_guard(
-                    _cwd_or_none(), cwd_common_dir, "git root",
+                    asked_start, cwd_common_dir, "git root",
                     toplevel=None,
                     no_working_tree_detail=(
                         "the process's repository is bare, or git cannot "
@@ -3278,7 +3310,7 @@ class PACTMemory:
             detected = PACTMemory._identity_at_root(
                 repo_root,
                 cwd_common_dir,
-                asked_root=_cwd_or_none(),
+                asked_root=asked_start,
                 source="git root",
                 label="git root",
                 decline_label="unresolved",
