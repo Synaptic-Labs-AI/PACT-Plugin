@@ -299,12 +299,12 @@ class TestCliArgParsing:
         assert set(_COMMANDS.keys()) == expected
 
     def test_the_project_id_rows_are_documented_and_dispatched(self):
-        """The SKILL.md rows and the CLI dispatch table agree.
+        """The SKILL.md rows, the CLI dispatch table and the parser agree.
 
         The rows tell an agent to run `project-id show` when a project looks
-        empty, so a row for a verb the dispatcher does not accept is an
-        agent-facing dead end. Anchoring on `_COMMANDS` keeps the doc and the
-        parser from drifting apart in either direction.
+        empty, so a row for a verb or flag the parser does not accept is an
+        agent-facing dead end. Each documented verb and flag is parsed with
+        the CLI's own parser, so dropping one from the parser reds here.
         """
         skill = Path(__file__).parent.parent / "skills" / "pact-memory" / "SKILL.md"
         text = skill.read_text(encoding="utf-8")
@@ -318,6 +318,19 @@ class TestCliArgParsing:
             )
         for flag in ("--from", "--candidates", "--apply", "--dry-run"):
             assert flag in text, f"SKILL.md's project-id rows omit {flag}"
+
+        parser = build_parser()
+        show = parser.parse_args(["project-id", "show"])
+        assert (show.command, show.project_id_action) == ("project-id", "show")
+        rekey = parser.parse_args(
+            ["project-id", "rekey", "--from", "old", "--to", "new", "--dry-run"]
+        )
+        assert (rekey.project_id_action, rekey.from_id, rekey.to_id, rekey.dry_run) == (
+            "rekey", "old", "new", True,
+        )
+        for flag, field in (("--apply", "apply"), ("--candidates", "candidates")):
+            parsed = parser.parse_args(["project-id", "rekey", "--from", "old", flag])
+            assert getattr(parsed, field) is True, flag
 
 
 # ---------------------------------------------------------------------------

@@ -2659,21 +2659,17 @@ def test_a_logged_question_names_a_missing_directory_by_its_joined_text(tmp_path
 
 
 @pytest.mark.parametrize("nul", [False, True], ids=["git rejects -z", "git lists with -z"])
-@pytest.mark.parametrize("layout, commands_with_z, commands_rejecting_z", [
-    ("main checkout", 4, 5),
-    ("linked worktree", 4, 5),
-    ("separate-git-dir linked worktree", 4, 5),
-], ids=["main checkout", "linked worktree", "separate-git-dir linked worktree"])
-def test_one_roots_lookup_lists_the_worktrees_once(
-    tmp_path, monkeypatch, layout, commands_with_z, commands_rejecting_z, nul
-):
+@pytest.mark.parametrize("layout", [
+    "main checkout", "linked worktree", "separate-git-dir linked worktree",
+])
+def test_one_roots_lookup_lists_the_worktrees_once(tmp_path, monkeypatch, layout, nul):
     """From any checkout, one roots lookup asks git for the worktree listing
     once: from a linked worktree the root's redirect check reads it, and the
     roots reuse that answer. The roots are the ones git's listing gives, and
-    the lookup runs the number of git commands the release notes state: four
-    from a checkout. A git that rejects `-z`, as git before 2.36 does, is
-    asked that one listing twice (`-z`, then without it), one command more in
-    each layout.
+    no git question is asked twice in the lookup (a question is the resolved
+    directory git runs in and the rest of its arguments). A git that rejects
+    `-z`, as git before 2.36 does, is asked that one listing twice (`-z`,
+    then without it), which are two questions.
 
     Real repos, real git, a `git` that logs each command it runs."""
     import os
@@ -2705,7 +2701,7 @@ def test_one_roots_lookup_lists_the_worktrees_once(
     assert calls, "control: the logging git ran"
     assert roots == expected, roots
     assert sum(" worktree list" in f" {args}" for _, args in calls) == (1 if nul else 2), calls
-    assert len(calls) == (commands_with_z if nul else commands_rejecting_z), calls
+    assert _repeated(calls) == [], calls
 
 
 def _git_listing(tmp_path, monkeypatch, listing: "bytes | None") -> None:
@@ -3894,8 +3890,9 @@ def test_an_unreadable_listing_with_no_branches_flags_nothing(tmp_path, monkeypa
     stale = [_item(status="active", ref="#9999", touched=_OLD)]
 
     assert len(backlog._abandoned_flags(stale, str(repo))) == 1, (
-        "control: with a readable listing the stale item no longer flags, so "
-        "the silence asserted below proves nothing"
+        "control failed: with a readable listing the stale item must flag "
+        "once, and it did not, so the silence asserted below would prove "
+        "nothing"
     )
 
     memory_api = backlog._memory_api()

@@ -58,6 +58,13 @@ import sys
 from pathlib import Path
 
 import pytest
+
+# A truth test of NotImplemented warns now and raises from Python 3.14, so a
+# profile function that reads a return value it has not checked fails here.
+pytestmark = pytest.mark.filterwarnings(
+    "error:NotImplemented should not be used in a boolean context:DeprecationWarning"
+)
+
 from fixtures.identity_git import (
     assert_outside_repository,
     bindings,
@@ -296,6 +303,12 @@ def _marker_predicates() -> set:
 # when it is not)}, measured with the filesystem and git by the matrix fixture.
 HOME_FACTS: dict = {}
 
+# [(home shape, `.git` directory the walk tested, whether `_home_facts`
+# judged git looked past it, whether memory_api's `_git_skips_marker` does
+# on git's answers there)], filled with HOME_FACTS, so the two rules cannot
+# drift apart without a test noticing.
+HOME_SKIPS: list = []
+
 
 def _home_facts(shape: str, target: Path) -> None:
     """Record, once per home shape, where the cwd marker walk lands and
@@ -320,10 +333,15 @@ def _home_facts(shape: str, target: Path) -> None:
         top = ask(walk, "--show-toplevel")
         common = ask(walk, "--path-format=absolute", "--git-common-dir")
         other_marker = (walk / ".claude").is_dir() or (walk / "CLAUDE.md").exists()
-        if other_marker or not (
+        skipped = bool(
             top and common and Path(top).resolve() != walk
             and Path(common).resolve() != (walk / ".git").resolve()
-        ):
+        )
+        if not other_marker:
+            HOME_SKIPS.append((shape, walk, skipped, memory_api._git_skips_marker(
+                walk, Path(common) if common else None, ask(walk, "--absolute-git-dir") or None,
+            )))
+        if other_marker or not skipped:
             break
         walk = PACTMemory._find_project_root(walk.parent).resolve()
     toplevel = ask(target, "--show-toplevel")
@@ -595,6 +613,51 @@ class TestEveryRungGivesAShapeTheSameAnswer:
                     wrong[(shape, route)] = (cells[(shape, route)][0], derived[shape])
         assert wrong == {}, f"a declining shape answered other than its derived reason: {wrong}"
         assert {"no_working_tree", "broken_git_marker"} <= set(derived.values()), derived  # control
+
+    def test_the_home_walk_skips_a_git_dir_where_the_resolver_does(self, matrix):
+        """`_home_facts` judges by its own comparison whether git looked past
+        a `.git` directory, and that judgement decides which cells the
+        agreement tests read. It must agree with memory_api's own rule,
+        `_git_skips_marker`, on git's answers at every `.git` the walk
+        tested, so neither can change alone.
+
+        RED WHEN either rule changes for a home shape's `.git` and the other
+        does not."""
+        assert any(skipped for _, _, skipped, _ in HOME_SKIPS), HOME_SKIPS  # control
+        assert any(not skipped for _, _, skipped, _ in HOME_SKIPS), HOME_SKIPS  # control
+        assert [row for row in HOME_SKIPS if row[2] != row[3]] == []
+
+    def test_the_derived_origin_rule_is_read_origins_rule(self, tmp_path_factory):
+        """`_git_derived_decline` derives `origin_unrepresentable` with its
+        own reading of `remote.origin.url`; read_origin's own-config-file
+        rule (`not_own_file`) is the one the resolver declines on. On every
+        shape that has a common dir the two must agree, so neither can
+        change alone.
+
+        RED WHEN either rule changes for a shape and the other does not."""
+        import subprocess
+
+        verdicts = {}
+        for shape, build in SHAPES.items():
+            base = tmp_path_factory.mktemp("origin-rule")
+            assert_outside_repository(base)
+            target = build(base)
+            derived = _git_derived_decline(target)
+            if derived in ("broken_git_marker", "no_working_tree"):
+                continue
+            common = subprocess.run(
+                ["git", "-C", str(target), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                capture_output=True, text=True, timeout=10, check=False,
+            )
+            if common.returncode != 0:
+                continue
+            with pytest.MonkeyPatch.context() as cell_patch:
+                _clear(cell_patch)
+                status = pi.read_origin(Path(common.stdout.rstrip("\n"))).state
+            verdicts[shape] = (derived == "origin_unrepresentable", status == pi.ORIGIN_NOT_OWN_FILE)
+        assert any(derived for derived, _ in verdicts.values()), verdicts  # control
+        assert any(not derived for derived, _ in verdicts.values()), verdicts  # control
+        assert {shape: v for shape, v in verdicts.items() if v[0] != v[1]} == {}
 
     def test_a_stray_git_with_no_repository_above_declines_on_every_route(self, matrix):
         """A `.git` directory with no repository above gets no answer from
@@ -3512,18 +3575,40 @@ def _documented_floor() -> tuple:
     return table, int(read.group(1))
 
 
+def _schema_inputs() -> tuple:
+    """Everything the store `ensure_initialized` creates depends on: the
+    schema module's text, the read-only scope, whether the vector extension
+    can load (the module's extension flag, its sqlite3 module and the
+    `sqlite_vec` import as `sys.modules` holds it), the embedding dimension
+    the vector table takes, and the module's schema functions, which a test
+    may patch. The objects themselves are the key, held by the cache, so a
+    patched one is a new key and no freed object's id can be reused."""
+    from scripts import database, embeddings
+
+    return (
+        Path(database.__file__).read_text(encoding="utf-8"),
+        database.read_only_scope_active(),
+        database.SQLITE_EXTENSIONS_ENABLED,
+        database.sqlite3,
+        sys.modules.get("sqlite_vec", _schema_inputs),
+        embeddings.get_embedding_service().embedding_dimension,
+        *(getattr(database, name) for name in (
+            "db_connection", "get_connection", "ensure_initialized", "init_schema",
+            "_init_vector_table", "_check_and_migrate_vector_table", "_migrate_ct_fields",
+        )),
+    )
+
+
 def _seed_bucket(store: Path, bucket: str) -> None:
     """One memory and one file row in `bucket`, in a new store at `store`.
-    The empty initialized store is built once per process for each text of
-    the schema module (`_initialized_store`) and copied; its schema, rows
-    and pragmas equal a store `ensure_initialized` creates in place."""
-    from scripts import database
+    The empty initialized store is built once per process for each set of
+    schema inputs (`_schema_inputs`, `_initialized_store`) and copied; its
+    schema, rows and pragmas equal a store `ensure_initialized` creates in
+    place with the same inputs."""
     from scripts.database import db_connection
 
     assert not store.exists(), store
-    store.write_bytes(_initialized_store(
-        Path(database.__file__).read_text(encoding="utf-8"), database.read_only_scope_active(),
-    ))
+    store.write_bytes(_initialized_store(_schema_inputs()))
     with db_connection(store) as conn:
         conn.execute(
             "INSERT INTO memories (id, context, project_id, session_id, created_at, "
@@ -3536,9 +3621,9 @@ def _seed_bucket(store: Path, bucket: str) -> None:
 
 
 @functools.lru_cache(maxsize=None)
-def _initialized_store(schema_source: str, read_only: bool) -> bytes:
-    """The bytes of an empty store `ensure_initialized` created, for one text
-    of the schema module and one read-only state."""
+def _initialized_store(inputs: tuple) -> bytes:
+    """The bytes of an empty store `ensure_initialized` created, for one set
+    of `_schema_inputs`; `inputs` is the cache key, read by no line here."""
     import tempfile
 
     from scripts.database import db_connection, ensure_initialized
@@ -3549,6 +3634,44 @@ def _initialized_store(schema_source: str, read_only: bool) -> bytes:
             ensure_initialized(conn)
             conn.commit()
         return store.read_bytes()
+
+
+@pytest.mark.parametrize("change", ["none", "vector extension off", "embedding dimension 384"])
+def test_a_seeded_store_has_the_schema_an_in_place_store_has(tmp_path, monkeypatch, change):
+    """`_seed_bucket` copies a cached empty store, so the copy must have the
+    schema `ensure_initialized` gives in place under the same inputs. The
+    cache is filled first with nothing changed, so a key that misses an
+    input serves that first store after the change.
+
+    RED WHEN the cache key leaves out the vector extension's state or the
+    embedding dimension."""
+    from scripts import database, embeddings
+    from scripts.database import db_connection, ensure_initialized
+
+    def schema(store: Path) -> list:
+        with db_connection(store) as conn:
+            return [tuple(row) for row in conn.execute(
+                "SELECT type, name, sql FROM sqlite_master ORDER BY type, name"
+            )]
+
+    _seed_bucket(tmp_path / "warm.db", "b")
+    if change == "vector extension off":
+        monkeypatch.setattr(database, "SQLITE_EXTENSIONS_ENABLED", False)
+    elif change == "embedding dimension 384":
+        monkeypatch.setattr(embeddings, "EMBEDDING_DIM", 384)
+    _seed_bucket(tmp_path / "seeded.db", "b")
+    with db_connection(tmp_path / "in-place.db") as conn:
+        ensure_initialized(conn)
+        conn.commit()
+
+    in_place = schema(tmp_path / "in-place.db")
+    vector = [sql for _, name, sql in in_place if name == "vec_memories"]
+    expected = {"none": "float[256]", "embedding dimension 384": "float[384]"}
+    # control: the change reached the schema an in-place store gets
+    assert [expected[change] in sql for sql in vector] == (
+        [] if change == "vector extension off" else [True]
+    ), in_place
+    assert schema(tmp_path / "seeded.db") == in_place
 
 
 def _fresh_scope_state() -> None:
@@ -3582,9 +3705,13 @@ def git_calls(tmp_path_factory):
 
     def tracer(frame, event, arg):
         code = frame.f_code
-        if event != "return" or not arg or code.co_name not in predicates:
+        # A profile function sees every return, so the return value is read
+        # only after the frame is known to be one of project_identity's
+        # predicates: any other function may return an object whose truth
+        # is not a bool (NotImplemented from an `__eq__`).
+        if event != "return" or code.co_name not in predicates:
             return None
-        if code.co_filename != pi.__file__:
+        if code.co_filename != pi.__file__ or not arg:
             return None
         key = (code.co_name, frame.f_lineno)
         if key in operands:

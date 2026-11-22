@@ -348,6 +348,29 @@ class TestBadOverride:
         assert memory._override_ignored["reason"] == "not_utf8"
         assert memory._override_ignored["path"].endswith("pact-project-id")
 
+    @pytest.mark.parametrize("extra", [0, 1], ids=["at the cap", "one byte over"])
+    def test_an_override_past_the_byte_cap_is_refused_as_too_long(
+        self, identity_env, monkeypatch, extra
+    ):
+        """An override file longer than the cap is refused as `too_long`,
+        whatever its lines hold: here a valid id followed by comment lines,
+        which would bind if the file were read whole. A file exactly at the
+        cap is read and binds.
+
+        RED WHEN the byte cap is removed or moved past the file's length."""
+        from scripts import project_identity
+
+        repo = make_repo(identity_env / "checkout", remote=REMOTE)
+        head = b"github.com/pinned/project\n"
+        padding = project_identity._MAX_OVERRIDE_BYTES + extra - len(head)
+        (common_dir(repo) / "pact-project-id").write_bytes(head + b"#" * padding)
+        monkeypatch.chdir(repo)
+
+        memory = _memory(identity_env)
+        refused = (memory._override_ignored or {}).get("reason")
+        expected = (CANONICAL, "too_long") if extra else ("github.com/pinned/project", None)
+        assert (memory._project_id, refused) == expected
+
     def test_an_empty_override_falls_through_with_a_reason(
         self, identity_env, monkeypatch
     ):

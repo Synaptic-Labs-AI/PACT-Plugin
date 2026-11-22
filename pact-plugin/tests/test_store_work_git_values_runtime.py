@@ -16,8 +16,9 @@ flag that changes what it reads (setup; save with `--claude-md-root`, with
 and with `--claude-md-root`; list; get; status; update and `update
 --replace`; sync with `--claude-md-root` and with its default root;
 project-file; `project-id show`; rekey with `--candidates`, with `--apply`,
-with `--dry-run`, with an explicit `--to` and no mode flag, and with
-`--from` alone on the canonical bucket, which refuses; delete). Positional
+with `--dry-run`, with an explicit `--to` and no mode flag, with `--from`
+alone on the canonical bucket, which refuses, and with `--from` alone on
+the checkout's own legacy bucket, whose `--to` defaults; delete). Positional
 JSON input and `--limit` are not run separately: they change only how a
 value arrives, or how many rows come back.
 
@@ -26,7 +27,10 @@ log would mean nothing. Store rows are read back in command output, and the
 session records and the prune ledger are read through files the process
 opens, which an audit hook records. The repository's `description` is read
 for its ctime only, so no string can mark it; the records that make the
-check consult it are marked, and their reads are observed.
+check consult it are marked, and their reads are observed. The legacy
+bucket's rows are read only once a session record vouches for the bucket,
+so the last two routes give the live legacy session a start after the
+`description` and then list and rekey: the list prints the legacy rows.
 
 One flow is allowed: a write whose CLAUDE_PROJECT_DIR disagrees with the
 session record asks git about the recorded project directory, to tell a
@@ -91,8 +95,11 @@ ROUTES = (
     "sync, default root", "save, default root", "project-file", "project-id show",
     "rekey --candidates", "rekey", "rekey --dry-run", "rekey --from (canonical, refused)", "delete",
     "save, disagreeing record", "update, disagreeing record", "delete, disagreeing record",
-    "sync, disagreeing record",
+    "sync, disagreeing record", "list, legacy bucket vouched for",
+    "rekey --from (legacy, --to defaulted)",
 )
+# The legacy bucket's rows, read only once a session record vouches for it.
+LEGACY_ROWS = tuple(f"{MARK}-row-{row_id}" for row_id in ("l1", "l2", "l3"))
 # The routes whose output carries store rows, so each must print a marked one.
 ROUTES_THAT_PRINT_ROWS = ("search", "search --current-file", "search --claude-md-root", "list", "get")
 # What the disagreement check asks git about the recorded directory, in order.
@@ -277,6 +284,14 @@ def rig(tmp_path_factory):
         ("sync", ("sync",), None),
     ):
         run(f"{label}, disagreeing record", *argv, stdin=stdin, session=DISAGREEING_SESSION)
+    # Last, so no route above reads the bucket as vouched for: the live
+    # legacy session now starts after the repository's description.
+    from datetime import datetime, timezone
+
+    record(LEGACY_LIVE, slug_dir, project_dir=str(repo),
+           started_at=datetime.now(timezone.utc).isoformat())
+    run("list, legacy bucket vouched for", "list", "--limit", "50")
+    run("rekey --from (legacy, --to defaulted)", "project-id", "rekey", "--from", "proj")
     return {
         "runs": runs, "recorded": recorded, "read_log": read_log, "base": base,
         "documents": documents,
@@ -312,7 +327,8 @@ def test_no_store_work_value_reaches_a_git_command(rig):
     # The values `update` writes are inputs to that write, not reads, so
     # they are checked for leaks but need no read evidence. The other
     # bucket's mark is its id, which the rekey commands read and print.
-    unread = [value for value in (*ROW_MARKS, FILE_ROW, OTHER_BUCKET) if value not in printed]
+    unread = [value for value in (*ROW_MARKS, *LEGACY_ROWS, FILE_ROW, OTHER_BUCKET)
+              if value not in printed]
     opened = rig["read_log"].read_text(encoding="utf-8") if rig["read_log"].exists() else ""
     unread += [name for name, path in rig["records"].items() if str(path) not in opened]
     assert unread == [], f"no evidence these marked values were read: {unread}"

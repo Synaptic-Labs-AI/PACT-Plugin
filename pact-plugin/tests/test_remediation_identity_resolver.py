@@ -799,6 +799,24 @@ class TestSessionEvidenceAdmitsAnUnverifiedBucket:
         ]
         assert len(notices) == 1 and "project-id rekey" in notices[0]
 
+    def test_a_scope_read_outside_a_pass_is_not_served_inside_one(
+        self, identity_env, monkeypatch
+    ):
+        """The read-scope cache is written only inside a detection pass. A
+        read outside one leaves nothing behind, so a session context file
+        that appears afterwards is read by the next read inside a pass, and
+        the bucket it vouches for is admitted.
+
+        RED WHEN a read outside a pass also writes the cache: the pass then
+        serves the scope computed before the context file existed."""
+        repo = self._checkout(identity_env, monkeypatch)
+        store = identity_env / "store.db"
+        _seed(store, "proj")
+        assert PACTMemory(session_id="s", db_path=store)._read_project_scopes() == (CANONICAL,)
+        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        with memory_api.detection_pass():
+            assert PACTMemory(session_id="s", db_path=store)._read_project_scopes() == (CANONICAL, "proj")
+
     def test_a_session_recorded_for_a_same_named_folder_is_no_evidence(
         self, identity_env, monkeypatch
     ):
@@ -3439,15 +3457,29 @@ def _binary(self, other, *rest):
 _arm_the_adversary()
 
 
+# The builtins the evaluation binds to the real object: pure functions of
+# their arguments, with no effect outside the call. Any other builtin an
+# expression names (`open`, `exec`, `eval`, `compile`, `input`, `print`,
+# `breakpoint`, `setattr`, ...) is an adversary like any unknown name, so
+# the evaluation never runs it and its verdict fails closed.
+_PURE_BUILTINS = frozenset({
+    "abs", "all", "any", "ascii", "bin", "bool", "bytes", "chr", "divmod",
+    "enumerate", "filter", "float", "frozenset", "hex", "int", "isinstance",
+    "issubclass", "len", "list", "map", "max", "min", "oct", "ord", "range",
+    "repr", "reversed", "round", "set", "sorted", "str", "sum", "tuple", "zip",
+})
+
+
 def _gives_back_an_answer(node, passing, parents, constants, sentinel_values, builtin_names=frozenset()) -> bool:
     """Whether the expression `node`, whose children `passing` pass an
     answer, can give one back. The nearest expression that compiles on its
     own (a formatted value's string, a starred item's container) is
     evaluated with each passing child replaced by each answer a reader
     gives (each sentinel string and a record list), every other name being
-    a module string constant (`constants`) or a builtin the module does not
-    shadow (`builtin_names`). FAIL CLOSED: an expression with any other
-    name, or none that compiles, can."""
+    a module string constant (`constants`) or a pure builtin
+    (`_PURE_BUILTINS`) the module does not shadow (`builtin_names`). FAIL
+    CLOSED: an expression with any other name, or none that compiles, can."""
+    builtin_names = frozenset(builtin_names) & _PURE_BUILTINS
     held = {id(child) for child in passing}
     while True:
         copy = ast.parse("x", mode="eval")
@@ -3477,6 +3509,34 @@ def _gives_back_an_answer(node, passing, parents, constants, sentinel_values, bu
         if _holds(result, answer) or any(_holds(value, answer) for value in handed):
             return True
     return False
+
+
+@pytest.mark.parametrize("name", ["open", "exec", "input", "breakpoint", "print", "delattr"])
+def test_the_answer_eval_runs_no_builtin_with_an_effect(monkeypatch, name):
+    """An expression that hands a passing value to a builtin with an effect
+    outside the call is judged without running that builtin: the name is an
+    adversary, so the verdict fails closed (it can give the answer back)
+    and the real builtin is never called. Control: a pure builtin (`len`)
+    is still evaluated, so an expression that only measures the answer
+    gives none back.
+
+    RED WHEN the evaluation binds a builtin with an effect to the real
+    object, or stops evaluating the pure ones."""
+    import builtins
+
+    calls = []
+    monkeypatch.setattr(builtins, name, lambda *args, **kwargs: calls.append(args))
+    every = frozenset(n for n in dir(builtins) if not n.startswith("_"))
+
+    def verdict(source):
+        node = ast.parse(source, mode="eval").body
+        parents = {id(child): parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)}
+        passing = [n for n in ast.walk(node) if isinstance(n, ast.Name) and n.id == "answer"]
+        return _gives_back_an_answer(node, passing, parents, {}, ["unreadable"], every)
+
+    assert verdict(f"{name}(answer)") is True
+    assert calls == []
+    assert verdict("len(answer)") is False  # control
 
 
 def _replace_passing(node, held):

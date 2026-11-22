@@ -1101,9 +1101,10 @@ class TestForgedSubmoduleAdminEndToEnd:
 
         # THE DECLARED PATHS, including a SUBDIRECTORY of the forged dir:
         # `<subdir>/.git` does not exist, so the marker must be found by
-        # walking up. In this suite the cwd is a real repository, so a
-        # declined declaration legitimately falls through to it — what must
-        # never appear is the VICTIM's id.
+        # walking up. A declaration that declines ends resolution, so each
+        # one gives no identity at all: neither the VICTIM's id nor any
+        # other (a folder name, or the cwd's, which here is the bare
+        # tmp_path and names no project).
         monkeypatch.chdir(tmp_path)
         (forged / "sub").mkdir()
         for declared in (forged, forged / "sub"):
@@ -1111,11 +1112,9 @@ class TestForgedSubmoduleAdminEndToEnd:
             declared_memory = memory_api.PACTMemory(
                 db_path=tmp_path / "store" / "memory.db"
             )
-            assert declared_memory.project_id != "github.com/victim/secret-lib"
-            assert declared_memory._project_id_source != "origin remote" or (
-                declared_memory.project_id
-                != "github.com/victim/secret-lib"
-            )
+            assert (
+                declared_memory.project_id, declared_memory._project_id_source
+            ) == (None, "unresolved"), declared
 
 
 class TestReadScopeCacheKeyIncludesTheIdentityRoot:

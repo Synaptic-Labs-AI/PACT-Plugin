@@ -364,14 +364,12 @@ class TestNoRepositoryChosenNameBindsAStoreKey:
             patcher.setattr(
                 PACTMemory, "_store_embedding", lambda self, *a, **k: None
             )
-            try:
+            # The save refuses with the resolver's own error, so an unrelated
+            # failure inside save cannot stand in for the refusal.
+            with pytest.raises(memory_api.ProjectIdentityUnresolvedError):
                 memory.save(
                     {"context": "attacker-scope write"}, sync_to_claude=False
                 )
-            except Exception:
-                # The refusal shape is the implementer's choice; the outcome
-                # assertion below is what this arm pins.
-                pass
         with db_connection(store) as conn:
             assert count_project_memories(conn, "ForeignProj") == before, (
                 "a write landed in the bucket named by the repository's own "
@@ -481,13 +479,10 @@ class TestDeinitEdSubmoduleAdminDir:
             patcher.setattr(
                 PACTMemory, "_store_embedding", lambda self, *a, **k: None
             )
-            try:
+            with pytest.raises(memory_api.ProjectIdentityUnresolvedError):
                 memory.save(
                     {"context": "forged-pointer write"}, sync_to_claude=False
                 )
-            except Exception:
-                # The refusal shape is the implementer's choice.
-                pass
         with db_connection(store) as conn:
             assert count_project_memories(conn, VICTIM) == before, (
                 "a write landed in the victim's bucket through a deinit-ed "
