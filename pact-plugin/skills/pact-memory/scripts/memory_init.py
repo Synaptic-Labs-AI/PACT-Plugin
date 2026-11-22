@@ -42,6 +42,9 @@ logger = logging.getLogger(__name__)
 #    specifically, persists across process restarts within the same session
 _init_lock = threading.Lock()
 _initialized = False
+# True when initialization ran inside a read scope and so skipped the
+# embedding migration; the first call outside a read scope runs it.
+_migration_deferred = False
 
 # Outcome of this session's embedding catch-up, kept so a STATUS READER can see
 # it. `_ensure_ready()` discards `ensure_memory_ready()`'s return value, and an
@@ -182,8 +185,8 @@ def maybe_migrate_embeddings() -> dict:
         # Import required modules - we're inside the scripts package now
         try:
             import pysqlite3 as sqlite3  # noqa: F401  # availability probe: absence must route to skipped_deps
-            import sqlite_vec
-            from .database import get_connection
+            import sqlite_vec  # noqa: F401  # availability probe: absence must route to skipped_deps
+            from .database import get_connection, load_sqlite_vec
             from .embeddings import get_embedding_service, generate_embedding_text, EMBEDDING_DIM
         except ImportError:
             # Distinct status to differentiate from "nothing to migrate"
@@ -194,7 +197,7 @@ def maybe_migrate_embeddings() -> dict:
 
         # Connect to database
         conn = get_connection()
-        sqlite_vec.load(conn)
+        load_sqlite_vec(conn)
 
         # Check if vec_memories table exists
         cursor = conn.execute(
@@ -289,6 +292,10 @@ try:
     from .pact_session import get_session_id_from_context_file
 except ImportError:
     from pact_session import get_session_id_from_context_file
+try:
+    from .config import read_only_scope_active
+except ImportError:
+    from config import read_only_scope_active
 
 
 # Fallback marker name for when the session id cannot be resolved. Process-
@@ -489,15 +496,21 @@ def ensure_memory_ready() -> dict:
             - migration: dict - Migration result
             - embedding: dict - Embedding catch-up result
     """
-    global _initialized
+    global _initialized, _migration_deferred
 
     # Fast path: already initialized this session
-    if _initialized:
+    if _initialized and not (_migration_deferred and not read_only_scope_active()):
         return {"already_initialized": True}
 
     with _init_lock:
         # Double-check after acquiring lock
         if _initialized:
+            if _migration_deferred and not read_only_scope_active():
+                _migration_deferred = False
+                return {
+                    "already_initialized": True,
+                    "migration": maybe_migrate_embeddings(),
+                }
             return {"already_initialized": True}
 
         result = {
@@ -516,8 +529,16 @@ def ensure_memory_ready() -> dict:
         if deps_result.get("failed"):
             logger.warning(f"Failed to install: {', '.join(deps_result['failed'])}")
 
-        # 2. Migrate embeddings if dimension changed
-        migration_result = maybe_migrate_embeddings()
+        # 2. Migrate embeddings if dimension changed. A READ RUNS NO MIGRATION:
+        # the migration drops and recreates the vector table, so inside a read
+        # scope it waits for the first call outside one. The catch-up below
+        # still runs; under the read scope it writes vectors only into a
+        # vector table that already exists.
+        if read_only_scope_active():
+            _migration_deferred = True
+            migration_result = {"status": "deferred", "message": None}
+        else:
+            migration_result = maybe_migrate_embeddings()
         result["migration"] = migration_result
 
         if migration_result.get("message"):
@@ -569,9 +590,10 @@ def reset_initialization() -> None:
     on the same machine, so deleting it here would reach outside the caller.
     Call clear_embedding_marker() when the marker itself needs removing.
     """
-    global _initialized
+    global _initialized, _migration_deferred
     with _init_lock:
         _initialized = False
+        _migration_deferred = False
 
 
 def clear_embedding_marker() -> None:

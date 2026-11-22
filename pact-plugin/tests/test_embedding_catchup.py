@@ -34,6 +34,7 @@ def _make_mock_database():
     mod.db_connection = MagicMock()
     mod.ensure_initialized = MagicMock()
     mod.get_memory = MagicMock()
+    mod.load_sqlite_vec = MagicMock()
     mod.SQLITE_EXTENSIONS_ENABLED = True
     return mod
 

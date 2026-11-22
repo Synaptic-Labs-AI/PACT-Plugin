@@ -30,6 +30,7 @@ from .database import (
     db_connection,
     ensure_initialized,
     get_memory,
+    load_sqlite_vec,
     SQLITE_EXTENSIONS_ENABLED,
 )
 from .embeddings import (
@@ -241,8 +242,7 @@ def get_unembedded_memories(
                 # A vec0 virtual table: the read needs the extension that
                 # `_init_vector_table` loads on a writing connection.
                 if sqlite_vec is not None:
-                    conn.enable_load_extension(True)
-                    sqlite_vec.load(conn)
+                    load_sqlite_vec(conn)
             else:
                 # No vector table yet: every memory is unembedded.
                 query = "SELECT m.id FROM memories m WHERE 1"
@@ -305,9 +305,7 @@ def embed_single_memory(memory_id: str) -> bool:
 
             # Store embedding
             try:
-                conn.enable_load_extension(True)
-                import sqlite_vec
-                sqlite_vec.load(conn)
+                load_sqlite_vec(conn)
 
                 embedding_blob = struct.pack(f'{len(embedding)}f', *embedding)
                 # DROP A ROW IN ANOTHER PARTITION FIRST. A vec0 primary key is
@@ -350,10 +348,7 @@ def _load_vector_extension(connection: Any) -> None:
     does not need (it walks the shadow tables as ordinary b-trees).
     """
     try:
-        import sqlite_vec
-
-        connection.enable_load_extension(True)
-        sqlite_vec.load(connection)
+        load_sqlite_vec(connection)
     except Exception as exc:  # noqa: BLE001
         logger.debug(f"sqlite-vec not loaded for the integrity check: {exc}")
 

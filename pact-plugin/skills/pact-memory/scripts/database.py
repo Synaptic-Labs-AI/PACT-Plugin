@@ -263,6 +263,16 @@ def get_connection(db_path: Optional[Path] = None) -> sqlite3.Connection:
     # Track whether the DB file is newly created for permission hardening
     is_new = not path.exists()
 
+    # A READ NEVER CREATES A STORE. Inside a read scope an absent store is
+    # refused before the pre-create below and before `sqlite3.connect`, both
+    # of which would leave a 0-byte file behind. This is the error sqlite
+    # itself raises for a read-only open of a missing file.
+    if is_new and read_only_scope_active():
+        raise sqlite3.OperationalError(
+            f"unable to open database file: {path} is absent, and a read "
+            "does not create a store"
+        )
+
     # TOCTOU mitigation: pre-create the file with 0o600 permissions atomically
     # so it is never world-readable, even briefly before sqlite3.connect() creates it.
     if is_new:
@@ -513,6 +523,23 @@ def init_schema(conn: sqlite3.Connection) -> None:
     logger.info("Database schema initialized successfully")
 
 
+def load_sqlite_vec(conn: sqlite3.Connection) -> None:
+    """Load sqlite-vec into `conn`, then turn extension loading back off.
+
+    Extension loading stays enabled only for the `sqlite_vec.load` call, so
+    no later statement on the connection can load another extension (for
+    example through SQL's `load_extension()`). Raises ImportError when
+    sqlite-vec is not installed, and whatever `sqlite_vec.load` raises.
+    """
+    import sqlite_vec
+
+    conn.enable_load_extension(True)
+    try:
+        sqlite_vec.load(conn)
+    finally:
+        conn.enable_load_extension(False)
+
+
 def _init_vector_table(conn: sqlite3.Connection) -> bool:
     """
     Attempt to create the vector table for semantic search.
@@ -547,11 +574,8 @@ def _init_vector_table(conn: sqlite3.Connection) -> bool:
         return False
 
     try:
-        # Enable extension loading (safe because we're using pysqlite3)
-        conn.enable_load_extension(True)
         try:
-            import sqlite_vec
-            sqlite_vec.load(conn)
+            load_sqlite_vec(conn)
         except ImportError:
             logger.warning(
                 "sqlite-vec not installed. Vector search will be unavailable. "
@@ -1653,8 +1677,13 @@ def rekey_project(
     both ids. A path present only under `from` is updated in place, and its
     links follow the file id unchanged. A CONFLICTING path keeps the target
     row: its memory links and its file relations are re-pointed and the old
-    row is then deleted. `relations_repointed` counts the row's own incident
-    edges before and after the move, so a SELF-relation is one edge.
+    row is then deleted. `relations_repointed` counts each relation with at
+    least one end on such a row ONCE, taken before the move, so an edge whose
+    two ends both merge is one edge and so is a SELF-relation. A re-pointed
+    edge that already exists under the target is dropped as an exact
+    duplicate: the key `(source_file, target_file, relationship)` includes the
+    relationship, so no relationship is ever lost and there is no
+    `relations_conflicted` counter to match `links_conflicted`.
 
     MEMORY LINKS USE A DETERMINISTIC KEEPER RULE. `memory_files` is keyed
     `(memory_id, file_id)`, so when the target already carries a link for the
@@ -1789,6 +1818,19 @@ def rekey_project(
             (from_id,),
         ).fetchall()
 
+        # EACH EDGE COUNTS ONCE, so the count is taken once, BEFORE any row
+        # moves: every relation with at least one end on a `from` row that
+        # merges into an existing target row. Counting per merged row instead
+        # counted an edge twice when both of its ends merged.
+        counters["relations_repointed"] = conn.execute(
+            "SELECT COUNT(*) FROM file_relations r WHERE EXISTS ("
+            "SELECT 1 FROM files o JOIN files t "
+            "ON t.path = o.path AND t.project_id = ? "
+            "WHERE o.project_id = ? "
+            "AND o.id IN (r.source_file, r.target_file))",
+            (to_id, from_id),
+        ).fetchone()[0]
+
         for old_id, old_path in old_files:
             target = conn.execute(
                 "SELECT id FROM files WHERE path = ? AND project_id = ?",
@@ -1835,17 +1877,9 @@ def rekey_project(
                 "DELETE FROM memory_files WHERE file_id = ?", (old_id,)
             )
 
-            # COUNT THE EDGES THE ROW ACTUALLY HAD, not the two INSERT
-            # rowcounts. A SELF-RELATION is why: the outgoing statement
-            # inserts `target -> old`, and the incoming scan then sees that
-            # new row and inserts `target -> target`, so summing both
-            # rowcounts reports 2 for one edge.
-            relations_before = conn.execute(
-                "SELECT COUNT(*) FROM file_relations "
-                "WHERE source_file = ? OR target_file = ?",
-                (old_id, old_id),
-            ).fetchone()[0]
-
+            # A SELF-RELATION needs both statements: the outgoing one inserts
+            # `target -> old`, and the incoming scan then sees that new row
+            # and inserts `target -> target`.
             conn.execute(
                 "INSERT OR IGNORE INTO file_relations "
                 "(source_file, target_file, relationship) "
@@ -1868,13 +1902,6 @@ def rekey_project(
                 "DELETE FROM file_relations WHERE target_file = ?", (old_id,)
             )
 
-            relations_after = conn.execute(
-                "SELECT COUNT(*) FROM file_relations "
-                "WHERE source_file = ? OR target_file = ?",
-                (old_id, old_id),
-            ).fetchone()[0]
-            counters["relations_repointed"] += relations_before - relations_after
-
             # Every reference to the old row (`memory_files.file_id` and the
             # two `file_relations` endpoints) was re-pointed and deleted
             # above, so the row is retired unconditionally.
@@ -1891,9 +1918,7 @@ def rekey_project(
         vector_ready = False
         if moved_ids and vector_table_present and SQLITE_EXTENSIONS_ENABLED:
             try:
-                conn.enable_load_extension(True)
-                import sqlite_vec
-                sqlite_vec.load(conn)
+                load_sqlite_vec(conn)
                 vector_ready = True
             except Exception as exc:  # noqa: BLE001 - degrade, never fail the move
                 logger.debug(f"rekey_project: vector table unavailable: {exc}")
@@ -2550,6 +2575,14 @@ def list_memories(
     return [_deserialize_json_fields(row) for row in rows]
 
 
+# The text columns the keyword search reads, in order. Fixed names, so the
+# query built from them carries no caller input.
+_TEXT_SEARCH_COLUMNS = (
+    "context", "goal", "lessons_learned", "decisions",
+    "reasoning_chains", "agreements_reached", "disagreements_resolved",
+)
+
+
 def search_memories_by_text(
     conn: sqlite3.Connection,
     search_term: str,
@@ -2588,19 +2621,19 @@ def search_memories_by_text(
     escaped = search_term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
     search_pattern = f"%{escaped}%"
 
-    query = """
-        SELECT * FROM memories
-        WHERE (
-            context LIKE ? ESCAPE '\\'
-            OR goal LIKE ? ESCAPE '\\'
-            OR lessons_learned LIKE ? ESCAPE '\\'
-            OR decisions LIKE ? ESCAPE '\\'
-            OR reasoning_chains LIKE ? ESCAPE '\\'
-            OR agreements_reached LIKE ? ESCAPE '\\'
-            OR disagreements_resolved LIKE ? ESCAPE '\\'
-        )
-    """
-    params = [search_pattern] * 7
+    # ONLY THE COLUMNS THE STORE HAS. A store from before v3.8.0 lacks the
+    # three CT columns until a write migrates it, and a read runs no
+    # migration, so naming an absent column would fail the whole search.
+    present = {
+        row[1] for row in conn.execute("PRAGMA table_info(memories)")
+    }
+    columns = [c for c in _TEXT_SEARCH_COLUMNS if c in present]
+    query = (
+        "SELECT * FROM memories WHERE ("
+        + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in columns)
+        + ")"
+    )
+    params = [search_pattern] * len(columns)
 
     if scopes is not None:
         predicate, scope_params = project_scope_predicate("project_id", scopes)

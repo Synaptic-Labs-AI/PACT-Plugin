@@ -6410,6 +6410,9 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', 'ensure_memory_ready'): (
             'prepares the memory system (dependencies, migration, embedding catch-up) before the store is used' + _AFTER_DETECTION
         ),
+        ('call', 'load_sqlite_vec'): (
+            'loads the vector extension into a store connection' + _AFTER_DETECTION
+        ),
         ('call', 'env_record_project_dir_disagreement'): (
             "compares CLAUDE_PROJECT_DIR with the session record's project directory so a write can refuse when they disagree; it changes no answer the identity reads" + _AFTER_DETECTION_ASKS
         ),
@@ -6535,9 +6538,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ('call', '<call to no function embedding_catchup: logger.debug>'): (
             "embedding_catchup's module logger" + _AFTER_DETECTION
-        ),
-        ('call', '<call to no function embedding_catchup: sqlite_vec.load>'): (
-            'loads the vector extension into a store connection' + _AFTER_DETECTION
         ),
         ('call', '<name imported from a project module embedding_catchup: MIN_CATCHUP_RAM_MB>'): (
             'the memory floor below which the embedding catch-up does not run, a constant' + _AFTER_DETECTION

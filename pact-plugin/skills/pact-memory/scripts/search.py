@@ -30,6 +30,7 @@ from .database import (
     db_connection,
     ensure_initialized,
     get_memory,
+    load_sqlite_vec,
     normalise_project_scopes,
     project_scope_predicate,
     search_memories_by_text,
@@ -146,11 +147,8 @@ def vector_search(
         return []
 
     try:
-        # Enable extension loading (safe because SQLITE_EXTENSIONS_ENABLED is True)
-        conn.enable_load_extension(True)
         try:
-            import sqlite_vec
-            sqlite_vec.load(conn)
+            load_sqlite_vec(conn)
         except ImportError:
             logger.debug("sqlite-vec not available for search")
             return []

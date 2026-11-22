@@ -56,6 +56,7 @@ from .database import (
     update_memory,
     delete_memory,
     list_memories,
+    load_sqlite_vec,
     ensure_initialized,
     resolve_memory_id_prefix,
     _unusable_identifier,
@@ -3642,6 +3643,29 @@ class PACTMemory:
             return store_path_origin() in DERIVED_STORE_ORIGINS
         return _store_schema_present(str(store))
 
+    def _ensure_ready_for_read(self) -> None:
+        """Run `_ensure_ready()` for a READ verb.
+
+        A store that exists is only read, so the initialization runs inside
+        the read scope: no schema DDL, no column migration and no embedding
+        migration. The embedding catch-up still writes vectors into a vector
+        table that already exists. An absent store reaches a read verb only on
+        the derived route (see `_schema_present`), where the first memory
+        operation creates the store and its schema, so that call runs outside
+        the scope.
+        """
+        from .database import get_db_path
+
+        try:
+            store = get_db_path()
+        except (OSError, RuntimeError, ValueError):
+            store = self._db_path or resolve_db_path()
+        if Path(store).exists():
+            with read_only_scope():
+                _ensure_ready()
+        else:
+            _ensure_ready()
+
     def _read_project_scopes(self, conn: Any = None) -> tuple:
         """The project ids a READ may bind: the canonical id plus its legacy bucket.
 
@@ -4971,11 +4995,8 @@ class PACTMemory:
             return self._degraded_reason(self.DEGRADED_NO_MODEL)
 
         try:
-            # Enable extension loading (safe because SQLITE_EXTENSIONS_ENABLED is True)
-            conn.enable_load_extension(True)
             try:
-                import sqlite_vec
-                sqlite_vec.load(conn)
+                load_sqlite_vec(conn)
             except ImportError:
                 logger.debug("sqlite-vec not installed, skipping embedding storage")
                 # Same as the no-extension exit: the vector table is
@@ -5086,9 +5107,7 @@ class PACTMemory:
         be reached, so a stale vector may survive.
         """
         try:
-            conn.enable_load_extension(True)
-            import sqlite_vec
-            sqlite_vec.load(conn)
+            load_sqlite_vec(conn)
             conn.execute("DELETE FROM vec_memories WHERE memory_id = ?", (memory_id,))
             if commit:
                 conn.commit()
@@ -5139,8 +5158,8 @@ class PACTMemory:
         # schema DDL.
         if not self._schema_present():
             return []
-        # Ensure memory system is ready (lazy initialization)
-        _ensure_ready()
+        # Ensure memory system is ready (lazy initialization).
+        self._ensure_ready_for_read()
         # NO SCHEMA DDL ON A READ: see `config.read_only_scope`. The scope is
         # computed INSIDE the block too: it is a read, and its probe must not
         # run the write-path initialiser either.
@@ -5208,8 +5227,8 @@ class PACTMemory:
         # A READ MUST NOT INITIALISE THE STORE (see `search`).
         if not self._schema_present():
             return []
-        # Ensure memory system is ready (lazy initialization)
-        _ensure_ready()
+        # Ensure memory system is ready (lazy initialization).
+        self._ensure_ready_for_read()
 
         # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
         with read_only_scope():
@@ -5324,8 +5343,8 @@ class PACTMemory:
         # store has no row to return, so it answers None without creating one.
         if not self._schema_present():
             return None
-        # Ensure memory system is ready (lazy initialization)
-        _ensure_ready()
+        # Ensure memory system is ready (lazy initialization).
+        self._ensure_ready_for_read()
 
         # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
         with read_only_scope(), db_connection() as conn:
@@ -5646,9 +5665,7 @@ class PACTMemory:
         Only an observed row under a different project makes this true.
         """
         try:
-            conn.enable_load_extension(True)
-            import sqlite_vec
-            sqlite_vec.load(conn)
+            load_sqlite_vec(conn)
             row = conn.execute(
                 "SELECT project_id FROM vec_memories WHERE memory_id = ?",
                 (memory_id,),
@@ -5925,8 +5942,8 @@ class PACTMemory:
         # A READ MUST NOT INITIALISE THE STORE (see `search`).
         if not self._schema_present():
             return []
-        # Ensure memory system is ready (lazy initialization)
-        _ensure_ready()
+        # Ensure memory system is ready (lazy initialization).
+        self._ensure_ready_for_read()
 
         # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
         with read_only_scope(), db_connection() as conn:
@@ -6092,8 +6109,8 @@ class PACTMemory:
         # uninitialized store has no counts to report.
         if not self._schema_present():
             return self._empty_status_envelope()
-        # Ensure memory system is ready (lazy initialization)
-        _ensure_ready()
+        # Ensure memory system is ready (lazy initialization).
+        self._ensure_ready_for_read()
 
         # NO IDENTITY MEANS NO STATUS QUERY. Both the memory count and the graph
         # stats report WHOLE-STORE numbers when the id is None, so an unguarded

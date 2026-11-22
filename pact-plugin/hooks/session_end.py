@@ -19,6 +19,7 @@ Output: None (SessionEnd hooks cannot inject context)
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -639,12 +640,39 @@ def _pruned_session_line(entry: Path) -> str | None:
         return None
 
 
+# The memory store's evidence reader reads only the last 1 MiB of the ledger
+# (`memory_api._PRUNE_LEDGER_TAIL_BYTES`), so lines older than that window are
+# never read. Past twice the window the writer keeps only the last window's
+# whole lines, which bounds the file without dropping a line the reader sees.
+_PRUNE_LEDGER_KEEP_BYTES = 1024 * 1024
+_PRUNE_LEDGER_COMPACT_BYTES = 2 * _PRUNE_LEDGER_KEEP_BYTES
+
+
+def _compact_ledger(fd: int, size: int) -> None:
+    """Rewrite the ledger open on `fd` as its last whole lines within the
+    reader's window. The caller holds the lock, and the file stays the same
+    inode, so a writer waiting on the lock appends to the compacted file."""
+    os.lseek(fd, size - _PRUNE_LEDGER_KEEP_BYTES, os.SEEK_SET)
+    tail = b""
+    while len(tail) < _PRUNE_LEDGER_KEEP_BYTES:
+        chunk = os.read(fd, _PRUNE_LEDGER_KEEP_BYTES - len(tail))
+        if not chunk:
+            break
+        tail += chunk
+    # The window starts mid-line; drop that partial first line.
+    tail = tail[tail.find(b"\n") + 1:]
+    os.ftruncate(fd, 0)
+    while tail:
+        tail = tail[os.write(fd, tail):]
+
+
 def _append_ledger_line(slug_dir: Path, line: str) -> None:
     """Append `line` to the slug's prune ledger. Never raises.
 
     Refuses a ledger that is a symlink or not a regular file. O_NOFOLLOW
     refuses a symlink planted after the lstat, and O_NONBLOCK keeps a planted
-    FIFO from hanging the hook on open.
+    FIFO from hanging the hook on open. The append and any compaction run
+    under an exclusive lock, so concurrent session ends do not interleave.
     """
     try:
         ledger = slug_dir / PRUNE_LEDGER_NAME
@@ -655,13 +683,17 @@ def _append_ledger_line(slug_dir: Path, line: str) -> None:
             pass
         fd = os.open(
             ledger,
-            os.O_WRONLY | os.O_APPEND | os.O_CREAT
+            os.O_RDWR | os.O_APPEND | os.O_CREAT
             | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
             0o600,
         )
         try:
             if stat.S_ISREG(os.fstat(fd).st_mode):
+                fcntl.flock(fd, fcntl.LOCK_EX)
                 os.write(fd, line.encode("utf-8"))
+                size = os.fstat(fd).st_size
+                if size > _PRUNE_LEDGER_COMPACT_BYTES:
+                    _compact_ledger(fd, size)
         finally:
             os.close(fd)
     except Exception:

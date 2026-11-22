@@ -160,11 +160,11 @@ _READ_ONLY_SCOPE: ContextVar[bool] = ContextVar(
 def read_only_scope() -> Iterator[None]:
     """Declare that this block must not write to the store.
 
-    The read verbs wrap their store work in this so `ensure_initialized`
-    SKIPS migrations and the vector-table CREATE: a READ must not emit schema
-    DDL on a store it is only reporting on. It is a DECLARATION, not a
-    connection mode — a caller that genuinely needs a write must stay outside
-    the scope, and none of the read verbs does.
+    The read verbs wrap their store work and lazy initialization in this: no
+    migration, vector-table CREATE, embedding migration, store creation or
+    journal-mode switch, so a READ emits no schema DDL on a store it reports
+    on. A DECLARATION about schema, not a connection mode: the catch-up still
+    fills vectors into an existing table, and a dry-run rekey rolls back.
 
     The same thread caveat as `store_scope` applies: this package starts no
     thread today, and a ContextVar set here is not visible in a thread

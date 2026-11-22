@@ -1006,7 +1006,7 @@ def _project_candidates(memory, db_path) -> list:
     is read READ-ONLY (`read_project_bucket_census`), so an absent or
     schema-less store answers an empty list and is NEVER created or given a
     schema by this report; a present store that cannot be opened, or is not
-    a readable SQLite database, raises, and the CLI reports exit 2 with the
+    a readable SQLite database, raises, and the CLI reports exit 3 with the
     remedy named.
     `memory` must already have computed its read scope, which is what names
     the legacy candidate.
@@ -1020,6 +1020,24 @@ def _project_candidates(memory, db_path) -> list:
     )
 
 
+def _exit_store_fault(exc, store, error) -> NoReturn:
+    """Report a present store that cannot serve a `project-id` verb: exit 3.
+
+    The whole `project-id` family keeps one exit code for an OPERATIONAL
+    fault (a locked store, an integrity error, an I/O fault), so `show`,
+    `--candidates` and `rekey` answer a corrupt store alike. Exit 2 stays
+    the bad-input code. The message names the store's remedy and is
+    rendered inert, because it echoes a path on a surface a caller prints.
+    """
+    _error(
+        error,
+        escape_for_envelope(
+            _scrub(present_store_fault(exc, str(store)) or str(exc))
+        ),
+        exit_code=3,
+    )
+
+
 def cmd_project_id(args, db_path=None) -> NoReturn:
     """Handle the 'project-id' subcommand family.
 
@@ -1027,37 +1045,45 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
     `id_shape`), the resolved read scope, and the bucket census. It reads an
     existing store only — a report must not bring a store into existence.
     """
+    from scripts.database import sqlite3 as db_sqlite3
+
     action = getattr(args, "project_id_action", None)
     if action == "show":
-        memory = PACTMemory(db_path=db_path)
-        read_scope = memory._read_project_scopes()
-        # `repo_root` IS THE IDENTITY ROOT: the root the winning rung resolved
-        # and the one the plausibility gate compared legacy rows against. A
-        # primary field named `repo_root` that named the PROCESS's repository
-        # would be the misdirection this field exists to remove, and the field
-        # is new in this PR so nothing depends on the older meaning.
-        # `process_repo_root` keeps the process location under a name that
-        # says what it is; in a declared-repo session the two differ.
-        identity_root = memory._project_identity_root
-        process_root = main_repo_root()
-        _success({
-            "project_id": memory._project_id_for_envelope(),
-            "id_shape": memory._project_id_shape,
-            "source": memory._project_id_source,
-            "override_ignored": memory._override_ignored,
-            # STRUCTURED DECLINE REASON, not just the warning. A repository
-            # chose the name a basename id would have used, so the refusal
-            # names the cause and the override file that is its remedy; a
-            # caller parsing this envelope never has to read stderr.
-            "decline_reason": memory._decline_reason,
-            "repo_root": str(identity_root) if identity_root is not None else None,
-            "process_repo_root": (
-                str(process_root) if process_root is not None else None
-            ),
-            "read_scope": list(read_scope),
-            "legacy_scope": memory._legacy_scope_state,
-            "candidates": _project_candidates(memory, db_path),
-        })
+        try:
+            memory = PACTMemory(db_path=db_path)
+            read_scope = memory._read_project_scopes()
+            # `repo_root` IS THE IDENTITY ROOT: the root the winning rung resolved
+            # and the one the plausibility gate compared legacy rows against. A
+            # primary field named `repo_root` that named the PROCESS's repository
+            # would be the misdirection this field exists to remove, and the field
+            # is new in this PR so nothing depends on the older meaning.
+            # `process_repo_root` keeps the process location under a name that
+            # says what it is; in a declared-repo session the two differ.
+            identity_root = memory._project_identity_root
+            process_root = main_repo_root()
+            _success({
+                "project_id": memory._project_id_for_envelope(),
+                "id_shape": memory._project_id_shape,
+                "source": memory._project_id_source,
+                "override_ignored": memory._override_ignored,
+                # STRUCTURED DECLINE REASON, not just the warning. A repository
+                # chose the name a basename id would have used, so the refusal
+                # names the cause and the override file that is its remedy; a
+                # caller parsing this envelope never has to read stderr.
+                "decline_reason": memory._decline_reason,
+                "repo_root": str(identity_root) if identity_root is not None else None,
+                "process_repo_root": (
+                    str(process_root) if process_root is not None else None
+                ),
+                "read_scope": list(read_scope),
+                "legacy_scope": memory._legacy_scope_state,
+                "candidates": _project_candidates(memory, db_path),
+            })
+        except db_sqlite3.DatabaseError as exc:
+            _exit_store_fault(
+                exc, Path(db_path) if db_path else resolve_db_path(),
+                "SYSTEM_ERROR",
+            )
     if action == "rekey":
         _project_id_rekey(args, db_path)
     _error(
@@ -1104,9 +1130,15 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 "run it alone, then rekey one bucket with --from and --to.",
                 exit_code=2,
             )
-        memory = PACTMemory(db_path=db_path)
-        memory._read_project_scopes()
-        _success({"candidates": _project_candidates(memory, db_path)})
+        try:
+            memory = PACTMemory(db_path=db_path)
+            memory._read_project_scopes()
+            _success({"candidates": _project_candidates(memory, db_path)})
+        except db_sqlite3.DatabaseError as exc:
+            _exit_store_fault(
+                exc, Path(db_path) if db_path else resolve_db_path(),
+                "SYSTEM_ERROR",
+            )
 
     if args.dry_run and args.apply:
         _error(
@@ -1146,32 +1178,10 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     # Every envelope that answers `--from` equal to `--to` carries
     # `noop: True`, whichever route answers it.
     noop = from_id == to_id
-    if not store.exists():
-        # NOTHING TO MOVE AND NOTHING TO CREATE: a plan against a store that
-        # does not exist must not bring one into existence.
-        _success({
-            "from": from_id,
-            "to": to_id,
-            "dry_run": not args.apply,
-            "store_absent": True,
-            "from_bucket_empty": True,
-            "schema_absent": True,
-            **({"noop": True} if noop else {}),
-            "target_defaulted": target_defaulted,
-            "legacy_verdict": None,
-            **{key: 0 for key in _REKEY_ZERO_COUNTERS},
-        })
-
     try:
         memory._read_project_scopes()
     except db_sqlite3.DatabaseError as exc:
-        _error(
-            "REKEY_FAILED",
-            escape_for_envelope(
-                _scrub(present_store_fault(exc, str(store)) or str(exc))
-            ),
-            exit_code=3,
-        )
+        _exit_store_fault(exc, store, "REKEY_FAILED")
     state = memory._legacy_scope_state or {}
     own_legacy = from_id == memory._legacy_project_basename
     if state.get("candidate") is not None and from_id == state["candidate"]:
@@ -1252,12 +1262,35 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 ),
             )
 
+    if not store.exists():
+        # NOTHING TO MOVE AND NOTHING TO CREATE: a plan against a store that
+        # does not exist must not bring one into existence. ANSWERED ONLY
+        # AFTER THE TARGET GATES ABOVE, so an absent store refuses every
+        # input a present store refuses instead of reporting success.
+        _success({
+            "from": from_id,
+            "to": to_id,
+            "dry_run": not args.apply,
+            "store_absent": True,
+            "from_bucket_empty": True,
+            "schema_absent": True,
+            **({"noop": True} if noop else {}),
+            "target_defaulted": target_defaulted,
+            "legacy_verdict": None,
+            **{key: 0 for key in _REKEY_ZERO_COUNTERS},
+        })
+
     # ON A PRESENT STORE `--from` EQUAL TO `--to` IS ANSWERED BY THE LIBRARY
     # TOO, so the no-op envelope carries every counter a plan carries. The
-    # library only reads on that path, and the read scope keeps opening the
-    # store from switching its journal mode.
+    # library only reads on that path. A DRY RUN opens in the read scope too:
+    # its writes sit inside a SAVEPOINT that is rolled back, so the only change
+    # it could leave is the journal-mode switch on open, which the scope
+    # prevents. Only an apply may convert a DELETE-mode store to WAL.
     try:
-        with read_only_scope() if noop else nullcontext(), db_connection() as conn:
+        with (
+            nullcontext() if args.apply and not noop else read_only_scope(),
+            db_connection() as conn,
+        ):
             counters = rekey_project(
                 conn, from_id, to_id, dry_run=not args.apply
             )
@@ -1273,14 +1306,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     except db_sqlite3.DatabaseError as exc:
         # OPERATIONAL FAILURE, NOT BAD INPUT: a locked store, an integrity
         # error or an I/O fault says nothing about the caller's arguments.
-        # A present store that cannot be opened names its remedy.
-        _error(
-            "REKEY_FAILED",
-            escape_for_envelope(
-                _scrub(present_store_fault(exc, str(store)) or str(exc))
-            ),
-            exit_code=3,
-        )
+        _exit_store_fault(exc, store, "REKEY_FAILED")
     if args.apply:
         # The move changed the bucket set this process cached.
         _invalidate_legacy_scope_cache()

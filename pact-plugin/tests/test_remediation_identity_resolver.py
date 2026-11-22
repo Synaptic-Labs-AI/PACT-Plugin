@@ -2071,6 +2071,10 @@ class TestTheWorkingMemoryCommentNamesWhenTheFolderNameKeys:
         "except in a submodule",
         "including a broken, redirected or bare .git",
         "the identity declines and nothing is written",
+        "by the project_id in the memory config.json when no project directory "
+        "is declared and no repository is found",
+        "or when git cannot see a home-directory checkout",
+        "by folder name for a checkout that is the home directory",
     )
 
     @staticmethod

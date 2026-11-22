@@ -695,9 +695,9 @@ class TestAStoreThatIsNotADatabaseNamesItsRemedy:
 
     @pytest.mark.parametrize("kind", ["garbage", "corrupt"])
     @pytest.mark.parametrize("argv, code, error", [
-        (["project-id", "show"], 2, "SYSTEM_ERROR"),
+        (["project-id", "show"], 3, "SYSTEM_ERROR"),
         (["status"], 2, "SYSTEM_ERROR"),
-        (["project-id", "rekey", "--candidates"], 2, "SYSTEM_ERROR"),
+        (["project-id", "rekey", "--candidates"], 3, "SYSTEM_ERROR"),
         (["project-id", "rekey", "--from=proj", "--to=github.com/o/p"], 3, "REKEY_FAILED"),
     ], ids=["show", "status", "candidates", "rekey-dry-run"])
     @pytest.mark.parametrize("where", ["no-repository", "repository"])
@@ -1033,9 +1033,9 @@ class TestStatusNeverWritesIntoACorruptStore:
 
 # Each read-only verb, with the exit code its store fault reports.
 STORE_FAULT_COMMANDS = {
-    "show": (["project-id", "show"], 2),
+    "show": (["project-id", "show"], 3),
     "status": (["status"], 2),
-    "candidates": (["project-id", "rekey", "--candidates"], 2),
+    "candidates": (["project-id", "rekey", "--candidates"], 3),
     "rekey-dry-run": (["project-id", "rekey", "--from=proj", "--to=github.com/o/p"], 3),
     "list": (["list"], 2),
     "search": (["search", "anything"], 2),
