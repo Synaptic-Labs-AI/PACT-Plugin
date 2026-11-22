@@ -9,8 +9,8 @@ Tests cover:
 5. SKILL.md body contains substantive content
 6. The retired memory_saved flag stays absent from every tracked Markdown
    file across the six LLM-loaded instruction surfaces (bounded entity
-   and escape decoding, per-surface known-member control, real
-   temporary-Git self-tests)
+   and escape decoding, per-surface file control, real temporary-Git
+   self-tests)
 """
 import ast
 import re
@@ -699,29 +699,34 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
 
     What counts as re-teaching it: an identifier-shaped spelling —
     underscore or hyphen separators (repeated included), backslash-
-    escaped separators, numeric or named separator character
-    references, camelCase, or a zero-separator run — is caught
-    anywhere, in or out of context. A literal-whitespace spelling
-    ("memory saved") is ordinary English, so it is caught only in an
-    identifier-ish context: inside a backticked span, or in a
-    key/assignment position (`:` or `=`). Backslash-escaped separators
-    are unescaped, separator-only numeric character references are
-    decoded (any other entity stays literal), Markdown delimiters are
-    removed and whitespace is collapsed before the case-insensitive
-    match, covering markup wrapping, inline markup, and line wrapping.
-    A tracked file that is not valid UTF-8 is named by the pin rather
-    than raising a bare decode error.
+    escaped separators (an escaped space included), numeric or named
+    separator character references, camelCase, or a zero-separator run —
+    is caught anywhere, in or out of context. A literal-whitespace
+    spelling ("memory saved") is ordinary English, so it is caught only
+    in an identifier-ish context: inside a backticked span (Markdown
+    emphasis around the words is stripped first), or in a key/assignment
+    position that carries a value-shaped token (`: true`, `= yes`, a
+    quoted value, `[`, or `{`). A colon followed by ordinary prose is
+    not a key position. Backslash-escaped separators are unescaped,
+    separator-only numeric and named references are decoded (any other
+    entity stays literal), Markdown delimiters (asterisks, tildes,
+    backticks) are removed and whitespace is collapsed before the
+    case-insensitive match, covering markup wrapping, emphasis, inline
+    markup, and line wrapping. A tracked file that is not valid UTF-8 is
+    named by the pin rather than raising a bare decode error.
 
     WHAT THIS CANNOT CATCH, stated so that a green is read no wider than
     it is: a population narrowed to a subset that still retains every
-    known member stays green here — the known-member control's guarantee
+    surface file stays green here — the surface-file control's guarantee
     is member presence, not full-population size, and the companion
     population floor covers only a collapse below its floor. That
     residual is the tracked-file fixture's documented PARTIAL-overlap
     boundary (tests/fixtures/tracked_files.py). The six-surface
     enumeration is itself a curated judgment: a new instruction-surface
-    directory would not be scanned until added to the population, and
-    surface completeness is reviewed per-PR rather than machine-checked.
+    directory would not be scanned until added to the population; a
+    structural arm pins the six curated directories plus the
+    nested-recursion member, and completeness beyond that is reviewed
+    per-PR rather than machine-checked.
     """
 
     # Identifier-shaped separators: at least one underscore/hyphen with
@@ -735,9 +740,13 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]*saved", re.IGNORECASE)
     # The identifier-ish contexts that turn a literal-whitespace spelling
     # into a flag reference: a backticked span, or a key/assignment
-    # position. Nothing else makes prose a flag.
+    # position that carries a value-shaped token. A colon followed by
+    # ordinary prose is NOT a key position, so a quoted sentence such as
+    # "Memory saved: 40% faster" stays green.
     PROSE_CONTEXT = re.compile(
-        r"`[^`\n]*memory\s+saved[^`\n]*`|memory\s+saved\s*[:=]",
+        r"`[^`]*memory\s+saved[^`]*`"
+        r"|memory\s+saved[\"']?\s*[:=]\s*"
+        r"(?:true|false|yes|no|1|0|[\"'\[\{])",
         re.IGNORECASE,
     )
     # The literal-whitespace forms. The reject arms seed these in
@@ -749,12 +758,21 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "memory  saved",
         "memory\tsaved",
     )
-    # A population narrowed to exactly the seven known members satisfies the
-    # member control while every other file goes unscanned. This floor is
-    # well below the current count (119 when written) so ordinary file churn
-    # does not churn the pin, but a collapse to a handful of files fails
-    # loudly instead of reading as coverage.
+    # A population narrowed to exactly the seven SURFACE_FILES satisfies the
+    # surface-file control while every other file goes unscanned. This floor
+    # is well below the current count (119 when written) so ordinary file
+    # churn does not churn the pin, but a collapse to a handful of files
+    # fails loudly instead of reading as coverage.
     POPULATION_FLOOR = 100
+    # The ONE surface axis: one tracked file per surface, plus the
+    # nested-recursion member. Both the real-run control and every reject
+    # arm read this constant; a second copy would need a drift test, and a
+    # narrower axis would leave whole directories unscanned without any
+    # arm noticing. SURFACE_DIRECTORIES is the curated judgment the axis
+    # is checked against, independent of the paths themselves.
+    SURFACE_DIRECTORIES = frozenset(
+        {"skills", "agents", "commands", "protocols", "reference", "templates"}
+    )
     SURFACE_FILES = (
         "skills/pact-agent-teams/SKILL.md",
         "skills/pact-testing-strategies/references/test-pyramid.md",
@@ -763,21 +781,6 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "protocols/pact-protocols.md",
         "reference/config.md",
         "templates/environment-model.md",
-    )
-    # One tracked file per surface, plus the nested-recursion member,
-    # each verified present in the real-tree population; the real-run
-    # control asserts all seven so a narrowed population cannot satisfy
-    # the control by keeping one surface alive, and a regression that
-    # stops nested-directory recursion cannot keep the six flat members
-    # while skills/** files silently leave the scan.
-    KNOWN_MEMBERS = (
-        "skills/pact-agent-teams/SKILL.md",
-        "agents/pact-orchestrator.md",
-        "commands/orchestrate.md",
-        "protocols/pact-protocols.md",
-        "reference/config.md",
-        "templates/environment-model.md",
-        "skills/pact-testing-strategies/references/test-pyramid.md",
     )
     PROHIBITED_FORMS = (
         "memory_saved",
@@ -811,6 +814,18 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "memory&lowbar;saved",
         "memory&hyphen;saved",
         "memory&NBSP;saved",
+        "memory&dash;saved",
+        "memory&minus;saved",
+        "memory&underbar;saved",
+        "memory&under;saved",
+        "memory&nbsp;saved",
+        r"memory\ saved",
+        "`memory saved`",
+        "`memory *saved*`",
+        "`memory **saved**`",
+        "`memory ~~saved~~`",
+        "memory saved = true",
+        '{"memory saved": true}',
     )
 
     @staticmethod
@@ -873,17 +888,28 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         """Collapse the encodings the flag can hide behind.
 
         ``decode`` applies the backslash/entity decoders; both paths strip
-        Markdown delimiters and collapse whitespace, so the two results
-        differ only by those decoders.
+        the Markdown delimiters (asterisk, tilde, backtick) and collapse
+        whitespace, so the two results differ only by those decoders.
         """
         body = text
         if decode:
             body = re.sub(
                 r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);",
                 _separator_entity,
-                re.sub(r"\\([_*`-])", r"\1", body),
+                re.sub(r"\\([_*` -])", r"\1", body),
             )
-        return " ".join(body.replace("*", "").replace("`", "").split())
+        return " ".join(
+            body.replace("*", "").replace("~", "").replace("`", "").split()
+        )
+
+    @staticmethod
+    def _context_view(text):
+        """Emphasis-stripped, whitespace-collapsed text for context detection.
+
+        Backticks survive: the context being tested IS the backticked span,
+        so this view must not be ``_normalize`` output (which deletes them).
+        """
+        return " ".join(text.replace("*", "").replace("~", "").split())
 
     @classmethod
     def _re_teaches_retired_flag(cls, text):
@@ -904,47 +930,50 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             return True
         if not cls.FORBIDDEN_PATTERN.search(literal):
             return True
-        return cls.PROSE_CONTEXT.search(text) is not None
+        return cls.PROSE_CONTEXT.search(cls._context_view(text)) is not None
 
     @pytest.mark.parametrize("form", PROHIBITED_FORMS)
-    def test_pin_rejects_prohibited_form_on_each_surface(
+    def test_pin_rejects_prohibited_form_on_every_surface(
             self, form, tmp_path, monkeypatch):
-        """Every prohibited form is rejected on every one of the seven
-        surfaces.
+        """Every prohibited form is rejected, and the scan names every
+        offending surface, when all seven surfaces carry the form at once.
 
-        The surface loop runs INSIDE the arm: one seeded temporary Git repo
-        per form, not one per (form, surface) pair. The per-case fixture
-        cost dominated the class runtime; the assertion count is unchanged
-        (each form is still asserted against each surface, and the pin must
-        name the offending surface).
+        One seeded temporary Git repo per form, one scan per form. Seeding
+        every surface in that single scan is what binds the axis: a
+        diagnostic that names only the first offender, or a scan that stops
+        early, leaves the un-named surfaces unasserted.
         """
         plugin = self._seed_tracked_repo(tmp_path)
         monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
         seeded = self._seeded_offender(form)
         for surface in self.SURFACE_FILES:
-            path = plugin / surface
-            clean = path.read_text(encoding="utf-8")
-            path.write_text(seeded, encoding="utf-8")
-            try:
-                with pytest.raises(
-                        AssertionError, match="re-teach the retired") as exc_info:
-                    self.test_no_memory_saved_in_any_llm_loaded_surface()
-                assert surface in str(exc_info.value), (
-                    f"the pin must name {surface!r}; it named: "
-                    f"{exc_info.value}"
-                )
-            finally:
-                path.write_text(clean, encoding="utf-8")
+            (plugin / surface).write_text(seeded, encoding="utf-8")
+
+        with pytest.raises(
+                AssertionError, match="re-teach the retired") as exc_info:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        message = str(exc_info.value)
+        for surface in self.SURFACE_FILES:
+            assert f"pact-plugin/{surface}" in message, (
+                f"the pin must name every offending surface; {surface!r} "
+                f"is missing from: {message}"
+            )
 
     def test_pin_is_silent_on_innocent_prose(self, tmp_path, monkeypatch):
-        """A plain English sentence containing "memory saved" is not the
-        retired flag. Anchoring the prose shape to identifier-ish context
-        is what keeps this arm green; a matcher that reverts to the bare
-        space shape reds it."""
+        """Plain English containing "memory saved" is not the retired flag.
+
+        Two shapes: an ordinary sentence, and a quoted sentence whose colon
+        is followed by prose rather than a value. Anchoring the prose shape
+        to identifier-ish context is what keeps both green; a matcher that
+        reverts to the bare space shape, or to a bare colon, reds this arm.
+        """
         plugin = self._seed_tracked_repo(tmp_path)
         (plugin / "agents" / "pact-orchestrator.md").write_text(
             "Your agent memory saved you a re-read.\n", encoding="utf-8"
+        )
+        (plugin / "commands" / "orchestrate.md").write_text(
+            '"Memory saved: 40% faster"\n', encoding="utf-8"
         )
         monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
@@ -956,7 +985,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         """A truncated scan must red.
 
         The offender is the LAST population entry, so a slice or an early
-        break that drops the tail leaves it unscanned. The known-member
+        break that drops the tail leaves it unscanned. The surface-file
         control cannot catch that: it checks list membership, not what the
         loop actually read."""
         plugin = self._seed_tracked_repo(tmp_path)
@@ -964,7 +993,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
         offender = plugin / "templates" / "zz-last-entry.md"
         offender.write_text("memory_saved\n", encoding="utf-8")
-        population = [plugin / relative for relative in self.KNOWN_MEMBERS]
+        population = [plugin / relative for relative in self.SURFACE_FILES]
         population.append(offender)
         monkeypatch.setitem(
             globals(), "_instruction_surface_population", lambda: population
@@ -976,28 +1005,39 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         assert "zz-last-entry.md" in str(exc_info.value)
 
     def test_real_population_has_not_collapsed(self):
-        """Population-size oracle the known-member control cannot satisfy.
+        """Population-size oracle the surface-file control cannot satisfy.
 
-        The member control is satisfied by the seven known members alone, so
-        it cannot see a population that has narrowed to exactly those seven.
-        The floor fails loudly if the population collapses instead of
-        reading as coverage."""
+        The surface-file control is satisfied by the seven SURFACE_FILES
+        alone, so it cannot see a population that has narrowed to exactly
+        those seven. The floor fails loudly if the population collapses
+        instead of reading as coverage."""
         population = _instruction_surface_population()
         assert len(population) >= self.POPULATION_FLOOR, (
             f"the pin's population collapsed to {len(population)} files "
             f"(floor {self.POPULATION_FLOOR}); a narrowed world that keeps "
-            f"every known member stays green over the files it drops"
+            f"every surface file stays green over the files it drops"
         )
 
-    def test_surface_and_known_member_lists_stay_in_step(self):
-        """Drift pin: a surface seeded in SURFACE_FILES without a
-        KNOWN_MEMBERS entry would pass every arm while getting no
-        known-member control.
+    def test_population_floor_exceeds_the_surface_axis(self):
+        """The floor is meaningful only above the surface axis.
 
-        This was an import-time assert in the class body, which disappears
-        under ``python -O`` and turns a drift into a whole-module collection
-        error instead of one named failure."""
-        assert set(self.SURFACE_FILES) == set(self.KNOWN_MEMBERS)
+        A floor at or below the seven SURFACE_FILES is satisfied by exactly
+        the world the floor exists to reject, and a floor of 0 leaves every
+        other arm green because the control alone still passes."""
+        assert self.POPULATION_FLOOR > len(self.SURFACE_FILES)
+
+    def test_surface_axis_keeps_every_curated_surface(self):
+        """A narrowed axis silently stops scanning whole directories.
+
+        Every reject arm derives its expectations from SURFACE_FILES, so
+        SURFACE_FILES[:1] otherwise leaves the suite green: the arms seed
+        and assert only the surfaces the constant still names. The curated
+        directory set is the independent oracle, and the extra member is the
+        nested-recursion file that keeps skills/** scanned."""
+        assert {
+            relative.split("/")[0] for relative in self.SURFACE_FILES
+        } == set(self.SURFACE_DIRECTORIES)
+        assert len(self.SURFACE_FILES) == len(self.SURFACE_DIRECTORIES) + 1
 
     def test_pin_names_non_utf8_surface(self, tmp_path, monkeypatch):
         plugin = self._seed_tracked_repo(tmp_path)
@@ -1133,23 +1173,6 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         with pytest.raises(AssertionError, match="narrowed"):
             self.test_no_memory_saved_in_any_llm_loaded_surface()
 
-    def test_control_fires_when_only_one_surface_survives(
-            self, tmp_path, monkeypatch):
-        """A population narrowed to exactly one surface's known member must
-        still fire the control: the single known member of the pre-widening
-        control satisfied it while the other five surfaces went unsanctioned."""
-        plugin = self._seed_tracked_repo(tmp_path)
-        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
-        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
-        monkeypatch.setitem(
-            globals(),
-            "_instruction_surface_population",
-            lambda: [plugin / "skills" / "pact-agent-teams" / "SKILL.md"],
-        )
-
-        with pytest.raises(AssertionError, match="narrowed"):
-            self.test_no_memory_saved_in_any_llm_loaded_surface()
-
     def test_control_fires_when_nested_recursion_member_missing(
             self, tmp_path, monkeypatch):
         """A narrowed world that retains the six per-surface members but
@@ -1176,13 +1199,13 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     def test_no_memory_saved_in_any_llm_loaded_surface(self):
         population = _instruction_surface_population()
         present = {p.relative_to(PLUGIN_ROOT).as_posix() for p in population}
-        missing = [m for m in self.KNOWN_MEMBERS if m not in present]
+        missing = [m for m in self.SURFACE_FILES if m not in present]
         assert not missing, (
             f"{missing} missing from the pin's enumerated population "
-            f"({len(population)} files), one known member per surface: the "
-            f"tracked-file fixture can answer a strict subset (PARTIAL "
-            f"overlap, tests/fixtures/tracked_files.py) and this run would "
-            f"go green vacuously over a narrowed world"
+            f"({len(population)} files); the surface axis names one file per "
+            f"surface, and the tracked-file fixture can answer a strict "
+            f"subset (PARTIAL overlap, tests/fixtures/tracked_files.py), so "
+            f"this run would go green vacuously over a narrowed world"
         )
         offenders = []
         undecodable = []
