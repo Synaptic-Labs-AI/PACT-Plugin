@@ -467,10 +467,12 @@ class TestSourceEquivalence:
         # `common.parent` is NOT always the root, so a presence check on the
         # source segment was satisfied by that sentence. The root is
         # `--show-toplevel`, except in a linked worktree, where it is the
-        # main checkout: the common dir's parent.
+        # main checkout: the common dir's parent. The top level is asked in
+        # `_start_and_toplevel`, which maps a start inside a git dir first.
         root_code = _function_code(_MEMORY_API_PATH, "main_repo_root")
         assert "main_repo_common_dir(start)" in root_code
-        assert "'--show-toplevel'" in root_code
+        assert "_start_and_toplevel(start, common)" in root_code
+        assert "'--show-toplevel'" in _function_code(_MEMORY_API_PATH, "_start_and_toplevel")
         assert "return common_path.parent" in root_code
 
     def test_main_repo_root_bases_a_relative_result_on_its_start_argument(self):

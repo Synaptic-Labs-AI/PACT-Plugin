@@ -2282,6 +2282,28 @@ def _git_dir_start(start: Optional[Path]) -> Optional[Path]:
     return git_dir_checkout(start)[1]
 
 
+def _start_and_toplevel(
+    start: Optional[str], common: Optional[Path]
+) -> "tuple[Optional[str], Optional[str]]":
+    """(the start to ask git from, its `--show-toplevel` answer).
+
+    `start` (None: the process cwd) and git's top level for it, unless git
+    gives a common dir but no top level, as for a start inside a git dir:
+    then the start is the checkout that git dir belongs to
+    (`_git_dir_start`), and the top level is asked again from there. With
+    no common dir nothing is asked, and the top level is None.
+    """
+    if common is None:
+        return start, None
+    toplevel = _git_rev_parse(start, "--show-toplevel")
+    if toplevel is None:
+        checkout = _git_dir_start(Path(start) if start is not None else _cwd_or_none())
+        if checkout is not None:
+            start = str(checkout)
+            toplevel = _git_rev_parse(start, "--show-toplevel")
+    return start, toplevel
+
+
 def _cwd_or_none() -> Optional[Path]:
     """`Path.cwd()`, or None when the process cwd no longer exists.
 
@@ -2502,7 +2524,8 @@ def main_repo_root(
     if common is None:
         return None
     if toplevel is _TOPLEVEL_UNASKED:
-        toplevel = _git_rev_parse(start, "--show-toplevel")
+        # A start inside a git dir is asked from its checkout.
+        start, toplevel = _start_and_toplevel(start, common)
     if toplevel is None:
         # No working tree: a bare repository, or a repository git cannot
         # describe. There is no root to name.
@@ -3010,16 +3033,8 @@ class PACTMemory:
         declared_common_dir = main_repo_common_dir(declared_dir)
         # The toplevel is asked once and handed to the root lookup and to the
         # home check, which both need it.
-        declared_toplevel = (
-            _git_rev_parse(declared_dir, "--show-toplevel")
-            if declared_common_dir is not None
-            else None
-        )
-        if declared_common_dir is not None and declared_toplevel is None:
-            checkout = _git_dir_start(Path(declared_dir))
-            if checkout is not None:
-                declared_dir = str(checkout)
-                declared_toplevel = _git_rev_parse(declared_dir, "--show-toplevel")
+        mapped_dir, declared_toplevel = _start_and_toplevel(declared_dir, declared_common_dir)
+        declared_dir = cast(str, mapped_dir)
         try:
             declared_root = Path(declared_dir).resolve()
         except (OSError, RuntimeError, ValueError):
@@ -3298,12 +3313,9 @@ class PACTMemory:
             # The pre-change resolver named every repository it reached here,
             # bare and redirected included, by its common dir's parent.
             git_pre_change = cwd_common_dir.parent.name or None
-            cwd_toplevel = _git_rev_parse(None, "--show-toplevel")
-            if cwd_toplevel is None:
-                git_start = _git_dir_start(asked_start)
-                if git_start is not None:
-                    start_arg, asked_start = str(git_start), git_start
-                    cwd_toplevel = _git_rev_parse(start_arg, "--show-toplevel")
+            start_arg, cwd_toplevel = _start_and_toplevel(None, cwd_common_dir)
+            if start_arg is not None:
+                asked_start = Path(start_arg)
             repo_root = main_repo_root(common=cwd_common_dir, toplevel=cwd_toplevel, start=start_arg)
             if repo_root is None:
                 # NO ROOT: a forged worktree pointer, or git gave no toplevel
