@@ -3216,6 +3216,8 @@ def _traced_rows(tmp_path, monkeypatch, source):
      "def ask():\n    argv = ['git']\n    fill(argv)\n    return run(argv)\n", True),
     ("def ask():\n    argv = ['git']\n    alias = argv\n    alias.append(read_row())\n    return run(argv)\n", True),
     ("def ask():\n    argv = ['git']\n    argv.append('status')\n    read_row()\n    return run(argv)\n", False),
+    ("def ask():\n    table = {}\n    table['k'] = read_row()\n    return run(['git', '-C', table.get('k')])\n", True),
+    ("def ask():\n    items = []\n    items.append(read_row())\n    return run(['git', '-C', items.pop()])\n", True),
     ("_SEEN = {}\n\ndef load():\n    _SEEN['root'] = read_row()\n\n" + _ASK + "_SEEN['root']])\n", True),
     ("def ask():\n    value0 = read_row()\n" + "".join(f"    value{n} = value{n - 1}\n" for n in range(1, 10))
      + "    return run(['git', '-C', value9])\n", True),
@@ -3241,6 +3243,7 @@ def _traced_rows(tmp_path, monkeypatch, source):
     "through a helper's return", "a helper that returns a constant", "a helper called elsewhere with a read",
     "through a container's writer method", "through an item assignment", "through a write a callee makes",
     "through an alias of the container", "a container written only with constants",
+    "through a container read back with get", "through a container read back with pop",
     "through a module-level table a function writes", "through a chain of nine steps",
     "through a cycle of two functions", "through a starred argument", "through a starred argument filling a named one", "through unpacked keywords", "through a local holding the function",
     "through a nested function's return", "a comprehension variable of the same name",
@@ -3309,22 +3312,165 @@ def test_the_trace_lists_its_adversarial_only_writes_and_does_not_follow_them(tm
         (tmp_path / str(index)).mkdir()
         sources, _unresolved = _traced_rows(tmp_path / str(index), monkeypatch, source)
         assert ("read_row" in sources) is (source in honest), (source, sources)
+    assert ("ADVERSARIAL-ONLY, and so read as a built-in object: a local an `isinstance` test has just proved "
+            "a built-in, rebound before the read (`_narrowed`); and a field filled by position in a call of "
+            "its class under another name (`_field_values`).") in doc
+    read_as_builtin = [
+        _MEMORY + "def ask(item, holder):\n    if isinstance(item, dict):\n        item = holder[0]\n"
+        "        return run(['git', '-C', item.get('root')])\n",
+        _MEMORY + "class Found:\n    reason: dict = None\n\ndef make(holder):\n    build = Found\n"
+        "    return build(holder)\n\ndef ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+    ]
+    read_both_ways = [
+        _MEMORY + "def ask(item, holder):\n    item = holder[0]\n    return run(['git', '-C', item.get('root')])\n",
+        _MEMORY + "class Found:\n    reason: dict = None\n\ndef make(holder):\n    return Found(holder)\n\n"
+        "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+    ]
+    for index, source in enumerate(read_as_builtin + read_both_ways):
+        (tmp_path / f"b{index}").mkdir()
+        sources, _unresolved = _traced_rows(tmp_path / f"b{index}", monkeypatch, source)
+        assert ("read_row" in sources) is (source in read_both_ways), (source, sources)
 
 
-def test_only_get_and_update_are_read_as_builtin_methods_on_an_untyped_value():
-    """Pin for `_untyped_methods`' NOT COVERED form: a method of a name a
-    built-in container or string defines, called on a value the census
-    cannot type, is read as the built-in's. That hides a project method only
-    when a project class the trace loads defines a method of that name (the
-    graph of `_store_work_taint_for`), and today two do: `PACTMemory.get`
-    and `PACTMemory.update`. A new such method makes this fail, so the
-    collision is decided, not inherited."""
-    *_taint, graph = _store_work_taint_for(_source_fingerprint())
-    collisions = {name: _methods_named(graph, name) for name in _BUILTIN_METHODS if _methods_named(graph, name)}
-    assert collisions == {"get": [("memory_api", "PACTMemory.get")],
-                          "update": [("memory_api", "PACTMemory.update")]}, collisions
+_MEMORY = "class Memory:\n    def get(self, key):\n        return read_row()\n\n"
+
+
+@pytest.mark.parametrize("source, reaches", [
+    ("def ask(memory):\n    return run(['git', '-C', memory.get('root')])\n", True),
+    ("def ask(memory):\n    return run(['git', '-C', memory.update('root')])\n", False),
+    ("def ask():\n    table = {'root': 'here'}\n    return run(['git', '-C', table.get('root')])\n", False),
+    ("def ask(row):\n    return run(['git', '-C', dict(row).get('root')])\n", False),
+    ("from collections import OrderedDict\n\n"
+     "def ask():\n    return run(['git', '-C', OrderedDict().get('root')])\n", False),
+    ("def ask():\n    table = {'k': {'root': 'here'}}\n    return run(['git', '-C', table.get('k').get('root')])\n",
+     False),
+    ("def ask(memory):\n    table = {'k': memory}\n    return run(['git', '-C', table.get('k').get('root')])\n", True),
+    ("def ask():\n    table = {'k': {'root': 'here'}}\n    return run(['git', '-C', table['k'].get('root')])\n", False),
+    ("def ask(memory):\n    table = {'k': memory}\n    return run(['git', '-C', table['k'].get('root')])\n", True),
+    ("def ask(memory):\n    rows = [{'root': 'here'}, memory]\n    return run(['git', '-C', rows[0].get('root')])\n",
+     True),
+    ("def ask(items):\n    found = [item for item in items if isinstance(item, dict)]\n"
+     "    return run(['git', '-C', found[0].get('root')])\n", False),
+    ("def ask(items):\n    found = [item for item in items if isinstance(item, Memory)]\n"
+     "    return run(['git', '-C', found[0].get('root')])\n", True),
+    ("def ask(items):\n    found = {item: item for item in items}\n"
+     "    return run(['git', '-C', found['k'].get('root')])\n", True),
+    ("def ask():\n    found = {key: {'root': key} for key in 'ab'}\n"
+     "    return run(['git', '-C', found['a'].get('root')])\n", False),
+    ("def ask(item):\n    if isinstance(item, dict):\n        return run(['git', '-C', item.get('root')])\n", False),
+    ("def ask(item):\n    if isinstance(item, Memory):\n        return run(['git', '-C', item.get('root')])\n", True),
+    ("def ask(item):\n    return not isinstance(item, dict) or run(['git', '-C', item.get('root')])\n", False),
+    ("def ask(item):\n    return isinstance(item, dict) and run(['git', '-C', item.get('root')])\n", False),
+    ("def ask(item):\n    if not isinstance(item, dict):\n        return None\n"
+     "    return run(['git', '-C', item.get('root')])\n", False),
+    ("def ask(item):\n    if not isinstance(item, dict):\n        print(item)\n"
+     "    return run(['git', '-C', item.get('root')])\n", True),
+    ("def ask():\n    for item in [{'root': 'here'}]:\n        return run(['git', '-C', item.get('root')])\n", False),
+    ("def ask(memory):\n    for item in [memory]:\n        return run(['git', '-C', item.get('root')])\n", True),
+    ("def ask(memory):\n    item = memory\n    [item for item in [{'root': 'here'}]]\n"
+     "    return run(['git', '-C', item.get('root')])\n", True),
+    ("def ask(memory):\n    return [run(['git', '-C', item.get('root')]) for item in [{'root': 'here'}]]\n", False),
+    ("def ask(**options):\n    return run(['git', '-C', options.get('root')])\n", False),
+    ("def ask(*parts):\n    return run(['git', '-C', parts[0].get('root')])\n\n"
+     "def entry(memory):\n    return ask(memory)\n", True),
+    ("_TABLE = {}\n\ndef ask():\n    return run(['git', '-C', _TABLE.get('root')])\n", False),
+    ("_TABLE = Memory()\n\ndef ask():\n    return run(['git', '-C', _TABLE.get('root')])\n", True),
+    ("_TABLE = {}\n\ndef load(memory):\n    _TABLE['k'] = memory\n\n"
+     "def ask():\n    return run(['git', '-C', _TABLE['k'].get('root')])\n", True),
+    ("from pkg import m as me\n\n_TABLE = {}\n\ndef ask():\n    return run(['git', '-C', me._TABLE.get('root')])\n",
+     False),
+    ("from pkg import m as me\n\n_TABLE = Memory()\n\n"
+     "def ask():\n    return run(['git', '-C', me._TABLE.get('root')])\n", True),
+    ("class Found:\n    reason: dict = None\n\ndef make():\n    return Found(reason={'root': 'here'})\n\n"
+     "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n", False),
+    ("class Found:\n    reason: dict = None\n\ndef make(memory):\n    return Found(reason=memory)\n\n"
+     "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n", True),
+    ("def table():\n    return {'root': 'here'}\n\ndef ask():\n    return run(['git', '-C', table().get('root')])\n",
+     False),
+    ("def table(memory):\n    return memory\n\n"
+     "def ask(memory):\n    return run(['git', '-C', table(memory).get('root')])\n", True),
+    ("def ask():\n    table = {}\n    table['k'] = {'root': 'here'}\n"
+     "    return run(['git', '-C', table['k'].get('root')])\n", False),
+    ("def ask(memory, flag):\n    table = {'root': 'here'} if flag else memory\n"
+     "    return run(['git', '-C', table.get('root')])\n", True),
+    ("def ask(flag):\n    table = {'root': 'here'} if flag else {}\n    return run(['git', '-C', table.get('root')])\n",
+     False),
+    ("def ask(memory):\n    table = memory or {}\n    return run(['git', '-C', table.get('root')])\n", True),
+    ("def ask(row):\n    table = row or {}\n    return run(['git', '-C', table.copy().get('root')])\n", True),
+    ("def ask():\n    table = {}\n    return run(['git', '-C', table.copy().get('root')])\n", False),
+    ("def ask(name):\n    rows = [{'root': name}]\n    return run(['git', '-C', rows[0].get('root')])\n", False),
+    ("def ask(name, memory):\n    rows = [{'root': name}]\n    rows[0] = memory\n"
+     "    return run(['git', '-C', rows[0].get('root')])\n", True),
+    ("_UNSET = object()\n_SLOT = _UNSET\n\ndef ask():\n    return run(['git', '-C', _SLOT.get('root')])\n", False),
+    ("def table(name):\n    return {'root': name}\n\n"
+     "def ask(name):\n    return run(['git', '-C', table(name).get('root')])\n", False),
+    ("def ask(memory):\n    rows = [{'root': 'here'}]\n    item = memory\n"
+     "    return [run(['git', '-C', item.get('root')]) for item in rows]\n", False),
+], ids=[
+    "an untyped receiver", "a method name the class does not define", "a dict display", "a built-in type's call",
+    "a standard-library class", "a content method on a display of displays",
+    "a content method on a display holding an untyped value", "an item of a display of displays",
+    "an item of a display holding an untyped value", "an item of a display holding one untyped value",
+    "an isinstance comprehension", "a comprehension tested against a project class",
+    "a dict comprehension of untyped values", "a dict comprehension of displays",
+    "inside an if isinstance", "inside an if isinstance of a project class", "after or not isinstance",
+    "after and isinstance", "after an early return", "after a test that does not leave",
+    "a loop over a display of displays", "a loop over an untyped value",
+    "a local beside a comprehension of the same name", "a comprehension's own variable",
+    "a **kwargs parameter", "an element of *args", "a module dict", "a module object of the class",
+    "a module dict written with an untyped value", "a module dict read through the module",
+    "a module object read through the module", "a field filled with a display",
+    "a field filled with an untyped value", "a project function returning a display",
+    "a project function returning an untyped value",
+    "a local dict written with a display", "a choice holding an untyped value", "a choice of displays",
+    "a boolean choice holding an untyped value", "a copy of an untyped value", "a copy of a display",
+    "an item of a list of displays", "an item of a list of displays written with an untyped value",
+    "a module object holding a built-in build", "a project function returning a display of a parameter",
+    "a comprehension's own variable beside a local of the same name",
+])
+def test_a_method_name_a_builtin_shares_is_read_both_ways(tmp_path, monkeypatch, source, reaches):
+    """Rows for `_untyped_methods` and `_builtin_receiver`: a call of a
+    method name a built-in also defines (`get`) on a value the census cannot
+    type is read both ways, as the built-in and as every project method of
+    that name, so `Memory.get`'s read is reached; on a value proved a
+    built-in or standard-library object (`_holds`), only as the built-in.
+    Each row is one form of that proof, beside the same form holding a
+    value it cannot type."""
+    sources, unresolved = _traced_rows(tmp_path, monkeypatch, _MEMORY + source)
+    assert ("read_row" in sources) is reaches, sources
+    assert unresolved == [], unresolved
+
+
+_LIMIT_ROWS = {
+    "a container item written with a project object":
+        "def ask(memory):\n    table = {}\n    table['k'] = memory\n    return run(['git', '-C', table['k'].get('root')])\n",
+    "super()": "class Child(Memory):\n    def ask(self):\n        return run(['git', '-C', super().get('root')])\n",
+    "next(iter(x))": "def ask(memory):\n    return run(['git', '-C', next(iter([memory])).get('root')])\n",
+    "getattr(o, n)": "def ask(holder, name):\n    return run(['git', '-C', getattr(holder, name).get('root')])\n",
+    "max(...)": "def ask(memory):\n    return run(['git', '-C', max([memory]).get('root')])\n",
+    "copy.copy(x)": "import copy\n\ndef ask(memory):\n    return run(['git', '-C', copy.copy(memory).get('root')])\n",
+}
+
+
+def test_the_trace_names_its_limits(tmp_path, monkeypatch):
+    """Pin for `_traced_sources`' LIMITS: the docstring names exactly the
+    forms in `_LIMIT_ROWS`, and each still reads as the built-in only, so
+    `Memory.get`'s read is not reached. If the census comes to read one of
+    them, or the named list changes, this fails: the list is a ruled
+    boundary of the static census, and changing it is a decision."""
     doc = " ".join(_traced_sources.__doc__.split())
-    assert "`PACTMemory.get`" in doc and "`PACTMemory.update`" in doc
+    assert ("LIMITS, by ruling: a method called on a value `_foreign` proves a standard-library one is read as "
+            "the built-in only, so a project method of the same name that the value could still run is not read. "
+            "Two such forms are named: a container an item of which holds a project object written into it "
+            "(`table['k'] = memory`, then `table['k'].get(...)`), and the result of a non-project callable that "
+            "hands back what it is given (`super().get(...)`, `next(iter(x))`, `getattr(o, n)`, `max(...)`, "
+            "`copy.copy(x)`).") in doc
+    named = doc[doc.index("LIMITS, by ruling"):]
+    assert all(form in named for form in ("table['k']", *list(_LIMIT_ROWS)[1:])), named
+    for index, (form, source) in enumerate(_LIMIT_ROWS.items()):
+        (tmp_path / str(index)).mkdir()
+        sources, _unresolved = _traced_rows(tmp_path / str(index), monkeypatch, _MEMORY + source)
+        assert "read_row" not in sources, (form, sources)
 
 
 def _pass_entry_problems(trees: dict) -> tuple:
@@ -4289,13 +4435,6 @@ def _store_work_git_questions(graph) -> tuple:
 # parameter read inside an entered function holds that call's arguments, and
 # beyond this depth it holds every argument any call passes there.
 _CONTEXT_DEPTH = 4
-# Method names the built-in containers and strings define (dunders aside, which
-# syntax calls). A method of one of these names called on a value the census
-# cannot type is read as the built-in's, which returns what its receiver and
-# arguments hold.
-_BUILTIN_METHODS = frozenset(
-    name for kind in (dict, list, set, frozenset, str, bytes, tuple) for name in dir(kind)
-    if not name.startswith("__"))
 # Methods that write into the object they are called on (a context variable's
 # `set` included).
 _CONTAINER_WRITERS = frozenset({
@@ -4327,11 +4466,12 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
       a local looked up in a table, `_table_callees`, or a callable a local
       or parameter holds, `_callables`), entered through that call; for a
       `_RETURNS_ITS_ARGUMENT` function, its callable argument's body or
-      returns; for a method on a value not proved a standard-library one
-      (`_foreign`) that no call resolves, the returns of every loaded
-      project method of that name (`_untyped_methods`). A call's receiver
-      and arguments are part of the expression, so a standard-library call
-      is followed through them;
+      returns; for a method on a value not proved a built-in or
+      standard-library object (`_builtin_receiver`) that no call resolves,
+      the returns of every loaded project method of that name
+      (`_untyped_methods`), a name a built-in also defines (`get`,
+      `update`) included. A call's receiver and arguments are part of the
+      expression, so a standard-library call is followed through them;
     - each local it names: every binding visible there (`_visible_bindings`,
       a comprehension's variable only inside it) and every write into the
       object the local holds (`_writes_into`; only into the attribute read,
@@ -4340,8 +4480,8 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
       arguments (up to `_CONTEXT_DEPTH` calls deep); otherwise its default
       and every argument any call passes there, a starred or unpacked one
       included (`_arguments_for`);
-    - each attribute it reads on a local not proved a standard-library
-      value: every assignment of and write into an attribute of that name,
+    - each attribute it reads on a local not proved a built-in or
+      standard-library object (`_builtin_receiver`): every assignment of and write into an attribute of that name,
       on any receiver, in the loaded modules (`_attribute_values`), and the
       returns of every project method of that name (a property);
     - each module-level name it reads that is not a function or class:
@@ -4354,14 +4494,8 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
     (`_callables`), and a parameter of a function the loaded code uses as a
     value whose calls it cannot see (`_calls_of`).
 
-    NOT COVERED: a method of a name a built-in container or string defines,
-    called on a value the census cannot type, is read as the built-in's
-    (`_untyped_methods`); two project methods share such a name,
-    `PACTMemory.get` and `PACTMemory.update`, and are followed only where
-    the census types the receiver
-    (`test_only_get_and_update_are_read_as_builtin_methods_on_an_untyped_value`).
-    A parameter of a function no loaded code calls or uses as a value holds
-    only what code outside the loaded modules passes.
+    NOT COVERED: a parameter of a function no loaded code calls or uses as
+    a value holds only what code outside the loaded modules passes.
 
     ADVERSARIAL-ONLY, and so not followed: a write into an object through
     `setattr`, `vars()`, `__dict__`, `globals()` or `locals()`; a
@@ -4369,7 +4503,24 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
     (`list.append(argv, value)`, `operator.setitem`); and a value carried
     out of a function by an exception it raises. Honest code writes with a
     method of the object or an item or attribute assignment, which is
-    followed (`test_the_trace_lists_its_adversarial_only_writes_and_does_not_follow_them`)."""
+    followed (`test_the_trace_lists_its_adversarial_only_writes_and_does_not_follow_them`).
+
+    ADVERSARIAL-ONLY, and so read as a built-in object: a local an
+    `isinstance` test has just proved a built-in, rebound before the read
+    (`_narrowed`); and a field filled by position in a call of its class
+    under another name (`_field_values`). Honest code reads the value it
+    tested and builds a class by its name, which is followed.
+
+    LIMITS, by ruling: a method called on a value `_foreign` proves a
+    standard-library one is read as the built-in only, so a project method
+    of the same name that the value could still run is not read. Two such
+    forms are named: a container an item of which holds a project object
+    written into it (`table['k'] = memory`, then `table['k'].get(...)`),
+    and the result of a non-project callable that hands back what it is
+    given (`super().get(...)`, `next(iter(x))`, `getattr(o, n)`,
+    `max(...)`, `copy.copy(x)`). The values themselves are still traced
+    through the container and the call; only that method's own returns are
+    not (`test_the_trace_names_its_limits`)."""
     import ast
 
     _memoize(graph)
@@ -4406,9 +4557,13 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
                     owner, scope, value = item
                     more.append((owner, scope, value, context if scope is function else ()))
 
+        # `obj.name` read as a value reads that one attribute; `obj.method(...)` reads
+        # the object itself (`d.get(k)` returns what was written into `d`), so it is
+        # not narrowed.
+        called = {id(sub.func) for sub in ast.walk(expression) if isinstance(sub, ast.Call)}
         read_from = {id(sub.value): sub.attr for sub in ast.walk(expression)
                      if isinstance(sub, ast.Attribute) and isinstance(sub.ctx, ast.Load)
-                     and isinstance(sub.value, ast.Name)}
+                     and isinstance(sub.value, ast.Name) and id(sub) not in called}
         # `getattr(obj, "name", ...)` reads that one attribute, like `obj.name`.
         read_from.update({id(sub.args[0]): sub.args[1].value for sub in ast.walk(expression)
                           if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "getattr"
@@ -4446,7 +4601,7 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
                 add(_writes_into(graph, module, function, sub.id, read_from.get(id(sub))))
             elif (isinstance(sub, ast.Attribute) and isinstance(sub.ctx, ast.Load)
                   and isinstance(sub.value, ast.Name) and _bound(graph, function, sub.value.id)
-                  and not _foreign(graph, module, function, sub.value)):
+                  and not _builtin_receiver(graph, module, function, sub.value)):
                 add(_attribute_values(graph, sub.attr))
                 for target in _untyped_methods(graph, sub.attr):
                     add(returns_of(target))
@@ -4549,7 +4704,7 @@ def _call_results(graph, module: str, function, call, unresolved: list, returns_
         unresolved.append((where, f"a call of a project object that is not a function: {func.id}"))
         return []
     if isinstance(func, ast.Attribute):
-        if _foreign(graph, module, function, func.value):
+        if _builtin_receiver(graph, module, function, func.value):
             return []
         found = []
         for method in _untyped_methods(graph, func.attr):
@@ -4629,7 +4784,7 @@ def _callables(graph, module: str, function, runner, seen: set):
         head = runner
         while isinstance(head, ast.Attribute):
             head = head.value
-        if _foreign(graph, module, function, runner.value):
+        if _builtin_receiver(graph, module, function, runner.value):
             return []  # a standard-library callable (`os.path.join`, `text.strip`)
         return [(module, function, key) for key in _untyped_methods(graph, runner.attr)] or (
             [] if not isinstance(head, ast.Name) or graph.project_name(head.id, module) is None else None)
@@ -4721,9 +4876,12 @@ def _returned_values(node) -> list:
 
 def _untyped_methods(graph, name: str) -> list:
     """The project methods a call of `<value>.name(...)` can run when the
-    census cannot type `<value>`: every loaded project method of that name,
-    unless a built-in container or string defines it (`_BUILTIN_METHODS`)."""
-    return [] if name in _BUILTIN_METHODS else _methods_named(graph, name)
+    census cannot type `<value>`: every loaded project method of that name.
+    A name a built-in container or string also defines (`dict.get`,
+    `PACTMemory.get`) is read both ways: as the built-in, through the
+    receiver and arguments the expression already holds, and as every
+    project method of that name."""
+    return _methods_named(graph, name)
 
 
 def _methods_named(graph, name: str) -> list:
@@ -4907,7 +5065,7 @@ def _writes_into_uncached(graph, module: str, function, name: str, attr, seen) -
         callee = graph.callee(sub, module, function)
         callees = [callee] if callee is not None else (
             _untyped_methods(graph, sub.func.attr) if isinstance(sub.func, ast.Attribute)
-            and not _foreign(graph, module, function, sub.func.value) else [])
+            and not _builtin_receiver(graph, module, function, sub.func.value) else [])
         for key in callees:
             node = graph.defs[key]
             positional = [argument.arg for argument in node.args.posonlyargs + node.args.args]
@@ -4983,6 +5141,379 @@ def _foreign(graph, module: str, function, value, seen=None, deep=True) -> bool:
     if deep and len(seen) == 1:
         cache[id(value)] = answer
     return answer
+
+
+def _enter_proof(graph) -> bool:
+    """Count one more nested step of a `_holds` proof, or refuse it past
+    `_PROOF_DEPTH` nested steps: a proof deeper than that is not a proof,
+    and its False only widens what the census reads."""
+    active = graph.__dict__.get("_active_proofs", 0)
+    if active >= _PROOF_DEPTH:
+        return False
+    graph._active_proofs = active + 1
+    return True
+
+
+# Nested proof steps allowed at once, well inside the interpreter's stack.
+_PROOF_DEPTH = 120
+
+
+_FRESH_BUILTIN_FUNCTIONS = frozenset({
+    "sorted", "len", "repr", "ascii", "format", "isinstance", "issubclass", "hasattr", "callable", "open",
+    "id", "hash", "abs", "round", "divmod", "ord", "chr", "hex", "oct", "bin", "any", "all", "input"})
+
+
+def _makes_builtin(graph, module: str, function, call) -> bool:
+    """`call` makes a fresh built-in or standard-library object: it calls a
+    built-in type other than `type` and `super` (which hand back a project
+    class or method), a built-in of `_FRESH_BUILTIN_FUNCTIONS`, or a class
+    imported from the standard library (`ContextVar`, `Path`)."""
+    import ast
+    import builtins
+    import importlib
+    import sys
+
+    if not isinstance(call.func, ast.Name) or _bound(graph, function, call.func.id):
+        return False
+    name = call.func.id
+    imported = graph.aliases.get(module, {}).get(name)
+    if imported is None and graph.project_name(name, module) is None:
+        made = getattr(builtins, name, None)
+        return name in _FRESH_BUILTIN_FUNCTIONS or (
+            isinstance(made, type) and name not in ("type", "super"))
+    if imported is None or imported.partition(".")[0] not in sys.stdlib_module_names:
+        return False
+    owner, _, leaf = imported.rpartition(".")
+    try:
+        made = getattr(importlib.import_module(owner), leaf) if owner else None
+    except (ImportError, AttributeError):
+        return False
+    return isinstance(made, type) and made is not type
+
+
+def _builtin_receiver(graph, module: str, function, value, deep=True, seen=None) -> bool:
+    """`value` is itself a built-in or standard-library object, whatever it
+    holds, so a method called on it is that object's own method and no
+    project method of the name (`_holds` at level 0). A proof begun outside
+    any other is cached; one begun inside another can be cut short by
+    `_PROOF_DEPTH`, so it is not."""
+    if seen is not None or graph.__dict__.get("_active_proofs", 0):
+        return _holds(graph, module, function, value, 0, deep, set() if seen is None else seen)
+    cache = graph.__dict__.setdefault("_receiver_cache", {})
+    key = (id(value), id(function), deep)
+    if key not in cache:
+        cache[key] = _holds(graph, module, function, value, 0, deep, set())
+    return cache[key]
+
+
+# Methods of a built-in container that hand back what it holds (or a
+# default the call passes).
+_CONTENT_METHODS = frozenset({"get", "pop", "setdefault", "popitem", "popleft"})
+
+
+def _holds(graph, module: str, function, value, level: int, deep, seen) -> bool:
+    """At level 0, `value` is a built-in or standard-library object: it is
+    `_foreign`; or a literal, display or comprehension; or a call that
+    `_makes_builtin`; or a method of one that is not a content method
+    (`_CONTENT_METHODS`: `d.get(k)` is what `d` holds, or its default); or
+    an item of a container (`x[k]`), or the result of a content method, that
+    holds such values only; or a `*args` or `**kwargs` parameter.
+    At level n > 0, everything `value` holds n steps down (by iteration,
+    item or content method) is one: it is `_foreign`, or a display or
+    comprehension of such values, or a built-in call on such arguments
+    (`dict(row)`, `sorted(items)`).
+    At every level, an operator, conditional or boolean choice over such
+    values; a local every binding of which is one, a loop, comprehension or
+    unpacking target counting as one step into its source and a `with`
+    target as its context, and everything written into which
+    (`_writes_into`) is one step up; a project module-level object every
+    assigned and written value of which is; and, with `deep`, a parameter
+    every argument and the default of which is, and the result of a project
+    function every returned value of which is. A cycle adds no value of its
+    own; a level past 4 is not proved."""
+    if level > 4:
+        return False
+    key = (id(value), level)
+    if key in seen:
+        return True
+    seen.add(key)
+    if not _enter_proof(graph):
+        return False
+    try:
+        return _foreign(graph, module, function, value, deep=deep) or _holds_by_form(
+            graph, module, function, value, level, deep, seen)
+    finally:
+        graph._active_proofs -= 1
+
+
+def _holds_by_form(graph, module: str, function, value, level: int, deep, seen) -> bool:
+    """`_holds` by the form of `value`, once `_foreign` has not proved it."""
+    import ast
+
+    def again(where, scope, item, depth=level):
+        return _holds(graph, where, scope, item, depth, deep, seen)
+
+    if isinstance(value, (ast.Constant, ast.JoinedStr, ast.Compare)):
+        return True
+    if isinstance(value, ast.BinOp):
+        return again(module, function, value.left) and again(module, function, value.right)
+    if isinstance(value, ast.UnaryOp):
+        return again(module, function, value.operand)
+    if isinstance(value, (ast.List, ast.Tuple, ast.Set)):
+        return level == 0 or all(
+            again(module, function, part.value if isinstance(part, ast.Starred) else part,
+                  level if isinstance(part, ast.Starred) else level - 1) for part in value.elts)
+    if isinstance(value, ast.Dict):
+        return level == 0 or all(
+            again(module, function, part, level - 1) for part in value.keys if part is not None) and all(
+            again(module, function, part, level if key is None else level - 1)
+            for key, part in zip(value.keys, value.values))
+    if isinstance(value, ast.DictComp):
+        return level == 0 or (again(module, function, value.key, level - 1)
+                              and again(module, function, value.value, level - 1))
+    if isinstance(value, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+        if level == 0:
+            return True
+        element = value.elt
+        return again(module, function, element, level - 1)
+    if isinstance(value, ast.IfExp):
+        return again(module, function, value.body) and again(module, function, value.orelse)
+    if isinstance(value, ast.BoolOp):
+        return all(again(module, function, part) for part in value.values)
+    if isinstance(value, ast.Subscript):
+        return again(module, function, value.value, level + 1)
+    if isinstance(value, ast.Attribute) and isinstance(value.ctx, ast.Load):
+        package = graph.project_name(value.value.id, module) if isinstance(value.value, ast.Name) and not _bound(
+            graph, function, value.value.id) else None
+        if package is not None and not package[1]:
+            # `project_module.name`
+            return bool(graph.load(package[0])) and again(package[0], None, ast.Name(id=value.attr, ctx=ast.Load()))
+        held = _field_values(graph, value.attr)
+        return held is not None and all(again(where, scope, item) for where, scope, item in held)
+    if isinstance(value, ast.Call):
+        func = value.func
+        passed = [*value.args, *(item.value for item in value.keywords)]
+        if _makes_builtin(graph, module, function, value):
+            return level == 0 or all(
+                again(module, function, item.value if isinstance(item, ast.Starred) else item, level)
+                for item in value.args) and all(
+                again(module, function, item.value, level if item.arg is None else level - 1)
+                for item in value.keywords)
+        if isinstance(func, ast.Attribute) and again(module, function, func.value, 0):
+            if func.attr in _CONTENT_METHODS:
+                return again(module, function, func.value, level + 1) and all(
+                    again(module, function, item) for item in passed)
+            return level == 0 or (again(module, function, func.value) and all(
+                again(module, function, item) for item in passed))
+        made = graph.callee(value, module, function)
+        if deep and made is not None and not made[1].endswith(".__init__"):
+            returned = _returned_values(graph.defs[made])
+            return bool(returned) and all(again(made[0], graph.defs[made], item) for item in returned)
+        return False
+    if not isinstance(value, ast.Name):
+        return False
+    if level == 0 and _narrowed(graph, module, function, value):
+        return True
+    bindings = _scoped_bindings(graph, function, value)
+    if not bindings or any(kind in ("global", "import") for kind, _bound_value in bindings):
+        owned = graph.project_name(value.id, module)
+        if owned is None or not owned[1] or not graph.load(owned[0]) or owned in graph.defs or (
+                owned[1] in graph.class_names.get(owned[0], {})):
+            return False
+        owner, leaf = owned
+        held = [(owner, None, item, level) for item in graph.bindings.get(owner, {}).get(leaf, []) if item is not None]
+        for node in _defs_naming(graph, owner, leaf):
+            rebinds = _bound(graph, node, leaf)
+            if not rebinds or any(kind == "global" for kind, _bound_value in rebinds):
+                held += [(owner, node, item, level) for kind, item in rebinds if kind not in ("global", "import")]
+                if level:
+                    held += [(where, scope, item, level - 1) for where, scope, item in _writes_into(graph, owner, node, leaf)]
+        held += [(where, scope, item, level) for where, scope, item in _attribute_values(graph, leaf)]
+        return bool(held) and all(item is not None and again(where, scope, item, depth)
+                                  for where, scope, item, depth in held)
+    arguments = function.args if isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)) else None
+    packed = {item.arg for item in (arguments.vararg, arguments.kwarg) if item is not None} if arguments else set()
+    for kind, bound in bindings:
+        if kind == "value" and bound is not None:
+            if not again(module, function, bound):
+                return False
+        elif kind == "param" and deep:
+            held = _arguments_for(graph, module, function, value.id, [])
+            if value.id in packed:
+                if level and not all(again(where, scope, item, level - 1) for where, scope, item in held):
+                    return False
+            elif not held or not all(again(where, scope, item) for where, scope, item in held):
+                return False
+        elif kind == "from" and bound is not None:
+            entered = any(item.context_expr is bound for node in ast.walk(function)
+                          if isinstance(node, (ast.With, ast.AsyncWith)) for item in node.items)
+            if not again(module, function, bound, level if entered else level + 1):
+                return False
+        else:
+            return False
+    return not level or all(again(where, scope, item, level - 1)
+                            for where, scope, item in _writes_into(graph, module, function, value.id))
+
+
+def _scoped_bindings(graph, function, name) -> list:
+    """`_visible_bindings` of the Name node `name`; inside a comprehension
+    that binds the name, only that comprehension's own binding."""
+    import ast
+
+    bindings = _visible_bindings(graph, function, name)
+    if function is None:
+        return bindings
+    innermost = None
+    for node in ast.walk(function):
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+            for generator in node.generators:
+                if name.id in {target.id for target in ast.walk(generator.target) if isinstance(target, ast.Name)} and (
+                        any(sub is name for sub in ast.walk(node)) and not any(sub is name for sub in ast.walk(generator.iter))):
+                    if innermost is None or any(sub is node for sub in ast.walk(innermost[0])):
+                        innermost = (node, generator)
+    if innermost is None:
+        return bindings
+    return [(kind, value) for kind, value in bindings if kind == "from" and value is innermost[1].iter]
+
+
+def _builtin_test(graph, module: str, function, test, name: str):
+    """True when `test` is `isinstance(name, T)` and every T is a built-in
+    type other than `type` and `super`; "not" when it is `not` such a test;
+    None otherwise."""
+    import ast
+    import builtins
+
+    negated = isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not)
+    call = test.operand if negated else test
+    if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "isinstance"
+            and len(call.args) == 2 and isinstance(call.args[0], ast.Name) and call.args[0].id == name):
+        return None
+    kinds = call.args[1].elts if isinstance(call.args[1], ast.Tuple) else [call.args[1]]
+    if all(isinstance(kind, ast.Name) and not _bound(graph, function, kind.id)
+           and graph.project_name(kind.id, module) is None and kind.id not in ("type", "super")
+           and isinstance(getattr(builtins, kind.id, None), type) for kind in kinds):
+        return "not" if negated else True
+    return None
+
+
+def _narrowed(graph, module: str, function, name) -> bool:
+    """The Name node `name` is read where an `isinstance` test against
+    built-in types (`_builtin_test`) has just held for it: after `and` the
+    test, after `or not` the test, in the body of an `if` or `while` whose
+    test (or one `and` part of it) is the test, in the element and later
+    conditions of a comprehension with the test as a condition, or in a
+    statement after `if not <test>:` whose body ends in `return`, `raise`,
+    `continue` or `break`. A rebinding between the test and the read is
+    not looked for."""
+    import ast
+
+    scope = function if function is not None else None
+    if scope is None:
+        return False
+    cache = graph.__dict__.setdefault("_narrowed_cache", {})
+    if id(scope) not in cache:
+        covered = {}
+
+        def cover(names, nodes):
+            for node in nodes:
+                for sub in ast.walk(node):
+                    if isinstance(sub, ast.Name):
+                        covered.setdefault(id(sub), set()).update(names)
+
+        def held(test, wanted):
+            parts = test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else [test]
+            return {part_name for part in parts for part_name in {
+                sub.id for sub in ast.walk(part) if isinstance(sub, ast.Name)}
+                if _builtin_test(graph, module, function, part, part_name) is wanted}
+
+        for node in ast.walk(scope):
+            if isinstance(node, ast.BoolOp):
+                for index, part in enumerate(node.values):
+                    names = {sub.id for sub in ast.walk(part) if isinstance(sub, ast.Name)}
+                    wanted = True if isinstance(node.op, ast.And) else "not"
+                    hit = {candidate for candidate in names
+                           if _builtin_test(graph, module, function, part, candidate) == wanted}
+                    cover(hit, node.values[index + 1:])
+            elif isinstance(node, (ast.If, ast.While, ast.IfExp)):
+                cover(held(node.test, True), node.body if isinstance(node.body, list) else [node.body])
+            elif isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+                for generator in node.generators:
+                    for index, test in enumerate(generator.ifs):
+                        hit = held(test, True)
+                        rest = [*generator.ifs[index + 1:],
+                                *([node.key, node.value] if isinstance(node, ast.DictComp) else [node.elt])]
+                        cover(hit, rest)
+            for field in ("body", "orelse", "finalbody"):
+                statements = getattr(node, field, None)
+                if not isinstance(statements, list):
+                    continue
+                for index, statement in enumerate(statements):
+                    if (isinstance(statement, ast.If) and not statement.orelse and statement.body
+                            and isinstance(statement.body[-1], (ast.Return, ast.Raise, ast.Continue, ast.Break))):
+                        test = statement.test
+                        parts = test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.Or) else [test]
+                        hit = {candidate for part in parts for candidate in {
+                            sub.id for sub in ast.walk(part) if isinstance(sub, ast.Name)}
+                            if _builtin_test(graph, module, function, part, candidate) == "not"}
+                        cover(hit, statements[index + 1:])
+        cache[id(scope)] = covered
+    return name.id in cache[id(scope)].get(id(name), set())
+
+
+def _field_values(graph, attr: str):
+    """(module, def, value) for every value an attribute named `attr` of any
+    object can hold, or None when one cannot be listed: each assignment of
+    or write into such an attribute (`_attribute_values`); each class-level
+    default of a field of that name; each keyword argument of that name in
+    any call (a dataclass or record build, `replace(obj, attr=...)`); each
+    positional argument of a call, by class name, of a class that declares
+    the field (only the field's own slot for a class without its own
+    `__init__` or a base); and each value a project method of that name
+    returns (a property). A `*` or `**` argument in a call of such a class
+    is None."""
+    import ast
+
+    cache = graph.__dict__.setdefault("_field_cache", {})
+    if attr in cache:
+        return cache[attr]
+    declaring, found = {}, list(_attribute_values(graph, attr))
+    for owner in list(graph.class_names):
+        for classes in graph.class_names[owner].values():
+            for _qualified, node in classes.items():
+                fields = [statement.target.id for statement in node.body
+                          if isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name)]
+                for statement in node.body:
+                    target = statement.target if isinstance(statement, ast.AnnAssign) else (
+                        statement.targets[0] if isinstance(statement, ast.Assign) and len(statement.targets) == 1
+                        else None)
+                    if isinstance(target, ast.Name) and target.id == attr:
+                        # The positional slot a generated `__init__` gives the field; None (every slot)
+                        # for a class with its own `__init__` or a base, whose order is not read here.
+                        own = any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+                                  and item.name == "__init__" for item in node.body)
+                        slot = fields.index(attr) if attr in fields and not own and not node.bases else None
+                        declaring.setdefault(node.name, set()).add(slot)
+                        if statement.value is not None:
+                            found.append((owner, None, statement.value))
+    for (owner, _qualified), node in list(graph.defs.items()):
+        for call in ast.walk(node):
+            if not isinstance(call, ast.Call):
+                continue
+            found += [(owner, node, item.value) for item in call.keywords if item.arg == attr]
+            name = call.func.id if isinstance(call.func, ast.Name) else (
+                call.func.attr if isinstance(call.func, ast.Attribute) else None)
+            if name in declaring:
+                if any(isinstance(item, ast.Starred) for item in call.args) or any(
+                        item.arg is None for item in call.keywords):
+                    cache[attr] = None
+                    return None
+                slots = declaring[name]
+                found += [(owner, node, item) for index, item in enumerate(call.args)
+                          if None in slots or index in slots]
+    for key in _methods_named(graph, attr):
+        found += [(key[0], graph.defs[key], item) for item in _returned_values(graph.defs[key])]
+    cache[attr] = found
+    return found
 
 
 def _arguments_for(graph, module: str, function, name: str, unresolved: list) -> list:
@@ -5135,7 +5666,7 @@ def _calls_of(graph, key) -> tuple:
                 elif (isinstance(call.func, ast.Name) and _bound(graph, node, call.func.id)) or isinstance(
                         call.func, (ast.Call, ast.Subscript)):
                     local_calls.append((owner, node, call))
-                elif isinstance(call.func, ast.Attribute) and call.func.attr not in _BUILTIN_METHODS and not _foreign(
+                elif isinstance(call.func, ast.Attribute) and not _builtin_receiver(
                         graph, owner, node, call.func.value, deep=False):
                     untyped.setdefault(call.func.attr, []).append((owner, node, call))
             called = {id(call.func) for call in ast.walk(node) if isinstance(call, ast.Call)}
@@ -5265,13 +5796,15 @@ _AFTER_DETECTION = (
 # The second half of the NOT_A_ROUTE reason of each condition whose value the
 # refusal check hands to git, and the def through which alone it may reach a
 # git question (`_flow_allowed`): `format_project_dir_disagreement`'s kind check
-# asks `recorded_main_root` about the recorded project directory. Pinned by
+# asks `recorded_main_root` two questions about the recorded project directory,
+# `rev-parse --show-toplevel` and then `--git-common-dir`. Pinned by
 # `test_no_git_question_takes_a_store_work_value` and
 # `test_the_recorded_directory_allowance_names_its_conditions`.
 _AFTER_DETECTION_ASKS = (
     "; it runs after PACTMemory.__init__ has detected the identity, which only __init__ sets, "
     "and a git question takes its value only in the refusal check `format_project_dir_disagreement`, "
-    "which asks git about the recorded project directory (`recorded_main_root`), keyed on that directory"
+    "which asks git two questions about the recorded project directory (`recorded_main_root`): "
+    "`rev-parse --show-toplevel`, then `--git-common-dir`, each keyed on that directory"
 )
 _ASKS_ABOUT_RECORDED_DIRECTORY = {
     ("call", "env_record_project_dir_disagreement"): ("pact_session", "format_project_dir_disagreement"),
@@ -6660,8 +7193,10 @@ class TestEveryRouteEntryConditionIsARoute:
         module-level names) meets no form it cannot follow. The one flow
         allowed, and measured here, is `_AFTER_DETECTION_ASKS`': the
         disagreement a write refuses on is handed to
-        `format_project_dir_disagreement`, whose kind check asks git about
-        the recorded project directory. Each call handing it over sits in a
+        `format_project_dir_disagreement`, whose kind check asks git two
+        questions about the recorded project directory, `rev-parse
+        --show-toplevel` and then `--git-common-dir`. Each call handing it
+        over sits in a
         `PACTMemory` method other than `__init__`, so it runs after the
         identity is detected, and only `__init__` sets the identity
         (`test_only_pact_memory_init_sets_the_identity_store_work_reads`).
