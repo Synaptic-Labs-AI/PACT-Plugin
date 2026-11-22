@@ -2509,9 +2509,11 @@ def _platform_claim_modules() -> dict:
     """The importable name and file of each module whose open-flag readers
     promise to run where an optional flag is missing."""
     from scripts import memory_api
+    from shared import git_helpers
     import session_end
 
     return {
+        "shared.git_helpers": Path(git_helpers.__file__),
         "scripts.project_identity": Path(pi.__file__),
         "scripts.memory_api": Path(memory_api.__file__),
         "session_end": Path(session_end.__file__),
@@ -2523,7 +2525,7 @@ def _platform_claim_modules() -> dict:
 _RUN_WITHOUT_OPTIONAL_FLAGS = {
     ("scripts.project_identity", "read_override"):
         TestEveryReaderOpensWithoutAnOptionalFlag.test_the_override_reader,
-    ("scripts.project_identity", "read_git_file"):
+    ("shared.git_helpers", "read_git_file"):
         TestEveryReaderOpensWithoutAnOptionalFlag.test_the_git_file_reader,
     ("scripts.memory_api", "_pruned_session_records"):
         TestEveryReaderOpensWithoutAnOptionalFlag.test_the_prune_ledger_reader,
@@ -2640,7 +2642,7 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
         assert {"builtins.getattr", "builtins.vars", ".__dict__", ".__getattribute__"} <= set(forms)
         guarded = [use for use in every_use if use[2].startswith("getattr(os, 'O_")]
         other = [use for use in every_use if use[2].startswith("getattr(") and "'O_" not in use[2]]
-        assert {use[0] for use in guarded} == {"project_identity.py", "memory_api.py", "session_end.py"}
+        assert {use[0] for use in guarded} == {"git_helpers.py", "project_identity.py", "memory_api.py", "session_end.py"}
         assert other, every_use
         assert not set(guarded + other) & set(unread)
 
@@ -2675,7 +2677,7 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
         """Control: with no read spared, the guarded `getattr(os, "O_X", 0)`
         names are found in each module, so the ban sees them."""
         found = self._flag_strings(lambda path, parent: False)
-        assert {hit[0] for hit in found} == {"project_identity.py", "memory_api.py", "session_end.py"}, found
+        assert {hit[0] for hit in found} == {"git_helpers.py", "project_identity.py", "memory_api.py", "session_end.py"}, found
 
     @pytest.mark.parametrize("source, named", [
         ("VALUE = 'O_NOFOLLOW'\n", True),
@@ -3016,10 +3018,15 @@ class TestTheSubmoduleWorktreeCheckNamesItsCause:
         (tmp_path / "elsewhere").mkdir()
         assert pi._admin_dir_refusal(admin, tmp_path / "elsewhere") == pi.FOREIGN_GIT_DIR_DETAIL
 
-    def test_an_unset_core_worktree_is_named_as_not_recorded(self, tmp_path):
+    def test_an_unset_core_worktree_accepts_the_checkout_git_names(self, tmp_path):
+        """With `core.worktree` unset, the checkout git names as its top level
+        is the admin dir's; another folder (no repository there) is not."""
         admin, checkout = self._submodule(tmp_path)
         run_git("--git-dir", str(admin), "config", "--unset", "core.worktree", cwd=tmp_path)
-        assert pi._admin_dir_refusal(admin, checkout) == pi.FOREIGN_GIT_DIR_DETAIL
+        assert pi._admin_dir_refusal(admin, checkout) is None
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        assert pi._admin_dir_refusal(admin, elsewhere) == pi.FOREIGN_GIT_DIR_DETAIL
 
     def test_a_core_worktree_git_cannot_read_is_named_as_unread(self, tmp_path, monkeypatch):
         admin, checkout = self._submodule(tmp_path)

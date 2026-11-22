@@ -308,14 +308,16 @@ _PRUNE_LEDGER_TAIL_BYTES = 1024 * 1024
 
 
 def _description_predates(common_dir: Optional[Path], started_at: Any) -> bool:
-    """Whether `<common_dir>/description` was created before `started_at`.
+    """Whether `<common_dir>/description` last changed before `started_at`.
 
     `started_at` must be an ISO-8601 timestamp that carries its zone; a naive
     or unparseable one fails closed. The description must be a regular file
     by `lstat` (a symlink to an old file is refused), and its ctime must be
-    STRICTLY earlier than the session's start. A copied, restored or
-    re-cloned repository has a new description, so its old sessions fail.
-    Never raises.
+    STRICTLY earlier than the session's start. The ctime is the file's last
+    status change, not its creation: a copied, restored or re-cloned
+    repository (an `rsync -a` copy included) has a new description, and a
+    `chmod` or `chown` that reaches the file moves its ctime later too, so
+    in each case the old sessions fail. Never raises.
     """
     if common_dir is None or not isinstance(started_at, str) or not started_at:
         return False
@@ -410,7 +412,7 @@ def _pruned_session_index(ledger: Path) -> Dict[str, List[dict]]:
     Built once per ledger state and then reused, so the evidence check costs
     one dictionary lookup per writing session instead of a scan of every
     line. The cache key carries the file's size and mtime, so an appended
-    line (the reaper's only write) is seen on the next read.
+    line or a cut-back (the reaper's two writes) is seen on the next read.
     """
     try:
         status = os.lstat(ledger)
@@ -544,7 +546,7 @@ def _warn_legacy_excluded(
         return
     _EXCLUSION_WARNED.add(key)
     logger.warning(
-        "legacy project bucket %r holds %d memories and %d file path%s, but "
+        "legacy project bucket %r holds %d memor%s and %d file path%s, but "
         "none of its absolute file rows could be located under %r, so it is "
         "NOT in this read scope: its rows belong to the repository their "
         "paths name. Run "
@@ -553,6 +555,7 @@ def _warn_legacy_excluded(
         "check for a corrupt or unreadable file row before hunting paths.",
         candidate,
         memories,
+        "y" if memories == 1 else "ies",
         file_paths,
         "" if file_paths == 1 else "s",
         str(repo_root) if repo_root is not None else "none",
@@ -596,13 +599,14 @@ def _warn_legacy_unproven(
         return
     _UNPROVEN_WARNED.add(key)
     logger.warning(
-        "legacy project bucket %r holds %d memories and %d file path%s, but "
+        "legacy project bucket %r holds %d memor%s and %d file path%s, but "
         "no file row places it and no recorded session from this repository "
         "wrote it, so it is NOT in this read scope: its folder name alone "
         "cannot tell this checkout's rows from another checkout of the same "
         "name. If the rows belong here, move them explicitly with: %s",
         candidate,
         memories,
+        "y" if memories == 1 else "ies",
         file_paths,
         "" if file_paths == 1 else "s",
         _printed_rekey_remedy(

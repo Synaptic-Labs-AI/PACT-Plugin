@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextvars
 import os
+import stat
 import subprocess
 from contextlib import contextmanager
 from typing import Callable, Iterator, Mapping, Optional, Sequence, TypeVar
@@ -169,3 +170,40 @@ def run_git(
         return run()
     except (subprocess.TimeoutExpired, FileNotFoundError):
         return None
+
+
+# The most git reads of a `.git` file (`read_gitfile_gently` refuses a
+# larger one); the same bound is taken for a worktree's admin `gitdir` file.
+GIT_FILE_LIMIT = 1 << 20
+
+
+def read_git_file(path) -> Optional[str]:
+    """The text of a `.git` file or a worktree admin `gitdir` file, decoded
+    with `os.fsdecode`, or None when it is not a regular file or is larger
+    than GIT_FILE_LIMIT. At most GIT_FILE_LIMIT + 1 bytes are read, whatever
+    the file's size. Raises what `os.stat` and `os.open` raise.
+
+    Only a regular file is read, as git's `read_gitfile_gently` reads only an
+    `S_ISREG` file. A symlink is followed, because git checks the file with
+    `stat`; do not add O_NOFOLLOW, or a symlinked gitfile naming another
+    checkout's git dir reads as naming nothing and binds that checkout. The
+    type is checked before the open, so a FIFO is never opened, and again on
+    the open descriptor; O_NONBLOCK keeps that open from waiting on a FIFO
+    put in its place between the two checks. Each flag a platform may lack
+    (Windows has no O_NONBLOCK) is taken through getattr with 0.
+    """
+    if not stat.S_ISREG(os.stat(path).st_mode):
+        return None
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
+    with open(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = handle.read(GIT_FILE_LIMIT + 1)
+    return os.fsdecode(data) if len(data) <= GIT_FILE_LIMIT else None
+
+
+def worktree_admin_gitdir(text: str) -> str:
+    """The path a worktree admin dir's `gitdir` file names, read as git
+    reads it (`get_linked_worktree`): the whole file, trailing whitespace
+    trimmed."""
+    return text.rstrip(" \t\n\v\f\r")

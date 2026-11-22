@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import List, NamedTuple, Optional, Set, Tuple
 
 from . import state_file
-from .git_helpers import run_git
+from .git_helpers import read_git_file, run_git, worktree_admin_gitdir
 from .pact_context import _UNSAFE_SLUG_CHARS_RE, _build_session_path, project_slug
 from .paths import get_claude_config_dir
 
@@ -343,6 +343,25 @@ def _git_dir_answers(directory: Path) -> bool:
     return result is not None and result.returncode == 0 and bool(result.stdout)
 
 
+def _inside_a_git_dir(directory: Path) -> Optional[bool]:
+    """Whether git, asked at `directory`, says it is inside a git dir: True,
+    False (no, or no repository there at all), or None when git could not
+    run, which the caller reads as unknown."""
+    try:
+        result = run_git(
+            ["-C", str(directory), "rev-parse", "--is-inside-git-dir"],
+            timeout=5,
+            text=False,
+            env=git_env_without_location(),
+            once_per_pass=True,
+        )
+    except (OSError, ValueError):
+        return None
+    if result is None:
+        return None
+    return result.returncode == 0 and result.stdout == b"true\n"
+
+
 def _raw_rev_parse(directory: Path, flag: str) -> tuple[Optional[Path], bool]:
     """`git -C <directory> rev-parse <flag>` as (resolved path, git RAN).
 
@@ -485,13 +504,15 @@ def _checkout_of_git_dir(
     if where != git_dir and git_dir not in where.parents:
         return False, None
     if git_dir != common_dir:
+        # Bounded and regular-file-only (a FIFO is never opened), trimmed as
+        # git reads an admin dir's `gitdir` file.
         try:
-            raw = os.fsdecode((git_dir / "gitdir").read_bytes())
+            text = read_git_file(git_dir / "gitdir")
         except (OSError, ValueError):
             return True, None
-        if raw.endswith("\n"):
-            raw = raw[:-1]
-        marker = Path(raw)
+        if text is None:
+            return True, None
+        marker = Path(worktree_admin_gitdir(text))
         if not marker.is_absolute():
             marker = git_dir / marker
         candidate = marker.parent
@@ -514,9 +535,10 @@ def _unnamed_main_worktree_root(
     listing holds that top level; else None.
 
     "No main checkout" is the filesystem fact behind `git init
-    --separate-git-dir`: the common dir is not `<candidate>/.git`, so no
-    folder holds it as its `.git` (git then lists the main worktree at the
-    git dir). A `<candidate>/.git` that IS the common dir is a main checkout
+    --separate-git-dir`: the common dir is not `<candidate>/.git`; the main
+    checkout's `.git` is a file naming it from elsewhere, and git, asked
+    from the common dir, names no main working tree (git then lists the
+    main worktree at the git dir). A `<candidate>/.git` that IS the common dir is a main checkout
     git could not describe, and stays unverified. Git also names a main
     working tree when, asked from the common dir itself, it answers a top
     level: a submodule's git dir under `.git/modules/` does, through the
@@ -532,6 +554,11 @@ def _unnamed_main_worktree_root(
         return None
     named_main, ran = _raw_rev_parse(common_dir, "--show-toplevel")
     if not ran or named_main is not None:
+        return None
+    if _inside_a_git_dir(common_dir.parent) is not False:
+        # A submodule's git dir whose `core.worktree` is unset answers as a
+        # separate-git-dir store does; git places it inside the
+        # superproject's git dir, so its linked worktree stays unknown.
         return None
     toplevel, ran = _raw_rev_parse(given, "--show-toplevel")
     if not ran or toplevel is None:
@@ -786,14 +813,15 @@ def _worktree_paths_from_admin_gitdirs(checkout: Path) -> Optional[list[str]]:
             # translation, so a worktree named `wt\rname` would read as
             # `wt\nname`, the real worktree would be rejected, and a forged
             # directory at the newline spelling could pass the membership
-            # check. os.fsdecode preserves every byte, and exactly one
-            # trailing newline (git's record terminator) is dropped below.
-            raw = (admin / "gitdir").read_bytes()
+            # check. The reader decodes with os.fsdecode, reads only a
+            # regular file of bounded size (never a FIFO), and the trailing
+            # whitespace is trimmed as git trims it.
+            text = read_git_file(admin / "gitdir")
         except (OSError, ValueError):
             continue
-        content = os.fsdecode(raw)
-        if content.endswith("\n"):
-            content = content[:-1]
+        if text is None:
+            continue
+        content = worktree_admin_gitdir(text)
         # The admin `gitdir` file holds the worktree's `.git` path with NO
         # `gitdir: ` prefix (unlike a worktree's own gitfile, which does).
         # Accept either so a future format change cannot silently empty the

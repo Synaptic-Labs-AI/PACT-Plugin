@@ -199,17 +199,13 @@ class TestPercentEncodedIdsAreDocumented:
     def test_the_path_case_split_is_documented_and_measured(self):
         from scripts.project_identity import normalize_remote_url
 
-        body = _body(SKILL)
-        assert (
-            "The host is lowercased but the path keeps its case, so "
-            "https://GitHub.com/Owner/Repo and https://github.com/owner/repo "
-            "are two ids even on a host that ignores path case: project-id "
-            "show lists the other spelling as an ordinary bucket with no "
-            "command, and only an explicit project-id rekey --from=<id> "
-            "--to=<id> joins them."
-        ) in body
-        assert normalize_remote_url("https://GitHub.com/Owner/Repo") == "github.com/Owner/Repo"
-        assert normalize_remote_url("https://github.com/owner/repo") == "github.com/owner/repo"
+        assert "On every other host the path keeps its case" in _body(SKILL)
+        github = {normalize_remote_url("https://GitHub.com/Owner/Repo"),
+                  normalize_remote_url("https://github.com/owner/repo")}
+        assert github == {"github.com/owner/repo"}
+        other = normalize_remote_url("https://gitlab.com/Owner/Repo")
+        assert other == "gitlab.com/Owner/Repo"
+        assert other != normalize_remote_url("https://gitlab.com/owner/repo")
 
     def test_the_scp_relative_absolute_collision_is_documented_and_measured(self):
         from scripts.project_identity import normalize_remote_url
@@ -6215,6 +6211,14 @@ class TestEveryRouteEntryConditionIsARoute:
             "runs the reader's own git command once per detection pass and hands later "
             "askers of the same question its result; the command is the reader's input, "
             "and answered_once's own body is read like any reached function"
+        ),
+        ("call", "read_git_file"): (
+            "the one bounded reader of a .git file or a worktree admin gitdir file, which "
+            "the layout routes build; its own body is read like any reached function"
+        ),
+        ("call", "worktree_admin_gitdir"): (
+            "trims the text read_git_file returned; its own body is read like any reached "
+            "function"
         ),
         ("call", "<call to no function shared.git_helpers: PASS_GIT_RESULTS.get>"): (
             "reads the pass's memo of git results, set only by git_results_pass"

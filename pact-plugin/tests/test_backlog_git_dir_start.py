@@ -132,8 +132,10 @@ def test_a_start_inside_a_checkouts_git_dir_files_in_that_checkouts_backlog(
 @pytest.mark.parametrize("kind", ["bare.git", "store.git"])
 def test_a_git_dir_with_no_checkout_still_refuses(tmp_path, kind, declared, command):
     """A bare repository and a separate-git-dir store have no checkout to
-    name, so `add`, `show` and `set` from inside either refuse (65, the
-    root check's refusal) and write nothing."""
+    name, so `add`, `show` and `set` from inside either refuse (65) and
+    write nothing. The
+    refusal is the root check's, naming its cause, whether or not a project
+    directory is declared, and never advises setting CLAUDE_PROJECT_DIR."""
     (tmp_path / "home" / ".claude").mkdir(parents=True)
     git_dir = tmp_path / kind
     if kind == "bare.git":
@@ -147,5 +149,7 @@ def test_a_git_dir_with_no_checkout_still_refuses(tmp_path, kind, declared, comm
 
     assert asked, "control: the logging git ran"
     assert result.returncode == 65, (result.returncode, result.stderr)
-    assert "root" in result.stderr
+    assert "the memory skill's root check refused" in result.stderr, result.stderr
+    assert "no working tree" in result.stderr, result.stderr
+    assert "Set CLAUDE_PROJECT_DIR" not in result.stderr, result.stderr
     assert list(store.iterdir()) == []

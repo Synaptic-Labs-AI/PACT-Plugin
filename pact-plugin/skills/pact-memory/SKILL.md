@@ -430,10 +430,12 @@ older `visualstudio.com` hosts), and all of them resolve to that one
 `dev.azure.com/<org>/<project>/_git/<repo>` id.
 
 One repository can still produce two ids, and two repositories can share one.
-The host is lowercased but the path keeps its case, so
-`https://GitHub.com/Owner/Repo` and `https://github.com/owner/repo` are two ids
-even on a host that ignores path case: `project-id show` lists the other
-spelling as an ordinary bucket with no command, and only an explicit
+The host is lowercased, and on github.com, whose owner and repository names
+are case-insensitive, so is the path: `https://GitHub.com/Owner/Repo` and
+`https://github.com/owner/repo` are one id, `github.com/owner/repo`. On every
+other host the path keeps its case, so two spellings that differ only in path
+case are two ids: `project-id show` lists the other spelling as an ordinary
+bucket with no command, and only an explicit
 `project-id rekey --from=<id> --to=<id>` joins them. A relative and an absolute
 scp path are one id (`git@host:srv/repo` and `git@host:/srv/repo` both give
 `host/srv/repo`), so two different repositories at `~/srv/repo` and

@@ -2897,8 +2897,9 @@ NOT_A_FLOOR_LAYOUT = {
         "forged_submodule_admin and symlinked_submodule_admin shapes decline "
         "`gitfile_redirect`). Reached by no fixture shape, and declining at "
         "the same redirect check when reached: `git config core.worktree` "
-        "cannot run, or exits non-zero or prints nothing (unset, as `git "
-        "submodule deinit` leaves it, or a git failure); or the recorded or "
+        "cannot run, or exits non-zero with output (a git failure); "
+        "`core.worktree` is unset and git, asked at the checkout, does not "
+        "name it as its top level (`_git_names_toplevel`); or the recorded or "
         "the asked path cannot be resolved. When `samefile` raises because "
         "the recorded checkout does not exist, the return is reached only by "
         "a direct call or a mocked `samefile`: with the checkout really "
@@ -2907,6 +2908,13 @@ NOT_A_FLOOR_LAYOUT = {
         "refusal is called"
     ),
     "_git_env_bool": "reads a git environment flag, not the `.git` layout",
+    "_git_names_toplevel": (
+        "answers only for a submodule admin dir whose `core.worktree` is "
+        "unset (`git config --unset core.worktree`), which no own layout "
+        "builds; there a True lets the checkout bind the submodule's own "
+        "origin (test_project_identity_name_provenance's unset-core.worktree "
+        "arms), and a False declines `gitfile_redirect`"
+    ),
 }
 
 
@@ -3214,6 +3222,8 @@ def _return_kind(function, defined: "dict | None" = None, seen: frozenset = froz
 # reason's text from the source and requires the reason to equal it; a new or
 # changed form fails the census arm.
 NAMED_LAYOUT_FORMS = {
+    ('_git_names_toplevel', 'binds', 'toplevel = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `_git_names_toplevel` (-> bool)"),
+    ('_admin_dir_refusal', 'uses', 'an `if` or `elif` test: _git_names_toplevel(asked_root)'): (1, "uses a call to `_git_names_toplevel` (-> bool) in an `if` or `elif` test in `_admin_dir_refusal` (-> Optional[str])"),
     ('_admin_dir_refusal', 'binds', 'value = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `_admin_dir_refusal` (-> Optional[str])"),
     ('_marker_target', 'binds', 'target = gitfile_target(text)'): (1, "assigns a call to `gitfile_target` (-> Optional[str]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
     ('git_dir_answer', 'binds', 'answer = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `git_dir_answer` (-> Optional[str])"),

@@ -103,22 +103,39 @@ class TestNormalizationEquivalence:
         Every other arm compares outputs; this one is the single literal.
         """
         assert (
-            pi.normalize_remote_url("git@github.com:Org/Repo.git")
-            == "github.com/Org/Repo"
+            pi.normalize_remote_url("git@gitlab.com:Org/Repo.git")
+            == "gitlab.com/Org/Repo"
         )
 
     def test_host_case_is_folded_and_path_case_is_preserved(self):
         """Catches a whole-string lower() and a missing host lower().
 
-        Hosts are case-insensitive; paths are not (a case-sensitive host can
-        hold two distinct repositories differing only by case).
+        Hosts are case-insensitive; paths are not on a host whose rules are
+        not known here (a case-sensitive host can hold two distinct
+        repositories differing only by case).
         """
-        assert pi.normalize_remote_url("https://GitHub.COM/owner/repo") == (
-            "github.com/owner/repo"
+        assert pi.normalize_remote_url("https://GitLab.COM/owner/repo") == (
+            "gitlab.com/owner/repo"
         )
-        preserved = pi.normalize_remote_url("https://github.com/Owner/Repo")
-        assert preserved == "github.com/Owner/Repo"
-        assert preserved != pi.normalize_remote_url("https://github.com/owner/repo")
+        preserved = pi.normalize_remote_url("https://gitlab.com/Owner/Repo")
+        assert preserved == "gitlab.com/Owner/Repo"
+        assert preserved != pi.normalize_remote_url("https://gitlab.com/owner/repo")
+
+    def test_a_github_path_is_one_id_in_every_case(self):
+        """GitHub owner and repository names are case-insensitive, so every
+        spelling of one GitHub repository is one id, in every remote form;
+        a host outside `_CASE_INSENSITIVE_PATH_HOSTS` keeps its path's case
+        (control: a self-hosted GitHub Enterprise host)."""
+        spellings = [
+            "https://github.com/Acme/Widget.git",
+            "https://GitHub.com/acme/WIDGET",
+            "git@github.com:ACME/widget.git",
+            "ssh://git@github.com/Acme/Widget",
+        ]
+        assert {pi.normalize_remote_url(url) for url in spellings} == {"github.com/acme/widget"}
+        assert pi.normalize_remote_url("https://github.example.com/Acme/Widget") == (
+            "github.example.com/Acme/Widget"
+        )
 
     def test_one_git_suffix_is_stripped(self):
         """Catches a loop that strips `.git` repeatedly."""

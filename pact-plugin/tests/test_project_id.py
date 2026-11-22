@@ -889,14 +889,16 @@ class TestCwdSubdirectoryDetection:
     of a project should return the PROJECT's basename, not the subdirectory's.
     """
 
-    def test_cwd_from_subdirectory_under_a_broken_marker_declines(
+    def test_cwd_from_subdirectory_with_git_absent_declines(
         self, clean_env_no_claude_project_dir, tmp_path, caplog, monkeypatch
     ):
-        """A `.git` marker git cannot answer for DECLINES, naming the marker.
+        """With git absent (every git launch raises FileNotFoundError), a
+        directory below a `.git` marker DECLINES, naming the marker.
 
-        The walk still lands on the project (not `.claude`), but a broken
-        marker must not be silent-basenamed: that files the session under a
-        folder name nobody can re-derive. The plain-marker basename shape is
+        The walk still lands on the project (not `.claude`), but a `.git`
+        marker git cannot answer for, here because git cannot run, must not
+        be silent-basenamed: that files the session under a folder name
+        nobody can re-derive. The plain-marker basename shape is
         held by `test_cwd_from_nested_subdirectory` (a CLAUDE.md marker) and
         `test_cwd_no_markers_falls_back_to_cwd_basename`.
 
@@ -926,7 +928,7 @@ class TestCwdSubdirectoryDetection:
              patch("pathlib.Path.cwd", return_value=subdir):
             result = PACTMemory._detect_project_id()
 
-        assert result is None, "a broken .git marker was basenamed"
+        assert result is None, "a .git marker was basenamed with git absent"
         messages = " ".join(record.message for record in caplog.records)
         assert "could not answer" in messages, (
             f"the decline did not report the unanswerable repository: {messages!r}"
@@ -947,14 +949,15 @@ class TestCwdSubdirectoryDetection:
 
         assert result == "deep-project"
 
-    def test_cwd_from_project_root_under_a_broken_marker_declines(
+    def test_cwd_from_project_root_with_git_absent_declines(
         self, clean_env_no_claude_project_dir, tmp_path
     ):
-        """From the root, a `.git` marker git cannot answer for DECLINES.
+        """From the root, with git absent (every git launch raises
+        FileNotFoundError), a `.git` marker DECLINES.
 
         The unchanged-root-basename intent still holds for a marker git CAN
-        answer for and for a plain non-git marker; this arm pins the broken
-        marker's new outcome.
+        answer for and for a plain non-git marker; this arm pins the outcome
+        for a marker git cannot answer for because git cannot run.
         """
         project = tmp_path / "root-project"
         project.mkdir()
@@ -964,7 +967,7 @@ class TestCwdSubdirectoryDetection:
              patch("pathlib.Path.cwd", return_value=project):
             result = PACTMemory._detect_project_id()
 
-        assert result is None, "a broken .git marker was basenamed"
+        assert result is None, "a .git marker was basenamed with git absent"
 
     @pytest.mark.claude_md_ambient  # §11.3.1 (a): marker-absence detection — the fixture's CLAUDE.md IS a project marker
     def test_cwd_no_markers_falls_back_to_cwd_basename(

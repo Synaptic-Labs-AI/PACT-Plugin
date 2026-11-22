@@ -55,5 +55,5 @@ def test_the_parsers_are_live_on_a_shared_positive_control():
     working altogether.
     """
     url = "https://github.com/Owner/Repo.git"
-    assert normalize_remote_url(url) == "github.com/Owner/Repo"
+    assert normalize_remote_url(url) == "github.com/owner/repo"
     assert _slug_from_remote_url(url) == ("Owner", "Repo")

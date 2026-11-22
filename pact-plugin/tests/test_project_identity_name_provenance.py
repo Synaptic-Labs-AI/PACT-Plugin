@@ -443,16 +443,20 @@ def _forged_checkout(tmp_path: Path, admin: Path) -> Path:
 
 
 class TestDeinitEdSubmoduleAdminDir:
-    """The class property, at the ORIGIN rung: a repository-shaped pointer must
-    not let a checkout bind somebody else's canonical id."""
+    """The class property, at the ORIGIN rung: a repository-shaped pointer
+    binds no id beyond the origin of the git dir it names. A submodule admin
+    dir whose `core.worktree` is unset (git commands make that state: a
+    `git submodule deinit`, `git config --unset core.worktree`) belongs to
+    the checkout git, asked there, names as its top level."""
 
-    def test_a_forged_gitfile_at_a_deinit_ed_admin_dir_declines(
+    def test_a_forged_gitfile_at_a_deinit_ed_admin_dir_binds_only_its_origin(
         self, tmp_path, monkeypatch
     ):
-        """RED on the unfixed tree: the guard's `core.worktree` probe answers
-        "unset" for a deinit-ed admin dir, so the origin is read from the
-        victim and the id binds. Asserts the read AND write outcomes.
-        """
+        """A hand-written `.git` file naming a deinit-ed admin dir
+        (adversarial-only: it takes the deinit and a hand-written file)
+        reads as the submodule's own checkout does, so it binds the id that
+        admin dir's own origin names, and no other: not the superproject's,
+        not a folder name."""
         admin = _deinit_ed_admin(tmp_path)
         attacker = _forged_checkout(tmp_path, admin)
         store = tmp_path / "store.db"
@@ -460,34 +464,36 @@ class TestDeinitEdSubmoduleAdminDir:
         _enter(monkeypatch, tmp_path, attacker)
         memory = _memory(store)
 
-        assert memory.project_id != VICTIM, (
-            "a forged .git file at a deinit-ed submodule admin dir bound the "
-            f"victim id: {memory.project_id!r}"
-        )
-        assert VICTIM not in (memory._read_project_scopes() or ()), (
-            "the victim bucket joined the read scope through a deinit-ed "
-            "submodule admin dir"
-        )
-        assert _ids(memory.list(limit=10)) == [], (
-            "a read at a deinit-ed admin dir returned the victim's rows"
+        assert memory.project_id == VICTIM, memory.project_id
+        assert set(memory._read_project_scopes() or ()) <= {VICTIM}, (
+            memory._read_project_scopes()
         )
 
-        with db_connection(store) as conn:
-            before = count_project_memories(conn, VICTIM)
-        with pytest.MonkeyPatch.context() as patcher:
-            patcher.setattr(memory_api, "_ensure_ready", lambda: None)
-            patcher.setattr(
-                PACTMemory, "_store_embedding", lambda self, *a, **k: None
-            )
-            with pytest.raises(memory_api.ProjectIdentityUnresolvedError):
-                memory.save(
-                    {"context": "forged-pointer write"}, sync_to_claude=False
-                )
-        with db_connection(store) as conn:
-            assert count_project_memories(conn, VICTIM) == before, (
-                "a write landed in the victim's bucket through a deinit-ed "
-                "submodule admin dir"
-            )
+    def test_a_submodule_with_core_worktree_unset_binds_its_own_id(
+        self, tmp_path, monkeypatch
+    ):
+        """`git config --unset core.worktree` in a live submodule's admin
+        dir: git, asked from the submodule's checkout (and a folder below
+        it), names the checkout as its top level, so the checkout binds the
+        submodule's own origin rather than declining `gitfile_redirect`."""
+        source = make_repo(tmp_path / "unset-source")
+        superproject = make_repo(tmp_path / "unset-super")
+        run_git(
+            "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-f",
+            str(source), "submod",
+            cwd=superproject,
+        )
+        checkout = superproject / "submod"
+        run_git("remote", "set-url", "origin", "https://github.com/o/sub.git", cwd=checkout)
+        admin = superproject / ".git" / "modules" / "submod"
+        run_git("--git-dir", str(admin), "config", "--unset", "core.worktree", cwd=superproject)
+        below = checkout / "below"
+        below.mkdir()
+
+        for start in (checkout, below):
+            _enter(monkeypatch, tmp_path, start)
+            memory = _memory(tmp_path / "store.db")
+            assert memory.project_id == "github.com/o/sub", (start, memory.project_id)
 
     def test_a_live_submodule_still_resolves_its_own_id(self, tmp_path, monkeypatch):
         """POSITIVE CONTROL: the guard must keep resolving genuine submodules.

@@ -400,6 +400,14 @@ def _root_and_common_dir(
     )
     if root is not None:
         return root, common
+    if not project_dir and common is not None:
+        # Nothing declared, but the working directory is in a repository git
+        # gives no root for (a bare one, say): the root check judges it as it
+        # judges a declared directory, so the refusal names that check's
+        # cause and remedy rather than advising CLAUDE_PROJECT_DIR.
+        cwd = memory_api._cwd_or_none()
+        if cwd is not None:
+            project_dir, source = str(cwd), "the working directory"
     if project_dir and Path(project_dir).is_dir():
         # _resolved never raises: an unresolvable directory falls back to its
         # unresolved path, the same fallback the detector takes for the name.
@@ -503,13 +511,13 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     # session there after the drive returns matches before any write records
     # it again, and an absent folder names no other repository's checkout.
     # The listed worktrees join only when the root is the checkout git lists
-    # first, or git lists the git dir there because it cannot name the main
-    # checkout (a `--separate-git-dir` or `core.worktree` repository). A
-    # folder whose `.git` file names another repository's `.git` directory
-    # is neither, so it claims none of that repository's worktrees. One
-    # whose `.git` file names such a listed git dir still claims them: it
-    # reads exactly as that repository's own main checkout does, and only a
-    # hand-written `.git` file makes it.
+    # first, git lists the git dir there because it cannot name the main
+    # checkout (a `--separate-git-dir` or `core.worktree` repository), or git
+    # lists there the folder whose `.git` is the git dir. A folder whose
+    # `.git` file names another folder's `.git` directory, as `git init
+    # --separate-git-dir=<folder>/.git` makes it, shares that git dir, so it
+    # carries the worktrees git lists for it; a hand-written `.git` file of
+    # that shape reads the same and is listed adversarial-only.
     memory_api = _memory_api()
     # ONE LISTING PER LOOKUP: read here and handed to the root's redirect
     # check, which a linked worktree runs on the same `--git-dir` listing.
@@ -543,14 +551,18 @@ def checkout_roots(recorded: Any = None) -> List[str]:
 
 
 def _lists_first(records: List[List[str]], root: Any, common: Optional[Path]) -> bool:
-    """Whether git's listing `records` puts `root` first, or the git dir
-    `common` first because it cannot name the main checkout: only then are
-    the listed worktrees `root`'s. An empty listing (its first record was
-    dropped) puts nothing first. Raises what `Path.resolve` raises."""
+    """Whether git's listing `records` puts first `root`, the git dir
+    `common` (git cannot name the main checkout), or the folder whose `.git`
+    is `common` (where git lists the main worktree of a git dir named
+    `.git`, `git init --separate-git-dir=<folder>/.git` included): only then
+    are the listed worktrees `root`'s. An empty listing (its first record
+    was dropped) puts nothing first. Raises what `Path.resolve` raises."""
     if common is None or not records:
         return False
     first = Path(records[0][0][len("worktree "):]).resolve()
-    return first in (Path(root).resolve(), Path(common).resolve())
+    common_path = Path(common).resolve()
+    listed_main = [common_path.parent] if common_path.name == ".git" else []
+    return first in (Path(root).resolve(), common_path, *listed_main)
 
 
 def _names_common_dir(checkout: Any, common: Path) -> bool:

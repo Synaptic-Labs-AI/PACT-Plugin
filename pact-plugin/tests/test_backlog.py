@@ -2469,11 +2469,14 @@ def test_a_checkout_recorded_through_a_link_and_directly_is_one_root(tmp_path, m
     assert (roots.count(str(checkout)), alias in roots, len(roots) == len(set(roots))) == (1, False, True), roots
 
 
-def test_a_folder_naming_another_repositorys_git_dir_claims_none_of_its_worktrees(tmp_path, monkeypatch):
-    """A folder whose `.git` file names another repository's `.git`
-    directory gets that repository's worktree listing from git, with that
-    repository's checkout listed first. The folder is not that checkout, so
-    its roots are itself alone; the control shows git lists the worktree.
+def test_a_folder_naming_another_folders_git_dir_carries_its_worktrees(tmp_path, monkeypatch):
+    """A folder whose `.git` file names another folder's `.git` directory
+    gets that repository's worktree listing from git, with the folder whose
+    `.git` is the git dir listed first. That is the shape `git init
+    --separate-git-dir=<other>/.git <folder>` makes, so the folder shares
+    the git dir and carries the listed worktree; a hand-written `.git` file
+    of that shape reads the same (adversarial-only). The control shows git
+    lists the worktree.
 
     Real repos, real git."""
     other = _repo(tmp_path / "other")
@@ -2486,7 +2489,7 @@ def test_a_folder_naming_another_repositorys_git_dir_claims_none_of_its_worktree
     listed = [record[0] for record in backlog._memory_api()._worktree_records(["-C", str(folder)])]
     assert f"worktree {(tmp_path / 'other-wt').resolve()}" in listed, f"control: {listed}"
 
-    assert backlog.checkout_roots() == [str(folder.resolve())]
+    assert backlog.checkout_roots() == [str(folder.resolve()), str((tmp_path / "other-wt").resolve())]
 
 
 def test_a_core_worktree_repository_keeps_its_worktrees(tmp_path, monkeypatch):
@@ -3989,11 +3992,12 @@ def test_gh_repo_view_runs_without_the_sessions_git_location(tmp_path, monkeypat
     assert {"GIT_DIR", "GIT_COMMON_DIR"} & set(seen[0]) == set(), sorted(seen[0])
 
 
-def test_a_folder_naming_another_repositorys_git_dir_reads_none_of_its_worktree_names(tmp_path):
-    """A folder whose `.git` file names another repository's `.git`
-    directory reads that repository's worktree listing, and the worktree
-    folder names are not this project's, as its roots are not. The control
-    shows git lists the worktree.
+def test_a_folder_naming_another_folders_git_dir_reads_its_worktree_names(tmp_path):
+    """A folder whose `.git` file names another folder's `.git` directory
+    (the `git init --separate-git-dir=<other>/.git` shape; a hand-written
+    file of that shape is adversarial-only) shares that git dir, so its
+    abandoned-work check reads the listed worktree's name, as its roots
+    carry the worktree. The control shows git lists the worktree.
 
     Real repos, real git."""
     other = _repo(tmp_path / "other")
@@ -4007,7 +4011,7 @@ def test_a_folder_naming_another_repositorys_git_dir_reads_none_of_its_worktree_
 
     names = backlog._branch_and_worktree_names(str(folder))
 
-    assert "theirs-8" not in (names or []), names
+    assert "theirs-8" in (names or []), names
 
 
 def test_staleness_flags_at_the_threshold_not_before(monkeypatch):

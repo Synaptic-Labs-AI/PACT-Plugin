@@ -302,16 +302,19 @@ def test_a_moved_worktree_is_unknown_and_the_archive_refuses(
     assert "could not classify" not in reason, reason
 
 
+@pytest.mark.parametrize("core_worktree", ["set", "unset"])
 def test_a_submodules_linked_worktree_is_unknown_and_the_archive_refuses(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, core_worktree
 ):
     """A linked worktree of a submodule. Its common dir is the submodule's
     git dir under `.git/modules/`, so no folder holds it as its `.git` and
     git lists the main worktree at the git dir, as for a separate-git-dir
-    repository. But git, asked from that git dir, names the submodule's own
-    checkout as its top level: the repository has a main working tree, so
-    the worktree is not its own root. It stays UNKNOWN, and its CLAUDE.md is
-    not the project memory's."""
+    repository. With `core.worktree` set, git, asked from that git dir,
+    names the submodule's own checkout as its top level; with it unset
+    (`git config --unset core.worktree`), git refuses there, as it does for
+    a separate-git-dir store, but places the git dir inside the
+    superproject's. Either way the worktree is not its own root: it stays
+    UNKNOWN, and its CLAUDE.md is not the project memory's."""
     import archive_pin
     from helpers import known_root
 
@@ -331,6 +334,9 @@ def test_a_submodules_linked_worktree_is_unknown_and_the_archive_refuses(
     wt = tmp_path / "sub-wt"
     added = _git("worktree", "add", "-q", str(wt), "-b", "subwt", cwd=sup / "sub")
     assert added.returncode == 0, added.stderr
+    if core_worktree == "unset":
+        unset = _git("config", "--unset", "core.worktree", cwd=sup / ".git" / "modules" / "sub")
+        assert unset.returncode == 0, unset.stderr
     # Control: the submodule's own checkout is still a known root.
     assert known_root(sup / "sub") == (sup / "sub").resolve()
     wt_md = wt / ".claude" / "CLAUDE.md"

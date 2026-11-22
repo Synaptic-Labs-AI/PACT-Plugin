@@ -679,11 +679,20 @@ def _azure_devops_services_id(host: str, port: str, segments: list) -> Optional[
     return None
 
 
+# Hosts whose owner and repository names are case-insensitive, so one
+# repository has one id whatever case a remote spells it in: the path is
+# lower-cased. Every other host keeps its path's case.
+_CASE_INSENSITIVE_PATH_HOSTS = frozenset({"github.com"})
+
+
 def _identifier(host: str, port: str, segments: list) -> str:
-    """`host[:port]/<segments>`, after the bounded Azure DevOps Services rule."""
+    """`host[:port]/<segments>`, after the bounded Azure DevOps Services rule
+    and the lower-cased path of a `_CASE_INSENSITIVE_PATH_HOSTS` host."""
     azure = _azure_devops_services_id(host, port, segments)
     if azure is not None:
         host, segments = "dev.azure.com", azure
+    if host in _CASE_INSENSITIVE_PATH_HOSTS:
+        segments = [segment.lower() for segment in segments]
     return f"{host}:{port}/{'/'.join(segments)}" if port else f"{host}/{'/'.join(segments)}"
 
 
@@ -1303,41 +1312,26 @@ def gitfile_target(text: str) -> Optional[str]:
     return text.rstrip("\r\n")[len("gitdir: "):] or None
 
 
-# The most git reads of a `.git` file (`read_gitfile_gently` refuses a
-# larger one); the same bound is taken for a worktree's admin `gitdir` file.
+# The most git reads of a `.git` file; equal to
+# `shared.git_helpers.GIT_FILE_LIMIT`, which the one reader enforces.
 GIT_FILE_LIMIT = 1 << 20
 
 
 def read_git_file(path) -> Optional[str]:
-    """The text of a `.git` file or a worktree admin `gitdir` file, decoded
-    with `os.fsdecode`, or None when it is not a regular file or is larger
-    than GIT_FILE_LIMIT. At most GIT_FILE_LIMIT + 1 bytes are read, whatever
-    the file's size. Raises what `os.stat` and `os.open` raise.
+    """`shared.git_helpers.read_git_file`: the text of a `.git` file or a
+    worktree admin `gitdir` file when it is a regular file of at most
+    GIT_FILE_LIMIT bytes, else None; a FIFO is never opened."""
+    from shared.git_helpers import read_git_file as read
 
-    Only a regular file is read, as git's `read_gitfile_gently` reads only an
-    `S_ISREG` file. A symlink is followed, because git checks the file with
-    `stat`; do not add O_NOFOLLOW, or a symlinked gitfile naming another
-    checkout's git dir reads as naming nothing and binds that checkout. The
-    type is checked before the open, so a FIFO is never opened, and again on
-    the open descriptor; O_NONBLOCK keeps that open from waiting on a FIFO
-    put in its place between the two checks. Each flag a platform may lack
-    (Windows has no O_NONBLOCK) is taken through getattr with 0.
-    """
-    if not stat.S_ISREG(os.stat(path).st_mode):
-        return None
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0))
-    with open(fd, "rb") as handle:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
-        data = handle.read(GIT_FILE_LIMIT + 1)
-    return os.fsdecode(data) if len(data) <= GIT_FILE_LIMIT else None
+    return read(path)
 
 
 def worktree_admin_gitdir(text: str) -> str:
-    """The path a worktree admin dir's `gitdir` file names, read as git
-    reads it (`get_linked_worktree`): the whole file, trailing whitespace
-    trimmed."""
-    return text.rstrip(" \t\n\v\f\r")
+    """`shared.git_helpers.worktree_admin_gitdir`: the path a worktree admin
+    dir's `gitdir` file names, trailing whitespace trimmed."""
+    from shared.git_helpers import worktree_admin_gitdir as trimmed
+
+    return trimmed(text)
 
 
 def git_dir_answer(start) -> Optional[str]:
@@ -1559,13 +1553,14 @@ def _admin_dir_refusal(admin_dir: Path, asked_root: Path) -> Optional[str]:
         return CORE_WORKTREE_UNREAD_DETAIL
     value = one_git_answer(result)
     if value is None:
-        # AN UNSET `core.worktree` IS UNPROVABLE, NOT PROVEN-INNOCENT, and the
-        # difference was a blocking defect: `git submodule deinit` UNSETS
-        # `core.worktree` while the submodule's origin SURVIVES, so a forged
-        # `.git` file naming that admin dir bound another repository's
-        # canonical id for reads AND writes. A live submodule always records
-        # it (measured: `../../../../checks/ForeignProj`), so failing closed
-        # here refuses only the deinit-ed state that cannot be checked.
+        # AN UNSET `core.worktree` IS A STATE GIT COMMANDS MAKE (`git config
+        # --unset core.worktree`, a deinit and re-init), and git then takes
+        # the checkout it is run from as the work tree. So the checkout is
+        # this admin dir's when git, asked there, names it as its top level.
+        # A hand-written `.git` naming such an admin dir reads the same and
+        # binds only the submodule's own origin (adversarial-only).
+        if _git_names_toplevel(asked_root):
+            return None
         return FOREIGN_GIT_DIR_DETAIL
     recorded = Path(value)
     if not recorded.is_absolute():
@@ -1585,6 +1580,32 @@ def _admin_dir_refusal(admin_dir: Path, asked_root: Path) -> Optional[str]:
         # A recorded path that does not exist cannot be this checkout's
         # worktree, and the question is unprovable: fail closed.
         return FOREIGN_GIT_DIR_DETAIL
+
+
+def _git_names_toplevel(root: Path) -> bool:
+    """Whether `git -C root rev-parse --show-toplevel` names `root` itself.
+    Any failure is False."""
+    try:
+        from shared.git_helpers import answered_once
+        from shared.project_scope import git_env_without_location
+
+        argv = ["git", "-C", str(root), "rev-parse", "--show-toplevel"]
+        result = answered_once(
+            argv,
+            lambda: subprocess.run(
+                argv,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
+            text=False,
+            env=git_env_without_location(),
+        )
+        toplevel = one_git_answer(result)
+        return toplevel is not None and os.path.samefile(toplevel, root)
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return False
 
 
 def _redirect_target_is_foreign(target: Path, marker_root: Path) -> bool:
