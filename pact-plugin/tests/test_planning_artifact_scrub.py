@@ -4,8 +4,8 @@ Tests for planning-artifact scrub discipline in LLM-loaded markdown.
 Background: Planning-artifact patterns (PR/issue refs, SHAs, version markers,
 in-session task IDs, letter-cycle labels) are forbidden in files that load
 into the LLM's context at runtime — agents/*.md, skills/*/SKILL.md,
-protocols/*.md, commands/*.md, reference/*.md — per the LLM-load
-distinction pin in user CLAUDE.md.
+protocols/*.md, commands/*.md, reference/*.md, templates/*.md — per the
+LLM-load distinction pin in user CLAUDE.md.
 
 Rationale (from the pin): these files load every session; planning artifacts
 become dead pointers (no tracker access), consume context, and undermine
@@ -82,6 +82,11 @@ LLM_LOADED_DIRECTORIES = (
     # tells agents to read reference/unattended-runs.md, and the protocols
     # SSOT links reference/vsm-glossary.md.
     PACT_PLUGIN_ROOT / "reference",
+    # templates/*.md is enumerated as an LLM-loaded surface by the test-run
+    # scope census (tests/test_test_run_scope_pins.py:176-180,191, known
+    # member templates/environment-model.md): an opened template instructs
+    # the same reader one hop from its instruction.
+    PACT_PLUGIN_ROOT / "templates",
 )
 
 
