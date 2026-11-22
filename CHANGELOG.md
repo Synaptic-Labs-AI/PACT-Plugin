@@ -30,6 +30,7 @@ The TeammateIdle hook now gives a selected task in `in_progress` or `completed` 
 - The failed instruction-only B orchestrator prose and its dedicated wait-discipline pins are withdrawn byte-for-byte to `main`. The previously withdrawn C files also remain `main`-identical. The independent spawn-overhead benchmark's 10,000-byte threshold remains unchanged; an oversized-note mutation control now proves that the shared completion note is counted.
 - Static controls cover eligibility, raw-name and symlink containment, minimal message shape, immediate and delayed positives, retry and fail-open inputs, the exact fake-clock poll and sleep bound, expired second idles, main output shape, exception fail-open, and the single synchronous 20-second registration. These tests do not establish platform `decision:block` behavior or real inbox timing.
 - The grace inbox buffer uses a distinct name from the idle-count parser's buffer, removing a false cross-function taint path in the no-message-delivery scanner without changing that scanner, its positive controls, or any hook behavior.
+- The test bootstrap imports `peer_inject` with the other by-value shared-name importers, so the import-order census covers the shared completion-authority note without an exemption or production behavior change; the stale-entry census remains active.
 
 ### Why
 

@@ -162,6 +162,7 @@ import file_tracker  # noqa: E402, F401
 import merge_guard_post  # noqa: E402, F401
 import merge_guard_pre  # noqa: E402, F401
 import missed_wake_scan  # noqa: E402, F401
+import peer_inject  # noqa: E402, F401
 import postcompact_archive  # noqa: E402, F401
 import session_end  # noqa: E402, F401
 import session_init  # noqa: E402, F401
