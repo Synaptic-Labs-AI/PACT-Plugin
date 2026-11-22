@@ -27,7 +27,6 @@ import re
 import shutil
 import stat
 import sys
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -650,6 +649,44 @@ _PRUNE_LEDGER_KEEP_BYTES = 1024 * 1024
 _PRUNE_LEDGER_COMPACT_BYTES = 2 * _PRUNE_LEDGER_KEEP_BYTES
 
 
+def _cut_back_file_pattern(ledger: Path) -> "re.Pattern[str]":
+    """The exact name of a cut-back's new file: '.' + the ledger's name + '.'
+    + 8 lowercase hex digits, as `_create_cut_back_file` makes it."""
+    return re.compile(rf"\.{re.escape(ledger.name)}\.[0-9a-f]{{8}}")
+
+
+def _create_cut_back_file(ledger: Path) -> tuple[int, Path]:
+    """Create the cut-back's new file next to the ledger, mode 0600, and
+    return its fd and path. O_EXCL never reuses a name; a collision retries."""
+    for _ in range(16):
+        path = ledger.parent / f".{ledger.name}.{os.urandom(4).hex()}"
+        try:
+            # O_EXCL refuses any existing name, a symlink included.
+            return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), path
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"no free cut-back name next to {ledger}")
+
+
+def _remove_cut_back_leftovers(ledger: Path) -> None:
+    """Remove the new files of earlier cut-backs that stopped before their
+    rename. The caller holds the ledger's lock, and a cut-back's file exists
+    only while its cut-back holds that lock, so none of these is in use. Only
+    regular files with the exact cut-back name go; never raises."""
+    pattern = _cut_back_file_pattern(ledger)
+    try:
+        names = os.listdir(ledger.parent)
+    except OSError:
+        return
+    for name in names:
+        if not pattern.fullmatch(name):
+            continue
+        path = ledger.parent / name
+        with contextlib.suppress(OSError):
+            if stat.S_ISREG(os.lstat(path).st_mode):
+                os.unlink(path)
+
+
 def _compact_ledger(ledger: Path, fd: int, size: int) -> None:
     """Replace the ledger open on `fd` with its last whole lines within the
     reader's window. The caller holds the lock. The kept lines go to a new
@@ -666,7 +703,8 @@ def _compact_ledger(ledger: Path, fd: int, size: int) -> None:
         tail += chunk
     # The window starts mid-line; drop that partial first line.
     tail = tail[tail.find(b"\n") + 1:]
-    new_fd, new_path = tempfile.mkstemp(dir=ledger.parent, prefix=f".{ledger.name}.")
+    _remove_cut_back_leftovers(ledger)
+    new_fd, new_path = _create_cut_back_file(ledger)
     try:
         try:
             while tail:

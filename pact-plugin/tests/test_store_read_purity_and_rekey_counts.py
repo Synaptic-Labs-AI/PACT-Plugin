@@ -580,3 +580,98 @@ class TestThePruneLedgerIsBounded:
         ids = [json.loads(item)["session_id"] for item in ledger.read_bytes().splitlines()]
         assert ids[0] == "s000000"
         assert ids[-1] == "trigger"
+
+    def test_the_next_cut_back_removes_a_crashed_cut_backs_file(self, tmp_path):
+        """Catches a crash between creating the cut-back's new file and the
+        rename leaving that file in the slug folder for good. Only an exact
+        '.pruned-sessions.jsonl.' + 8 lowercase hex regular file goes; the
+        ledger, session folders, near-miss names and links stay."""
+        import os
+
+        import session_end
+
+        slug = tmp_path / "slug"
+        ledger, line = self._ledger_one_line_below_compaction(slug)
+        leftover = slug / ".pruned-sessions.jsonl.0a1b2c3d"
+        leftover.write_bytes(b'{"session_id": "half"}\n')
+        kept = {
+            ".pruned-sessions.jsonl.0a1b2c3": b"seven hex",
+            ".pruned-sessions.jsonl.0A1B2C3D": b"upper case",
+            ".pruned-sessions.jsonl.0a1b2c3d9": b"nine hex",
+            ".pruned-sessions.jsonl.0a1b2c3d.bak": b"suffix",
+            "pruned-sessions.jsonl.0a1b2c3d": b"no leading dot",
+            ".other.jsonl.0a1b2c3d": b"other prefix",
+            "notes.txt": b"unrelated",
+        }
+        for name, data in kept.items():
+            (slug / name).write_bytes(data)
+        (slug / "session-a").mkdir()
+        (slug / ".pruned-sessions.jsonl.deadbeef").mkdir()
+        outside = tmp_path / "outside.txt"
+        outside.write_bytes(b"target")
+        os.symlink(outside, slug / ".pruned-sessions.jsonl.feedface")
+
+        session_end._append_ledger_line(slug, line("trigger"))
+
+        assert ledger.stat().st_size <= session_end._PRUNE_LEDGER_KEEP_BYTES
+        assert json.loads(ledger.read_bytes().splitlines()[-1])["session_id"] == "trigger"
+        assert not leftover.exists()
+        assert {name: (slug / name).read_bytes() for name in kept} == kept
+        assert (slug / "session-a").is_dir()
+        assert (slug / ".pruned-sessions.jsonl.deadbeef").is_dir()
+        assert os.path.islink(slug / ".pruned-sessions.jsonl.feedface")
+        assert outside.read_bytes() == b"target"
+        assert sorted(p.name for p in slug.iterdir()) == sorted(
+            [*kept, "pruned-sessions.jsonl", "session-a",
+             ".pruned-sessions.jsonl.deadbeef", ".pruned-sessions.jsonl.feedface"]
+        )
+
+    def test_a_cut_back_in_flight_keeps_its_file_from_another_writer(
+        self, tmp_path, monkeypatch
+    ):
+        """Control: the removal runs only under the ledger's lock, so a second
+        writer that would cut back too waits while a cut-back's new file is
+        being written, and that file is not removed under it."""
+        import os
+        import threading
+
+        import session_end
+
+        slug = tmp_path / "slug"
+        ledger, line = self._ledger_one_line_below_compaction(slug)
+        main = threading.get_ident()
+        real_fsync = os.fsync
+        seen = {}
+
+        def fsync(fd):
+            if threading.get_ident() == main and "scratch" not in seen:
+                scratch = [
+                    p for p in slug.iterdir() if p.name.startswith(".pruned-sessions.jsonl.")
+                ]
+                seen["scratch"] = scratch
+                other = threading.Thread(
+                    target=session_end._append_ledger_line,
+                    args=(slug, line("other") * 6000),
+                )
+                other.start()
+                other.join(0.5)
+                seen["other_waited"] = other.is_alive()
+                seen["scratch_kept"] = all(p.exists() for p in scratch)
+                seen["other"] = other
+            return real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", fsync)
+        session_end._append_ledger_line(slug, line("trigger"))
+        seen["other"].join(30)
+        monkeypatch.undo()
+
+        assert len(seen["scratch"]) == 1
+        assert seen["other_waited"] is True
+        assert seen["scratch_kept"] is True
+        assert not seen["other"].is_alive()
+        # The second writer's own cut-back ran after the first released the
+        # lock: the ledger is its whole lines, ending with its line.
+        assert ledger.stat().st_size <= session_end._PRUNE_LEDGER_KEEP_BYTES
+        ids = [json.loads(item)["session_id"] for item in ledger.read_bytes().splitlines()]
+        assert ids[-1] == "other"
+        assert [p.name for p in slug.iterdir()] == ["pruned-sessions.jsonl"]
