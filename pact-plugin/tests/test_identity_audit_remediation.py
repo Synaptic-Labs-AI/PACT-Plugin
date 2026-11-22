@@ -131,12 +131,12 @@ class TestRenderedRekeyCommandIsQuoted:
 
 
 class TestSaveEnvelopeDisclosesTheCandidate:
-    """Surface 4 carries the candidate's size and the literal command."""
+    """The save envelope carries the candidate's size and the literal command."""
 
     def test_the_legacy_scope_carries_counts_and_the_command(
         self, tmp_path, monkeypatch
     ):
-        store = tmp_path / "surface4.db"
+        store = tmp_path / "envelope.db"
         _make_store(store)
         _seed(store, _LEGACY, "b" * 32, path="relative/linked.py")
         monkeypatch.setattr(
@@ -150,7 +150,7 @@ class TestSaveEnvelopeDisclosesTheCandidate:
         )
         with patch("scripts.memory_api._ensure_ready"):
             memory = PACTMemory(session_id="s", db_path=store)
-            memory.save({"context": "surface-4"}, sync_to_claude=False)
+            memory.save({"context": "envelope"}, sync_to_claude=False)
 
         scope = memory.last_project_scope
         assert scope is not None

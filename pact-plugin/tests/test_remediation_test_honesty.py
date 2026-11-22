@@ -457,7 +457,8 @@ class TestIdentityFilesCarryNoPlanningLabels:
 
     LABELS = (
         (re.compile(r"#\d{3,4}\b"), "issue or PR number"),
-        (re.compile(r"\bSURFACE \d"), "design surface tag"),
+        # A design surface tag in any case, with or without a separator.
+        (re.compile(r"(?i)(?<![a-z])surface[ _-]?\d"), "design surface tag"),
         (re.compile(r"\bSEC-\d"), "security finding id"),
         (re.compile(r"\bPREPARE\b"), "planning phase name"),
         (re.compile(r"\bP0\b"), "test-matrix priority tag"),
@@ -470,6 +471,11 @@ class TestIdentityFilesCarryNoPlanningLabels:
         # One capital letter, a hyphen and one or two digits. The same
         # boundaries as above, so `UTF-8` and an ISO timestamp never match.
         (re.compile(r"(?<![%+\w-])[A-Z]-\d{1,2}(?![\w+])"), "lettered finding id"),
+        # The same id inside a camel-case name: after a lowercase letter that
+        # is not a regex escape (`\b`), and before a capital, an underscore or
+        # the end of the word.
+        (re.compile(r"(?<=[a-z])(?<!\\[a-z])[A-Z]-?\d{1,2}(?=[A-Z_]|\b)(?![+])"),
+         "finding, corpus-row or design id"),
         # Review-process labels: a remediation cycle, a bare cycle and a
         # review round, each followed by its number. The bare-cycle pattern
         # skips the remediation prefix so each label has one owning pattern.
@@ -507,6 +513,11 @@ class TestIdentityFilesCarryNoPlanningLabels:
     PLANTED = (
         ("# see " + "#" + "1699", "issue or PR number"),
         ("# " + "SURFACE" + " 4: the candidate", "design surface tag"),
+        ('"""' + "Sur" + "face 4 carries the size", "design surface tag"),
+        ("store = tmp_path / " + "sur" + "face4.db", "design surface tag"),
+        ("class Test" + "Review" + "B" + "6IncidentFlow:", "finding, corpus-row or design id"),
+        ("class Test" + "Review" + "B" + "-2Seams:", "finding, corpus-row or design id"),
+        ("def test_" + "row" + "A" + "13_case():", "finding, corpus-row or design id"),
         ('("' + "SEC" + "-1" + '")', "security finding id"),
         ("# the " + "PREP" + "ARE corpus", "planning phase name"),
         ("(" + "P" + "0 matrix)", "test-matrix priority tag"),
@@ -536,6 +547,9 @@ class TestIdentityFilesCarryNoPlanningLabels:
         "a round-trip through the cycle-free graph",
         "_R1_GRAMMAR = re.compile(CANONICAL_ID_RE)",
         "SELECT r1.id FROM memories AS r1 JOIN files AS f2 ON f2.id = r1.id",
+        "IPv4 and IPv6 hosts, a Utf8Decoder, an X509Store, sha256Hex, toBase64, int64",
+        're.compile(r"\\bP0\\b|\\bC1\\b")',
+        "the surface of the store, resurfaced 3 times",
     )
 
     @pytest.mark.parametrize(("line", "kind"), PLANTED)

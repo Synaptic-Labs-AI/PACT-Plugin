@@ -3582,6 +3582,26 @@ def _grammar_expression_classes() -> set:
     }
 
 
+# The name pins this module keeps, each with why a behaviour check cannot
+# stand in for it. They compare hand-kept sets with the classes the compiler's
+# own module defines, not with message text, so a class Python gains fails
+# until the walk reads it.
+_KEPT_TEXT_PINS = {
+    "_BINDINGS_READ": "the binding classes the walk reads; compared with `_target_classes()`",
+    "_CAPTURES_READ": "the match captures the walk reads; compared with `_capture_classes()`",
+    "_ANSWER_CHILDREN": "expression classes whose children the walk reads; each must be one `_grammar_expression_classes()` builds",
+}
+
+
+def test_each_kept_text_pin_names_a_pin_here():
+    """`_KEPT_TEXT_PINS` names only pins this module holds, each with a
+    reason, so the table cannot outlive what it explains."""
+    import sys
+
+    module = sys.modules[__name__]
+    assert all(hasattr(module, name) and reason for name, reason in _KEPT_TEXT_PINS.items()), _KEPT_TEXT_PINS
+
+
 # Calls whose value is one of their arguments, unchanged, by the callee's
 # last name and the argument's position.
 _ARGUMENT_PASSERS = {

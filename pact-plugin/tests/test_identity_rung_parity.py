@@ -3269,31 +3269,94 @@ def _return_kind(function, defined: "dict | None" = None, seen: frozenset = froz
     return "not a predicate", None
 
 
-# Every form the layout walk does not read, on the tree as it is, with how
-# many times it occurs and what the code at the site is: the project_identity
-# function it calls (or the module-level name it reaches), with its return
-# annotation, and the annotation of the function the site is in.
+# The exact-text pins this module keeps, each with why a behaviour check
+# cannot stand in for it. A pin of source text that is not here is a change
+# detector to replace with a check of the behaviour it states.
+_KEPT_TEXT_PINS = {
+    "NAMED_LAYOUT_FORMS": (
+        "each row is a judgement that the git-call floor still covers a form the layout walk cannot "
+        "read; a new form must fail until someone makes it. Rows are keyed by the function a form "
+        "calls (`_layout_form_key`), not by its text, and each reason is derived from the live site"
+    ),
+    "_CONVERSION_MISSING": (
+        "Python 3.12's ast records no field types, so the grammar's identifier fields are read from the "
+        "compiler's own conversion errors; changed wording empties the result, which fails "
+        "`test_every_identifier_field_of_the_grammar_has_a_form` (its `Name.id` control) instead of passing"
+    ),
+    "_CONVERSION_SORT": "the same compiler wording, read for the class a field expects",
+    "_CONVERSION_IDENTIFIER": "the same compiler wording, read for a field that holds an identifier",
+}
+
+
+def test_each_kept_text_pin_names_a_pin_here():
+    """`_KEPT_TEXT_PINS` names only pins this module holds, each with a
+    reason, so the table cannot outlive what it explains."""
+    module = sys.modules[__name__]
+    assert all(hasattr(module, name) and reason for name, reason in _KEPT_TEXT_PINS.items()), _KEPT_TEXT_PINS
+
+
+def _layout_form_key(function: str, kind: str, form: str) -> tuple:
+    """The NAMED_LAYOUT_FORMS key of a form the layout walk does not read:
+    (function, kind, what the form calls). A bind is keyed by the
+    project_identity function its value calls, a `return not` by the
+    function it negates, a call in a place by that place and the function;
+    a local's name, the arguments and the spelling of the statement are
+    not part of the key. Any other form keeps its text."""
+    try:
+        if kind == "binds":
+            value = getattr(ast.parse(form).body[0], "value", None)
+            if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+                return (function, kind, f"a call to {value.func.id}")
+        if kind == "returns":
+            value = ast.parse(form, mode="eval").body
+            if (isinstance(value, ast.UnaryOp) and isinstance(value.op, ast.Not)
+                    and isinstance(value.operand, ast.Call) and isinstance(value.operand.func, ast.Name)):
+                return (function, kind, f"not a call to {value.operand.func.id}")
+        if kind == "uses":
+            place, _, call = form.partition(": ")
+            value = ast.parse(call, mode="eval").body
+            if isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+                return (function, kind, f"{place}: a call to {value.func.id}")
+    except SyntaxError:
+        pass
+    return (function, kind, form)
+
+
+def _named_layout_forms() -> collections.Counter:
+    """The forms the layout walk does not read (`_layout_predicate_forms`),
+    counted by their NAMED_LAYOUT_FORMS key (`_layout_form_key`)."""
+    counted = collections.Counter()
+    for (function, kind, form), count in _layout_predicate_forms()[1].items():
+        counted[_layout_form_key(function, kind, form)] += count
+    return counted
+
+
+# Every form the layout walk does not read, on the tree as it is, keyed by
+# what it calls (`_layout_form_key`), with how many times it occurs and what
+# the code at the site is: the project_identity function it calls (or the
+# module-level name it reaches), with its return annotation, and the
+# annotation of the function the site is in.
 # `test_each_named_layout_reason_states_the_code_at_its_site` derives each
-# reason's text from the source and requires the reason to equal it; a new or
-# changed form fails the census arm.
+# reason's text from the code at each site and requires the reason to equal
+# it; a new form, or a form that calls another function, fails the census arm.
 NAMED_LAYOUT_FORMS = {
-    ('_git_names_toplevel', 'binds', 'toplevel = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `_git_names_toplevel` (-> bool)"),
-    ('_admin_dir_refusal', 'uses', 'an `if` or `elif` test: _git_names_toplevel(asked_root)'): (1, "uses a call to `_git_names_toplevel` (-> bool) in an `if` or `elif` test in `_admin_dir_refusal` (-> Optional[str])"),
-    ('_admin_dir_refusal', 'binds', 'value = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `_admin_dir_refusal` (-> Optional[str])"),
-    ('_marker_target', 'binds', 'target = gitfile_target(text)'): (1, "assigns a call to `gitfile_target` (-> Optional[str]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
-    ('git_dir_answer', 'binds', 'answer = one_git_answer(result)'): (1, "assigns a call to `one_git_answer` (-> Optional[str]) to a local in `git_dir_answer` (-> Optional[str])"),
-    ('_gitfile_redirect_detail', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_gitfile_redirect_detail` (-> Optional[str])"),
-    ('_marker_names_external_git_dir', 'binds', 'target = _marker_target(root)'): (1, "assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_marker_names_external_git_dir` (-> bool)"),
-    ('_marker_names_external_git_dir', 'returns', 'not _submodule_admin_dir(git_dir)'): (1, "returns `not` applied to a call to `_submodule_admin_dir` (-> bool) in `_marker_names_external_git_dir` (-> bool)"),
-    ('_marker_target', 'binds', 'text = read_git_file(marker)'): (1, "assigns a call to `read_git_file` (-> Optional[str]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
-    ('_marker_target', 'binds', 'marker = find_git_marker(root)'): (1, "assigns a call to `find_git_marker` (-> Optional[Path]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])"),
-    ('_resolved_git_dir', 'binds', 'raw = git_dir_answer(asked_root)'): (1, "assigns a call to `git_dir_answer` (-> Optional[str]) to a local in `_resolved_git_dir` (-> Optional[Path])"),
-    ('_submodule_checkout', 'binds', 'git_dir = _resolved_git_dir(asked)'): (1, "assigns a call to `_resolved_git_dir` (-> Optional[Path]) to a local in `_submodule_checkout` (-> bool)"),
-    ('find_git_marker', 'binds', 'ceilings = _git_ceiling_directories()'): (1, "assigns a call to `_git_ceiling_directories` (-> set) to a local in `find_git_marker` (-> Optional[Path])"),
-    ('find_git_marker', 'binds', "cross_filesystem = _git_env_bool('GIT_DISCOVERY_ACROSS_FILESYSTEM')"): (1, "assigns a call to `_git_env_bool` (-> bool) to a local in `find_git_marker` (-> Optional[Path])"),
-    ('git_dir_answer', 'calls', 'DETECTION_GIT_DIRS.get'): (1, "calls a method on `DETECTION_GIT_DIRS`, a module-level assignment of a `contextvars.ContextVar(...)` call, in `git_dir_answer` (-> Optional[str])"),
-    ('_redirect_target_refusal', 'uses', 'an `if` or `elif` test: _submodule_admin_dir(target)'): (1, "uses a call to `_submodule_admin_dir` (-> bool) in an `if` or `elif` test in `_redirect_target_refusal` (-> Optional[str])"),
-    ('_submodule_checkout', 'uses', 'an `if` or `elif` test: _submodule_admin_dir(common_dir)'): (1, "uses a call to `_submodule_admin_dir` (-> bool) in an `if` or `elif` test in `_submodule_checkout` (-> bool)"),
+    ('_git_names_toplevel', 'binds', 'a call to one_git_answer'): (1, 'assigns a call to `one_git_answer` (-> Optional[str]) to a local in `_git_names_toplevel` (-> bool)'),
+    ('_admin_dir_refusal', 'uses', 'an `if` or `elif` test: a call to _git_names_toplevel'): (1, 'uses a call to `_git_names_toplevel` (-> bool) in an `if` or `elif` test in `_admin_dir_refusal` (-> Optional[str])'),
+    ('_admin_dir_refusal', 'binds', 'a call to one_git_answer'): (1, 'assigns a call to `one_git_answer` (-> Optional[str]) to a local in `_admin_dir_refusal` (-> Optional[str])'),
+    ('_marker_target', 'binds', 'a call to gitfile_target'): (1, 'assigns a call to `gitfile_target` (-> Optional[str]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])'),
+    ('git_dir_answer', 'binds', 'a call to one_git_answer'): (1, 'assigns a call to `one_git_answer` (-> Optional[str]) to a local in `git_dir_answer` (-> Optional[str])'),
+    ('_gitfile_redirect_detail', 'binds', 'a call to _marker_target'): (1, 'assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_gitfile_redirect_detail` (-> Optional[str])'),
+    ('_marker_names_external_git_dir', 'binds', 'a call to _marker_target'): (1, 'assigns a call to `_marker_target` (-> Optional[Tuple[Path, Path]]) to a local in `_marker_names_external_git_dir` (-> bool)'),
+    ('_marker_names_external_git_dir', 'returns', 'not a call to _submodule_admin_dir'): (1, 'returns `not` applied to a call to `_submodule_admin_dir` (-> bool) in `_marker_names_external_git_dir` (-> bool)'),
+    ('_marker_target', 'binds', 'a call to read_git_file'): (1, 'assigns a call to `read_git_file` (-> Optional[str]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])'),
+    ('_marker_target', 'binds', 'a call to find_git_marker'): (1, 'assigns a call to `find_git_marker` (-> Optional[Path]) to a local in `_marker_target` (-> Optional[Tuple[Path, Path]])'),
+    ('_resolved_git_dir', 'binds', 'a call to git_dir_answer'): (1, 'assigns a call to `git_dir_answer` (-> Optional[str]) to a local in `_resolved_git_dir` (-> Optional[Path])'),
+    ('_submodule_checkout', 'binds', 'a call to _resolved_git_dir'): (1, 'assigns a call to `_resolved_git_dir` (-> Optional[Path]) to a local in `_submodule_checkout` (-> bool)'),
+    ('find_git_marker', 'binds', 'a call to _git_ceiling_directories'): (1, 'assigns a call to `_git_ceiling_directories` (-> set) to a local in `find_git_marker` (-> Optional[Path])'),
+    ('find_git_marker', 'binds', 'a call to _git_env_bool'): (1, 'assigns a call to `_git_env_bool` (-> bool) to a local in `find_git_marker` (-> Optional[Path])'),
+    ('git_dir_answer', 'calls', 'DETECTION_GIT_DIRS.get'): (1, 'calls a method on `DETECTION_GIT_DIRS`, a module-level assignment of a `contextvars.ContextVar(...)` call, in `git_dir_answer` (-> Optional[str])'),
+    ('_redirect_target_refusal', 'uses', 'an `if` or `elif` test: a call to _submodule_admin_dir'): (1, 'uses a call to `_submodule_admin_dir` (-> bool) in an `if` or `elif` test in `_redirect_target_refusal` (-> Optional[str])'),
+    ('_submodule_checkout', 'uses', 'an `if` or `elif` test: a call to _submodule_admin_dir'): (1, 'uses a call to `_submodule_admin_dir` (-> bool) in an `if` or `elif` test in `_submodule_checkout` (-> bool)'),
 }
 
 
@@ -3892,7 +3955,8 @@ class TestTheDocumentedGitCallFloor:
         NOT_A_FLOOR_OUTCOME names single outcomes, each of which must still
         exist."""
         _measured, reached = git_calls
-        predicates, unresolved = _layout_predicate_forms()
+        predicates, _unresolved = _layout_predicate_forms()
+        unresolved = _named_layout_forms()
         named = {key: count for key, (count, _reason) in NAMED_LAYOUT_FORMS.items()}
         assert all(reason for _count, reason in NAMED_LAYOUT_FORMS.values())
         new = {key: count for key, count in unresolved.items() if named.get(key) != count}
@@ -4032,8 +4096,9 @@ class TestTheDocumentedGitCallFloor:
             assert places(read) == [None], read
 
     def test_each_named_layout_reason_states_the_code_at_its_site(self):
-        """Each NAMED_LAYOUT_FORMS reason IS the text derived from its form's
-        AST, compared by equality, so a reason that adds a claim (a flow
+        """Each NAMED_LAYOUT_FORMS reason IS the text derived from the code at
+        each site the layout walk does not read (its row found by
+        `_layout_form_key`), compared by equality, so a reason that adds a claim (a flow
         fact, a purpose) fails as surely as one that drops a fragment. A
         bind names the project_identity function it calls and the function
         it is in, each with its return annotation; a return of `not` applied
@@ -4090,11 +4155,14 @@ class TestTheDocumentedGitCallFloor:
                     )
             return None
 
+        sites = _layout_predicate_forms()[1]
         wrong = {
             (function, kind, form): (reason, derived(function, kind, form))
-            for (function, kind, form), (_count, reason) in NAMED_LAYOUT_FORMS.items()
+            for function, kind, form in sites
+            for _count, reason in [NAMED_LAYOUT_FORMS.get(_layout_form_key(function, kind, form), (0, None))]
             if reason != derived(function, kind, form)
         }
+        assert len(sites) >= len(NAMED_LAYOUT_FORMS), sites  # control: every named key has a site
         assert wrong == {}, f"(stated, derived) for a named reason that is not its site's code: {wrong}"
 
 # --- the git-call floor with an override pin --------------------------------

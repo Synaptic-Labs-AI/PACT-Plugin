@@ -638,7 +638,7 @@ class TestCliSurface:
 # The reported incident flow, end to end
 # ---------------------------------------------------------------------------
 
-class TestReviewB6IncidentFlow:
+class TestOldFolderNameRowsReachableAfterRekey:
     def test_show_candidates_then_rekey_makes_the_old_name_rows_reachable(
         self, tmp_path, monkeypatch, capfd
     ):

@@ -740,7 +740,7 @@ class TestPerSeamUnion:
 # Review findings: the arms the review proved were missing
 # ---------------------------------------------------------------------------
 
-class TestReviewB1GateVerified:
+class TestGateVerifiesAgainstTheDeclaredRoot:
     def test_the_gate_verifies_against_the_declared_identity_root(
         self, tmp_path, monkeypatch
     ):
@@ -794,7 +794,7 @@ class TestReviewB1GateVerified:
         assert "A-checkout" in scopes
 
 
-class TestReviewB3EmptyScope:
+class TestEmptyScopeStaysEmpty:
     def test_scope_or_none_keeps_the_empty_sequence_empty(self):
         """`_scope_or_none` must not fold `()` to None.
 
@@ -846,7 +846,7 @@ class TestReviewB3EmptyScope:
             )
 
 
-class TestReviewB4FoldedCandidate:
+class TestExactCaseBucketWinsOverAFold:
     def test_an_exact_case_match_wins_over_a_case_variant(self):
         """EXACT case first, the fold only as a fallback.
 
@@ -891,7 +891,7 @@ class TestReviewB4FoldedCandidate:
         assert ambiguous == []
 
 
-class TestReviewB2Seams:
+class TestUnionSeamsRejectAForeignBucket:
     def _vec_store(self, env):
         from helpers import create_test_schema
 

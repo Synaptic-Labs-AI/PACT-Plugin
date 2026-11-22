@@ -114,44 +114,158 @@ class TestExitCodeThreeCoversBothVerbs:
 
 
 class TestSecretaryProjectionKey:
-    """The secretary's Working Memory step names the key the store uses."""
+    """The secretary's Working Memory step names the key the store uses. Each
+    case its sentences name is run on a real layout, and the identity the
+    resolver gives there is the one the sentence states; a short phrase of
+    the sentence ties each case to its prose, so a sentence that drops a case
+    or a resolver that changes one fails here."""
 
-    def test_the_projection_is_keyed_by_repository_identity(self):
-        assert (
-            "The projection is keyed by the repository identity "
-            "(host/owner/repo from the repository's override file or its "
-            "origin remote) when one resolves, and by the project root's "
-            "folder name when there is no override file and the origin is "
-            "absent or a local path, except in a submodule."
-        ) in _body(SECRETARY)
+    _CANONICAL = "github.com/acme/widget"
+    _OVERRIDE = "override.example.com/team/pinned"
 
-    def test_an_unrepresentable_origin_declines_rather_than_falling_back(self):
+    @staticmethod
+    def _layout(case, root, monkeypatch):
+        """Build `case` under `root`, enter it, and return the folder whose
+        name a folder-name key would use."""
+        import subprocess
+
+        from fixtures.identity_git import make_repo, write_common_dir_override
+
+        canonical = "https://github.com/acme/widget.git"
+        checkout = root / "checkout"
+        if case == "override file":
+            write_common_dir_override(make_repo(checkout, remote=canonical),
+                                      TestSecretaryProjectionKey._OVERRIDE)
+        elif case == "origin remote":
+            make_repo(checkout, remote=canonical)
+        elif case == "no origin":
+            make_repo(checkout)
+        elif case == "local-path origin":
+            make_repo(checkout, remote=str(root / "elsewhere"))
+        elif case == "no repository":
+            (checkout / ".claude").mkdir(parents=True)
+        elif case == "submodule":
+            source = make_repo(root / "source")
+            make_repo(root / "super")
+            added = subprocess.run(
+                ["git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(source), "sub"],
+                cwd=root / "super", capture_output=True, text=True, timeout=60, check=False,
+            )
+            assert added.returncode == 0, added.stderr
+            checkout = root / "super" / "sub"
+        elif case == "unrepresentable origin":
+            make_repo(checkout, remote="https://host/owner/re po")
+        elif case == "broken .git":
+            checkout.mkdir()
+            (checkout / ".git").write_text("not a gitdir line\n", encoding="utf-8")
+        elif case == "bare .git":
+            checkout.mkdir()
+            subprocess.run(["git", "init", "-q", "--bare", str(checkout / ".git")], check=True, timeout=30)
+        elif case in ("home checkout", "home checkout git cannot see"):
+            make_repo(checkout, remote=canonical)
+            monkeypatch.setattr(Path, "home", classmethod(lambda cls: checkout))
+            if case == "home checkout git cannot see":
+                monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(checkout))
+                (checkout / "sub").mkdir()
+                monkeypatch.chdir(checkout / "sub")
+                return checkout
+        else:
+            raise AssertionError(case)
+        monkeypatch.chdir(checkout)
+        return checkout
+
+    # (phrase of the sentence naming the case, case, a user setting, declared,
+    # the identity it states: a literal, "folder" for the folder's name, or
+    # None for a decline)
+    CASES = [
+        ("from the repository's override file", "override file", None, False, _OVERRIDE),
+        ("or its origin remote", "origin remote", None, False, _CANONICAL),
+        ("the origin is absent or a local path", "no origin", None, False, "folder"),
+        ("the origin is absent or a local path", "local-path origin", None, False, "folder"),
+        ("folder name when there is no override file", "no repository", None, False, "folder"),
+        ("except in a submodule", "submodule", None, False, None),
+        ("home directory is keyed by its folder name", "home checkout", None, False, "folder"),
+        ("home directory is keyed by its folder name", "home checkout", "my-setting", False, "folder"),
+        ("home directory is keyed by its folder name", "home checkout", None, True, "folder"),
+        ("no project directory is declared and no repository is found", "no repository", "my-setting", False,
+         "my-setting"),
+        ("no project directory is declared and no repository is found", "no repository", "my-setting", True,
+         "folder"),
+        ("when git cannot see a home-directory checkout", "home checkout git cannot see", "my-setting", False,
+         "my-setting"),
+        ("when git cannot see a home-directory checkout", "home checkout git cannot see", None, False, "folder"),
+        ("a present origin that cannot be represented", "unrepresentable origin", None, False, None),
+        ("a broken, redirected or bare .git", "broken .git", None, False, None),
+        ("a broken, redirected or bare .git", "bare .git", None, False, None),
+    ]
+
+    @pytest.mark.parametrize("phrase, case, setting, declared, stated", CASES)
+    def test_each_case_the_sentence_names_resolves_as_it_states(
+            self, tmp_path, monkeypatch, phrase, case, setting, declared, stated):
+        import json
+        import os
+
+        from fixtures.identity_git import assert_outside_repository
+        from scripts.memory_api import PACTMemory
+
+        assert phrase in " ".join(_body(SECRETARY).split()), phrase
+        assert_outside_repository(tmp_path)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+        folder = self._layout(case, tmp_path, monkeypatch)
+        if setting is not None:
+            memory_dir = Path(os.environ["PACT_TEST_MEMORY_DIR"])
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            (memory_dir / "config.json").write_text(
+                json.dumps({"project_id": setting}), encoding="utf-8")
+        if declared:
+            monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(folder))
+        project_id, _source = PACTMemory._detect_project_id_with_source()
+        assert project_id == (folder.name if stated == "folder" else stated), (case, project_id)
+
+    def test_every_case_the_projection_sentence_names_is_run(self):
+        """Control: the rows cover every clause of the two sentences, so a
+        clause added to the prose without a row fails here."""
+        body = " ".join(_body(SECRETARY).split())
+        start = body.index("The projection is keyed by")
+        passage = body[start:body.index("nothing is projected.", start)]
+        clauses = {phrase for phrase, *_rest in self.CASES}
+        assert all(phrase in passage for phrase in clauses), clauses
+        assert passage.count("keys it instead") == 1 and passage.count("declines instead") == 1, passage
+
+    @pytest.mark.parametrize("launched_in, counts", [("", True), ("sub", False)], ids=["root", "subfolder"])
+    def test_the_legacy_bucket_is_read_only_on_evidence(self, tmp_path, launched_in, counts):
+        """A session that wrote into the legacy bucket counts as evidence
+        when it was launched at the repository's root, and not when it was
+        launched in a subfolder, as the sentence states; its phrases tie the
+        rule to the prose, and the retired "until it is rekeyed" stays gone."""
+        from datetime import datetime, timezone
+
+        from fixtures.identity_git import make_repo, seed_session_evidence
+        from scripts.database import db_connection, ensure_initialized
+
+        from scripts import memory_api
+
         body = _body(SECRETARY)
-        assert (
-            "Every other case declines instead, including a present origin "
-            "that cannot be represented and a broken, redirected or bare .git: "
-            "sync reports empty with a null project_id, and nothing is "
-            "projected."
-        ) in body
-        assert "folder name otherwise" not in body.lower()
-        assert "origin is absent or local." not in body
-        # `unresolved` names a missing CLAUDE.md, not an identity cause.
-        start = body.index("Every other case declines instead")
-        assert "reports unresolved" not in body[start:start + 200]
-
-    def test_the_legacy_bucket_is_read_only_on_evidence(self):
-        body = _body(SECRETARY)
-        assert (
-            "This checkout's legacy folder-name bucket is read beside the "
-            "repository identity while it holds rows, but only when a file row "
-            "places it under this repository or its linked worktrees, or a "
-            "recorded session from this repository wrote into it."
-        ) in body
-        assert (
-            "An admitted bucket is shared with every checkout whose root "
-            "folder has that name"
-        ) in body
+        for phrase in ("only when a file row places it under this repository or its linked worktrees",
+                       "a session launched at the root of this repository or of one of its linked worktrees "
+                       "wrote into it",
+                       "An admitted bucket is shared with every checkout whose root folder has that name"):
+            assert phrase in body, phrase
         assert "until it is rekeyed" not in body.lower()
+        memory_api._PRUNED_SESSION_INDEX.clear()
+        repo = make_repo(tmp_path / "proj", remote="https://github.com/o/proj.git")
+        (repo / "sub").mkdir()
+        store = tmp_path / "store.db"
+        now = datetime.now(timezone.utc).isoformat()
+        with db_connection(store) as conn:
+            ensure_initialized(conn)
+            conn.execute("INSERT INTO memories (id, context, project_id, session_id, created_at, updated_at) "
+                         "VALUES (?, 'x', 'proj', 'writer', ?, ?)", ("a" * 32, now, now))
+            conn.commit()
+        seed_session_evidence(tmp_path / "home" / ".claude", repo / launched_in if launched_in else repo, "writer")
+        with db_connection(store) as conn:
+            assert memory_api._legacy_session_evidence(conn, "proj", [str(repo)], repo / ".git") is counts
 
     def test_the_retired_folder_name_key_is_gone(self):
         assert "keyed by the basename of the project root" not in _body(SECRETARY).lower()
@@ -3233,6 +3347,18 @@ def _traced_rows(tmp_path, monkeypatch, source):
      "    def ask(self):\n        return run(['git', '-C', getattr(self, 'b')])\n", False),
     ("class Store:\n    def load(self):\n        self.a = read_row()\n\n"
      "    def ask(self):\n        return run(['git', '-C', getattr(self, 'a')])\n", True),
+    ("class Store:\n    def __init__(self):\n        self.root = 'here'\n\n"
+     "    def search(self):\n        self.status = read_row()\n        return ask(self)\n\n"
+     "def ask(memory):\n    return run(['git', '-C', str(memory.root)])\n", False),
+    ("class Store:\n    def __init__(self):\n        self.root = 'here'\n\n"
+     "    def search(self):\n        self.root = read_row()\n        return ask(self)\n\n"
+     "def ask(memory):\n    return run(['git', '-C', str(memory.root)])\n", True),
+    ("class Store:\n    def __init__(self):\n        self.root = 'here'\n\n"
+     "    def search(self):\n        self.status = read_row()\n        return ask(self)\n\n"
+     "def ask(memory):\n    return run(['git', '-C', str(getattr(memory, 'root'))])\n", False),
+    ("class Store:\n    def __init__(self):\n        self.root = 'here'\n\n"
+     "    def search(self):\n        self.status = read_row()\n        return ask(self)\n\n"
+     "def ask(memory):\n    return run(['git', '-C', memory.status])\n", True),
 ], ids=[
     "through a caller's local", "through the callee's own local", "through a self attribute",
     "through a keyword argument", "a read beside the question", "an attribute bound to a constant",
@@ -3244,6 +3370,10 @@ def _traced_rows(tmp_path, monkeypatch, source):
     "through a cycle of two functions", "through a starred argument", "through a starred argument filling a named one", "through unpacked keywords", "through a local holding the function",
     "through a nested function's return", "a comprehension variable of the same name",
     "an attribute getattr names that holds a constant", "an attribute getattr names that holds the read",
+    "a helper handed the object reads one field the work does not write",
+    "a helper handed the object reads the field the work writes",
+    "a helper handed the object reads one field through getattr",
+    "a helper handed the object reads the field holding the read",
 ])
 def test_a_git_argument_is_traced_to_every_value_that_reaches_it(tmp_path, monkeypatch, source, reaches):
     """Rows for `_traced_sources`: a value that can reach an argument of a git
@@ -3252,7 +3382,10 @@ def test_a_git_argument_is_traced_to_every_value_that_reaches_it(tmp_path, monke
     `getattr`), a helper's return, a local or nested function holding the
     callee, a module-level table a function writes, and every write into a
     container (a writer method, an item assignment, an alias, a callee),
-    on a chain of any length and through a cycle, which ends. A read beside the question, a constant, a
+    on a chain of any length and through a cycle, which ends. A helper's
+    parameter read as `p.attr` carries only that attribute of the object
+    handed to it, so a write into another attribute of that object is not
+    followed. A read beside the question, a constant, a
     helper's own read it does not return, an argument another call passes
     (the trace enters a function through one call and reads that call's
     arguments), and a comprehension's own variable are not."""
@@ -3279,53 +3412,125 @@ def test_a_git_argument_the_trace_cannot_follow_fails_closed(tmp_path, monkeypat
     assert any(item.startswith(why) for item in unresolved), unresolved
 
 
-def test_the_trace_lists_its_adversarial_only_writes_and_does_not_follow_them(tmp_path, monkeypatch):
-    """Pin for `_traced_sources`' ADVERSARIAL-ONLY list: a write through
-    `setattr` or a standard-library function that writes into an object
-    passed to it, and a value carried by an exception, are not followed, and
-    the list names them. The honest forms (a writer method, an attribute
-    assignment) are followed (control). If the trace comes to follow the
-    listed forms, or the list drops them, this fails."""
+def _paragraph(doc: str, heading: str) -> str:
+    """The paragraph of the whitespace-joined `doc` that opens with
+    `heading`, up to the next list heading (`NOT COVERED`,
+    `ADVERSARIAL-ONLY`, `LIMITS`) or the end."""
+    import re
+
+    start = doc.index(heading)
+    rest = doc[start + len(heading):]
+    following = re.search(r"\b(NOT COVERED|ADVERSARIAL-ONLY|LIMITS)\b", rest)
+    return doc[start:start + len(heading) + (following.start() if following else len(rest))]
+
+
+# Each form `_traced_sources`' first ADVERSARIAL-ONLY list names (the anchor,
+# as its docstring writes it), with a row the trace does not follow.
+_NOT_FOLLOWED_ROWS = {
+    "`setattr`": "class Box:\n    pass\n\ndef ask():\n    box = Box()\n    setattr(box, 'root', read_row())\n"
+                 "    return run(['git', '-C', box.root])\n",
+    "`vars()`": "class Box:\n    pass\n\ndef ask():\n    box = Box()\n    vars(box)['root'] = read_row()\n"
+                "    return run(['git', '-C', box.root])\n",
+    "`__dict__`": "class Box:\n    pass\n\ndef ask():\n    box = Box()\n    box.__dict__['root'] = read_row()\n"
+                  "    return run(['git', '-C', box.root])\n",
+    "`globals()`": "ROOT = 'here'\n\ndef load():\n    globals()['ROOT'] = read_row()\n\n" + _ASK + "ROOT])\n",
+    "`locals()`": "def ask():\n    root = 'here'\n    locals()['root'] = read_row()\n    return run(['git', '-C', root])\n",
+    "`list.append(argv, value)`": "def ask():\n    argv = ['git']\n    list.append(argv, read_row())\n    return run(argv)\n",
+    "`operator.setitem`": "def ask():\n    argv = ['git', '-C', '.']\n    operator.setitem(argv, 2, read_row())\n"
+                          "    return run(argv)\n",
+    "exception": "def ask():\n    try:\n        raise ValueError(read_row())\n    except ValueError as error:\n"
+                 "        return run(['git', '-C', error.args[0]])\n",
+}
+# Each form `_traced_sources`' second ADVERSARIAL-ONLY list names, with a row
+# read as the built-in only.
+_READ_AS_BUILTIN_ROWS = {
+    "`:=`": "def ask(item, holder):\n    if isinstance(item, dict):\n"
+            "        [item := other for other in holder]\n        return run(['git', '-C', item.get('root')])\n",
+    "nested function": "def ask(item, holder):\n    if isinstance(item, dict):\n        def swap():\n"
+                       "            nonlocal item\n            item = holder[0]\n        swap()\n"
+                       "        return run(['git', '-C', item.get('root')])\n",
+    "table": "class Found:\n    reason: dict = None\n\nKINDS = {'found': Found}\n\ndef make(holder):\n"
+             "    return KINDS['found'](holder)\n\ndef ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+    "`getattr`": "import sys\n\nclass Found:\n    reason: dict = None\n\ndef make(holder):\n"
+                 "    return getattr(sys.modules[__name__], 'Found')(holder)\n\n"
+                 "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+}
+# The honest forms beside them, each followed: a write by a method of the
+# object or an attribute assignment; a narrowed local rebound in the
+# function's own statements (in a branch, in a loop that reads it before the
+# rebinding on its next pass); and a positional build by the class's name, a
+# local bound to it or to a choice of classes, a classmethod's `cls`,
+# `type(self)` and `self.__class__`.
+_FOLLOWED_ROWS = {
+    "an attribute assignment": "class Box:\n    pass\n\ndef ask():\n    box = Box()\n    box.root = read_row()\n"
+                               "    return run(['git', '-C', box.root])\n",
+    "a writer method": "def ask():\n    argv = ['git']\n    argv.append(read_row())\n    return run(argv)\n",
+    "a narrowed local rebound in its branch": "def ask(item, holder):\n    if isinstance(item, dict):\n"
+                                              "        item = holder[0]\n        return run(['git', '-C', item.get('root')])\n",
+    "a narrowed local rebound after an early return": "def ask(item, holder):\n    if not isinstance(item, dict):\n"
+                                                       "        return None\n    item = holder[0]\n"
+                                                       "    return run(['git', '-C', item.get('root')])\n",
+    "a narrowed local rebound by a loop": "def ask(item, holder):\n    if isinstance(item, dict):\n"
+                                          "        for item in holder:\n"
+                                          "            return run(['git', '-C', item.get('root')])\n",
+    "a narrowed local rebound later in a loop": "def ask(item, holder):\n    if isinstance(item, dict):\n"
+                                                "        for other in holder:\n"
+                                                "            run(['git', '-C', item.get('root')])\n            item = other\n",
+    "a narrowed local rebound with a with item": "def ask(item, holder):\n    if isinstance(item, dict):\n"
+                                                 "        with holder as item:\n"
+                                                 "            return run(['git', '-C', item.get('root')])\n",
+    "a build by the class's name": "class Found:\n    reason: dict = None\n\ndef make(holder):\n    return Found(holder)\n\n"
+                                   "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+    "a build through a local bound to the class": "class Found:\n    reason: dict = None\n\ndef make(holder):\n"
+                                                  "    build = Found\n    return build(holder)\n\n"
+                                                  "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+    "a build through a local bound to a choice of classes": "class Found:\n    reason: dict = None\n\n"
+                                                            "class Other:\n    pass\n\ndef make(holder, flag):\n"
+                                                            "    build = Found if flag else Other\n    return build(holder)\n\n"
+                                                            "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+    "a classmethod's cls": "class Found:\n    reason: dict = None\n\n    @classmethod\n    def make(cls, holder):\n"
+                           "        return cls(holder)\n\ndef ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+    "type(self)": "class Found:\n    reason: dict = None\n\n    def again(self, holder):\n        return type(self)(holder)\n\n"
+                  "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+    "self.__class__": "class Found:\n    reason: dict = None\n\n    def again(self, holder):\n"
+                      "        return self.__class__(holder)\n\n"
+                      "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+}
+# Controls that stay built-in: the narrowed local read before its rebinding,
+# and a classmethod building another class by position.
+_STILL_BUILTIN_ROWS = {
+    "a narrowed local read before its rebinding": "def ask(item, holder):\n    if isinstance(item, dict):\n"
+                                                  "        found = run(['git', '-C', item.get('root')])\n"
+                                                  "        item = holder[0]\n        return found\n",
+    "a classmethod building another class": "class Found:\n    reason: dict = None\n\nclass Other:\n"
+                                            "    @classmethod\n    def make(cls, holder):\n        return Found()\n\n"
+                                            "    @classmethod\n    def other(cls, holder):\n        return cls(holder)\n\n"
+                                            "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
+}
+
+
+def test_the_trace_lists_its_adversarial_only_forms_and_does_not_follow_them(tmp_path, monkeypatch):
+    """Pin for `_traced_sources`' two ADVERSARIAL-ONLY lists, by behaviour:
+    each form the first list names (`_NOT_FOLLOWED_ROWS`) is not followed,
+    and each form the second names (`_READ_AS_BUILTIN_ROWS`) is read as the
+    built-in only, so `Memory.get`'s read is not reached; each list names
+    exactly its rows' forms (their anchors appear in its paragraph); and the
+    honest forms beside them (`_FOLLOWED_ROWS`) are followed, while the
+    controls (`_STILL_BUILTIN_ROWS`) stay built-in. If the trace comes to
+    follow a listed form, stops following an honest one, or a list drops a
+    form it has a row for, this fails."""
     doc = " ".join(_traced_sources.__doc__.split())
-    assert ("ADVERSARIAL-ONLY, and so not followed: a write into an object through `setattr`, `vars()`, "
-            "`__dict__`, `globals()` or `locals()`; a standard-library function that writes into an object "
-            "passed to it (`list.append(argv, value)`, `operator.setitem`); and a value carried out of a "
-            "function by an exception it raises.") in doc
-    listed = [
-        "class Box:\n    pass\n\ndef ask():\n    box = Box()\n    setattr(box, 'root', read_row())\n"
-        "    return run(['git', '-C', box.root])\n",
-        "def ask():\n    argv = ['git']\n    list.append(argv, read_row())\n    return run(argv)\n",
-        "def ask():\n    argv = ['git', '-C', '.']\n    operator.setitem(argv, 2, read_row())\n    return run(argv)\n",
-        "def ask():\n    try:\n        raise ValueError(read_row())\n    except ValueError as error:\n"
-        "        return run(['git', '-C', error.args[0]])\n",
-    ]
-    honest = [
-        "class Box:\n    pass\n\ndef ask():\n    box = Box()\n    box.root = read_row()\n"
-        "    return run(['git', '-C', box.root])\n",
-        "def ask():\n    argv = ['git']\n    argv.append(read_row())\n    return run(argv)\n",
-    ]
-    for index, source in enumerate(listed + honest):
+    first = _paragraph(doc, "ADVERSARIAL-ONLY, and so not followed")
+    second = _paragraph(doc, "ADVERSARIAL-ONLY, and so read as a built-in object")
+    assert [anchor for anchor in _NOT_FOLLOWED_ROWS if anchor not in first] == [], first
+    assert [anchor for anchor in _READ_AS_BUILTIN_ROWS if anchor not in second] == [], second
+    rows = [(source, False) for source in _NOT_FOLLOWED_ROWS.values()]
+    rows += [(_MEMORY + source, False) for source in (*_READ_AS_BUILTIN_ROWS.values(), *_STILL_BUILTIN_ROWS.values())]
+    rows += [(_MEMORY + source, True) for source in _FOLLOWED_ROWS.values()]
+    for index, (source, followed) in enumerate(rows):
         (tmp_path / str(index)).mkdir()
         sources, _unresolved = _traced_rows(tmp_path / str(index), monkeypatch, source)
-        assert ("read_row" in sources) is (source in honest), (source, sources)
-    assert ("ADVERSARIAL-ONLY, and so read as a built-in object: a local an `isinstance` test has just proved "
-            "a built-in, rebound before the read (`_narrowed`); and a field filled by position in a call of "
-            "its class under another name (`_field_values`).") in doc
-    read_as_builtin = [
-        _MEMORY + "def ask(item, holder):\n    if isinstance(item, dict):\n        item = holder[0]\n"
-        "        return run(['git', '-C', item.get('root')])\n",
-        _MEMORY + "class Found:\n    reason: dict = None\n\ndef make(holder):\n    build = Found\n"
-        "    return build(holder)\n\ndef ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
-    ]
-    read_both_ways = [
-        _MEMORY + "def ask(item, holder):\n    item = holder[0]\n    return run(['git', '-C', item.get('root')])\n",
-        _MEMORY + "class Found:\n    reason: dict = None\n\ndef make(holder):\n    return Found(holder)\n\n"
-        "def ask(found):\n    return run(['git', '-C', found.reason.get('root')])\n",
-    ]
-    for index, source in enumerate(read_as_builtin + read_both_ways):
-        (tmp_path / f"b{index}").mkdir()
-        sources, _unresolved = _traced_rows(tmp_path / f"b{index}", monkeypatch, source)
-        assert ("read_row" in sources) is (source in read_both_ways), (source, sources)
+        assert ("read_row" in sources) is followed, (source, sources)
 
 
 _MEMORY = "class Memory:\n    def get(self, key):\n        return read_row()\n\n"
@@ -3449,20 +3654,15 @@ _LIMIT_ROWS = {
 
 
 def test_the_trace_names_its_limits(tmp_path, monkeypatch):
-    """Pin for `_traced_sources`' LIMITS: the docstring names exactly the
-    forms in `_LIMIT_ROWS`, and each still reads as the built-in only, so
-    `Memory.get`'s read is not reached. If the census comes to read one of
-    them, or the named list changes, this fails: the list is a ruled
-    boundary of the static census, and changing it is a decision."""
-    doc = " ".join(_traced_sources.__doc__.split())
-    assert ("LIMITS, by ruling: a method called on a value `_foreign` proves a standard-library one is read as "
-            "the built-in only, so a project method of the same name that the value could still run is not read. "
-            "Two such forms are named: a container an item of which holds a project object written into it "
-            "(`table['k'] = memory`, then `table['k'].get(...)`), and the result of a non-project callable that "
-            "hands back what it is given (`super().get(...)`, `next(iter(x))`, `getattr(o, n)`, `max(...)`, "
-            "`copy.copy(x)`).") in doc
-    named = doc[doc.index("LIMITS, by ruling"):]
-    assert all(form in named for form in ("table['k']", *list(_LIMIT_ROWS)[1:])), named
+    """Pin for `_traced_sources`' LIMITS, by behaviour: the paragraph names
+    each form in `_LIMIT_ROWS` (its anchor appears there), and each still
+    reads as the built-in only, so `Memory.get`'s read is not reached. If the
+    census comes to read one of them, or the paragraph drops one, this
+    fails: the list is a ruled boundary of the static census, and changing
+    it is a decision."""
+    named = _paragraph(" ".join(_traced_sources.__doc__.split()), "LIMITS, by ruling")
+    anchors = {form: ("table['k']" if form.startswith("a container item") else form) for form in _LIMIT_ROWS}
+    assert [anchor for anchor in anchors.values() if anchor not in named] == [], named
     for index, (form, source) in enumerate(_LIMIT_ROWS.items()):
         (tmp_path / str(index)).mkdir()
         sources, _unresolved = _traced_rows(tmp_path / str(index), monkeypatch, _MEMORY + source)
@@ -4358,11 +4558,8 @@ def test_a_context_read_through_copy_context_is_listed_not_reported(tmp_path, mo
     import ast
     import sys
 
-    doc = route_inputs.__doc__
-    assert "ADVERSARIAL-ONLY" in doc
-    listed = " ".join(doc[doc.index("ADVERSARIAL-ONLY"):].split())
-    assert listed.startswith("ADVERSARIAL-ONLY, and so not reported: a context variable read through "
-                             "`contextvars.copy_context()` (`.get(...)` or a subscript) in the module that defines it.")
+    listed = _paragraph(" ".join(route_inputs.__doc__.split()), "ADVERSARIAL-ONLY, and so not reported")
+    assert "`contextvars.copy_context()`" in listed, listed
     package = tmp_path / "pkg"
     package.mkdir()
     (package / "__init__.py").write_text("")
@@ -4475,7 +4672,9 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
     - each parameter: inside a function entered through a call, that call's
       arguments (up to `_CONTEXT_DEPTH` calls deep); otherwise its default
       and every argument any call passes there, a starred or unpacked one
-      included (`_arguments_for`);
+      included (`_arguments_for`); where the parameter is read as
+      `p.attr` (or `getattr(p, "attr")`), only that attribute of each
+      argument, read as `argument.attr`;
     - each attribute it reads on a local not proved a built-in or
       standard-library object (`_builtin_receiver`): every assignment of and write into an attribute of that name,
       on any receiver, in the loaded modules (`_attribute_values`), and the
@@ -4502,10 +4701,13 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
     followed (`test_the_trace_lists_its_adversarial_only_writes_and_does_not_follow_them`).
 
     ADVERSARIAL-ONLY, and so read as a built-in object: a local an
-    `isinstance` test has just proved a built-in, rebound before the read
-    (`_narrowed`); and a field filled by position in a call of its class
-    under another name (`_field_values`). Honest code reads the value it
-    tested and builds a class by its name, which is followed.
+    `isinstance` test has proved a built-in, rebound before the read only
+    by a `:=` inside a comprehension or from a nested function
+    (`_rebindings`); and a field filled by position in a call that reaches
+    its class through a table or `getattr` (`_built_classes`). A rebinding
+    in the function's own statements, and a build by the class's name, a
+    local bound to it, or a method's `cls`, `type(self)` or
+    `self.__class__`, are followed.
 
     LIMITS, by ruling: a method called on a value `_foreign` proves a
     standard-library one is read as the built-in only, so a project method
@@ -4523,7 +4725,20 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
     unresolved = [] if unresolved is None else unresolved
     parents = {} if parents is None else parents
     crossings = [] if crossings is None else crossings
-    found, seen = {}, set()
+    found, seen, synthetic = {}, set(), {}
+
+    def narrowed(value, attr):
+        # A parameter read only as `p.attr` (or `getattr(p, "attr")`) carries
+        # that one attribute of its argument, not the whole object: the
+        # argument is traced as `argument.attr`. One node per (argument,
+        # attribute), kept for the whole trace, so a revisit is seen.
+        if attr is None:
+            return value
+        key = (id(value), attr)
+        if key not in synthetic:
+            synthetic[key] = ast.copy_location(ast.Attribute(value=value, attr=attr, ctx=ast.Load()), value)
+        return synthetic[key]
+
     pending = [(module, function, expression, (), index, None)
                for index, (module, function, expression) in enumerate(starts)]
 
@@ -4587,11 +4802,12 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
                                       if caller is not None]
                     elif kind == "param" and context and context[0][0] == id(function) and context[0][1] is not None:
                         _frame, call, caller_module, caller = context[0]
-                        more += [(caller_module, caller, value, context[1:])
+                        more += [(caller_module, caller, narrowed(value, read_from.get(id(sub))), context[1:])
                                  for value in _passed(graph, function, sub.id, call)]
                         add(_default_of(graph, function, sub.id))
                     elif kind == "param":
-                        add(_arguments_for(graph, module, function, sub.id, problems))
+                        add([(owner, scope, narrowed(value, read_from.get(id(sub))))
+                             for owner, scope, value in _arguments_for(graph, module, function, sub.id, problems)])
                     elif kind in ("global", "import"):
                         add(_module_values(graph, module, sub.id))
                 add(_writes_into(graph, module, function, sub.id, read_from.get(id(sub))))
@@ -5399,8 +5615,10 @@ def _narrowed(graph, module: str, function, name) -> bool:
     test (or one `and` part of it) is the test, in the element and later
     conditions of a comprehension with the test as a condition, or in a
     statement after `if not <test>:` whose body ends in `return`, `raise`,
-    `continue` or `break`. A rebinding between the test and the read is
-    not looked for."""
+    `continue` or `break`; and not rebound there before the read
+    (`_rebindings`): a read after the name is assigned again inside that
+    reach, or inside a loop there that also assigns it, holds the new value
+    and is not narrowed."""
     import ast
 
     scope = function if function is not None else None
@@ -5411,10 +5629,17 @@ def _narrowed(graph, module: str, function, name) -> bool:
         covered = {}
 
         def cover(names, nodes):
+            parents = {id(child): sub for node in nodes for sub in ast.walk(node)
+                       for child in ast.iter_child_nodes(sub)}
+            stores = _rebindings(names, nodes, parents)
             for node in nodes:
                 for sub in ast.walk(node):
-                    if isinstance(sub, ast.Name):
-                        covered.setdefault(id(sub), set()).update(names)
+                    if isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                        loops = _enclosing_loops(sub, parents)
+                        covered.setdefault(id(sub), set()).update(
+                            name for name in names if not any(
+                                position < (sub.lineno, sub.col_offset) or loops & inside
+                                for position, inside in stores.get(name, ())))
 
         def held(test, wanted):
             parts = test.values if isinstance(test, ast.BoolOp) and isinstance(test.op, ast.And) else [test]
@@ -5456,14 +5681,64 @@ def _narrowed(graph, module: str, function, name) -> bool:
     return name.id in cache[id(scope)].get(id(name), set())
 
 
+def _enclosing_loops(node, parents) -> set:
+    """The ids of the `for` and `while` loops around `node` that `parents`
+    (child id to parent, over one reach of statements) holds."""
+    import ast
+
+    loops = set()
+    while id(node) in parents:
+        node = parents[id(node)]
+        if isinstance(node, (ast.For, ast.AsyncFor, ast.While)):
+            loops.add(id(node))
+    return loops
+
+
+def _rebindings(names, nodes, parents) -> dict:
+    """{name: [(position, loops)]} for each assignment of one of `names`
+    in `nodes`, in their own scope (not in a nested def, lambda, class or
+    comprehension): `position` is where the new value takes hold (the end
+    of the assignment, of a `for` loop's iterable, of a `with` item's
+    expression, of a `:=`), and `loops` the loops around it
+    (`_enclosing_loops`), whose next pass the new value also reaches."""
+    import ast
+
+    nested = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef,
+              ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+    found = {}
+    for node in nodes:
+        for sub in ast.walk(node):
+            if not (isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Store) and sub.id in names):
+                continue
+            chain, node_above = [], parents.get(id(sub))
+            while node_above is not None:
+                chain.append(node_above)
+                node_above = parents.get(id(node_above))
+            if any(isinstance(above, nested) for above in chain):
+                continue
+            child, holder = sub, None
+            for above in chain:
+                if isinstance(above, (ast.stmt, ast.NamedExpr, ast.withitem)):
+                    holder = above
+                    break
+                child = above
+            if holder is None:
+                continue
+            end = (holder.iter if isinstance(holder, (ast.For, ast.AsyncFor)) and child is holder.target
+                   else holder.context_expr if isinstance(holder, ast.withitem) else holder)
+            found.setdefault(sub.id, []).append(((end.end_lineno, end.end_col_offset), _enclosing_loops(sub, parents)))
+    return found
+
+
 def _field_values(graph, attr: str):
     """(module, def, value) for every value an attribute named `attr` of any
     object can hold, or None when one cannot be listed: each assignment of
     or write into such an attribute (`_attribute_values`); each class-level
     default of a field of that name; each keyword argument of that name in
     any call (a dataclass or record build, `replace(obj, attr=...)`); each
-    positional argument of a call, by class name, of a class that declares
-    the field (only the field's own slot for a class without its own
+    positional argument of a call that builds a class declaring the field
+    (`_built_classes`: by its name, a local bound to it, or its own
+    method's `cls`, `type(self)` or `self.__class__`; only the field's own slot for a class without its own
     `__init__` or a base); and each value a project method of that name
     returns (a property). A `*` or `**` argument in a call of such a class
     is None."""
@@ -5491,25 +5766,62 @@ def _field_values(graph, attr: str):
                         declaring.setdefault(node.name, set()).add(slot)
                         if statement.value is not None:
                             found.append((owner, None, statement.value))
-    for (owner, _qualified), node in list(graph.defs.items()):
+    for (owner, qualified), node in list(graph.defs.items()):
         for call in ast.walk(node):
             if not isinstance(call, ast.Call):
                 continue
             found += [(owner, node, item.value) for item in call.keywords if item.arg == attr]
-            name = call.func.id if isinstance(call.func, ast.Name) else (
-                call.func.attr if isinstance(call.func, ast.Attribute) else None)
-            if name in declaring:
+            built = _built_classes(graph, qualified, node, call.func) & set(declaring)
+            if built:
                 if any(isinstance(item, ast.Starred) for item in call.args) or any(
                         item.arg is None for item in call.keywords):
                     cache[attr] = None
                     return None
-                slots = declaring[name]
+                slots = set().union(*(declaring[name] for name in built))
                 found += [(owner, node, item) for index, item in enumerate(call.args)
                           if None in slots or index in slots]
     for key in _methods_named(graph, attr):
         found += [(key[0], graph.defs[key], item) for item in _returned_values(graph.defs[key])]
     cache[attr] = found
     return found
+
+
+def _built_classes(graph, qualified: str, function, func) -> set:
+    """The names of the classes a call of `func` in the def `function`
+    (named `qualified`) can build, as far as a field's slot is read: a class
+    named plainly (`Found(...)`, `module.Found(...)`); a local bound to a
+    class name, or to a choice of class names (`build = Found`, `build =
+    Found if flag else Other`, then `build(...)`); and, in a method of a
+    class, the method's own class through its first parameter (`cls(...)`
+    in a classmethod, `type(self)(...)`, `self.__class__(...)`). Empty for
+    any other callee."""
+    import ast
+
+    def names(value):
+        if isinstance(value, ast.Name):
+            return {value.id}
+        if isinstance(value, ast.IfExp):
+            return names(value.body) | names(value.orelse)
+        if isinstance(value, ast.BoolOp):
+            return set().union(*(names(item) for item in value.values))
+        return set()
+
+    if isinstance(func, ast.Attribute) and func.attr != "__class__":
+        return {func.attr}
+    positional = [argument.arg for argument in function.args.posonlyargs + function.args.args]
+    first = positional[0] if positional and "." in qualified else None
+    owner = {qualified.rpartition(".")[0].rpartition(".")[2]} if first else set()
+    if isinstance(func, ast.Attribute):
+        return owner if isinstance(func.value, ast.Name) and func.value.id == first else set()
+    if isinstance(func, ast.Call):
+        return owner if (isinstance(func.func, ast.Name) and func.func.id == "type" and len(func.args) == 1
+                         and isinstance(func.args[0], ast.Name) and func.args[0].id == first) else set()
+    if not isinstance(func, ast.Name):
+        return set()
+    if func.id == first and any(isinstance(item, ast.Name) and item.id == "classmethod"
+                                for item in function.decorator_list):
+        return owner
+    return {func.id}.union(*(names(bound) for kind, bound in _bound(graph, function, func.id) if kind == "value"))
 
 
 def _arguments_for(graph, module: str, function, name: str, unresolved: list) -> list:
@@ -5808,6 +6120,259 @@ _ASKS_ABOUT_RECORDED_DIRECTORY = {
 }
 
 
+# The exact-text pins this census keeps, each with why a behaviour check
+# cannot stand in for it. A pin of source or docstring text that is not here
+# is a change detector to replace with a check of the behaviour it states.
+_KEPT_TEXT_PINS = {
+    "TestEveryRouteEntryConditionIsARoute.NOT_A_ROUTE": (
+        "each row is a judgement that an input the resolver reads needs no route, which no code "
+        "computes; a new or renamed input must fail until someone writes that judgement. A reason the "
+        "code computes (`_derived_reason`) is not a row"
+    ),
+    "_AFTER_DETECTION": (
+        "the store-work pin selects its conditions by this reason suffix, so the text is the selector; "
+        "what it claims is pinned by behaviour (the identity attributes only __init__ sets, and no git "
+        "question taking a store-work value)"
+    ),
+    "_AFTER_DETECTION_ASKS": "the same selector, for the one store-work flow allowed through a sink",
+    "_traced_sources": (
+        "its ADVERSARIAL-ONLY and LIMITS paragraphs are read for each listed form's anchor only, tying "
+        "each named form to the row that shows the trace does not follow it"
+    ),
+    "route_inputs": (
+        "its ADVERSARIAL-ONLY paragraph is read for the `contextvars.copy_context()` anchor only, tied "
+        "to the row that shows the read is not reported"
+    ),
+}
+
+
+def test_each_kept_text_pin_names_a_pin_here():
+    """`_KEPT_TEXT_PINS` names only pins this module holds, each with a
+    reason, so the table cannot outlive what it explains."""
+    import sys
+
+    module = sys.modules[__name__]
+    for name, reason in _KEPT_TEXT_PINS.items():
+        owner = module
+        for part in name.split("."):
+            assert hasattr(owner, part), name
+            owner = getattr(owner, part)
+        assert reason, name
+
+
+# The reasons `_derived_reason` computes for a build or a method call, by the
+# kind of code it finds.
+_KIND_REASONS = {
+    "opening class": "a class a pass opening builds; the census reads every method it defines",
+    "build": "builds a record class (fields only)",
+    "pattern": "a method of a compiled literal pattern",
+    "method-free build": (
+        "builds a method-free class whose chain ends in outside bases, so neither the build nor an "
+        "instance runs project code"
+    ),
+    "followed build": (
+        "builds a plain class; the census follows the build into its __init__, and a method the class "
+        "defines into the class wherever it types the object as that build (instance_target)"
+    ),
+}
+_INERT_BASE = "a base whose project classes define no __init_subclass__ or __class_getitem__ and name no metaclass"
+_SHAPE_CALL = re.compile(r"<call to no function ([\w.]+): (\w+)(?:\.(\w+))?>")
+_SHAPE_ANNOTATED = re.compile(r"<name imported from a project module ([\w.]+): (\w+) in an annotation>")
+_SHAPE_STATEMENT = re.compile(r"<class statement on a project name ([\w.]+): \w+ (base|keyword \w+|decorator) (\w+)>")
+_SHAPE_OWN = re.compile(r"<class of its own module used as a value ([\w.]+): ([\w.]+?)( in an annotation)?>")
+
+
+def _derived_graph():
+    """The census graph `route_inputs` reads, with the pass openings read."""
+    graph = _DetectionGraph()
+    for module in (*DETECTION_MODULES, *(module for module, _name in PASS_SETUPS)):
+        graph.load(module)
+    _pass_openings(graph)
+    return graph
+
+
+def _call_kind(graph, condition):
+    """The kind of code a `<call to no function m: X[.method]>` condition
+    names, as a key of `_KIND_REASONS`, or None for any other code:
+    - "opening class": a class a pass opening builds (`_pass_openings`),
+      whose methods `route_inputs` reads as roots;
+    - "build": a NamedTuple whose body holds only annotated fields with
+      literal defaults and a docstring (no method, decorator or keyword);
+    - "method-free build": a `plain_class` that defines no method, nor does
+      any project base of it;
+    - "followed build": a `plain_class` with an `__init__` in its chain
+      (`init_of`);
+    - "pattern": a method called on a module name (followed through
+      imports) whose every binding is `re.compile` of literals or `re`
+      flags."""
+    import ast
+
+    from fixtures.identity_git import qualified_name
+
+    found = _SHAPE_CALL.fullmatch(condition[1]) if condition[0] == "call" else None
+    if not found:
+        return None
+    module, name, method = found.groups()
+    assert graph.load(module), module
+    owned = graph.project_name(name, module)
+    if owned is None or not owned[1]:
+        return None
+
+    def literal(value):
+        try:
+            ast.literal_eval(value)
+        except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+            return False
+        return True
+
+    owner, leaf = owned
+    graph.load(owner)
+    node = graph.classes.get(owner, {}).get(leaf)
+    if method is not None:
+        aliases = graph.aliases[owner]
+        values = graph.bindings[owner].get(leaf, [])
+
+        def flag(value):
+            if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
+                return flag(value.left) and flag(value.right)
+            return (qualified_name(value, aliases) or "").startswith("re.")
+
+        return "pattern" if values and all(
+            isinstance(value, ast.Call) and qualified_name(value.func, aliases) == "re.compile"
+            and all(literal(argument) or flag(argument) for argument in [*value.args, *(kw.value for kw in value.keywords)])
+            for value in values
+        ) else None
+    if node is None:
+        return None
+    plain = graph.plain_class(ast.Name(id=name, ctx=ast.Load()), module) == owned
+
+    def methods(of):
+        return [item for item in of.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))]
+
+    if owned in graph.opening_classes:
+        return "opening class"
+    if ([ast.unparse(base) for base in node.bases] in (["NamedTuple"], ["typing.NamedTuple"])
+            and not node.decorator_list and not node.keywords and all(
+                (isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
+                 and (item.value is None or literal(item.value)))
+                or (isinstance(item, ast.Expr) and isinstance(item.value, ast.Constant))
+                for item in node.body)):
+        return "build"
+    if plain and not methods(node) and all(
+            not methods(graph.classes[base[0]][base[1]]) for base in graph.project_bases(owned)):
+        return "method-free build"
+    if plain and graph.init_of(owned) is not None:
+        return "followed build"
+    return None
+
+
+def _class_reason(graph, condition):
+    """The reason a class condition's code gives, or None for a form this
+    does not read: for a name used in an annotation, the class's module, its
+    form (a NamedTuple, an Enum, a @dataclass, a plain class or a class
+    whose every base is from outside the project, such as Exception) and
+    whether its body defines a method; for a class statement on a project
+    base, that the base and every project class it derives from define no
+    `__init_subclass__` or `__class_getitem__` and name no metaclass; for a
+    class of its own module used as a value, its form as for an annotation,
+    that same hook-free chain, and whether the use is an annotation."""
+    import ast
+
+    text = condition[1] if condition[0] == "call" and len(condition) > 1 else ""
+
+    def class_node(name, module):
+        assert graph.load(module), module
+        owned = graph.project_name(name, module)
+        if owned is None or not owned[1] or not graph.load(owned[0]):
+            return None, None
+        return owned[0], graph.classes.get(owned[0], {}).get(owned[1])
+
+    def described(owner, node):
+        bases = [ast.unparse(base) for base in node.bases]
+        decorators = [ast.unparse(decorator) for decorator in node.decorator_list]
+        outside = all(
+            isinstance(base, ast.Name) and graph.project_name(base.id, owner) is None
+            or isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+            and graph.project_name(base.value.id, owner) is None
+            for base in node.bases
+        )
+        form = (
+            "NamedTuple " if bases in (["NamedTuple"], ["typing.NamedTuple"]) and not decorators
+            else "Enum " if bases in (["Enum"], ["enum.Enum"]) and not decorators
+            else "@dataclass " if decorators in (["dataclass"], ["dataclasses.dataclass"]) and not bases
+            else "" if not bases and not decorators
+            else f"{' and '.join(bases)}-based " if outside and not decorators
+            else None
+        )
+        if form is None or node.keywords:
+            return None
+        short = owner.rpartition(".")[2]
+        has_methods = any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) for item in node.body)
+        return (f"{short}{chr(39) if short.endswith('s') else chr(39) + 's'} {form}class"
+                f"{' with methods' if has_methods else ''}")
+
+    def no_hooks(owner, node, depth=0):
+        if depth > 8 or any(keyword.arg == "metaclass" for keyword in node.keywords) or any(
+            isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and item.name in ("__init_subclass__", "__class_getitem__")
+            for item in node.body
+        ):
+            return False
+        for base in node.bases:
+            if isinstance(base, ast.Name):
+                parent_owner, parent = class_node(base.id, owner)
+                if parent is not None and not no_hooks(parent_owner, parent, depth + 1):
+                    return False
+                if parent is None and graph.project_name(base.id, owner) is not None:
+                    return False
+            elif not (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
+                      and graph.project_name(base.value.id, owner) is None):
+                return False
+        return True
+
+    found = _SHAPE_ANNOTATED.fullmatch(text)
+    if found:
+        owner, node = class_node(found.group(2), found.group(1))
+        described_text = described(owner, node) if node is not None else None
+        return None if described_text is None else f"{described_text}, named in an annotation"
+    found = _SHAPE_STATEMENT.fullmatch(text)
+    if found:
+        module, role, name = found.groups()
+        owner, node = class_node(name, module)
+        return _INERT_BASE if role == "base" and node is not None and no_hooks(owner, node) else None
+    found = _SHAPE_OWN.fullmatch(text)
+    if found:
+        module, name, in_annotation = found.groups()
+        assert graph.load(module), module
+        node = next((names[name] for names in graph.class_names.get(module, {}).values() if name in names), None)
+        described_text = described(module, node) if node is not None and no_hooks(module, node) else None
+        return None if described_text is None else (
+            f"{described_text}, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
+            + ("named in an annotation" if in_annotation else "used as a value")
+        )
+    return None
+
+
+def _derived_reason(graph, condition):
+    """The reason the census computes from the code a condition names, or
+    None when it computes none and NOT_A_ROUTE must name the condition: a
+    build or a compiled pattern's method (`_call_kind`, `_KIND_REASONS`),
+    or a class used in an annotation, as a value or as a base
+    (`_class_reason`)."""
+    kind = _call_kind(graph, condition)
+    return _KIND_REASONS[kind] if kind is not None else _class_reason(graph, condition)
+
+
+@functools.lru_cache(maxsize=2)
+def _derived_reasons_for(fingerprint: tuple) -> dict:
+    """{condition: reason} for each condition `route_entry_conditions`
+    finds whose reason `_derived_reason` computes, for the tree
+    `fingerprint` names."""
+    graph = _derived_graph()
+    reasons = {condition: _derived_reason(graph, condition) for condition in route_entry_conditions()}
+    return {condition: reason for condition, reason in reasons.items() if reason is not None}
+
+
 class TestEveryRouteEntryConditionIsARoute:
     """Every input that selects a resolver route is a route the matrices
     measure.
@@ -5818,7 +6383,8 @@ class TestEveryRouteEntryConditionIsARoute:
     each route in `identity_routes.ROUTES` sets. A call into a helper counts
     as driven only when a route replaces it: an input a route drives that is
     read inside a helper does not drive the helper's other inputs.
-    Every input must be driven or be listed in NOT_A_ROUTE, and every route
+    Every input must be driven, have a reason the census computes from its
+    code (`_derived_reason`), or be listed in NOT_A_ROUTE, and every route
     input must still be read. A new route through any rung, a new reader of
     a record or setting in another project module, or a new environment
     variable in any form therefore reds an arm here until a route drives it
@@ -5828,8 +6394,9 @@ class TestEveryRouteEntryConditionIsARoute:
     (every `_root_guard` and `_identity_at_root` call site must run).
     """
 
-    # Inputs the detection path reads that no route sets, each with the reason
-    # the matrices do not need one to.
+    # Inputs the detection path reads that no route sets and whose reason the
+    # census cannot compute (`_derived_reason`), each with the reason the
+    # matrices do not need one to.
     NOT_A_ROUTE = {
         ("env", "GIT_DISCOVERY_ACROSS_FILESYSTEM"): (
             "read beside the driven GIT_CEILING_DIRECTORIES by both marker walks "
@@ -5942,9 +6509,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function shared.git_helpers: PASS_GIT_RESULTS.reset>"): (
             "git_results_pass ends the pass's memo of git results with the block"
         ),
-        ("call", "<call to no function shared.backlog: _HeldWarnings>"): (
-            "a class a pass opening builds; the census reads every method it defines"
-        ),
         ("call", "<call to no function shared.backlog: self.logger.addFilter>"): (
             "the decline-warning holder attaches itself to the memory skill's logger while a backlog "
             "command runs"
@@ -5966,57 +6530,17 @@ class TestEveryRouteEntryConditionIsARoute:
             "backlog.main prints the held decline warnings when a command does not succeed; it hands "
             "logged records to the skill's logger and reads no input"
         ),
-        ("call", "<class of its own module used as a value shared.backlog: _RefKind in an annotation>"): (
-            "backlog's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
-            "named in an annotation"
-        ),
-        ("call", "<class of its own module used as a value shared.backlog: _HeldWarnings in an annotation>"): (
-            "backlog's logging.Filter-based class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
-            "named in an annotation"
-        ),
-        ("call", "<class of its own module used as a value shared.backlog_store: BacklogFileError>"): (
-            "backlog_store's Exception-based class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
-            "used as a value"
-        ),
-        ("call", "<class of its own module used as a value shared.backlog_store: BacklogNotice in an annotation>"): (
-            "backlog_store's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
-            "named in an annotation"
-        ),
-        ("call", "<class statement on a project name shared.backlog_store: "
-                 "BacklogUnreadableError base BacklogFileError>"): (
-            "a base whose project classes define no __init_subclass__ or __class_getitem__ "
-            "and name no metaclass"
-        ),
-        ("call", "<call to no function memory_api: _DetectedIdentity>"): (
-            "builds a record class (fields only)"
-        ),
-        ("call", "<call to no function project_identity: OriginRead>"): "builds a record class (fields only)",
-        ("call", "<call to no function project_identity: OverrideRead>"): (
-            "builds a record class (fields only)"
-        ),
-        ("call", "<call to no function project_identity: RootIdentity>"): (
-            "builds a record class (fields only)"
-        ),
         ("call", "<call to no function memory_api: logger.debug>"): (
             "a logger method; every project object built on the path is a named build"
         ),
         ("call", "<call to no function memory_api: logger.warning>"): (
             "a logger method; every project object built on the path is a named build"
         ),
-        ("call", "<call to no function database: CANONICAL_ID_RE.fullmatch>"): (
-            "a method of a compiled literal pattern"
-        ),
         ("call", "<call to no function database: a method of what CANONICAL_ID_RE.fullmatch returns>"): (
             "a method of that pattern's match"
         ),
-        ("call", "<call to no function project_identity: _SCHEME_PREFIX_RE.match>"): (
-            "a method of a compiled literal pattern"
-        ),
         ("call", "<call to no function project_identity: a method of what _SCHEME_PREFIX_RE.match returns>"): (
             "a method of that pattern's match"
-        ),
-        ("call", "<call to no function project_identity: _SCP_FORM_RE.match>"): (
-            "a method of a compiled literal pattern"
         ),
         ("call", "<call to no function project_identity: a method of what _SCP_FORM_RE.match returns>"): (
             "a method of that pattern's match"
@@ -6044,9 +6568,6 @@ class TestEveryRouteEntryConditionIsARoute:
             "a method on a local the census cannot type; every project object built on "
             "the path is a named build"
         ),
-        ("call", "<call to no function shared.project_scope: _GIT_INT_RE.fullmatch>"): (
-            "a method of a compiled literal pattern"
-        ),
         ("call", "<call to no function shared.project_scope: a method of what _GIT_INT_RE.fullmatch returns>"): (
             "a method of that pattern's match"
         ),
@@ -6054,156 +6575,22 @@ class TestEveryRouteEntryConditionIsARoute:
             "a method on a local the census cannot type; every project object built on "
             "the path is a named build"
         ),
-        ("call", "<call to no function shared.project_scope: _UNSAFE_SLUG_CHARS_RE.sub>"): (
-            "a method of a compiled literal pattern"
-        ),
         ("call", "store_scope"): (
             "the _with_store_scope decorator runs each PACTMemory method inside "
             "store_scope(self._db_path), which binds the store file; get_user_memory_dir, "
             "which the user-setting route replaces, sets that binding aside"
         ),
-        ("call", "<call to no function shared.merge_guard_common: _ReadVerbSpec>"): (
-            "builds a record class (fields only)"
-        ),
-        ("call", "<call to no function shared.merge_guard_common: _WrapperGrammar>"): (
-            "builds a record class (fields only)"
-        ),
-        ("call", "<call to no function shared.pact_context: TeamAlignment>"): (
-            "builds a record class (fields only)"
-        ),
-        ("call", "<call to no function shared.session_state: SAFE_PATH_COMPONENT_RE.fullmatch>"): (
-            "a method of a compiled literal pattern"
-        ),
-        ("call", "<name imported from a project module memory_api: MemoryObject in an annotation>"): (
-            "models' @dataclass class with methods, named in an annotation"
-        ),
         ("call", "<name imported from a project module memory_api: ProjectScopeDisagreementError>"): (
             "pact_session's error class, the base of a class memory_api defines"
-        ),
-        ("call", "<class statement on a project name memory_api: "
-                 "ProjectIdentityUnresolvedError base ProjectScopeDisagreementError>"): (
-            "a base whose project classes define no __init_subclass__ or __class_getitem__ "
-            "and name no metaclass"
         ),
         ("call", "<name imported from a project module project_identity: CANONICAL_ID_MAX_LENGTH>"): (
             "database's id length constant, which the importing function returns"
         ),
-        ("call", "<name imported from a project module search: MemoryObject in an annotation>"): (
-            "models' @dataclass class with methods, named in an annotation"
-        ),
-        ("call", "<name imported from a project module shared.claude_md_manager: Document in an annotation>"): (
-            "claude_md_markers' class with methods, named in an annotation"
-        ),
-        ("call", "<name imported from a project module shared.claude_md_manager: Located in an annotation>"): (
-            "claude_md_markers' NamedTuple class, named in an annotation"
-        ),
-        ("call", "<name imported from a project module shared.claude_md_manager: SessionRoot in an annotation>"): (
-            "project_scope's NamedTuple class, named in an annotation"
-        ),
         ("call", "<name imported from a project module shared.project_scope: _UNSAFE_SLUG_CHARS_RE>"): (
             "pact_context's compiled pattern, whose sub replaces unsafe characters in the session id"
         ),
-        ("call", "<name imported from a project module shared.session_resume: Document in an annotation>"): (
-            "claude_md_markers' class with methods, named in an annotation"
-        ),
-        ("call", "<name imported from a project module shared.session_resume: ManagedDocument in an annotation>"): (
-            "claude_md_manager's NamedTuple class, named in an annotation"
-        ),
-        ("call", "<name imported from a project module shared.session_resume: SessionRoot in an annotation>"): (
-            "project_scope's NamedTuple class, named in an annotation"
-        ),
-        ("call", "<name imported from a project module working_memory: Document in an annotation>"): (
-            "claude_md_markers' class with methods, named in an annotation"
-        ),
-        ("call", "<name imported from a project module working_memory: Located in an annotation>"): (
-            "claude_md_markers' NamedTuple class, named in an annotation"
-        ),
         ("call", "<name imported from a project module graph: _connection_sqlite3>"): (
             "the sqlite3 module database imports, read for its IntegrityError class in a module-level tuple"
-        ),
-        ('call', '<class of its own module used as a value embeddings: EmbeddingService in an annotation>'): (
-            "embeddings' class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value memory_api: PACTMemory in an annotation>'): (
-            "memory_api's class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value memory_api: PACTMemory>'): (
-            "memory_api's class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
-        ),
-        ('call', '<class of its own module used as a value models: Decision in an annotation>'): (
-            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value models: Decision>'): (
-            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
-        ),
-        ('call', '<class of its own module used as a value models: Entity in an annotation>'): (
-            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value models: Entity>'): (
-            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
-        ),
-        ('call', '<class of its own module used as a value models: MemoryObject in an annotation>'): (
-            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value models: TaskItem in an annotation>'): (
-            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value models: TaskItem>'): (
-            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
-        ),
-        ('call', '<class of its own module used as a value pin_caps: CapViolation in an annotation>'): (
-            "pin_caps' NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value pin_caps: Pin in an annotation>'): (
-            "pin_caps' NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value project_identity: OriginRead in an annotation>'): (
-            "project_identity's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value project_identity: OverrideRead in an annotation>'): (
-            "project_identity's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value project_identity: RootIdentity in an annotation>'): (
-            "project_identity's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.claude_md_manager: GateTarget in an annotation>'): (
-            "claude_md_manager's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.claude_md_manager: ManagedDocument in an annotation>'): (
-            "claude_md_manager's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.claude_md_markers: Cause in an annotation>'): (
-            "claude_md_markers' Enum class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.claude_md_markers: Cause>'): (
-            "claude_md_markers' Enum class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
-        ),
-        ('call', '<class of its own module used as a value shared.claude_md_markers: Document in an annotation>'): (
-            "claude_md_markers' class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.claude_md_markers: Kind in an annotation>'): (
-            "claude_md_markers' Enum class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.claude_md_markers: Line in an annotation>'): (
-            "claude_md_markers' NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.claude_md_markers: Located in an annotation>'): (
-            "claude_md_markers' NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.claude_md_markers: State in an annotation>'): (
-            "claude_md_markers' Enum class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.merge_guard_common: _PyScope in an annotation>'): (
-            "merge_guard_common's class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.pact_context: TeamAlignment in an annotation>'): (
-            "pact_context's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value shared.project_scope: SessionRoot in an annotation>'): (
-            "project_scope's NamedTuple class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
-        ),
-        ('call', '<class of its own module used as a value working_memory: SyncResult in an annotation>'): (
-            "working_memory's class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, named in an annotation"
         ),
         ("call", "is_canonical_id"): "validates an id value",
         ("call", "validate_identifier_for_write"): "validates an id value",
@@ -6271,17 +6658,11 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "<call to no function setup_memory: logger.error>"): "setup_memory's module logger",
         ("call", "<call to no function setup_memory: logger.info>"): "setup_memory's module logger",
-        ("call", "<call to no function shared.claude_md_manager: ManagedDocument>"): (
-            "builds a record class (fields only)"
-        ),
         ("call", "<call to no function shared.claude_md_manager: a method of what managed_document_paths returns>"): (
             "a method of a candidate CLAUDE.md path, to find the session's managed document for a sync"
         ),
         ("call", "<call to no function shared.claude_md_manager: a method of what session_memory_root returns>"): (
             "_replace on the session-root record session_memory_root returned"
-        ),
-        ("call", "<call to no function shared.pact_context: _UNSAFE_SLUG_CHARS_RE.sub>"): (
-            "a method of a compiled literal pattern"
         ),
         ("call", "<call to no function shared.pact_context: candidate.resolve>"): (
             "a method of a session-directory path built from get_claude_config_dir(), which the "
@@ -6290,9 +6671,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function shared.pact_context: sessions_root.resolve>"): (
             "a method of the sessions directory built from get_claude_config_dir(), which the "
             "census cannot type"
-        ),
-        ("call", "<call to no function shared.project_scope: SessionRoot>"): (
-            "builds a record class (fields only)"
         ),
         ("call", "<call to no function shared.project_scope: _fsdecode(...).split>"): (
             "splits the text _fsdecode decodes from git's output"
@@ -6349,17 +6727,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<name imported from a project module staleness: SESSION_BOUNDARY_PREFIX>"): (
             "a CLAUDE.md boundary-marker prefix constant"
         ),
-        ("call", "<name imported from a project module staleness: CapViolation in an annotation>"): (
-            "pin_caps' NamedTuple class, named in an annotation"
-        ),
-        ("call", "<class of its own module used as a value memory_api: StoreFaultError>"): (
-            "memory_api's sqlite3.OperationalError-based class, with no __init_subclass__, "
-            "__class_getitem__ or metaclass in its project chain, used as a value"
-        ),
-        ("call", "<class of its own module used as a value shared.claude_md_manager: UserGlobalDocumentRefused>"): (
-            "claude_md_manager's RuntimeError-based class, with no __init_subclass__, "
-            "__class_getitem__ or metaclass in its project chain, used as a value"
-        ),
         ("call", "_unusable_identifier"): "validates an id value",
         ("call", "get_session_id_from_context_file"): (
             "detects the session id a saved memory records, not a project identity"
@@ -6368,22 +6735,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ("env", "PWD"): (
             "session_anchor's fallback when the process directory is gone; it locates the session's "
             "CLAUDE.md for a sync, not a memory identity"
-        ),
-        ("call", "<call to no function cli: PACTMemory>"): (
-            'builds a plain class; the census follows the build into its __init__, and a method the class '
-            'defines into the class wherever it types the object as that build (instance_target)'
-        ),
-        ("call", "<call to no function embeddings: EmbeddingService>"): (
-            'builds a plain class; the census follows the build into its __init__, and a method the class '
-            'defines into the class wherever it types the object as that build (instance_target)'
-        ),
-        ("call", "<call to no function memory_api: StoreFaultError>"): (
-            'builds a method-free class whose chain ends in outside bases, so neither the '
-            'build nor an instance runs project code'
-        ),
-        ("call", "<call to no function shared.claude_md_manager: UserGlobalDocumentRefused>"): (
-            'builds a method-free class whose chain ends in outside bases, so neither the '
-            'build nor an instance runs project code'
         ),
         # The store work a memory CLI command runs (`_DetectionGraph.instance_target`):
         # each runs after PACTMemory.__init__ has detected the identity
@@ -6495,12 +6846,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', 'update_memory'): (
             "updates a memory's row in the store" + _AFTER_DETECTION
         ),
-        ('call', '<call to no function database: AmbiguousPrefixError>'): (
-            'builds a plain class; the census follows the build into its __init__, and a method the class defines into the class wherever it types the object as that build (instance_target)'
-        ),
-        ('call', '<call to no function database: PrefixTooShortError>'): (
-            'builds a plain class; the census follows the build into its __init__, and a method the class defines into the class wherever it types the object as that build (instance_target)'
-        ),
         ('call', '<call to no function database: a method of what _serialize_json_fields returns>'): (
             'reads the fields of the row dict _serialize_json_fields builds for an insert' + _AFTER_DETECTION
         ),
@@ -6524,12 +6869,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ('call', '<name imported from a project module database: TaskItem>'): (
             "models' record class, registered as the class of an active_tasks field" + _AFTER_DETECTION
-        ),
-        ('call', '<call to no function embedding_catchup: UnembeddedResult>'): (
-            'builds a plain class; the census follows the build into its __init__, and a method the class defines into the class wherever it types the object as that build (instance_target)'
-        ),
-        ('call', '<class of its own module used as a value embedding_catchup: UnembeddedResult>'): (
-            "embedding_catchup's list-based class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
         ),
         ('call', '<call to no function embedding_catchup: a method of what get_memory returns>'): (
             'reads a field of a memory row the store returned, to re-embed it' + _AFTER_DETECTION
@@ -6569,15 +6908,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ('call', '<call to no function graph: logger.debug>'): (
             "graph's module logger" + _AFTER_DETECTION
-        ),
-        ('call', '<call to no function memory_api: ProjectIdentityUnresolvedError>'): (
-            'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
-        ),
-        ('call', '<call to no function memory_api: ProjectScopeDisagreementError>'): (
-            'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
-        ),
-        ('call', '<call to no function memory_api: _UNSAFE_SLUG_CHARS_RE.sub>'): (
-            'a method of a compiled literal pattern'
         ),
         ('call', '<call to no function memory_api: a method of what get_memory returns>'): (
             'reads a field of a memory row the store returned' + _AFTER_DETECTION
@@ -6639,9 +6969,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ('env', 'CI'): (
             "memory_init's CI check, which skips installing dependencies in CI; it changes no answer the identity reads" + _AFTER_DETECTION
         ),
-        ('call', '<call to no function memory_init: _UNSAFE_SLUG_CHARS_RE.sub>'): (
-            'a method of a compiled literal pattern'
-        ),
         ('call', '<call to no function memory_init: a method of what _UNSAFE_SLUG_CHARS_RE.sub returns>'): (
             "encodes the slug that pattern's substitution returns, to hash it" + _AFTER_DETECTION
         ),
@@ -6669,9 +6996,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', '<call to no function models: logger.warning>'): (
             "models' module logger" + _AFTER_DETECTION
         ),
-        ('call', '<class of its own module used as a value models: MemoryObject>'): (
-            "models' @dataclass class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
-        ),
         ('call', '<call to no function search: a method of what check_embedding_availability returns>'): (
             "reads the embedding backend's status for the search capabilities" + _AFTER_DETECTION
         ),
@@ -6687,24 +7011,9 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', '<name imported from a project module search: SQLITE_EXTENSIONS_ENABLED>'): (
             "whether this Python's sqlite3 can load extensions, a constant" + _AFTER_DETECTION
         ),
-        ('call', '<call to no function shared.claude_md_markers: Document>'): (
-            'builds a plain class; the census follows the build into its __init__, and a method the class defines into the class wherever it types the object as that build (instance_target)'
-        ),
-        ('call', '<call to no function shared.claude_md_markers: Line>'): (
-            'builds a record class (fields only)'
-        ),
         ('call', '<call to no function shared.claude_md_markers: _COMMENT_START_RE.match>'): (
             'a method of the HTML comment start pattern, a compiled literal taken from the _HTML_BLOCKS '
             'table, matched against a CLAUDE.md line' + _AFTER_DETECTION
-        ),
-        ('call', '<call to no function shared.claude_md_markers: _CONTAINER_FENCE_RE.fullmatch>'): (
-            'a method of a compiled literal pattern'
-        ),
-        ('call', '<call to no function shared.claude_md_markers: _LINE_RE.finditer>'): (
-            'a method of a compiled literal pattern'
-        ),
-        ('call', '<call to no function shared.claude_md_markers: _OPENER_RE.fullmatch>'): (
-            'a method of a compiled literal pattern'
         ),
         ('call', '<call to no function shared.claude_md_markers: a method of what _LINE_RE.finditer returns>'): (
             "a method of that pattern's match" + _AFTER_DETECTION
@@ -6723,27 +7032,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ('call', '<call to no function shared.claude_md_markers: start_re.match>'): (
             "a method of a CLAUDE.md fence's start pattern" + _AFTER_DETECTION
-        ),
-        ('call', '<class of its own module used as a value shared.claude_md_markers: Kind>'): (
-            "claude_md_markers' Enum class, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
-        ),
-        ('call', '<call to no function working_memory: AmbientSyncRefused>'): (
-            'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
-        ),
-        ('call', '<call to no function working_memory: ContainmentError>'): (
-            'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
-        ),
-        ('call', '<call to no function working_memory: ProjectScopeDisagreementError>'): (
-            'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
-        ),
-        ('call', '<call to no function working_memory: SyncResult>'): (
-            'builds a plain class; the census follows the build into its __init__, and a method the class defines into the class wherever it types the object as that build (instance_target)'
-        ),
-        ('call', '<class of its own module used as a value working_memory: SyncResult>'): (
-            "working_memory's class with methods, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, used as a value"
-        ),
-        ('call', '<call to no function working_memory: _PROMPT_CONTROL_CHARS_RE.sub>'): (
-            'a method of a compiled literal pattern'
         ),
         ('call', '<call to no function working_memory: a method of what _resolve_display_claude_md_with_base returns>'): (
             'a method of the CLAUDE.md path a sync writes to, which the census cannot type' + _AFTER_DETECTION
@@ -6777,229 +7065,60 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
     }
 
-    def test_each_named_build_and_pattern_is_what_its_reason_says(self):
-        """Computes the three properties NOT_A_ROUTE's reasons state: an entry
-        whose reason says "builds a record class (fields only)" builds a
-        class that is a NamedTuple whose body holds only annotated fields and
-        a docstring (no method, decorator or class keyword); one that says "a
-        class a pass opening builds; the census reads every method it
-        defines" builds a class a pass opening builds (`_pass_openings`),
-        whose methods `route_inputs` reads as roots; one that says "builds
-        a method-free class whose chain ends in outside bases" builds a `plain_class` that
-        defines no method, nor does any project base of it; one that says
-        "builds a plain class; the census follows the build into its
-        __init__" builds a `plain_class` with an `__init__` in its chain
-        (`init_of`); and one that says "a method of a compiled
-        literal pattern" calls a method on a module name (followed through
-        imports) whose every binding is `re.compile` of literals or `re`
-        flags. Every entry of each shape carries that reason, and no other
-        entry does."""
-        import ast
-        import re as regex
+    def test_the_table_names_only_what_the_code_cannot_explain(self, route_driven_conditions):
+        """NOT_A_ROUTE holds only judgement: no row names a condition whose
+        reason the census computes from its code (`_derived_reason`), and no
+        row's reason is one the census computes (`_KIND_REASONS`), so a row
+        cannot claim a build or a pattern the code is not. Control: the
+        computed reasons cover a record build, a compiled pattern, a class in
+        an annotation, a class of its own module and a class statement's
+        base, and none is a condition a route drives."""
+        derived = _derived_reasons_for(_source_fingerprint())
+        assert set(self.NOT_A_ROUTE) & set(derived) == set(), sorted(set(self.NOT_A_ROUTE) & set(derived))
+        claimed = {condition for condition, reason in self.NOT_A_ROUTE.items() if reason in _KIND_REASONS.values()}
+        assert claimed == set(), claimed
+        assert set(derived) & set(route_driven_conditions) == set(), set(derived) & set(route_driven_conditions)
+        reasons = set(derived.values())
+        assert {_KIND_REASONS["build"], _KIND_REASONS["pattern"], _INERT_BASE} <= reasons, reasons  # control
+        assert any(reason.endswith("named in an annotation") for reason in reasons), reasons  # control
+        assert any(reason.endswith("used as a value") for reason in reasons), reasons  # control
 
-        from fixtures.identity_git import qualified_name
+    def test_a_computed_reason_follows_the_code(self, tmp_path, monkeypatch):
+        """`_derived_reason` on scratch code: a fields-only NamedTuple build,
+        a compiled literal pattern's method and a hook-free class in an
+        annotation get their reasons; the same build with a method, the
+        pattern compiled from a non-literal, and the class with an
+        `__init_subclass__` get none, so the census fails until NOT_A_ROUTE
+        names them."""
+        import sys
 
+        package = tmp_path / "pkg"
+        package.mkdir()
+        (package / "__init__.py").write_text("")
+        (package / "m.py").write_text(
+            "import re\nfrom typing import NamedTuple\n\nPATTERN = re.compile(r'x', re.I)\n"
+            "SOURCE = 'x'\nLOOSE = re.compile(SOURCE)\n\n"
+            "class Record(NamedTuple):\n    name: str = ''\n\n"
+            "class Busy(NamedTuple):\n    name: str = ''\n\n    def size(self):\n        return 1\n\n"
+            "class Plain:\n    pass\n\n"
+            "class Hooked:\n    def __init_subclass__(cls):\n        pass\n"
+        )
+        monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path,))
         graph = _DetectionGraph()
-        shape = regex.compile(r"<call to no function ([\w.]+): (\w+)(?:\.(\w+))?>")
-
-        def literal(value):
-            try:
-                ast.literal_eval(value)
-            except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
-                return False
-            return True
-
-        def fields_only(node):
-            return (
-                [ast.unparse(base) for base in node.bases] in (["NamedTuple"], ["typing.NamedTuple"])
-                and not node.decorator_list and not node.keywords
-                and all(
-                    (isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name)
-                     and (item.value is None or literal(item.value)))
-                    or (isinstance(item, ast.Expr) and isinstance(item.value, ast.Constant))
-                    for item in node.body
-                )
-            )
-
-        def compiled_literal(owner, name):
-            aliases = graph.aliases[owner]
-            values = graph.bindings[owner].get(name, [])
-
-            def flag(value):
-                if isinstance(value, ast.BinOp) and isinstance(value.op, ast.BitOr):
-                    return flag(value.left) and flag(value.right)
-                return (qualified_name(value, aliases) or "").startswith("re.")
-
-            return bool(values) and all(
-                isinstance(value, ast.Call) and qualified_name(value.func, aliases) == "re.compile"
-                and all(literal(argument) or flag(argument)
-                        for argument in [*value.args, *(kw.value for kw in value.keywords)])
-                for value in values
-            )
-
-        builds, patterns, wrong = set(), set(), {}
-        for module in (*DETECTION_MODULES, *(module for module, _name in PASS_SETUPS)):
-            graph.load(module)
+        assert graph.load("pkg.m")
         _pass_openings(graph)
-        opening_classes = graph.opening_classes
-        for condition, reason in self.NOT_A_ROUTE.items():
-            found = shape.fullmatch(condition[1]) if condition[0] == "call" else None
-            kind = None
-            if found:
-                module, name, method = found.groups()
-                assert graph.load(module), module
-                owned = graph.project_name(name, module)
-                if owned is not None and owned[1]:
-                    owner, leaf = owned
-                    graph.load(owner)
-                    node = graph.classes.get(owner, {}).get(leaf)
-                    plain = graph.plain_class(ast.Name(id=name, ctx=ast.Load()), module) == owned
-                    methods = [item for item in node.body if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))] if (
-                        node is not None) else []
-                    if method is None and node is not None and owned in opening_classes:
-                        kind = "opening class"
-                    elif method is None and node is not None and fields_only(node):
-                        kind = "build"
-                        builds.add(condition)
-                    elif method is None and node is not None and plain and not methods and all(
-                            not [item for item in graph.classes[base[0]][base[1]].body
-                                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))]
-                            for base in graph.project_bases(owned)):
-                        kind = "method-free build"
-                    elif method is None and node is not None and plain and graph.init_of(owned) is not None:
-                        kind = "followed build"
-                    elif method is None and node is not None:
-                        kind = "build"
-                        wrong.setdefault("not fields only", set()).add(condition)
-                    elif method is not None and compiled_literal(owner, leaf):
-                        kind = "pattern"
-                        patterns.add(condition)
-            says = (
-                "opening class" if reason == "a class a pass opening builds; the census reads every method it defines"
-                else "build" if reason == "builds a record class (fields only)"
-                else "pattern" if reason == "a method of a compiled literal pattern"
-                else "method-free build" if reason == 'builds a method-free class whose chain ends in outside bases, so neither the build nor an instance runs project code'
-                else "followed build" if reason == (
-                    'builds a plain class; the census follows the build into its __init__, and a method the class '
-                    'defines into the class wherever it types the object as that build (instance_target)'
-                )
-                else None
-            )
-            if says != kind:
-                wrong.setdefault(f"reason says {says}, the code is {kind}", set()).add(condition)
-        assert wrong == {}, wrong
-        assert len(builds) >= 1 and len(patterns) >= 1, (builds, patterns)  # control
+        own = "<class of its own module used as a value pkg.m: {} in an annotation>"
+        rows = {
+            "<call to no function pkg.m: Record>": _KIND_REASONS["build"],
+            "<call to no function pkg.m: PATTERN.match>": _KIND_REASONS["pattern"],
+            own.format("Plain"): "m's class, with no __init_subclass__, __class_getitem__ or metaclass in its "
+                                 "project chain, named in an annotation",
+            "<call to no function pkg.m: Busy>": None,
+            "<call to no function pkg.m: LOOSE.match>": None,
+            own.format("Hooked"): None,
+        }
+        assert {text: _derived_reason(graph, ("call", text)) for text in rows} == rows
 
-    def test_each_class_reason_states_the_class_it_names(self):
-        """Each NOT_A_ROUTE reason for a class is the text computed from the
-        class: for a name used in an annotation, its module, whether it is a
-        NamedTuple, a @dataclass, an Enum, a plain class or a class whose
-        every base is from outside the project (such as Exception), and
-        whether its body defines a method; for a class statement on a project base, that
-        the base and every project class it derives from define no
-        `__init_subclass__` or `__class_getitem__` and name no metaclass; for
-        a class of its own module used as a value, its form as for an
-        annotation, that same hook-free chain, and whether the use is an
-        annotation. Any other form computes no reason, so it fails here until
-        the arm reads it."""
-        import ast
-        import re as regex
-
-        graph = _DetectionGraph()
-        annotated = regex.compile(r"<name imported from a project module ([\w.]+): (\w+) in an annotation>")
-        statement = regex.compile(r"<class statement on a project name ([\w.]+): \w+ (base|keyword \w+|decorator) (\w+)>")
-        own = regex.compile(r"<class of its own module used as a value ([\w.]+): ([\w.]+?)( in an annotation)?>")
-        inert = "a base whose project classes define no __init_subclass__ or __class_getitem__ and name no metaclass"
-
-        def class_node(name, module):
-            assert graph.load(module), module
-            owned = graph.project_name(name, module)
-            if owned is None or not owned[1] or not graph.load(owned[0]):
-                return None, None
-            return owned[0], graph.classes.get(owned[0], {}).get(owned[1])
-
-        def described(owner, node):
-            """`<module>'s <form> class[ with methods]`, or None for a form
-            the arm does not read."""
-            bases = [ast.unparse(base) for base in node.bases]
-            decorators = [ast.unparse(decorator) for decorator in node.decorator_list]
-            outside = all(  # every base is a name from outside the project, such as Exception
-                isinstance(base, ast.Name) and graph.project_name(base.id, owner) is None
-                or isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
-                and graph.project_name(base.value.id, owner) is None
-                for base in node.bases
-            )
-            form = (
-                "NamedTuple " if bases in (["NamedTuple"], ["typing.NamedTuple"]) and not decorators
-                else "Enum " if bases in (["Enum"], ["enum.Enum"]) and not decorators
-                else "@dataclass " if decorators in (["dataclass"], ["dataclasses.dataclass"]) and not bases
-                else "" if not bases and not decorators
-                else f"{' and '.join(bases)}-based " if outside and not decorators
-                else None
-            )
-            if form is None or node.keywords:
-                return None
-            short = owner.rpartition(".")[2]
-            methods = any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) for item in node.body)
-            return (f"{short}{chr(39) if short.endswith('s') else chr(39) + 's'} {form}class"
-                    f"{' with methods' if methods else ''}")
-
-        def annotation_reason(owner, node):
-            text = described(owner, node)
-            return None if text is None else f"{text}, named in an annotation"
-
-        def no_hooks(owner, node, depth=0):
-            if depth > 8 or any(keyword.arg == "metaclass" for keyword in node.keywords) or any(
-                isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and item.name in ("__init_subclass__", "__class_getitem__")
-                for item in node.body
-            ):
-                return False
-            for base in node.bases:
-                if isinstance(base, ast.Name):
-                    parent_owner, parent = class_node(base.id, owner)
-                    if parent is not None and not no_hooks(parent_owner, parent, depth + 1):
-                        return False
-                    if parent is None and graph.project_name(base.id, owner) is not None:
-                        return False
-                elif not (isinstance(base, ast.Attribute) and isinstance(base.value, ast.Name)
-                          and graph.project_name(base.value.id, owner) is None):
-                    return False
-            return True
-
-        computed, wrong = 0, {}
-        for condition, reason in self.NOT_A_ROUTE.items():
-            text = condition[1] if condition[0] == "call" else ""
-            if not (annotated.fullmatch(text) or text.startswith(("<class statement", "<class of its own module"))):
-                continue
-            expected = None
-            found = annotated.fullmatch(text)
-            if found:
-                owner, node = class_node(found.group(2), found.group(1))
-                expected = annotation_reason(owner, node) if node is not None else None
-            found = statement.fullmatch(text)
-            if found:
-                module, role, name = found.groups()
-                owner, node = class_node(name, module)
-                expected = inert if role == "base" and node is not None and no_hooks(owner, node) else None
-            found = own.fullmatch(text)
-            if found:
-                module, name, in_annotation = found.groups()
-                assert graph.load(module), module
-                node = next(
-                    (found[name] for found in graph.class_names.get(module, {}).values() if name in found),
-                    None,
-                )
-                text = described(module, node) if node is not None and no_hooks(module, node) else None
-                expected = None if text is None else (
-                    f"{text}, with no __init_subclass__, __class_getitem__ or metaclass in its project chain, "
-                    + ("named in an annotation" if in_annotation else "used as a value")
-                )
-            computed += 1
-            if reason != expected:
-                wrong[condition] = (reason, expected)
-        assert wrong == {}, wrong
-        assert computed >= 2, computed  # control
 
     def test_a_class_statement_on_a_project_class_is_reported(self):
         """A base, keyword value or decorator of a class statement reached
@@ -7110,7 +7229,7 @@ class TestEveryRouteEntryConditionIsARoute:
 
     def test_every_entry_condition_is_driven_or_excluded(self, route_driven_conditions):
         conditions = route_entry_conditions()
-        covered = set(route_driven_conditions)
+        covered = set(route_driven_conditions) | set(_derived_reasons_for(_source_fingerprint()))
         unclassified = {
             condition: sites for condition, sites in conditions.items()
             if condition not in covered and condition not in self.NOT_A_ROUTE
