@@ -562,6 +562,54 @@ def test_each_named_failure_is_reachable(
     assert expected in proc.stderr, (case_id, proc.stderr)
 
 
+@pytest.mark.parametrize("target_name,label", [("summary", "run"), ("canary", "canary")])
+def test_manifest_path_and_hash_are_bound_with_valid_controls(
+        tmp_path, rig, target_name, label):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    control = _run(summary, canary, base_sha, root, manifest)
+    assert control.returncode == 0, control.stderr
+
+    target = {"summary": summary, "canary": canary}[target_name]
+    _mutate(target, _set(("manifest", "path"), "scripts/other-manifest.json"))
+    wrong_path = _run(summary, canary, base_sha, root, manifest)
+    assert wrong_path.returncode == 1
+    assert f"MANIFEST-PATH-MISMATCH: {label}" in wrong_path.stderr
+
+    _mutate(target, _set(
+        ("manifest", "path"), "scripts/fast_suite_exclusions.json"))
+    _mutate(target, _set(("manifest", "sha256"), "0" * 64))
+    wrong_hash = _run(summary, canary, base_sha, root, manifest)
+    assert wrong_hash.returncode == 1
+    assert f"MANIFEST-DRIFT: {label}" in wrong_hash.stderr
+
+
+@pytest.mark.parametrize("relative", [False, True], ids=["absolute", "relative"])
+def test_an_outside_repository_manifest_invocation_remains_valid(
+        tmp_path, rig, relative):
+    root, plugin, manifest = rig
+    outside = tmp_path / "outside-manifest.json"
+    outside.write_bytes(manifest.read_bytes())
+    invoked = Path(os.path.relpath(outside, Path.cwd())) if relative else outside
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    for artifact in (summary, canary):
+        _mutate(artifact, _set(("manifest", "path"), str(invoked)))
+    proc = _run(summary, canary, base_sha, root, invoked)
+    assert proc.returncode == 0, proc.stderr
+    assert "VERIFY-OK" in proc.stdout
+
+
+def test_a_genuinely_invalid_outside_repository_manifest_is_refused(tmp_path, rig):
+    root, plugin, manifest = rig
+    outside = tmp_path / "invalid-outside-manifest.json"
+    outside.write_text("{}", encoding="utf-8")
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+    proc = _run(summary, canary, base_sha, root, outside)
+    assert proc.returncode == 1
+    assert "MANIFEST-INVALID" in proc.stderr
+    assert str(outside) in proc.stderr
+
+
 def test_a_missing_independent_base_is_refused(tmp_path, rig):
     root, plugin, manifest = rig
     summary, canary, _ = _artifacts(root, plugin, manifest)

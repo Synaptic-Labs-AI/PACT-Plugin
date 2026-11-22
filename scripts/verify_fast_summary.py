@@ -658,7 +658,8 @@ def main(argv: list[str] | None = None) -> int:
                     "BASE-SHA-MISMATCH",
                     f"{label} base_sha {artifact['base_sha']!r} != {independent_base!r}")
         try:
-            manifest = load_manifest(manifest_path)
+            manifest = load_manifest(
+                manifest_path, plugin_root=plugin_root, repo_root=repo_root)
         except ManifestError as exc:
             raise VerificationFailure(
                 "MANIFEST-INVALID", f"{manifest_path}: " + "; ".join(exc.errors)) from exc
@@ -678,7 +679,14 @@ def main(argv: list[str] | None = None) -> int:
         _require_canary_delta_empty(canary)
         _require_selection_identity(canary, summary, recomputed)
         manifest_sha = _sha256_file(manifest_path)
+        expected_manifest_path = (
+            str(manifest_path.relative_to(repo_root))
+            if manifest_path.is_relative_to(repo_root) else str(manifest_path))
         for label, artifact in (("canary", canary), ("run", summary)):
+            if artifact["manifest"].get("path") != expected_manifest_path:
+                raise VerificationFailure(
+                    "MANIFEST-PATH-MISMATCH",
+                    f"{label} manifest path differs from the current manifest")
             if artifact["manifest"].get("sha256") != manifest_sha:
                 raise VerificationFailure(
                     "MANIFEST-DRIFT", f"{label} manifest hash differs from the current manifest")

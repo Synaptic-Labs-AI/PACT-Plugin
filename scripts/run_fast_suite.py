@@ -424,7 +424,8 @@ def main(argv: list[str] | None = None) -> int:
                      else repo_root / "scripts" / "fast_suite_exclusions.json")
 
     try:
-        manifest = load_manifest(manifest_path, plugin_root=plugin_root)
+        manifest = load_manifest(
+            manifest_path, plugin_root=plugin_root, repo_root=repo_root)
     except ManifestError as exc:
         for error in exc.errors:
             print(error, file=sys.stderr)

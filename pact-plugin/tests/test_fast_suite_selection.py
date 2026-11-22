@@ -701,6 +701,33 @@ def test_valid_rig_loads(core, tmp_path):
     assert len(manifest.guard_files) == 10
 
 
+def test_explicit_repo_root_loads_an_outside_manifest(core, tmp_path):
+    root, plugin, document = _build_rig(tmp_path)
+    document["value_inert_keys"] = {
+        ".claude-plugin/marketplace.json": ["version"]}
+    path = _write_manifest(root, document)
+    outside = tmp_path / "outside-manifest.json"
+    outside.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    manifest = core.load_manifest(
+        outside, plugin_root=plugin, repo_root=root)
+    assert manifest.selection_machinery == tuple(SELECTION_MACHINERY)
+    assert manifest.value_inert_keys == (
+        (".claude-plugin/marketplace.json", ("version",)),)
+
+
+def test_default_repo_root_derivation_is_unchanged_for_an_outside_manifest(
+        core, tmp_path):
+    root, plugin, document = _build_rig(tmp_path)
+    path = _write_manifest(root, document)
+    outside = tmp_path / "outside-manifest.json"
+    outside.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    with pytest.raises(core.ManifestError) as excinfo:
+        core.load_manifest(outside, plugin_root=plugin)
+    rendered = "\n".join(excinfo.value.errors)
+    assert "selection_machinery[0]" in rendered
+    assert "does not exist" in rendered
+
+
 def test_value_inert_keys_and_empty_seams_load(core, tmp_path):
     root, _, document = _build_rig(tmp_path)
     document["value_inert_keys"] = {
@@ -2295,10 +2322,15 @@ class TestRunnerArtifactDestinations:
         assert "--summary" in required[0] and "--canary" in required[0]
         assert list(workspace.iterdir()) == []
 
+    @pytest.mark.parametrize("outside_manifest", [False, True], ids=["inside", "outside"])
     def test_the_canary_goes_to_its_flag_not_the_workspace(
-            self, core, tmp_path):
+            self, core, tmp_path, outside_manifest):
         root, plugin, document = _build_rig(tmp_path)
-        _write_manifest(root, document)
+        manifest_path = _write_manifest(root, document)
+        if outside_manifest:
+            outside = tmp_path / "outside-manifest.json"
+            outside.write_bytes(manifest_path.read_bytes())
+            manifest_path = outside
         _git(root, "init", "-q")
         _git(root, "config", "user.email", "test@example.com")
         _git(root, "config", "user.name", "Test")
@@ -2318,13 +2350,17 @@ class TestRunnerArtifactDestinations:
         proc = subprocess.run(
             [sys.executable, str(self._runner()), "--collect-only",
              "--base-sha", base, "--repo-root", str(root),
-             "--manifest", str(root / "scripts" / "fast_suite_exclusions.json"),
+             "--manifest", str(manifest_path),
              "--summary", str(out / "summary.json"),
              "--canary", str(out / "canary.json")],
             capture_output=True, text=True, timeout=120,
             env=self._env(workspace), cwd=str(plugin))
         assert proc.returncode == 0, proc.stdout + proc.stderr
         assert (out / "canary.json").is_file()
+        artifact = json.loads((out / "canary.json").read_text(encoding="utf-8"))
+        expected_path = (str(manifest_path) if outside_manifest
+                         else "scripts/fast_suite_exclusions.json")
+        assert artifact["manifest"]["path"] == expected_path
         assert not (out / "summary.json").exists()
         assert list(workspace.iterdir()) == []
 
