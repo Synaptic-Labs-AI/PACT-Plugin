@@ -695,29 +695,66 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     Markdown file, .md/.markdown/.MD extensions alike): a token an LLM
     loads as instruction re-teaches the retired flag wherever it
     appears. The repo-root CHANGELOG's retirement note legitimately
-    names the flag and stays out of scope. Backslash-escaped separators
-    (underscore, hyphen, star, backtick) are unescaped, separator-only
-    numeric character references are decoded (any other entity stays
-    literal),
-    Markdown delimiters are removed and whitespace is collapsed before
-    the case-insensitive match, covering markup wrapping, inline
-    markup, line wrapping, and spelling variants (memory_saved,
-    memorySaved, memory-saved, "memory saved"). A tracked file that is
-    not valid UTF-8 is named by the pin rather than raising a bare
-    decode error.
+    names the flag and stays out of scope.
+
+    What counts as re-teaching it: an identifier-shaped spelling —
+    underscore or hyphen separators (repeated included), backslash-
+    escaped separators, numeric or named separator character
+    references, camelCase, or a zero-separator run — is caught
+    anywhere, in or out of context. A literal-whitespace spelling
+    ("memory saved") is ordinary English, so it is caught only in an
+    identifier-ish context: inside a backticked span, or in a
+    key/assignment position (`:` or `=`). Backslash-escaped separators
+    are unescaped, separator-only numeric character references are
+    decoded (any other entity stays literal), Markdown delimiters are
+    removed and whitespace is collapsed before the case-insensitive
+    match, covering markup wrapping, inline markup, and line wrapping.
+    A tracked file that is not valid UTF-8 is named by the pin rather
+    than raising a bare decode error.
 
     WHAT THIS CANNOT CATCH, stated so that a green is read no wider than
-    it is: a narrowed population that retains every known member stays
-    green — the known-member control's guarantee is member presence, not
-    full-population size. That residual is the tracked-file fixture's
-    documented PARTIAL-overlap boundary (tests/fixtures/tracked_files.py).
-    The six-surface enumeration is itself a curated judgment: a new
-    instruction-surface directory would not be scanned until added to the
-    population, and surface completeness is reviewed per-PR rather than
-    machine-checked.
+    it is: a population narrowed to a subset that still retains every
+    known member stays green here — the known-member control's guarantee
+    is member presence, not full-population size, and the companion
+    population floor covers only a collapse below its floor. That
+    residual is the tracked-file fixture's documented PARTIAL-overlap
+    boundary (tests/fixtures/tracked_files.py). The six-surface
+    enumeration is itself a curated judgment: a new instruction-surface
+    directory would not be scanned until added to the population, and
+    surface completeness is reviewed per-PR rather than machine-checked.
     """
 
+    # Identifier-shaped separators: at least one underscore/hyphen with
+    # optional surrounding whitespace (line wrapping), or a zero-separator
+    # run (camelCase, or an all-lowercase "memorysaved"). A literal space
+    # between the words is NOT this class — that shape is ordinary English
+    # and needs identifier-ish context.
+    LITERAL_FLAG_PATTERN = re.compile(
+        r"memory\s*[-_]+\s*saved|memory[-_]*saved", re.IGNORECASE
+    )
     FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]*saved", re.IGNORECASE)
+    # The identifier-ish contexts that turn a literal-whitespace spelling
+    # into a flag reference: a backticked span, or a key/assignment
+    # position. Nothing else makes prose a flag.
+    PROSE_CONTEXT = re.compile(
+        r"`[^`\n]*memory\s+saved[^`\n]*`|memory\s+saved\s*[:=]",
+        re.IGNORECASE,
+    )
+    # The literal-whitespace forms. The reject arms seed these in
+    # key/assignment context, because their bare prose shape is
+    # deliberately allowed.
+    PROSE_FORMS = (
+        "memory saved",
+        "memory\nsaved",
+        "memory  saved",
+        "memory\tsaved",
+    )
+    # A population narrowed to exactly the seven known members satisfies the
+    # member control while every other file goes unscanned. This floor is
+    # well below the current count (119 when written) so ordinary file churn
+    # does not churn the pin, but a collapse to a handful of files fails
+    # loudly instead of reading as coverage.
+    POPULATION_FLOOR = 100
     SURFACE_FILES = (
         "skills/pact-agent-teams/SKILL.md",
         "skills/pact-testing-strategies/references/test-pyramid.md",
@@ -742,9 +779,6 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "templates/environment-model.md",
         "skills/pact-testing-strategies/references/test-pyramid.md",
     )
-    # Drift pin: a surface seeded in SURFACE_FILES without a KNOWN_MEMBERS
-    # entry would pass every arm while getting no known-member control.
-    assert set(SURFACE_FILES) == set(KNOWN_MEMBERS)
     PROHIBITED_FORMS = (
         "memory_saved",
         "memorySaved",
@@ -822,19 +856,148 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         message = str(exc_info.value)
         assert "pact-plugin/skills/GUIDE.MD" in message
         assert "pact-plugin/agents/NOTES.markdown" in message
-        assert "The agent memory saved us hours." in message
 
-    @pytest.mark.parametrize("surface", SURFACE_FILES)
+    @staticmethod
+    def _seeded_offender(form):
+        """Seed a prose-shaped form in key/assignment context.
+
+        Its bare prose shape is legitimate English and deliberately not a
+        match; the identifier-shaped forms are caught as written.
+        """
+        if form in TestMemorySavedRetiredFromInstructionSurfaces.PROSE_FORMS:
+            return f"{form}: true"
+        return form
+
+    @staticmethod
+    def _normalize(text, *, decode):
+        """Collapse the encodings the flag can hide behind.
+
+        ``decode`` applies the backslash/entity decoders; both paths strip
+        Markdown delimiters and collapse whitespace, so the two results
+        differ only by those decoders.
+        """
+        body = text
+        if decode:
+            body = re.sub(
+                r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);",
+                _separator_entity,
+                re.sub(r"\\([_*`-])", r"\1", body),
+            )
+        return " ".join(body.replace("*", "").replace("`", "").split())
+
+    @classmethod
+    def _re_teaches_retired_flag(cls, text):
+        """True when the text re-teaches the retired flag.
+
+        An identifier-shaped spelling (underscore/hyphen separators,
+        escapes, entities, camelCase, zero-separated) is caught anywhere.
+        A literal-whitespace spelling is ordinary English, so it is caught
+        only in identifier-ish context (a backticked span or a key/
+        assignment position) — unless the catch itself required a decoder,
+        because an encoded spelling is never innocent prose.
+        """
+        decoded = cls._normalize(text, decode=True)
+        if not cls.FORBIDDEN_PATTERN.search(decoded):
+            return False
+        literal = cls._normalize(text, decode=False)
+        if cls.LITERAL_FLAG_PATTERN.search(literal):
+            return True
+        if not cls.FORBIDDEN_PATTERN.search(literal):
+            return True
+        return cls.PROSE_CONTEXT.search(text) is not None
+
     @pytest.mark.parametrize("form", PROHIBITED_FORMS)
-    def test_pin_rejects_prohibited_form_in_seeded_temp_git_repo(
-            self, form, surface, tmp_path, monkeypatch):
+    def test_pin_rejects_prohibited_form_on_each_surface(
+            self, form, tmp_path, monkeypatch):
+        """Every prohibited form is rejected on every one of the seven
+        surfaces.
+
+        The surface loop runs INSIDE the arm: one seeded temporary Git repo
+        per form, not one per (form, surface) pair. The per-case fixture
+        cost dominated the class runtime; the assertion count is unchanged
+        (each form is still asserted against each surface, and the pin must
+        name the offending surface).
+        """
         plugin = self._seed_tracked_repo(tmp_path)
-        (plugin / surface).write_text(form, encoding="utf-8")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        seeded = self._seeded_offender(form)
+        for surface in self.SURFACE_FILES:
+            path = plugin / surface
+            clean = path.read_text(encoding="utf-8")
+            path.write_text(seeded, encoding="utf-8")
+            try:
+                with pytest.raises(
+                        AssertionError, match="re-teach the retired") as exc_info:
+                    self.test_no_memory_saved_in_any_llm_loaded_surface()
+                assert surface in str(exc_info.value), (
+                    f"the pin must name {surface!r}; it named: "
+                    f"{exc_info.value}"
+                )
+            finally:
+                path.write_text(clean, encoding="utf-8")
+
+    def test_pin_is_silent_on_innocent_prose(self, tmp_path, monkeypatch):
+        """A plain English sentence containing "memory saved" is not the
+        retired flag. Anchoring the prose shape to identifier-ish context
+        is what keeps this arm green; a matcher that reverts to the bare
+        space shape reds it."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "agents" / "pact-orchestrator.md").write_text(
+            "Your agent memory saved you a re-read.\n", encoding="utf-8"
+        )
         monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
 
-        with pytest.raises(AssertionError, match="re-teach the retired"):
+        self.test_no_memory_saved_in_any_llm_loaded_surface()
+
+    def test_scan_visits_every_population_entry(
+            self, tmp_path, monkeypatch):
+        """A truncated scan must red.
+
+        The offender is the LAST population entry, so a slice or an early
+        break that drops the tail leaves it unscanned. The known-member
+        control cannot catch that: it checks list membership, not what the
+        loop actually read."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        offender = plugin / "templates" / "zz-last-entry.md"
+        offender.write_text("memory_saved\n", encoding="utf-8")
+        population = [plugin / relative for relative in self.KNOWN_MEMBERS]
+        population.append(offender)
+        monkeypatch.setitem(
+            globals(), "_instruction_surface_population", lambda: population
+        )
+
+        with pytest.raises(
+                AssertionError, match="re-teach the retired") as exc_info:
             self.test_no_memory_saved_in_any_llm_loaded_surface()
+        assert "zz-last-entry.md" in str(exc_info.value)
+
+    def test_real_population_has_not_collapsed(self):
+        """Population-size oracle the known-member control cannot satisfy.
+
+        The member control is satisfied by the seven known members alone, so
+        it cannot see a population that has narrowed to exactly those seven.
+        The floor fails loudly if the population collapses instead of
+        reading as coverage."""
+        population = _instruction_surface_population()
+        assert len(population) >= self.POPULATION_FLOOR, (
+            f"the pin's population collapsed to {len(population)} files "
+            f"(floor {self.POPULATION_FLOOR}); a narrowed world that keeps "
+            f"every known member stays green over the files it drops"
+        )
+
+    def test_surface_and_known_member_lists_stay_in_step(self):
+        """Drift pin: a surface seeded in SURFACE_FILES without a
+        KNOWN_MEMBERS entry would pass every arm while getting no
+        known-member control.
+
+        This was an import-time assert in the class body, which disappears
+        under ``python -O`` and turns a drift into a whole-module collection
+        error instead of one named failure."""
+        assert set(self.SURFACE_FILES) == set(self.KNOWN_MEMBERS)
 
     def test_pin_names_non_utf8_surface(self, tmp_path, monkeypatch):
         plugin = self._seed_tracked_repo(tmp_path)
@@ -893,8 +1056,11 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
              "a malformed reference matches neither the numeric nor the "
              "named grammar and stays literal (regex never reaches the "
              "decoder)"),
+            ("memory&#10;saved",
+             "a successfully parsed numeric reference to a NON-separator "
+             "character stays literal (the separator-class guard rejects it)"),
         ],
-        ids=["over-range", "unlisted-name", "malformed-ref"],
+        ids=["over-range", "unlisted-name", "malformed-ref", "non-separator"],
     )
     def test_pin_passes_when_reference_stays_literal(
             self, content, why, tmp_path, monkeypatch):
@@ -905,16 +1071,49 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
 
-        # The file is clean exactly because the reference stays literal:
-        # a decoder that resolved it into a separator (fail-open) or raised
-        # on it makes this run fail, and the contract is what names it.
+        # The file is clean exactly because the reference stays literal: a
+        # decoder that resolved it into a separator (fail-open) makes the
+        # pin raise, and this wrapper names the contract. Faults that are
+        # not the pin's own AssertionError (an environment refusal, a
+        # pytest skip, a decoder crash) propagate unchanged rather than
+        # being misattributed to the decoder's contract.
         try:
             self.test_no_memory_saved_in_any_llm_loaded_surface()
-        except BaseException as exc:
+        except AssertionError as exc:
+            if "re-teach the retired" not in str(exc):
+                # An environment or fixture refusal is not the decoder's
+                # contract; it propagates unchanged instead of being
+                # rewritten as a decoder failure.
+                raise
             raise AssertionError(
                 f"decoder must leave {content!r} literal: {why}. "
                 f"Decoder instead: {exc!r}"
             ) from exc
+
+    def test_literal_stays_wrapper_lets_environment_faults_propagate(
+            self, tmp_path, monkeypatch):
+        """A git/fixture refusal must not be rewritten as the decoder's
+        contract. Catching it and answering with the decoder message makes a
+        broken environment read as a decoder regression."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        def environment_refusal():
+            raise AssertionError("git is unavailable for the pin's root")
+
+        monkeypatch.setitem(
+            globals(), "_instruction_surface_population", environment_refusal
+        )
+
+        with pytest.raises(AssertionError) as exc_info:
+            self.test_pin_passes_when_reference_stays_literal(
+                "memory&#10;saved", "why", tmp_path, monkeypatch
+            )
+        assert str(exc_info.value).startswith("git is unavailable"), (
+            "an environment refusal must propagate unchanged; it was "
+            f"rewritten as: {exc_info.value}"
+        )
 
     def test_real_run_names_a_silently_narrowed_population(
             self, tmp_path, monkeypatch):
@@ -1006,18 +1205,11 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             # (memory–saved reads as memory-saved to a human), zero-width
             # joiners, and homoglyph separators, none of which the ASCII
             # separator class matches or decodes. No general HTML or escape
-            # decode happens here.
-            normalized = " ".join(
-                re.sub(
-                    r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);",
-                    _separator_entity,
-                    re.sub(r"\\([_*`-])", r"\1", text),
-                )
-                .replace("*", "")
-                .replace("`", "")
-                .split()
-            )
-            if self.FORBIDDEN_PATTERN.search(normalized):
+            # decode happens here. The matcher itself is
+            # _re_teaches_retired_flag: identifier-shaped spellings are
+            # caught anywhere, while a literal-whitespace spelling is
+            # caught only in identifier-ish context.
+            if self._re_teaches_retired_flag(text):
                 offenders.append(path)
         diagnostics = []
         if offenders:
@@ -1029,10 +1221,12 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
                 f"in v4.8.36 (zero code readers, unenforced — a task could "
                 f"attest a save no mechanism verified); reintroducing the token "
                 f"in an LLM-loaded surface revives a write-only signal. "
-                f"Innocent prose is caught too: any 'memory saved'-shaped "
-                f"phrase trips the match (e.g. 'The agent memory saved us "
-                f"hours.') — reword such prose, or update this pin "
-                f"deliberately if the flag ever returns with an enforcer."
+                f"Identifier-shaped spellings are caught anywhere; a "
+                f"literal-whitespace spelling is flagged only in "
+                f"identifier-ish context (a backticked span or a key/"
+                f"assignment position), so ordinary English prose is not a "
+                f"match. Update this pin deliberately if the flag ever "
+                f"returns with an enforcer."
             )
         if undecodable:
             names = ", ".join(
