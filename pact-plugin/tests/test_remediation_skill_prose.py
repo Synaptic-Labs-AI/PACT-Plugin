@@ -3168,6 +3168,29 @@ def test_a_parameter_every_caller_passes_one_plain_class_is_followed(tmp_path, m
 
 
 _STORE_READ = "def read_row():\n    return 'row'\n\n"
+_ASK = "def ask():\n    return run(['git', '-C', "
+
+
+def _traced_rows(tmp_path, monkeypatch, source):
+    """(source names the trace reaches, unresolved) for the `run` call in
+    `ask` of a scratch module holding `source` (`_traced_sources`)."""
+    import ast
+    import sys
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "m.py").write_text("import operator\nfrom subprocess import run\n\n" + _STORE_READ + source)
+    monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path, PLUGIN_ROOT / "hooks"))
+    graph = _DetectionGraph()
+    assert graph.load("pkg.m")
+    key = next(key for key in graph.defs if key[1].rpartition(".")[2] == "ask")
+    asking = graph.defs[key]
+    question = next(node for node in ast.walk(asking) if isinstance(node, ast.Call)
+                    and ast.unparse(node.func) == "run")
+    unresolved = []
+    found = _traced_sources(graph, [("pkg.m", asking, argument) for argument in question.args], unresolved)
+    return {ast.unparse(call.func) for _owner, call in found}, [why for _where, why, _origin in unresolved]
 
 
 @pytest.mark.parametrize("source, reaches", [
@@ -3183,33 +3206,125 @@ _STORE_READ = "def read_row():\n    return 'row'\n\n"
      "def entry(root):\n    read_row()\n    return ask(root)\n", False),
     ("class Store:\n    def load(self):\n        self.seen = 'constant'\n        read_row()\n\n"
      "    def ask(self):\n        return run(['git', '-C', self.seen])\n", False),
+    ("def helper():\n    return read_row()\n\n" + _ASK + "helper()])\n", True),
+    ("def helper():\n    read_row()\n    return 'here'\n\n" + _ASK + "helper()])\n", False),
+    ("def helper(value):\n    return value\n\n" + _ASK + "helper('here')])\n\n"
+     "def other():\n    return helper(read_row())\n", False),
+    ("def ask():\n    argv = ['git']\n    argv.append(read_row())\n    return run(argv)\n", True),
+    ("def ask():\n    argv = ['git', '-C', '.']\n    argv[2] = read_row()\n    return run(argv)\n", True),
+    ("def fill(items):\n    items.extend([read_row()])\n\n"
+     "def ask():\n    argv = ['git']\n    fill(argv)\n    return run(argv)\n", True),
+    ("def ask():\n    argv = ['git']\n    alias = argv\n    alias.append(read_row())\n    return run(argv)\n", True),
+    ("def ask():\n    argv = ['git']\n    argv.append('status')\n    read_row()\n    return run(argv)\n", False),
+    ("_SEEN = {}\n\ndef load():\n    _SEEN['root'] = read_row()\n\n" + _ASK + "_SEEN['root']])\n", True),
+    ("def ask():\n    value0 = read_row()\n" + "".join(f"    value{n} = value{n - 1}\n" for n in range(1, 10))
+     + "    return run(['git', '-C', value9])\n", True),
+    ("def first(value):\n    return second(value)\n\n"
+     "def second(value):\n    return first(value) if value else read_row()\n\n"
+     + _ASK + "first('')])\n", True),
+    ("def ask(*parts):\n    return run(['git', *parts])\n\ndef entry():\n    return ask(*[read_row()])\n", True),
+    ("def ask(flag, directory):\n    return run(['git', '-C', directory])\n\n"
+     "def entry():\n    return ask(*['-q', read_row()])\n", True),
+    ("def ask(**options):\n    return run(['git', '-C', options['root']])\n\n"
+     "def entry():\n    return ask(root=read_row())\n", True),
+    ("def helper():\n    return read_row()\n\n"
+     "def ask():\n    getter = helper\n    return run(['git', '-C', getter()])\n", True),
+    ("def ask():\n    def nested():\n        return read_row()\n    return run(['git', '-C', nested()])\n", True),
+    ("def ask():\n    key = 'here'\n    [key for key in [read_row()]]\n    return run(['git', '-C', key])\n", False),
+    ("class Store:\n    def load(self):\n        self.a = read_row()\n        self.b = 'here'\n\n"
+     "    def ask(self):\n        return run(['git', '-C', getattr(self, 'b')])\n", False),
+    ("class Store:\n    def load(self):\n        self.a = read_row()\n\n"
+     "    def ask(self):\n        return run(['git', '-C', getattr(self, 'a')])\n", True),
 ], ids=[
     "through a caller's local", "through the callee's own local", "through a self attribute",
     "through a keyword argument", "a read beside the question", "an attribute bound to a constant",
+    "through a helper's return", "a helper that returns a constant", "a helper called elsewhere with a read",
+    "through a container's writer method", "through an item assignment", "through a write a callee makes",
+    "through an alias of the container", "a container written only with constants",
+    "through a module-level table a function writes", "through a chain of nine steps",
+    "through a cycle of two functions", "through a starred argument", "through a starred argument filling a named one", "through unpacked keywords", "through a local holding the function",
+    "through a nested function's return", "a comprehension variable of the same name",
+    "an attribute getattr names that holds a constant", "an attribute getattr names that holds the read",
 ])
 def test_a_git_argument_is_traced_to_every_value_that_reaches_it(tmp_path, monkeypatch, source, reaches):
-    """Rows for `_value_sources`: the calls whose result can reach an
-    argument of a git command are found through a local of the asking
-    function, a caller's argument by position or keyword and the caller's
-    local behind it, and a `self` attribute's assignments in the class; a
-    read that only sits beside the question, and an attribute bound to a
-    constant, are not."""
-    import ast
-    import sys
-
-    package = tmp_path / "pkg"
-    package.mkdir()
-    (package / "__init__.py").write_text("")
-    (package / "m.py").write_text("from subprocess import run\n\n" + _STORE_READ + source)
-    monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path, PLUGIN_ROOT / "hooks"))
-    graph = _DetectionGraph()
-    assert graph.load("pkg.m")
-    key = next(key for key in graph.defs if key[1].rpartition(".")[2] == "ask")
-    asking = graph.defs[key]
-    question = next(node for node in ast.walk(asking) if isinstance(node, ast.Call)
-                    and ast.unparse(node.func) == "run")
-    sources = {ast.unparse(call.func) for _owner, call in _value_sources(graph, "pkg.m", asking, question.args[0])}
+    """Rows for `_traced_sources`: a value that can reach an argument of a git
+    command is found through a local, a caller's argument by position,
+    keyword, star or unpacking, a `self` attribute (also named by a literal
+    `getattr`), a helper's return, a local or nested function holding the
+    callee, a module-level table a function writes, and every write into a
+    container (a writer method, an item assignment, an alias, a callee),
+    on a chain of any length and through a cycle, which ends. A read beside the question, a constant, a
+    helper's own read it does not return, an argument another call passes
+    (the trace enters a function through one call and reads that call's
+    arguments), and a comprehension's own variable are not."""
+    sources, unresolved = _traced_rows(tmp_path, monkeypatch, source)
     assert ("read_row" in sources) is reaches, sources
+    assert unresolved == [], unresolved
+
+
+@pytest.mark.parametrize("source, why", [
+    ("def ask(table):\n    return run(['git', '-C', table['root']()])\n\n"
+     "def entry():\n    return ask({'root': read_row})\n", "a call of a computed callee"),
+    ("def make():\n    return object()\n\n"
+     "def ask(getter):\n    return run(['git', '-C', getter()])\n\n"
+     "def entry():\n    return ask(make())\n", "a callable that is neither a lambda nor a project function"),
+    ("def ask(path):\n    return run(['git', '-C', path])\n\n"
+     "def entry():\n    return sorted(['a'], key=ask)\n",
+     "a parameter of a function used as a value whose calls cannot be seen"),
+], ids=["a computed callee", "a callable from a call no trace can name", "a function handed to the standard library"])
+def test_a_git_argument_the_trace_cannot_follow_fails_closed(tmp_path, monkeypatch, source, why):
+    """Rows for `_traced_sources`' fail-closed forms: a value the trace cannot
+    follow is reported in `unresolved`, which fails the pin, rather than
+    read as harmless."""
+    _sources, unresolved = _traced_rows(tmp_path, monkeypatch, source)
+    assert any(item.startswith(why) for item in unresolved), unresolved
+
+
+def test_the_trace_lists_its_adversarial_only_writes_and_does_not_follow_them(tmp_path, monkeypatch):
+    """Pin for `_traced_sources`' ADVERSARIAL-ONLY list: a write through
+    `setattr` or a standard-library function that writes into an object
+    passed to it, and a value carried by an exception, are not followed, and
+    the list names them. The honest forms (a writer method, an attribute
+    assignment) are followed (control). If the trace comes to follow the
+    listed forms, or the list drops them, this fails."""
+    doc = " ".join(_traced_sources.__doc__.split())
+    assert ("ADVERSARIAL-ONLY, and so not followed: a write into an object through `setattr`, `vars()`, "
+            "`__dict__`, `globals()` or `locals()`; a standard-library function that writes into an object "
+            "passed to it (`list.append(argv, value)`, `operator.setitem`); and a value carried out of a "
+            "function by an exception it raises.") in doc
+    listed = [
+        "class Box:\n    pass\n\ndef ask():\n    box = Box()\n    setattr(box, 'root', read_row())\n"
+        "    return run(['git', '-C', box.root])\n",
+        "def ask():\n    argv = ['git']\n    list.append(argv, read_row())\n    return run(argv)\n",
+        "def ask():\n    argv = ['git', '-C', '.']\n    operator.setitem(argv, 2, read_row())\n    return run(argv)\n",
+        "def ask():\n    try:\n        raise ValueError(read_row())\n    except ValueError as error:\n"
+        "        return run(['git', '-C', error.args[0]])\n",
+    ]
+    honest = [
+        "class Box:\n    pass\n\ndef ask():\n    box = Box()\n    box.root = read_row()\n"
+        "    return run(['git', '-C', box.root])\n",
+        "def ask():\n    argv = ['git']\n    argv.append(read_row())\n    return run(argv)\n",
+    ]
+    for index, source in enumerate(listed + honest):
+        (tmp_path / str(index)).mkdir()
+        sources, _unresolved = _traced_rows(tmp_path / str(index), monkeypatch, source)
+        assert ("read_row" in sources) is (source in honest), (source, sources)
+
+
+def test_only_get_and_update_are_read_as_builtin_methods_on_an_untyped_value():
+    """Pin for `_untyped_methods`' NOT COVERED form: a method of a name a
+    built-in container or string defines, called on a value the census
+    cannot type, is read as the built-in's. That hides a project method only
+    when a project class the trace loads defines a method of that name (the
+    graph of `_store_work_taint_for`), and today two do: `PACTMemory.get`
+    and `PACTMemory.update`. A new such method makes this fail, so the
+    collision is decided, not inherited."""
+    *_taint, graph = _store_work_taint_for(_source_fingerprint())
+    collisions = {name: _methods_named(graph, name) for name in _BUILTIN_METHODS if _methods_named(graph, name)}
+    assert collisions == {"get": [("memory_api", "PACTMemory.get")],
+                          "update": [("memory_api", "PACTMemory.update")]}, collisions
+    doc = " ".join(_traced_sources.__doc__.split())
+    assert "`PACTMemory.get`" in doc and "`PACTMemory.update`" in doc
 
 
 def _pass_entry_problems(trees: dict) -> tuple:
@@ -4170,94 +4285,974 @@ def _store_work_git_questions(graph) -> tuple:
     return questions, reached
 
 
-def _value_sources(graph, module: str, function, expression, depth: int = 0, seen=None) -> set:
-    """{(module, call)} for every call whose result can reach `expression`
-    in `function`: the calls inside it, and, followed to a depth of eight,
-    the calls behind each local it names (every binding, `_bindings`), each
-    `self` attribute it reads (every assignment of that attribute in the
-    class's methods) and each parameter (every argument a caller passes
-    there, by position or keyword, `parameter_class`'s callers index)."""
+# How many calls a trace remembers having entered a function through: a
+# parameter read inside an entered function holds that call's arguments, and
+# beyond this depth it holds every argument any call passes there.
+_CONTEXT_DEPTH = 4
+# Method names the built-in containers and strings define (dunders aside, which
+# syntax calls). A method of one of these names called on a value the census
+# cannot type is read as the built-in's, which returns what its receiver and
+# arguments hold.
+_BUILTIN_METHODS = frozenset(
+    name for kind in (dict, list, set, frozenset, str, bytes, tuple) for name in dir(kind)
+    if not name.startswith("__"))
+# Methods that write into the object they are called on (a context variable's
+# `set` included).
+_CONTAINER_WRITERS = frozenset({
+    "append", "extend", "insert", "add", "update", "setdefault", "appendleft", "extendleft", "__setitem__",
+    "set",
+})
+
+
+def _value_sources(graph, module: str, function, expression) -> set:
+    """{(module, call)} for every call whose result can reach `expression` in
+    `function` (`_traced_sources`, from that one start)."""
+    return set(_traced_sources(graph, [(module, function, expression)]))
+
+
+def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=frozenset(), crossings=None) -> dict:
+    """{(module, call): (index of the start it was reached from, the
+    trace state it was found in)} for every call whose result can reach one
+    of `starts`, each a (module, def or None for module scope, expression);
+    `parents` records, for each trace state, (the state it was reached
+    from, its site), so a hit can be explained. A parameter of a def in
+    `barriers` is not followed to its arguments: each (module, def, argument)
+    and the barrier def's key is appended to `crossings` instead, as
+    (module, def, argument, barrier), for the caller to trace on its own
+    terms. Every (expression, context)
+    is visited once, so the trace ends on any chain length and on cycles:
+    there is no depth bound. From each expression it follows:
+    - each call inside it, and the values that call returns: every `return`
+      and `yield` of the project function it runs (`_DetectionGraph.callee`,
+      a local looked up in a table, `_table_callees`, or a callable a local
+      or parameter holds, `_callables`), entered through that call; for a
+      `_RETURNS_ITS_ARGUMENT` function, its callable argument's body or
+      returns; for a method on a value not proved a standard-library one
+      (`_foreign`) that no call resolves, the returns of every loaded
+      project method of that name (`_untyped_methods`). A call's receiver
+      and arguments are part of the expression, so a standard-library call
+      is followed through them;
+    - each local it names: every binding visible there (`_visible_bindings`,
+      a comprehension's variable only inside it) and every write into the
+      object the local holds (`_writes_into`; only into the attribute read,
+      for `x.attr` or a literal `getattr(x, "attr")`);
+    - each parameter: inside a function entered through a call, that call's
+      arguments (up to `_CONTEXT_DEPTH` calls deep); otherwise its default
+      and every argument any call passes there, a starred or unpacked one
+      included (`_arguments_for`);
+    - each attribute it reads on a local not proved a standard-library
+      value: every assignment of and write into an attribute of that name,
+      on any receiver, in the loaded modules (`_attribute_values`), and the
+      returns of every project method of that name (a property);
+    - each module-level name it reads that is not a function or class:
+      every module-level binding, and every write into it in the loaded
+      modules (`_module_values`).
+    Each place the trace cannot follow is appended to `unresolved` as
+    (site, why, start index), and the pin fails on it: a call of a project
+    object that is not a function, a call of a computed callee, a callable a
+    local or parameter holds that is neither a lambda nor a project function
+    (`_callables`), and a parameter of a function the loaded code uses as a
+    value whose calls it cannot see (`_calls_of`).
+
+    NOT COVERED: a method of a name a built-in container or string defines,
+    called on a value the census cannot type, is read as the built-in's
+    (`_untyped_methods`); two project methods share such a name,
+    `PACTMemory.get` and `PACTMemory.update`, and are followed only where
+    the census types the receiver
+    (`test_only_get_and_update_are_read_as_builtin_methods_on_an_untyped_value`).
+    A parameter of a function no loaded code calls or uses as a value holds
+    only what code outside the loaded modules passes.
+
+    ADVERSARIAL-ONLY, and so not followed: a write into an object through
+    `setattr`, `vars()`, `__dict__`, `globals()` or `locals()`; a
+    standard-library function that writes into an object passed to it
+    (`list.append(argv, value)`, `operator.setitem`); and a value carried
+    out of a function by an exception it raises. Honest code writes with a
+    method of the object or an item or attribute assignment, which is
+    followed (`test_the_trace_lists_its_adversarial_only_writes_and_does_not_follow_them`)."""
+    import ast
+
+    _memoize(graph)
+    unresolved = [] if unresolved is None else unresolved
+    parents = {} if parents is None else parents
+    crossings = [] if crossings is None else crossings
+    found, seen = {}, set()
+    pending = [(module, function, expression, (), index, None)
+               for index, (module, function, expression) in enumerate(starts)]
+
+    while pending:
+        module, function, expression, context, origin, parent = pending.pop()
+        state = (id(expression), context)
+        if state in seen:
+            continue
+        seen.add(state)
+        parents[state] = (parent, f"{module}.py:{getattr(expression, 'lineno', '?')}")
+        problems, more = [], []
+
+        def returns_of(target, call=None):
+            # Entering a function through one call: its parameters, read in
+            # there, hold that call's arguments (`_CONTEXT_DEPTH` frames kept).
+            node = graph.defs[target]
+            entered = (((id(node), call, module, function),) + context)[:_CONTEXT_DEPTH]
+            return [(target[0], node, value, entered) for value in _returned_values(node)]
+
+        def add(items):
+            # A value read in this same function keeps this context; one read
+            # in another function holds whatever any call passes there.
+            for item in items:
+                if len(item) == 4:
+                    more.append(item)
+                else:
+                    owner, scope, value = item
+                    more.append((owner, scope, value, context if scope is function else ()))
+
+        read_from = {id(sub.value): sub.attr for sub in ast.walk(expression)
+                     if isinstance(sub, ast.Attribute) and isinstance(sub.ctx, ast.Load)
+                     and isinstance(sub.value, ast.Name)}
+        # `getattr(obj, "name", ...)` reads that one attribute, like `obj.name`.
+        read_from.update({id(sub.args[0]): sub.args[1].value for sub in ast.walk(expression)
+                          if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Name) and sub.func.id == "getattr"
+                          and len(sub.args) >= 2 and isinstance(sub.args[0], ast.Name)
+                          and isinstance(sub.args[1], ast.Constant) and isinstance(sub.args[1].value, str)})
+        for sub in ast.walk(expression):
+            if isinstance(sub, ast.Call):
+                found.setdefault((module, sub), (origin, state))
+                add(_call_results(graph, module, function, sub, problems, returns_of))
+                if id(sub.args[0] if sub.args else None) in read_from and isinstance(sub.func, ast.Name) and (
+                        sub.func.id == "getattr"):
+                    add(_attribute_values(graph, read_from[id(sub.args[0])]))
+            elif isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load):
+                bindings = _visible_bindings(graph, function, sub)
+                if not bindings:
+                    add(_module_values(graph, module, sub.id))
+                    continue
+                barred = _def_key(graph, function) if barriers and _def_key(graph, function) in barriers else None
+                for kind, bound in bindings:
+                    if kind in ("value", "from") and bound is not None:
+                        more.append((module, function, bound, context))
+                    elif kind == "param" and barred:
+                        crossings += [(owner, caller, value, barred) for owner, caller, value
+                                      in _arguments_for(graph, module, function, sub.id, problems)
+                                      if caller is not None]
+                    elif kind == "param" and context and context[0][0] == id(function) and context[0][1] is not None:
+                        _frame, call, caller_module, caller = context[0]
+                        more += [(caller_module, caller, value, context[1:])
+                                 for value in _passed(graph, function, sub.id, call)]
+                        add(_default_of(graph, function, sub.id))
+                    elif kind == "param":
+                        add(_arguments_for(graph, module, function, sub.id, problems))
+                    elif kind in ("global", "import"):
+                        add(_module_values(graph, module, sub.id))
+                add(_writes_into(graph, module, function, sub.id, read_from.get(id(sub))))
+            elif (isinstance(sub, ast.Attribute) and isinstance(sub.ctx, ast.Load)
+                  and isinstance(sub.value, ast.Name) and _bound(graph, function, sub.value.id)
+                  and not _foreign(graph, module, function, sub.value)):
+                add(_attribute_values(graph, sub.attr))
+                for target in _untyped_methods(graph, sub.attr):
+                    add(returns_of(target))
+        unresolved += [(where, why, origin) for where, why in problems]
+        pending += [(owner, scope, value, entered, origin, state) for owner, scope, value, entered in more]
+    return found
+
+
+def _memoize(graph) -> None:
+    """Cache, on this graph instance, the lookups a trace repeats: the
+    bindings of a name in a scope and the def a call runs. The graph's
+    loaded modules do not change while a trace runs; a load that adds defs
+    clears the call cache."""
+    if getattr(graph, "_memoized", False):
+        return
+    bindings, callees = {}, {}
+    plain_bindings, plain_callee = graph._bindings, graph.callee
+
+    def cached_bindings(scope, name=None, attribute=None):
+        key = (id(scope), name, attribute)
+        if key not in bindings:
+            bindings[key] = plain_bindings(scope, name=name, attribute=attribute)
+        return bindings[key]
+
+    def cached_callee(call, module, function=None):
+        key = (id(call), module, id(function), len(graph.defs))
+        if key not in callees:
+            callees[key] = plain_callee(call, module, function)
+        return callees[key]
+
+    graph._bindings, graph.callee, graph._memoized = cached_bindings, cached_callee, True
+
+
+def _def_key(graph, function):
+    """The (module, def) key of the def node `function`; None for a nested
+    def, a lambda or module scope."""
+    if function is None:
+        return None
+    graph.parameter_class(function, "")  # builds the def-key index
+    return graph._keys.get(id(function))
+
+
+def _visible_bindings(graph, function, name) -> list:
+    """`_bound` of the Name node `name`, without the bindings a
+    comprehension makes of a variable of the same name elsewhere in
+    `function`: a comprehension's loop variable is visible only inside it."""
+    import ast
+
+    bindings = _bound(graph, function, name.id)
+    if function is None or not bindings or not any(kind == "from" for kind, _value in bindings):
+        return bindings
+    cache = graph.__dict__.setdefault("_comprehension_cache", {})
+    if id(function) not in cache:
+        cache[id(function)] = [
+            ({id(inner) for inner in ast.walk(node)},
+             [(id(generator.iter), {target.id for target in ast.walk(generator.target) if isinstance(target, ast.Name)})
+              for generator in node.generators])
+            for node in ast.walk(function) if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp))]
+    hidden = {iter_id for inside, generators in cache[id(function)] if id(name) not in inside
+              for iter_id, targets in generators if name.id in targets}
+    return [(kind, value) for kind, value in bindings if not (kind == "from" and id(value) in hidden)]
+
+
+def _bound(graph, function, name: str) -> list:
+    """`_DetectionGraph._bindings` of `name` in `function`, cached; [] at
+    module scope."""
+    if function is None:
+        return []
+    cache = graph.__dict__.setdefault("_bound_cache", {})
+    key = (id(function), name)
+    if key not in cache:
+        cache[key] = graph._bindings(function, name=name)
+    return cache[key]
+
+
+def _call_results(graph, module: str, function, call, unresolved: list, returns_of) -> list:
+    """(module, def, value) for each value `call`'s result can come from
+    (`_value_sources`)."""
+    import ast
+
+    where = f"{module}.py:{call.lineno}"
+    target = graph.target(call, module)
+    if target in graph._RETURNS_ITS_ARGUMENT:
+        position, keyword = graph._RETURNS_ITS_ARGUMENT[target]
+        runner = next((item.value for item in call.keywords if item.arg == keyword), None)
+        if runner is None and position < len(call.args):
+            runner = call.args[position]
+        return _callable_results(graph, module, function, runner, where, unresolved, returns_of)
+    callee = graph.callee(call, module, function)
+    if callee is not None:
+        return returns_of(callee, call)
+    func = call.func
+    if isinstance(func, ast.Name):
+        if _bound(graph, function, func.id):
+            return _callable_results(graph, module, function, func, where, unresolved, returns_of)
+        owned = graph.project_name(func.id, module)
+        if owned is None or owned[1] in graph.class_names.get(owned[0], {}) or (
+                not owned[1] and graph._path(owned[0]) is not None):
+            return []  # a builtin, a standard-library name or a project class build
+        unresolved.append((where, f"a call of a project object that is not a function: {func.id}"))
+        return []
+    if isinstance(func, ast.Attribute):
+        if _foreign(graph, module, function, func.value):
+            return []
+        found = []
+        for method in _untyped_methods(graph, func.attr):
+            found += returns_of(method)
+        return found
+    unresolved.append((where, f"a call of a computed callee: {_callee_text(func)}"))
+    return []
+
+
+def _callable_results(graph, module: str, function, runner, where: str, unresolved: list, returns_of) -> list:
+    """The values a call of `runner` returns, for each callable it can hold
+    (`_callables`); appends to `unresolved` when it holds anything else."""
+    runners = _callables(graph, module, function, runner, set())
+    if runners is None:
+        unresolved.append((where, "a callable that is neither a lambda nor a project function"))
+        return []
+    found = []
+    for owner, scope, value in runners:
+        if isinstance(value, tuple):
+            found += returns_of(value)
+        else:
+            found.append((owner, scope, value))
+    return found
+
+
+def _callables(graph, module: str, function, runner, seen: set):
+    """[(module, def, body expression) or (module, def, def key)] for the
+    callable `runner` holds: a lambda (its body, read in the def it sits
+    in); either side of a conditional or boolean expression, and each
+    element of a display; a project function (its key), named directly, through an import
+    inside `function` or as a table lookup (`_table_callees`); a method
+    reached through an attribute chain (`x().Store.method`: every loaded
+    project method of that name); a function nested in `function` (each
+    value it returns, read in `function`, whose locals it closes over); or a
+    local or parameter every binding, loop element or argument of which is
+    one of these. A class nested in `function`, a standard-library callable
+    and a literal hold no project code, so they give []. None for anything
+    else."""
+    import ast
+
+    if runner is None:
+        return None
+    if id(runner) in seen:
+        return []
+    seen.add(id(runner))
+    if isinstance(runner, ast.Lambda):
+        return [(module, function, runner.body)]
+    if isinstance(runner, ast.Constant):
+        return []
+    if isinstance(runner, (ast.Tuple, ast.List, ast.Set, ast.IfExp, ast.BoolOp)):
+        found = []
+        items = runner.elts if isinstance(runner, (ast.Tuple, ast.List, ast.Set)) else (
+            [runner.body, runner.orelse] if isinstance(runner, ast.IfExp) else runner.values)
+        for item in items:
+            inner = _callables(graph, module, function, item, seen)
+            if inner is None:
+                return None
+            found += inner
+        return found
+    named = graph.refers_to(runner, module)
+    if named is not None:
+        return [(module, function, named)]
+    if isinstance(runner, ast.Call):
+        maker = graph.callee(runner, module, function)
+        if maker is None:
+            return None
+        found = []
+        for value in _returned_values(graph.defs[maker]):
+            inner = _callables(graph, maker[0], graph.defs[maker], value, seen)
+            if inner is None:
+                return None
+            found += inner
+        return found
+    if isinstance(runner, ast.Subscript):
+        return _callables(graph, module, function, runner.value, seen)
+    if isinstance(runner, ast.Attribute):
+        head = runner
+        while isinstance(head, ast.Attribute):
+            head = head.value
+        if _foreign(graph, module, function, runner.value):
+            return []  # a standard-library callable (`os.path.join`, `text.strip`)
+        return [(module, function, key) for key in _untyped_methods(graph, runner.attr)] or (
+            [] if not isinstance(head, ast.Name) or graph.project_name(head.id, module) is None else None)
+    if not isinstance(runner, ast.Name):
+        return None
+    if function is None or not _bound(graph, function, runner.id):
+        owned = graph.project_name(runner.id, module)
+        if owned is None or owned[1] in graph.class_names.get(owned[0], {}):
+            return []  # a builtin, a standard-library name or a project class build
+        return None
+    found = []
+    for kind, bound in _bound(graph, function, runner.id):
+        if kind == "value":
+            inner = _callables(graph, module, function, bound, seen)
+            if inner is None and isinstance(bound, (ast.Call, ast.Subscript)):
+                call = ast.Call(func=runner, args=[], keywords=[])
+                tabled = _table_callees(graph, module, function, call)
+                inner = [(module, function, graph.refers_to(value, module)) for value in tabled] if tabled else None
+        elif kind == "from":
+            inner = _callables(graph, module, function, bound, seen)
+        elif kind == "param":
+            inner = []
+            for owner, caller, argument in _arguments_for(graph, module, function, runner.id, []):
+                more = _callables(graph, owner, caller, argument, seen)
+                if more is None:
+                    return None
+                inner += more
+        elif kind == "import":
+            inner = _imported_callable(graph, module, function, runner.id)
+        elif kind == "unknown":
+            nested = [node for node in ast.walk(function) if node is not function and isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == runner.id]
+            inner = [] if nested and all(isinstance(node, ast.ClassDef) for node in nested) else [
+                (module, function, value) for node in nested if not isinstance(node, ast.ClassDef)
+                for value in _returned_values(node)] if nested else None
+        else:
+            inner = None
+        if inner is None:
+            return None
+        found += inner
+    return found
+
+
+def _imported_callable(graph, module: str, function, name: str):
+    """[(module, def, def key)] for a name an import inside `function` binds
+    to a project function; [] for one bound to a standard-library or
+    third-party name; None when it names a project object that is not a
+    function."""
+    import ast
+
+    package = module.rpartition(".")[0]
+    for node in ast.walk(function):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        for alias in node.names:
+            bound = alias.asname or (alias.name.split(".")[0] if isinstance(node, ast.Import) else alias.name)
+            if bound != name:
+                continue
+            if isinstance(node, ast.Import):
+                return [] if graph._path(alias.name) is None else None
+            base = node.module or ""
+            if node.level:
+                parts = module.split(".")
+                stem = ".".join(parts[:len(parts) - node.level]) if len(parts) > node.level else package
+                base = f"{stem}.{base}".strip(".") if base else stem
+            source = _script_module(base)
+            if graph._path(source) is None:
+                return []
+            target = graph.follow(f"{source}.{alias.name}")
+            return [(module, function, target)] if target is not None else None
+    return None
+
+
+def _returned_values(node) -> list:
+    """Every `return` value and every `yield` value of the def `node`, not
+    counting functions, lambdas and classes nested in it."""
+    import ast
+
+    values, pending = [], list(node.body)
+    while pending:
+        item = pending.pop()
+        if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+            continue
+        if isinstance(item, (ast.Return, ast.Yield, ast.YieldFrom)) and item.value is not None:
+            values.append(item.value)
+        pending.extend(ast.iter_child_nodes(item))
+    return values
+
+
+def _untyped_methods(graph, name: str) -> list:
+    """The project methods a call of `<value>.name(...)` can run when the
+    census cannot type `<value>`: every loaded project method of that name,
+    unless a built-in container or string defines it (`_BUILTIN_METHODS`)."""
+    return [] if name in _BUILTIN_METHODS else _methods_named(graph, name)
+
+
+def _methods_named(graph, name: str) -> list:
+    """The key of every loaded project method called `name`."""
+    cache = getattr(graph, "_methods_cache", None)
+    if cache is None or cache[0] != len(graph.defs):
+        index = {}
+        for key in list(graph.defs):
+            if "." in key[1]:
+                index.setdefault(key[1].rpartition(".")[2], []).append(key)
+        cache = graph._methods_cache = (len(graph.defs), index)
+    return cache[1].get(name, [])
+
+
+def _module_values(graph, module: str, name: str) -> list:
+    """(module, def or None, value) for a name `module` reads at module
+    level that is one of a project module's own objects other than a
+    function or class (`project_name`): each module-level binding (read at
+    module scope, so with no def), each write into it in a function of the
+    owning module (`_writes_into`) or through a `global` declaration, and
+    each write into an attribute of that name elsewhere (`_attribute_values`).
+    [] for a function, a class, a module, a builtin and a standard-library
+    name."""
+    cache = graph.__dict__.setdefault("_module_values_cache", {})
+    if (module, name) in cache:
+        return cache[(module, name)]
+    found = []
+    owned = graph.project_name(name, module)
+    if owned is not None and owned[1] and graph.load(owner := owned[0]) and (owner, owned[1]) not in graph.defs and (
+            owned[1] not in graph.class_names.get(owner, {})):
+        leaf = owned[1]
+        found = [(owner, None, value) for value in graph.bindings.get(owner, {}).get(leaf, []) if value is not None]
+        for node in _defs_naming(graph, owner, leaf):
+            bindings = _bound(graph, node, leaf)
+            if not bindings:
+                found += _writes_into(graph, owner, node, leaf)
+            elif any(kind == "global" for kind, _value in bindings):
+                found += [(owner, node, value) for kind, value in bindings
+                          if kind in ("value", "from") and value is not None]
+                found += _writes_into(graph, owner, node, leaf)
+        found += _attribute_values(graph, leaf)
+    cache[(module, name)] = found
+    return found
+
+
+def _defs_naming(graph, module: str, name: str) -> list:
+    """Every def of `module` that reads or binds the name `name`."""
+    import ast
+
+    cache = getattr(graph, "_names_cache", None)
+    if cache is None or cache[0] != len(graph.defs):
+        index = {}
+        for (owner, _qualified), node in list(graph.defs.items()):
+            for used in {sub.id for sub in ast.walk(node) if isinstance(sub, ast.Name)} | {
+                    name for sub in ast.walk(node) if isinstance(sub, (ast.Global, ast.Nonlocal))
+                    for name in sub.names}:
+                index.setdefault((owner, used), []).append(node)
+        cache = graph._names_cache = (len(graph.defs), index)
+    return cache[1].get((module, name), [])
+
+
+def _base(node):
+    """The name or attribute an item, attribute or method chain starts from
+    (`groups.setdefault(k, [])[0]` -> `groups`)."""
+    import ast
+
+    while True:
+        if isinstance(node, ast.Subscript):
+            node = node.value
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            node = node.func.value
+        elif isinstance(node, ast.Attribute) and not isinstance(node.value, ast.Name):
+            node = node.value
+        else:
+            return node
+
+
+def _attribute_values(graph, attr: str) -> list:
+    """(module, def, value) for every assignment of an attribute named
+    `attr`, on any receiver, in a function of the loaded modules, and every
+    write into such an attribute (an item or attribute assignment, or a
+    writer method, `_CONTAINER_WRITERS`, on a chain that starts from it)."""
+    import ast
+
+    cache = getattr(graph, "_attribute_cache", None)
+    if cache is None or cache[0] != len(graph.defs):
+        index = {}
+        for (owner, _qualified), node in list(graph.defs.items()):
+            for sub in ast.walk(node):
+                for target, value in _stores(sub):
+                    if isinstance(target, ast.Attribute):
+                        index.setdefault(target.attr, []).append((owner, node, value))
+                    base = _base(target.value) if isinstance(target, (ast.Subscript, ast.Attribute)) else None
+                    if isinstance(base, ast.Attribute):
+                        index.setdefault(base.attr, []).append((owner, node, value))
+                if isinstance(sub, ast.Call) and isinstance(sub.func, ast.Attribute) and (
+                        sub.func.attr in _CONTAINER_WRITERS):
+                    base = _base(sub.func.value)
+                    if isinstance(base, ast.Attribute):
+                        for value in [*sub.args, *(item.value for item in sub.keywords)]:
+                            index.setdefault(base.attr, []).append((owner, node, value))
+        cache = graph._attribute_cache = (len(graph.defs), index)
+    return cache[1].get(attr, [])
+
+
+def _stores(node) -> list:
+    """(target, value) for each plain, annotated or augmented assignment
+    `node` makes."""
+    import ast
+
+    if isinstance(node, ast.Assign):
+        return [(target, node.value) for target in node.targets]
+    if isinstance(node, (ast.AugAssign, ast.AnnAssign)) and node.value is not None:
+        return [(node.target, node.value)]
+    return []
+
+
+def _writes_into(graph, module: str, function, name: str, attr=None) -> list:
+    """`_writes_into_uncached`, cached."""
+    cache = graph.__dict__.setdefault("_writes_cache", {})
+    key = (id(function), name, attr)
+    if key not in cache:
+        cache[key] = _writes_into_uncached(graph, module, function, name, attr, set())
+    return cache[key]
+
+
+def _writes_into_uncached(graph, module: str, function, name: str, attr, seen) -> list:
+    """(module, def, value) for each value `function` writes into the
+    object its local `name` holds, or into a local bound to that same
+    object (`alias = name`); with `attr`, only into that attribute of it.
+    A write is an item or attribute assignment, or a writer method
+    (`_CONTAINER_WRITERS`), on a chain that starts from the object
+    (`_base`); and, when the object is passed to a project function, each
+    write that function makes into its parameter, or, passed to a method no
+    call resolves on a receiver not proved a standard-library value
+    (`_foreign`), each write every loaded project method of that name makes
+    into the parameter at that place."""
+    import ast
+
+    if function is None or (id(function), name, attr) in seen:
+        return []
+    seen.add((id(function), name, attr))
+    names, pending = set(), [name]
+    while pending:
+        current = pending.pop()
+        if current in names:
+            continue
+        names.add(current)
+        for sub in ast.walk(function):
+            for target, value in _stores(sub):
+                if isinstance(target, ast.Name) and isinstance(value, ast.Name) and value.id == current:
+                    pending.append(target.id)
+    found = []
+
+    def holds(node):
+        base = _base(node)
+        if attr is None:
+            return isinstance(base, ast.Name) and base.id in names
+        return (isinstance(base, ast.Attribute) and base.attr == attr and isinstance(base.value, ast.Name)
+                and base.value.id in names)
+
+    def held(node):
+        base = _base(node)
+        return isinstance(base, ast.Name) and base.id in names
+
+    for sub in ast.walk(function):
+        for target, value in _stores(sub):
+            if isinstance(target, ast.Attribute) and attr is not None and target.attr == attr and held(target.value):
+                found.append((module, function, value))
+            elif isinstance(target, (ast.Subscript, ast.Attribute)) and holds(target.value):
+                found.append((module, function, value))
+        if not isinstance(sub, ast.Call):
+            continue
+        if isinstance(sub.func, ast.Attribute) and sub.func.attr in _CONTAINER_WRITERS and holds(sub.func.value):
+            found += [(module, function, value) for value in [*sub.args, *(item.value for item in sub.keywords)]]
+            continue
+        handed = [(index, None) for index, value in enumerate(sub.args) if held(value)] + [
+            (None, item.arg) for item in sub.keywords if item.arg is not None and held(item.value)]
+        if not handed:
+            continue
+        callee = graph.callee(sub, module, function)
+        callees = [callee] if callee is not None else (
+            _untyped_methods(graph, sub.func.attr) if isinstance(sub.func, ast.Attribute)
+            and not _foreign(graph, module, function, sub.func.value) else [])
+        for key in callees:
+            node = graph.defs[key]
+            positional = [argument.arg for argument in node.args.posonlyargs + node.args.args]
+            offset = 1 if "." in key[1] and isinstance(sub.func, ast.Attribute) else 0
+            for index, keyword in handed:
+                parameter = keyword if keyword is not None else (
+                    positional[index + offset] if index + offset < len(positional) else None)
+                if parameter is not None:
+                    found += _writes_into_uncached(graph, key[0], node, parameter, attr, seen)
+    return found
+
+
+def _foreign(graph, module: str, function, value, seen=None, deep=True) -> bool:
+    """`value` is a standard-library value: `_DetectionGraph._foreign_value`
+    proves it one, or it is an attribute, item or method chain on one, or a
+    local every binding of which is one, or a parameter that holds some
+    value and every value of which (its default, and its argument at every
+    call `_calls_of` finds) is one, or it
+    starts from a builtin or a module imported from outside the project
+    (`os.environ`, `sys.stderr`). A method called on it, or an attribute
+    read from it, runs no project code. Without `deep`, locals and
+    parameters are judged by `_foreign_value` alone (used while the call
+    index `_calls_of` reads is being built)."""
     import ast
 
     seen = set() if seen is None else seen
-    if depth > 8 or id(expression) in seen:
-        return set()
-    seen.add(id(expression))
-    found = set()
-    for sub in ast.walk(expression):
-        if isinstance(sub, ast.Call):
-            found.add((module, sub))
-        elif isinstance(sub, ast.Name) and isinstance(sub.ctx, ast.Load) and function is not None:
-            for kind, bound in graph._bindings(function, name=sub.id):
-                if bound is not None and kind in ("value", "from", "unknown"):
-                    found |= _value_sources(graph, module, function, bound, depth + 1, seen)
+    cache = graph.__dict__.setdefault("_foreign_cache", {})
+    if deep and id(value) in cache:
+        return cache[id(value)]
+    if id(value) in seen:
+        return True  # a cycle adds no value of its own
+    seen.add(id(value))
+    parts = (
+        [value.body, value.orelse] if isinstance(value, ast.IfExp) else value.values if isinstance(value, ast.BoolOp)
+        else [value.left, value.right] if isinstance(value, ast.BinOp)
+        else value.elts if isinstance(value, (ast.Tuple, ast.List, ast.Set)) else None)
+    if parts is not None:
+        answer = all(_foreign(graph, module, function, part, seen, deep) for part in parts)
+        if deep and len(seen) == 1:
+            cache[id(value)] = answer
+        return answer
+    head = value
+    while isinstance(head, (ast.Attribute, ast.Subscript)) or (
+            isinstance(head, ast.Call) and isinstance(head.func, ast.Attribute)
+            and graph.callee(head, module, function) is None):
+        head = head.func.value if isinstance(head, ast.Call) else head.value
+    if isinstance(head, (ast.Constant, ast.JoinedStr, ast.Compare)):
+        answer = True
+    elif isinstance(head, ast.Name) and not _bound(graph, function, head.id):
+        answer = graph.project_name(head.id, module) is None
+    elif function is None:
+        answer = False
+    else:
+        try:
+            answer = bool(graph._foreign_value(head, module, function, frozenset()))
+        except RecursionError:
+            answer = False
+        if not answer and deep and isinstance(head, ast.Name):
+            answer = True
+            for kind, bound in _bound(graph, function, head.id):
+                if kind in ("value", "from") and bound is not None:
+                    answer = _foreign(graph, module, function, bound, seen)
                 elif kind == "param":
-                    for owner, caller, argument in _arguments_for(graph, function, sub.id):
-                        found |= _value_sources(graph, owner, caller, argument, depth + 1, seen)
-        elif (isinstance(sub, ast.Attribute) and isinstance(sub.value, ast.Name) and sub.value.id == "self"
-              and isinstance(sub.ctx, ast.Load)):
-            owner = graph._owner_class(module, function) if function is not None else None
-            node = graph.classes.get(module, {}).get(owner) if owner else None
-            for method in (item for item in (node.body if node else [])
-                           if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))):
-                for kind, bound in graph._bindings(method, attribute=("self", sub.attr)):
-                    if bound is not None:
-                        found |= _value_sources(graph, module, method, bound, depth + 1, seen)
+                    held = _arguments_for(graph, module, function, head.id, [])
+                    answer = bool(held) and all(_foreign(graph, owner, scope, argument, seen)
+                                                for owner, scope, argument in held)
+                elif kind == "import":
+                    answer = graph.project_name(head.id, module) is None
+                else:
+                    answer = False
+                if not answer:
+                    break
+    if deep and len(seen) == 1:
+        cache[id(value)] = answer
+    return answer
+
+
+def _arguments_for(graph, module: str, function, name: str, unresolved: list) -> list:
+    """(module, def, value) for each value the parameter `name` can hold.
+    For a parameter of `function` itself: its default, and each argument a
+    call of the function in the loaded modules passes there (`_calls_of`),
+    by position or keyword; a starred or unpacked argument that could fill
+    the parameter counts, and so does every extra argument for `*args` or
+    `**kwargs`. The first parameter of a method (`self`, `cls`) holds the
+    object, whose attributes are followed where they are read. A function
+    no loaded code calls and that is never used as a value is called only
+    from outside the loaded modules, so its parameters hold nothing the
+    store work computes. One the loaded code uses as a value in a way whose
+    calls cannot be seen (`_calls_of`) is appended to `unresolved`.
+    For a parameter of a function or lambda nested in `function`: every
+    argument of every call in `function` of the nested function's name, or,
+    for a lambda passed to a call, every other argument of that call (a key
+    function's element)."""
+    graph.parameter_class(function, name)  # builds the def-key index
+    key = graph._keys.get(id(function))
+    arguments = function.args
+    own = [argument.arg for argument in (
+        *arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs,
+        *(extra for extra in (arguments.vararg, arguments.kwarg) if extra))]
+    if key is None or name not in own:
+        return _nested_arguments(module, function, name)
+    positional = [argument.arg for argument in arguments.posonlyargs + arguments.args]
+    method = "." in key[1]
+    if method and positional[:1] == [name]:
+        return []
+    found = list(_default_of(graph, function, name))
+    calls, unseen = _calls_of(graph, key)
+    if unseen:
+        unresolved.append((f"{key[0]}.py:{function.lineno}",
+                           f"a parameter of a function used as a value whose calls cannot be seen: {name}"))
+    for owner, caller, call in calls:
+        found += [(owner, caller, value) for value in _passed(graph, function, name, call)]
     return found
 
 
-def _arguments_for(graph, function, name: str) -> list:
-    """(module, caller def, argument) for each argument a call of `function`
-    in the loaded modules passes to its parameter `name`, by position or
-    keyword (a method's position counts `self` when called on an
-    attribute)."""
+def _default_of(graph, function, name: str) -> list:
+    """[(module, None, default)] for the default of the parameter `name` of
+    the def `function`, read at module scope; [] when it has none."""
+    graph.parameter_class(function, name)  # builds the def-key index
+    key = graph._keys.get(id(function))
+    arguments = function.args
+    positional = [argument.arg for argument in arguments.posonlyargs + arguments.args]
+    defaults = dict(zip(positional[len(positional) - len(arguments.defaults):], arguments.defaults))
+    defaults.update({argument.arg: value for argument, value in zip(arguments.kwonlyargs, arguments.kw_defaults)
+                     if value is not None})
+    return [(key[0], None, defaults[name])] if key is not None and name in defaults else []
+
+
+def _passed(graph, function, name: str, call) -> list:
+    """The argument expressions `call`, a call of the def `function`, can pass
+    to its parameter `name`: by position or keyword; a starred or unpacked
+    argument that could fill it; every extra argument for `*args` or
+    `**kwargs`. A method's position counts `self` when it is called on an
+    attribute."""
     import ast
 
-    graph.parameter_class(function, name)  # builds the callers index
+    graph.parameter_class(function, name)  # builds the def-key index
     key = graph._keys.get(id(function))
-    if key is None:
-        return []
-    positional = [argument.arg for argument in function.args.posonlyargs + function.args.args]
-    method = "." in key[1]
-    found = []
-    for owner, caller, call in graph._callers.get(key, ()):
-        value = next((keyword.value for keyword in call.keywords if keyword.arg == name), None)
-        if value is None and name in positional:
-            index = positional.index(name) - (1 if method and isinstance(call.func, ast.Attribute) else 0)
-            if 0 <= index < len(call.args) and not any(
-                    isinstance(argument, ast.Starred) for argument in call.args[:index + 1]):
-                value = call.args[index]
-        if value is not None:
-            found.append((owner, caller, value))
+    arguments = function.args
+    positional = [argument.arg for argument in arguments.posonlyargs + arguments.args]
+    method = key is not None and "." in key[1]
+    star = arguments.vararg.arg if arguments.vararg else None
+    double = arguments.kwarg.arg if arguments.kwarg else None
+    named = set(positional) | {argument.arg for argument in arguments.kwonlyargs}
+    shift = 1 if method and isinstance(call.func, ast.Attribute) else 0
+    if name == star:
+        passed = [item.value if isinstance(item, ast.Starred) else item
+                  for item in call.args[max(len(positional) - shift, 0):]]
+        return passed + [item.value for item in call.args if isinstance(item, ast.Starred)]
+    if name == double:
+        return [item.value for item in call.keywords if item.arg is None or item.arg not in named]
+    passed = [item.value for item in call.keywords if item.arg == name or item.arg is None]
+    if name in positional:
+        index = positional.index(name) - shift
+        for position, item in enumerate(call.args):
+            if isinstance(item, ast.Starred) and position <= index:
+                passed.append(item.value)
+            elif position == index and not any(isinstance(earlier, ast.Starred) for earlier in call.args[:position]):
+                passed.append(item)
+    return passed
+
+
+def _nested_arguments(module: str, function, name: str) -> list:
+    """(module, def, value) for a parameter `name` of a function or lambda
+    nested in `function` (`_arguments_for`)."""
+    import ast
+
+    found, holders = [], []
+    for node in ast.walk(function):
+        if node is function or not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            continue
+        every = node.args
+        if any(argument.arg == name for argument in (
+                *every.posonlyargs, *every.args, *every.kwonlyargs,
+                *(extra for extra in (every.vararg, every.kwarg) if extra))):
+            holders.append(node)
+    for call in (node for node in ast.walk(function) if isinstance(node, ast.Call)):
+        passed = [*call.args, *(item.value for item in call.keywords)]
+        for holder in holders:
+            if isinstance(holder, ast.Lambda) and any(item is holder for item in passed):
+                found += [(module, function, item) for item in passed if item is not holder]
+            elif not isinstance(holder, ast.Lambda) and isinstance(call.func, ast.Name) and (
+                    call.func.id == holder.name):
+                found += [(module, function, item.value if isinstance(item, ast.Starred) else item)
+                          for item in passed]
     return found
+
+
+def _calls_of(graph, key) -> tuple:
+    """(calls, unseen) for the def `key`. `calls` is (caller module, caller
+    def, call) for every call of it the loaded modules make: a call
+    `_DetectionGraph.callee` or `_table_callees` resolves to it; for a
+    method, a call of a method of that name on an object no call resolves;
+    a call of a local or parameter that holds it (`_callables`, so a
+    function passed as an argument is found where the receiving function
+    calls its parameter). `unseen` is True when the def is used as a value
+    (`references` on a name that is not called) and some such use is an
+    argument of a call that resolves to no project function (a
+    standard-library higher-order call such as `sorted(key=...)` or
+    `functools.partial`), or is stored anywhere but a local, a loop display
+    or a module-level table, or returned; or when it is used as a value and
+    the loaded code calls some local, parameter or computed callee whose
+    callables `_callables` cannot name, since that call could be one of
+    it."""
+    import ast
+
+    cache = getattr(graph, "_calls_cache", None)
+    if cache is None or cache[0] != len(graph.defs):
+        resolved, untyped, local_calls, foreign_uses, value_uses = {}, {}, [], set(), set()
+        for (owner, _qualified), node in list(graph.defs.items()):
+            arguments_of = {}
+            for call in ast.walk(node):
+                if not isinstance(call, ast.Call):
+                    continue
+                for item in [*call.args, *(keyword.value for keyword in call.keywords)]:
+                    arguments_of[id(item.value if isinstance(item, ast.Starred) else item)] = call
+                found = graph.callee(call, owner, node)
+                if found is not None:
+                    resolved.setdefault(found, []).append((owner, node, call))
+                    continue
+                tabled = _table_callees(graph, owner, node, call)
+                if tabled:
+                    for value in tabled:
+                        resolved.setdefault(graph.refers_to(value, owner), []).append((owner, node, call))
+                elif (isinstance(call.func, ast.Name) and _bound(graph, node, call.func.id)) or isinstance(
+                        call.func, (ast.Call, ast.Subscript)):
+                    local_calls.append((owner, node, call))
+                elif isinstance(call.func, ast.Attribute) and call.func.attr not in _BUILTIN_METHODS and not _foreign(
+                        graph, owner, node, call.func.value, deep=False):
+                    untyped.setdefault(call.func.attr, []).append((owner, node, call))
+            called = {id(call.func) for call in ast.walk(node) if isinstance(call, ast.Call)}
+            held = {id(value) for sub in ast.walk(node) for target, value in _stores(sub)
+                    if isinstance(target, ast.Name)}
+            held |= {id(item) for sub in ast.walk(node) if isinstance(sub, (ast.For, ast.comprehension))
+                     for item in ast.walk(sub.iter)}
+            held |= {id(item) for value in _returned_values(node)
+                     for item in (value.elts if isinstance(value, (ast.Tuple, ast.List)) else [value])}
+            for expression, target in graph.references(node, owner):
+                if id(expression) not in called:
+                    value_uses.add(target)
+                if id(expression) in called or id(expression) in held or (
+                        isinstance(expression, ast.Name) and any(
+                            kind != "import" for kind, _value in _bound(graph, node, expression.id))):
+                    continue
+                receiver = arguments_of.get(id(expression))
+                if receiver is None or (graph.callee(receiver, owner, node) is None
+                                        and not _table_callees(graph, owner, node, receiver)):
+                    foreign_uses.add(target)
+        cache = graph._calls_cache = [len(graph.defs), resolved, untyped, local_calls, foreign_uses, None, value_uses]
+    if cache[5] is None:
+        cache[5], graph._unknown_callable_calls = {}, []
+        for owner, node, call in cache[3]:
+            held = _callables(graph, owner, node, call.func, set())
+            if held is None:
+                graph._unknown_callable_calls.append(f"{owner}.py:{call.lineno} {_callee_text(call.func)}")
+            for _module, _scope, value in held or ():
+                if isinstance(value, tuple):
+                    cache[5].setdefault(value, []).append((owner, node, call))
+    calls = list(cache[1].get(key, [])) + list(cache[5].get(key, []))
+    if "." in key[1]:
+        calls += cache[2].get(key[1].rpartition(".")[2], [])
+    return calls, key in cache[4] or (key in cache[6] and bool(graph._unknown_callable_calls))
+
+
+@functools.lru_cache(maxsize=2)
+def _store_work_taint_for(fingerprint: tuple) -> tuple:
+    """`_store_work_git_taint` over the census's own NOT_A_ROUTE and
+    `route_entry_conditions`, for the tree `fingerprint` names: computed
+    once per source tree, so the tests that read it share one trace and one
+    graph."""
+    return _store_work_git_taint(TestEveryRouteEntryConditionIsARoute.NOT_A_ROUTE, route_entry_conditions())
+
+
+def _flow_allowed(not_a_route: dict, condition, sink) -> bool:
+    """A store-work condition's value may reach a git question as an argument
+    of the def `sink` only when the condition is a key of
+    `_ASKS_ABOUT_RECORDED_DIRECTORY` naming that sink and its NOT_A_ROUTE
+    reason ends with `_AFTER_DETECTION_ASKS`."""
+    return (_ASKS_ABOUT_RECORDED_DIRECTORY.get(condition) == sink
+            and not_a_route.get(condition, "").endswith(_AFTER_DETECTION_ASKS))
 
 
 def _store_work_git_taint(not_a_route: dict, inputs: dict) -> tuple:
-    """(questions, problems): each git question the memory CLI's command
-    work asks (`_store_work_git_questions`), and each one an argument of
-    which a store-work value can reach: a call at a site (`route_inputs`'
-    `module.py:line`) of a condition whose NOT_A_ROUTE reason ends with
-    `_AFTER_DETECTION`."""
+    """(questions, problems, allowed, graph): each git question the memory
+    CLI's command work asks (`_store_work_git_questions`); each problem, as
+    (question site, source site, conditions, trace path); and each allowed
+    flow, as (condition, sink call site). A problem is a call at a site
+    (`route_inputs`' `module.py:line`) of a store-work condition (its
+    NOT_A_ROUTE reason ends with `_AFTER_DETECTION` or
+    `_AFTER_DETECTION_ASKS`) that one trace back from every question's
+    arguments reaches (`_traced_sources`), or a place that trace cannot
+    follow, whose conditions are `(("unresolved", why),)`. One trace serves
+    every question, so a source is reported once, under the first question
+    that reached it. `graph` is the loaded census graph the trace read. The
+    trace stops at the parameters of each sink of
+    `_ASKS_ABOUT_RECORDED_DIRECTORY` and traces each argument a call passes
+    there on its own: a condition `_flow_allowed` for that sink is an
+    allowed flow there; every other store-work condition is a problem."""
     graph = _DetectionGraph()
     for module in (*DETECTION_MODULES, *(module for module, _name in PASS_SETUPS)):
         graph.load(module)
     _pass_openings(graph)
     questions, _reached = _store_work_git_questions(graph)
-    store_work = {condition for condition, reason in not_a_route.items() if reason.endswith(_AFTER_DETECTION)}
+    store_work = {condition for condition, reason in not_a_route.items()
+                  if reason.endswith(_AFTER_DETECTION) or reason.endswith(_AFTER_DETECTION_ASKS)}
     tainted_sites = {}
     for condition, sites in inputs.items():
         if condition in store_work:
             for site in sites:
                 tainted_sites.setdefault(site, set()).add(condition)
-    problems = []
+    starts, asked = [], []
     for module, key, call in questions:
-        arguments = [*call.args, *(keyword.value for keyword in call.keywords)]
-        for argument in arguments:
-            for owner, source in _value_sources(graph, module, graph.defs[key], argument):
-                hit = tainted_sites.get(f"{owner}.py:{source.lineno}")
-                if hit:
-                    problems.append((f"{module}.py:{call.lineno}", f"{owner}.py:{source.lineno}", sorted(hit)))
-    return questions, sorted(set((a, b, tuple(c)) for a, b, c in problems))
+        for argument in [*call.args, *(keyword.value for keyword in call.keywords)]:
+            starts.append((module, graph.defs[key], argument))
+            asked.append(f"{module}.py:{call.lineno}")
+    sinks = frozenset(_ASKS_ABOUT_RECORDED_DIRECTORY.values())
+    unresolved, parents, problems, crossings, allowed = [], {}, [], [], set()
+
+    def path(step):
+        sites = []
+        while step is not None:
+            step, site = parents[step]
+            sites.append(site)
+        return " <- ".join(sites)
+
+    for (owner, source), (origin, step) in _traced_sources(
+            graph, starts, unresolved, parents, barriers=sinks, crossings=crossings).items():
+        hit = tainted_sites.get(f"{owner}.py:{source.lineno}")
+        if hit:
+            problems.append((asked[origin], f"{owner}.py:{source.lineno}", tuple(sorted(hit)), path(step)))
+    problems += [(asked[origin], where, (("unresolved", why),), "") for where, why, origin in unresolved]
+    for owner, caller, argument, sink in crossings:
+        crossing_unresolved, crossing_parents = [], {}
+        handed = f"{owner}.py:{argument.lineno}"
+        for (module, source), (_origin, step) in _traced_sources(
+                graph, [(owner, caller, argument)], crossing_unresolved, crossing_parents,
+                barriers=sinks).items():
+            site = f"{module}.py:{source.lineno}"
+            for condition in tainted_sites.get(site, ()):
+                if _flow_allowed(not_a_route, condition, sink):
+                    allowed.add((condition, handed))
+                else:
+                    problems.append((handed, site, (condition,), "through a sink of _ASKS_ABOUT_RECORDED_DIRECTORY"))
+        problems += [(handed, where, (("unresolved", why),), "") for where, why, _o in crossing_unresolved]
+    return questions, sorted(set(problems)), sorted(allowed), graph
 
 
 # The second half of each NOT_A_ROUTE reason for a memory CLI command's store work.
@@ -4267,6 +5262,21 @@ _AFTER_DETECTION = (
     "; it runs after PACTMemory.__init__ has detected the identity, which only __init__ sets, "
     "and no git question takes its value"
 )
+# The second half of the NOT_A_ROUTE reason of each condition whose value the
+# refusal check hands to git, and the def through which alone it may reach a
+# git question (`_flow_allowed`): `format_project_dir_disagreement`'s kind check
+# asks `recorded_main_root` about the recorded project directory. Pinned by
+# `test_no_git_question_takes_a_store_work_value` and
+# `test_the_recorded_directory_allowance_names_its_conditions`.
+_AFTER_DETECTION_ASKS = (
+    "; it runs after PACTMemory.__init__ has detected the identity, which only __init__ sets, "
+    "and a git question takes its value only in the refusal check `format_project_dir_disagreement`, "
+    "which asks git about the recorded project directory (`recorded_main_root`), keyed on that directory"
+)
+_ASKS_ABOUT_RECORDED_DIRECTORY = {
+    ("call", "env_record_project_dir_disagreement"): ("pact_session", "format_project_dir_disagreement"),
+    ("call", "format_project_dir_disagreement"): ("pact_session", "format_project_dir_disagreement"),
+}
 
 
 class TestEveryRouteEntryConditionIsARoute:
@@ -4868,10 +5878,10 @@ class TestEveryRouteEntryConditionIsARoute:
             'prepares the memory system (dependencies, migration, embedding catch-up) before the store is used' + _AFTER_DETECTION
         ),
         ('call', 'env_record_project_dir_disagreement'): (
-            "compares CLAUDE_PROJECT_DIR with the session record's project directory so a write can refuse when they disagree; it changes no answer the identity reads" + _AFTER_DETECTION
+            "compares CLAUDE_PROJECT_DIR with the session record's project directory so a write can refuse when they disagree; it changes no answer the identity reads" + _AFTER_DETECTION_ASKS
         ),
         ('call', 'format_project_dir_disagreement'): (
-            'formats that disagreement for the refusal' + _AFTER_DETECTION
+            'formats that disagreement for the refusal' + _AFTER_DETECTION_ASKS
         ),
         ('call', 'generate_embedding'): (
             "computes a memory's embedding vector" + _AFTER_DETECTION
@@ -5642,25 +6652,41 @@ class TestEveryRouteEntryConditionIsARoute:
     def test_no_git_question_takes_a_store_work_value(self):
         """The pin under the second half of `_AFTER_DETECTION`: no argument
         of a git command the memory CLI's command work runs (argv, cwd or
-        env, traced back through locals, `self` attributes and callers'
-        arguments, `_value_sources`) is reached by a value a store-work
-        condition reads, that is, by a call at a site of a condition whose
-        NOT_A_ROUTE reason carries `_AFTER_DETECTION`. The git questions
-        the store work asks take the identity's root and common dir, the
-        process directory, the environment or a command's own arguments."""
+        env) is reached by a value a store-work condition reads, that is, by
+        a call at a site of a condition whose NOT_A_ROUTE reason carries
+        `_AFTER_DETECTION` or `_AFTER_DETECTION_ASKS`, and the trace back
+        from each argument (`_traced_sources`: locals, writes into
+        containers, attributes, parameters, project functions' returns,
+        module-level names) meets no form it cannot follow. The one flow
+        allowed, and measured here, is `_AFTER_DETECTION_ASKS`': the
+        disagreement a write refuses on is handed to
+        `format_project_dir_disagreement`, whose kind check asks git about
+        the recorded project directory. Each call handing it over sits in a
+        `PACTMemory` method other than `__init__`, so it runs after the
+        identity is detected, and only `__init__` sets the identity
+        (`test_only_pact_memory_init_sets_the_identity_store_work_reads`).
+        Its limits are the NOT COVERED and ADVERSARIAL-ONLY lists in
+        `_traced_sources`."""
         import ast
 
-        questions, problems = _store_work_git_taint(self.NOT_A_ROUTE, route_entry_conditions())
+        questions, problems, allowed, graph = _store_work_taint_for(_source_fingerprint())
         assert problems == [], problems
+        # Control: the allowed flow is the measured one, at each write path's
+        # refusal, and each hands the value over from a PACTMemory method
+        # other than __init__.
+        assert {condition for condition, _site in allowed} == {("call", "env_record_project_dir_disagreement")}, allowed
+        handing = set()
+        for _condition, site in allowed:
+            module, _, line = site.rpartition(".py:")
+            owner = next(name for (owned, name), node in graph.defs.items() if owned == module and any(
+                getattr(sub, "lineno", None) == int(line) for sub in ast.walk(node)) and "." in name)
+            handing.add(owner)
+        assert handing and all(name.startswith("PACTMemory.") and name != "PACTMemory.__init__"
+                               for name in handing), handing
         # Control: the git commands are found, and the read scope's question
         # traces back to its call in `_read_project_scopes`.
-        graph = _DetectionGraph()
-        for module in (*DETECTION_MODULES, *(module for module, _name in PASS_SETUPS)):
-            graph.load(module)
-        _pass_openings(graph)
-        found, _reached = _store_work_git_questions(graph)
-        assert len(found) >= 10 and len(questions) == len(found), (len(found), len(questions))
-        common = [(module, key, call) for module, key, call in found
+        assert len(questions) >= 10, len(questions)
+        common = [(module, key, call) for module, key, call in questions
                   if key == ("memory_api", "main_repo_common_dir") and ast.unparse(call.func) == "subprocess.run"]
         assert len(common) == 1, common
         module, key, call = common[0]
@@ -5670,6 +6696,25 @@ class TestEveryRouteEntryConditionIsARoute:
                     and ast.unparse(sub.func) == "main_repo_common_dir")
         sources = {f"{owner}.py:{source.lineno}" for owner, source in _value_sources(graph, module, graph.defs[key], call.args[0])}
         assert f"memory_api.py:{site}" in sources, sorted(sources)
+
+    def test_the_recorded_directory_allowance_names_its_conditions(self):
+        """Pin for `_flow_allowed`: the allowance is keyed to the exact
+        conditions of `_ASKS_ABOUT_RECORDED_DIRECTORY`, whose reasons, and
+        only theirs, carry `_AFTER_DETECTION_ASKS`. A third condition given
+        the same reason text is not allowed through the sink, and a listed
+        condition is not allowed through any other def."""
+        carrying = {condition for condition, reason in self.NOT_A_ROUTE.items()
+                    if reason.endswith(_AFTER_DETECTION_ASKS)}
+        assert carrying == set(_ASKS_ABOUT_RECORDED_DIRECTORY), carrying
+        sink = ("pact_session", "format_project_dir_disagreement")
+        for condition in carrying:
+            assert _flow_allowed(self.NOT_A_ROUTE, condition, sink)
+            assert not _flow_allowed(self.NOT_A_ROUTE, condition, ("shared.project_scope", "recorded_main_root"))
+        third = ("call", "count_project_memories")
+        forged = {**self.NOT_A_ROUTE, third: "counts the rows" + _AFTER_DETECTION_ASKS}
+        assert not _flow_allowed(forged, third, sink)
+        unsuffixed = {**self.NOT_A_ROUTE, ("call", "env_record_project_dir_disagreement"): "compares" + _AFTER_DETECTION}
+        assert not _flow_allowed(unsuffixed, ("call", "env_record_project_dir_disagreement"), sink)
 
     def test_the_census_reads_the_declaration_routes(self, route_driven_conditions):
         """Control: the known declaration inputs are found on both sides."""
