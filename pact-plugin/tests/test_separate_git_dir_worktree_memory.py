@@ -302,6 +302,49 @@ def test_a_moved_worktree_is_unknown_and_the_archive_refuses(
     assert "could not classify" not in reason, reason
 
 
+def test_a_submodules_linked_worktree_is_unknown_and_the_archive_refuses(
+    tmp_path, monkeypatch
+):
+    """A linked worktree of a submodule. Its common dir is the submodule's
+    git dir under `.git/modules/`, so no folder holds it as its `.git` and
+    git lists the main worktree at the git dir, as for a separate-git-dir
+    repository. But git, asked from that git dir, names the submodule's own
+    checkout as its top level: the repository has a main working tree, so
+    the worktree is not its own root. It stays UNKNOWN, and its CLAUDE.md is
+    not the project memory's."""
+    import archive_pin
+    from helpers import known_root
+
+    lib = tmp_path / "lib"
+    lib.mkdir()
+    _git("init", "-q", str(lib))
+    _seed(lib)
+    sup = tmp_path / "super"
+    sup.mkdir()
+    _git("init", "-q", str(sup))
+    _seed(sup)
+    added = _git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(lib), "sub", cwd=sup)
+    assert added.returncode == 0, added.stderr
+    wt = tmp_path / "sub-wt"
+    added = _git("worktree", "add", "-q", str(wt), "-b", "subwt", cwd=sup / "sub")
+    assert added.returncode == 0, added.stderr
+    # Control: the submodule's own checkout is still a known root.
+    assert known_root(sup / "sub") == (sup / "sub").resolve()
+    wt_md = wt / ".claude" / "CLAUDE.md"
+    wt_md.parent.mkdir()
+    wt_md.write_text(_managed_doc(_stale_capable_pin()), encoding="utf-8")
+
+    assert known_root(wt) is None, "a submodule's linked worktree became its own root"
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(wt))
+    monkeypatch.chdir(wt)
+    with pytest.raises(archive_pin._Unevaluable) as excinfo:
+        archive_pin.resolve_claude_md()
+    assert (
+        "exists but could not be verified as a checkout of a repository"
+        in excinfo.value.reason
+    ), excinfo.value.reason
+
+
 def test_the_no_argument_reader_answers_nothing_on_a_worktree_cwd(
     tmp_path, monkeypatch
 ):

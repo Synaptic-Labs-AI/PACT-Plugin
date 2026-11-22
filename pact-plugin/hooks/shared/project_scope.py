@@ -517,14 +517,21 @@ def _unnamed_main_worktree_root(
     --separate-git-dir`: the common dir is not `<candidate>/.git`, so no
     folder holds it as its `.git` (git then lists the main worktree at the
     git dir). A `<candidate>/.git` that IS the common dir is a main checkout
-    git could not describe, and stays unverified. The listing check is the
-    same anti-forgery check as the main-checkout path: a `.git` file naming
-    another repository's worktree admin dir is not listed."""
+    git could not describe, and stays unverified. Git also names a main
+    working tree when, asked from the common dir itself, it answers a top
+    level: a submodule's git dir under `.git/modules/` does, through the
+    submodule's configuration, so a submodule's linked worktree stays
+    unverified too. The listing check is the same anti-forgery check as the
+    main-checkout path: a `.git` file naming another repository's worktree
+    admin dir is not listed."""
     marker = candidate / ".git"
     try:
         if marker.exists() and marker.resolve() == common_dir:
             return None
     except (OSError, RuntimeError):
+        return None
+    named_main, ran = _raw_rev_parse(common_dir, "--show-toplevel")
+    if not ran or named_main is not None:
         return None
     toplevel, ran = _raw_rev_parse(given, "--show-toplevel")
     if not ran or toplevel is None:
