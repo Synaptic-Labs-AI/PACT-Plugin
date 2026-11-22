@@ -39,7 +39,10 @@ from pathlib import Path
 import pytest
 
 # Surfaces that are loaded into an LLM's context as shipped instructions.
-_LLM_LOADED_DIRS = ("agents", "skills", "commands", "protocols")
+# `reference/` is on-demand rather than automatic: session_init's notice
+# points agents at reference/unattended-runs.md. `templates/` is a
+# per-feature scaffold with no in-plugin consumer, so it is not included.
+_LLM_LOADED_DIRS = ("agents", "skills", "commands", "protocols", "reference")
 
 _PLUGIN_ROOT = Path(__file__).parent.parent
 

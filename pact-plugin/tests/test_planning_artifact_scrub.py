@@ -4,18 +4,19 @@ Tests for planning-artifact scrub discipline in LLM-loaded markdown.
 Background: Planning-artifact patterns (PR/issue refs, SHAs, version markers,
 in-session task IDs, letter-cycle labels) are forbidden in files that load
 into the LLM's context at runtime — agents/*.md, skills/*/SKILL.md,
-protocols/*.md, commands/*.md — per the LLM-load distinction pin in
-user CLAUDE.md.
+protocols/*.md, commands/*.md, reference/*.md — per the LLM-load
+distinction pin in user CLAUDE.md.
 
 Rationale (from the pin): these files load every session; planning artifacts
 become dead pointers (no tracker access), consume context, and undermine
 project-agnostic posture. The repo must self-describe through behavioral
 language; provenance refs belong in commit messages and PR descriptions.
 
-This test walks the four LLM-loaded directories and scans each .md file
-for planning-artifact regex patterns. Legitimate retentions (fictional
-example data, external-tracker refs, markdown anchor links, operational
-IDs, behavioral provenance via memory IDs) are exempt via either:
+This test walks the LLM-loaded directories enumerated below and scans each
+.md file for planning-artifact regex patterns. Legitimate retentions
+(fictional example data, external-tracker refs, markdown anchor links,
+operational IDs, behavioral provenance via memory IDs) are exempt via
+either:
 
   1. Same-line trailing `<!-- planning-artifact-exempt: <reason> -->` marker.
   2. Preceding-line `<!-- planning-artifact-exempt: <reason> -->` marker.
@@ -77,6 +78,10 @@ LLM_LOADED_DIRECTORIES = (
     PACT_PLUGIN_ROOT / "skills",
     PACT_PLUGIN_ROOT / "protocols",
     PACT_PLUGIN_ROOT / "commands",
+    # On-demand instruction surface: session_init's in-process-mode notice
+    # tells agents to read reference/unattended-runs.md, and the protocols
+    # SSOT links reference/vsm-glossary.md.
+    PACT_PLUGIN_ROOT / "reference",
 )
 
 
@@ -379,7 +384,7 @@ def _scan_directory(directory: Path) -> list[Violation]:
 
 class TestPlanningArtifactScrub:
     """Structural enforcement of the planning-artifact scrub discipline
-    across the four LLM-loaded directories.
+    across the LLM-loaded directories enumerated in LLM_LOADED_DIRECTORIES.
 
     Per-directory tests give a focused failure surface (one failing
     directory does not mask violations in others). The detailed assertion
@@ -404,7 +409,7 @@ class TestPlanningArtifactScrub:
         silently disable ALL planning-artifact enforcement below it,
         without any same-PR signal.
 
-        This additive lint walks the same four LLM-loaded directories as
+        This additive lint walks the same LLM-loaded directories as
         `test_directory_is_clean` and fails when any .md file contains
         an unmatched block-start. Intentional matched start+end pairs
         remain silent. Whole-file exempt markers do NOT silence this
