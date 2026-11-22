@@ -202,6 +202,11 @@ def check_inbox_grace(
             inbox_json = state_file.read_text(
                 inbox_path, root=teams_root, max_bytes=INBOX_MAX_BYTES
             )
+        except FileNotFoundError as error:
+            # read_text wraps containment refusals in FileNotFoundError; only absence retries.
+            if error.__cause__ is not None:
+                return None
+            inbox_json = "[]"
         except (OSError, ValueError):
             return None
         # Invalid UTF-8 is replaced by state_file; decoded replacement is not evidence.

@@ -2265,7 +2265,8 @@ dead-by-construction and historically produced near-100% false positives.
 **Bounded RECEIVE-SIDE exception — TeammateIdle grace.** The `TeammateIdle` hook may hold a fresh
 `awaiting_lead_completion` idle only on positive valid queued-message evidence within the original ten-second budget.
 The gate never infers acceptance, sends no message, and writes no task or inbox state. It preserves that budget
-when the task becomes `completed` and fails open to the existing fallback after timeout or on missing or unreadable inbox input.
+when the task becomes `completed`. A genuinely missing inbox retries within that budget; persistent absence fails open
+at timeout, while unsafe or unreadable input fails open to the existing fallback immediately.
 
 The receive-side gate supplements, and does not replace, the existing mitigation layer: redundant-by-design wake handling on both sides (this rule
 plus the teammate-side disk-first re-read in

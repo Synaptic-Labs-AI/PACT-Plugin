@@ -1122,12 +1122,43 @@ class TestInboxGraceGate:
             assert read.call_args.kwargs["max_bytes"] == 1024 * 1024
             assert clock.sleeps == []
 
-    def test_missing_inbox_fails_open_without_sleep(self, tmp_path):
-        clock = _FakeGraceClock()
+    def test_missing_then_created_inbox_blocks_within_grace(self, tmp_path):
+        valid = json.dumps([{"from": "team-lead", "text": "wake"}])
 
+        class _CreatingClock(_FakeGraceClock):
+            def sleep(self, seconds):
+                super().sleep(seconds)
+                _write_inbox(tmp_path, valid)
+
+        clock = _CreatingClock()
         decision = _call_grace([_grace_task()], tmp_path, clock)
 
+        assert decision == _BLOCK_DECISION
+        assert clock.sleeps == [0.1]
+
+    def test_persistently_missing_inbox_uses_original_remaining_budget(self, tmp_path):
+        clock = _FakeGraceClock()
+        with patch(
+            "teammate_idle.state_file.read_text",
+            side_effect=FileNotFoundError("missing"),
+        ) as read:
+            decision = _call_grace([_grace_task(age=5.216)], tmp_path, clock)
+
         assert decision is None
+        assert read.call_count == 48
+        assert clock.sleeps[:-1] == pytest.approx([0.1] * 47)
+        assert clock.sleeps[-1] == pytest.approx(0.084)
+
+    def test_non_missing_oserror_fails_open_without_retry(self, tmp_path):
+        clock = _FakeGraceClock()
+        with patch(
+            "teammate_idle.state_file.read_text",
+            side_effect=OSError("unreadable"),
+        ) as read:
+            decision = _call_grace([_grace_task()], tmp_path, clock)
+
+        assert decision is None
+        assert read.call_count == 1
         assert clock.sleeps == []
 
     def test_undecodable_replacement_never_becomes_positive_evidence(self, tmp_path):

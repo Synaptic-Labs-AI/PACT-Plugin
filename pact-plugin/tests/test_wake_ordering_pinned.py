@@ -378,12 +378,18 @@ GRACE_CONTRACT_PINS = [
     (COMPLETION_AUTHORITY, "never infers acceptance, sends no message, and writes no task or inbox state"),
     (COMPLETION_AUTHORITY, "original ten-second budget"),
     (COMPLETION_AUTHORITY, "fails open to the existing fallback"),
+    (COMPLETION_AUTHORITY, "genuinely missing inbox retries within that budget"),
+    (COMPLETION_AUTHORITY, "persistent absence fails open at timeout"),
+    (COMPLETION_AUTHORITY, "unsafe or unreadable input fails open to the existing fallback immediately"),
     (PROTOCOLS_SSOT, "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction"),
     (PROTOCOLS_SSOT, "Bounded RECEIVE-SIDE exception — TeammateIdle grace"),
     (PROTOCOLS_SSOT, "positive valid queued-message evidence"),
     (PROTOCOLS_SSOT, "never infers acceptance, sends no message, and writes no task or inbox state"),
     (PROTOCOLS_SSOT, "original ten-second budget"),
     (PROTOCOLS_SSOT, "fails open to the existing fallback"),
+    (PROTOCOLS_SSOT, "genuinely missing inbox retries within that budget"),
+    (PROTOCOLS_SSOT, "persistent absence fails open at timeout"),
+    (PROTOCOLS_SSOT, "unsafe or unreadable input fails open to the existing fallback immediately"),
 ]
 PHRASE_PINS.extend(GRACE_CONTRACT_PINS)
 
