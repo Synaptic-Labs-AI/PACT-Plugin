@@ -310,6 +310,18 @@ HOME_FACTS: dict = {}
 HOME_SKIPS: list = []
 
 
+def _git_looked_past(walk: Path, top: str, common: str) -> bool:
+    """The home walk's own judgement, from git's answers asked at `walk`,
+    that git looked past the `.git` directory there: git names another top
+    level and a common dir other than that `.git`. A `.git` git uses as a
+    linked worktree's git dir has a common dir elsewhere but names `walk`
+    as its top level, so it is not looked past."""
+    return bool(
+        top and common and Path(top).resolve() != walk
+        and Path(common).resolve() != (walk / ".git").resolve()
+    )
+
+
 def _home_facts(shape: str, target: Path) -> None:
     """Record, once per home shape, where the cwd marker walk lands and
     whether git's toplevel for the target, or the target itself, is HOME.
@@ -333,10 +345,7 @@ def _home_facts(shape: str, target: Path) -> None:
         top = ask(walk, "--show-toplevel")
         common = ask(walk, "--path-format=absolute", "--git-common-dir")
         other_marker = (walk / ".claude").is_dir() or (walk / "CLAUDE.md").exists()
-        skipped = bool(
-            top and common and Path(top).resolve() != walk
-            and Path(common).resolve() != (walk / ".git").resolve()
-        )
+        skipped = _git_looked_past(walk, top, common)
         if not other_marker:
             HOME_SKIPS.append((shape, walk, skipped, memory_api._git_skips_marker(
                 walk, Path(common) if common else None, ask(walk, "--absolute-git-dir") or None,
@@ -347,6 +356,52 @@ def _home_facts(shape: str, target: Path) -> None:
     toplevel = ask(target, "--show-toplevel")
     at_home = target.resolve() == home or (toplevel and Path(toplevel).resolve() == home)
     HOME_FACTS[shape] = (walk == home, f"bound:{home.name}" if at_home else None)
+
+
+def test_a_git_dir_whose_common_dir_is_elsewhere_is_not_looked_past(tmp_path):
+    """A `.git` directory that is a linked worktree's git dir (its
+    `commondir` names another repository's `.git`) is one git uses: asked
+    there, git names the folder as its top level, that `.git` as its git
+    dir, and the other repository's `.git` as its common dir. The home
+    walk's judgement and memory_api's `_git_skips_marker` must both keep it
+    as a marker. The home shapes do not build this layout, so it is the one
+    place the walk's top-level comparison decides.
+
+    RED WHEN the walk's judgement drops the top-level comparison, or either
+    rule stops reading the git dir git names."""
+    import os
+    import shutil
+
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+
+    def git(where, *args):
+        return subprocess.run(
+            ["git", "-C", str(where), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+            capture_output=True, text=True, env=env, timeout=30, check=True,
+        ).stdout.strip()
+
+    base = tmp_path.resolve()
+    assert_outside_repository(base)
+    main = base / "main"
+    git(base, "init", "-q", str(main))
+    git(main, "commit", "-q", "--allow-empty", "-m", "seed")
+    git(main, "worktree", "add", "-q", str(base / "wt"), "-b", "wt")
+    walk = base / "folder"
+    walk.mkdir()
+    shutil.move(str(main / ".git" / "worktrees" / "wt"), str(walk / ".git"))
+    shutil.rmtree(base / "wt")
+    (walk / ".git" / "commondir").write_text(f"{main / '.git'}\n", encoding="utf-8")
+
+    top = git(walk, "rev-parse", "--show-toplevel")
+    common = git(walk, "rev-parse", "--path-format=absolute", "--git-common-dir")
+    git_dir = git(walk, "rev-parse", "--absolute-git-dir")
+    # control: the layout is the one where only the top-level comparison decides
+    assert (Path(top), Path(git_dir), Path(common)) == (walk, walk / ".git", main / ".git")
+    assert (
+        _git_looked_past(walk, top, common),
+        memory_api._git_skips_marker(walk, Path(common), git_dir),
+    ) == (False, False)
 
 
 def _set_home(monkeypatch, shape: str, target: Path) -> None:

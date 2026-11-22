@@ -371,6 +371,49 @@ class TestBadOverride:
         expected = (CANONICAL, "too_long") if extra else ("github.com/pinned/project", None)
         assert (memory._project_id, refused) == expected
 
+    def test_an_override_far_past_the_cap_is_read_no_further_than_the_cap(
+        self, identity_env, monkeypatch
+    ):
+        """The cap bounds the READ, not only the verdict: a file a thousand
+        times the cap is classified as `too_long` from at most cap + 1
+        bytes, so an accidentally huge or hostile file is never read whole.
+        The reader's file object is wrapped to count the bytes it returns.
+
+        RED WHEN the reader reads the whole file and checks its length
+        afterwards."""
+        from scripts import project_identity
+
+        cap = project_identity._MAX_OVERRIDE_BYTES
+        repo = make_repo(identity_env / "checkout", remote=REMOTE)
+        (common_dir(repo) / "pact-project-id").write_bytes(b"#" * (cap * 1000))
+        returned = []
+
+        class Counted:
+            def __init__(self, handle):
+                self._handle = handle
+
+            def __enter__(self):
+                self._handle.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._handle.__exit__(*exc)
+
+            def read(self, *args):
+                data = self._handle.read(*args)
+                returned.append(len(data))
+                return data
+
+        real_open = open
+        monkeypatch.setattr(
+            project_identity, "open",
+            lambda *args, **kwargs: Counted(real_open(*args, **kwargs)), raising=False,
+        )
+        result = project_identity.read_override(common_dir(repo))
+
+        assert (result.value, result.reason) == (None, "too_long")
+        assert returned and sum(returned) <= cap + 1, returned
+
     def test_an_empty_override_falls_through_with_a_reason(
         self, identity_env, monkeypatch
     ):
