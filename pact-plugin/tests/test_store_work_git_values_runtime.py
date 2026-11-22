@@ -10,6 +10,17 @@ backs those limits by running the memory CLI's store-work commands on values
 marked with sentinel strings, through a `git` first on PATH that logs every
 call, and failing when a sentinel reaches one.
 
+`ROUTES` lists what runs: every command of the memory CLI's parser, by each
+flag that changes what it reads (setup; save with `--claude-md-root`, with
+`--no-sync` and with its default root; search plain, with `--current-file`
+and with `--claude-md-root`; list; get; status; update and `update
+--replace`; sync with `--claude-md-root` and with its default root;
+project-file; `project-id show`; rekey with `--candidates`, with `--apply`,
+with `--dry-run`, with an explicit `--to` and no mode flag, and with
+`--from` alone on the canonical bucket, which refuses; delete). Positional
+JSON input and `--limit` are not run separately: they change only how a
+value arrives, or how many rows come back.
+
 Each sentinel also needs evidence that the run read it; otherwise a clean
 log would mean nothing. Store rows are read back in command output, and the
 session records and the prune ledger are read through files the process
@@ -72,6 +83,18 @@ ELSEWHERE = f"/{MARK}-recorded-elsewhere"
 # project_dir is the repository is read, its description consulted, and the
 # record still not taken as evidence: every record is read, none stops the check.
 LONG_AGO = "2000-01-01T00:00:00+00:00"
+# Every route the rig runs, in order: each memory CLI command, by each flag
+# that changes what it reads, then each write site with the disagreement.
+ROUTES = (
+    "setup", "save", "save --no-sync", "rekey --apply", "search", "search --current-file",
+    "search --claude-md-root", "list", "get", "status", "update", "update --replace", "sync",
+    "sync, default root", "save, default root", "project-file", "project-id show",
+    "rekey --candidates", "rekey", "rekey --dry-run", "rekey --from (canonical, refused)", "delete",
+    "save, disagreeing record", "update, disagreeing record", "delete, disagreeing record",
+    "sync, disagreeing record",
+)
+# The routes whose output carries store rows, so each must print a marked one.
+ROUTES_THAT_PRINT_ROWS = ("search", "search --current-file", "search --claude-md-root", "list", "get")
 # What the disagreement check asks git about the recorded directory, in order.
 RECORDED_DIR_QUESTIONS = (("rev-parse", "--show-toplevel"), ("rev-parse", "--git-common-dir"))
 
@@ -227,11 +250,17 @@ def rig(tmp_path_factory):
     # The move runs first so the search below reads the moved row.
     run("rekey --apply", "project-id", "rekey", "--from", OTHER_BUCKET, "--to", canonical, "--apply")
     run("search", "search", MARK)
+    run("search --current-file", "search", MARK, "--current-file", repo / FILE_ROW)
+    run("search --claude-md-root", "search", MARK, "--claude-md-root", repo)
+    run("list", "list")
+    run("get", "get", first)
     run("status", "status")
     run("update", "update", first, "--stdin", stdin=json.dumps({"goal": f"{MARK}-row-updated"}))
     run("update --replace", "update", second, "--stdin", "--replace",
         stdin=json.dumps({"context": f"{MARK}-row-replaced"}))
     run("sync", "sync", "--claude-md-root", repo)
+    run("sync, default root", "sync")
+    run("save, default root", "save", "--stdin", stdin=json.dumps({"context": f"{MARK}-row-default-root"}))
     run("project-file", "project-file")
     run("project-id show", "project-id", "show")
     run("rekey --candidates", "project-id", "rekey", "--candidates")
@@ -261,6 +290,7 @@ def test_no_store_work_value_reaches_a_git_command(rig):
     """Every store-work command runs, every marked value is read, and no
     marked value reaches a git command except the one allowed question."""
     runs = rig["runs"]
+    assert tuple(label for label, _done, _calls in runs) == ROUTES
     refusals = [label for label, _done, _calls in runs if label.endswith("disagreeing record")]
     assert len(refusals) == 4, refusals
     for label, done, _calls in runs:
@@ -273,7 +303,11 @@ def test_no_store_work_value_reaches_a_git_command(rig):
         else:
             assert done.returncode == 0, (label, done.stdout, done.stderr)
 
-    # Controls: each marked value was read in this run.
+    # Controls: each marked value was read in this run, and each route that
+    # prints rows printed a marked one.
+    silent = [label for label, done, _calls in runs
+              if label in ROUTES_THAT_PRINT_ROWS and ROW["context"] not in done.stdout]
+    assert silent == [], f"these routes printed no marked row: {silent}"
     printed = "".join(done.stdout for label, done, _calls in runs)
     # The values `update` writes are inputs to that write, not reads, so
     # they are checked for leaks but need no read evidence. The other
