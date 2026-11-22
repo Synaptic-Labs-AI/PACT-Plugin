@@ -44,6 +44,20 @@ def test_never_collected():
     assert True
 '''
 
+TEARDOWN_SKIP_SUITE = '''\
+import pytest
+
+
+@pytest.fixture
+def teardown_skip():
+    yield
+    pytest.skip("teardown skip after pass")
+
+
+def test_teardown_skip(teardown_skip):
+    assert True
+'''
+
 WORKER_ONLY_SILENT_REMOVAL_CONFTEST = '''
 
 def pytest_collection_modifyitems(config, items):
@@ -258,6 +272,30 @@ def test_real_distributed_module_skip_reconciles_without_a_node_id(tmp_path):
                    for node_id in canary["canary"]["collected_node_ids"])
     assert not any(node_id.startswith("tests/test_alpha.py")
                    for node_id in record["terminal_node_ids"])
+
+
+def test_real_distributed_pass_plus_teardown_skip_verifies(tmp_path):
+    control = _rig(tmp_path / "control")
+    _, _, control_record, _ = _assert_valid(control)
+
+    rig = _rig(
+        tmp_path / "teardown",
+        suites={"tests/test_teardown_skip.py": TEARDOWN_SKIP_SUITE})
+    _, _, record, _ = _assert_valid(rig)
+    assert record["collected"] == control_record["collected"] + 1
+    assert record["passed"] == control_record["passed"] + 1
+    assert record["skipped"] == control_record["skipped"] + 1
+    assert record["skipped_at_collection"] == 0
+    non_skip_outcomes = sum(record[key] for key in (
+        "passed", "failed", "errors", "xfailed", "xpassed"))
+    control_non_skip_outcomes = sum(control_record[key] for key in (
+        "passed", "failed", "errors", "xfailed", "xpassed"))
+    assert non_skip_outcomes == control_non_skip_outcomes + 1
+    assert non_skip_outcomes == record["collected"] - 1
+    assert non_skip_outcomes + record["skipped"] == record["collected"] + 1
+    assert any(site["file"] == "tests/test_teardown_skip.py"
+               and site["reason"] == "teardown skip after pass"
+               for site in record["skip_sites"])
 
 
 def test_real_one_selected_non_guard_file_retains_four_worker_evidence(tmp_path):

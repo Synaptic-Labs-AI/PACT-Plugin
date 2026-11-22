@@ -594,12 +594,20 @@ def _require_outcomes(summary: dict, record: dict, run_summary: dict,
         raise VerificationFailure(
             "BAD-FIELD-SKIPPED_AT_COLLECTION",
             f"skipped_at_collection={collection_skips}, skipped={record_counts['skipped']}")
-    total = sum(record_counts[key] for key in _OUTCOME_KEYS
-                if key != "deselected") - collection_skips
-    if total != record["collected"]:
+    # Counts are report events, not mutually exclusive node categories: a
+    # fixture can skip during teardown after its test passed. Every collected
+    # node needs a non-skip outcome or a runtest skip, and an extra non-skip
+    # outcome cannot belong to any collected node. Exact terminal-node set
+    # equality above remains the per-node completeness proof.
+    non_skip_outcomes = sum(record_counts[key] for key in _OUTCOME_KEYS
+                            if key not in {"skipped", "deselected"})
+    runtest_skips = record_counts["skipped"] - collection_skips
+    covered = non_skip_outcomes + runtest_skips
+    if non_skip_outcomes > record["collected"] or covered < record["collected"]:
         raise VerificationFailure(
             "ACCOUNTING",
-            f"outcomes minus skipped_at_collection={total}, collected={record['collected']}")
+            f"outcome coverage non_skip={non_skip_outcomes}, "
+            f"with_skips={covered}, collected={record['collected']}")
     sites = _require_skip_sites(record)
     if sum(site["count"] for site in sites) != record_counts["skipped"]:
         raise VerificationFailure(

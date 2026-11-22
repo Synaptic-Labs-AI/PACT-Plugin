@@ -822,6 +822,40 @@ def test_consistent_but_incomplete_outcome_accounting_is_refused(tmp_path, rig):
     assert "ACCOUNTING" in proc.stderr
 
 
+def test_consistent_but_extra_non_skip_outcome_accounting_is_refused(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+
+    def add_one(artifact):
+        target = artifact["run"] if "run" in artifact else artifact
+        target["passed"] += 1
+        target["summary_line"] = f"{target['passed']} passed in 0.01s"
+
+    _mutate(summary, add_one)
+    _mutate_record(root, add_one)
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 1
+    assert "ACCOUNTING" in proc.stderr
+
+
+def test_a_consistent_pass_plus_teardown_skip_is_accepted(tmp_path, rig):
+    root, plugin, manifest = rig
+    summary, canary, base_sha = _artifacts(root, plugin, manifest)
+
+    def add_teardown_skip(artifact):
+        target = artifact["run"] if "run" in artifact else artifact
+        target["skipped"] = 1
+        target["summary_line"] = f"{target['passed']} passed, 1 skipped in 0.01s"
+
+    _mutate(summary, add_teardown_skip)
+    _mutate_record(root, add_teardown_skip)
+    _mutate_record(root, _set(("skip_sites",), [
+        {"file": "tests/test_x.py", "reason": "teardown skip", "count": 1}]))
+    proc = _run(summary, canary, base_sha, root, manifest)
+    assert proc.returncode == 0, proc.stderr
+    assert "VERIFY-OK" in proc.stdout
+
+
 def test_the_run_record_option_is_required(tmp_path, rig):
     root, plugin, manifest = rig
     summary, canary, base_sha = _artifacts(root, plugin, manifest)
