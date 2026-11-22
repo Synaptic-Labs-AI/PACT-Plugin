@@ -19,6 +19,7 @@ Output: None (SessionEnd hooks cannot inject context)
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import json
 import os
@@ -26,6 +27,7 @@ import re
 import shutil
 import stat
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
@@ -648,10 +650,13 @@ _PRUNE_LEDGER_KEEP_BYTES = 1024 * 1024
 _PRUNE_LEDGER_COMPACT_BYTES = 2 * _PRUNE_LEDGER_KEEP_BYTES
 
 
-def _compact_ledger(fd: int, size: int) -> None:
-    """Rewrite the ledger open on `fd` as its last whole lines within the
-    reader's window. The caller holds the lock, and the file stays the same
-    inode, so a writer waiting on the lock appends to the compacted file."""
+def _compact_ledger(ledger: Path, fd: int, size: int) -> None:
+    """Replace the ledger open on `fd` with its last whole lines within the
+    reader's window. The caller holds the lock. The kept lines go to a new
+    file in the same folder, which is then renamed over the ledger, so the
+    unlocked reader sees the whole old file or the whole new one, never an
+    empty or half-written one. A writer waiting on the old file's lock finds
+    the inode changed and reopens (`_open_locked_ledger`)."""
     os.lseek(fd, size - _PRUNE_LEDGER_KEEP_BYTES, os.SEEK_SET)
     tail = b""
     while len(tail) < _PRUNE_LEDGER_KEEP_BYTES:
@@ -661,9 +666,54 @@ def _compact_ledger(fd: int, size: int) -> None:
         tail += chunk
     # The window starts mid-line; drop that partial first line.
     tail = tail[tail.find(b"\n") + 1:]
-    os.ftruncate(fd, 0)
-    while tail:
-        tail = tail[os.write(fd, tail):]
+    new_fd, new_path = tempfile.mkstemp(dir=ledger.parent, prefix=f".{ledger.name}.")
+    try:
+        try:
+            while tail:
+                tail = tail[os.write(new_fd, tail):]
+            os.fsync(new_fd)
+        finally:
+            os.close(new_fd)
+        os.replace(new_path, ledger)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(new_path)
+        raise
+
+
+def _open_locked_ledger(ledger: Path) -> int | None:
+    """Open the ledger for append and take its exclusive lock; return the fd,
+    or None when the path is not a regular file.
+
+    A compaction renames a new file over the ledger, so a writer that opened
+    the old file and then waited for the lock would append to a file no one
+    reads. After the lock, the open file must still be the one at the path;
+    if it is not, reopen and lock again.
+    """
+    for _ in range(8):
+        fd = os.open(
+            ledger,
+            os.O_RDWR | os.O_APPEND | os.O_CREAT
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            0o600,
+        )
+        try:
+            held = os.fstat(fd)
+            if not stat.S_ISREG(held.st_mode):
+                os.close(fd)
+                return None
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            current = os.lstat(ledger)
+        except FileNotFoundError:
+            os.close(fd)
+            continue
+        except BaseException:
+            os.close(fd)
+            raise
+        if (current.st_dev, current.st_ino) == (held.st_dev, held.st_ino):
+            return fd
+        os.close(fd)
+    return None
 
 
 def _append_ledger_line(slug_dir: Path, line: str) -> None:
@@ -681,19 +731,14 @@ def _append_ledger_line(slug_dir: Path, line: str) -> None:
                 return
         except FileNotFoundError:
             pass
-        fd = os.open(
-            ledger,
-            os.O_RDWR | os.O_APPEND | os.O_CREAT
-            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
-            0o600,
-        )
+        fd = _open_locked_ledger(ledger)
+        if fd is None:
+            return
         try:
-            if stat.S_ISREG(os.fstat(fd).st_mode):
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                os.write(fd, line.encode("utf-8"))
-                size = os.fstat(fd).st_size
-                if size > _PRUNE_LEDGER_COMPACT_BYTES:
-                    _compact_ledger(fd, size)
+            os.write(fd, line.encode("utf-8"))
+            size = os.fstat(fd).st_size
+            if size > _PRUNE_LEDGER_COMPACT_BYTES:
+                _compact_ledger(ledger, fd, size)
         finally:
             os.close(fd)
     except Exception:

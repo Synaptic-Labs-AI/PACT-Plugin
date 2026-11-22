@@ -464,3 +464,119 @@ class TestThePruneLedgerIsBounded:
         assert all(json.loads(item) for item in lines)
         assert json.loads(lines[-1])["session_id"] == f"s{count - 1}"
         assert len(data) >= session_end._PRUNE_LEDGER_KEEP_BYTES // 2
+
+    @staticmethod
+    def _ledger_one_line_below_compaction(slug):
+        """A ledger one line short of compaction, plus a line that crosses it."""
+        import session_end
+
+        def line(session_id):
+            return json.dumps({"session_id": session_id, "project_dir": "/x",
+                               "started_at": "2026-01-01T00:00:00+00:00",
+                               "pad": "x" * 200}) + "\n"
+
+        width = len(line("s000000"))
+        count = session_end._PRUNE_LEDGER_COMPACT_BYTES // width
+        slug.mkdir()
+        ledger = slug / "pruned-sessions.jsonl"
+        ledger.write_bytes("".join(line(f"s{i:06d}") for i in range(count)).encode())
+        ledger.chmod(0o600)
+        return ledger, line
+
+    def test_a_reader_never_sees_an_empty_or_partial_ledger(self, tmp_path, monkeypatch):
+        """Catches a cut-back done in place (truncate, then rewrite): a reader
+        between the two calls finds no lines. Reads the ledger before and after
+        every write, truncate, sync and rename the compaction makes."""
+        import os
+        import threading
+
+        import session_end
+        from scripts import memory_api
+
+        slug = tmp_path / "slug"
+        ledger, line = self._ledger_one_line_below_compaction(slug)
+        main = threading.get_ident()
+        seen = []
+        busy = []
+
+        def observed(real):
+            def call(*args, **kwargs):
+                if busy or threading.get_ident() != main:
+                    return real(*args, **kwargs)
+                busy.append(True)
+                try:
+                    seen.append(memory_api._pruned_session_records(ledger))
+                    result = real(*args, **kwargs)
+                    seen.append(memory_api._pruned_session_records(ledger))
+                finally:
+                    busy.pop()
+                return result
+            return call
+
+        for name in ("write", "ftruncate", "truncate", "fsync", "replace", "rename"):
+            monkeypatch.setattr(os, name, observed(getattr(os, name)))
+        session_end._append_ledger_line(slug, line("trigger"))
+        monkeypatch.undo()
+
+        final = memory_api._pruned_session_records(ledger)
+        assert ledger.stat().st_size <= session_end._PRUNE_LEDGER_KEEP_BYTES
+        assert final[-1]["session_id"] == "trigger"
+        assert len(seen) >= 4
+        assert min(len(records) for records in seen) >= len(final) - 1
+        assert [p.name for p in slug.iterdir()] == ["pruned-sessions.jsonl"]
+        assert ledger.stat().st_mode & 0o777 == 0o600
+
+    def test_a_writer_waiting_on_the_old_ledger_appends_to_the_new_one(
+        self, tmp_path, monkeypatch
+    ):
+        """Catches a writer that opened the ledger, then waited for the lock
+        while another writer's compaction replaced the file. Without a check of
+        the inode after the lock, the late writer appends to the replaced file,
+        finds it over the limit, compacts it and renames it over the ledger,
+        which drops a line a third writer had appended to the new file."""
+        import session_end
+
+        slug = tmp_path / "slug"
+        ledger, line = self._ledger_one_line_below_compaction(slug)
+        real_flock = session_end.fcntl.flock
+        raced = []
+
+        def flock(fd, operation):
+            if not raced:
+                raced.append(True)
+                session_end._append_ledger_line(slug, line("trigger"))
+                session_end._append_ledger_line(slug, line("between"))
+            return real_flock(fd, operation)
+
+        monkeypatch.setattr(session_end.fcntl, "flock", flock)
+        session_end._append_ledger_line(slug, line("late"))
+        monkeypatch.undo()
+
+        assert raced
+        assert ledger.stat().st_size < session_end._PRUNE_LEDGER_COMPACT_BYTES
+        ids = [json.loads(item)["session_id"] for item in ledger.read_bytes().splitlines()]
+        assert ids[-3:] == ["trigger", "between", "late"]
+
+    def test_a_failed_cut_back_keeps_the_old_ledger_and_no_scratch_file(
+        self, tmp_path, monkeypatch
+    ):
+        """Catches a compaction that fails part way and leaves its new file
+        in the folder, or loses the ledger it was replacing."""
+        import os
+
+        import session_end
+
+        slug = tmp_path / "slug"
+        ledger, line = self._ledger_one_line_below_compaction(slug)
+
+        def refuse(*args, **kwargs):
+            raise OSError("rename refused")
+
+        monkeypatch.setattr(os, "replace", refuse)
+        session_end._append_ledger_line(slug, line("trigger"))
+        monkeypatch.undo()
+
+        assert [p.name for p in slug.iterdir()] == ["pruned-sessions.jsonl"]
+        ids = [json.loads(item)["session_id"] for item in ledger.read_bytes().splitlines()]
+        assert ids[0] == "s000000"
+        assert ids[-1] == "trigger"

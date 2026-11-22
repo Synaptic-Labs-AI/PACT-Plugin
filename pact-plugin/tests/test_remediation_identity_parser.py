@@ -2529,7 +2529,7 @@ _RUN_WITHOUT_OPTIONAL_FLAGS = {
         TestEveryReaderOpensWithoutAnOptionalFlag.test_the_git_file_reader,
     ("scripts.memory_api", "_pruned_session_records"):
         TestEveryReaderOpensWithoutAnOptionalFlag.test_the_prune_ledger_reader,
-    ("session_end", "_append_ledger_line"):
+    ("session_end", "_open_locked_ledger"):
         TestEveryReaderOpensWithoutAnOptionalFlag.test_the_prune_ledger_writer,
 }
 
