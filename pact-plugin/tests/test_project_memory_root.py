@@ -597,3 +597,57 @@ def test_a_record_whose_worktree_is_a_sibling_of_the_declaration_is_corrupt(repo
     assert project_scope.record_resolution(declared, identity) == (
         project_scope.RECORD_CORRUPT, None
     )
+
+
+def test_project_file_from_a_bare_repository_at_a_folders_git_asks_each_question_once(repo, tmp_path):
+    """A bare repository kept at `<folder>/.git` (`git clone --bare <url>
+    <folder>/.git`): from `<folder>`, `--show-toplevel` refuses while a `.git`
+    is there, so the root lookup asks `rev-parse --git-dir` of `<folder>` to
+    tell a bare repository from one git cannot open, and the git-dir reader
+    has asked that same question. `project-file` must run it once.
+
+    Real repositories and git, the CLI as its own process with its own HOME
+    and Claude config directory, and a `git` first on PATH that logs each
+    command with the directory it ran in."""
+    import shutil
+    import sys
+    from pathlib import Path
+
+    folder = tmp_path / "bare-at-dot-git"
+    folder.mkdir()
+    _git("clone", "-q", "--bare", str(repo), str(folder / ".git"), cwd=tmp_path)
+    log = tmp_path / "git.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "git").write_text(
+        "#!/bin/sh\n"
+        f"{{ printf '%s\\t' \"$PWD\" \"$@\"; printf '\\n'; }} >> '{log}'\n"
+        f"exec '{shutil.which('git')}' \"$@\"\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "git").chmod(0o755)
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_", "PACT_", "GIT_"))}
+    env.update(
+        PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", HOME=str(home),
+        CLAUDE_CONFIG_DIR=str(home / ".claude"), PACT_TEST_MEMORY_DIR=str(tmp_path / "memdir"),
+    )
+    cli = Path(__file__).resolve().parent.parent / "skills" / "pact-memory" / "scripts" / "cli.py"
+    documents = {p: p.read_bytes() for p in tmp_path.rglob("CLAUDE.md")}
+    done = subprocess.run(
+        [sys.executable, str(cli), "project-file"], env=env, cwd=str(folder),
+        capture_output=True, text=True, timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    questions = []
+    for line in log.read_text(encoding="utf-8").splitlines():
+        where, *args = line.rstrip("\t").split("\t")
+        while len(args) >= 2 and args[0] == "-C":
+            where, args = os.path.join(where, args[1]), args[2:]
+        questions.append((os.path.realpath(where), tuple(args)))
+    # Control: the route reaches the git-dir question about the folder.
+    assert (os.path.realpath(folder), ("rev-parse", "--git-dir")) in questions, questions
+    assert sorted({q for q in questions if questions.count(q) > 1}) == [], questions
+    # Control: the command wrote no CLAUDE.md.
+    assert {p: p.read_bytes() for p in tmp_path.rglob("CLAUDE.md")} == documents
