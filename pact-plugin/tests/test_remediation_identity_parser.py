@@ -14,6 +14,7 @@ import ast
 import itertools
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -2953,6 +2954,17 @@ def _joint_bodies(joints) -> dict:
     }
 
 
+@pytest.fixture(scope="module")
+def built_repo(tmp_path_factory):
+    """One `make_repo` repository, which each header form copies to its own
+    folder: a main checkout's `.git` names no path outside itself, so the
+    copy is the same repository at a new path, and no form reads another's
+    config or any answer cached for another's path."""
+    folder = tmp_path_factory.mktemp("built")
+    assert_outside_repository(folder)
+    return make_repo(folder / "proj")
+
+
 class TestTheIncludeScanReadsAHeaderAsGitDoes:
     """For each header form, git's own parse decides the answer. Where git
     reads the file, the scan finds an include section exactly when git lists
@@ -2961,9 +2973,9 @@ class TestTheIncludeScanReadsAHeaderAsGitDoes:
     says."""
 
     @pytest.mark.parametrize("form", list(_HEADER_FORMS))
-    def test_the_scan_agrees_with_git(self, tmp_path, form):
+    def test_the_scan_agrees_with_git(self, tmp_path, form, built_repo):
         assert_outside_repository(tmp_path)
-        repo = make_repo(tmp_path / "proj")
+        repo = Path(shutil.copytree(built_repo, tmp_path / "proj", symlinks=True))
         body = _HEADER_FORMS[form]
         assert _scan_disagreement(repo, None if body is None else body.format(repo=repo.resolve())) is None
 

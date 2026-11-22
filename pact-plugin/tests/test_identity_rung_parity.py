@@ -3314,10 +3314,26 @@ def _layout_predicate_forms() -> tuple:
     call that only a read form would cover, in the body of a nested def or
     lambda. The census arm
     compares the Counter with NAMED_LAYOUT_FORMS exactly, so a new form fails
-    it."""
+    it.
+
+    The walk reads project_identity's text and, through `_resolved`, the
+    values its module globals hold, so it runs once per process for each
+    text and each set of those values (`_layout_predicate_forms_of`), and
+    each caller gets its own copy of the result."""
+    predicates, unresolved = _layout_predicate_forms_of(
+        Path(pi.__file__).read_text(encoding="utf-8"),
+        tuple(sorted((name, id(value)) for name, value in vars(pi).items())),
+    )
+    return set(predicates), collections.Counter(unresolved)
+
+
+@functools.lru_cache(maxsize=None)
+def _layout_predicate_forms_of(text: str, _globals: tuple) -> tuple:
+    """`_layout_predicate_forms` for one text of project_identity and one set
+    of its module globals (`_globals`, by name and object, is the cache key)."""
     import builtins
 
-    tree = ast.parse(Path(pi.__file__).read_text(encoding="utf-8"))
+    tree = ast.parse(text)
     defined = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
     module_imports = {
         (alias.asname or alias.name).split(".")[0]
@@ -3497,10 +3513,18 @@ def _documented_floor() -> tuple:
 
 
 def _seed_bucket(store: Path, bucket: str) -> None:
-    from scripts.database import db_connection, ensure_initialized
+    """One memory and one file row in `bucket`, in a new store at `store`.
+    The empty initialized store is built once per process for each text of
+    the schema module (`_initialized_store`) and copied; its schema, rows
+    and pragmas equal a store `ensure_initialized` creates in place."""
+    from scripts import database
+    from scripts.database import db_connection
 
+    assert not store.exists(), store
+    store.write_bytes(_initialized_store(
+        Path(database.__file__).read_text(encoding="utf-8"), database.read_only_scope_active(),
+    ))
     with db_connection(store) as conn:
-        ensure_initialized(conn)
         conn.execute(
             "INSERT INTO memories (id, context, project_id, session_id, created_at, "
             "updated_at) VALUES ('m1', 'seeded', ?, 's', '2026-01-01T00:00:00+00:00', "
@@ -3509,6 +3533,22 @@ def _seed_bucket(store: Path, bucket: str) -> None:
         )
         conn.execute("INSERT INTO files (id, path, project_id) VALUES ('f', 'src/a.py', ?)", (bucket,))
         conn.commit()
+
+
+@functools.lru_cache(maxsize=None)
+def _initialized_store(schema_source: str, read_only: bool) -> bytes:
+    """The bytes of an empty store `ensure_initialized` created, for one text
+    of the schema module and one read-only state."""
+    import tempfile
+
+    from scripts.database import db_connection, ensure_initialized
+
+    with tempfile.TemporaryDirectory() as folder:
+        store = Path(folder) / "m.db"
+        with db_connection(store) as conn:
+            ensure_initialized(conn)
+            conn.commit()
+        return store.read_bytes()
 
 
 def _fresh_scope_state() -> None:

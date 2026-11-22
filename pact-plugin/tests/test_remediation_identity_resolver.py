@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import ast
 import collections
+import functools
 import itertools
 import logging
 import re
@@ -3905,13 +3906,24 @@ def _listing_answer_modules() -> dict:
     """{path relative to the plugin root: tree} for the two modules that read
     or pass a worktree listing: the memory skill's and the backlog's. Keyed by
     path, not file name, so two modules of one name could not hide each
-    other."""
+    other.
+
+    Each tree is parsed once per process for each text its file holds
+    (`_parsed_source`), so the binding reader built on it
+    (`test_identity_rung_parity._reader_for`, cached by tree) is built
+    once too. No reader edits a tree it is given."""
     plugin = Path(__file__).resolve().parent.parent
     return {
         Path(module.__file__).resolve().relative_to(plugin).as_posix():
-            ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+            _parsed_source(Path(module.__file__).read_text(encoding="utf-8"))
         for module in (memory_api, backlog)
     }
+
+
+@functools.lru_cache(maxsize=None)
+def _parsed_source(text: str):
+    """The tree of `text`, one per text, so equal source gives the same tree."""
+    return ast.parse(text)
 
 
 def _string_constants(tree) -> dict:
