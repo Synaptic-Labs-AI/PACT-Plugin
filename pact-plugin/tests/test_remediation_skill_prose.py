@@ -438,8 +438,9 @@ class TestLegacyScopeStatesAreDocumented:
     def test_a_recorded_session_counts_only_before_the_description_ctime(self):
         body = _body(SKILL)
         assert (
-            "A recorded session counts only when it ran in this repository or "
-            "one of its linked worktrees, and <git-common-dir>/description is a "
+            "A recorded session counts only when it was launched at the root of "
+            "this repository or of one of its linked worktrees (a session "
+            "launched in a subfolder is not read), and <git-common-dir>/description is a "
             "regular file whose ctime is earlier than the session's start."
         ) in body
         assert (

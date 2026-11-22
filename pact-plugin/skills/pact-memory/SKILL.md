@@ -52,7 +52,10 @@ only after you pass `--db-path`, which this rule forbids. Do not run it.
 Report it and ask the user. The danger is NOT that the flag reaches the live
 store. The flag binds the store you name, so the danger is that your save
 lands in a store nobody reads. For a memory system, a write that goes nowhere
-costs as much as a write that goes incorrectly.
+costs as much as a write that goes incorrectly. The one exception is a
+`project-id rekey` command the CLI prints for you: its `--db-path` names the
+store the CLI resolved, so run it exactly as printed, its `--db-path`
+included. Never add `--db-path` to a command yourself.
 
 ### To inspect the store
 
@@ -333,7 +336,9 @@ anything. It reports the identity this session resolved, how it was decided,
 and every populated bucket; the rows it offers a command for carry a literal,
 runnable rekey command that names its target — interpreter-prefixed
 (`python3 "<skill>/scripts/cli.py" project-id rekey --from=<id> --to=<canonical> --db-path=<store>`),
-because there is no `pact-memory` executable on PATH. Run that command with
+because there is no `pact-memory` executable on PATH. Its `--db-path` is the
+store the CLI resolved, not one you selected: keep it, and run the command
+exactly as printed. Run that command with
 `--apply` ONLY with the user's explicit approval, and NEVER for an excluded
 bucket or for another repository's canonical id: a rekey merges rows into the
 target and cannot be undone. The dry run, the default, changes nothing. A bucket can hold
@@ -360,8 +365,9 @@ one of `included`, `excluded` and `unproven` is true:
 - `included`: the bucket is read. `verified` means an absolute file row places
   it in this repository. `included_unverified` means no file row places it but
   a recorded session from this repository wrote into it (`session_evidence` is
-  `true`). A recorded session counts only when it ran in this repository or
-  one of its linked worktrees, and `<git-common-dir>/description` is a regular
+  `true`). A recorded session counts only when it was launched at the root of
+  this repository or of one of its linked worktrees (a session launched in a
+  subfolder is not read), and `<git-common-dir>/description` is a regular
   file whose ctime is earlier than the session's start. A session folder that
   was cleaned up counts the same way through the line recorded for it when it
   was removed.
