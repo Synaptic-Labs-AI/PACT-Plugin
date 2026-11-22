@@ -473,8 +473,9 @@ class TestIdentityFilesCarryNoPlanningLabels:
         (re.compile(r"(?<![%+\w-])[A-Z]-\d{1,2}(?![\w+])"), "lettered finding id"),
         # The same id inside a camel-case name: after a lowercase letter that
         # is not a regex escape (`\b`), and before a capital, an underscore or
-        # the end of the word.
-        (re.compile(r"(?<=[a-z])(?<!\\[a-z])[A-Z]-?\d{1,2}(?=[A-Z_]|\b)(?![+])"),
+        # the end of the word. A version token inside a name (as in
+        # `getV2Api`) is part of the name, not a label.
+        (re.compile(r"(?<=[a-z])(?<!\\[a-z])(?!V\d)[A-Z]-?\d{1,2}(?=[A-Z_]|\b)(?![+])"),
          "finding, corpus-row or design id"),
         # Review-process labels: a remediation cycle, a bare cycle and a
         # review round, each followed by its number. The bare-cycle pattern
@@ -551,6 +552,23 @@ class TestIdentityFilesCarryNoPlanningLabels:
         're.compile(r"\\bP0\\b|\\bC1\\b")',
         "the surface of the store, resurfaced 3 times",
     )
+
+    # Honest names that carry a version token inside a camel-case name.
+    VERSION_NAMES = (
+        "def getV2Api(): return api_v2",
+        "class ApiV3Client: pass",
+        "readV1Header(raw)",
+        "parseV10Response",
+        "toPy312(), fromPy39_layout",
+        "self.useV2_store = True",
+    )
+
+    @pytest.mark.parametrize("line", VERSION_NAMES)
+    def test_a_version_token_in_a_name_is_not_flagged(self, line):
+        """NEGATIVE CONTROL: a version token inside a camel-case name (as in
+        `getV2Api`, `parseV10Response`, `toPy312`) is part of the name, not a
+        planning label."""
+        assert self._hits(line) == []
 
     @pytest.mark.parametrize(("line", "kind"), PLANTED)
     def test_each_label_shape_is_flagged(self, line, kind):

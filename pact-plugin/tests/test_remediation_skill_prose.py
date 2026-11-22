@@ -3669,6 +3669,65 @@ def test_the_trace_names_its_limits(tmp_path, monkeypatch):
         assert "read_row" not in sources, (form, sources)
 
 
+def _computed_callee_calls(graph) -> list:
+    """`module.py:line` and source for each call with a positional argument
+    whose callee is computed where it is called: a subscript (`KINDS[k](x)`)
+    or the result of another call (`getattr(m, "Found")(x)`), in any def or
+    module-level code of the loaded graph. `_field_values` cannot see which
+    class such a call builds, so a field it fills by position is not read."""
+    import ast
+
+    found = []
+    scopes = [(owner, node) for (owner, _name), node in graph.defs.items()]
+    scopes += list(graph.import_time.items())
+    for owner, node in scopes:
+        for call in ast.walk(node):
+            if isinstance(call, ast.Call) and call.args and isinstance(call.func, (ast.Subscript, ast.Call)):
+                found.append(f"{owner}.py:{call.lineno} {ast.unparse(call)[:80]}")
+    return sorted(set(found))
+
+
+def test_no_production_call_builds_through_a_computed_callee():
+    """The store-work value pin lists a field filled by position through a
+    class reached by a table or `getattr` as adversarial-only. No production
+    module the pin reads calls a subscript or a call result with positional
+    arguments, so the listing hides no real site; a new one fails here.
+    Calls of a parameter or a local that holds a function are not counted:
+    the trace follows them through their callers (`_callables`,
+    `_arguments_for`)."""
+    _questions, _problems, _allowed, graph = _store_work_taint_for(_source_fingerprint())
+    assert len(graph.defs) > 500, len(graph.defs)  # control: the pin's whole graph is loaded
+    sites = _computed_callee_calls(graph)
+    assert sites == [], (
+        "a production call passes positional arguments to a callee computed where it is called (a subscript "
+        "or a call result). The store-work value pin cannot see which class it builds, so classify each site: "
+        "call the class by name, or extend _built_classes to read the form, or list it in _traced_sources' "
+        f"ADVERSARIAL-ONLY paragraph with a row: {sites}"
+    )
+
+
+def test_a_computed_callee_call_is_found(tmp_path, monkeypatch):
+    """Control for `_computed_callee_calls` on scratch code: a table lookup
+    and a getattr result called with a positional argument are found, and a
+    call of a name, a parameter or a method is not."""
+    import sys
+
+    package = tmp_path / "pkg"
+    package.mkdir()
+    (package / "__init__.py").write_text("")
+    (package / "m.py").write_text(
+        "import sys\n\nclass Found:\n    pass\n\nKINDS = {'found': Found}\n\n"
+        "def by_table(holder):\n    return KINDS['found'](holder)\n\n"
+        "def by_getattr(holder):\n    return getattr(sys.modules[__name__], 'Found')(holder)\n\n"
+        "def plain(holder, make):\n    Found()\n    make(holder)\n    return holder.copy(holder)\n"
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path,))
+    graph = _DetectionGraph()
+    assert graph.load("pkg.m")
+    found = _computed_callee_calls(graph)
+    assert {site.split(" ", 1)[0] for site in found} == {"pkg.m.py:9", "pkg.m.py:12"}, found
+
+
 def _pass_entry_problems(trees: dict) -> tuple:
     """(entries, problems) for the pass-entry ban over `trees` ({file path:
     parsed module}). "The pass" is `detection_pass` or `git_results_pass`
