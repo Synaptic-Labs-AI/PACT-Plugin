@@ -629,31 +629,41 @@ class TestNoFirstActionFossilInSkillBodies:
         )
 
 
-# Named references of the separator class — the bounded separator-class
-# set: hyphen/dash/minus canonically denote non-ASCII dashes but are
-# decoded to ASCII "-" so the matcher sees them; NBSP keeps its HTML
-# legacy uppercase alias. Any name outside this map (including real
-# HTML5 separator names not listed, e.g. &UnderBar;) stays literal, the
-# same contract as numeric references.
-_NAMED_SEPARATORS = {
+# Named references the decoder resolves. The map is deliberately closed:
+# separators (lowbar/underbar/under/UnderBar -> "_", hyphen/dash/minus ->
+# "-", nbsp/NBSP/NonBreakingSpace -> space) and the canonical whitespace
+# names (NewLine -> LF, Tab -> TAB). Any name outside it stays literal,
+# the same contract as a numeric reference to a character the normalizer
+# does not fold.
+_NAMED_REFERENCES = {
     "lowbar": "_",
     "underbar": "_",
     "under": "_",
+    "UnderBar": "_",
     "hyphen": "-",
     "dash": "-",
     "minus": "-",
     "nbsp": " ",
     "NBSP": " ",
+    "NonBreakingSpace": " ",
+    "NewLine": "\n",
+    "Tab": "\t",
 }
 
+# The characters the normalizer folds or strips, so a reference that
+# resolves to one changes the scanned text: separators (_ - space) and
+# Markdown delimiters (* ~ `). Whitespace joins them via str.isspace().
+_FOLDABLE = "_- *~`"
 
-def _separator_entity(match):
+
+def _foldable_entity(match):
     """Bounded entity decoder for the memory_saved pin: numeric references
-    denoting a separator-class character (_ - space) and the named
-    separator references in _NAMED_SEPARATORS are resolved; any other
-    reference — unlisted name, malformed, over-long (past CPython's int
-    digit limit), or over-range (past chr's valid range) — is returned
-    unchanged."""
+    and the named references in _NAMED_REFERENCES are resolved when the
+    character is one the normalizer folds or strips — a separator, a
+    Markdown delimiter, or whitespace. Any other reference — unlisted
+    name, malformed, over-long (past CPython's int digit limit),
+    over-range (past chr's valid range), or a character outside the
+    foldable set — is returned unchanged."""
     token = match.group(1)
     if token.startswith("#"):
         code = token[1:]
@@ -664,10 +674,10 @@ def _separator_entity(match):
             # value past chr's range. Either way, leave it literal.
             return match.group(0)
     else:
-        char = _NAMED_SEPARATORS.get(token)
+        char = _NAMED_REFERENCES.get(token)
         if char is None:
             return match.group(0)
-    return char if char in "_- " else match.group(0)
+    return char if char in _FOLDABLE or char.isspace() else match.group(0)
 
 
 # The ONE census of LLM-loaded instruction surfaces. The pin's population
@@ -710,14 +720,16 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
 
     The rule is a STRICT TOKEN BAN: after normalization, any match of
     "memory[-_ ]*saved" is an offender, with no context test.
-    Normalization unescapes the separator escapes (underscore, asterisk,
-    backtick, hyphen, space), decodes numeric and named character
-    references that denote a separator character (any other entity stays
-    literal), strips the Markdown delimiters asterisk, tilde and
-    backtick, collapses whitespace, and case-folds. Those steps cover
-    identifier, hyphen, space, repeated-separator, escaped-separator,
-    entity, camelCase, zero-separator and case spellings, plus markup or
-    line wrapping around the words.
+    Normalization unescapes the foldable escapes (underscore, asterisk,
+    backtick, tilde, hyphen, space, and line breaks), decodes numeric and
+    named character references that resolve to a character the
+    normalization folds or strips — separators (_ - space), Markdown
+    delimiters (* ~ `), and whitespace — and leaves every other
+    reference literal; it then strips the Markdown delimiters asterisk,
+    tilde and backtick, collapses whitespace, and case-folds. Those
+    steps cover identifier, hyphen, space, repeated-separator,
+    escaped-separator, entity, camelCase, zero-separator and case
+    spellings, plus markup or line wrapping around the words.
 
     The cost is deliberate: ordinary English containing "memory saved"
     is an offender too and must be reworded, and the diagnostic says so
@@ -746,8 +758,9 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     # a zero-separator run all match the same rule.
     FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]*saved")
     # The escapes the pin understands: a backslash before a separator
-    # character or a Markdown delimiter. Any other backslash stays literal.
-    _ESCAPABLE = "_*` -"
+    # character, a Markdown delimiter, or a line break. Any other
+    # backslash stays literal.
+    _ESCAPABLE = "_*`~ -\n\r"
     _ENTITY_REFERENCE = re.compile(
         r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);"
     )
@@ -812,7 +825,24 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "memory&underbar;saved",
         "memory&under;saved",
         "memory&nbsp;saved",
+        "memory&#42;saved",
+        "memory&#x2A;saved",
+        "memory&#96;saved",
+        "memory&#x60;saved",
+        "memory&#126;saved",
+        "memory&#9;saved",
+        "memory&#10;saved",
+        "memory&#13;saved",
+        "memory&#160;saved",
+        "memory&#8194;saved",
+        "memory&UnderBar;saved",
+        "memory&NonBreakingSpace;saved",
+        "memory&NewLine;saved",
+        "memory&Tab;saved",
         r"memory\ saved",
+        r"memory\~saved",
+        "memory\\\nsaved",
+        "memory\\\r\nsaved",
         "`memory saved`",
         "`memory *saved*`",
         "`memory **saved**`",
@@ -869,11 +899,11 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     def _normalize(cls, text):
         """Escape/entity decode, delimiter strip, whitespace collapse, casefold.
 
-        The decoders read the ORIGINAL text, so a separator escape survives
+        The decoders read the ORIGINAL text, so a foldable escape survives
         long enough to be decoded before the delimiter strip removes it
-        (``memory\\*saved``), and a space escape becomes the space the
-        collapse keeps. ``_separator_entity`` leaves every reference outside
-        the separator class literal.
+        (``memory\\*saved``), and an escaped space or line break becomes
+        the whitespace the collapse keeps. ``_foldable_entity`` leaves
+        every reference to a character outside the foldable set literal.
         """
         decoded = []
         index = 0
@@ -887,9 +917,9 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             if char == "&":
                 reference = cls._ENTITY_REFERENCE.match(text, index)
                 if reference is not None:
-                    separator = _separator_entity(reference)
-                    if separator != reference.group(0):
-                        decoded.append(separator)
+                    foldable = _foldable_entity(reference)
+                    if foldable != reference.group(0):
+                        decoded.append(foldable)
                         index = reference.end()
                         continue
             decoded.append(char)
@@ -973,7 +1003,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         )
 
         with pytest.raises(
-                AssertionError, match="re-teach the retired") as exc_info:
+                AssertionError, match="retired memory_saved flag") as exc_info:
             self.test_no_memory_saved_in_any_llm_loaded_surface()
         assert "zz-last-entry.md" in str(exc_info.value)
 
@@ -1070,7 +1100,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
 
         # Completing without raising IS the assertion: with the conversion
-        # outside _separator_entity's try, int() raises ValueError and this
+        # outside _foldable_entity's try, int() raises ValueError and this
         # call dies instead of leaving the reference literal.
         self.test_no_memory_saved_in_any_llm_loaded_surface()
 
@@ -1080,16 +1110,17 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             ("memory&#99999999999;saved",
              "an over-range numeric reference stays literal (chr's range "
              "failure is caught, not propagated)"),
-            ("memory&UnderBar;saved",
-             "a named reference outside the bounded separator map stays "
-             "literal, even a real HTML5 separator name"),
+            ("memory&copy;saved",
+             "a named reference outside the bounded decoder map stays "
+             "literal, even a real HTML5 name"),
             ("memory&#zz;saved",
              "a malformed reference matches neither the numeric nor the "
              "named grammar and stays literal (regex never reaches the "
              "decoder)"),
-            ("memory&#10;saved",
-             "a successfully parsed numeric reference to a NON-separator "
-             "character stays literal (the separator-class guard rejects it)"),
+            ("memory&#97;saved",
+             "a successfully parsed numeric reference to a character the "
+             "normalizer does not fold (a letter) stays literal (the "
+             "foldable-character guard rejects it)"),
         ],
         ids=["over-range", "unlisted-name", "malformed-ref", "non-separator"],
     )
@@ -1103,15 +1134,16 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
 
         # The file is clean exactly because the reference stays literal: a
-        # decoder that resolved it into a separator (fail-open) makes the
-        # pin raise, and this wrapper names the contract. Faults that are
-        # not the pin's own AssertionError (an environment refusal, a
-        # pytest skip, a decoder crash) propagate unchanged rather than
-        # being misattributed to the decoder's contract.
+        # decoder that over-resolves it (treats a non-foldable reference as
+        # foldable) makes the pin raise, and this wrapper names the
+        # contract. Faults that are not the pin's own AssertionError (an
+        # environment refusal, a pytest skip, a decoder crash) propagate
+        # unchanged rather than being misattributed to the decoder's
+        # contract.
         try:
             self.test_no_memory_saved_in_any_llm_loaded_surface()
         except AssertionError as exc:
-            if "re-teach the retired" not in str(exc):
+            if "retired memory_saved flag" not in str(exc):
                 # An environment or fixture refusal is not the decoder's
                 # contract; it propagates unchanged instead of being
                 # rewritten as a decoder failure.
@@ -1203,19 +1235,28 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             except UnicodeDecodeError:
                 undecodable.append(path)
                 continue
-            # Strict ban: normalize, then match anywhere. The bounded decode
-            # resolves escapes and character references that denote a
-            # separator character (_ - space) only; every other entity stays
-            # literal. Confirmed out-of-contract misses, all of which stay
-            # literal: markup shapes (memory<br>saved), double-encoded
-            # entities (memory&amp;#95;saved), an escaped backslash before a
-            # separator (memory\\_saved), a newline entity
-            # (memory&#10;saved), numeric references without a semicolon
-            # (memory&#95saved), and the whole non-ASCII-joiner family —
-            # Unicode dashes (memory–saved reads as memory-saved to a
-            # human), zero-width joiners, and homoglyph separators, none of
-            # which the ASCII separator class matches or decodes. No general
-            # HTML or escape decode happens here.
+            # Strict ban: normalize, then match anywhere. The escape
+            # decoder resolves a backslash before a separator, a Markdown
+            # delimiter, or a line break; the entity decoder resolves a
+            # numeric reference or a name in _NAMED_REFERENCES when the
+            # character is one the normalizer folds or strips (separators
+            # _ - space, delimiters * ~ `, whitespace), and leaves every
+            # other reference literal. Measured out-of-contract misses,
+            # each with its reason: an escaped ampersand
+            # (memory\&#95;saved — the backslash blocks the reference); an
+            # escaped backslash before a separator (memory\\_saved — the
+            # surviving backslash is not folded); a double-encoded entity
+            # (memory&amp;#95;saved — &amp; is not in the map); non-flattening
+            # markup (memory<br>saved — < and > survive); an
+            # entity-encoded letter (mem&#111;ry_saved — letters are not
+            # foldable); a reference without a semicolon (memory&#95saved —
+            # no reference grammar match); a named reference outside the
+            # map (memory&copy;saved); and the non-ASCII family — Unicode dashes
+            # (memory–saved reads as memory-saved to a human), zero-width
+            # joiners and spaces, soft hyphens, BOM/NUL, and homoglyph
+            # separators or letters, none of which the ASCII foldable set
+            # matches or decodes. No general HTML or escape decode happens
+            # here.
             if self._re_teaches_retired_flag(text):
                 offenders.append(path)
         diagnostics = []
@@ -1223,8 +1264,9 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             names = ", ".join(
                 str(p.relative_to(PLUGIN_ROOT.parent)) for p in offenders
             )
+            verb = "re-teaches" if len(offenders) == 1 else "re-teach"
             diagnostics.append(
-                f"{names} re-teach the retired memory_saved flag. The flag was removed "
+                f"{names} {verb} the retired memory_saved flag. The flag was removed "
                 f"in v4.8.36 (zero code readers, unenforced — a task could "
                 f"attest a save no mechanism verified); reintroducing the token "
                 f"in an LLM-loaded surface revives a write-only signal. This "
@@ -1239,10 +1281,12 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             names = ", ".join(
                 str(p.relative_to(PLUGIN_ROOT.parent)) for p in undecodable
             )
+            verb = "is" if len(undecodable) == 1 else "are"
+            pronoun = "it" if len(undecodable) == 1 else "them"
             diagnostics.append(
-                f"{names} is not valid UTF-8, so this pin cannot read it to check for "
-                f"the retired memory_saved flag; instruction surfaces must "
-                f"stay UTF-8."
+                f"{names} {verb} not valid UTF-8, so this pin cannot read "
+                f"{pronoun} to check for the retired memory_saved flag; "
+                f"instruction surfaces must stay UTF-8."
             )
         assert not diagnostics, "\n".join(diagnostics)
 
