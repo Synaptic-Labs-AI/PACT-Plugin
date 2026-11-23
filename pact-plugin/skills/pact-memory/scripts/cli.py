@@ -59,6 +59,7 @@ from scripts.database import (
     escape_for_envelope,
 )
 from scripts.memory_api import (
+    _UNPROVEN_CAUSES,
     PACTMemory,
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
@@ -72,7 +73,6 @@ from scripts.memory_api import (
 )
 from scripts.project_identity import is_canonical
 from scripts.setup_memory import ensure_initialized, get_setup_status
-
 
 # The stream the ERROR ENVELOPE is written to. None means "use sys.stderr",
 # which is the state outside a guarded window.
@@ -1240,18 +1240,26 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 ),
             )
         if legacy_verdict == "unproven":
-            # THE READ GATE REFUSED IT, SO A DEFAULTED TARGET MUST TOO. No
-            # file row places it and no recorded session from this
-            # repository wrote it: its folder name alone cannot tell this
-            # checkout's rows from another checkout of the same name.
+            # THE READ GATE REFUSED IT, SO A DEFAULTED TARGET MUST TOO. The
+            # cause and the row counts are the read gate's own, so this text
+            # and the read warning cannot disagree.
+            sessions = state["sessions"]
+            cause = _UNPROVEN_CAUSES[state["unproven_reason"]].format(**sessions)
             _error(
                 "REKEY_REFUSED",
                 escape_for_envelope(
-                    f"--from={from_id!r} is unproven: no file row places it "
-                    "and no recorded session from this repository wrote it, "
-                    "so it is not read here and a defaulted --to cannot "
-                    "claim it. Pass --to explicitly after confirming the rows "
-                    "belong here. Nothing was moved."
+                    f"--from={from_id!r} is unproven: {cause}, so it is not "
+                    "read here and a defaulted --to cannot claim it. Of its "
+                    f"memories, {sessions['here']} were written by sessions "
+                    f"recorded here, {sessions['subfolder']} by sessions "
+                    "launched in a subfolder of this repository, "
+                    f"{sessions['description_newer']} by sessions that started "
+                    "before its `description` file last changed, "
+                    f"{sessions['elsewhere']} by sessions recorded at another "
+                    f"checkout, and {sessions['unattributed']} by no recorded "
+                    "session. Pass "
+                    "--to explicitly after confirming the rows belong here. "
+                    "Nothing was moved."
                 ),
             )
         if legacy_verdict == "excluded":

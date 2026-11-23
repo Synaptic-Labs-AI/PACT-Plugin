@@ -6698,6 +6698,12 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function cli: state.get>"): (
             "reads the legacy-bucket state the store recorded at construction, for the rekey verdict"
         ),
+        ("call", "<call to no function cli: _UNPROVEN_CAUSES[state['unproven_reason']].format>"): (
+            "fills the unproven bucket's cause, from that recorded state, into the rekey refusal"
+        ),
+        ("call", "<name imported from a project module cli: _UNPROVEN_CAUSES>"): (
+            "memory_api's table of the clauses an unproven bucket's warning prints"
+        ),
         ("call", "<call to no function cli: store.exists>"): (
             "a method of the store path rekey resolves (resolve_db_path), checked before the store "
             "is opened"

@@ -1157,6 +1157,77 @@ class TestADefaultedTargetRefusesAnUnprovenBucket:
         assert "is unproven" in envelope["message"]
         assert _snapshot(store) == before
 
+    @pytest.mark.parametrize(
+        "cause, clause, counts",
+        [
+            (
+                "no_session",
+                "no file row places it and no session launched at the root of "
+                "this repository or of one of its linked worktrees wrote it",
+                (0, 0, 0, 0, 1),
+            ),
+            (
+                "recorded_elsewhere",
+                "1 of its memories were written by sessions recorded at another "
+                "checkout (0 by sessions recorded here)",
+                (0, 0, 0, 1, 0),
+            ),
+            (
+                "subfolder_launch",
+                "no file row places it, and the sessions recorded as writing "
+                "it were launched in a "
+                "subfolder of this repository",
+                (0, 1, 0, 0, 0),
+            ),
+            (
+                "description_newer",
+                "no file row places it, and this repository's `description` "
+                "file changed after the "
+                "sessions that wrote it started",
+                (0, 0, 1, 0, 0),
+            ),
+        ],
+    )
+    def test_the_refusal_names_the_cause_and_the_counts(
+        self, identity_env, store, monkeypatch, capfd, cause, clause, counts
+    ):
+        """The refusal says why the read gate refused the bucket, in the read
+        warning's words, and how many of its memories each kind of session
+        wrote.
+
+        RED WHEN the refusal states one fixed cause, or drops a count."""
+        from fixtures.identity_git import seed_session_evidence
+
+        self._rig(identity_env, monkeypatch, store, evidence=False)
+        repo = identity_env / "proj"
+        config = identity_env / "home" / ".claude"
+        if cause == "recorded_elsewhere":
+            elsewhere = identity_env / "delivered" / "proj"
+            elsewhere.mkdir(parents=True)
+            seed_session_evidence(config, elsewhere, "legacy-session")
+        elif cause == "subfolder_launch":
+            (repo / "src").mkdir()
+            seed_session_evidence(config, repo / "src", "legacy-session")
+        elif cause == "description_newer":
+            seed_session_evidence(
+                config, repo, "legacy-session", started_at="2000-01-01T00:00:00+00:00"
+            )
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--apply", "--db-path", str(store)], capfd
+        )
+        assert code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
+        message = envelope["message"]
+        assert f"--from='proj' is unproven: {clause}" in message, message
+        here, subfolder, newer, elsewhere_count, unattributed = counts
+        assert (
+            f"Of its memories, {here} were written by sessions recorded here, "
+            f"{subfolder} by sessions launched in a subfolder of this repository, "
+            f"{newer} by sessions that started before its `description` file "
+            f"last changed, {elsewhere_count} by sessions recorded at another "
+            f"checkout, and {unattributed} by no recorded session."
+        ) in message, message
+        assert message.endswith("Nothing was moved."), message
+
     def test_the_same_bucket_with_session_evidence_moves(
         self, identity_env, store, monkeypatch, capfd
     ):
