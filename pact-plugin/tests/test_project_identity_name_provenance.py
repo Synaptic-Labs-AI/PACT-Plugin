@@ -411,11 +411,9 @@ VICTIM = "github.com/victim/private"
 def _deinit_ed_admin(tmp_path: Path) -> Path:
     """A submodule admin dir after `submodule deinit -f`, origin still set.
 
-    MEASURED: `core.worktree` is unset for this shape while
-    `remote.origin.url` survives in the admin config. The forged-gitfile guard
-    uses `core.worktree` to tell a genuine submodule from a pointer at
-    somebody else's, so an unset value makes the guard answer False — "nothing
-    to contradict the pointer" — and the victim's origin is read.
+    `core.worktree` is unset for this shape while `remote.origin.url`
+    survives in the admin config, so a checkout reading this admin dir reads
+    its origin, `VICTIM`: the admin dir's own origin and nothing beyond it.
     """
     source = make_repo(tmp_path / "deinit-source")
     superproject = make_repo(tmp_path / "deinit-super")

@@ -816,10 +816,10 @@ class TestThePruneLedgerIsBounded:
                 return result
             return call
 
-        for name in ("write", "ftruncate", "truncate", "fsync", "replace", "rename"):
-            monkeypatch.setattr(os, name, observed(getattr(os, name)))
-        session_end._append_ledger_line(slug, line("trigger"))
-        monkeypatch.undo()
+        with pytest.MonkeyPatch.context() as patch:
+            for name in ("write", "ftruncate", "truncate", "fsync", "replace", "rename"):
+                patch.setattr(os, name, observed(getattr(os, name)))
+            session_end._append_ledger_line(slug, line("trigger"))
 
         final = memory_api._pruned_session_records(ledger)
         assert ledger.stat().st_size <= session_end._PRUNE_LEDGER_KEEP_BYTES
@@ -851,9 +851,9 @@ class TestThePruneLedgerIsBounded:
                 session_end._append_ledger_line(slug, line("between"))
             return real_flock(fd, operation)
 
-        monkeypatch.setattr(session_end.fcntl, "flock", flock)
-        session_end._append_ledger_line(slug, line("late"))
-        monkeypatch.undo()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(session_end.fcntl, "flock", flock)
+            session_end._append_ledger_line(slug, line("late"))
 
         assert raced
         assert ledger.stat().st_size < session_end._PRUNE_LEDGER_COMPACT_BYTES
@@ -875,9 +875,9 @@ class TestThePruneLedgerIsBounded:
         def refuse(*args, **kwargs):
             raise OSError("rename refused")
 
-        monkeypatch.setattr(os, "replace", refuse)
-        session_end._append_ledger_line(slug, line("trigger"))
-        monkeypatch.undo()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "replace", refuse)
+            session_end._append_ledger_line(slug, line("trigger"))
 
         assert [p.name for p in slug.iterdir()] == ["pruned-sessions.jsonl"]
         ids = [json.loads(item)["session_id"] for item in ledger.read_bytes().splitlines()]
@@ -963,10 +963,10 @@ class TestThePruneLedgerIsBounded:
                 seen["other"] = other
             return real_fsync(fd)
 
-        monkeypatch.setattr(os, "fsync", fsync)
-        session_end._append_ledger_line(slug, line("trigger"))
-        seen["other"].join(30)
-        monkeypatch.undo()
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(os, "fsync", fsync)
+            session_end._append_ledger_line(slug, line("trigger"))
+            seen["other"].join(30)
 
         assert len(seen["scratch"]) == 1
         assert seen["other_waited"] is True

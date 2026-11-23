@@ -193,9 +193,9 @@ def _read_scope(monkeypatch, cwd, store):
         "_LEGACY_SCOPE_CACHE", "_EXCLUSION_WARNED", "_CASE_VARIANT_WARNED",
         "_UNPROVEN_WARNED", "_SUBMODULE_SUPPRESSED",
     ):
-        memo = getattr(memory_api, name, None)
-        if memo is not None:
-            memo.clear()
+        # getattr with no default: a renamed or removed cache raises here
+        # instead of leaving its state to the next test
+        getattr(memory_api, name).clear()
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     monkeypatch.chdir(cwd)
     memory = PACTMemory(session_id="s", db_path=store)

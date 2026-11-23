@@ -215,19 +215,15 @@ class TestOverrideLocation:
         )
 
     def test_a_submodule_keeps_its_own_canonical_id(self, identity_env, monkeypatch):
-        """DEFECT ARM. `main_repo_root()` assumes `common_dir.parent` is the
-        repository root; in a submodule that is `<super>/.git/modules/vendor`,
-        so the origin is read at the wrong path and the id collapses to
-        'vendor'. Expected: the submodule's own canonical id.
+        """A submodule keeps its own canonical id. Its common dir is
+        `<super>/.git/modules/vendor`, so a resolver that took
+        `common_dir.parent` as the repository root would read the origin at
+        the wrong path and collapse the id to 'vendor'.
 
-        ALSO PINS THE LEGACY-CANDIDATE SUPPRESSION. The
-        PRE-change resolver derived the legacy bucket from
-        `common_dir.resolve().parent.name` — 'vendor' for this fixture — but a
-        submodule admin dir's parent name comes from the repository's own
-        tracked `.gitmodules`, so a repository could choose which populated
-        bucket a read unions. No legacy candidate is derived for this shape at
-        all. This supersedes the plan's pin-census line that required 'vendor'
-        here; the derivation is now pinned as ABSENT rather than as a value.
+        No legacy candidate is derived for a submodule: the admin dir's
+        parent name ('vendor' here) comes from the repository's own tracked
+        `.gitmodules`, so deriving one would let a repository choose which
+        populated bucket a read unions.
         """
         _, submodule = self._submodule(identity_env)
         monkeypatch.chdir(submodule)
@@ -240,15 +236,15 @@ class TestOverrideLocation:
         assert memory._legacy_project_basename is None, (
             "a submodule admin dir still derives a legacy candidate; its name "
             "is chosen by the tracked .gitmodules, so the read union must not "
-            "use it (supersedes the plan's 'vendor' census line)"
+            "use it"
         )
 
     def test_a_separate_git_dir_repo_keeps_its_own_canonical_id(
         self, identity_env, monkeypatch
     ):
-        """DEFECT ARM, same root cause. `--separate-git-dir` puts the common
-        dir outside the work tree, so `common_dir.parent` names the external
-        directory's parent, not the checkout root."""
+        """A `--separate-git-dir` repository keeps its own canonical id: the
+        common dir is outside the work tree, so `common_dir.parent` names
+        the external directory's parent, not the checkout root."""
         repo = make_separate_git_dir_repo(
             identity_env / "checkout", identity_env / "external.git"
         )
@@ -269,7 +265,8 @@ class TestOverrideLocation:
         ), "a --separate-git-dir repo lost its canonical id (common_dir.parent)"
 
         # The legacy candidate is the EXTERNAL git dir's parent name, not the
-        # checkout folder: the pre-change resolver used common_dir.parent.
+        # checkout folder, because folder-name rows were filed under
+        # common_dir.parent's name.
         memory = _memory(identity_env)
         assert memory._legacy_project_basename == identity_env.name, (
             "the legacy candidate followed the checkout folder instead of "
@@ -302,10 +299,9 @@ class TestOverrideLocation:
     ):
         """Catches a user setting consulted BEFORE the repository rung.
 
-        NOTE: the ruled disagreement WA RNING is unreachable by construction —
-        the user setting is read only after no repository answered, so the two
-        surfaces cannot disagree in one resolution. This arm pins precedence,
-        not a warning. (Reported to the lead as a contract gap, not a test.)
+        The user setting is read only after no repository answered, so the
+        two cannot disagree in one resolution and no warning is possible;
+        this arm pins precedence.
         """
         repo = make_repo(identity_env / "checkout", remote=REMOTE)
         write_common_dir_override(repo, OVERRIDE)

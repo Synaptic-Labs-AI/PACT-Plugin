@@ -3,7 +3,8 @@ Location: pact-plugin/tests/test_admin_gitdir_relative_record.py
 Summary: Pins that the worktree-listing fallback (`<common-dir>/worktrees/*/
          gitdir`, used when `git worktree list -z` is unavailable) resolves a
          RELATIVE record against the admin dir holding it, the form git writes
-         under `worktree.useRelativePaths`.
+         under `worktree.useRelativePaths`, and that a record padded with
+         trailing whitespace is trimmed as git trims it.
 Used by: pytest. Exercises hooks/shared/project_scope.py
          `_worktree_paths_from_admin_gitdirs` directly and through
          `_project_memory_root_cause`, with a real repository and worktree
@@ -75,3 +76,25 @@ def test_a_worktree_with_a_relative_record_is_known_main(tmp_path, monkeypatch):
     _without_the_z_listing(monkeypatch)
 
     assert _project_memory_root_cause(worktree) == (main.resolve(), ROOT_CAUSE_OK)
+
+
+def test_a_record_with_trailing_whitespace_names_its_worktree(tmp_path):
+    """git trims every trailing whitespace byte from an admin `gitdir` record
+    (spaces, tabs and blank lines, not one newline), and still lists the
+    worktree. The readers that compare the record against the worktree's
+    `.git` must trim the same way, or a worktree git lists is refused.
+    Control: git's own listing names the worktree with the padded record."""
+    from scripts.database import _worktree_admin_of
+
+    main = tmp_path / "main"
+    main.mkdir()
+    _git("init", "-q", ".", cwd=main)
+    _git("commit", "-q", "--allow-empty", "-m", "seed", cwd=main)
+    worktree = tmp_path / "wt"
+    _git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
+    admin = main / ".git" / "worktrees" / "wt"
+    (admin / "gitdir").write_bytes(os.fsencode(str(worktree / ".git")) + b" \t\n\n")
+
+    listed = _git("worktree", "list", "--porcelain", cwd=main)
+    assert f"worktree {worktree}\n" in listed, listed
+    assert _worktree_admin_of(str(worktree), str(main / ".git"), "wt") is True

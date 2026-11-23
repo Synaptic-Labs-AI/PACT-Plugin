@@ -412,6 +412,39 @@ class TestEmptyScopeNeverSelectsTheStore:
 # The plausibility gate and the disclosure
 # ---------------------------------------------------------------------------
 
+class TestTheCountsReadAsWords:
+    """Each legacy-bucket warning names its two counts in agreeing words.
+
+    Catches a count rendered "1 memories" or "1 file paths": the fixtures
+    elsewhere seed two memories, so only a count of one reaches the singular
+    form, and a count of zero must take the plural.
+    """
+
+    CASES = [
+        (1, 1, "1 memory and 1 file path,"),
+        (2, 2, "2 memories and 2 file paths,"),
+        (0, 0, "0 memories and 0 file paths,"),
+    ]
+
+    @pytest.mark.parametrize("memories, file_paths, words", CASES)
+    def test_the_exclusion_warning(self, tmp_path, caplog, memories, file_paths, words):
+        store = str(tmp_path / "store.db")
+        with caplog.at_level(logging.WARNING):
+            memory_api._warn_legacy_excluded(
+                store, LEGACY, memories, file_paths, tmp_path / "repo"
+            )
+        assert f"holds {words}" in caplog.text, caplog.text
+
+    @pytest.mark.parametrize("memories, file_paths, words", CASES)
+    def test_the_unproven_warning(self, tmp_path, caplog, memories, file_paths, words):
+        store = str(tmp_path / "store.db")
+        with caplog.at_level(logging.WARNING):
+            memory_api._warn_legacy_unproven(
+                store, LEGACY, CANONICAL, memories, file_paths
+            )
+        assert f"holds {words}" in caplog.text, caplog.text
+
+
 class TestDisclosure:
     def test_an_excluded_populated_bucket_is_disclosed_even_when_rows_return(
         self, union_env, caplog

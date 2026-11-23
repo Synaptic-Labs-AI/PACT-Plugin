@@ -156,18 +156,48 @@ def test_main_repo_root_ignores_an_inherited_GIT_DIR(tmp_path, monkeypatch, unre
     )
 
 
-# EVERY git call in the memory scripts is a resolver call: each one answers a
-# question about "the repository this session is in", and an inherited GIT_DIR
-# would answer it for another repository. The arm below therefore walks EVERY
-# function of EVERY module in this directory, so a git call added anywhere
-# there without the location-free environment fails it.
+# EVERY git call in the memory scripts and in the shared project-root module
+# is a resolver call: each one answers a question about "the repository this
+# session is in", and an inherited GIT_DIR would answer it for another
+# repository. The arm below therefore walks EVERY function of EVERY module in
+# that directory, and of the root module, so a git call added anywhere there
+# without the location-free environment fails it.
 _SCRIPTS_DIR = "skills/pact-memory/scripts"
+_ROOT_MODULE = "hooks/shared/project_scope.py"
 # Per-module floors: the git calls each module holds today. A scan that finds
 # fewer is not reading the module it names (a parse or detection regression),
 # so the floor fails it rather than letting an empty scan pass.
 _GIT_CALL_FLOORS = {
     "memory_api.py": 4,
     "project_identity.py": 3,
+    "project_scope.py": 5,
+}
+# Every other plugin module that runs git, or a command the scan cannot
+# resolve, with why its calls are not resolver calls. The census arm fails on
+# a module that runs git and is neither scanned nor listed here, and on a
+# listed module that no longer runs git.
+_NOT_RESOLVER_GIT_MODULES = {
+    "hooks/git_commit_check.py": (
+        "reads the index of the commit being made; inside a git hook the "
+        "inherited GIT_DIR names that commit's repository"
+    ),
+    "hooks/shared/backlog.py": (
+        "one runner for git and gh whose environment is the location-free one "
+        "with GH_HOST removed, held in a name the scan does not follow; the "
+        "inherited-GIT_DIR arms in test_backlog.py check it by behaviour"
+    ),
+    "hooks/shared/git_helpers.py": (
+        "defines run_git, whose environment is its caller's; each caller is "
+        "checked where it calls run_git"
+    ),
+    "hooks/shared/merge_guard_common.py": (
+        "reads git's aliases and command list for the command being guarded, "
+        "in that command's own git environment"
+    ),
+    "hooks/shared/wrap_up_record.py": (
+        "reads the branch and remotes of the checkout the wrap-up runs in, as "
+        "the user's own git commands there would"
+    ),
 }
 # The public subprocess callables that do NOT run a command. Every other
 # public callable of the module, exception classes aside, is treated as one
@@ -282,6 +312,20 @@ def _runner(node, aliases: dict):
     return _SUBPROCESS_CALLS.get(function) if module == "subprocess" else None
 
 
+def _is_run_git(node, aliases: dict) -> bool:
+    """`run_git` of the shared git helper module, by any import of it
+    (`from .git_helpers import run_git`, `from shared.git_helpers import
+    run_git as rg`, `git_helpers.run_git`). It runs git by definition, so its
+    argv needs no resolving."""
+    name = qualified_name(node, aliases) or ""
+    return name.split(".")[-2:] == ["git_helpers", "run_git"]
+
+
+# `run_git(args, timeout, text, env)`: the position `env` takes when passed
+# positionally.
+_RUN_GIT_ENV_POSITION = 3
+
+
 def _git_calls(scope, scope_bindings: dict = None, aliases: dict = None):
     """Yield (call, passes_location_free_env) for each call of a subprocess
     runner (`_SUBPROCESS_CALLS`, read from the subprocess module: `run`,
@@ -311,6 +355,17 @@ def _git_calls(scope, scope_bindings: dict = None, aliases: dict = None):
     aliases = aliases or {}
     for node in nodes:
         if not isinstance(node, ast.Call):
+            continue
+        partial_of_run_git = is_partial(node, aliases) and bool(node.args) and _is_run_git(
+            node.args[0], aliases
+        )
+        if _is_run_git(node.func, aliases) or partial_of_run_git:
+            env = call_argument(
+                node, _RUN_GIT_ENV_POSITION + (1 if partial_of_run_git else 0), "env"
+            )
+            yield node, env is not None and (
+                _is_location_free_env_call(env, aliases) or _is_key_filter_of_it(env, aliases)
+            )
             continue
         keyword, first = _runner(node.func, aliases), 0
         wrapped = is_partial(node, aliases) and bool(node.args)
@@ -413,6 +468,7 @@ def _unread_runner_references(source: str) -> list:
             continue
         if id(node) in annotations or (
             _runner(node, aliases) is None
+            and not _is_run_git(node, aliases)
             and (qualified_name(node, aliases) or "") not in _OTHER_RUNNERS
         ):
             continue
@@ -469,11 +525,47 @@ def test_a_python_file_in_a_subdirectory_fails_the_flat_listing(tmp_path):
         _flat_python_files(tmp_path)
 
 
+def _resolver_modules() -> list:
+    """The modules whose every git call is a resolver call: the memory
+    scripts and the shared project-root module."""
+    return [*_flat_python_files(_PLUGIN / _SCRIPTS_DIR), _PLUGIN / _ROOT_MODULE]
+
+
+def _plugin_modules() -> list:
+    """Every Python module the plugin ships: the hooks and every skill's
+    scripts."""
+    found = [*(_PLUGIN / "hooks").rglob("*.py"), *(_PLUGIN / "skills").glob("*/scripts/**/*.py")]
+    return sorted(path for path in found if "__pycache__" not in path.parts)
+
+
+def test_every_module_that_runs_git_is_scanned_or_listed():
+    """Census for the guard arm below: every plugin module that runs git (a
+    `run_git` call, or a subprocess, os or asyncio runner whose argv runs git
+    or cannot be resolved) is either one the arm scans or one listed in
+    `_NOT_RESOLVER_GIT_MODULES` with its reason. A listed module that runs
+    no git is stale and fails too. Control: the scanned modules hold git
+    calls, so the census reads the same calls the arm does."""
+    scanned = {path.relative_to(_PLUGIN).as_posix() for path in _resolver_modules()}
+    running = {}
+    for path in _plugin_modules():
+        source = path.read_text(encoding="utf-8")
+        found = len(_module_git_calls(source)) + len(_unread_runner_references(source))
+        if found:
+            running[path.relative_to(_PLUGIN).as_posix()] = found
+    assert running.get(_ROOT_MODULE, 0) >= _GIT_CALL_FLOORS["project_scope.py"], running
+    unlisted = sorted(set(running) - scanned - set(_NOT_RESOLVER_GIT_MODULES))
+    stale = sorted(set(_NOT_RESOLVER_GIT_MODULES) - set(running))
+    assert unlisted == [], f"modules that run git, neither scanned nor listed: {unlisted}"
+    assert stale == [], f"listed modules that no longer run git: {stale}"
+
+
 def test_every_resolver_git_call_passes_the_location_free_env():
-    """Guard arm: every call of a subprocess runner (every public
-    subprocess callable that runs a command, `_SUBPROCESS_CALLS`) in every
-    memory script whose argv runs git, or cannot be resolved statically,
-    passes `env=git_env_without_location()` (or an inline key filter of it).
+    """Guard arm: every `run_git` call, and every call of a subprocess
+    runner (every public subprocess callable that runs a command,
+    `_SUBPROCESS_CALLS`) whose argv runs git or cannot be resolved
+    statically, in every memory script and in the shared project-root
+    module, passes `env=git_env_without_location()` (or an inline key filter
+    of it), by keyword or, for `run_git`, by position.
     The call is found in every scope (`fixtures.identity_git.scopes`: the
     module, class bodies, functions, lambdas and comprehensions), through
     the module's imports (`import subprocess`, `import subprocess as sp`,
@@ -487,23 +579,25 @@ def test_every_resolver_git_call_passes_the_location_free_env():
     of an os or asyncio command runner (`_OTHER_RUNNERS`) whose program is
     git or cannot be resolved never passes. A runner used as a value (held
     in a name or a container, passed as an argument) fails closed
-    (`_unread_runner_references`). A git call added in that directory in
-    any of those forms without the environment fails here.
+    (`_unread_runner_references`). A git call added in those modules in
+    any of those forms without the environment fails here, and the census
+    above fails a module outside the scan that starts running git.
 
     NOT COVERED: a runner reached through `getattr`, `exec` or a re-export
     from another module, and a call of a partial's RESULT that overrides
     the environment the partial bound (the partial itself is checked),
     which only adversarial code would write."""
     missing, counts, unread = [], {}, []
-    for path in _flat_python_files(_PLUGIN / _SCRIPTS_DIR):
+    for path in _resolver_modules():
         source = path.read_text(encoding="utf-8")
         calls = _module_git_calls(source)
         counts[path.name] = len(calls)
+        where = path.relative_to(_PLUGIN).as_posix()
         missing += [
-            f"{_SCRIPTS_DIR}/{path.name}::{name}:{call.lineno}"
+            f"{where}::{name}:{call.lineno}"
             for name, call, passes in calls if not passes
         ]
-        unread += [f"{_SCRIPTS_DIR}/{path.name}:{line}" for line in _unread_runner_references(source)]
+        unread += [f"{where}:{line}" for line in _unread_runner_references(source)]
     for name, floor in _GIT_CALL_FLOORS.items():
         assert counts.get(name, 0) >= floor, (
             f"{name}: found {counts.get(name, 0)} git calls, expected at least {floor}"
@@ -530,6 +624,9 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
         import os
         import functools
         from functools import partial
+        from .git_helpers import run_git
+        from shared.git_helpers import run_git as rg
+        from shared import git_helpers
         BASE = ["git"]
         FROZEN = ("git",)
         LISTER = ["ls"]
@@ -595,6 +692,16 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
             inner = lambda: subprocess.run(near)  # skip
             inner = lambda: subprocess.run(far)  # bad
 
+            run_git(["rev-parse"], env=git_env_without_location())  # ok
+            run_git(["rev-parse"], 5, False, git_env_without_location())  # ok
+            git_helpers.run_git(["log"], env=git_env_without_location())  # ok
+            functools.partial(run_git, ["log"], env=git_env_without_location())  # ok
+            run_git(["rev-parse"])  # bad
+            run_git(["rev-parse"], 5, False, os.environ)  # bad
+            rg(["log"], env=dict(os.environ))  # bad
+            functools.partial(run_git, ["log"])  # bad
+            tools.run_git(["log"])  # skip
+
             def nested():
                 subprocess.run(near)  # skip
                 subprocess.run(far)  # bad
@@ -619,7 +726,7 @@ def test_the_scan_resolves_every_argv_form_and_fails_closed():
         call.lineno: ("ok" if passes else "bad")
         for _name, call, passes in _module_git_calls(source)
     }
-    assert len(expected) == 55, expected  # every marked fixture line was read
+    assert len(expected) == 64, expected  # every marked fixture line was read
     got = {number: seen.get(number, "skip") for number in expected}
     assert got == expected
     assert sorted(seen) == sorted(n for n, v in expected.items() if v != "skip")
@@ -634,8 +741,11 @@ def test_a_runner_used_as_a_value_fails_closed():
         import subprocess
         import functools
         from subprocess import run as launch
+        from shared.git_helpers import run_git
 
         def resolver(argv, proc: subprocess.Popen) -> subprocess.Popen:
+            asker = run_git  # unread
+            run_git(argv, env=env)  # read
             runner = subprocess.run  # unread
             table = {"run": subprocess.run}  # unread
             list(map(subprocess.check_output, argv))  # unread
@@ -654,7 +764,7 @@ def test_a_runner_used_as_a_value_fails_closed():
         for number, line in enumerate(source.splitlines(), start=1)
         if line.rstrip().endswith(("# unread", "# read"))
     }
-    assert len(expected) == 12, expected
+    assert len(expected) == 14, expected
     found = set(_unread_runner_references(source))
     assert {number: ("unread" if number in found else "read") for number in expected} == expected
     assert found <= set(expected), sorted(found - set(expected))

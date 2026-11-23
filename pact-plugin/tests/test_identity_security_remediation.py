@@ -231,8 +231,12 @@ class TestRedirectedCheckouts:
         assert pi._gitfile_points_at_foreign_gitdir(forged) is True
 
     def test_a_forged_direct_pointer_still_binds_the_victims_pin(self, tmp_path):
-        """THE ACKNOWLEDGED NARROWING, pinned so it cannot widen silently: the
-        origin is suppressed, but an override the VICTIM wrote still answers."""
+        """ADVERSARIAL-ONLY, pinned so it cannot widen silently: the origin is
+        suppressed, but an override the VICTIM wrote still answers. Kept
+        because `git init --separate-git-dir=<dir>/.git` writes a `.git` file
+        byte-identical to this hand-written one, and the pin is that honest
+        layout's only route to an id; the forgery needs a hand-written `.git`
+        and binds only a pin the victim wrote, never the victim's remote."""
         victim = _repo(tmp_path / "victim", "https://github.com/victim/private")
         (victim / ".git" / "pact-project-id").write_text(
             "github.com/victim/pinned\n", encoding="utf-8"

@@ -53,7 +53,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from fixtures.identity_git import make_repo
+from fixtures.identity_git import make_repo, start_after_description
 from shared.pact_context import PRUNE_LEDGER_NAME, project_slug
 
 PLUGIN = Path(__file__).resolve().parent.parent
@@ -289,11 +289,10 @@ def rig(tmp_path_factory):
     ):
         run(f"{label}, disagreeing record", *argv, stdin=stdin, session=DISAGREEING_SESSION)
     # Last, so no route above reads the bucket as vouched for: the live
-    # legacy session now starts after the repository's description.
-    from datetime import datetime, timezone
-
+    # legacy session now starts after the repository's description, dated
+    # from that file's ctime rather than this process's clock.
     record(LEGACY_LIVE, slug_dir, project_dir=str(repo),
-           started_at=datetime.now(timezone.utc).isoformat())
+           started_at=start_after_description(repo))
     # A row whose session is recorded at another directory keeps the whole
     # bucket out of the read scope, and the routes above have read both of
     # those records. The two rows now carry the live legacy session, so the

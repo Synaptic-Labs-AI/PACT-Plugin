@@ -8062,9 +8062,9 @@ def test_each_worktree_listing_reads_to_its_answer(
     """The memory skill's reader of `git worktree list --porcelain`, the one
     this module's roots and branch names read, gives each listing its
     records, or refuses it: one it could not hold whole is no listing."""
-    paths = {name: tmp_path / name for name in "abwd"}
-    for name in "ab":
-        (paths[name] / ".git").mkdir(parents=True)
+    paths = {key: tmp_path / key for key in "abwd"}
+    for key in "ab":
+        (paths[key] / ".git").mkdir(parents=True)
     paths["d"].mkdir()
     nul, plain = (text.format(**paths) for text in (nul, plain))
     _canned_git(tmp_path, monkeypatch, nul, plain)

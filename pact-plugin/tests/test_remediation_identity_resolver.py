@@ -517,7 +517,11 @@ class TestThePreChangeName:
 
     @staticmethod
     def _place(rig, monkeypatch, cwd, declared, record):
-        monkeypatch.setenv("HOME", str(rig["home"]))
+        # The resolver asks `Path.home()`, not the HOME variable, so HOME is
+        # left pointing elsewhere: a resolver that read it would miss the rig's
+        # home and the HOME landing case would lose its warning.
+        monkeypatch.setenv("HOME", str(rig["home"].parent / "not-home"))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: rig["home"]))
         paths = dict(rig, home_notes=rig["home"] / "notes")
         monkeypatch.chdir(paths[cwd])
         if declared is None:
@@ -540,6 +544,16 @@ class TestThePreChangeName:
     ):
         self._place(name_rig, monkeypatch, cwd, declared, record)
         assert PACTMemory._detect_project_basename() == expected
+
+    def test_the_home_landing_case_takes_the_home_branch(
+        self, name_rig, monkeypatch, caplog
+    ):
+        """The case is named for the branch, so the branch's own warning must
+        fire: a `.claude` marker walk also names `home`, without the warning."""
+        self._place(name_rig, monkeypatch, "home_notes", None, None)
+        with caplog.at_level(logging.WARNING):
+            assert PACTMemory._detect_project_basename() == "home"
+        assert any("HOME directory" in record.getMessage() for record in caplog.records)
 
     def test_the_user_setting_rung_keeps_the_folder_name(
         self, name_rig, monkeypatch, tmp_path
@@ -745,9 +759,9 @@ def _fresh_scope_state() -> None:
         "_LEGACY_SCOPE_CACHE", "_EXCLUSION_WARNED", "_CASE_VARIANT_WARNED",
         "_UNPROVEN_WARNED", "_SUBMODULE_SUPPRESSED",
     ):
-        memo = getattr(memory_api, name, None)
-        if memo is not None:
-            memo.clear()
+        # getattr with no default: a renamed or removed cache raises here
+        # instead of leaving its state to the next test
+        getattr(memory_api, name).clear()
 
 
 REMOTE = "https://github.com/o/proj.git"
@@ -2230,7 +2244,7 @@ class TestTheEvidenceCheckScansEachRootOnce:
         from shared.pact_context import PRUNE_LEDGER_NAME, reconstruct_session_dir
 
         _fresh_scope_state()
-        getattr(memory_api, "_PRUNED_SESSION_INDEX", {}).clear()
+        memory_api._PRUNED_SESSION_INDEX.clear()
         repo = make_repo(identity_env / "proj", remote=REMOTE)
         monkeypatch.chdir(repo)
         store = identity_env / "store.db"
@@ -3498,7 +3512,22 @@ _PURE_BUILTINS = frozenset({
     "enumerate", "filter", "float", "frozenset", "hex", "int", "isinstance",
     "issubclass", "len", "list", "map", "max", "min", "oct", "ord", "range",
     "repr", "reversed", "round", "set", "sorted", "str", "sum", "tuple", "zip",
+    "type", "id", "hash", "callable", "hasattr", "getattr",
 })
+
+
+def _one_argument_type(*args):
+    """`type` as the eval binds it: one argument gives that value's class; the
+    three-argument form, which builds a class whose namespace can keep a
+    value, gives back its arguments so the verdict reads what they hold."""
+    return type(args[0]) if len(args) == 1 else args
+
+
+def _getattr_or_default(value, name, *default):
+    """`getattr` as the eval binds it: the attribute, and with a default also
+    the default, since an object without the attribute gives the default
+    back (an unknown object answers every attribute with itself)."""
+    return (getattr(value, name, *default), *default) if default else getattr(value, name)
 
 
 def _gives_back_an_answer(node, passing, parents, constants, sentinel_values, builtin_names=frozenset()) -> bool:
@@ -3529,8 +3558,16 @@ def _gives_back_an_answer(node, passing, parents, constants, sentinel_values, bu
                 return True
     import builtins
 
+    import copy as copying
+
     names_bound = {name: getattr(builtins, name) for name in builtin_names}
-    for answer in [*sentinel_values, _ANSWER_SAMPLES[1]]:
+    if "type" in names_bound:
+        names_bound["type"] = _one_argument_type
+    if "getattr" in names_bound:
+        names_bound["getattr"] = _getattr_or_default
+    # A fresh record list per evaluation: `getattr` reaches the list's own
+    # methods, and one that empties it would change every later verdict.
+    for answer in [*sentinel_values, copying.deepcopy(_ANSWER_SAMPLES[1])]:
         handed = []
         adversaries = {name: _Adversary(handed) for name in unknown}
         try:
@@ -3568,6 +3605,38 @@ def test_the_answer_eval_runs_no_builtin_with_an_effect(monkeypatch, name):
     assert verdict(f"{name}(answer)") is True
     assert calls == []
     assert verdict("len(answer)") is False  # control
+
+
+@pytest.mark.parametrize("source, gives_back", [
+    ("type(answer).__name__", False),
+    ("id(answer)", False),
+    ("hash(answer)", False),
+    ("callable(answer)", False),
+    ("hasattr(answer, 'append')", False),
+    ("getattr(answer, 'missing', None) is None", False),
+    ("getattr(holder, 'field', answer)", True),
+    ("type('Kept', (), {'value': answer})", True),
+    ("[id(answer), answer]", True),
+    ("type(answer)(answer) if callable(answer) else answer", True),
+])
+def test_the_pure_builtins_judge_honest_and_hiding_forms(source, gives_back):
+    """`type`, `id`, `hash`, `callable`, `hasattr` and `getattr` are evaluated,
+    not treated as unknown, so an expression that only inspects the answer
+    gives none back, and one that passes the answer on through them still
+    does. The three-argument `type`, which can keep a value in the class it
+    builds, is judged by what its arguments hold, and `getattr` with a
+    default by the default too.
+
+    RED WHEN one of these builtins is dropped from `_PURE_BUILTINS` (the
+    honest rows fail closed) or the evaluation stops reading what a call
+    hands back (the hiding rows pass)."""
+    import builtins
+
+    every = frozenset(n for n in dir(builtins) if not n.startswith("_"))
+    node = ast.parse(source, mode="eval").body
+    parents = {id(child): parent for parent in ast.walk(node) for child in ast.iter_child_nodes(parent)}
+    passing = [n for n in ast.walk(node) if isinstance(n, ast.Name) and n.id == "answer"]
+    assert _gives_back_an_answer(node, passing, parents, {}, ["unreadable"], every) is gives_back
 
 
 def _replace_passing(node, held):

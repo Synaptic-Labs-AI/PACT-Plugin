@@ -176,7 +176,7 @@ class TestTheOriginIsTheUrlGitFetches:
         assert identity.detail != pi.EMPTY_URL_ENTRY_DETAIL
         assert identity.decline_reason is None
 
-    def test_only_the_empty_entry_decline_carries_a_detail(self, tmp_path):
+    def test_an_unrepresentable_origin_decline_carries_no_detail(self, tmp_path):
         assert_outside_repository(tmp_path)
         repo = make_repo(tmp_path / "repo", remote="https://host/owner/re po")
 
@@ -2066,6 +2066,24 @@ def _in_child(code: str, *args: str) -> str:
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
+
+def _wait_until_waiting_in_open(proc):
+    """Return once `proc` waits in a FIFO open for a reader. Linux names that
+    wait `wait_for_partner` in /proc; where /proc is absent, wait a second."""
+    import time
+
+    wchan = Path(f"/proc/{proc.pid}/wchan")
+    if not wchan.exists():
+        time.sleep(1)
+        return
+    deadline = time.monotonic() + 30
+    while True:
+        assert proc.poll() is None, "the writer exited before its open waited"
+        if wchan.read_text() == "wait_for_partner":
+            return
+        assert time.monotonic() < deadline, "the writer never waited in its open"
+        time.sleep(0.01)
+
 class TestAGitFileThatIsNotARegularFileNamesNothing:
     """A `.git` or an admin `gitdir` that is a FIFO, a link to one, or a
     directory is read as naming nothing, as git reads only a regular file
@@ -2107,7 +2125,6 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
         it, so a writer still waiting after the read shows it was not opened.
         Control: the same reader reads a regular file whole."""
         import sys
-        import time
 
         (tmp_path / "regular").write_text("gitdir: /x\n")
         assert pi.read_git_file(tmp_path / "regular") == "gitdir: /x\n"
@@ -2116,7 +2133,7 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
             [sys.executable, "-c", "import sys; open(sys.argv[1], 'wb')", str(fifo)]
         )
         try:
-            time.sleep(1)  # the writer is now waiting in its open
+            _wait_until_waiting_in_open(writer)
             assert writer.poll() is None
             assert pi.read_git_file(fifo) is None
             with pytest.raises(subprocess.TimeoutExpired):

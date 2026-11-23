@@ -83,6 +83,32 @@ def test_the_resolver_reports_the_worktree_as_its_own_root(sep_worktree):
     assert root_or_input(wt) == wt.resolve()
 
 
+def test_an_unanswered_git_dir_question_leaves_the_worktree_unknown(
+    sep_worktree, monkeypatch
+):
+    """The worktree is its own root only when git says the common dir's parent
+    is not inside a git dir; when that question gets no answer (git timed out
+    or is missing), the root is unknown, not the worktree. Control: the same
+    worktree with the question answered is its own root."""
+    from helpers import known_root
+    from shared import project_scope
+
+    _work, wt, _md = sep_worktree
+    assert known_root(wt) == wt.resolve()
+    real = project_scope.run_git
+    asked = []
+
+    def unanswered(args, *rest, **kwargs):
+        if "--is-inside-git-dir" in args:
+            asked.append(args)
+            return None
+        return real(args, *rest, **kwargs)
+
+    monkeypatch.setattr(project_scope, "run_git", unanswered)
+    assert known_root(wt) is None, "an unanswered git-dir question made the worktree its own root"
+    assert asked, "the question the arm withholds was never asked"
+
+
 def test_the_session_start_writers_write_the_worktree_copy(sep_worktree, monkeypatch):
     _work, wt, wt_md = sep_worktree
     before = wt_md.read_bytes()
@@ -348,10 +374,17 @@ def test_a_submodules_linked_worktree_is_unknown_and_the_archive_refuses(
     monkeypatch.chdir(wt)
     with pytest.raises(archive_pin._Unevaluable) as excinfo:
         archive_pin.resolve_claude_md()
+    reason = excinfo.value.reason
+    assert "project memory root unknown" in reason, reason
     assert (
         "exists but could not be verified as a checkout of a repository"
-        in excinfo.value.reason
-    ), excinfo.value.reason
+        in reason
+    ), reason
+    # git answered on this layout, so the refusal is the anchor's, not the
+    # git-failure text
+    assert "git could not answer" not in reason, reason
+    # the worktree's own document is left as it was
+    assert wt_md.read_text(encoding="utf-8") == _managed_doc(_stale_capable_pin())
 
 
 def test_the_no_argument_reader_answers_nothing_on_a_worktree_cwd(

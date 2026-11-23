@@ -201,6 +201,7 @@ class TestNoLineWithoutATrustworthyRecord:
         (entry / "pact-session-context.json").symlink_to(real)
         _age(entry)
         _reap(slug_dir)
+        assert not entry.exists()
         assert _ids(slug_dir) == expected
 
 

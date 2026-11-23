@@ -264,7 +264,11 @@ class TestTheRekeyNoOpGivesTheLibrarysAnswer:
     BUCKET = "github.com/o/same"
 
     @pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
-    @pytest.mark.parametrize("writable", [True, False], ids=["writable", "read-only file"])
+    @pytest.mark.parametrize("writable", [
+        pytest.param(True, id="writable"),
+        # root writes through a 0444 file, so the read-only case needs a non-root uid
+        pytest.param(False, id="read-only file", marks=pytest.mark.requires_non_root),
+    ])
     def test_the_no_op_envelope_is_the_librarys_answer(
         self, identity_env, store, monkeypatch, capfd, apply, writable
     ):
@@ -1508,6 +1512,7 @@ class TestSyncReportsItsReadScope:
                 )
             ),
         )
+        monkeypatch.chdir(identity_env)
         code, envelope = _cli(["sync", "--db-path", str(store)], capfd)
         assert code == 0, envelope
         assert envelope["result"]["read_scope"] == []
