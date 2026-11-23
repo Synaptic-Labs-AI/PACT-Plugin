@@ -631,10 +631,10 @@ class TestNoFirstActionFossilInSkillBodies:
 
 # Named references the decoder resolves. The map is deliberately closed:
 # separators (lowbar/underbar/under/UnderBar -> "_", hyphen/dash/minus ->
-# "-", nbsp/NBSP/NonBreakingSpace -> space) and the canonical whitespace
-# names (NewLine -> LF, Tab -> TAB). Any name outside it stays literal,
-# the same contract as a numeric reference to a character the normalizer
-# does not fold.
+# "-", nbsp/NBSP/NonBreakingSpace -> space), the canonical whitespace
+# names (NewLine -> LF, Tab -> TAB), and the backslash name (bsol). Any
+# name outside it stays literal, the same contract as a numeric reference
+# to a character the normalization does not fold.
 _NAMED_REFERENCES = {
     "lowbar": "_",
     "underbar": "_",
@@ -648,22 +648,28 @@ _NAMED_REFERENCES = {
     "NonBreakingSpace": " ",
     "NewLine": "\n",
     "Tab": "\t",
+    "bsol": "\\",
 }
 
-# The characters the normalizer folds or strips, so a reference that
+# The characters the normalization folds or strips, so a reference that
 # resolves to one changes the scanned text: separators (_ - space) and
 # Markdown delimiters (* ~ `). Whitespace joins them via str.isspace().
 _FOLDABLE = "_- *~`"
+
+# Characters the entity decoder may resolve. A backslash is not foldable
+# itself, but decoding it matters because the unescape step runs AFTER
+# this decoder and consumes it as an escape introducer.
+_ENTITY_RESOLVABLE = _FOLDABLE + "\\"
 
 
 def _foldable_entity(match):
     """Bounded entity decoder for the memory_saved pin: numeric references
     and the named references in _NAMED_REFERENCES are resolved when the
-    character is one the normalizer folds or strips — a separator, a
-    Markdown delimiter, or whitespace. Any other reference — unlisted
-    name, malformed, over-long (past CPython's int digit limit),
-    over-range (past chr's valid range), or a character outside the
-    foldable set — is returned unchanged."""
+    character is one the normalization folds or strips — a separator, a
+    Markdown delimiter, whitespace — or a backslash the unescape step
+    consumes. Any other reference — unlisted name, malformed, over-long
+    (past CPython's int digit limit), over-range (past chr's valid
+    range), or a character outside that set — is returned unchanged."""
     token = match.group(1)
     if token.startswith("#"):
         code = token[1:]
@@ -677,10 +683,10 @@ def _foldable_entity(match):
         char = _NAMED_REFERENCES.get(token)
         if char is None:
             return match.group(0)
-    return char if char in _FOLDABLE or char.isspace() else match.group(0)
+    return char if char in _ENTITY_RESOLVABLE or char.isspace() else match.group(0)
 
 
-# The ONE census of LLM-loaded instruction surfaces. The pin's population
+# The census shared by this pin and its two siblings. The pin's population
 # below and the two sibling census pins all scan these six directories; a
 # drift arm in TestMemorySavedRetiredFromInstructionSurfaces holds the three
 # copies equal, so editing one without the others fails the suite.
@@ -720,14 +726,16 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
 
     The rule is a STRICT TOKEN BAN: after normalization, any match of
     "memory[-_ ]*saved" is an offender, with no context test.
-    Normalization unescapes the foldable escapes (underscore, asterisk,
-    backtick, tilde, hyphen, space, and line breaks), decodes numeric and
-    named character references that resolve to a character the
-    normalization folds or strips — separators (_ - space), Markdown
-    delimiters (* ~ `), and whitespace — and leaves every other
-    reference literal; it then strips the Markdown delimiters asterisk,
-    tilde and backtick, collapses whitespace, and case-folds. Those
-    steps cover identifier, hyphen, space, repeated-separator,
+    Normalization decodes character references first and then unescapes
+    backslashes. An escape is a backslash before a separator, a Markdown
+    delimiter, or a line break. The decoder resolves a numeric reference,
+    or a named reference in its closed map, when the character is one
+    the normalization folds or strips — separators (_ - space), Markdown
+    delimiters (* ~ `), whitespace, or a backslash the unescape step
+    consumes; every other reference stays literal, a named reference
+    outside the map included. It then strips the Markdown delimiters
+    asterisk, tilde and backtick, collapses whitespace, and case-folds.
+    Those steps cover identifier, hyphen, space, repeated-separator,
     escaped-separator, entity, camelCase, zero-separator and case
     spellings, plus markup or line wrapping around the words.
 
@@ -839,10 +847,15 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "memory&NonBreakingSpace;saved",
         "memory&NewLine;saved",
         "memory&Tab;saved",
+        "memory&#92;_saved",
+        "memory&bsol;_saved",
+        "memory&#92;&#95;saved",
+        "memory&#92;~saved",
         r"memory\ saved",
         r"memory\~saved",
         "memory\\\nsaved",
         "memory\\\r\nsaved",
+        r"memory\&#95;saved",
         "`memory saved`",
         "`memory *saved*`",
         "`memory **saved**`",
@@ -896,35 +909,57 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         assert "pact-plugin/agents/NOTES.markdown" in message
 
     @classmethod
-    def _normalize(cls, text):
-        """Escape/entity decode, delimiter strip, whitespace collapse, casefold.
+    def _decode_references(cls, text):
+        """Resolve character references on the raw text.
 
-        The decoders read the ORIGINAL text, so a foldable escape survives
-        long enough to be decoded before the delimiter strip removes it
-        (``memory\\*saved``), and an escaped space or line break becomes
-        the whitespace the collapse keeps. ``_foldable_entity`` leaves
-        every reference to a character outside the foldable set literal.
+        This runs BEFORE the unescape step, which is what lets an encoded
+        backslash (``&#92;``, ``&bsol;``) become the backslash that
+        escapes the next character; the decoder keeps every other
+        reference literal.
         """
         decoded = []
+        index = 0
+        while index < len(text):
+            if text[index] == "&":
+                reference = cls._ENTITY_REFERENCE.match(text, index)
+                if reference is not None:
+                    resolved = _foldable_entity(reference)
+                    if resolved != reference.group(0):
+                        decoded.append(resolved)
+                        index = reference.end()
+                        continue
+            decoded.append(text[index])
+            index += 1
+        return "".join(decoded)
+
+    @classmethod
+    def _unescape(cls, text):
+        """Resolve a backslash before a separator, delimiter, or line break."""
+        unescaped = []
         index = 0
         while index < len(text):
             char = text[index]
             if (char == "\\" and index + 1 < len(text)
                     and text[index + 1] in cls._ESCAPABLE):
-                decoded.append(text[index + 1])
+                unescaped.append(text[index + 1])
                 index += 2
                 continue
-            if char == "&":
-                reference = cls._ENTITY_REFERENCE.match(text, index)
-                if reference is not None:
-                    foldable = _foldable_entity(reference)
-                    if foldable != reference.group(0):
-                        decoded.append(foldable)
-                        index = reference.end()
-                        continue
-            decoded.append(char)
+            unescaped.append(char)
             index += 1
-        stripped = "".join(char for char in decoded if char not in "*~`")
+        return "".join(unescaped)
+
+    @classmethod
+    def _normalize(cls, text):
+        """Decode references, unescape backslashes, strip delimiters,
+        collapse whitespace, casefold — in that order.
+
+        The order is load-bearing: a reference that resolves to a
+        backslash must exist before the unescape step runs, and a
+        backslash-escaped delimiter must be unescaped before the strip
+        removes it (``memory\\*saved``).
+        """
+        unescaped = cls._unescape(cls._decode_references(text))
+        stripped = "".join(char for char in unescaped if char not in "*~`")
         return " ".join(stripped.split()).casefold()
 
     @classmethod
@@ -1121,8 +1156,13 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
              "a successfully parsed numeric reference to a character the "
              "normalizer does not fold (a letter) stays literal (the "
              "foldable-character guard rejects it)"),
+            ("mem&#111;ry_saved",
+             "an encoded LETTER inside the token stays literal; a guard "
+             "that resolved every reference would decode it into the "
+             "banned token and make the pin raise"),
         ],
-        ids=["over-range", "unlisted-name", "malformed-ref", "non-separator"],
+        ids=["over-range", "unlisted-name", "malformed-ref", "non-separator",
+             "entity-letter"],
     )
     def test_pin_passes_when_reference_stays_literal(
             self, content, why, tmp_path, monkeypatch):
@@ -1235,28 +1275,34 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             except UnicodeDecodeError:
                 undecodable.append(path)
                 continue
-            # Strict ban: normalize, then match anywhere. The escape
-            # decoder resolves a backslash before a separator, a Markdown
-            # delimiter, or a line break; the entity decoder resolves a
-            # numeric reference or a name in _NAMED_REFERENCES when the
-            # character is one the normalizer folds or strips (separators
-            # _ - space, delimiters * ~ `, whitespace), and leaves every
-            # other reference literal. Measured out-of-contract misses,
-            # each with its reason: an escaped ampersand
-            # (memory\&#95;saved — the backslash blocks the reference); an
-            # escaped backslash before a separator (memory\\_saved — the
-            # surviving backslash is not folded); a double-encoded entity
-            # (memory&amp;#95;saved — &amp; is not in the map); non-flattening
+            # Strict ban: normalize, then match anywhere. Normalization order is
+            # load-bearing: character references are decoded FIRST, then
+            # backslashes are unescaped, so an encoded backslash
+            # (memory&#92;_saved, memory&bsol;_saved) becomes the escape the
+            # next character needs. The escape step resolves a backslash
+            # before a separator, a Markdown delimiter, or a line break;
+            # the entity step resolves a numeric reference, or a named
+            # reference IN _NAMED_REFERENCES, when the character is one the
+            # normalization folds or strips (separators _ - space,
+            # delimiters * ~ `, whitespace) or a backslash; every other
+            # reference stays literal. Measured out-of-contract misses,
+            # each with its reason: an escaped backslash before a
+            # separator (memory\\_saved — the surviving backslash is not
+            # folded); a double-encoded entity (memory&amp;#95;saved and
+            # memory&amp;#92;_saved — &amp; is not in the map); non-flattening
             # markup (memory<br>saved — < and > survive); an
             # entity-encoded letter (mem&#111;ry_saved — letters are not
             # foldable); a reference without a semicolon (memory&#95saved —
             # no reference grammar match); a named reference outside the
-            # map (memory&copy;saved); and the non-ASCII family — Unicode dashes
-            # (memory–saved reads as memory-saved to a human), zero-width
-            # joiners and spaces, soft hyphens, BOM/NUL, and homoglyph
-            # separators or letters, none of which the ASCII foldable set
-            # matches or decodes. No general HTML or escape decode happens
-            # here.
+            # map (memory&copy;saved); named whitespace references outside
+            # the map (&ensp; &emsp; &thinsp; &hairsp; &numsp; &puncsp;
+            # &MediumSpace; &NoBreak; — their numeric forms decode, the
+            # names are not in the map); and the non-ASCII family —
+            # Unicode dashes (memory–saved reads as memory-saved to a
+            # human), zero-width joiners and spaces, soft hyphens, BOM/NUL,
+            # and homoglyph separators or letters, none of which the ASCII
+            # foldable set matches or decodes. No general HTML or escape
+            # decode happens here.
             if self._re_teaches_retired_flag(text):
                 offenders.append(path)
         diagnostics = []

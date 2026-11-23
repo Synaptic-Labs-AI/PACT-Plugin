@@ -26,10 +26,14 @@ pytestmark = pytest.mark.claude_md_ambient
 
 PLUGIN_ROOT = Path(__file__).parent.parent
 
-# The census population. NOT the nine dirs the model gate walks, and no
-# top-level iterdir pass: that scope yields 357 out-of-population hits across
-# 86 files (tests 227, hooks 100, README 21, telegram 6, reference 3).
-CENSUS_DIRS = ("agents", "commands", "skills", "protocols")
+# The census population: the six LLM-loaded surfaces this PR declares —
+# agents, commands, skills, protocols, reference, templates. NOT the nine
+# dirs the model gate walks, and no top-level iterdir pass: that scope
+# yields hundreds of out-of-population hits across tests, hooks, README and
+# other non-instruction files. `reference/` and `templates/` are here
+# because the retirement pin scans them as LLM-loaded instruction surfaces.
+CENSUS_DIRS = ("agents", "commands", "skills", "protocols", "reference",
+               "templates")
 
 # Suffix ALLOWLIST, and it is load-bearing rather than defence-in-depth: it is
 # the only mechanism that excludes `__pycache__/*.pyc`. No (path, literal,
@@ -119,6 +123,16 @@ _TELEGRAM = (
 # lives where the scan does not look. Do not "tidy" this into CENSUS_DIRS.
 _TELEGRAM_PREMISE = ("telegram/config.py", 'Path.home() / ".claude" / "pact-telegram"')
 
+# Justification for the one reference/ literal: the sentence documents the
+# memory DB's DEFAULT, which is hard-pinned to the default root in code.
+# Migrating the prose would describe a default that does not exist.
+_CONFIG_DOC_PIN = (
+    "documents the default-root-pinned memory DB: "
+    "skills/pact-memory/scripts/config.py:186 (#1410) pins "
+    "~/.claude/pact-memory, so migrating this prose would describe a "
+    "default that does not exist"
+)
+
 # (path, literal, count, justification). The count closes the hole in BOTH
 # directions: a new site pushes it above declared, a removed site drops it
 # below, so a stale entry reds instead of outliving its reason.
@@ -127,6 +141,7 @@ ARM1_ALLOWLIST = [
     ("commands/telegram-setup.md", "~/.claude/pact-telegram/.env", 6, _TELEGRAM),
     ("protocols/pact-protocols.md", "~/.claude/pact-memory/memory.db", 1, _DB_PIN_MIRRORED),
     ("protocols/pact-state-recovery.md", "~/.claude/pact-memory/memory.db", 1, _DB_PIN_MIRRORED),
+    ("reference/config.md", "~/.claude/pact-memory", 1, _CONFIG_DOC_PIN),
     ("skills/pact-memory/SKILL.md", "~/.claude/pact-memory/memory.db", 2, _DB_PIN),
     ("skills/pact-memory/scripts/cli.py", "~/.claude/pact-memory/...", 1,
      "illustrative, no consumer — a stderr-scrubbing comment. NOT 'pact-memory, "
@@ -452,7 +467,9 @@ def test_control_tracked_census_population_excludes_untracked_files(tmp_path, mo
         ("agents", "known_module.py"),
         ("commands", "orchestrate.md"),
         ("protocols", "pact-protocols.md"),
+        ("reference", "config.md"),
         ("skills", "pact-handoff-harvest/SKILL.md"),
+        ("templates", "environment-model.md"),
     )
     for subdir, known in known_members:
         path = plugin / subdir / known

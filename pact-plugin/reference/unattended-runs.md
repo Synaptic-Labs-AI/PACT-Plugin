@@ -45,16 +45,19 @@ If you walk away from a run waiting on a long job, note the deadline the lead
 gave you. **A run that is quiet past its stated deadline is the case to check on,
 whichever teammate mode you are in.**
 
-You can also set it permanently in `~/.claude/settings.json`:
+You can also set it permanently in `{config_dir}/settings.json`:
 
 ```json
 { "teammateMode": "tmux" }
 ```
 
+`{config_dir}` is the config root Claude Code reads: `$CLAUDE_CONFIG_DIR`
+when set, otherwise `~/.claude`.
+
 > **In tmux mode, set the task-tools value too.** A teammate in its own split
 > pane is a separate Claude Code process, so the tools it gets follow its own
 > model. A lead can hold the task tools while a teammate does not. The `env`
-> block that restores them sits in the same `~/.claude/settings.json` shown
+> block that restores them sits in the same `{config_dir}/settings.json` shown
 > above, which each Claude Code process reads at start, so one entry is
 > sufficient for the lead and the teammate. See
 > [If specialist agents will not spawn](https://github.com/Synaptic-Labs-AI/PACT-Plugin#if-specialist-agents-will-not-spawn).
