@@ -8,8 +8,8 @@ Tests cover:
 4. Skill names and descriptions are present
 5. SKILL.md body contains substantive content
 6. The retired memory_saved flag stays absent from every tracked Markdown
-   file across the six LLM-loaded instruction surfaces (bounded entity
-   and escape decoding, per-surface file control, real temporary-Git
+   file across the six LLM-loaded instruction surfaces (strict token ban
+   over normalized text, per-surface file control, real temporary-Git
    self-tests)
 """
 import ast
@@ -21,7 +21,9 @@ import pytest
 
 from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from helpers import parse_frontmatter
+from test_agent_memory_leaf_construction import _LLM_LOADED_DIRS
 from test_peer_review_cold_lane_pin import FORWARD_POINTER
+from test_planning_artifact_scrub import LLM_LOADED_DIRECTORIES
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = PLUGIN_ROOT / "skills"
@@ -668,17 +670,26 @@ def _separator_entity(match):
     return char if char in "_- " else match.group(0)
 
 
-def _instruction_surface_population():
-    """Every tracked markdown file across the six LLM-loaded surfaces.
+# The ONE census of LLM-loaded instruction surfaces. The pin's population
+# below and the two sibling census pins all scan these six directories; a
+# drift arm in TestMemorySavedRetiredFromInstructionSurfaces holds the three
+# copies equal, so editing one without the others fails the suite.
+SURFACE_DIRECTORIES = frozenset(
+    {"skills", "agents", "commands", "protocols", "reference", "templates"}
+)
 
-    Built from the collection-time populations so an untracked scratch
-    file stays invisible and the installed-layout skip behavior matches
-    the rest of the module.
+
+def _instruction_surface_population():
+    """Every tracked markdown file across the LLM-loaded surfaces.
+
+    The scan sequence is derived from SURFACE_DIRECTORIES — the same
+    enumeration the structural and drift arms check — so there is no second
+    literal tuple to fall out of step. Built from the collection-time
+    populations so an untracked scratch file stays invisible and the
+    installed-layout skip behavior matches the rest of the module.
     """
     files = []
-    for surface in (
-        "skills", "agents", "commands", "protocols", "reference", "templates"
-    ):
+    for surface in sorted(SURFACE_DIRECTORIES):
         files.extend(_collection_population(f"{PLUGIN_ROOT.name}/{surface}", "**"))
     return sorted(p for p in files if p.suffix.lower() in (".md", ".markdown"))
 
@@ -693,59 +704,27 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     Scoped to six LLM-loaded instruction surfaces (skills/, agents/,
     commands/, protocols/, reference/, templates/ — every tracked
     Markdown file, .md/.markdown/.MD extensions alike): a token an LLM
-    loads as instruction re-teaches the retired flag wherever it
-    appears. The repo-root CHANGELOG's retirement note legitimately
-    names the flag and stays out of scope.
+    loads as instruction re-teaches the retired flag wherever it appears.
+    The repo-root CHANGELOG's retirement note legitimately names the flag
+    and stays out of scope.
 
-    What counts as re-teaching it: an identifier-shaped spelling —
-    underscore or hyphen separators (repeated included), backslash-
-    escaped separators (an escaped space included), numeric or named
-    separator character references, camelCase, or a zero-separator run —
-    is caught anywhere, in or out of context. A literal-whitespace
-    spelling ("memory saved") is ordinary English, so it is caught only
-    in an identifier-ish context, and the two context shapes have
-    different value grammars:
+    The rule is a STRICT TOKEN BAN: after normalization, any match of
+    "memory[-_ ]*saved" is an offender, with no context test.
+    Normalization unescapes the separator escapes (underscore, asterisk,
+    backtick, hyphen, space), decodes numeric and named character
+    references that denote a separator character (any other entity stays
+    literal), strips the Markdown delimiters asterisk, tilde and
+    backtick, collapses whitespace, and case-folds. Those steps cover
+    identifier, hyphen, space, repeated-separator, escaped-separator,
+    entity, camelCase, zero-separator and case spellings, plus markup or
+    line wrapping around the words.
 
-    A QUOTED key — the phrase immediately followed by a closing quote,
-    optional whitespace, then `:` or `=` — is a JSON/YAML key marker and
-    accepts ANY value: {"memory saved": true}, {"memory saved": "m1"},
-    and "memory saved": notes about the flag all match. A quoted key
-    takes precedence over every unquoted rule below.
+    The cost is deliberate: ordinary English containing "memory saved"
+    is an offender too and must be reworded, and the diagnostic says so
+    — a retired token must not appear at all in text an LLM loads.
 
-    An UNQUOTED key accepts only a CLOSED scalar literal — the YAML
-    booleans (true, false, yes, no, on, off, enabled, disabled), null,
-    `~`, or a number `-?\\d+(?:\\.\\d+)?`, case-insensitive — followed by
-    optional whitespace and END-OF-LINE, `}` or `]`. A comma is not a
-    terminator, and a bare `[`, `{`, or quote is not a value starter for
-    an unquoted key: those shapes are prose. So `memory saved: true`,
-    `memory saved: null`, `memory saved: ~`, and `memory saved: 40`
-    match, while "Memory saved: 40% faster", `memory saved: [notes](url)`,
-    `memory saved: {draft}`, `memory saved: 'quoted prose'`, and
-    `memory saved: true,` stay green.
-
-    A single-line backticked span is an identifier-ish context too, with or
-    without asterisk or tilde emphasis around the words, so
-    `memory *saved*`, `memory **saved**`, and `memory ~~saved~~` all
-    match. Backticks pair by parity within a line, so a phrase between
-    two SEPARATE code spans is prose, not a flag (a regex would read one
-    span's closing backtick as the next span's opening backtick), and a
-    code span that wraps across a line break is out of scope.
-
-    Backslash-escaped separators are unescaped, separator-only numeric
-    and named references are decoded (any other entity stays literal),
-    Markdown delimiters (asterisks, tildes, backticks) are removed and
-    whitespace is collapsed before the case-insensitive match, covering
-    markup wrapping, emphasis, inline markup, and line wrapping. A
-    tracked file that is not valid UTF-8 is named by the pin rather than
-    raising a bare decode error.
-
-    DECODER-REQUIRED IS DECIDED PER MATCH: a FORBIDDEN match whose span
-    contains a character produced by an escape or entity decode is
-    decoder-required, and one such match makes the file an offender even
-    when an English decoy elsewhere in the same file also matches. The
-    decode provenance survives the delimiter strip (a decoded delimiter
-    that is removed marks the next surviving character) and the
-    whitespace collapse (an encoded space marks the collapsed space).
+    A tracked file that is not valid UTF-8 is named by the pin rather
+    than raising a bare decode error.
 
     WHAT THIS CANNOT CATCH, stated so that a green is read no wider than
     it is: a population narrowed to a subset that still retains every
@@ -755,47 +734,22 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     residual is the tracked-file fixture's documented PARTIAL-overlap
     boundary (tests/fixtures/tracked_files.py). The six-surface
     enumeration is itself a curated judgment: a new instruction-surface
-    directory would not be scanned until added to the population; a
-    structural arm pins the six curated directories plus the
-    nested-recursion member, and completeness beyond that is reviewed
-    per-PR rather than machine-checked.
+    directory would not be scanned until added to it; a structural arm
+    pins the six curated directories plus the nested-recursion member, a
+    drift arm holds the three sibling censuses equal, and completeness
+    beyond that is reviewed per-PR rather than machine-checked.
     """
 
-    # Identifier-shaped separators: at least one underscore/hyphen with
-    # optional surrounding whitespace (line wrapping), or a zero-separator
-    # run (camelCase, or an all-lowercase "memorysaved"). A literal space
-    # between the words is NOT this class — that shape is ordinary English
-    # and needs identifier-ish context.
-    LITERAL_FLAG_PATTERN = re.compile(
-        r"memory\s*[-_]+\s*saved|memory[-_]*saved", re.IGNORECASE
-    )
-    FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]*saved", re.IGNORECASE)
-    # The key-shaped identifier-ish contexts. A QUOTED key (the phrase, a
-    # closing quote, then `:`/`=`) accepts ANY value and takes precedence.
-    # An UNQUOTED key accepts only a closed scalar literal — a YAML
-    # boolean, null, `~`, or a number — followed by end-of-line, `}` or
-    # `]`; a comma is not a terminator, and a bare `[`, `{`, or quote is
-    # not a value starter. The backticked-span context is decided by
-    # _in_backticked_span, not by a regex: a regex cannot tell one span's
-    # closing backtick from another span's opening backtick.
-    PROSE_CONTEXT = re.compile(
-        r"memory\s+saved[\"']\s*[:=]"
-        r"|memory\s+saved\s*[:=]\s*"
-        r"(?:true|false|yes|no|on|off|enabled|disabled|null|~"
-        r"|-?\d+(?:\.\d+)?)\s*(?=$|[}\]])",
-        re.IGNORECASE | re.MULTILINE,
-    )
-    _BACKTICK_PHRASE = re.compile(
-        r"memory[\s*~_\-]*saved", re.IGNORECASE
-    )
-    # The literal-whitespace forms. The reject arms seed these in
-    # key/assignment context, because their bare prose shape is
-    # deliberately allowed.
-    PROSE_FORMS = (
-        "memory saved",
-        "memory\nsaved",
-        "memory  saved",
-        "memory\tsaved",
+    # One pattern applied to normalized text, with no context test: the
+    # separator class accepts underscore, hyphen and space in any run, so
+    # an identifier, a hyphenated compound, an ordinary English phrase and
+    # a zero-separator run all match the same rule.
+    FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]*saved")
+    # The escapes the pin understands: a backslash before a separator
+    # character or a Markdown delimiter. Any other backslash stays literal.
+    _ESCAPABLE = "_*` -"
+    _ENTITY_REFERENCE = re.compile(
+        r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);"
     )
     # A population narrowed to exactly the seven SURFACE_FILES satisfies the
     # surface-file control while every other file goes unscanned. This floor
@@ -805,13 +759,10 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     POPULATION_FLOOR = 100
     # The ONE surface axis: one tracked file per surface, plus the
     # nested-recursion member. Both the real-run control and every reject
-    # arm read this constant; a second copy would need a drift test, and a
-    # narrower axis would leave whole directories unscanned without any
-    # arm noticing. SURFACE_DIRECTORIES is the curated judgment the axis
-    # is checked against, independent of the paths themselves.
-    SURFACE_DIRECTORIES = frozenset(
-        {"skills", "agents", "commands", "protocols", "reference", "templates"}
-    )
+    # arm read this constant; a narrower axis would leave whole directories
+    # unscanned without any arm noticing. SURFACE_DIRECTORIES is the
+    # curated judgment the axis is checked against, independent of the
+    # paths themselves.
     SURFACE_FILES = (
         "skills/pact-agent-teams/SKILL.md",
         "skills/pact-testing-strategies/references/test-pyramid.md",
@@ -821,6 +772,9 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "reference/config.md",
         "templates/environment-model.md",
     )
+    # Every spelling form the normalization must fold into the banned
+    # token. Each is seeded verbatim on all seven surfaces by the reject
+    # arm; a normalization step that goes missing reds the forms it owns.
     PROHIBITED_FORMS = (
         "memory_saved",
         "memorySaved",
@@ -863,31 +817,8 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         "`memory *saved*`",
         "`memory **saved**`",
         "`memory ~~saved~~`",
-        "memory saved = true",
-        '{"memory saved": true}',
         "memorysaved",
-        "memory saved: true",
-        "memory saved: false",
-        "memory saved: yes",
-        "memory saved: no",
-        "memory saved: on",
-        "memory saved: off",
-        "memory saved: enabled",
-        "memory saved: disabled",
-        "memory saved: null",
-        "memory saved: ~",
-        "memory saved: 40",
-        "memory saved: -3",
-        "memory saved: 3.14",
-        "memory saved: NULL",
-        "memory saved: true}",
-        "memory saved: true]",
-        '{"memory saved": "m1"}',
-        '{"memory saved": [draft]}',
-        '{"memory saved": {draft}}',
-        '"memory saved": notes about the flag',
-        "**memory saved**: true",
-        "memory** **saved: true",
+        "memory** **saved",
     )
 
     @staticmethod
@@ -934,146 +865,46 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         assert "pact-plugin/skills/GUIDE.MD" in message
         assert "pact-plugin/agents/NOTES.markdown" in message
 
-    @staticmethod
-    def _seeded_offender(form):
-        """Seed a prose-shaped form in key/assignment context.
-
-        Its bare prose shape is legitimate English and deliberately not a
-        match; the identifier-shaped forms are caught as written.
-        """
-        if form in TestMemorySavedRetiredFromInstructionSurfaces.PROSE_FORMS:
-            return f"{form}: true"
-        return form
-
-    _ENTITY_REFERENCE = re.compile(
-        r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);"
-    )
-
     @classmethod
-    def _normalize_with_provenance(cls, text, *, decode):
-        """Normalized text plus, per character, whether a decoder made it.
+    def _normalize(cls, text):
+        """Escape/entity decode, delimiter strip, whitespace collapse, casefold.
 
-        ``decode`` applies the backslash/entity decoders; both paths strip
-        the Markdown delimiters (asterisk, tilde, backtick) and collapse
-        whitespace, so the two results differ only by those decoders.
-
-        Provenance must survive both lossy steps. A decoded delimiter that
-        the strip removes marks the next surviving character, which is how
-        ``memory\\*saved`` stays decoder-required after its asterisk is
-        dropped; a decoded whitespace character marks the space the
-        collapse emits, which is how an encoded space stays visible. Those
-        marks are what make the decoder decision PER MATCH rather than per
-        file.
+        The decoders read the ORIGINAL text, so a separator escape survives
+        long enough to be decoded before the delimiter strip removes it
+        (``memory\\*saved``), and a space escape becomes the space the
+        collapse keeps. ``_separator_entity`` leaves every reference outside
+        the separator class literal.
         """
-        chars = []
+        decoded = []
         index = 0
         while index < len(text):
-            if decode:
-                if (text[index] == "\\" and index + 1 < len(text)
-                        and text[index + 1] in "_*` -"):
-                    chars.append((text[index + 1], True))
-                    index += 2
-                    continue
-                if text[index] == "&":
-                    reference = cls._ENTITY_REFERENCE.match(text, index)
-                    if reference is not None:
-                        decoded_char = _separator_entity(reference)
-                        if decoded_char != reference.group(0):
-                            chars.append((decoded_char, True))
-                            index = reference.end()
-                            continue
-            chars.append((text[index], False))
+            char = text[index]
+            if (char == "\\" and index + 1 < len(text)
+                    and text[index + 1] in cls._ESCAPABLE):
+                decoded.append(text[index + 1])
+                index += 2
+                continue
+            if char == "&":
+                reference = cls._ENTITY_REFERENCE.match(text, index)
+                if reference is not None:
+                    separator = _separator_entity(reference)
+                    if separator != reference.group(0):
+                        decoded.append(separator)
+                        index = reference.end()
+                        continue
+            decoded.append(char)
             index += 1
-
-        surviving = []
-        pending_decode = False
-        for char, from_decode in chars:
-            if char in "*~`":
-                pending_decode = pending_decode or from_decode
-                continue
-            surviving.append((char, from_decode or pending_decode))
-            pending_decode = False
-        if pending_decode and surviving:
-            surviving[-1] = (surviving[-1][0], True)
-
-        out_chars, out_flags = [], []
-        space_pending = False
-        space_decoded = False
-        for char, from_decode in surviving:
-            if char.isspace():
-                if out_chars:
-                    space_pending = True
-                    space_decoded = space_decoded or from_decode
-                continue
-            if space_pending:
-                out_chars.append(" ")
-                out_flags.append(space_decoded)
-                space_pending = False
-                space_decoded = False
-            out_chars.append(char)
-            out_flags.append(from_decode)
-        return "".join(out_chars), out_flags
-
-    @staticmethod
-    def _context_view(text):
-        """Asterisk-stripped text for context detection.
-
-        Tildes and line breaks survive. A tilde is a legitimate null VALUE;
-        a line break is what lets an unquoted key's terminator be
-        end-of-line and what bounds an inline code span, so this view must
-        not be whitespace-collapsed and must not be
-        ``_normalize_with_provenance`` output (which deletes backticks).
-        """
-        return text.replace("*", "")
-
-    @classmethod
-    def _in_backticked_span(cls, text):
-        """True when a memory/saved phrase sits inside a single-line code span.
-
-        Backticks are paired per LINE by parity: the odd-indexed segments of
-        a line split on backticks are the span interiors. A regex cannot do
-        this — one span's closing backtick is indistinguishable from a
-        later span's opening backtick — so ordinary prose sitting between
-        two separate code spans would be read as a flag. A code span that
-        wraps across a line break is out of scope, the same line-scoped
-        grammar the unquoted key's end-of-line terminator uses.
-        """
-        for line in cls._context_view(text).splitlines():
-            for segment in line.split("`")[1::2]:
-                if cls._BACKTICK_PHRASE.search(segment):
-                    return True
-        return False
+        stripped = "".join(char for char in decoded if char not in "*~`")
+        return " ".join(stripped.split()).casefold()
 
     @classmethod
     def _re_teaches_retired_flag(cls, text):
-        """True when the text re-teaches the retired flag.
+        """True when the normalized text carries the banned token anywhere.
 
-        An identifier-shaped spelling (underscore/hyphen separators,
-        escapes, entities, camelCase, zero-separated) is caught anywhere.
-        A literal-whitespace spelling is ordinary English, so it is caught
-        only in an identifier-ish context (see PROSE_CONTEXT). A FORBIDDEN
-        match whose span contains a decoded character is decoder-required;
-        that decision is per match, so an English decoy elsewhere in the
-        same file cannot answer for the file.
+        One rule with no context test: the token is retired, so its
+        presence in an LLM-loaded surface is the offense.
         """
-        decoded, decoded_flags = cls._normalize_with_provenance(
-            text, decode=True
-        )
-        matches = list(cls.FORBIDDEN_PATTERN.finditer(decoded))
-        if not matches:
-            return False
-        if any(
-            any(decoded_flags[index]
-                for index in range(match.start(), match.end()))
-            for match in matches
-        ):
-            return True
-        literal, _ = cls._normalize_with_provenance(text, decode=False)
-        if cls.LITERAL_FLAG_PATTERN.search(literal):
-            return True
-        if cls.PROSE_CONTEXT.search(cls._context_view(text)) is not None:
-            return True
-        return cls._in_backticked_span(text)
+        return cls.FORBIDDEN_PATTERN.search(cls._normalize(text)) is not None
 
     @pytest.mark.parametrize("form", PROHIBITED_FORMS)
     def test_pin_rejects_prohibited_form_on_every_surface(
@@ -1089,9 +920,8 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         plugin = self._seed_tracked_repo(tmp_path)
         monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
-        seeded = self._seeded_offender(form)
         for surface in self.SURFACE_FILES:
-            (plugin / surface).write_text(seeded, encoding="utf-8")
+            (plugin / surface).write_text(form, encoding="utf-8")
 
         with pytest.raises(
                 AssertionError, match="re-teach the retired") as exc_info:
@@ -1103,121 +933,25 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
                 f"is missing from: {message}"
             )
 
-    @pytest.mark.parametrize(
-        "content",
-        [
-            "Your agent memory saved you a re-read.",
-            '"Memory saved: 40% faster"',
-            "Memory saved: nothing was lost.",
-            "memory saved: false alarm.",
-            "memory saved: true story.",
-            "memory saved: yes, it did.",
-            "memory saved: 100% of the time.",
-            "memory saved: [notes](url)",
-            "memory saved: {draft}",
-            "memory saved: 'quoted prose'",
-            "memory saved: true, and then it continued.",
-        ],
-        ids=["sentence", "quoted-colon-prose", "nothing-was-lost",
-             "false-alarm", "true-story", "yes-comma", "percent", "bracket",
-             "brace", "bare-quote", "comma-not-terminator"],
-    )
-    def test_pin_is_silent_on_prose_shapes(
-            self, content, tmp_path, monkeypatch):
-        """Plain English containing "memory saved" is not the retired flag.
-
-        An unquoted key needs a CLOSED scalar literal ending the line (or a
-        `}`/`]`): a scalar followed by prose, a comma, a percent sign, a
-        bracket, a brace, or a bare quote is prose, not a flag. A quoted
-        sentence whose colon arrives before any closing quote is not a
-        quoted key either. Reverting to a value-shaped token list, or adding
-        a comma as a terminator, reds the matching case.
-        """
-        plugin = self._seed_tracked_repo(tmp_path)
-        (plugin / "agents" / "pact-orchestrator.md").write_text(
-            content + "\n", encoding="utf-8"
-        )
-        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
-        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
-
-        self.test_no_memory_saved_in_any_llm_loaded_surface()
-
-    @pytest.mark.parametrize(
-        "content",
-        [
-            "Use `alpha` here. Your agent memory saved you a re-read. "
-            "Use `beta` there.",
-            "Use `alpha` here.\nYour agent memory saved you a re-read.\n"
-            "Use `beta` there.",
-        ],
-        ids=["same-line-spans", "separate-line-spans"],
-    )
-    def test_two_separate_code_spans_do_not_pair_around_prose(
-            self, content, tmp_path, monkeypatch):
-        """One span's closing backtick is not the next span's opening one.
-
-        Reading any two backticks as one span made ordinary prose sitting
-        between two code spans a flag. Within a line, parity decides which
-        segments are span interiors; across lines, spans never pair. A
-        naive span regex reds the same-line case; whole-text parity reds the
-        separate-line case.
-        """
-        plugin = self._seed_tracked_repo(tmp_path)
-        (plugin / "agents" / "pact-orchestrator.md").write_text(
-            content + "\n", encoding="utf-8"
-        )
-        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
-        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
-
-        self.test_no_memory_saved_in_any_llm_loaded_surface()
-
-    def test_multi_line_code_span_is_out_of_scope(
+    def test_strict_ban_flags_ordinary_english_and_says_reword(
             self, tmp_path, monkeypatch):
-        """Spans pair per line, so a code span that wraps is not a context.
+        """The ban's cost, pinned: plain English using the phrase is an
+        offender and the diagnostic tells the author to reword.
 
-        That is the price of the line bound: keeping parity per line is what
-        stops a closing backtick on one line from pairing with an opening
-        backtick on another. Whole-text parity would red this case."""
-        plugin = self._seed_tracked_repo(tmp_path)
-        (plugin / "agents" / "pact-orchestrator.md").write_text(
-            "`memory\nsaved`\n", encoding="utf-8"
-        )
-        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
-        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
-
-        self.test_no_memory_saved_in_any_llm_loaded_surface()
-
-    @pytest.mark.parametrize(
-        "encoded",
-        [
-            "memory&#95;saved",
-            r"memory\*saved",
-            "memory&lowbar;saved",
-            "memory&#32;saved",
-        ],
-        ids=["numeric-underscore", "escaped-star", "named-lowbar",
-             "numeric-space"],
-    )
-    def test_encoded_spelling_is_not_masked_by_a_same_file_decoy(
-            self, encoded, tmp_path, monkeypatch):
-        """The decoder-required decision is per match, not per file.
-
-        Deciding it once per file let the decoy answer for the whole file:
-        its literal match suppressed the decoder-required branch and the
-        encoded spelling went green. The encoded space is the sharpest case
-        because it normalizes to exactly the decoy's text.
+        This is intended behaviour, not a false positive. A prose carve-out
+        is the complexity this pin deliberately dropped, so an author who
+        means the ordinary English phrase changes the words, not the pin.
         """
         plugin = self._seed_tracked_repo(tmp_path)
         (plugin / "agents" / "pact-orchestrator.md").write_text(
-            f"The old flag was written as {encoded} in metadata.\n"
-            f"Your agent memory saved you a re-read.\n",
-            encoding="utf-8",
+            "Your agent memory saved you a re-read.\n", encoding="utf-8"
         )
         monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
 
-        with pytest.raises(AssertionError, match="re-teach the retired"):
+        with pytest.raises(AssertionError, match="Reword") as exc_info:
             self.test_no_memory_saved_in_any_llm_loaded_surface()
+        assert "pact-plugin/agents/pact-orchestrator.md" in str(exc_info.value)
 
     def test_scan_visits_every_population_entry(
             self, tmp_path, monkeypatch):
@@ -1275,8 +1009,26 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         nested-recursion file that keeps skills/** scanned."""
         assert {
             relative.split("/")[0] for relative in self.SURFACE_FILES
-        } == set(self.SURFACE_DIRECTORIES)
-        assert len(self.SURFACE_FILES) == len(self.SURFACE_DIRECTORIES) + 1
+        } == set(SURFACE_DIRECTORIES)
+        assert len(self.SURFACE_FILES) == len(SURFACE_DIRECTORIES) + 1
+
+    def test_surface_censuses_agree(self):
+        """The three six-directory censuses are one judgment, kept in three
+        modules. Drift silently narrows one pin's coverage while the
+        CHANGELOG asserts sameness, so compare all three here: this pin's
+        names, the leaf construction pin's names, and the planning-artifact
+        scrub pin's directory basenames (its tuple is Path-valued)."""
+        ours = set(SURFACE_DIRECTORIES)
+        leaf = set(_LLM_LOADED_DIRS)
+        assert leaf == ours, (
+            f"the leaf construction pin's census drifted from the "
+            f"retired-flag pin's: {sorted(leaf ^ ours)} differ"
+        )
+        scrub = {path.name for path in LLM_LOADED_DIRECTORIES}
+        assert scrub == ours, (
+            f"the planning-artifact scrub pin's census drifted from the "
+            f"retired-flag pin's: {sorted(scrub ^ ours)} differ"
+        )
 
     def test_pin_names_non_utf8_surface(self, tmp_path, monkeypatch):
         plugin = self._seed_tracked_repo(tmp_path)
@@ -1308,8 +1060,8 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     def test_pin_survives_over_long_numeric_reference(
             self, tmp_path, monkeypatch):
         """A numeric reference past CPython's 4300-digit int limit must fall
-        through to the literal-stays path, not kill the pin with a
-        traceback raised from inside re.sub."""
+        through to the literal-stays path, not kill the pin with a traceback
+        raised from the entity decoder."""
         plugin = self._seed_tracked_repo(tmp_path)
         (plugin / "commands" / "orchestrate.md").write_text(
             "memory&#" + "9" * 5000 + ";saved", encoding="utf-8"
@@ -1318,8 +1070,8 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
 
         # Completing without raising IS the assertion: with the conversion
-        # outside the decoder's try, int() raises ValueError inside re.sub
-        # and this call dies instead of leaving the reference literal.
+        # outside _separator_entity's try, int() raises ValueError and this
+        # call dies instead of leaving the reference literal.
         self.test_no_memory_saved_in_any_llm_loaded_surface()
 
     @pytest.mark.parametrize(
@@ -1451,23 +1203,19 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             except UnicodeDecodeError:
                 undecodable.append(path)
                 continue
-            # Bounded decode: numeric character references are resolved only
-            # when they denote a separator-class char (_ - space), and named
-            # references only when they are in _NAMED_SEPARATORS; every
-            # other entity stays literal. Confirmed out-of-contract misses,
-            # all of which stay literal: markup shapes (memory<br>saved),
-            # double-encoded entities (memory&amp;#95;saved), an escaped
-            # backslash before a separator (memory\\_saved), an escaped
-            # space (memory\ saved), a newline entity (memory&#10;saved),
-            # numeric references without a semicolon (memory&#95saved),
-            # and the whole non-ASCII-joiner family — Unicode dashes
-            # (memory–saved reads as memory-saved to a human), zero-width
-            # joiners, and homoglyph separators, none of which the ASCII
-            # separator class matches or decodes. No general HTML or escape
-            # decode happens here. The matcher itself is
-            # _re_teaches_retired_flag: identifier-shaped spellings are
-            # caught anywhere, while a literal-whitespace spelling is
-            # caught only in identifier-ish context.
+            # Strict ban: normalize, then match anywhere. The bounded decode
+            # resolves escapes and character references that denote a
+            # separator character (_ - space) only; every other entity stays
+            # literal. Confirmed out-of-contract misses, all of which stay
+            # literal: markup shapes (memory<br>saved), double-encoded
+            # entities (memory&amp;#95;saved), an escaped backslash before a
+            # separator (memory\\_saved), a newline entity
+            # (memory&#10;saved), numeric references without a semicolon
+            # (memory&#95saved), and the whole non-ASCII-joiner family —
+            # Unicode dashes (memory–saved reads as memory-saved to a
+            # human), zero-width joiners, and homoglyph separators, none of
+            # which the ASCII separator class matches or decodes. No general
+            # HTML or escape decode happens here.
             if self._re_teaches_retired_flag(text):
                 offenders.append(path)
         diagnostics = []
@@ -1479,12 +1227,12 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
                 f"{names} re-teach the retired memory_saved flag. The flag was removed "
                 f"in v4.8.36 (zero code readers, unenforced — a task could "
                 f"attest a save no mechanism verified); reintroducing the token "
-                f"in an LLM-loaded surface revives a write-only signal. "
-                f"Identifier-shaped spellings are caught anywhere; a "
-                f"literal-whitespace spelling is flagged only in "
-                f"identifier-ish context (a backticked span or a key/"
-                f"assignment position), so ordinary English prose is not a "
-                f"match. Update this pin deliberately if the flag ever "
+                f"in an LLM-loaded surface revives a write-only signal. This "
+                f"pin enforces a strict token ban: after normalization a "
+                f"memory[-_ ]*saved spelling anywhere in the file is an "
+                f"offender, with no context test, so ordinary English that "
+                f"happens to use the phrase is flagged too. Reword the "
+                f"sentence, and update this pin deliberately if the flag ever "
                 f"returns with an enforcer."
             )
         if undecodable:
