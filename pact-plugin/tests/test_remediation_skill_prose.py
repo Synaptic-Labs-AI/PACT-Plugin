@@ -737,12 +737,12 @@ class TestCalibrationCountReadsTheWholeScope:
                 )
         return binding
 
-    def test_the_binding_is_a_mapping_over_the_sync_read_scope(self):
+    def test_the_binding_is_a_mapping_over_the_show_read_scope(self):
         assert (
             "Run it with Python's sqlite3 module and bind a mapping, not a "
             "tuple: {\"name\": \"orchestration_calibration\", \"scope\": "
-            "json.dumps(read_scope)}, where read_scope is the array from this "
-            "briefing's sync envelope."
+            "json.dumps(read_scope)}, where read_scope is the array from that "
+            "project-id show output."
         ) in _body(SECRETARY)
 
     def test_the_documented_sql_and_binding_count_both_buckets(self, tmp_path):
@@ -792,7 +792,7 @@ class TestCalibrationCountReadsTheWholeScope:
 
     def test_no_scope_means_not_determined(self):
         assert (
-            "If sync did not run in this briefing, or its read_scope is empty, "
+            "If the command fails, or its read_scope is empty, "
             "do not run the count and report the gate state not determined."
         ) in _body(SECRETARY)
 

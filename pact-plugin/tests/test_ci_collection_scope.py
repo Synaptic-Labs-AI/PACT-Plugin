@@ -716,6 +716,20 @@ class TestTheFastManifestNamesRealCorpusFiles:
             f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
         )
 
+    def test_outside_manifest_check_uses_the_explicit_repo_root(self, tmp_path):
+        repo_root, _ = _require_checkout()
+        _require_fast_lane(repo_root)
+        source = repo_root / "scripts" / "fast_suite_exclusions.json"
+        outside = tmp_path / "outside-manifest.json"
+        outside.write_bytes(source.read_bytes())
+        cli = repo_root / "scripts" / "fast_suite_args.py"
+        proc = subprocess.run(
+            [sys.executable, str(cli), "--repo-root", str(repo_root),
+             "--manifest", str(outside), "--check"],
+            cwd=str(tmp_path), capture_output=True, text=True, timeout=120)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert f"MANIFEST-OK {outside}" in proc.stderr
+
 
 # The reviewed exclusion identities: path, production_seams, mechanism.
 # Changing any entry is a reviewed manifest change, not a code tweak. This

@@ -192,7 +192,7 @@ MEMORY_END_MARKER = "<!-- PACT_MEMORY_END -->"
 # `tests/test_managed_comment_mirror.py` holds this copy to that definition.
 # `## Pinned Context` carries no comment in the template, so it gets none here.
 RETRIEVED_CONTEXT_COMMENT = "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->"
-WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. Keyed by repository identity (from the repository's override file or its origin remote) when one resolves; by the project_id in the memory config.json when no project directory is declared and no repository is found, or when git cannot see a home-directory checkout; by folder name for a checkout that is the home directory, and when there is no override file and the origin is absent or a local path, except in a submodule; otherwise, including a broken, redirected or bare .git, the identity declines and nothing is written. -->"
+WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. Keyed by repository identity (the repository's override file or its origin remote); the memory skill's `project-id show` command reports the key in use, which can be a folder name, and how it was chosen. When the identity declines, nothing is written. -->"
 
 # Declared START boundary of the `## Pinned Context` section. The pinned
 # region's extent was INFERRED before this pair existed -- every reader guessed
@@ -376,6 +376,12 @@ if not SESSION_BOUNDARY_PREFIX:
 _STALE_ORCHESTRATOR_LINE_RE = re.compile(
     r"^The global PACT Orchestrator is loaded from `~/\.claude/CLAUDE\.md`\.?\s*$",
 )
+
+# The prefix of a memory section's own comment, in this and every earlier
+# release. A migration drops each row that is one such comment, found by the
+# finder as a marker line, and the rebuilt section gets the current comment,
+# so an earlier release's wording is never kept beside it.
+_SECTION_COMMENT_PREFIX = "<!-- Auto-managed by pact-memory skill."
 
 
 class ContainmentError(OSError):
@@ -845,7 +851,7 @@ def _atomic_write_text(target: Path, content: str, project_root: Path) -> None:
 
 def _legacy_spans_after_cuts(doc: Document, cuts: list[tuple[int, int]],
                              header_end: int) -> list[tuple[int, int]]:
-    """The stale loader lines the ORIGINAL file `doc` reads as visible prose,
+    """The stale lines (`_legacy_line_spans`) the ORIGINAL file `doc` reads,
     as spans in the text left after dropping `cuts` from `doc.text` and then
     its first `header_end` characters. Parsing that text instead would decide
     on a text the cuts have changed: a cut session block that closes an HTML
@@ -858,14 +864,19 @@ def _legacy_spans_after_cuts(doc: Document, cuts: list[tuple[int, int]],
 
 
 def _legacy_line_spans(doc: Document) -> list[tuple[int, int]]:
-    """The (start, end) span in `doc.text` of each stale loader line the
-    parser reads as visible prose (`find_lines` rows whose `in_html` is
-    False), with its line break. A copy inside an HTML block that hides it,
-    such as a comment, is the user's text and stays. A leading U+FEFF is not
-    part of row 0's span, so it stays at byte 0."""
-    return [(doc.row_start(row), doc.lines[row].end)
-            for row in doc.find_lines(_STALE_ORCHESTRATOR_LINE_RE)
-            if not doc.lines[row].in_html]
+    """The (start, end) span in `doc.text`, with its line break, of each stale
+    line: a loader line the parser reads as visible prose (`find_lines` rows
+    whose `in_html` is False), and a memory-section comment of any release
+    that the finder reads as a marker line. A copy inside an HTML block that
+    hides it, in a fence, or sharing its line is the user's text and stays. A
+    leading U+FEFF is not part of row 0's span, so it stays at byte 0."""
+    loader_rows = [row for row in doc.find_lines(_STALE_ORCHESTRATOR_LINE_RE)
+                   if not doc.lines[row].in_html]
+    # FOUND, DUPLICATE and a stray's MALFORMED all carry the clean comment
+    # rows as spans; an UNKNOWN reading carries none, and drops nothing.
+    comment = doc.find_marker(_SECTION_COMMENT_PREFIX)
+    rows = sorted({*loader_rows, *(first for first, _ in comment.spans)})
+    return [(doc.row_start(row), doc.lines[row].end) for row in rows]
 
 
 

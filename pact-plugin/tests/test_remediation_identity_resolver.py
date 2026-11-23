@@ -2112,26 +2112,22 @@ class TestTheScopeSaysWhatDegradesAndWhatRaises:
 
 
 class TestTheWorkingMemoryCommentNamesWhenTheFolderNameKeys:
-    """The managed comment names every way the projection is keyed, and the
-    declines.
+    """The managed comment names what keys the projection, where to read the
+    key in use, that it can be a folder name, and that a decline writes
+    nothing.
 
     Catches the comment telling a reader that any checkout without a
     parseable origin falls back to its folder name ("otherwise by folder
-    name"), when the override file keys it canonically, a submodule with a
-    local-path origin declines, and a broken, redirected or bare `.git`
-    declines with nothing written.
+    name"): the override file keys it canonically, and a decline writes
+    nothing. The full precedence is `project-id show`'s report, not the
+    comment's, so the comment points there.
     """
 
     CLAUSES = (
-        "from the repository's override file or its origin remote",
-        "when there is no override file",
-        "except in a submodule",
-        "including a broken, redirected or bare .git",
-        "the identity declines and nothing is written",
-        "by the project_id in the memory config.json when no project directory "
-        "is declared and no repository is found",
-        "or when git cannot see a home-directory checkout",
-        "by folder name for a checkout that is the home directory",
+        "the repository's override file or its origin remote",
+        "`project-id show` command reports the key in use",
+        "which can be a folder name, and how it was chosen",
+        "When the identity declines, nothing is written.",
     )
 
     @staticmethod

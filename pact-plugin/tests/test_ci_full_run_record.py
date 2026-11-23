@@ -325,7 +325,7 @@ def test_an_interrupted_session_keeps_its_status_in_the_record(tmp_path):
     assert _record(workspace)["exitstatus"] == 2
 
 
-def test_deselection_is_read_from_terminal_stats_not_the_item_list(tmp_path):
+def test_serial_deselection_reflects_the_deselection_events_not_the_item_list(tmp_path):
     root, plugin_root, workspace = _rig(tmp_path, PASSING_SUITE)
     proc = _run(plugin_root, workspace, ["-k", "test_pass or test_skip"])
     assert proc.returncode == 0, proc.stdout + proc.stderr
@@ -335,6 +335,45 @@ def test_deselection_is_read_from_terminal_stats_not_the_item_list(tmp_path):
     verdict = _verify(root, workspace / RECORD_NAME)
     assert verdict.returncode == 1
     assert "RUN-VERIFY-FAILURE DESELECTED:" in verdict.stderr
+
+
+def test_the_serial_record_consumes_the_hook_accumulation(tmp_path, monkeypatch):
+    """The record's serial deselected count is the recorder's own counter.
+
+    In a real session the counter and the terminal reporter's stats are
+    equal, so this rig makes them disagree on purpose: the hook counted 2,
+    the fake reporter's stats claim 3. The record must carry the hook's 2 —
+    the same counter the worker-publish role reads — and a regression to a
+    stats read reddens here. The counts are driven through the recorder's
+    real hooks: the collection wrapper (opened and closed, as a hook caller
+    would drive it) and pytest_deselected.
+    """
+    record = _controller(tmp_path, monkeypatch)
+    items = [object(), object(), object(), object()]
+    wrapper = record.pytest_collection_modifyitems(None, None, items)
+    next(wrapper)
+    wrapper.close()
+    record.pytest_deselected([object(), object()])
+    session = _fake_session(tmp_path, testscollected=4,
+                            options={"tx": [], "dist": "no"})
+    original_get_plugin = session.config.pluginmanager.get_plugin
+
+    def _dissenting_reporter(name):
+        reporter = original_get_plugin(name)
+        if reporter is not None:
+            reporter.stats = {
+                "passed": [object()],
+                "deselected": [object(), object(), object()],
+            }
+        return reporter
+
+    monkeypatch.setattr(session.config.pluginmanager, "get_plugin",
+                        _dissenting_reporter)
+    record.pytest_sessionfinish(session, 0)
+    written = json.loads((tmp_path / RECORD_NAME).read_text(encoding="utf-8"))
+    assert written["deselected"] == 2, written
+    assert written["items_before_modifyitems"] == 4, written
+    assert written["items_after_modifyitems"] == 4, written
 
 
 def test_an_ungated_local_run_writes_nothing(tmp_path):

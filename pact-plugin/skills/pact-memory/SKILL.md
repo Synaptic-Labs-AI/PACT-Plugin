@@ -418,7 +418,13 @@ Two operator surfaces answer, and they are deliberately ordered:
   canonical `host/owner/repo` id is accepted: a folder-name value is reported
   as `override_ignored` with reason `not_canonical`, and resolution continues
   without it. To move a copied store's folder-name bucket, use
-  `project-id rekey --from=<old> --to=<canonical>`. It must be a regular file: a FIFO or a symlink in that position is refused, and an
+  `project-id rekey --from=<old> --to=<canonical>`. An ssh host alias from
+  the user's ssh config stays in the id, because git cannot tell an alias
+  from a host: `git@github-work:Acme/Widget` gives `github-work/Acme/Widget`,
+  while an https clone of the same repository gives `github.com/acme/widget`.
+  The pin is the remedy: a pin holding `github.com/acme/widget` in the alias
+  clone gives it the https clone's bucket.
+  It must be a regular file: a FIFO or a symlink in that position is refused, and an
   unusable file is reported as `override_ignored` and resolution continues
   without it. The file is never read, so nothing is reported, when git
   gives no working tree for the repository, when the checkout's `.git` names a linked

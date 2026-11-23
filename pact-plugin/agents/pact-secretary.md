@@ -104,8 +104,10 @@ You are **exempted from the standard teachback** at spawn — your bootstrap tas
    open the store. Report the gate state `not determined`, give the full name
    of the sidecar that is present, and continue the briefing.
 
-   If the two sidecar files are absent, open the store with `mode=ro` and
-   `immutable=1`, and run this count:
+   If the two sidecar files are absent, run the pact-memory `project-id show`
+   command and take `read_scope` from its output. Run it whether or not `sync`
+   ran in this briefing: it reads without creating the store. Then open the
+   store with `mode=ro` and `immutable=1`, and run this count:
 
    ```sql
    SELECT COUNT(*) FROM memories
@@ -118,8 +120,8 @@ You are **exempted from the standard teachback** at spawn — your bootstrap tas
 
    Run it with Python's `sqlite3` module and bind a mapping, not a tuple:
    `{"name": "orchestration_calibration", "scope": json.dumps(read_scope)}`,
-   where `read_scope` is the array from this briefing's `sync` envelope. If
-   `sync` did not run in this briefing, or its `read_scope` is empty, do not run the count and
+   where `read_scope` is the array from that `project-id show` output. If the
+   command fails, or its `read_scope` is empty, do not run the count and
    report the gate state `not determined`. Keep the three guards. `COALESCE` gives an empty array for a null column. The object
    arm keeps `json_extract` off a bare string, which gives an error. The text
    arm finds a record that holds the name in a bare string.

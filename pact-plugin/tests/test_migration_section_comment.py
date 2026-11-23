@@ -147,6 +147,38 @@ class TestNoSectionEverGainsASecondComment:
         )
 
 
+class TestAnEarlierReleasesCommentIsReplaced:
+    """A section carrying an earlier release's wording of the comment comes
+    out with the current comment only. The add-when-absent test reads the old
+    wording as absent, so without the drop the two sat side by side."""
+
+    EARLIER = (
+        "<!-- Auto-managed by pact-memory skill. Full history searchable via "
+        "pact-memory skill. -->",
+        "<!-- Auto-managed by pact-memory skill. Full history searchable via "
+        "pact-memory skill. Keyed by folder name, so another checkout with the "
+        "same name shares this section. -->",
+    )
+
+    @pytest.mark.parametrize("earlier", EARLIER)
+    @pytest.mark.parametrize("lead", ["{c}\n", "\n{c}\n", "   {c}\n"])
+    def test_only_the_current_comment_remains(self, earlier, lead):
+        assert earlier != WORKING_MEMORY_COMMENT
+        out = _build_migrated_content(_old_format(wm_lead=lead.format(c=earlier)))
+        assert earlier not in out
+        assert out.count(WORKING_MEMORY_COMMENT) == 1
+        assert f"## Working Memory\n{WORKING_MEMORY_COMMENT}\n" in out
+
+    def test_a_quoted_copy_is_the_users_text_and_stays(self):
+        """CONTROL: the drop reads marker lines only, so a fenced copy and one
+        sharing its line with other text are left alone."""
+        earlier = self.EARLIER[1]
+        lead = f"```\n{earlier}\n```\nnote: {earlier}\n"
+        out = _build_migrated_content(_old_format(wm_lead=lead))
+        assert out.count(earlier) == 2
+        assert out.count(WORKING_MEMORY_COMMENT) == 1
+
+
 class TestMigrationStaysIdempotent:
     """NO TEST NAMED THIS BEFORE. The property is real and it is easy to lose
     to an emit change, because losing it reddens nothing else."""
