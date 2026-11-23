@@ -14,6 +14,11 @@ INDEPENDENCE (load-bearing)
   full-workflow contract must stay green. A guard that shares machinery with
   the thing it certifies inherits its bugs.
 
+  Collection here stays serial even though the certifying full run is
+  distributed. It is the independent non-xdist collection reference for that
+  run; distributing both sides would share collection and worker-loss failure
+  modes instead of providing independent evidence.
+
 INVOCATION
   python scripts/verify_full_collection.py [--record PATH]   (from the repo root)
 

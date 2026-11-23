@@ -133,6 +133,16 @@ _CONFIG_DOC_PIN = (
     "default that does not exist"
 )
 
+# Premise pin for _CONFIG_DOC_PIN. ARM2 matches only the
+# `Path.home() / ".claude"` prefix and is blind to the `pact-memory` tail, so
+# a rename to `pact-memory-v2` would leave every entry licensed while the
+# allowlisted prose described a directory that no longer exists. This reads
+# the whole expression.
+_CONFIG_DOC_PREMISE = (
+    "skills/pact-memory/scripts/config.py",
+    'return Path.home() / ".claude" / "pact-memory"',
+)
+
 # (path, literal, count, justification). The count closes the hole in BOTH
 # directions: a new site pushes it above declared, a removed site drops it
 # below, so a stale entry reds instead of outliving its reason.
@@ -295,6 +305,19 @@ def test_telegram_allowlist_premise_still_holds():
         f"_TELEGRAM justification is false and its 8 allowlisted occurrences in "
         f"commands/telegram-setup.md are unlicensed. Either restore the pin or "
         f"migrate the prose AND drop those entries - see #1206."
+    )
+
+
+def test_config_doc_allowlist_premise_still_holds():
+    """reference/config.md documents this default. If the tail moves, the
+    allowlisted prose describes a directory that no longer exists."""
+    rel, needle = _CONFIG_DOC_PREMISE
+    text = (PLUGIN_ROOT / rel).read_text(encoding="utf-8")
+    assert needle in text, (
+        f"{rel} no longer ends its memory-dir default with the `pact-memory` "
+        f"tail, so the _CONFIG_DOC_PIN justification is false and "
+        f"reference/config.md's allowlisted literal is unlicensed. Either "
+        f"restore the pin or migrate the prose AND drop the entry."
     )
 
 

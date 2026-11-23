@@ -52,7 +52,7 @@ You can also set it permanently in `{config_dir}/settings.json`:
 ```
 
 `{config_dir}` is the config root Claude Code reads: `$CLAUDE_CONFIG_DIR`
-when set, otherwise `~/.claude`.
+when set and non-empty, otherwise `$HOME/.claude`.
 
 > **In tmux mode, set the task-tools value too.** A teammate in its own split
 > pane is a separate Claude Code process, so the tools it gets follow its own

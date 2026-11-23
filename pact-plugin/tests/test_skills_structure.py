@@ -24,6 +24,7 @@ from helpers import parse_frontmatter
 from test_agent_memory_leaf_construction import _LLM_LOADED_DIRS
 from test_peer_review_cold_lane_pin import FORWARD_POINTER
 from test_planning_artifact_scrub import LLM_LOADED_DIRECTORIES
+from test_prose_root_gate import CENSUS_DIRS as PROSE_GATE_CENSUS
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = PLUGIN_ROOT / "skills"
@@ -686,10 +687,12 @@ def _foldable_entity(match):
     return char if char in _ENTITY_RESOLVABLE or char.isspace() else match.group(0)
 
 
-# The census shared by this pin and its two siblings. The pin's population
-# below and the two sibling census pins all scan these six directories; a
-# drift arm in TestMemorySavedRetiredFromInstructionSurfaces holds the three
-# copies equal, so editing one without the others fails the suite.
+# The census shared by this pin and its three siblings. The pin's population
+# below and the sibling census pins (the leaf construction pin, the
+# planning-artifact scrub pin, and the prose-root gate) all scan these six
+# directories; a drift arm in TestMemorySavedRetiredFromInstructionSurfaces
+# holds the four copies equal, so editing one without the others fails the
+# suite.
 SURFACE_DIRECTORIES = frozenset(
     {"skills", "agents", "commands", "protocols", "reference", "templates"}
 )
@@ -711,7 +714,7 @@ def _instruction_surface_population():
 
 
 class TestMemorySavedRetiredFromInstructionSurfaces:
-    """The memory_saved flag was retired in v4.8.36: zero code readers,
+    """The memory_saved flag was retired in v4.8.37: zero code readers,
     self-reported, unenforced — the "Confirm Memory Saved" checklist step
     in pact-agent-teams/SKILL.md and the emitter docstring caveat naming
     the flag were both deleted. Nothing else asserted that retirement, so
@@ -756,7 +759,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
     enumeration is itself a curated judgment: a new instruction-surface
     directory would not be scanned until added to it; a structural arm
     pins the six curated directories plus the nested-recursion member, a
-    drift arm holds the three sibling censuses equal, and completeness
+    drift arm holds the four sibling censuses equal, and completeness
     beyond that is reviewed per-PR rather than machine-checked.
     """
 
@@ -1078,11 +1081,12 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         assert len(self.SURFACE_FILES) == len(SURFACE_DIRECTORIES) + 1
 
     def test_surface_censuses_agree(self):
-        """The three six-directory censuses are one judgment, kept in three
+        """The four six-directory censuses are one judgment, kept in four
         modules. Drift silently narrows one pin's coverage while the
-        CHANGELOG asserts sameness, so compare all three here: this pin's
-        names, the leaf construction pin's names, and the planning-artifact
-        scrub pin's directory basenames (its tuple is Path-valued)."""
+        CHANGELOG asserts sameness, so compare all four here: this pin's
+        names, the leaf construction pin's names, the planning-artifact
+        scrub pin's directory basenames (its tuple is Path-valued), and the
+        prose-root gate's names."""
         ours = set(SURFACE_DIRECTORIES)
         leaf = set(_LLM_LOADED_DIRS)
         assert leaf == ours, (
@@ -1093,6 +1097,11 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
         assert scrub == ours, (
             f"the planning-artifact scrub pin's census drifted from the "
             f"retired-flag pin's: {sorted(scrub ^ ours)} differ"
+        )
+        gate = set(PROSE_GATE_CENSUS)
+        assert gate == ours, (
+            f"the prose-root gate's census drifted from the retired-flag "
+            f"pin's: {sorted(gate ^ ours)} differ"
         )
 
     def test_pin_names_non_utf8_surface(self, tmp_path, monkeypatch):
@@ -1296,8 +1305,10 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             # no reference grammar match); a named reference outside the
             # map (memory&copy;saved); named whitespace references outside
             # the map (&ensp; &emsp; &thinsp; &hairsp; &numsp; &puncsp;
-            # &MediumSpace; &NoBreak; — their numeric forms decode, the
-            # names are not in the map); and the non-ASCII family —
+            # &MediumSpace; — their numeric forms decode, the names are not
+            # in the map; &NoBreak; is not whitespace, so its numeric form
+            # stays literal with the zero-width family); and the non-ASCII
+            # family —
             # Unicode dashes (memory–saved reads as memory-saved to a
             # human), zero-width joiners and spaces, soft hyphens, BOM/NUL,
             # and homoglyph separators or letters, none of which the ASCII
@@ -1313,7 +1324,7 @@ class TestMemorySavedRetiredFromInstructionSurfaces:
             verb = "re-teaches" if len(offenders) == 1 else "re-teach"
             diagnostics.append(
                 f"{names} {verb} the retired memory_saved flag. The flag was removed "
-                f"in v4.8.36 (zero code readers, unenforced — a task could "
+                f"in v4.8.37 (zero code readers, unenforced — a task could "
                 f"attest a save no mechanism verified); reintroducing the token "
                 f"in an LLM-loaded surface revives a write-only signal. This "
                 f"pin enforces a strict token ban: after normalization a "
