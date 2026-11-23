@@ -25,6 +25,7 @@ import atexit
 import hashlib
 import logging
 import os
+import re
 import uuid
 import struct
 import subprocess
@@ -171,14 +172,25 @@ def check_and_install_dependencies() -> dict:
     return {'status': status, 'installed': installed, 'failed': failed}
 
 
+_DECLARED_DIMENSION = re.compile(r"\bembedding\s+float\[(\d+)\]", re.IGNORECASE)
+
+
 def _stored_vector_dimension(conn) -> "tuple[bool, int | None]":
-    """Whether `conn`'s store has a vector table, and the dimension of one
-    stored vector (None when the table is empty). sqlite-vec must be loaded on
-    `conn`. Reads only."""
-    if conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_memories'"
-    ).fetchone() is None:
+    """Whether `conn`'s store has a vector table, and its dimension.
+
+    The dimension is the one the table's own definition declares, so an empty
+    table left at an older dimension reads as that dimension rather than as
+    "nothing stored". Without a declaration this can parse, it is the size of
+    one stored vector; with neither, None, which callers treat as a migration
+    being due. sqlite-vec must be loaded on `conn`. Reads only."""
+    found = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_memories'"
+    ).fetchone()
+    if found is None:
         return False, None
+    declared = _DECLARED_DIMENSION.search(found[0] or "")
+    if declared:
+        return True, int(declared[1])
     row = conn.execute("SELECT embedding FROM vec_memories LIMIT 1").fetchone()
     return True, (None if row is None else len(row[0]) // 4)  # 4 bytes per float
 
@@ -188,8 +200,9 @@ def _read_can_catch_up() -> bool:
 
     Under the read scope no vector table is created and no migration runs, so
     the catch-up can only add vectors to a table that already exists at the
-    current dimension. With no table, or with a migration due, it is postponed
-    to the first call outside the scope. A store this cannot inspect is
+    current dimension. With no table, or with a migration due (a table declared
+    at another dimension, empty or not, or one whose dimension cannot be read),
+    it is postponed to the first call outside the scope. A store this cannot inspect is
     postponed too, which writes nothing. Without sqlite-vec the catch-up writes
     nothing and reports why, so it runs.
     """
@@ -210,7 +223,7 @@ def _read_can_catch_up() -> bool:
         return False
     finally:
         conn.close()
-    return exists and dim in (None, EMBEDDING_DIM)
+    return exists and dim == EMBEDDING_DIM
 
 
 def maybe_migrate_embeddings() -> dict:
@@ -256,13 +269,13 @@ def maybe_migrate_embeddings() -> dict:
         except Exception:
             conn.close()
             return result
-        if not exists or actual_dim in (None, expected_dim):
+        if not exists or actual_dim == expected_dim:
             conn.close()
-            return result  # No table, an empty one, or the current dimension
+            return result  # No table, or one at the current dimension
 
         # Dimension mismatch detected - need to migrate
         result["status"] = "migrating"
-        result["message"] = f"Migrating embeddings: {actual_dim}-dim -> {expected_dim}-dim"
+        result["message"] = f"Migrating embeddings: {actual_dim or 'unknown'}-dim -> {expected_dim}-dim"
 
         # Drop old table
         conn.execute("DROP TABLE IF EXISTS vec_memories")

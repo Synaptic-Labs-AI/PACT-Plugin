@@ -494,7 +494,7 @@ class TestNoRekeyRefusalRendersAnAngleBracket:
         (["--candidates", "--apply"], 2, "INVALID_INPUT"),
         (["--from=proj", "--dry-run", "--apply"], 2, "INVALID_INPUT"),
         ([], 2, "INVALID_INPUT"),
-        (["--from=proj", "--to=proj"], 2, "INVALID_INPUT"),
+        (["--from=proj", "--to=other"], 2, "INVALID_INPUT"),
         (["--from=proj"], 1, "REKEY_REFUSED"),
         (["--from=github.com/o/other"], 1, "REKEY_REFUSED"),
         (["--from=foreign"], 1, "REKEY_REFUSED"),
@@ -700,7 +700,7 @@ class TestAStoreThatIsNotADatabaseNamesItsRemedy:
     @pytest.mark.parametrize("kind", ["garbage", "corrupt"])
     @pytest.mark.parametrize("argv, code, error", [
         (["project-id", "show"], 3, "SYSTEM_ERROR"),
-        (["status"], 2, "SYSTEM_ERROR"),
+        (["status"], 3, "SYSTEM_ERROR"),
         (["project-id", "rekey", "--candidates"], 3, "SYSTEM_ERROR"),
         (["project-id", "rekey", "--from=proj", "--to=github.com/o/p"], 3, "REKEY_FAILED"),
     ], ids=["show", "status", "candidates", "rekey-dry-run"])
@@ -828,7 +828,7 @@ class TestStatusNeverWritesIntoACorruptStore:
         monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
         code, rendered = self._status(store, capfd)
         assert store.read_bytes() == before
-        assert code == 2, rendered
+        assert code == 3, rendered
         assert "exists but cannot be opened" in rendered, rendered
         assert "names a PACT memory store" in rendered, rendered
         self._first_call_outside_the_read(store)
@@ -850,7 +850,7 @@ class TestStatusNeverWritesIntoACorruptStore:
         self._first_call_outside_the_read(store)
         after = store.read_bytes()
         assert catchup == []
-        assert code == 2, rendered
+        assert code == 3, rendered
         assert "no memory was written to it" in rendered, rendered
         assert "not modified" not in rendered, rendered
         assert len(after) == len(before)
@@ -1031,7 +1031,7 @@ class TestStatusNeverWritesIntoACorruptStore:
         self._first_call_outside_the_read(store)
         after = store.read_bytes()
         assert queried and queried[0], "the real pending query found no work"
-        assert code == 2, rendered
+        assert code == 3, rendered
         assert "no memory was written to it" in rendered, rendered
         if journal == "wal":
             assert after == before
@@ -1055,13 +1055,15 @@ class TestStatusNeverWritesIntoACorruptStore:
 
 
 # Each read-only verb, with the exit code its store fault reports.
+# Every verb answers a store fault with exit 3, the operational-fault code;
+# exit 2 is bad input.
 STORE_FAULT_COMMANDS = {
     "show": (["project-id", "show"], 3),
-    "status": (["status"], 2),
+    "status": (["status"], 3),
     "candidates": (["project-id", "rekey", "--candidates"], 3),
     "rekey-dry-run": (["project-id", "rekey", "--from=proj", "--to=github.com/o/p"], 3),
-    "list": (["list"], 2),
-    "search": (["search", "anything"], 2),
+    "list": (["list"], 3),
+    "search": (["search", "anything"], 3),
 }
 # A page-corrupt store faults only where a read reaches the overwritten page;
 # these are the verbs that do, from inside the repository.
@@ -1224,11 +1226,11 @@ class TestADefaultedTargetRefusesAnUnprovenBucket:
         assert f"--from='proj' is unproven: {clause}" in message, message
         here, subfolder, newer, elsewhere_count, unattributed = counts
         assert (
-            f"Of its memories, {here} were written by sessions recorded here, "
-            f"{subfolder} by sessions launched in a subfolder of this repository, "
-            f"{newer} by sessions that started before its `description` file "
-            f"last changed, {elsewhere_count} by sessions recorded at another "
-            f"checkout, and {unattributed} by no recorded session."
+            f"Of its memories, {here} came from sessions recorded here, "
+            f"{subfolder} from sessions launched in a subfolder of this repository, "
+            f"{newer} from sessions that started before its `description` file "
+            f"last changed, {elsewhere_count} from sessions recorded at another "
+            f"checkout, and {unattributed} from no recorded session."
         ) in message, message
         assert message.endswith("Nothing was moved."), message
 

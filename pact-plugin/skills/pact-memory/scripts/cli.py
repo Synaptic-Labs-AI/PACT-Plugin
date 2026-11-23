@@ -810,7 +810,7 @@ def cmd_setup(args, db_path=None):
             "details": status,
         })
     else:
-        _error("SETUP_FAILED", "Memory system initialization failed", exit_code=2)
+        _error("SETUP_FAILED", "Memory system initialization failed", exit_code=3)
 
 
 def cmd_update(args, db_path=None):
@@ -1021,13 +1021,13 @@ def _project_candidates(memory, db_path) -> list:
 
 
 def _exit_store_fault(exc, store, error) -> NoReturn:
-    """Report a present store that cannot serve a `project-id` verb: exit 3.
+    """Report a store that cannot serve the command: exit 3.
 
-    The whole `project-id` family keeps one exit code for an OPERATIONAL
-    fault (a locked store, an integrity error, an I/O fault), so `show`,
-    `--candidates` and `rekey` answer a corrupt store alike. Exit 2 stays
-    the bad-input code. The message names the store's remedy and is
-    rendered inert, because it echoes a path on a surface a caller prints.
+    Every verb keeps one exit code for an OPERATIONAL fault (a locked store,
+    an integrity error, an I/O fault), so a corrupt store answers alike
+    whichever verb reaches it. Exit 2 stays the bad-input code. The message
+    names the store's remedy when it has one and is rendered inert, because
+    it echoes a path on a surface a caller prints.
     """
     _error(
         error,
@@ -1055,8 +1055,8 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
             # `repo_root` IS THE IDENTITY ROOT: the root the winning rung resolved
             # and the one the plausibility gate compared legacy rows against. A
             # primary field named `repo_root` that named the PROCESS's repository
-            # would be the misdirection this field exists to remove, and the field
-            # is new in this PR so nothing depends on the older meaning.
+            # would be the misdirection this field exists to remove; no earlier
+            # release had the field, so nothing depends on another meaning.
             # `process_repo_root` keeps the process location under a name that
             # says what it is; in a declared-repo session the two differ.
             identity_root = memory._project_identity_root
@@ -1157,10 +1157,11 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             exit_code=2,
         )
 
-    if args.to_id and not is_canonical(args.to_id):
+    if args.to_id and args.to_id != from_id and not is_canonical(args.to_id):
         # A SUPPLIED non-canonical target is caller input, refused on the
         # bad-input channel. Moving rows into a basename bucket is the
-        # misfile this whole change exists to prevent.
+        # misfile this whole change exists to prevent. A target equal to
+        # --from moves nothing, so it gets the no-op answer instead.
         _error(
             "INVALID_INPUT",
             escape_for_envelope(
@@ -1250,13 +1251,13 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 escape_for_envelope(
                     f"--from={from_id!r} is unproven: {cause}, so it is not "
                     "read here and a defaulted --to cannot claim it. Of its "
-                    f"memories, {sessions['here']} were written by sessions "
-                    f"recorded here, {sessions['subfolder']} by sessions "
+                    f"memories, {sessions['here']} came from sessions "
+                    f"recorded here, {sessions['subfolder']} from sessions "
                     "launched in a subfolder of this repository, "
-                    f"{sessions['description_newer']} by sessions that started "
-                    "before its `description` file last changed, "
-                    f"{sessions['elsewhere']} by sessions recorded at another "
-                    f"checkout, and {sessions['unattributed']} by no recorded "
+                    f"{sessions['description_newer']} from sessions that "
+                    "started before its `description` file last changed, "
+                    f"{sessions['elsewhere']} from sessions recorded at another "
+                    f"checkout, and {sessions['unattributed']} from no recorded "
                     "session. Pass "
                     "--to explicitly after confirming the rows belong here. "
                     "Nothing was moved."
@@ -1965,15 +1966,18 @@ def main(argv=None):
         # the realpath form) from the message so absolute paths
         # (e.g. ~/.claude/pact-memory/... — illustrative example, not a live path) don't leak into stderr for
         # callers piping the JSON envelope into logs.
-        # A store that is present and cannot serve the command names its
-        # remedy here, whichever verb reached the fault.
+        # Nothing that reaches this handler is bad input, so nothing here
+        # exits 2. A store fault (sqlite could not open, read or write the
+        # store) exits 3, whichever verb reached it, as the project-id verbs
+        # do, and names the store's remedy when it has one. Every other
+        # failure (a save whose read-back finds no row, or an unexpected
+        # internal error) exits 3 as well.
         from scripts.database import sqlite3 as db_sqlite3
 
-        message = str(exc)
         if isinstance(exc, db_sqlite3.DatabaseError):
             store = db_path if db_path is not None else resolve_db_path()
-            message = present_store_fault(exc, str(store)) or message
-        _error("SYSTEM_ERROR", _scrub(message), exit_code=2)
+            _exit_store_fault(exc, store, "SYSTEM_ERROR")
+        _error("SYSTEM_ERROR", _scrub(str(exc)), exit_code=3)
 
 
 if __name__ == "__main__":

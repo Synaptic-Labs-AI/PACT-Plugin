@@ -110,6 +110,43 @@ class TestAnAbsentStoreRefusesWhatAPresentStoreRefuses:
         else:
             assert not resolve_db_path().exists()
 
+    @pytest.mark.parametrize("with_store", [False, True])
+    def test_an_explicit_target_equal_to_a_non_canonical_from_is_a_no_op_success(
+        self, identity_env, monkeypatch, capfd, with_store
+    ):
+        """Catches the canonical-target check refusing `--from=X --to=X` for a
+        folder-name X: the target equals the source, so nothing moves and the
+        answer is the promised no-op success."""
+        from scripts.config import resolve_db_path
+
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote=REMOTE))
+        if with_store:
+            resolve_db_path().parent.mkdir(parents=True, exist_ok=True)
+            _store_with_row(resolve_db_path(), "proj")
+            before = resolve_db_path().read_bytes()
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--to=proj", "--apply"], capfd
+        )
+        assert code == 0, envelope
+        result = envelope["result"]
+        assert (result["noop"], result["target_defaulted"]) == (True, False)
+        assert (result["from"], result["to"]) == ("proj", "proj")
+        if with_store:
+            assert resolve_db_path().read_bytes() == before
+        else:
+            assert not resolve_db_path().exists()
+
+    def test_a_non_canonical_target_other_than_from_is_still_refused(
+        self, identity_env, monkeypatch, capfd
+    ):
+        """The control: a folder-name --to that differs from --from is bad
+        input, refused before anything is opened."""
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote=REMOTE))
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--to=other"], capfd
+        )
+        assert (code, envelope["error"]) == (2, "INVALID_INPUT"), envelope
+
     def test_an_explicit_move_still_answers_store_absent(
         self, identity_env, monkeypatch, capfd
     ):
@@ -148,25 +185,35 @@ class TestADryRunLeavesTheJournalMode:
         assert _journal_mode(store) == "wal"
 
 
-class TestACorruptStoreExitsThreeOnEveryProjectIdVerb:
-    """Catches `show` and `--candidates` reaching the generic handler's exit
-    2 (the bad-input code) while `rekey` exits 3 for the same fault."""
+class TestACorruptStoreExitsThreeOnEveryVerb:
+    """Catches a verb answering a store fault with exit 2, the bad-input
+    code: `show` and `--candidates` once did while `rekey` exited 3, and
+    `status`, `list`, `search`, `sync` and `save` did through the generic
+    handler."""
 
     @pytest.mark.parametrize("argv", [
         ["project-id", "show"],
         ["project-id", "rekey", "--candidates"],
         ["project-id", "rekey", "--from=proj", f"--to={CANONICAL}"],
-    ], ids=["show", "candidates", "rekey"])
+        ["status"],
+        ["list"],
+        ["search", "anything"],
+        ["sync", "--claude-md-root", "{repo}"],
+        ["save", json.dumps({"context": "store fault"})],
+    ], ids=["show", "candidates", "rekey", "status", "list", "search", "sync", "save"])
     def test_exit_three(self, identity_env, monkeypatch, capfd, argv):
         from scripts import memory_api
 
         memory_api._LEGACY_SCOPE_CACHE.clear()
-        monkeypatch.chdir(make_repo(identity_env / "proj", remote=REMOTE))
+        repo = make_repo(identity_env / "proj", remote=REMOTE)
+        monkeypatch.chdir(repo)
         store = identity_env / "bad.db"
         store.write_bytes(b"not a sqlite store, " * 8)
+        argv = [arg.replace("{repo}", str(repo)) for arg in argv]
         code, envelope = _cli([*argv, "--db-path", str(store)], capfd)
         assert code == 3, envelope
         assert "exists but cannot be opened" in envelope["message"]
+        assert not (repo / "CLAUDE.md").exists()
 
 
 def _rekey_store(tmp_path, edges, target_edges=()):
@@ -597,9 +644,16 @@ class TestTheCatchUpOnASessionThatStartsWithARead:
         assert sqlite3.connect(str(store)).execute(
             "SELECT name, sql FROM sqlite_master ORDER BY name").fetchall() == tables
 
+    @pytest.mark.parametrize("old_table_empty", [False, True])
     def test_a_migration_due_postpones_until_after_the_migration(
-        self, monkeypatch, tmp_path, identity_env
+        self, monkeypatch, tmp_path, identity_env, old_table_empty
     ):
+        """An old-dimension table postpones the read's catch-up, and the
+        first call outside the read scope migrates it, then catches up.
+
+        RED WHEN an EMPTY table at the old dimension reads as current: the
+        read then spends the marker on inserts the table refuses, and the
+        migration skips the table."""
         import struct
 
         from scripts import embeddings, memory_api
@@ -614,10 +668,11 @@ class TestTheCatchUpOnASessionThatStartsWithARead:
             "CREATE VIRTUAL TABLE vec_memories USING vec0(memory_id TEXT PRIMARY KEY, "
             "project_id TEXT PARTITION KEY, embedding float[128])"
         )
-        conn.execute(
-            "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
-            ("a" * 32, CANONICAL, struct.pack("128f", *[0.5] * 128)),
-        )
+        if not old_table_empty:
+            conn.execute(
+                "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
+                ("a" * 32, CANONICAL, struct.pack("128f", *[0.5] * 128)),
+            )
         conn.commit()
         conn.close()
         before = store.read_bytes()
@@ -633,6 +688,95 @@ class TestTheCatchUpOnASessionThatStartsWithARead:
         assert self._vectors(store) == [
             ("a" * 32, embeddings.EMBEDDING_DIM), ("b" * 32, embeddings.EMBEDDING_DIM)
         ]
+
+
+    def test_an_unreadable_dimension_postpones_the_read_and_is_migrated(
+        self, monkeypatch, tmp_path, identity_env
+    ):
+        """A vector table whose dimension can be read neither from its
+        declaration nor from a stored vector counts as a migration due.
+
+        RED WHEN an unknown dimension lets the read catch up, or the
+        migration skips the table."""
+        from scripts import embeddings
+        from scripts.database import get_connection, load_sqlite_vec
+
+        store, memory_init = self._session(monkeypatch, tmp_path, identity_env)
+        conn = sqlite3.connect(str(store))
+        create_test_schema(conn)
+        conn.execute(
+            "CREATE TABLE vec_memories (memory_id TEXT, project_id TEXT, embedding BLOB)"
+        )
+        conn.commit()
+        conn.close()
+
+        assert memory_init._read_can_catch_up() is False
+        migrated = memory_init.maybe_migrate_embeddings()
+        assert migrated["message"].startswith("Migrated "), migrated
+        conn = get_connection(store)
+        try:
+            load_sqlite_vec(conn)
+            assert memory_init._stored_vector_dimension(conn) == (
+                True, embeddings.EMBEDDING_DIM
+            )
+        finally:
+            conn.close()
+
+
+class TestTheStoredVectorDimension:
+    """The dimension comes from the table's declaration; without one it is
+    the size of a stored vector; with neither it is unknown (None), which the
+    catch-up and the migration read as a migration being due."""
+
+    def _dimension(self, ddl, vector=None):
+        from scripts.memory_init import _stored_vector_dimension
+
+        conn = sqlite3.connect(":memory:")
+        conn.execute(ddl)
+        if vector is not None:
+            conn.execute("INSERT INTO vec_memories VALUES ('m', 'p', ?)", (vector,))
+        return _stored_vector_dimension(conn)
+
+    def test_no_table(self):
+        from scripts.memory_init import _stored_vector_dimension
+
+        assert _stored_vector_dimension(sqlite3.connect(":memory:")) == (False, None)
+
+    def test_a_declared_dimension_wins_over_an_empty_table(self):
+        ddl = ("CREATE TABLE vec_memories (memory_id TEXT, project_id TEXT, "
+               "embedding float[384])")
+        assert self._dimension(ddl) == (True, 384)
+
+    def test_an_undeclared_dimension_is_read_from_a_stored_vector(self):
+        import struct
+
+        ddl = "CREATE TABLE vec_memories (memory_id TEXT, project_id TEXT, embedding BLOB)"
+        assert self._dimension(ddl, struct.pack("128f", *[0.5] * 128)) == (True, 128)
+
+    def test_with_neither_the_dimension_is_unknown(self):
+        ddl = "CREATE TABLE vec_memories (memory_id TEXT, project_id TEXT, embedding BLOB)"
+        assert self._dimension(ddl) == (True, None)
+
+
+class TestTheRegistryRewriteWritesEveryByte:
+    """Catches the teammate-registry rewrite keeping whatever one `os.write`
+    accepted: a short write left the registry truncated mid-line."""
+
+    @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd")
+    def test_a_short_write_still_rewrites_every_kept_line(self, tmp_path, monkeypatch):
+        from session_end import _prune_registry_dead_teams
+
+        teams = tmp_path / ".claude" / "teams"
+        (teams / "pact-live").mkdir(parents=True)
+        registry = tmp_path / ".claude" / "pact-sessions" / ".teammate-registry.jsonl"
+        registry.parent.mkdir(parents=True)
+        kept = [json.dumps({"session_id": f"s{i}", "value": f"m{i}@pact-live"})
+                for i in range(20)]
+        dead = json.dumps({"session_id": "gone", "value": "x@pact-dead"})
+        registry.write_text("\n".join([*kept, dead]) + "\n", encoding="utf-8")
+        TestThePruneLedgerIsBounded._short_writes(monkeypatch, tmp_path)
+        assert _prune_registry_dead_teams(registry_path=registry, teams_dir=teams) == 1
+        assert registry.read_text(encoding="utf-8").splitlines() == kept
 
 
 class TestAReadDoesNotCreateAStore:
@@ -828,6 +972,55 @@ class TestThePruneLedgerIsBounded:
         assert min(len(records) for records in seen) >= len(final) - 1
         assert [p.name for p in slug.iterdir()] == ["pruned-sessions.jsonl"]
         assert ledger.stat().st_mode & 0o777 == 0o600
+
+    @staticmethod
+    def _short_writes(monkeypatch, under, limit=7):
+        """`os.write` writes at most `limit` bytes per call to a file under
+        `under`, as a write interrupted by a signal or a full disk may."""
+        import os
+
+        real = os.write
+
+        def write(fd, data):
+            try:
+                target = os.readlink(f"/proc/self/fd/{fd}")
+            except OSError:
+                target = ""
+            if target.startswith(str(under)):
+                return real(fd, bytes(data[:limit]))
+            return real(fd, data)
+
+        monkeypatch.setattr(os, "write", write)
+
+    @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd")
+    def test_a_short_write_still_appends_the_whole_line(self, tmp_path, monkeypatch):
+        """Catches the append writing once and keeping whatever `os.write`
+        accepted: a short write left a truncated, unparseable line."""
+        import session_end
+
+        slug = tmp_path / "slug"
+        slug.mkdir()
+        line = json.dumps({"session_id": "short", "project_dir": "/x",
+                           "started_at": "2026-01-01T00:00:00+00:00"}) + "\n"
+        self._short_writes(monkeypatch, tmp_path)
+        session_end._append_ledger_line(slug, line)
+        assert (slug / "pruned-sessions.jsonl").read_text() == line
+
+    @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc/self/fd")
+    def test_a_short_write_still_cuts_back_to_whole_lines(self, tmp_path, monkeypatch):
+        """The cut-back writes its kept window through the same loop: every
+        kept line is whole and the new line is last."""
+        import session_end
+        from scripts import memory_api
+
+        slug = tmp_path / "slug"
+        ledger, line = self._ledger_one_line_below_compaction(slug)
+        self._short_writes(monkeypatch, tmp_path, limit=4093)
+        session_end._append_ledger_line(slug, line("trigger"))
+        data = ledger.read_bytes()
+        assert data.endswith(line("trigger").encode())
+        assert all(json.loads(item) for item in data.splitlines())
+        assert memory_api._pruned_session_records(ledger)[-1]["session_id"] == "trigger"
 
     def test_a_writer_waiting_on_the_old_ledger_appends_to_the_new_one(
         self, tmp_path, monkeypatch

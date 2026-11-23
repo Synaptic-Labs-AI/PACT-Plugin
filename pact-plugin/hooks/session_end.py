@@ -707,8 +707,7 @@ def _compact_ledger(ledger: Path, fd: int, size: int) -> None:
     new_fd, new_path = _create_cut_back_file(ledger)
     try:
         try:
-            while tail:
-                tail = tail[os.write(new_fd, tail):]
+            _write_all(new_fd, tail)
             os.fsync(new_fd)
         finally:
             os.close(new_fd)
@@ -754,6 +753,12 @@ def _open_locked_ledger(ledger: Path) -> int | None:
     return None
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """Write every byte of `data` to `fd`; `os.write` may write fewer."""
+    while data:
+        data = data[os.write(fd, data):]
+
+
 def _append_ledger_line(slug_dir: Path, line: str) -> None:
     """Append `line` to the slug's prune ledger. Never raises.
 
@@ -773,7 +778,7 @@ def _append_ledger_line(slug_dir: Path, line: str) -> None:
         if fd is None:
             return
         try:
-            os.write(fd, line.encode("utf-8"))
+            _write_all(fd, line.encode("utf-8"))
             size = os.fstat(fd).st_size
             if size > _PRUNE_LEDGER_COMPACT_BYTES:
                 _compact_ledger(ledger, fd, size)
@@ -1389,7 +1394,7 @@ def _prune_registry_dead_teams(
         try:
             os.fchmod(fd, 0o600)
             payload = ("\n".join(kept_lines) + "\n") if kept_lines else ""
-            os.write(fd, payload.encode("utf-8"))
+            _write_all(fd, payload.encode("utf-8"))
         finally:
             os.close(fd)
         os.replace(tmp_path, registry_path)

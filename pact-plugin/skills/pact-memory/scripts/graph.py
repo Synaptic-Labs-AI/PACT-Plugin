@@ -217,7 +217,7 @@ def get_file_ids(
         # DELIBERATELY NOT `_scope_sql`: in this resolver None means the
         # NULL-PROJECT row, not "no clause". Routing it through the builder
         # would return every project's row for the path — the cross-project
-        # read this PR exists to close. Four MUST-KEEP arms pin this.
+        # read that project scoping exists to prevent. Four MUST-KEEP arms pin this.
         cursor = conn.execute(
             "SELECT id FROM files WHERE path = ? AND project_id IS NULL "
             "ORDER BY id",
@@ -678,7 +678,7 @@ def get_file_relations(
     # FILTER, and an empty scope has already returned above.
     #
     # SCOPE, RECORDED SO IT IS NOT RE-LITIGATED: this is a READ-side defence.
-    # The WRITE side is out of scope for this PR — with no project column, a
+    # The WRITE side is not defended here: with no project column, a
     # cross-project edge remains hand-insertable, and that is data corruption
     # owned by the NULL-key/relations backfill arc, not a read-path defect.
     if direction in ("outgoing", "both"):

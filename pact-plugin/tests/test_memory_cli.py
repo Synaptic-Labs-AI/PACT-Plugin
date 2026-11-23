@@ -572,7 +572,8 @@ class TestCliSaveVerification:
 
     Verification (save-then-get) lives in PACTMemory.save() so all callers
     benefit.  When verification fails, save() raises RuntimeError which
-    main()'s try/except catches as SYSTEM_ERROR (exit 2).
+    main()'s try/except catches as SYSTEM_ERROR (exit 3: the store did not
+    keep the write).
     """
 
     def test_save_success_when_save_returns_id(self, mock_pact_memory, capsys):
@@ -590,8 +591,8 @@ class TestCliSaveVerification:
         assert output["ok"] is True
         assert output["result"]["memory_id"] == "abc123def456"
 
-    def test_save_verification_failure_exits_2(self, capsys):
-        """When save() raises RuntimeError (verification failure), exits 2."""
+    def test_save_verification_failure_exits_3(self, capsys):
+        """When save() raises RuntimeError (verification failure), exits 3."""
         mock = MagicMock()
         mock.save.side_effect = RuntimeError(
             "Save verification failed — memory_id abc123 not found after save"
@@ -601,7 +602,7 @@ class TestCliSaveVerification:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", json.dumps(memory_dict)])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
 
     def test_save_verification_failure_error_format(self, capsys):
         """Verification failure outputs SYSTEM_ERROR JSON envelope to stderr."""
@@ -636,7 +637,7 @@ class TestCliSaveVerification:
         err_output = json.loads(captured.err)
         assert "custom_id_xyz" in err_output["message"]
 
-    def test_save_exception_via_main_exits_2(self, capsys):
+    def test_save_exception_via_main_exits_3(self, capsys):
         """Any exception from save() is caught by main() as SYSTEM_ERROR."""
         mock = MagicMock()
         mock.save.side_effect = RuntimeError("DB connection lost")
@@ -645,7 +646,7 @@ class TestCliSaveVerification:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", json.dumps(memory_dict)])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
@@ -664,7 +665,7 @@ class TestCliSaveVerification:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", "--stdin"])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "SYSTEM_ERROR"
@@ -1313,7 +1314,7 @@ class TestCliSetupCommand:
         with patch("scripts.cli.ensure_initialized", return_value=False):
             with pytest.raises(SystemExit) as exc_info:
                 cmd_setup(args)
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
@@ -1628,7 +1629,7 @@ class TestCliSystemErrorPathScrubbing:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", json.dumps(memory_dict)])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
 
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
@@ -1665,7 +1666,7 @@ class TestCliSystemErrorPathScrubbing:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", json.dumps(memory_dict)])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
 
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
@@ -1897,7 +1898,7 @@ class TestCliErrorHandling:
             main([])
         assert exc_info.value.code == 1
 
-    def test_system_error_exits_2(self, capsys):
+    def test_system_error_exits_3(self, capsys):
         parser = build_parser()
         args = parser.parse_args(["list"])
 
@@ -1906,7 +1907,7 @@ class TestCliErrorHandling:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["list"])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "SYSTEM_ERROR"
@@ -1943,7 +1944,7 @@ class TestCliErrorHandling:
                 main(["list"])
         mock_cls.assert_called_once_with(db_path=None)
 
-    def test_save_api_exception_exits_2(self, capsys):
+    def test_save_api_exception_exits_3(self, capsys):
         mock = MagicMock()
         mock.save.side_effect = Exception("Disk full")
         memory_dict = make_cli_memory_dict()
@@ -1951,7 +1952,7 @@ class TestCliErrorHandling:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", json.dumps(memory_dict)])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "SYSTEM_ERROR"
@@ -2918,8 +2919,9 @@ class TestCliSaveVerificationE2E:
 
     The save-then-get verification lives in PACTMemory.save(). When it
     fails, save() raises RuntimeError, which main()'s try/except catches
-    as SYSTEM_ERROR (exit 2). These tests exercise the full CLI binary
-    against real SQLite databases.
+    as SYSTEM_ERROR (exit 3). A store sqlite cannot open or write is a store
+    fault and exits 3 too. These tests exercise the full CLI binary against real
+    SQLite databases.
     """
 
     def test_save_roundtrip_confirms_verification_passed(self, cli_script_path, cli_db):
@@ -2980,13 +2982,9 @@ class TestCliSaveVerificationE2E:
         get_output = json.loads(get_result.stdout)
         assert get_output["result"]["context"] == "stdin verification test"
 
-    def test_save_exits_2_on_unwritable_db(self, cli_script_path, tmp_path):
-        """Save exits 2 with SYSTEM_ERROR when DB is inaccessible.
-
-        This exercises the same error-handling path that a verification
-        failure would take: PACTMemory.save() raises an exception, main()
-        catches it as SYSTEM_ERROR with exit code 2.
-        """
+    def test_save_exits_3_on_unwritable_db(self, cli_script_path, tmp_path):
+        """Save exits 3 with SYSTEM_ERROR when sqlite cannot open the store:
+        a store fault, not bad input."""
         # Create a directory where a file is expected — SQLite can't open it
         bad_db = tmp_path / "not_a_file"
         bad_db.mkdir()
@@ -2999,7 +2997,7 @@ class TestCliSaveVerificationE2E:
              "--db-path", str(bad_db)],
             capture_output=True, text=True, timeout=60,
         )
-        assert result.returncode == 2
+        assert result.returncode == 3
         assert result.stdout == ""
         err_output = json.loads(result.stderr)
         assert err_output["ok"] is False
@@ -3009,12 +3007,9 @@ class TestCliSaveVerificationE2E:
     # process: only mode bits give that, and uid 0 ignores them. The SYSTEM_ERROR
     # exit itself stays covered under root by the directory-as-db test above.
     @pytest.mark.requires_non_root
-    def test_save_exits_2_on_readonly_db(self, cli_script_path, cli_db):
-        """Save exits 2 when the database file is read-only.
-
-        A read-only DB prevents the INSERT in save() from succeeding,
-        triggering the SYSTEM_ERROR path (exit 2).
-        """
+    def test_save_exits_3_on_readonly_db(self, cli_script_path, cli_db):
+        """Save exits 3 when the database file is read-only: the INSERT
+        fails in sqlite, which is a store fault, not bad input."""
         import stat
         # Make the DB file read-only
         cli_db.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
@@ -3027,7 +3022,7 @@ class TestCliSaveVerificationE2E:
                  "--db-path", str(cli_db)],
                 capture_output=True, text=True, timeout=60,
             )
-            assert result.returncode == 2
+            assert result.returncode == 3
             err_output = json.loads(result.stderr)
             assert err_output["ok"] is False
             assert err_output["error"] == "SYSTEM_ERROR"
@@ -3048,7 +3043,7 @@ class TestCliSaveVerificationE2E:
              "--db-path", str(bad_db)],
             capture_output=True, text=True, timeout=60,
         )
-        assert result.returncode == 2
+        assert result.returncode == 3
         err_output = json.loads(result.stderr)
         # Verify full envelope structure
         assert set(err_output.keys()) == {"ok", "error", "message"}
