@@ -250,6 +250,8 @@ class TestSecretaryProjectionKey:
         for phrase in ("only when a file row places it under this repository or its linked worktrees",
                        "a session launched at the root of this repository or of one of its linked worktrees "
                        "wrote into it",
+                       "and no row in it was written by a session recorded outside this repository and its "
+                       "linked worktrees",
                        "An admitted bucket is shared with every checkout whose root folder has that name"):
             assert phrase in body, phrase
         assert "until it is rekeyed" not in body.lower()
@@ -441,7 +443,8 @@ class TestLegacyScopeStatesAreDocumented:
             "A recorded session counts only when it was launched at the root of "
             "this repository or of one of its linked worktrees (a session "
             "launched in a subfolder is not read), and <git-common-dir>/description is a "
-            "regular file whose ctime is earlier than the session's start."
+            "regular file whose ctime is earlier than the session's start, or the "
+            "repository has no description file."
         ) in body
         assert (
             "A session folder that was cleaned up counts the same way through "
@@ -460,9 +463,8 @@ class TestLegacyScopeStatesAreDocumented:
 
     def test_a_copied_or_recloned_repository_reads_as_unproven(self):
         assert (
-            "A repository that was moved, copied, restored or cloned again, a "
-            "repository with no description file, and a folder that is not a "
-            "repository all read as unproven too."
+            "A repository that was moved, copied, restored or cloned again, and "
+            "a folder that is not a repository, read as unproven too."
         ) in _body(SKILL)
 
     def test_the_moved_repository_residual_is_stated(self):
@@ -480,9 +482,22 @@ class TestLegacyScopeStatesAreDocumented:
 
     def test_unproven_is_not_read_and_names_its_command(self):
         assert (
-            "unproven: no file row places it and no recorded session from this "
-            "repository wrote into it (session_evidence is false). It is not "
-            "read, and its rekey command is printed once per process"
+            "unproven: it is not read, and its rekey command is printed once "
+            "per process, with the cause."
+        ) in _body(SKILL)
+
+    def test_an_unattributed_row_is_read_with_a_warning(self):
+        assert (
+            "an included bucket that holds such rows is read with a warning, "
+            "once per process, that gives their count (sessions.unattributed) "
+            "and the rekey command."
+        ) in _body(SKILL)
+
+    def test_a_foreign_row_keeps_either_kind_out(self):
+        assert (
+            "Neither kind is read when any of its rows was written by a session "
+            "recorded outside this repository and its linked worktrees: it is "
+            "then unproven."
         ) in _body(SKILL)
 
     def test_the_suppression_reason_is_documented_only_there(self):
@@ -6628,13 +6643,6 @@ class TestEveryRouteEntryConditionIsARoute:
             "a method on a local the census cannot type; every project object built on "
             "the path is a named build"
         ),
-        ("call", "<call to no function shared.project_scope: a method of what _GIT_INT_RE.fullmatch returns>"): (
-            "a method of that pattern's match"
-        ),
-        ("call", "<call to no function shared.project_scope: digits.strip>"): (
-            "a method on a local the census cannot type; every project object built on "
-            "the path is a named build"
-        ),
         ("call", "store_scope"): (
             "the _with_store_scope decorator runs each PACTMemory method inside "
             "store_scope(self._db_path), which binds the store file; get_user_memory_dir, "
@@ -6665,6 +6673,11 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "worktree_admin_gitdir"): (
             "trims the text read_git_file returned; its own body is read like any reached "
+            "function"
+        ),
+        ("call", "git_config_bool"): (
+            "parses the value of a git boolean environment variable the way git does; "
+            "the variable is the input, and its own body is read like any reached "
             "function"
         ),
         ("call", "<call to no function shared.git_helpers: PASS_GIT_RESULTS.get>"): (
@@ -6801,8 +6814,8 @@ class TestEveryRouteEntryConditionIsARoute:
         # (`test_only_pact_memory_init_sets_the_identity_store_work_reads`), and no git
         # command that work runs takes a value one of these reads
         # (`test_no_git_question_takes_a_store_work_value`).
-        ('call', 'bucket_session_ids'): (
-            "lists the session ids a legacy bucket's rows carry, as evidence for the read scope; it reads the store, not git or the identity" + _AFTER_DETECTION
+        ('call', 'bucket_session_counts'): (
+            "counts a legacy bucket's rows by the session id they carry, as evidence for the read scope; it reads the store, not git or the identity" + _AFTER_DETECTION
         ),
         ('call', 'count_project_file_paths'): (
             "counts a bucket's tracked file paths in the store for the bucket census" + _AFTER_DETECTION
@@ -6990,8 +7003,26 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', '<call to no function memory_api: bucket.casefold>'): (
             'compares a bucket name with the legacy name, ignoring case' + _AFTER_DETECTION
         ),
-        ('call', '<call to no function memory_api: context.read_text>'): (
-            "reads a session's context record, as evidence that a legacy bucket's session belongs to this project; it decides the read scope, not the identity" + _AFTER_DETECTION
+        ('call', '<call to no function memory_api: _UNPROVEN_CAUSES[reason].format>'): (
+            "fills the clause an unproven bucket's warning prints with the bucket's session counts" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: _LOCKED_READS_ONLY.get>'): (
+            "the flag that makes a read-only open of the store use SQLite's locking; it chooses how the store is opened, not what is read"
+        ),
+        ('call', '<call to no function memory_api: _LOCKED_READS_ONLY.set>'): (
+            "_stable_read_only sets the locking flag while it repeats a read the store moved under"
+        ),
+        ('call', '<call to no function memory_api: _LOCKED_READS_ONLY.reset>'): (
+            "_stable_read_only clears the locking flag after the repeated read"
+        ),
+        ('call', '<call to no function memory_api: _STABLE_READ_ACTIVE.get>'): (
+            "the flag that tells a self-wrapping read it already runs inside _stable_read_only"
+        ),
+        ('call', '<call to no function memory_api: _STABLE_READ_ACTIVE.set>'): (
+            "_stable_read_only marks that a read runs inside it"
+        ),
+        ('call', '<call to no function memory_api: _STABLE_READ_ACTIVE.reset>'): (
+            "_stable_read_only clears its mark after the read"
         ),
         ('call', '<call to no function memory_api: logger.info>'): (
             "memory_api's module logger" + _AFTER_DETECTION

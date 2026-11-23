@@ -33,7 +33,7 @@ import unicodedata
 from contextlib import closing, contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple, Optional, Tuple, cast
 
 # Use the same sqlite3 module as database.py for type consistency
 try:
@@ -232,7 +232,7 @@ LEGACY_SCOPE_KEYS = frozenset({
     "verified", "included_unverified", "excluded", "unproven",
     "session_evidence", "ambiguous", "canonical_count", "detail",
     "case_variant", "case_variant_rekey", "suppressed",
-    "suppressed_candidate", "degraded",
+    "suppressed_candidate", "degraded", "sessions", "unproven_reason",
 })
 
 
@@ -266,6 +266,8 @@ def _legacy_scope_record(**overrides: Any) -> Dict[str, Any]:
         "suppressed": None,
         "suppressed_candidate": None,
         "degraded": None,
+        "sessions": None,
+        "unproven_reason": None,
     }
     record.update(overrides)
     return record
@@ -308,16 +310,24 @@ _PRUNE_LEDGER_TAIL_BYTES = 1024 * 1024
 
 
 def _description_predates(common_dir: Optional[Path], started_at: Any) -> bool:
-    """Whether `<common_dir>/description` last changed before `started_at`.
+    """Whether `<common_dir>/description` last changed before `started_at`,
+    or the repository has no `description` file at all.
 
     `started_at` must be an ISO-8601 timestamp that carries its zone; a naive
-    or unparseable one fails closed. The description must be a regular file
-    by `lstat` (a symlink to an old file is refused), and its ctime must be
-    STRICTLY earlier than the session's start. The ctime is the file's last
-    status change, not its creation: a copied, restored or re-cloned
-    repository (an `rsync -a` copy included) has a new description, and a
-    `chmod` or `chown` that reaches the file moves its ctime later too, so
-    in each case the old sessions fail. Never raises.
+    or unparseable one fails closed. A description that exists must be a
+    regular file by `lstat` (a symlink to an old file is refused), and its
+    ctime must be STRICTLY earlier than the session's start. The ctime is the
+    file's last status change, not its creation: a copied, restored or
+    re-cloned repository (an `rsync -a` copy included) has a new description,
+    and a `chmod` or `chown` that reaches the file moves its ctime later too,
+    so in each case the old sessions fail.
+
+    NO DESCRIPTION FILE, NO ORDERING CHECK. A repository made from a template
+    without one (`git init --template=<dir>`) has nothing to date it by, so a
+    session recorded at its root counts on the record alone. The record
+    still names the root it was launched at and the session id that wrote
+    the rows, so it admits only a bucket that session wrote into. Never
+    raises.
     """
     if common_dir is None or not isinstance(started_at, str) or not started_at:
         return False
@@ -325,7 +335,10 @@ def _description_predates(common_dir: Optional[Path], started_at: Any) -> bool:
         started = datetime.fromisoformat(started_at)
         if started.tzinfo is None:
             return False
-        described = os.lstat(Path(common_dir) / "description")
+        try:
+            described = os.lstat(Path(common_dir) / "description")
+        except FileNotFoundError:
+            return True
         return (
             stat.S_ISREG(described.st_mode)
             and described.st_ctime < started.timestamp()
@@ -340,7 +353,9 @@ def _session_record_counts(
     """Whether one recorded session (a live context or a ledger line) counts.
 
     It ran in a gate root (its `project_dir` resolves to one) and started
-    after this repository's description was created. Never raises.
+    after this repository's `description` file last changed, or the
+    repository has no `description` file (`_description_predates`). Never
+    raises.
     """
     try:
         project_dir = record.get("project_dir")
@@ -434,19 +449,59 @@ def _pruned_session_index(ledger: Path) -> Dict[str, List[dict]]:
 def _legacy_session_evidence(
     conn: Any, candidate: str, gate_roots: list, common_dir: Optional[Path]
 ) -> bool:
-    """Whether a recorded session from one of `gate_roots` wrote `candidate`.
+    """Whether a recorded session from one of `gate_roots` wrote `candidate`
+    (`_legacy_session_census` counts a row of it `here`).
 
     The evidence an UNVERIFIED legacy bucket needs to be read: a session id
     that wrote into the bucket, whose record names a `project_dir` that IS a
     gate root and a zone-aware `started_at` later than the ctime of
-    `<common_dir>/description` (`common_dir` is the MAIN repository's, so
-    every linked worktree shares one file). The record is the session
-    folder's context file while the folder exists, and its line in the
-    project's prune ledger once the reaper has removed the folder; both pass
-    the same test. A delivered checkout with the same folder name has no such
-    record, and every new write binds the canonical id, so the evidence
-    cannot be manufactured after the upgrade. Stops at the first hit. Never
-    raises: any failure for one record is "no evidence" for that record.
+    `<common_dir>/description`, or any start when there is no `description`
+    file (`common_dir` is the MAIN repository's, so every linked worktree
+    shares one file). The record is the session folder's context file while
+    the folder exists, and its line in the project's prune ledger once the
+    reaper has removed the folder; both pass the same test. A delivered
+    checkout with the same folder name has no such record. Never raises.
+
+    WHAT THIS CANNOT TELL APART: a row whose writing session has no record
+    anywhere (no session id, a session older than session records, or one
+    pruned past the ledger's tail). Such a row reads like this repository's
+    own once another of the bucket's sessions counts here. A row whose
+    session IS recorded at another checkout keeps the whole bucket out of
+    the read scope (`_legacy_session_census`). A repository that has no
+    origin keeps writing folder-name rows after the upgrade, so a bucket can
+    gain rows of either kind at any time.
+    """
+    return _legacy_session_census(conn, candidate, gate_roots, common_dir)["here"] > 0
+
+
+# Where a legacy bucket's writing sessions are recorded, by row count:
+# `here` (a session that counts as evidence here), `elsewhere` (recorded at a
+# directory outside every gate root), `subfolder` (recorded at a folder inside
+# a gate root but not at the root), `description_newer` (recorded at a gate
+# root but started before `description` last changed), `unattributed`
+# (no session id, or no record found).
+_SESSION_CENSUS_KEYS = ("here", "elsewhere", "subfolder", "description_newer", "unattributed")
+
+
+def _legacy_session_census(
+    conn: Any, candidate: str, gate_roots: list, common_dir: Optional[Path]
+) -> Dict[str, int]:
+    """`candidate`'s memories counted by where their writing session is
+    recorded (`_SESSION_CENSUS_KEYS`).
+
+    EVERY SLUG FOLDER UNDER THE SESSIONS ROOT, NOT ONLY THE GATE ROOTS'. A
+    session recorded at ANOTHER checkout is what marks a row as that
+    checkout's, and a subfolder launch is recorded under the subfolder's own
+    slug. Each slug folder is listed once per call. A session with records in
+    two places counts by the first of elsewhere, here, subfolder,
+    description_newer.
+
+    A PRESENT ENTRY IS A LIVE FOLDER: its context file is the record, and
+    anything unreadable there is no record; only an ABSENT entry lets that
+    slug folder's prune ledger stand in. A slug folder that exists but cannot
+    be listed is not taken as empty: each session is then looked up in it by
+    path. Never raises: a store or filesystem failure leaves the affected
+    rows `unattributed`.
     """
     from shared.pact_context import (
         PRUNE_LEDGER_NAME,
@@ -454,82 +509,92 @@ def _legacy_session_evidence(
         reconstruct_session_dir,
     )
 
-    from .database import bucket_session_ids
+    from .database import bucket_session_counts
 
+    counts = dict.fromkeys(_SESSION_CENSUS_KEYS, 0)
+    try:
+        rows = bucket_session_counts(conn, candidate)
+    except sqlite3.Error:
+        return counts
     roots = set()
     for root in gate_roots:
         try:
             roots.add(os.path.realpath(root))
         except (OSError, ValueError):
             continue
-    if not roots or common_dir is None:
-        return False
-    try:
-        session_ids = bucket_session_ids(conn, candidate)
-    except sqlite3.Error:
-        return False
-    # ONE LISTING PER ROOT, NOT A PATH BUILD PER SESSION. Every session of
-    # one root lives in the same slug folder, and a sanitized id holds no
-    # separator, so `<slug folder>/<safe id>` is the folder
-    # `reconstruct_session_dir` names. Listing it once replaces one resolve
-    # per writing session (measured: most of the cost at 1,000 sessions).
-    # A PRESENT ENTRY IS A LIVE FOLDER, exactly as the per-session existence
-    # test it replaces: its context is read (and anything unreadable is no
-    # evidence), and only an ABSENT entry lets the ledger stand in.
-    #
-    # THE LISTING IS A SPEEDUP, NEVER THE ANSWER. A slug folder that does not
-    # exist (or is a file) has no live session folders, so every session is
-    # absent, as the per-session test would also find. Any OTHER failure (a
-    # folder that is searchable but not readable, say) says nothing about
-    # which entries exist, so that root falls back to the per-session
-    # existence test (`present` is None).
-    folders: Dict[str, tuple] = {}
-    for root in sorted(roots):
-        base: Optional[Path] = None
-        present: Optional[set] = set()
+    named = [
+        (session_id, count) for session_id, count in rows
+        if isinstance(session_id, str) and session_id
+    ]
+    counts["unattributed"] = sum(count for _, count in rows) - sum(c for _, c in named)
+    sessions_root: Optional[Path] = None
+    entries: Dict[str, Optional[set]] = {}
+    if named:
         try:
-            probe = reconstruct_session_dir(root, "_")
-            base = Path(probe).parent if probe else None
-            if base is not None:
-                present = set(os.listdir(base))
-        except (FileNotFoundError, NotADirectoryError):
-            present = set()
-        except OSError:
-            present = None
+            # Every session folder sits at `<sessions root>/<slug>/<id>`;
+            # any named path gives the root (the filesystem root has no slug).
+            sessions_root = Path(
+                reconstruct_session_dir(os.path.join(os.sep, "x"), "_")
+            ).parent.parent
+            for slug in sorted(os.listdir(sessions_root)):
+                try:
+                    entries[slug] = set(os.listdir(sessions_root / slug))
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                except OSError:
+                    entries[slug] = None
         except Exception:
-            base = None
-        folders[root] = (base, present)
+            sessions_root = None
     ledgers: Dict[str, Dict[str, List[dict]]] = {}
-    for session_id in session_ids:
-        safe_id = _UNSAFE_SLUG_CHARS_RE.sub("_", str(session_id))
-        for root in sorted(roots):
-            try:
-                base, present = folders[root]
-                if base is None:
-                    continue
-                session_path = base / safe_id
-                if (
-                    safe_id in present
-                    if present is not None
-                    else os.path.lexists(session_path)
-                ):
-                    context = session_path / "pact-session-context.json"
-                    recorded = json.loads(context.read_text(encoding="utf-8"))
-                    if isinstance(recorded, dict) and _session_record_counts(
-                        recorded, roots, common_dir
+
+    def where(record: Any) -> Optional[str]:
+        try:
+            project_dir = os.path.realpath(record.get("project_dir"))
+        except Exception:
+            return None
+        if project_dir in roots:
+            return (
+                "here"
+                if _session_record_counts(record, roots, common_dir)
+                else "description_newer"
+            )
+        if any(project_dir.startswith(root.rstrip(os.sep) + os.sep) for root in roots):
+            return "subfolder"
+        return "elsewhere"
+
+    for session_id, count in named:
+        places = set()
+        if sessions_root is not None:
+            safe_id = _UNSAFE_SLUG_CHARS_RE.sub("_", session_id)
+            for slug, present in entries.items():
+                try:
+                    folder = sessions_root / slug / safe_id
+                    if safe_id in present if present is not None else os.path.lexists(folder):
+                        recorded = json.loads(
+                            (folder / "pact-session-context.json").read_text(encoding="utf-8")
+                        )
+                        if isinstance(recorded, dict):
+                            places.add(where(recorded))
+                        continue
+                    ledger = sessions_root / slug / PRUNE_LEDGER_NAME
+                    if (
+                        PRUNE_LEDGER_NAME in present
+                        if present is not None
+                        else os.path.lexists(ledger)
                     ):
-                        return True
+                        if str(ledger) not in ledgers:
+                            ledgers[str(ledger)] = _pruned_session_index(ledger)
+                        for record in ledgers[str(ledger)].get(session_id, ()):
+                            places.add(where(record))
+                except Exception:
                     continue
-                # THE FOLDER IS GONE: its line in the prune ledger stands in.
-                ledger = str(session_path.parent / PRUNE_LEDGER_NAME)
-                if ledger not in ledgers:
-                    ledgers[ledger] = _pruned_session_index(Path(ledger))
-                for record in ledgers[ledger].get(session_id, ()):
-                    if _session_record_counts(record, roots, common_dir):
-                        return True
-            except Exception:
-                continue
-    return False
+        for place in ("elsewhere", "here", "subfolder", "description_newer"):
+            if place in places:
+                counts[place] += count
+                break
+        else:
+            counts["unattributed"] += count
+    return counts
 
 
 def _warn_legacy_excluded(
@@ -590,25 +655,106 @@ def _printed_rekey_remedy(commands: list) -> str:
     return " ; ".join(commands)
 
 
+# Why an unproven bucket was not read: the `unproven_reason` value and the
+# clause the warning prints for it.
+_UNPROVEN_CAUSES = {
+    "recorded_elsewhere": (
+        "{elsewhere} of its memories were written by sessions recorded at "
+        "another checkout ({here} by sessions recorded here)"
+    ),
+    "subfolder_launch": (
+        "no file row places it, and the sessions recorded as writing it were "
+        "launched in a subfolder of this repository; only a session launched "
+        "at the root of this repository or of one of its linked worktrees "
+        "counts"
+    ),
+    "description_newer": (
+        "no file row places it, and this repository's `description` file "
+        "changed after the sessions that wrote it started (a copy, restore, "
+        "chmod or chown changes it)"
+    ),
+    "no_session": (
+        "no file row places it and no session launched at the root of this "
+        "repository or of one of its linked worktrees wrote it"
+    ),
+}
+
+
+def _unproven_reason(outcome: str, sessions: Dict[str, int]) -> str:
+    """The `_UNPROVEN_CAUSES` key for a bucket that is not read."""
+    if sessions["elsewhere"]:
+        return "recorded_elsewhere"
+    if outcome == "unverified" and sessions["subfolder"]:
+        return "subfolder_launch"
+    if outcome == "unverified" and sessions["description_newer"]:
+        return "description_newer"
+    return "no_session"
+
+
 def _warn_legacy_unproven(
-    store: str, candidate: str, target: str, memories: int, file_paths: int
+    store: str,
+    candidate: str,
+    target: str,
+    memories: int,
+    file_paths: int,
+    reason: str = "no_session",
+    sessions: Optional[Dict[str, int]] = None,
 ) -> None:
-    """Disclose an UNPROVEN legacy bucket, once per process per bucket."""
+    """Disclose an UNPROVEN legacy bucket, once per process per bucket, with
+    the reason it was not read (`_UNPROVEN_CAUSES`)."""
     key = (store, candidate)
     if key in _UNPROVEN_WARNED:
         return
     _UNPROVEN_WARNED.add(key)
+    cause = _UNPROVEN_CAUSES[reason].format(
+        **(sessions or dict.fromkeys(_SESSION_CENSUS_KEYS, 0))
+    )
     logger.warning(
         "legacy project bucket %r holds %d memor%s and %d file path%s, but "
-        "no file row places it and no recorded session from this repository "
-        "wrote it, so it is NOT in this read scope: its folder name alone "
-        "cannot tell this checkout's rows from another checkout of the same "
-        "name. If the rows belong here, move them explicitly with: %s",
+        "%s, so it is NOT in this read scope: its folder name alone cannot "
+        "tell this checkout's rows from another checkout of the same name. "
+        "If the rows belong here, move them explicitly with: %s",
         candidate,
         memories,
         "y" if memories == 1 else "ies",
         file_paths,
         "" if file_paths == 1 else "s",
+        cause,
+        _printed_rekey_remedy(
+            [runnable_rekey_command(candidate, target, db_path=store)]
+        ),
+    )
+
+
+def _warn_legacy_unattributed(
+    store: str,
+    candidate: str,
+    target: str,
+    verified: bool,
+    sessions: Dict[str, int],
+) -> None:
+    """Disclose an ADMITTED legacy bucket that holds rows no session record
+    places, once per process per bucket. Such a row reads like this
+    repository's own, and nothing can tell it from a row another checkout of
+    the same name wrote (`_legacy_session_evidence`'s limit)."""
+    key = (store, candidate, "unattributed")
+    if key in _UNPROVEN_WARNED:
+        return
+    _UNPROVEN_WARNED.add(key)
+    logger.warning(
+        "legacy project bucket %r is in this read scope because %s, but %d "
+        "of its memories were written by no recorded session, so nothing "
+        "places them: they may belong to another checkout of the same name. "
+        "If every row belongs here, file the bucket under this repository's "
+        "id with: %s",
+        candidate,
+        "its file rows lie under this repository"
+        if verified
+        else (
+            f"{sessions['here']} of its memories were written by sessions "
+            "recorded here"
+        ),
+        sessions["unattributed"],
         _printed_rekey_remedy(
             [runnable_rekey_command(candidate, target, db_path=store)]
         ),
@@ -1241,39 +1387,25 @@ def _store_stat_key(store: str):
     or being emptied is a change signal even when the main file's stamp did
     not move (a write inside one timestamp tick that kept the file's size).
 
-    A read-only open of a store with no `-wal` creates an empty one, so when
-    the `-wal` is absent the key first opens and closes a read-only
-    connection, letting SQLite create it, and stamps after that. The read the
-    key is taken for then finds the `-wal` already there and leaves the key
-    unchanged, so the next read is served from the cache. The absence check
-    on the main file runs first, and the probe is read-only, so it never
-    creates a store. When SQLite cannot create the `-wal` (a read-only
-    directory, a store not in WAL mode) the leg is None, and the read cannot
-    create it either.
+    An absent `-wal` is the leg None. A read-only open of a store with no
+    `-wal` is immutable (`_read_only_connection`) and creates none, so the
+    read the key is taken for leaves the key unchanged.
 
     THE STAMP'S LIMIT: a change is missed only when it leaves both legs'
     `(mtime_ns, size)` unchanged, for example a `-wal` deleted and recreated
     at its old size within one timestamp tick while the main file's stamp is
-    unchanged too. Every stamp-keyed read shares that limit.
+    unchanged too. Every stamp-keyed read shares that limit. Because a read
+    of a store with no `-wal` creates none, one case of it is named: two
+    scope reads in one command, with another process's commit and close
+    between them, inside one timestamp tick and with no change in the main
+    file's size. The second read is served the scope decided before that
+    commit.
     """
     try:
         main = os.stat(store)
     except OSError:
         return None
     wal_path = store + "-wal"
-    if not os.path.lexists(wal_path):
-        try:
-            probe = _read_only_connection(store)
-            try:
-                probe.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
-            finally:
-                probe.close()
-        except (sqlite3.Error, OSError):
-            pass
-        try:
-            main = os.stat(store)
-        except OSError:
-            return None
     try:
         wal = os.stat(wal_path)
         wal_key = (wal.st_mtime_ns, wal.st_size)
@@ -1287,6 +1419,20 @@ def _invalidate_legacy_scope_cache() -> None:
     _LEGACY_SCOPE_CACHE.clear()
 
 
+# Set while a read that found the store changing under an immutable open is
+# repeated with SQLite's locking (`_stable_read_only`).
+_LOCKED_READS_ONLY: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "_LOCKED_READS_ONLY", default=False
+)
+
+
+# Set while `_stable_read_only` runs a read, so a reader that wraps itself
+# does not wrap again.
+_STABLE_READ_ACTIVE: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "_STABLE_READ_ACTIVE", default=False
+)
+
+
 def _read_only_connection(store: str):
     """Open `store` READ-ONLY; raises sqlite3.OperationalError on failure.
 
@@ -1296,15 +1442,67 @@ def _read_only_connection(store: str):
     contradicting the verb's own "creates none" contract. The URI form with
     `mode=ro` refuses those writes instead.
 
-    SQLite may still create the EMPTY `-wal`/`-shm` sidecars when the
-    directory is writable; they carry no schema and no rows. The store file
+    NO SIDECARS ON A SETTLED STORE. When no `<store>-wal` exists the open is
+    also `immutable=1`, so SQLite takes no lock and creates no `-wal` or
+    `-shm`. Immutable means SQLite trusts the file not to change, and a
+    writer in another process can change it during the read (measured: an
+    immutable reader beside a committing, checkpointing writer raised
+    "database disk image is malformed" and also returned wrong row counts),
+    so every caller reads through `_stable_read_only`, which repeats the
+    read with locking when the store moved. With a `-wal` present, or while
+    that repeat runs, the open is `mode=ro` alone, which may leave the empty
+    `-wal`/`-shm` sidecars; they carry no schema and no rows. The store file
     itself is never written.
     """
-    connection = sqlite3.connect(
-        Path(store).resolve().as_uri() + "?mode=ro", uri=True
-    )
+    uri = Path(store).resolve().as_uri() + "?mode=ro"
+    if not _LOCKED_READS_ONLY.get() and not os.path.lexists(store + "-wal"):
+        uri += "&immutable=1"
+    connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
     return connection
+
+
+def _store_stamp(store: str):
+    """What an immutable read relies on staying put: the store's inode,
+    size and mtime, and whether a `-wal` exists. None when unreadable."""
+    try:
+        main = os.stat(store)
+    except OSError:
+        return None
+    return (main.st_ino, main.st_size, main.st_mtime_ns, os.path.lexists(store + "-wal"))
+
+
+def _stable_read_only(store: str, read: Callable[[], Any]) -> Any:
+    """Run `read()`, whose connections `_read_only_connection` opens, and
+    repeat it once with SQLite's locking when the store moved under it.
+
+    A read counts as moved when the store's stamp (`_store_stamp`) differs
+    before and after it, or when it raised a `sqlite3.DatabaseError` while
+    its opens were immutable. The repeat's own answer or error stands, so a
+    store that is really corrupt still raises and an empty answer is never
+    served for a store that was being written.
+    """
+    active = _STABLE_READ_ACTIVE.set(True)
+    try:
+        if _LOCKED_READS_ONLY.get():
+            return read()
+        before = _store_stamp(store)
+        if before is None or before[3]:
+            return read()
+        moved = False
+        try:
+            answer = read()
+        except sqlite3.DatabaseError:
+            moved = True
+        if not moved and _store_stamp(store) == before:
+            return answer
+        locked = _LOCKED_READS_ONLY.set(True)
+        try:
+            return read()
+        finally:
+            _LOCKED_READS_ONLY.reset(locked)
+    finally:
+        _STABLE_READ_ACTIVE.reset(active)
 
 
 def _store_schema_present(store: str) -> bool:
@@ -1325,8 +1523,11 @@ def _store_schema_present(store: str) -> bool:
     try:
         if not Path(store).exists():
             return False
-        with closing(_read_only_connection(store)) as connection:
-            return _connection_has_memories_table(connection)
+        def read() -> bool:
+            with closing(_read_only_connection(store)) as connection:
+                return _connection_has_memories_table(connection)
+
+        return _stable_read_only(store, read)
     except sqlite3.DatabaseError as exc:
         if _read_only_store_unavailable(exc, store):
             return False
@@ -1443,6 +1644,7 @@ def _legacy_probe_context(store: str, conn):
         yield conn, None
         return
     degraded: Optional[str] = None
+    connection = None
     try:
         connection = _read_only_connection(store)
         # A SCHEMA CHECK, NOT THE INITIALISER: a read never runs migrations
@@ -1451,8 +1653,12 @@ def _legacy_probe_context(store: str, conn):
         if not _connection_has_memories_table(connection):
             connection.close()
             degraded = "no schema"
-    except sqlite3.DatabaseError as exc:
-        if not _read_only_store_unavailable(exc, store):
+    except BaseException as exc:
+        # A connection opened before the failure is closed here, whether the
+        # failure degrades or propagates.
+        if connection is not None:
+            connection.close()
+        if not isinstance(exc, sqlite3.DatabaseError) or not _read_only_store_unavailable(exc, store):
             raise
         degraded = str(exc)
     # EVERY YIELD SITS OUTSIDE THE `try`: an exception the caller's body
@@ -1479,13 +1685,16 @@ def read_project_bucket_census(store: str) -> Dict[str, int]:
         return {}
     from .database import project_bucket_counts
 
-    try:
+    def read() -> Dict[str, int]:
         with closing(_read_only_connection(store)) as connection:
             # NO SCHEMA, NO BUCKETS. `project_bucket_counts` requires the
             # schema and never creates it, so the census checks first.
             if not _connection_has_memories_table(connection):
                 return {}
             return project_bucket_counts(connection)
+
+    try:
+        return _stable_read_only(store, read)
     except sqlite3.DatabaseError as exc:
         if not _read_only_store_unavailable(exc, store):
             raise
@@ -3507,14 +3716,8 @@ class PACTMemory:
                     )
                 if cwd_root is None or not cwd_root.name:
                     return unresolved
-                if _is_home(cwd_root):
-                    _warn_home_landing(cwd_root)
-                    return _DetectedIdentity(
-                        project_id=cwd_root.name, source="cwd",
-                        legacy_basename=cwd_root.name, override_ignored=None,
-                        identity_root=cwd_root, pre_change_name=cwd_root.name,
-                    )
-            # A repository, or a non-home folder: `cwd_root` is set on both.
+            # A repository or a folder, HOME included: `_identity_at_root`
+            # lands a HOME checkout on its folder name and warns.
             cwd_root = cast(Path, cwd_root)
             return PACTMemory._identity_at_root(
                 cwd_root,
@@ -3652,8 +3855,11 @@ class PACTMemory:
 
         A store that exists is only read, so the initialization runs inside
         the read scope: no schema DDL, no column migration and no embedding
-        migration. The embedding catch-up still writes vectors into a vector
-        table that already exists. An absent store reaches a read verb only on
+        migration. The one write it may make is the embedding catch-up adding
+        vector rows for memories not yet embedded, and only into a vector
+        table that already exists at the current dimension; otherwise the
+        catch-up is postponed to the first call outside the scope. An absent
+        store reaches a read verb only on
         the derived route (see `_schema_present`), where the first memory
         operation creates the store and its schema, so that call runs outside
         the scope.
@@ -3725,6 +3931,14 @@ class PACTMemory:
         `_store_stat_key`). An in-process write clears the cache as well, so a save
         that changes the bucket set is observed immediately.
         """
+        # A READ ON ITS OWN CONNECTION IS REPEATED WITH LOCKING when the store
+        # moved under its immutable open (`_stable_read_only`); a caller's
+        # connection is read as it is.
+        if conn is None and not _STABLE_READ_ACTIVE.get():
+            return _stable_read_only(
+                str(self._db_path or resolve_db_path()),
+                lambda: self._read_project_scopes(),
+            )
         self._legacy_scope_state = None
         scope = self._project_scope()
         if scope is None:
@@ -3928,20 +4142,33 @@ class PACTMemory:
                 outcome, detail = legacy_candidate_plausibility(
                     connection, candidate, deduped or None, root_common=gate_common
                 )
-                # ADMISSION. `verified` is read; `excluded` is not. An
-                # UNVERIFIED bucket (no absolute file row places it) is read
+                # ADMISSION. `excluded` is not read. A `verified` bucket is
+                # read, and an UNVERIFIED one (no absolute file row places it)
                 # only when a recorded session from one of these roots wrote
                 # into it: its folder name alone cannot tell this checkout's
-                # rows from a same-named checkout's.
-                session_evidence = (
-                    _legacy_session_evidence(
+                # rows from a same-named checkout's. Either way a bucket
+                # holding rows whose session is recorded at another checkout
+                # stays out, as `unproven` with that reason.
+                sessions = (
+                    _legacy_session_census(
                         connection, candidate, deduped, gate_common
                     )
+                    if outcome != "excluded"
+                    else None
+                )
+                session_evidence = (
+                    bool(sessions and sessions["here"])
                     if outcome == "unverified"
                     else None
                 )
-                included = outcome == "verified" or bool(session_evidence)
-                unproven = outcome == "unverified" and not session_evidence
+                foreign = bool(sessions and sessions["elsewhere"])
+                included = (
+                    outcome == "verified" or bool(session_evidence)
+                ) and not foreign
+                unproven = outcome != "excluded" and not included
+                unproven_reason = (
+                    _unproven_reason(outcome, sessions) if unproven else None
+                )
                 memory_count = buckets.get(candidate, 0)
                 state = _legacy_scope_record(
                     candidate=candidate,
@@ -3957,7 +4184,7 @@ class PACTMemory:
                         else runnable_rekey_command(candidate, scope, db_path=store)
                     ),
                     included=included,
-                    verified=outcome == "verified",
+                    verified=included and outcome == "verified",
                     included_unverified=included and outcome != "verified",
                     # LOAD-BEARING: the exclusion disclosure fires on this
                     # field. Without it a populated legacy bucket can be
@@ -3965,6 +4192,8 @@ class PACTMemory:
                     excluded=outcome == "excluded",
                     unproven=unproven,
                     session_evidence=session_evidence,
+                    sessions=sessions,
+                    unproven_reason=unproven_reason,
                     ambiguous=ambiguous,
                     canonical_count=canonical_count,
                     detail=detail,
@@ -3979,7 +4208,12 @@ class PACTMemory:
                     )
                 elif unproven:
                     _warn_legacy_unproven(
-                        store, candidate, scope, memory_count, file_paths or 0
+                        store, candidate, scope, memory_count, file_paths or 0,
+                        unproven_reason, sessions,
+                    )
+                elif sessions and sessions["unattributed"]:
+                    _warn_legacy_unattributed(
+                        store, candidate, scope, outcome == "verified", sessions,
                     )
                 result = (scope, candidate) if included else (scope,)
         self._legacy_scope_state = state
@@ -4106,9 +4340,10 @@ class PACTMemory:
         A quarantined link is one whose recorded path could not be
         re-tracked (a NUL byte, refused by `track_file`), so the link was
         left on its old project instead of aborting the re-key. Zero is the
-        normal answer. Reported here because update() has no envelope: the
-        count is the structured half, the warning in `_cascade_rekey` is the
-        human half.
+        normal answer. Reported here because the library's update() returns
+        no structured result; the CLI's `update` envelope carries this count
+        as `last_cascade_skipped`. The count is the structured half, the
+        warning in `_cascade_rekey` is the human half.
         """
         return self._last_cascade_skipped
 
@@ -4726,6 +4961,20 @@ class PACTMemory:
             # `_read_project_scopes` records the legacy candidate, whether it
             # was admitted, and the canonical bucket's prior count.
             self._read_project_scopes(conn)
+            # A PAYLOAD-SUPPLIED ID ELSEWHERE IS ITS OWN BUCKET: the instance's
+            # legacy reconciliation says nothing about it, so the record
+            # carries only that bucket's prior count.
+            if (
+                payload_supplied_project
+                and memory.get("project_id") != self._project_scope()
+            ):
+                from .database import count_project_memories
+
+                self._legacy_scope_state = _legacy_scope_record(
+                    canonical_count=count_project_memories(
+                        conn, memory.get("project_id")
+                    ),
+                )
 
             # Create the memory record
             memory_id = create_memory(conn, memory)

@@ -1201,7 +1201,7 @@ class TestAPrintedRekeyCommandRunsAsPrinted:
         monkeypatch.chdir(repo)
         caplog.clear()
         assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
-        text = self._printed_command(caplog, "no recorded session from this repository")
+        text = self._printed_command(caplog, "no session launched at the root")
         code, envelope = self._run_printed(text + " --apply", capfd)
         assert code == 0, envelope
         assert envelope["result"]["memories"] == 1, envelope
@@ -1244,7 +1244,7 @@ class TestAPrintedRekeyCommandRunsAsPrinted:
         assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
         messages = [
             r.getMessage() for r in caplog.records
-            if "no recorded session from this repository" in r.getMessage()
+            if "no session launched at the root" in r.getMessage()
         ]
         assert len(messages) == 1 and "\n" not in messages[0], messages
         assert "printed by the `project-id show` verb" in messages[0]
@@ -1271,7 +1271,7 @@ class TestAPrintedRekeyCommandRunsAsPrinted:
         assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
         messages = [
             r.getMessage() for r in caplog.records
-            if "no recorded session from this repository" in r.getMessage()
+            if "no session launched at the root" in r.getMessage()
         ]
         assert len(messages) == 1 and "\n" not in messages[0], messages
         assert "refuses a bucket id that holds a control character" in messages[0]

@@ -9,6 +9,13 @@ directory it was cloned into. Before this module the id was the working
 directory's basename, which split one repository across machines and merged
 unrelated folders that happened to share a name.
 
+The id is built from the remote URL as written. An ssh host alias
+(`git@github-work:o/r`, where `github-work` is a `Host` entry in the ssh
+config) stays in the id, because git cannot tell an alias from a host name:
+that clone gets `github-work/o/r`, not the `github.com/o/r` an https clone
+of the same repository gets. The repository override file
+(`<git-common-dir>/pact-project-id`) is the remedy that makes them one id.
+
 Used by:
 - memory_api.py — the resolver rungs call `detect_id_for_root`, `read_override`
   and `is_canonical`; nothing here imports memory_api, so the dependency is
@@ -265,6 +272,10 @@ def _holds_include_section(text: str) -> bool:
     - the section name runs from the `[` to the first `]` or git whitespace,
       compared case-folded, a dotted name by its first part.
 
+    - a line that continues a value (`_value_continues`: the value's last
+      character is an unescaped `\\`) is part of that value, not a line of
+      its own, so a `[include]` there is no header.
+
     A header git refuses (`[ include]`, a form feed before the `[`) makes
     git refuse the whole file, so the origin read is already unavailable
     there and the answer here does not matter. A header git reads but does
@@ -272,11 +283,17 @@ def _holds_include_section(text: str) -> bool:
     """
     if text.startswith("\ufeff"):
         text = text[1:]
+    in_value = False
+    in_quote = False
     for line in text.split("\n"):
+        if in_value:
+            in_value, in_quote = _value_continues(line, in_quote)
+            continue
         rest = line
         while True:
             rest = rest.lstrip(" \t\r")
             if not rest.startswith("["):
+                in_value, in_quote = _line_value_continues(rest)
                 break
             name_end = 0
             for index, char in enumerate(rest):
@@ -292,6 +309,37 @@ def _holds_include_section(text: str) -> bool:
                 break
             rest = rest[close + 1:]
     return False
+
+
+def _line_value_continues(line: str) -> Tuple[bool, bool]:
+    """For a line that is not a section header, whether its value continues
+    on the next line, and whether it ends inside a quote. A comment line, or
+    a line with no `=`, has no value to continue."""
+    if line.startswith((";", "#")) or "=" not in line:
+        return False, False
+    return _value_continues(line.split("=", 1)[1], False)
+
+
+def _value_continues(value: str, in_quote: bool) -> Tuple[bool, bool]:
+    """Whether a config value's text continues past this line, read as git
+    reads a value (`parse_value`): a `\\` takes the next character, so one
+    at the very end joins the next line to the value; `"` toggles a quote;
+    `;` or `#` outside a quote starts a comment, which never continues.
+    Returns `(continues, in_quote)`."""
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char == "\\":
+            if index + 1 == len(value) or value[index + 1:] == "\r":
+                return True, in_quote
+            index += 2
+            continue
+        if char == '"':
+            in_quote = not in_quote
+        elif char in ";#" and not in_quote:
+            return False, False
+        index += 1
+    return False, False
 
 
 def _header_end(header: str, name_end: int) -> Optional[int]:
@@ -388,38 +436,20 @@ def _server_identity_impl() -> tuple:
     return is_canonical_id, validate_identifier_for_write
 
 
-_GIT_ENV_TRUE = frozenset({"true", "yes", "on"})
-_GIT_ENV_FALSE = frozenset({"false", "no", "off"})
-
-
 def _git_env_bool(name: str) -> bool:
-    """A git boolean environment variable, parsed the way git parses it.
+    """A git boolean environment variable, read as git reads it
+    (`shared.git_helpers.git_config_bool`; Python truthiness is wrong here,
+    since git reads "0", "false", "no" and "off" as false).
 
-    Python truthiness is WRONG here: `bool("0")`, `bool("false")`, `bool("no")`
-    and `bool("off")` are all True, while git reads each as FALSE. A value of
-    "0" therefore crossed a filesystem boundary git would have stopped at.
-
-    Accepted, case-insensitively: `true`/`yes`/`on` and any non-zero decimal;
-    false for `false`/`no`/`off`/`0`/empty. An UNSET variable is the default,
-    which is 0 for both git variables this module reads. Git treats anything
-    else as a fatal config error; here it is FALSE.
-
-    The empty string is FALSE and whitespace is NOT stripped, both MEASURED
-    against git's own parser (`git -c probe.bool=<v> config --type=bool`):
-    `""` answers false, and both `" "` and `" true"` answer
-    `fatal: bad boolean config value`.
+    An UNSET variable is the default, which is false for both git variables
+    this module reads. A value git refuses (git stops with a fatal error) is
+    false here: git cannot answer this directory then, so the git questions
+    the resolver asks decline it whichever way the walk goes.
     """
+    from shared.git_helpers import git_config_bool
+
     raw = os.environ.get(name)
-    if raw is None:
-        return False
-    value = raw.lower()
-    if not value or value in _GIT_ENV_FALSE:
-        return False
-    if value in _GIT_ENV_TRUE:
-        return True
-    if value.isascii() and value.isdigit():
-        return int(value) != 0
-    return False
+    return raw is not None and bool(git_config_bool(raw))
 
 
 def _git_ceiling_directories() -> set:
@@ -602,6 +632,11 @@ def _normalize_segment(raw: str) -> Optional[str]:
 def _strip_path_suffixes(path: str) -> str:
     """Drop one trailing `/`, then one `.git`, then one exposed `/`.
 
+    The `.git` is read in the last segment's normal form
+    (`_normalize_segment`), so a percent-encoded spelling of it (`%2Egit`)
+    is dropped too; the segment then stays in that normal form, which
+    `_split_path` leaves as it is.
+
     The second slash strip exists only for the `owner/.git` form: once `.git`
     is removed the path ends in the separator that used to precede it, and
     leaving it would create an empty final segment. It does NOT rescue
@@ -610,10 +645,11 @@ def _strip_path_suffixes(path: str) -> str:
     """
     if path.endswith("/"):
         path = path[:-1]
-    if path.lower().endswith(".git"):
-        path = path[:-4]
-        if path.endswith("/"):
-            path = path[:-1]
+    head, separator, last = path.rpartition("/")
+    normal = _normalize_segment(last)
+    if normal is not None and normal.lower().endswith(".git"):
+        last = normal[:-4]
+        path = head + separator + last if last else head
     return path
 
 
@@ -649,7 +685,7 @@ def _azure_devops_services_id(host: str, port: str, segments: list) -> Optional[
     - `ssh.dev.azure.com` or `vs-ssh.visualstudio.com`, path
       `v3/{org}/{project}/{repo}`;
     - `{org}.visualstudio.com`, path `{project}/_git/{repo}` or
-      `DefaultCollection/{project}/_git/{repo}`;
+      `DefaultCollection/{project}/_git/{repo}` (the collection in any case);
     - `dev.azure.com`, path `{org}/{project}/_git/{repo}`.
 
     The ORGANISATION is lower-cased in every spelling: Azure DevOps
@@ -673,7 +709,7 @@ def _azure_devops_services_id(host: str, port: str, segments: list) -> Optional[
         org = host[: -len(_AZURE_LEGACY_SUFFIX)]
         if not org or "." in org:
             return None
-        rest = segments[1:] if segments[:1] == ["DefaultCollection"] else segments
+        rest = segments[1:] if segments[:1] and segments[0].lower() == "defaultcollection" else segments
         if len(rest) == 3 and rest[1] == "_git":
             return [org, rest[0], "_git", rest[2]]
     return None
@@ -1109,7 +1145,7 @@ def read_origin(git_dir: Path) -> OriginRead:
     origins, values = pieces[0::2], pieces[1::2]
     if not values:
         return _absent_origin(git_dir)
-    if any(not value.strip() for value in values):
+    if any(not value for value in values):
         return OriginRead(ORIGIN_EMPTY_ENTRY, None)
     own = os.path.realpath(os.path.join(git_dir, "config"))
     first_own = next(
@@ -1693,7 +1729,10 @@ def _gitfile_redirect_detail(root: Path) -> Optional[str]:
     cannot derive an id from its own remote, but it is RECOVERABLE — the
     override is read first, so one pin at `<common-dir>/pact-project-id`
     restores it. A forgery can likewise bind a pin, but only one the victim
-    deliberately wrote, never its remote.
+    deliberately wrote, never its remote. That binding is ADVERSARIAL-ONLY
+    and kept: it needs a hand-written `.git` file, and declining the pin
+    would leave the honest `--separate-git-dir` layout, whose `.git` file is
+    byte-identical, with no route to an id.
     """
     # THE MARKER IS FOUND BY WALKING UP, AS GIT DOES (`find_git_marker`).
     # The caller may hand us a SUBDIRECTORY of the redirected checkout (a
@@ -1791,7 +1830,9 @@ def detect_id_for_root(
       an empty value, or no url comes from the repository's own config file
       -> DECLINE (`origin_unrepresentable`);
     - the origin is ABSENT (none configured, `file://`, a local path) ->
-      the basename, the designed non-git form, EXCEPT in a submodule: there
+      the basename, the designed non-git form (so in a `--separate-git-dir`
+      repository with no origin, each linked worktree, being its own root,
+      gets its own folder's name and its own bucket), EXCEPT in a submodule: there
       the checkout path is chosen by the superproject's tracked `.gitmodules`,
       so a basename would let a repository name another project's bucket. A
       submodule-controlled basename DECLINES and names the override as the

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextvars
 import os
+import re
 import stat
 import subprocess
 from contextlib import contextmanager
@@ -207,3 +208,47 @@ def worktree_admin_gitdir(text: str) -> str:
     reads it (`get_linked_worktree`): the whole file, trailing whitespace
     trimmed."""
     return text.rstrip(" \t\n\v\f\r")
+
+
+_GIT_BOOL_TRUE = frozenset({"true", "yes", "on"})
+_GIT_BOOL_FALSE = frozenset({"", "false", "no", "off"})
+# git's integer form (`git_parse_signed`): C whitespace, an optional sign,
+# then a number `strtoimax(..., 0)` reads in full (0x-hex, 0-octal or
+# decimal), then at most one k/m/g unit. Nothing may follow.
+_GIT_BOOL_INT = re.compile(
+    r"[ \t\n\v\f\r]*(?P<sign>[-+]?)"
+    r"(?:0[xX](?P<hex>[0-9a-fA-F]+)|(?P<oct>0[0-7]*)|(?P<dec>[1-9][0-9]*))"
+    r"(?P<unit>[kKmMgG]?)"
+)
+_GIT_BOOL_UNITS = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30}
+_GIT_INT_MAX = (1 << 31) - 1
+
+
+def git_config_bool(value: str) -> Optional[bool]:
+    """`value` read as git's `git_config_bool` reads it, or None where git
+    refuses the value and stops (`fatal: bad boolean config value`).
+
+    The words true/yes/on and false/no/off and the empty string, compared
+    ASCII case-insensitively, with no whitespace around them. Otherwise an
+    integer, true when nonzero: leading whitespace and a sign are allowed,
+    `0x` reads hex and a leading `0` reads octal, one k/m/g unit multiplies,
+    trailing text of any kind is refused, and a value outside a C int is
+    refused. The caller decides what an unknown value means for it.
+    """
+    if value.isascii() and value.lower() in _GIT_BOOL_TRUE:
+        return True
+    if value.isascii() and value.lower() in _GIT_BOOL_FALSE:
+        return False
+    match = _GIT_BOOL_INT.fullmatch(value)
+    if match is None:
+        return None
+    if match["hex"] is not None:
+        number = int(match["hex"], 16)
+    elif match["oct"] is not None:
+        number = int(match["oct"], 8)
+    else:
+        number = int(match["dec"])
+    factor = _GIT_BOOL_UNITS[match["unit"].lower()]
+    if number > _GIT_INT_MAX // factor:
+        return None
+    return number != 0

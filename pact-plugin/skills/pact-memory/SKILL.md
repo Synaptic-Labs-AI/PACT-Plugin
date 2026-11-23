@@ -348,7 +348,7 @@ and an empty result never means those records do not exist. A full id still
 resolves by id, so `get <id>` is a way to check one record when you know it.
 
 A WIDENED READ IS NOT A CLAIM OF OWNERSHIP. An `included_unverified` bucket is
-read because a recorded session from this repository wrote into it, not because
+read because a session recorded at this repository's root wrote into it, not because
 its file rows place it here, so a result can contain rows from another checkout
 that shares the folder name, including one that used this exact folder before
 this repository was moved into it. Treat it as a discovery to review, not as proof
@@ -356,28 +356,44 @@ that every row belongs here.
 
 `legacy_scope` carries the same keys in every state: `candidate`,
 `memory_count`, `file_paths`, `rekey`, `included`, `verified`,
-`included_unverified`, `excluded`, `unproven`, `session_evidence`, `ambiguous`,
-`canonical_count`, `detail`, `case_variant`, `case_variant_rekey`,
-`suppressed`, `suppressed_candidate` and `degraded`. It is `null` only when no
+`included_unverified`, `excluded`, `unproven`, `unproven_reason`,
+`session_evidence`, `sessions`, `ambiguous`, `canonical_count`, `detail`,
+`case_variant`, `case_variant_rekey`, `suppressed`, `suppressed_candidate` and
+`degraded`. It is `null` only when no
 identity resolves or the id is not canonical. When `candidate` is set, exactly
 one of `included`, `excluded` and `unproven` is true:
 
-- `included`: the bucket is read. `verified` means an absolute file row places
-  it in this repository. `included_unverified` means no file row places it but
-  a recorded session from this repository wrote into it (`session_evidence` is
-  `true`). A recorded session counts only when it was launched at the root of
-  this repository or of one of its linked worktrees (a session launched in a
-  subfolder is not read), and `<git-common-dir>/description` is a regular
-  file whose ctime is earlier than the session's start. A session folder that
-  was cleaned up counts the same way through the line recorded for it when it
-  was removed.
+- `included`: the whole bucket is read. `verified` means an absolute file row
+  places it in this repository. `included_unverified` means no file row places
+  it but a recorded session from this repository wrote into it
+  (`session_evidence` is `true`). A recorded session counts only when it was
+  launched at the root of this repository or of one of its linked worktrees (a
+  session launched in a subfolder is not read), and `<git-common-dir>/description` is a
+  regular file whose ctime is earlier than the session's start, or the
+  repository has no `description` file. A session folder that was cleaned up
+  counts the same way through the line recorded for it when it was removed.
+  Neither kind is read when any of its rows was written by a session recorded
+  outside this repository and its linked worktrees: it is then `unproven`. A
+  row with no recorded session does not block it, because nothing tells such
+  rows apart: an included bucket that holds such rows is read with a warning,
+  once per process, that gives their count (`sessions.unattributed`) and the
+  rekey command.
 - `excluded`: its absolute file rows place it in another repository, and it is
   not read.
-- `unproven`: no file row places it and no recorded session from this
-  repository wrote into it (`session_evidence` is `false`). It is not read, and
-  its `rekey` command is printed once per process. A repository that was
-  moved, copied, restored or cloned again, a repository with no `description`
-  file, and a folder that is not a repository all read as `unproven` too. A
+- `unproven`: it is not read, and its `rekey` command is printed once per
+  process, with the cause. `unproven_reason` names the cause:
+  `recorded_elsewhere` (some of its rows were written by sessions recorded
+  outside this repository), `subfolder_launch` (no file row places it, and
+  its writing sessions were launched in a subfolder of this repository),
+  `description_newer` (no file row places it, and `description` changed after
+  its writing sessions started) or `no_session` (no file row places it and no
+  session launched at the root of this repository or of one of its linked
+  worktrees wrote it). `sessions` counts the bucket's memories by where their
+  writing session is recorded: `here`, `elsewhere`, `subfolder`,
+  `description_newer` and `unattributed`; it is `null` when the bucket is
+  excluded or there is no candidate. A repository that was moved, copied,
+  restored or cloned again, and a folder that is not a repository, read as
+  `unproven` too. A
   session folder that an earlier version of the plugin removed left no line,
   so a project whose writing sessions were all removed that way reads as
   `unproven` until its rows are moved with that rekey command and `--apply`,

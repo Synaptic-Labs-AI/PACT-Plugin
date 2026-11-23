@@ -196,15 +196,13 @@ def _commit_verified_legacy_row(other, repo):
 
 
 class TestTheReadScopeCacheServesTheSecondRead:
-    """The read's own read-only connection creates an EMPTY `-wal` beside a
-    store that had none. A key stamped before that creation changed across
-    the read it keyed, so the second read missed and re-ran the whole
-    membership decision (the bucket census and the evidence check). The key
-    therefore lets a read-only open create the `-wal` first and stamps after
-    it, keeping the `-wal`'s own stamp, so the journal being deleted,
-    recreated or emptied still moves the key and a write is never served
-    from the cache. The cache lives for one detection pass, so each arm reads
-    inside one, as a command does."""
+    """A read of a store with no `-wal` is immutable and creates no sidecar,
+    so it leaves the key it is cached under unchanged and the second read is
+    served from the cache. The key keeps the `-wal`'s own stamp when one
+    exists, so the journal being deleted, recreated or emptied still moves
+    the key. A read the store moved under is repeated with locking. The
+    cache lives for one detection pass, so each arm reads inside one, as a
+    command does."""
 
     @pytest.fixture(autouse=True)
     def _one_pass(self):
@@ -225,25 +223,23 @@ class TestTheReadScopeCacheServesTheSecondRead:
         return decisions
 
     def test_repeated_reads_decide_the_scope_once(self, repo_env, monkeypatch):
-        """RED WHEN `_store_stat_key` stamps an absent `-wal` without first
-        letting a read-only open create it: the first read then creates it
-        after the stamp, and the second read decides again."""
+        """Three reads of a store with no `-wal` decide the scope once and
+        leave no `-wal` or `-shm` behind: the open is immutable, so the read
+        does not change the key it is cached under. RED WHEN a read of a
+        settled store opens with locking: SQLite then creates the sidecars,
+        and the `-wal` appearing after the first stamp makes the second read
+        decide again."""
         _repo, store = repo_env
         _seed_canonical(store)
         wal = Path(str(store) + "-wal")
-        # PRECONDITION, not the subject: the store starts with no `-wal`, so
-        # the first read is the one that creates it.
-        assert not wal.exists(), "the seeded store already has a -wal; the arm would not cross the transition"
+        shm = Path(str(store) + "-shm")
+        # PRECONDITION, not the subject: the store starts settled.
+        assert not wal.exists() and not shm.exists(), "the seeded store has sidecars; the arm would not read a settled store"
         memory = PACTMemory(session_id="s", db_path=store)
         decisions = self._count_decisions(monkeypatch)
-        scopes = [memory._read_project_scopes()]
-        # PRECONDITION, not the subject: the first read crossed the
-        # transition (measured with SQLite 3.45.1: a read-only open creates
-        # the empty `-wal`), and the `-wal` holds no frames.
-        assert wal.exists(), "no -wal was created; the arm would not cross the transition"
-        assert wal.stat().st_size == 0, "the -wal holds frames; the arm would not exercise the empty stamp"
-        scopes += [memory._read_project_scopes() for _ in range(2)]
+        scopes = [memory._read_project_scopes() for _ in range(3)]
         assert scopes == [(CANONICAL,)] * 3, scopes
+        assert not wal.exists() and not shm.exists(), "a read of a settled store created a sidecar"
         assert len(decisions) == 1, f"3 reads decided the scope {len(decisions)} times"
 
     def test_a_read_after_a_truncating_checkpoint_decides_again(self, repo_env, monkeypatch):
@@ -292,47 +288,62 @@ class TestTheReadScopeCacheServesTheSecondRead:
         finally:
             other.close()
 
-    def test_a_writer_that_commits_and_closes_in_one_tick_is_read(self, repo_env, monkeypatch):
-        """A writer's last close checkpoints its commit into the main file and
-        deletes the `-wal`. When the main file's `(mtime_ns, size)` comes out
-        unchanged (a write inside one timestamp tick that kept the size), the
-        `-wal` leg is the only change signal: the key must stamp the `-wal`
-        the read found differently from the absent one the writer left. RED
-        WHEN an empty `-wal` stamps the same as an absent one: the read after
-        the writer is served the scope decided without its row.
-
-        The arm holds the main leg at its pre-write stamp with `os.utime`,
-        standing in for a coarse-timestamp filesystem; the commit, the close
-        and the stat key the production code reads are real."""
-        repo, store = repo_env
-        _seed_canonical(store)
-        memory = PACTMemory(session_id="s", db_path=store)
-        decisions = self._count_decisions(monkeypatch)
-        assert memory._read_project_scopes() == (CANONICAL,)
-        wal = Path(str(store) + "-wal")
-        # PRECONDITION, not the subject: the cached read left an empty `-wal`.
-        assert wal.exists() and wal.stat().st_size == 0
-        main_before = store.stat()
+    def _commit_and_close(self, store, repo):
+        """Another process's commit and close: the close checkpoints the
+        commit into the main file and deletes the `-wal`."""
         other = sqlite3.connect(str(store))
         try:
             _commit_verified_legacy_row(other, repo)
         finally:
             other.close()
-        # PRECONDITION, not the subject: the last close deleted the `-wal`,
-        # and the row reached the main file without resizing it.
-        assert not wal.exists(), "the writer's close left the -wal; the arm would not cross the deletion"
-        assert store.stat().st_size == main_before.st_size, "the commit resized the main file"
-        # ISOLATION: hold the main leg at its pre-write stamp, so the `-wal`
-        # leg is the only part of the key that can have moved.
-        os.utime(store, ns=(store.stat().st_atime_ns, main_before.st_mtime_ns))
-        assert (store.stat().st_mtime_ns, store.stat().st_size) == (
+        # PRECONDITION, not the subject: no `-wal` is left behind.
+        assert not Path(str(store) + "-wal").exists(), "the writer's close left the -wal"
+
+    def test_a_commit_and_close_that_moves_the_main_stamp_is_read(self, repo_env, monkeypatch):
+        """The read after another process's commit and close is decided
+        again when the main file's stamp moved. RED WHEN the key leaves out
+        the main file's leg: that read is served the scope from before the
+        commit."""
+        repo, store = repo_env
+        _seed_canonical(store)
+        memory = PACTMemory(session_id="s", db_path=store)
+        decisions = self._count_decisions(monkeypatch)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        main_before = store.stat()
+        self._commit_and_close(store, repo)
+        # PRECONDITION, not the subject: the commit moved the main stamp.
+        os.utime(store, ns=(store.stat().st_atime_ns, main_before.st_mtime_ns + 1_000_000))
+        assert (store.stat().st_mtime_ns, store.stat().st_size) != (
             main_before.st_mtime_ns, main_before.st_size,
-        ), "the main file's stamp could not be held; the arm would not isolate the -wal leg"
+        )
         seen = len(decisions)
         assert memory._read_project_scopes() == (CANONICAL, LEGACY), (
             "the read after the writer's commit and close was served from the cache"
         )
         assert len(decisions) == seen + 1
+
+    def test_a_commit_and_close_inside_one_tick_is_the_named_limit(self, repo_env, monkeypatch):
+        """THE NAMED LIMIT of `_store_stat_key`: with no `-wal` before or
+        after, a commit and close that leaves the main file's
+        `(mtime_ns, size)` unchanged (one timestamp tick, no growth) is not
+        seen by the second scope read of the same command. The arm holds the
+        main leg with `os.utime`, standing in for that tick. RED WHEN the
+        limit changes, in either direction, without this pin and the
+        docstring paragraph that names it changing too."""
+        repo, store = repo_env
+        _seed_canonical(store)
+        memory = PACTMemory(session_id="s", db_path=store)
+        decisions = self._count_decisions(monkeypatch)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        assert not Path(str(store) + "-wal").exists(), "the read created a -wal"
+        main_before = store.stat()
+        self._commit_and_close(store, repo)
+        assert store.stat().st_size == main_before.st_size, "the commit resized the main file"
+        os.utime(store, ns=(store.stat().st_atime_ns, main_before.st_mtime_ns))
+        seen = len(decisions)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        assert len(decisions) == seen, "the read inside the tick decided again"
+        assert "inside one timestamp tick" in memory_api._store_stat_key.__doc__
 
     def test_a_write_landing_during_the_read_is_not_served_from_the_cache(
         self, repo_env, monkeypatch
@@ -340,7 +351,9 @@ class TestTheReadScopeCacheServesTheSecondRead:
         """RED WHEN the cache entry is keyed by a stamp taken AFTER the read:
         a commit landing after the read counted the buckets is then filed
         under a key that already includes it, and the next read is served the
-        scope decided without it."""
+        scope decided without it. The writer's connection has read the store
+        first, so a `-wal` exists and the read is a locking one, which
+        `_stable_read_only` does not repeat."""
         from scripts import database
 
         repo, store = repo_env
@@ -348,6 +361,9 @@ class TestTheReadScopeCacheServesTheSecondRead:
         memory = PACTMemory(session_id="s", db_path=store)
         other = sqlite3.connect(str(store))
         try:
+            other.execute("SELECT COUNT(*) FROM memories").fetchone()
+            # PRECONDITION, not the subject: the read below is not immutable.
+            assert Path(str(store) + "-wal").exists(), "no -wal; the read would be immutable and repeated"
             landed = []
             real = database.project_bucket_counts
 
@@ -368,6 +384,70 @@ class TestTheReadScopeCacheServesTheSecondRead:
             )
         finally:
             other.close()
+
+    def test_an_immutable_read_the_store_moved_under_is_repeated(
+        self, repo_env, monkeypatch
+    ):
+        """A read of a settled store is immutable, and SQLite trusts an
+        immutable file not to change. When a write lands during it, the read
+        is repeated with locking, and the repeat's answer is the one returned
+        and cached. RED WHEN `_stable_read_only` returns the first answer
+        although the store's stamp moved."""
+        from scripts import database
+
+        repo, store = repo_env
+        _seed_canonical(store)
+        # PRECONDITION, not the subject: the first read is immutable.
+        assert not Path(str(store) + "-wal").exists()
+        memory = PACTMemory(session_id="s", db_path=store)
+        other = sqlite3.connect(str(store))
+        try:
+            calls = []
+            real = database.project_bucket_counts
+
+            def counted_then_written(connection):
+                buckets = real(connection)
+                if not calls:
+                    _commit_verified_legacy_row(other, repo)
+                calls.append(1)
+                return buckets
+
+            monkeypatch.setattr(database, "project_bucket_counts", counted_then_written)
+            assert memory._read_project_scopes() == (CANONICAL, LEGACY), (
+                "the answer read before the write landed was returned"
+            )
+            assert len(calls) == 2, f"the read ran {len(calls)} times, not twice"
+            assert memory._read_project_scopes() == (CANONICAL, LEGACY)
+            assert len(calls) == 2, "the repeated answer was not served from the cache"
+        finally:
+            other.close()
+
+    def test_a_read_that_raises_under_an_immutable_open_is_repeated(
+        self, repo_env, monkeypatch
+    ):
+        """An immutable open reading a store being rewritten can raise
+        "database disk image is malformed". That is the store moving, not the
+        store being corrupt: the read is repeated with locking, and only the
+        repeat's error would stand. RED WHEN the first error escapes, or the
+        repeat is not run with locking."""
+        from scripts import database
+
+        _repo, store = repo_env
+        _seed_canonical(store)
+        assert not Path(str(store) + "-wal").exists()
+        memory = PACTMemory(session_id="s", db_path=store)
+        locked = []
+        real = database.project_bucket_counts
+
+        def malformed_once(connection):
+            locked.append(memory_api._LOCKED_READS_ONLY.get())
+            if len(locked) == 1:
+                raise memory_api.sqlite3.DatabaseError("database disk image is malformed")
+            return real(connection)
+
+        monkeypatch.setattr(database, "project_bucket_counts", malformed_once)
+        assert memory._read_project_scopes() == (CANONICAL,)
+        assert locked == [False, True], locked
 
 
 class TestRekeyLibraryRefusesANonCanonicalTarget:

@@ -168,7 +168,7 @@ KNOWN_NAME_SITES = Counter({
     ("hooks/shared/session_resume.py", "format_session_substitutions"): 1,  # docstring
     ("skills/pact-memory/scripts/pact_session.py", "_context_file_path"): 2,       # read; docstring
     ("skills/pact-memory/scripts/pact_session.py", "_context_record_on_disk"): 1,  # read
-    ("skills/pact-memory/scripts/memory_api.py", "_legacy_session_evidence"): 1,  # read (legacy-admission evidence)
+    ("skills/pact-memory/scripts/memory_api.py", "_legacy_session_census"): 1,  # read (legacy-admission evidence)
     ("hooks/session_end.py", "_pruned_session_line"): 2,  # read (prune-ledger evidence before a reap); docstring
     ("hooks/shared/project_scope.py", "<module>"): 1,  # read (the record rung's _CONTEXT_FILE)
 })

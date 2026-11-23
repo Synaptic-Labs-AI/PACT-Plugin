@@ -1357,17 +1357,20 @@ def project_bucket_counts(conn: sqlite3.Connection) -> Dict[str, int]:
     return {row[0]: row[1] for row in cursor.fetchall()}
 
 
-def bucket_session_ids(conn: sqlite3.Connection, project_id: str) -> List[str]:
-    """Every session id that wrote a memory into `project_id`, newest first.
+def bucket_session_counts(
+    conn: sqlite3.Connection, project_id: str
+) -> List[Tuple[Optional[str], int]]:
+    """Every session id that wrote a memory into `project_id`, with how many.
 
-    The legacy-admission evidence check reads this: a session that wrote into
-    the bucket, whose recorded project directory is this repository, and
-    which started after the repository's `description` file was created is
-    evidence the bucket belongs here (see `_legacy_session_evidence`). NULL and empty session ids are
-    excluded, because no session record can be found for them. Ordered by
-    each session's most recent memory (newest first, ties by id), so a caller
-    that stops at the first hit tries the sessions most likely to still have
-    a record on disk.
+    The legacy-admission evidence check reads this (`_legacy_session_census`
+    in memory_api): a session that wrote into the bucket, whose recorded
+    project directory is this repository, and which started after the
+    repository's `description` file last changed (or whose repository has no
+    `description` file) is evidence the bucket belongs here, and a session
+    recorded at another checkout marks its rows as that checkout's. NULL and
+    empty session ids are kept, each as its own entry, because their rows
+    count as rows no session record can place. Ordered by session id, NULL
+    first.
 
     PRECONDITION: the store's schema is present. This is an identity read
     primitive, reached from read-only probes, so it never calls
@@ -1376,12 +1379,11 @@ def bucket_session_ids(conn: sqlite3.Connection, project_id: str) -> List[str]:
     `sqlite3.OperationalError`, and the caller checks the schema first.
     """
     cursor = conn.execute(
-        "SELECT session_id FROM memories "
-        "WHERE project_id = ? AND session_id IS NOT NULL AND session_id != '' "
-        "GROUP BY session_id ORDER BY MAX(created_at) DESC, session_id",
+        "SELECT session_id, COUNT(*) FROM memories WHERE project_id = ? "
+        "GROUP BY session_id ORDER BY session_id",
         (project_id,),
     )
-    return [row[0] for row in cursor.fetchall()]
+    return [(row[0], row[1]) for row in cursor.fetchall()]
 
 
 LEGACY_PLAUSIBLE_VERIFIED = "verified"
@@ -1506,12 +1508,15 @@ def _contained_by_root(
     repository, or one unpacked inside another) owns the row, so an ancestor
     root must not count it; the root's own submodules do not end its claim.
     `root_common` is git's verified common dir for the root (None: no
-    exemption). `nested` caches each answer for one gate call.
+    exemption). `nested` caches each answer for one gate call. A root that
+    already ends in a separator (the filesystem root, `/`) is its own
+    prefix.
     """
-    if resolved != root and not resolved.startswith(root + os.sep):
+    prefix = root if root.endswith(os.sep) else root + os.sep
+    if resolved != root and not resolved.startswith(prefix):
         return False
     directory = os.path.dirname(resolved)
-    while directory != root and directory.startswith(root + os.sep):
+    while directory != root and directory.startswith(prefix):
         key = (root, directory)
         if key not in nested:
             nested[key] = _owns_row_instead_of(directory, root, root_common)

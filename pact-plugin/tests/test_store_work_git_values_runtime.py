@@ -28,9 +28,11 @@ session records and the prune ledger are read through files the process
 opens, which an audit hook records. The repository's `description` is read
 for its ctime only, so no string can mark it; the records that make the
 check consult it are marked, and their reads are observed. The legacy
-bucket's rows are read only once a session record vouches for the bucket,
-so the last two routes give the live legacy session a start after the
-`description` and then list and rekey: the list prints the legacy rows.
+bucket's rows are read only once a session record vouches for the bucket
+and no row's session is recorded at another directory, so the last two
+routes give the live legacy session a start after the `description`, move
+the bucket's other two rows to that session, and then list and rekey: the
+list prints the legacy rows.
 
 One flow is allowed: a write whose CLAUDE_PROJECT_DIR disagrees with the
 session record asks git about the recorded project directory, to tell a
@@ -292,6 +294,14 @@ def rig(tmp_path_factory):
 
     record(LEGACY_LIVE, slug_dir, project_dir=str(repo),
            started_at=datetime.now(timezone.utc).isoformat())
+    # A row whose session is recorded at another directory keeps the whole
+    # bucket out of the read scope, and the routes above have read both of
+    # those records. The two rows now carry the live legacy session, so the
+    # bucket is vouched for and the list prints all three.
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE memories SET session_id = ? WHERE id IN ('l2', 'l3')", (LEGACY_LIVE,)
+        )
     run("list, legacy bucket vouched for", "list", "--limit", "50")
     run("rekey --from (legacy, --to defaulted)", "project-id", "rekey", "--from", "proj")
     return {

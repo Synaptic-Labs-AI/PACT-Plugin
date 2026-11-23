@@ -795,9 +795,10 @@ class TestSessionEvidenceAdmitsAnUnverifiedBucket:
         assert state["session_evidence"] is False
         notices = [
             record.getMessage() for record in caplog.records
-            if "no recorded session" in record.getMessage()
+            if "no session launched at the root" in record.getMessage()
         ]
         assert len(notices) == 1 and "project-id rekey" in notices[0]
+        assert state["unproven_reason"] == "no_session"
 
     def test_a_scope_read_outside_a_pass_is_not_served_inside_one(
         self, identity_env, monkeypatch
@@ -845,8 +846,8 @@ class TestSessionEvidenceAdmitsAnUnverifiedBucket:
 
 class TestTheSessionMustPostdateTheRepository:
     """A recorded session is evidence only if it started after this
-    repository's `description` was created, through its live context or,
-    once the folder is reaped, its prune-ledger line.
+    repository's `description` file last changed (its ctime), through its
+    live context or, once the folder is reaped, its prune-ledger line.
 
     Catches a repository re-cloned, restored or copied at a deleted
     checkout's path inheriting that checkout's legacy bucket through the
@@ -931,9 +932,10 @@ class TestTheSessionMustPostdateTheRepository:
         assert scopes == (CANONICAL,) and state["unproven"], state
         notices = [
             r.getMessage() for r in caplog.records
-            if "no recorded session" in r.getMessage()
+            if "`description` file changed after the sessions" in r.getMessage()
         ]
         assert len(notices) == 1 and "project-id rekey" in notices[0], notices
+        assert state["unproven_reason"] == "description_newer", state
 
     def test_a_naive_start_is_no_evidence(self, identity_env, monkeypatch):
         """A day ahead and zone-less: read as local time it would pass."""
@@ -968,12 +970,35 @@ class TestTheSessionMustPostdateTheRepository:
         scopes, state = self._state(identity_env)
         assert scopes == (CANONICAL,) and state["unproven"], state
 
-    def test_a_repository_with_no_description_is_unproven(self, identity_env, monkeypatch):
+    def test_a_repository_with_no_description_is_admitted_by_a_root_launch(
+        self, identity_env, monkeypatch
+    ):
+        """With no `description` file there is no ordering check: a session
+        recorded at this root that wrote the bucket admits it on its own.
+
+        RED WHEN a missing `description` refuses the session record."""
         repo = self._checkout(identity_env, monkeypatch)
         (repo / ".git" / "description").unlink()
-        seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
+        seed_session_evidence(
+            _config_root(identity_env), repo, "legacy-session",
+            started_at=self._iso(-self.HOUR),
+        )
+        scopes, state = self._state(identity_env)
+        assert scopes == (CANONICAL, "proj") and state["session_evidence"] is True, state
+
+    def test_a_repository_with_no_description_still_refuses_a_subfolder_launch(
+        self, identity_env, monkeypatch
+    ):
+        """The fallback drops the ordering check only; the session must still
+        have been launched at this repository's root."""
+        repo = self._checkout(identity_env, monkeypatch)
+        (repo / ".git" / "description").unlink()
+        sub = repo / "sub"
+        sub.mkdir()
+        seed_session_evidence(_config_root(identity_env), sub, "legacy-session")
         scopes, state = self._state(identity_env)
         assert scopes == (CANONICAL,) and state["unproven"], state
+        assert state["unproven_reason"] == "subfolder_launch", state
 
     def test_a_linked_worktree_session_dates_against_the_main_description(
         self, identity_env, monkeypatch
@@ -1251,9 +1276,9 @@ class TestTheReadScopeCacheEndsWithItsPass:
         _seed(identity_env / "store.db", "proj")
         seed_session_evidence(_config_root(identity_env), repo, "legacy-session")
         calls = []
-        real = memory_api._legacy_session_evidence
+        real = memory_api._legacy_session_census
         monkeypatch.setattr(
-            memory_api, "_legacy_session_evidence",
+            memory_api, "_legacy_session_census",
             lambda *args, **kwargs: calls.append(1) or real(*args, **kwargs),
         )
         with memory_api.detection_pass():
@@ -2274,13 +2299,18 @@ class TestTheEvidenceCheckScansEachRootOnce:
         self, identity_env, monkeypatch
     ):
         """Repeated reads and instances in one detection pass (one command)
-        list the root's session folder exactly once: never zero (each session
-        checked on its own) and never again for an unchanged store. The next
-        pass lists it again."""
+        list the sessions root and each slug folder under it exactly once:
+        never zero (each session checked on its own) and never again for an
+        unchanged store. The next pass lists them again."""
         import os
 
         _repo, store, slug_dir, _ledger = self._rig(identity_env, monkeypatch)
         real = os.listdir
+        root = slug_dir.parent
+        once = [os.path.realpath(str(root))] + [
+            os.path.realpath(str(root / slug)) for slug in sorted(real(root))
+        ]
+        assert os.path.realpath(str(slug_dir)) in once, once
         listed = []
 
         def spy(path="."):
@@ -2293,10 +2323,10 @@ class TestTheEvidenceCheckScansEachRootOnce:
                 memory = PACTMemory(session_id="s", db_path=store)
                 for _ in range(3):
                     memory._read_project_scopes()
-        assert listed == [os.path.realpath(str(slug_dir))], listed
+        assert listed == once, listed
         with memory_api.detection_pass():
             PACTMemory(session_id="s", db_path=store)._read_project_scopes()
-        assert listed == [os.path.realpath(str(slug_dir))] * 2, listed
+        assert listed == once * 2, listed
 
     def test_a_present_entry_is_a_live_folder_not_a_reaped_one(
         self, identity_env, monkeypatch
@@ -2625,7 +2655,8 @@ class TestTheGateProseMatchesTheCode:
         assert "the caller INCLUDES the bucket" not in gate
         assert "counts and no rekey command" in gate
         assert "counts and the rekey command" not in gate
-        assert "`description` file was created" in database.bucket_session_ids.__doc__
+        assert "`description` file last changed" in database.bucket_session_counts.__doc__
+        assert "was created" not in database.bucket_session_counts.__doc__
 
     def test_the_cli_help_and_docstring(self):
         from scripts import cli

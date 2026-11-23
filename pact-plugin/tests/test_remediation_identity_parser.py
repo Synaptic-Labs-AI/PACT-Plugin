@@ -131,7 +131,6 @@ class TestTheOriginIsTheUrlGitFetches:
             ["git@a.example:o/a.git", ""],
             ["", "git@b.example:o/b.git"],
             [""],
-            ["git@a.example:o/a.git", "   "],
         ],
     )
     def test_a_url_list_holding_an_empty_value_declines(self, tmp_path, urls):
@@ -151,6 +150,31 @@ class TestTheOriginIsTheUrlGitFetches:
             "origin_unrepresentable", str(common_dir(repo) / "pact-project-id")
         )
         assert identity.detail == pi.EMPTY_URL_ENTRY_DETAIL
+
+    @pytest.mark.parametrize(
+        "urls, expected",
+        [
+            (["   "], "repo"),
+            (["   ", "git@a.example:o/a.git"], "repo"),
+            (["git@a.example:o/a.git", "   "], "a.example/o/a"),
+        ],
+    )
+    def test_a_whitespace_url_is_a_url_not_an_empty_entry(self, tmp_path, urls, expected):
+        """Only an EMPTY value clears git's url list; a value of spaces is an
+        ordinary value, so it never gets the empty entry's explanation. First
+        in the list it is no portable origin (`classify_remote_origin`), so
+        the folder name binds as for no origin at all; after a usable url it
+        does not decide the id."""
+        assert_outside_repository(tmp_path)
+        repo = make_repo(tmp_path / "repo")
+        for url in urls:
+            _add_url(repo, url)
+
+        assert pi.read_origin(repo / ".git").state == pi.ORIGIN_PRESENT
+        identity = pi.detect_id_for_root(repo, common_dir(repo))
+        assert identity.project_id == expected
+        assert identity.detail != pi.EMPTY_URL_ENTRY_DETAIL
+        assert identity.decline_reason is None
 
     def test_only_the_empty_entry_decline_carries_a_detail(self, tmp_path):
         assert_outside_repository(tmp_path)

@@ -13,7 +13,7 @@ The rekey is the only row-rewriting surface in the memory store
   table, and an empty source bucket is reported as such.
 
 It also pins the identity READ primitives beside it (`count_project_memories`,
-`project_bucket_counts`, `bucket_session_ids`, `legacy_candidate_plausibility`
+`project_bucket_counts`, `bucket_session_counts`, `legacy_candidate_plausibility`
 and `graph.count_project_file_paths`): they never run the write-path
 initialiser, so a read-only probe cannot attempt DDL through them.
 
@@ -26,7 +26,7 @@ from __future__ import annotations
 import pytest
 from helpers import create_test_schema
 from scripts.database import (
-    bucket_session_ids,
+    bucket_session_counts,
     count_project_memories,
     legacy_candidate_plausibility,
     project_bucket_counts,
@@ -414,7 +414,7 @@ class TestIdentityReadPrimitivesNeverInitialise:
         [
             pytest.param(lambda conn: count_project_memories(conn, LEGACY), id="count_project_memories"),
             pytest.param(project_bucket_counts, id="project_bucket_counts"),
-            pytest.param(lambda conn: bucket_session_ids(conn, LEGACY), id="bucket_session_ids"),
+            pytest.param(lambda conn: bucket_session_counts(conn, LEGACY), id="bucket_session_counts"),
             pytest.param(
                 lambda conn: legacy_candidate_plausibility(conn, LEGACY, "/tmp"),
                 id="legacy_candidate_plausibility",
@@ -455,17 +455,15 @@ class TestIdentityReadPrimitivesNeverInitialise:
         assert path.stat().st_size == 0
 
 
-class TestBucketSessionIds:
-    def test_every_writing_session_is_listed_newest_first_and_scoped(self, tmp_path):
-        """Catches an evidence list that is unscoped, unordered or carries
-        sessions no record can be found for.
+class TestBucketSessionCounts:
+    def test_every_writing_session_is_counted_and_scoped(self, tmp_path):
+        """Catches an evidence census that is unscoped, drops rows or merges
+        sessions.
 
         RED WHEN another bucket's session appears, a NULL or empty session id
-        is returned, a session repeats, or the sessions are not ordered by
-        their newest memory, newest first. Three sessions, so the expected
-        order is neither id order in either direction; the session written
-        twice holds both the oldest and the newest memory, so no order by
-        first memory produces it either.
+        is dropped or merged with the other, a session repeats, or a count is
+        wrong. The NULL and empty ids are kept apart because both are rows no
+        session record can place, and the census counts every row.
         """
         _path, conn = _store(tmp_path)
         rows = [
@@ -486,9 +484,10 @@ class TestBucketSessionIds:
             )
         conn.commit()
         try:
-            assert bucket_session_ids(conn, LEGACY) == [
-                "s2-written-twice", "s3-written-once", "s1-written-once",
+            assert bucket_session_counts(conn, LEGACY) == [
+                (None, 1), ("", 1), ("s1-written-once", 1),
+                ("s2-written-twice", 2), ("s3-written-once", 1),
             ]
-            assert bucket_session_ids(conn, "no-such-bucket") == []
+            assert bucket_session_counts(conn, "no-such-bucket") == []
         finally:
             conn.close()

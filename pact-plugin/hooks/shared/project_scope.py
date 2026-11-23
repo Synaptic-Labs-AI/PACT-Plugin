@@ -32,12 +32,11 @@ from __future__ import annotations
 
 import json
 import os
-import re
 from pathlib import Path
 from typing import List, NamedTuple, Optional, Set, Tuple
 
 from . import state_file
-from .git_helpers import read_git_file, run_git, worktree_admin_gitdir
+from .git_helpers import git_config_bool, read_git_file, run_git, worktree_admin_gitdir
 from .pact_context import _UNSAFE_SLUG_CHARS_RE, _build_session_path, project_slug
 from .paths import get_claude_config_dir
 
@@ -219,33 +218,18 @@ def _unanswered_cause(given: Path) -> str:
     )
 
 
-_GIT_TRUE_WORDS = frozenset({"true", "yes", "on"})
-_GIT_FALSE_WORDS = frozenset({"", "false", "no", "off"})
-# git's integer form: optional sign, decimal or 0x-hex, optional k/m/g unit.
-_GIT_INT_RE = re.compile(r"\s*[-+]?(?:0[xX](?P<hex>[0-9a-fA-F]+)|(?P<dec>[0-9]+))[kKmMgG]?")
-
-
 def _git_env_bool(value: Optional[str]) -> bool:
-    """A git boolean environment value, read as git reads it.
+    """A git boolean environment value, read as git reads it
+    (`git_helpers.git_config_bool`).
 
-    Unset is false. The words true/yes/on and false/no/off (any case) and the
-    empty string are git's text forms; otherwise git parses an integer, and
-    any nonzero integer is true. A value git cannot parse makes git itself
-    refuse to run, so it reads as true here: the walk then counts more
-    metadata, which is the fail-closed direction.
+    Unset is false. A value git cannot parse makes git itself refuse to run,
+    so it reads as true here: the walk then counts more metadata, which is
+    the fail-closed direction.
     """
     if value is None:
         return False
-    lowered = value.lower()
-    if lowered in _GIT_TRUE_WORDS:
-        return True
-    if lowered in _GIT_FALSE_WORDS:
-        return False
-    match = _GIT_INT_RE.fullmatch(value)
-    if match is None:
-        return True
-    digits = match.group("hex") or match.group("dec")
-    return digits.strip("0") != ""
+    parsed = git_config_bool(value)
+    return True if parsed is None else parsed
 
 
 def _git_ceiling_directories() -> Set[str]:
