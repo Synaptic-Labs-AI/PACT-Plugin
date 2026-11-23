@@ -724,9 +724,29 @@ class TestAStoreThatIsNotADatabaseNamesItsRemedy:
         assert envelope["error"] == error
         message = envelope["message"]
         assert "exists but cannot be opened" in message, message
-        assert "names a PACT memory store" in message, message
+        assert "is a PACT memory store" in message, message
         assert "no memory was written to it" in message, message
         assert store.read_bytes() == before
+
+    @pytest.mark.parametrize("argv", [["project-id", "show"], ["status"]], ids=["show", "status"])
+    def test_a_default_store_names_no_flag_the_caller_did_not_pass(
+        self, identity_env, monkeypatch, capfd, argv
+    ):
+        """With no --db-path the remedy names the file, not a flag."""
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        home = identity_env / "memdir"
+        home.mkdir()
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(home))
+        store = _not_a_database(home / "memory.db", "garbage")
+        monkeypatch.chdir(identity_env)
+        got, envelope = _cli(argv, capfd)
+        assert got != 0, envelope
+        message = envelope["message"]
+        assert "is a PACT memory store" in message, message
+        assert "--db-path" not in message, message
+        assert store.read_bytes() == b"not a sqlite store, " * 8
 
 
 def _page_corrupt_store(path: Path, journal: str = "wal") -> Path:
@@ -830,7 +850,7 @@ class TestStatusNeverWritesIntoACorruptStore:
         assert store.read_bytes() == before
         assert code == 3, rendered
         assert "exists but cannot be opened" in rendered, rendered
-        assert "names a PACT memory store" in rendered, rendered
+        assert "is a PACT memory store" in rendered, rendered
         self._first_call_outside_the_read(store)
         assert catchup == [], "the catch-up embedded into a corrupt store"
 
@@ -1174,8 +1194,8 @@ class TestADefaultedTargetRefusesAnUnprovenBucket:
             ),
             (
                 "recorded_elsewhere",
-                "1 of its memories were written by sessions recorded at another "
-                "checkout (0 by sessions recorded here)",
+                "1 of its memories came from sessions recorded at another "
+                "checkout (0 from sessions recorded here)",
                 (0, 0, 0, 1, 0),
             ),
             (
@@ -1351,7 +1371,7 @@ class TestAPrintedRekeyCommandRunsAsPrinted:
             if "no session launched at the root" in r.getMessage()
         ]
         assert len(messages) == 1 and "\n" not in messages[0], messages
-        assert "refuses a bucket id that holds a control character" in messages[0]
+        assert "refuses this bucket id (a control character" in messages[0]
         code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
         assert code == 0, show
         rows = [row for row in show["result"]["candidates"] if row["id"] == folder]

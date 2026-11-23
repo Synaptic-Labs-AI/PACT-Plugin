@@ -326,8 +326,10 @@ def _description_predates(common_dir: Optional[Path], started_at: Any) -> bool:
     without one (`git init --template=<dir>`) has nothing to date it by, so a
     session recorded at its root counts on the record alone. The record
     still names the root it was launched at and the session id that wrote
-    the rows, so it admits only a bucket that session wrote into. Never
-    raises.
+    the rows, so it admits only a bucket that session wrote into. With no
+    common dir (git could not name the repository) there is nothing to date
+    by and nothing to show the root is a repository, so the record is no
+    evidence. Never raises.
     """
     if common_dir is None or not isinstance(started_at, str) or not started_at:
         return False
@@ -476,8 +478,9 @@ def _legacy_session_evidence(
 
 # Where a legacy bucket's writing sessions are recorded, by row count:
 # `here` (a session that counts as evidence here), `elsewhere` (recorded at a
-# directory outside every gate root), `subfolder` (recorded at a folder inside
-# a gate root but not at the root), `description_newer` (recorded at a gate
+# directory outside every gate root, or inside another checkout nested under
+# one), `subfolder` (recorded at a folder of a gate root's own checkout, below
+# the root), `description_newer` (recorded at a gate
 # root but started before `description` last changed), `unattributed`
 # (no session id, or no record found).
 _SESSION_CENSUS_KEYS = ("here", "elsewhere", "subfolder", "description_newer", "unattributed")
@@ -558,8 +561,17 @@ def _legacy_session_census(
                 if _session_record_counts(record, roots, common_dir)
                 else "description_newer"
             )
-        if any(project_dir.startswith(root.rstrip(os.sep) + os.sep) for root in roots):
-            return "subfolder"
+        if any(
+            project_dir.startswith(root if root.endswith(os.sep) else root + os.sep)
+            for root in roots
+        ):
+            # BELOW A ROOT IS NOT ENOUGH: a folder inside a separate checkout
+            # nested under the root (or under a root at `/`, which holds every
+            # path) belongs to that checkout. Only a folder whose nearest
+            # `.git` marker is a gate root's own is a subfolder launch.
+            marker = find_git_marker(project_dir)
+            if marker is not None and os.path.realpath(marker.parent) in roots:
+                return "subfolder"
         return "elsewhere"
 
     for session_id, count in named:
@@ -639,8 +651,8 @@ def _printed_rekey_remedy(commands: list) -> str:
     """
     if any(command is None for command in commands):
         return (
-            "no command: `project-id rekey` refuses a bucket id that holds a "
-            "control character"
+            "no command: `project-id rekey` refuses this bucket id (a control "
+            "character, a lone surrogate or an over-long id)"
         )
     if any(
         unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp")
@@ -659,8 +671,8 @@ def _printed_rekey_remedy(commands: list) -> str:
 # clause the warning prints for it.
 _UNPROVEN_CAUSES = {
     "recorded_elsewhere": (
-        "{elsewhere} of its memories were written by sessions recorded at "
-        "another checkout ({here} by sessions recorded here)"
+        "{elsewhere} of its memories came from sessions recorded at "
+        "another checkout ({here} from sessions recorded here)"
     ),
     "subfolder_launch": (
         "no file row places it, and the sessions recorded as writing it were "
@@ -671,7 +683,8 @@ _UNPROVEN_CAUSES = {
     "description_newer": (
         "no file row places it, and this repository's `description` file "
         "changed after the sessions that wrote it started (a copy, restore, "
-        "chmod or chown changes it)"
+        "chmod or chown changes it), or git could not name the repository "
+        "to date them by"
     ),
     "no_session": (
         "no file row places it and no session launched at the root of this "
@@ -743,7 +756,7 @@ def _warn_legacy_unattributed(
     _UNPROVEN_WARNED.add(key)
     logger.warning(
         "legacy project bucket %r is in this read scope because %s, but %d "
-        "of its memories were written by no recorded session, so nothing "
+        "of its memories came from no recorded session, so nothing "
         "places them: they may belong to another checkout of the same name. "
         "If every row belongs here, file the bucket under this repository's "
         "id with: %s",
@@ -751,7 +764,7 @@ def _warn_legacy_unattributed(
         "its file rows lie under this repository"
         if verified
         else (
-            f"{sessions['here']} of its memories were written by sessions "
+            f"{sessions['here']} of its memories came from sessions "
             "recorded here"
         ),
         sessions["unattributed"],
@@ -1405,7 +1418,9 @@ def _store_stat_key(store: str):
         main = os.stat(store)
     except OSError:
         return None
-    wal_path = store + "-wal"
+    # SQLite keeps the journal beside the store's REAL file, so a store
+    # reached through a symlink has its `-wal` next to the link's target.
+    wal_path = os.path.realpath(store) + "-wal"
     try:
         wal = os.stat(wal_path)
         wal_key = (wal.st_mtime_ns, wal.st_size)
@@ -1442,7 +1457,8 @@ def _read_only_connection(store: str):
     contradicting the verb's own "creates none" contract. The URI form with
     `mode=ro` refuses those writes instead.
 
-    NO SIDECARS ON A SETTLED STORE. When no `<store>-wal` exists the open is
+    NO SIDECARS ON A SETTLED STORE. When no `-wal` exists beside the store's
+    real file (a symlinked store's journal is beside its target) the open is
     also `immutable=1`, so SQLite takes no lock and creates no `-wal` or
     `-shm`. Immutable means SQLite trusts the file not to change, and a
     writer in another process can change it during the read (measured: an
@@ -1454,8 +1470,11 @@ def _read_only_connection(store: str):
     `-wal`/`-shm` sidecars; they carry no schema and no rows. The store file
     itself is never written.
     """
-    uri = Path(store).resolve().as_uri() + "?mode=ro"
-    if not _LOCKED_READS_ONLY.get() and not os.path.lexists(store + "-wal"):
+    real = Path(store).resolve()
+    uri = real.as_uri() + "?mode=ro"
+    # The `-wal` SQLite reads sits beside the real file, not beside a
+    # symlink naming it.
+    if not _LOCKED_READS_ONLY.get() and not os.path.lexists(str(real) + "-wal"):
         uri += "&immutable=1"
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
@@ -1469,7 +1488,10 @@ def _store_stamp(store: str):
         main = os.stat(store)
     except OSError:
         return None
-    return (main.st_ino, main.st_size, main.st_mtime_ns, os.path.lexists(store + "-wal"))
+    return (
+        main.st_ino, main.st_size, main.st_mtime_ns,
+        os.path.lexists(os.path.realpath(store) + "-wal"),
+    )
 
 
 def _stable_read_only(store: str, read: Callable[[], Any]) -> Any:
@@ -1579,10 +1601,10 @@ def present_store_fault(exc: Exception, store: str) -> Optional[str]:
         not errorname
         and ("file is not a database" in text or "disk image is malformed" in text)
     ):
-        check = (
-            "that --db-path names a PACT memory store, or restore the file "
-            "from a backup"
-        )
+        # THE FLAG IS NOT NAMED. A fault raised inside a read does not know
+        # whether the path came from --db-path or from the default, and the
+        # message already names the path itself.
+        check = "that the file is a PACT memory store, or restore it from a backup"
     else:
         return None
     return (
@@ -2769,7 +2791,9 @@ def main_repo_root(
         # linked worktree is listed. The caller reports the refusal: every
         # resolver rung names it as `gitfile_redirect` through its own guard,
         # so a warning here would log the one cause twice.
-        asked = Path(start) if start is not None else Path.cwd()
+        asked = Path(start) if start is not None else _cwd_or_none()
+        if asked is None:
+            return None
         if _worktree_redirect(asked, common_path, git_dir=git_dir, toplevel=root, listing=listing):
             return None
         if main_git == common_path:
@@ -4200,11 +4224,7 @@ class PACTMemory:
                 )
                 if outcome == "excluded":
                     _warn_legacy_excluded(
-                        store, candidate, memory_count,
-                        file_paths
-                        if file_paths is not None
-                        else count_project_file_paths(connection, candidate),
-                        repo_root,
+                        store, candidate, memory_count, file_paths, repo_root,
                     )
                 elif unproven:
                     _warn_legacy_unproven(
@@ -5509,7 +5529,11 @@ class PACTMemory:
         can REACH. A full 32-character id is returned before any query, so
         the by-id capability stays project-blind; a prefix is resolved with
         `_project_scope()` so a prefix matching only another project's row
-        resolves as no row at all.
+        resolves as no row at all. So `get`, `update` and `delete` by FULL id
+        reach a row outside the read scope, an unproven or excluded legacy
+        bucket's row included: a full id is an explicit target (the Memory
+        IDs Working Memory prints), and it is how such a row is still
+        reached until a rekey moves its bucket.
 
         AN UNRESOLVED OR UNUSABLE IDENTITY REFUSES THE PREFIX. `None` at the
         resolver

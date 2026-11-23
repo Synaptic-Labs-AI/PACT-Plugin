@@ -112,3 +112,29 @@ def test_a_store_with_a_wal_is_read_with_locking(settled, capfd):
         assert result["legacy_scope"]["canonical_count"] == 3, result
     finally:
         writer.close()
+
+
+def test_a_symlinked_store_reads_the_journal_beside_its_target(settled, tmp_path, capfd):
+    """SQLite keeps a store's `-wal` beside its real file, so a store reached
+    through a symlink (a dotfiles-managed `memory.db`) has its journal next
+    to the target. RED WHEN the `-wal` check looks beside the link: the read
+    is then immutable, ignores the journal, and misses a commit that sits
+    only there."""
+    _repo, store = settled
+    link = tmp_path / "linked.db"
+    link.symlink_to(store)
+    writer = sqlite3.connect(str(store))
+    try:
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        writer.execute(
+            "INSERT INTO memories (id, context, goal, project_id, created_at, updated_at) "
+            "VALUES (?, 'ctx', 'g', ?, ?, ?)",
+            (f"{9:032x}", CANONICAL, STAMP, STAMP),
+        )
+        writer.commit()
+        # PRECONDITION, not the subject: the journal is beside the target only.
+        assert Path(str(store) + "-wal").exists() and not Path(str(link) + "-wal").exists()
+        result = _cli(["project-id", "show", "--db-path", str(link)], capfd)
+        assert result["legacy_scope"]["canonical_count"] == 3, result
+    finally:
+        writer.close()

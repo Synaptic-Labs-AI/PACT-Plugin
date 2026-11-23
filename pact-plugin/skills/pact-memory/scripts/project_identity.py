@@ -37,6 +37,7 @@ import stat
 import subprocess
 from pathlib import Path
 from typing import NamedTuple, Optional, Tuple
+from urllib.parse import quote, unquote
 
 # Accepted remote schemes. The same set `hooks/shared/backlog.py` already
 # ships, plus `ssh+git`, an alias git itself still honours (it connects over
@@ -127,9 +128,10 @@ class OriginRead(NamedTuple):
                     repository's own config file could not be read to look
                     for an include section (larger than the bounded reader
                     takes, or not a regular file).
-    `empty_entry` — the url list holds an empty (or whitespace-only) value.
-                    Which url git then fetches depends on the git version,
-                    so no url in the list is the repository's identity.
+    `empty_entry` — the url list holds an empty value. Which url git then
+                    fetches depends on the git version, so no url in the
+                    list is the repository's identity. A whitespace-only
+                    value is an ordinary url, not an empty one.
     `not_own_file` — no url comes from the repository's own config file:
                     a url from an included file can differ between its
                     worktrees and branches.
@@ -489,8 +491,13 @@ def find_git_marker(start) -> Optional[Path]:
       `GIT_DISCOVERY_ACROSS_FILESYSTEM` is true (`_git_env_bool`);
     - it stops at the filesystem root.
 
-    `lexists`, so a broken marker (a dangling symlink, a `.git` file naming a
-    missing directory) still counts. Never raises: an unreadable path or
+    An `lstat` of the candidate, so a broken marker (a dangling symlink, a
+    `.git` file naming a missing directory) still counts. Only a missing
+    entry (`FileNotFoundError`, `NotADirectoryError`) lets the walk go on:
+    a `.git` whose `lstat` fails for any other reason (a folder that cannot
+    be searched, a symlink loop) is returned as the marker, so the caller
+    asks git about it and refuses when git cannot answer, instead of reading
+    the folder as having no repository. Never raises: an unreadable start or
     environment answers None.
     """
     if start is None:
@@ -508,9 +515,13 @@ def find_git_marker(start) -> Optional[Path]:
     while True:
         marker = level / ".git"
         try:
-            if os.path.lexists(marker):
-                return marker
-        except (OSError, ValueError):
+            os.lstat(marker)
+            return marker
+        except (FileNotFoundError, NotADirectoryError):
+            pass
+        except OSError:
+            return marker
+        except ValueError:
             return None
         parent = level.parent
         if parent == level or parent in ceilings:
@@ -629,13 +640,27 @@ def _normalize_segment(raw: str) -> Optional[str]:
     return segment
 
 
+def _ssh_path_as_git_sends_it(path: str) -> str:
+    """An ssh url's path decoded as git decodes it, then put back in the
+    form `_normalize_segment` reads: every character a segment may not hold
+    raw is escaped again (`%20` stays `%20`, a decoded `%` is `%25`)."""
+    return quote(
+        unquote(path, errors="surrogateescape"),
+        safe="/" + "".join(sorted(_SEGMENT_RAW_CHARS)),
+        errors="surrogateescape",
+    )
+
+
 def _strip_path_suffixes(path: str) -> str:
     """Drop one trailing `/`, then one `.git`, then one exposed `/`.
 
     The `.git` is read in the last segment's normal form
     (`_normalize_segment`), so a percent-encoded spelling of it (`%2Egit`)
     is dropped too; the segment then stays in that normal form, which
-    `_split_path` leaves as it is.
+    `_split_path` leaves as it is. Only a lower-case `.git` is dropped, as
+    git's own lookup appends exactly `.git`: on a server `repo.GIT` is
+    another directory. A `_CASE_INSENSITIVE_PATH_HOSTS` host drops any case
+    (`_identifier`).
 
     The second slash strip exists only for the `owner/.git` form: once `.git`
     is removed the path ends in the separator that used to precede it, and
@@ -647,7 +672,7 @@ def _strip_path_suffixes(path: str) -> str:
         path = path[:-1]
     head, separator, last = path.rpartition("/")
     normal = _normalize_segment(last)
-    if normal is not None and normal.lower().endswith(".git"):
+    if normal is not None and normal.endswith(".git"):
         last = normal[:-4]
         path = head + separator + last if last else head
     return path
@@ -719,6 +744,7 @@ def _azure_devops_services_id(host: str, port: str, segments: list) -> Optional[
 # repository has one id whatever case a remote spells it in: the path is
 # lower-cased. Every other host keeps its path's case.
 _CASE_INSENSITIVE_PATH_HOSTS = frozenset({"github.com"})
+_PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-f]{2}")
 
 
 def _identifier(host: str, port: str, segments: list) -> str:
@@ -728,7 +754,15 @@ def _identifier(host: str, port: str, segments: list) -> str:
     if azure is not None:
         host, segments = "dev.azure.com", azure
     if host in _CASE_INSENSITIVE_PATH_HOSTS:
-        segments = [segment.lower() for segment in segments]
+        # Lower-cased OUTSIDE its percent escapes, which stay upper-case as
+        # the id grammar requires (`%C3%A9`, not `%c3%a9`).
+        segments = [
+            _PERCENT_ESCAPE_RE.sub(lambda m: m.group(0).upper(), segment.lower())
+            for segment in segments
+        ]
+        if segments and segments[-1].endswith(".git") and len(segments[-1]) > 4:
+            # The case-sensitive strip left a `.GIT` spelling for this host.
+            segments[-1] = segments[-1][:-4]
     return f"{host}:{port}/{'/'.join(segments)}" if port else f"{host}/{'/'.join(segments)}"
 
 
@@ -869,12 +903,19 @@ def normalize_remote_url(url: object) -> Optional[str]:
         host = host.lower()
         if not _valid_host(host):
             return None
-        if scheme in _HOME_RELATIVE_SCHEMES:
-            # git percent-decodes an ssh url's WHOLE path before sending it,
-            # so an encoded `/` is a separator there (measured: `~%2Fsrv`
-            # sends `~/srv`). Other schemes keep `%2F` inside its segment.
-            path = re.sub("%2[Ff]", "/", path)
-        path = _strip_path_suffixes(path)
+        # git percent-decodes an ssh url's WHOLE path before sending it
+        # (measured: `ssh://h/srv/a%2Bb` sends `/srv/a+b`, `%2F` sends a
+        # separator and `%25` a literal `%`), while the scp form sends its
+        # path as written. So an ssh path is decoded here too, then every
+        # character a segment may not hold raw is escaped again, for the
+        # segment rule: `ssh://h/a%2Bb` and `h:a+b` share one id, `%20` stays
+        # `%20`, and a decoded `%` becomes `%25`. Other schemes keep their
+        # escapes.
+        path = _strip_path_suffixes(
+            _ssh_path_as_git_sends_it(path)
+            if scheme in _HOME_RELATIVE_SCHEMES
+            else path
+        )
         segments = _split_path(path)
         if not segments:
             return None
@@ -1010,7 +1051,8 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
     - no_portable_origin: no origin, an empty or whitespace-only string, a
       local path or `file://`. The caller falls through to the basename.
       (An empty value inside the url list never reaches this function:
-      `read_origin` reports it as `empty_entry`, which declines.)
+      `read_origin` reports it as `empty_entry`, which declines. A
+      whitespace-only value does reach it, as an ordinary first url.)
     - decline: a NETWORK remote that was present but cannot be a canonical id:
       an unsupported scheme; a bad, zero, out-of-range or leading-zero port;
       a backslash or more than one `@`; a host outside `[a-z0-9.-]` or with a
@@ -1063,8 +1105,9 @@ def read_origin(git_dir: Path) -> OriginRead:
     is matched by real path. An unconditional `include.path` is skipped
     too.
 
-    A LIST HOLDING AN EMPTY OR WHITESPACE-ONLY VALUE IS `empty_entry`, AND
-    THE CALLER DECLINES IT, whatever the git version. Git 2.46 reads an
+    A LIST HOLDING AN EMPTY VALUE IS `empty_entry`, AND THE CALLER DECLINES
+    IT, whatever the git version. A whitespace-only value is not empty: it
+    is an ordinary url, and the first url binds the id as usual. Git 2.46 reads an
     empty value as clearing the urls before it, and earlier versions do not
     (measured on 2.43: `[A, "", B]` fetches A, where 2.46 fetches B). Taking
     either reading would give one repository two ids on two machines.

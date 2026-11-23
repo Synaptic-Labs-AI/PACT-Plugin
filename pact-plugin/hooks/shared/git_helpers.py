@@ -232,8 +232,11 @@ def git_config_bool(value: str) -> Optional[bool]:
     ASCII case-insensitively, with no whitespace around them. Otherwise an
     integer, true when nonzero: leading whitespace and a sign are allowed,
     `0x` reads hex and a leading `0` reads octal, one k/m/g unit multiplies,
-    trailing text of any kind is refused, and a value outside a C int is
-    refused. The caller decides what an unknown value means for it.
+    trailing text of any kind is refused, and a value whose signed value
+    times its unit lies outside a C int (-2^31 through 2^31-1) is refused.
+    Git versions differ at exactly -2^31 (git 2.43 refuses it, a newer git
+    accepts it); this accepts every value any of them accepts. The caller
+    decides what an unknown value means for it.
     """
     if value.isascii() and value.lower() in _GIT_BOOL_TRUE:
         return True
@@ -249,6 +252,7 @@ def git_config_bool(value: str) -> Optional[bool]:
     else:
         number = int(match["dec"])
     factor = _GIT_BOOL_UNITS[match["unit"].lower()]
-    if number > _GIT_INT_MAX // factor:
+    limit = _GIT_INT_MAX + 1 if match["sign"] == "-" else _GIT_INT_MAX
+    if number > limit // factor:
         return None
     return number != 0

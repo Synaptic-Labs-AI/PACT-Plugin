@@ -152,7 +152,7 @@ _GH_API_HOST_ARGS = ("--hostname", _GITHUB_HOST)
 # Remote-URL schemes `_slug_from_remote_url` parses, plus the scp-like form
 # `user@host:path`, which needs a non-empty user and the `@` so arbitrary text
 # (a sentence, a JSON body) never parses as a remote.
-_REMOTE_SCHEMES = {"https", "http", "ssh", "git", "git+ssh"}
+_REMOTE_SCHEMES = {"https", "http", "ssh", "git", "git+ssh", "ssh+git"}
 _SCP_REMOTE = re.compile(r"^[^@\s/:\\]+@([^:/\s]+):(.+)\Z")
 # A ref that names an issue or pull request of a github.com repository, as a
 # link. Owner and name are compared to this repository's slug by the callers.

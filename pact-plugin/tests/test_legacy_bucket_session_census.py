@@ -91,8 +91,8 @@ def test_a_row_recorded_at_another_checkout_keeps_an_unverified_bucket_out(check
     }, state
     assert len(notices) == 1, notices
     assert (
-        "1 of its memories were written by sessions recorded at another checkout "
-        "(2 by sessions recorded here)"
+        "1 of its memories came from sessions recorded at another checkout "
+        "(2 from sessions recorded here)"
     ) in notices[0], notices
     assert "project-id rekey" in notices[0], notices
 
@@ -152,8 +152,8 @@ def test_an_unattributed_row_is_read_with_a_notice(checkout, caplog):
     assert state["sessions"]["here"] == 1 and state["sessions"]["unattributed"] == 2, state
     assert len(notices) == 1, notices
     assert (
-        "is in this read scope because 1 of its memories were written by sessions "
-        "recorded here, but 2 of its memories were written by no recorded session"
+        "is in this read scope because 1 of its memories came from sessions "
+        "recorded here, but 2 of its memories came from no recorded session"
     ) in notices[0], notices
     assert "project-id rekey" in notices[0], notices
     _read(store, caplog)
@@ -182,3 +182,52 @@ def test_no_session_names_its_reason(checkout, caplog):
     assert scopes == (CANONICAL,), state
     assert state["unproven_reason"] == "no_session", state
     assert len(notices) == 1 and "no session launched at the root" in notices[0], notices
+
+
+def test_a_full_id_reaches_a_row_outside_the_read_scope_and_a_prefix_does_not(checkout):
+    """Both halves of the full-id rule: `get`, `update` and `delete` by a full
+    32-character id reach a row in an unproven legacy bucket, and by a prefix
+    they find nothing, as `list` shows nothing. RED WHEN a full id is bound to
+    the read scope, or a prefix escapes it."""
+    _repo, store, _config = checkout
+    full = "ab" * 16
+    _rows(store, [(full, "never-recorded")])
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._read_project_scopes() == (CANONICAL,)
+    assert memory._legacy_scope_state["unproven"]
+    assert memory.list() == []
+    for call in (memory.get, lambda i: memory.update(i, {"context": "x"}), memory.delete):
+        assert call(full[:8]) is None
+    assert memory.get(full) is not None
+    assert memory.update(full, {"context": "edited"}) == full
+    assert memory.get(full).context == "edited"
+    assert memory.delete(full) == full
+    assert memory.get(full) is None
+
+
+def test_a_session_in_a_checkout_nested_under_the_root_is_elsewhere(checkout, caplog):
+    """Below a root is not enough to be a subfolder launch: a separate
+    checkout nested inside the root (or every checkout, under a root at `/`)
+    owns the sessions launched in it. RED WHEN the census counts such a
+    session as a subfolder of the root: its rows then read as this
+    repository's own instead of keeping the bucket out."""
+    repo, store, config = checkout
+    nested = make_repo(repo / "vendor" / "other", remote="https://github.com/o/other.git")
+    _rows(store, [("m1", "here-1"), ("m2", "nested-1")])
+    seed_session_evidence(config, repo, "here-1")
+    seed_session_evidence(config, nested, "nested-1")
+    scopes, state, _notices = _read(store, caplog)
+    assert scopes == (CANONICAL,), state
+    assert state["sessions"]["elsewhere"] == 1 and state["sessions"]["subfolder"] == 0, state
+    assert state["unproven_reason"] == "recorded_elsewhere", state
+
+
+def test_a_session_in_the_roots_own_subfolder_is_a_subfolder_launch(checkout, caplog):
+    """The control: a plain folder of the root's own checkout."""
+    repo, store, config = checkout
+    sub = repo / "src" / "pkg"
+    sub.mkdir(parents=True)
+    _rows(store, [("m1", "sub-1")])
+    seed_session_evidence(config, sub, "sub-1")
+    _scopes, state, _notices = _read(store, caplog)
+    assert state["sessions"]["subfolder"] == 1 and state["sessions"]["elsewhere"] == 0, state

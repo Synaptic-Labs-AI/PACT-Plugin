@@ -11,6 +11,7 @@ parser GIT_DISCOVERY_ACROSS_FILESYSTEM goes through (`git_env_bool` calls
 
 import os
 import random
+import re
 import subprocess
 
 import pytest
@@ -53,9 +54,50 @@ def _git_answer(value: str):
     return None
 
 
+_AT_INT_MIN = re.compile(
+    r"[ \t\n\v\f\r]*-(?:0[xX](?P<hex>[0-9a-fA-F]+)|(?P<oct>0[0-7]*)|(?P<dec>[1-9][0-9]*))"
+    r"(?P<unit>[kKmMgG]?)"
+)
+_UNITS = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30}
+
+
+def _at_int_min(value: str) -> bool:
+    """Whether `value` is exactly -2^31, the one integer git versions
+    disagree on: git 2.43 refuses it, a newer git accepts it."""
+    match = _AT_INT_MIN.fullmatch(value)
+    if match is None:
+        return False
+    number = (
+        int(match["hex"], 16) if match["hex"] is not None
+        else int(match["oct"], 8) if match["oct"] is not None
+        else int(match["dec"])
+    )
+    return number * _UNITS[match["unit"].lower()] == 1 << 31
+
+
 @pytest.mark.parametrize("value", _NAMED + _random_values(400))
 def test_the_shared_parser_answers_as_git_does(value):
+    """Every value the installed git agrees on with every supported git."""
+    if _at_int_min(value):
+        assert git_config_bool(value) is True, value
+        return
     assert git_config_bool(value) is _git_answer(value)
+
+
+@pytest.mark.parametrize("value", [
+    "-2147483648", "-0x80000000", "-020000000000", "-2097152k", "-2097152K",
+    "-2048m", "-2g", "-2G",
+])
+def test_minus_two_to_the_31_is_accepted_as_a_newer_git_accepts_it(value):
+    """The parser accepts what any supported git accepts. RED WHEN the
+    negative bound is git 2.43's -(2^31-1) rather than -2^31."""
+    assert _at_int_min(value)
+    assert git_config_bool(value) is True
+
+
+@pytest.mark.parametrize("value", ["-2147483649", "-2097153k", "-3g", "2147483648", "2g"])
+def test_beyond_a_c_int_is_refused_by_every_git(value):
+    assert git_config_bool(value) is None
 
 
 @pytest.mark.parametrize("value", [" 1", "0x1", "1k", "2m", "1 ", "maybe", "0"])

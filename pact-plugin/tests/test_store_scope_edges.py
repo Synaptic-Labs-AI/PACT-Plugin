@@ -84,3 +84,27 @@ def test_a_supplied_id_reports_its_own_buckets_prior_count(tmp_path, monkeypatch
 )
 def test_the_filesystem_root_contains_its_rows(row, expected):
     assert _contained_by_root(row, "/", {}, None) is expected
+
+
+@pytest.mark.requires_non_root
+def test_a_git_marker_that_cannot_be_examined_is_refused_not_read_as_absent(tmp_path, monkeypatch):
+    """A `.git` whose `lstat` fails for a reason other than absence (here the
+    folder cannot be searched) is returned as the marker, so the resolver
+    asks git about it and declines; it is never read as "no repository",
+    which would key the checkout by its folder name. RED WHEN the marker
+    walk maps that failure to absence."""
+    import os
+
+    from scripts.project_identity import find_git_marker
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/o/proj.git")
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+    os.chmod(repo, 0o644)
+    try:
+        assert find_git_marker(repo) == repo / ".git"
+        detected = PACTMemory._detect_project_identity_with_legacy()
+        assert detected.project_id is None, detected
+        assert detected.decline_reason["reason"] == "broken_git_marker", detected
+    finally:
+        os.chmod(repo, 0o755)

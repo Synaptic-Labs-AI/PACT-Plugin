@@ -532,9 +532,14 @@ def _unnamed_main_worktree_root(
     admin dir is not listed."""
     marker = candidate / ".git"
     try:
-        if marker.exists() and marker.resolve() == common_dir:
+        # A `.git` that cannot be examined (any failure but absence) leaves
+        # the worktree unverified rather than reading as no main checkout.
+        os.stat(marker)
+        if marker.resolve() == common_dir:
             return None
-    except (OSError, RuntimeError):
+    except (FileNotFoundError, NotADirectoryError):
+        pass
+    except (OSError, RuntimeError, ValueError):
         return None
     named_main, ran = _raw_rev_parse(common_dir, "--show-toplevel")
     if not ran or named_main is not None:
