@@ -17,10 +17,10 @@ and with `--claude-md-root`; list; get; status; update and `update
 --replace`; sync with `--claude-md-root` and with its default root;
 project-file; `project-id show`; rekey with `--candidates`, with `--apply`,
 with `--dry-run`, with an explicit `--to` and no mode flag, with `--from`
-alone on the canonical bucket, which refuses, and with `--from` alone on
-the checkout's own legacy bucket, whose `--to` defaults; delete). Positional
-JSON input and `--limit` are not run separately: they change only how a
-value arrives, or how many rows come back.
+alone on another repository's canonical bucket, which refuses, and with
+`--from` alone on the checkout's own legacy bucket, whose `--to` defaults;
+delete). Positional JSON input and `--limit` are not run separately: they
+change only how a value arrives, or how many rows come back.
 
 Each sentinel also needs evidence that the run read it; otherwise a clean
 log would mean nothing. Store rows are read back in command output, and the
@@ -273,7 +273,9 @@ def rig(tmp_path_factory):
     run("rekey --candidates", "project-id", "rekey", "--candidates")
     run("rekey", "project-id", "rekey", "--from", "proj", "--to", canonical)
     run("rekey --dry-run", "project-id", "rekey", "--from", "proj", "--to", canonical, "--dry-run")
-    run("rekey --from (canonical, refused)", "project-id", "rekey", "--from", canonical)
+    # Another repository's canonical bucket: a defaulted --to here is this
+    # checkout's identity, so --from equal to it would be a no-op success.
+    run("rekey --from (canonical, refused)", "project-id", "rekey", "--from", "example.invalid/o/other")
     run("delete", "delete", second)
     for label, argv, stdin in (
         ("save", ("save", "--stdin", "--claude-md-root", repo), json.dumps({"context": "x"})),
@@ -314,7 +316,8 @@ def test_no_store_work_value_reaches_a_git_command(rig):
                 f"{label}: the write did not refuse on the disagreement: {done.stdout} {done.stderr}"
             )
         elif label.endswith("(canonical, refused)"):
-            assert "REKEY_REFUSED" in done.stdout + done.stderr, (label, done.stdout, done.stderr)
+            out = done.stdout + done.stderr
+            assert "REKEY_REFUSED" in out and "is a canonical bucket" in out, (label, out)
         else:
             assert done.returncode == 0, (label, done.stdout, done.stderr)
 

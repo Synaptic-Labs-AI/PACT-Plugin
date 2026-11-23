@@ -1214,6 +1214,11 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                     "prevent. Nothing was moved."
                 ),
             )
+    # A DEFAULTED TARGET EQUAL TO --from MOVES NOTHING. It is the no-op the
+    # docstring promises, not a defaulted move of a canonical bucket, so the
+    # refusals below, which guard what a defaulted move would claim, do not
+    # apply. The unresolved-identity refusal above still runs first.
+    if target_defaulted and not noop:
         if is_canonical(from_id):
             _error(
                 "REKEY_REFUSED",

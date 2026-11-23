@@ -84,6 +84,32 @@ class TestAnAbsentStoreRefusesWhatAPresentStoreRefuses:
         assert envelope["error"] == "REKEY_REFUSED"
         assert not resolve_db_path().exists()
 
+    @pytest.mark.parametrize("with_store", [False, True])
+    def test_a_defaulted_target_equal_to_from_is_a_no_op_success(
+        self, identity_env, monkeypatch, capfd, with_store
+    ):
+        """Catches a defaulted --to that equals --from being refused as a
+        canonical-bucket move: it moves nothing, so it is the no-op success
+        an explicit equal --to already gets."""
+        from scripts.config import resolve_db_path
+
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote=REMOTE))
+        if with_store:
+            resolve_db_path().parent.mkdir(parents=True, exist_ok=True)
+            _store_with_row(resolve_db_path(), CANONICAL)
+            before = resolve_db_path().read_bytes()
+        code, envelope = _cli(
+            ["project-id", "rekey", f"--from={CANONICAL}"], capfd
+        )
+        assert code == 0, envelope
+        result = envelope["result"]
+        assert (result["noop"], result["target_defaulted"]) == (True, True)
+        assert (result["from"], result["to"]) == (CANONICAL, CANONICAL)
+        if with_store:
+            assert resolve_db_path().read_bytes() == before
+        else:
+            assert not resolve_db_path().exists()
+
     def test_an_explicit_move_still_answers_store_absent(
         self, identity_env, monkeypatch, capfd
     ):
@@ -334,6 +360,280 @@ class TestExtensionLoadingIsTurnedBackOff:
         assert loads == [held]
         assert not _extension_loading_enabled(conn)
 
+    # Production code outside tests: every .py under pact-plugin except tests/.
+    _HELPER = ("skills/pact-memory/scripts/database.py", "load_sqlite_vec")
+
+    @staticmethod
+    def _extension_loading_outside_helper(source: str, rel: str) -> list:
+        """Each place `source` touches extension loading outside the helper:
+        an `enable_load_extension` or `load_extension` attribute (a call or a
+        bound reference), a getattr of either by name, a `<sqlite_vec>.load`
+        through any name the module bound to sqlite_vec, and an import of
+        `load` from sqlite_vec."""
+        import ast
+
+        tree = ast.parse(source)
+        allowed = set()
+        if rel == TestExtensionLoadingIsTurnedBackOff._HELPER[0]:
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.FunctionDef)
+                    and node.name == TestExtensionLoadingIsTurnedBackOff._HELPER[1]
+                ):
+                    allowed.update(id(sub) for sub in ast.walk(node))
+        vec_names = {"sqlite_vec"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                vec_names.update(
+                    alias.asname or alias.name for alias in node.names
+                    if alias.name == "sqlite_vec"
+                )
+        names = {"enable_load_extension", "load_extension"}
+        found = []
+        for node in ast.walk(tree):
+            if id(node) in allowed:
+                continue
+            if isinstance(node, ast.Attribute) and node.attr in names:
+                found.append((rel, node.lineno, node.attr))
+            elif (
+                isinstance(node, ast.Attribute)
+                and node.attr == "load"
+                and isinstance(node.value, ast.Name)
+                and node.value.id in vec_names
+            ):
+                found.append((rel, node.lineno, "sqlite_vec.load"))
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "getattr"
+                and any(
+                    isinstance(arg, ast.Constant) and arg.value in names
+                    for arg in node.args
+                )
+            ):
+                found.append((rel, node.lineno, "getattr"))
+            elif (
+                isinstance(node, ast.ImportFrom)
+                and node.module == "sqlite_vec"
+                and any(alias.name == "load" for alias in node.names)
+            ):
+                found.append((rel, node.lineno, "from sqlite_vec import load"))
+        return found
+
+    def test_the_scanner_finds_each_raw_form(self):
+        """Control for the pin below: each form it bans is found outside the
+        helper and passes inside it."""
+        raw = (
+            "import sqlite_vec as sv\n"
+            "from sqlite_vec import load\n"
+            "def f(conn):\n"
+            "    conn.enable_load_extension(True)\n"
+            "    sv.load(conn)\n"
+            "    g = conn.load_extension\n"
+            "    getattr(conn, 'enable_load_extension')(True)\n"
+        )
+        kinds = sorted(k for _, _, k in self._extension_loading_outside_helper(raw, "x.py"))
+        assert kinds == sorted([
+            "enable_load_extension", "load_extension", "sqlite_vec.load",
+            "getattr", "from sqlite_vec import load",
+        ])
+        helper = (
+            "import sqlite_vec\n"
+            "def load_sqlite_vec(conn):\n"
+            "    conn.enable_load_extension(True)\n"
+            "    sqlite_vec.load(conn)\n"
+        )
+        assert self._extension_loading_outside_helper(helper, self._HELPER[0]) == []
+
+    def test_only_the_helper_turns_extension_loading_on(self):
+        """Catches a sqlite-vec load site that bypasses `load_sqlite_vec`: a
+        raw `enable_load_extension(True)` there leaves loading on for the
+        rest of the connection, and no other test reaches every site."""
+        plugin = Path(__file__).resolve().parents[1]
+        files = sorted(
+            path for path in plugin.rglob("*.py")
+            if "tests" not in path.relative_to(plugin).parts
+            and "__pycache__" not in path.parts
+        )
+        rels = {path.relative_to(plugin).as_posix() for path in files}
+        # Fail closed: the walk saw the plugin and the helper itself.
+        assert self._HELPER[0] in rels and len(files) > 50, len(files)
+        helper_source = (plugin / self._HELPER[0]).read_text(encoding="utf-8")
+        assert self._extension_loading_outside_helper(
+            helper_source.replace(f"def {self._HELPER[1]}(", "def _renamed("),
+            self._HELPER[0],
+        ), "the helper's own loading calls must be visible to this scan"
+        found = [
+            hit
+            for path in files
+            for hit in self._extension_loading_outside_helper(
+                path.read_text(encoding="utf-8"), path.relative_to(plugin).as_posix()
+            )
+        ]
+        assert found == [], found
+
+
+class TestTheCatchUpOnASessionThatStartsWithARead:
+    """A read may add vector rows for memories not yet embedded, and nothing
+    else. Catches a read-first session's catch-up failing and spending the
+    session marker (no vector table, or a migration due), and a postponed
+    catch-up never running."""
+
+    @staticmethod
+    def _session(monkeypatch, tmp_path, identity_env):
+        """Fresh catch-up state, stub embeddings, a marker under tmp_path,
+        and this repository as the working directory. Returns the store path
+        and the memory_init module."""
+        pytest.importorskip("sqlite_vec")
+        from scripts import embedding_catchup, embeddings, memory_init, search
+        from scripts.config import resolve_db_path
+        from scripts.database import SQLITE_EXTENSIONS_ENABLED
+
+        if not SQLITE_EXTENSIONS_ENABLED:
+            pytest.skip("this sqlite3 cannot load extensions")
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote=REMOTE))
+        for name in ("_initialized", "_migration_deferred", "_catchup_deferred",
+                     "_last_catchup_result"):
+            monkeypatch.setattr(
+                memory_init, name, None if name == "_last_catchup_result" else False,
+                raising=False,
+            )
+        monkeypatch.setattr(
+            memory_init, "_get_embedding_attempted_path", lambda: tmp_path / "marker"
+        )
+
+        def fake(text):
+            return [0.001 + 0.01 * ((len(text) + i) % 7) for i in range(embeddings.EMBEDDING_DIM)]
+
+        class _Service:
+            generate = staticmethod(fake)
+            embedding_dimension = embeddings.EMBEDDING_DIM
+
+        monkeypatch.setattr(embedding_catchup, "generate_embedding", fake)
+        monkeypatch.setattr(search, "generate_embedding", fake)
+        monkeypatch.setattr(embeddings, "get_embedding_service", lambda: _Service())
+        store = resolve_db_path()
+        store.parent.mkdir(parents=True, exist_ok=True)
+        return store, memory_init
+
+    @staticmethod
+    def _memories(conn, *rows):
+        for memory_id, context in rows:
+            conn.execute(
+                "INSERT INTO memories (id, context, project_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                (memory_id, context, CANONICAL),
+            )
+        conn.commit()
+
+    @staticmethod
+    def _vectors(store):
+        from scripts.database import get_connection, load_sqlite_vec
+
+        conn = get_connection(store)
+        try:
+            load_sqlite_vec(conn)
+            return sorted(
+                (row[0], len(row[1]) // 4)
+                for row in conn.execute("SELECT memory_id, embedding FROM vec_memories")
+            )
+        finally:
+            conn.close()
+
+    def test_no_vector_table_postpones_to_the_first_write(
+        self, monkeypatch, tmp_path, identity_env
+    ):
+        from scripts import memory_api
+
+        store, memory_init = self._session(monkeypatch, tmp_path, identity_env)
+        conn = sqlite3.connect(str(store))
+        create_test_schema(conn)
+        self._memories(conn, ("a" * 32, "alpha widgets"), ("b" * 32, "zebra crossing"))
+        conn.close()
+        before = store.read_bytes()
+
+        hits = memory_api.PACTMemory().search("zebra")
+        # The read found the memory by keyword, wrote nothing, and kept the
+        # marker for the postponed sweep.
+        assert "b" * 32 in [hit.id for hit in hits]
+        assert store.read_bytes() == before
+        assert memory_init.get_embedding_catchup_status() is None
+        assert not (tmp_path / "marker").exists()
+
+        memory_init.ensure_memory_ready()
+        assert memory_init.get_embedding_catchup_status()["status"] == "ok"
+        assert [m for m, _ in self._vectors(store)] == ["a" * 32, "b" * 32]
+
+    def test_a_table_with_an_unembedded_row_is_caught_up_by_the_read(
+        self, monkeypatch, tmp_path, identity_env
+    ):
+        """The exception: the read adds the missing vector, so search finds
+        the memory instead of returning only its embedded neighbours."""
+        import struct
+
+        from scripts import embeddings, memory_api
+        from scripts.database import ensure_initialized, get_connection, load_sqlite_vec
+
+        store, memory_init = self._session(monkeypatch, tmp_path, identity_env)
+        conn = get_connection(store)
+        ensure_initialized(conn)
+        self._memories(conn, ("a" * 32, "alpha widgets"), ("b" * 32, "zebra crossing"))
+        load_sqlite_vec(conn)
+        conn.execute(
+            "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
+            ("a" * 32, CANONICAL, struct.pack(f"{embeddings.EMBEDDING_DIM}f",
+                                             *[0.5] * embeddings.EMBEDDING_DIM)),
+        )
+        conn.commit()
+        conn.close()
+        tables = sqlite3.connect(str(store)).execute(
+            "SELECT name, sql FROM sqlite_master ORDER BY name").fetchall()
+
+        hits = memory_api.PACTMemory().search("zebra")
+        assert "b" * 32 in [hit.id for hit in hits]
+        assert [m for m, _ in self._vectors(store)] == ["a" * 32, "b" * 32]
+        assert memory_init.get_embedding_catchup_status()["status"] == "ok"
+        # Nothing but vector rows changed: the schema is as it was.
+        assert sqlite3.connect(str(store)).execute(
+            "SELECT name, sql FROM sqlite_master ORDER BY name").fetchall() == tables
+
+    def test_a_migration_due_postpones_until_after_the_migration(
+        self, monkeypatch, tmp_path, identity_env
+    ):
+        import struct
+
+        from scripts import embeddings, memory_api
+        from scripts.database import get_connection, load_sqlite_vec
+
+        store, memory_init = self._session(monkeypatch, tmp_path, identity_env)
+        conn = get_connection(store)
+        create_test_schema(conn)
+        self._memories(conn, ("a" * 32, "alpha widgets"), ("b" * 32, "zebra crossing"))
+        load_sqlite_vec(conn)
+        conn.execute(
+            "CREATE VIRTUAL TABLE vec_memories USING vec0(memory_id TEXT PRIMARY KEY, "
+            "project_id TEXT PARTITION KEY, embedding float[128])"
+        )
+        conn.execute(
+            "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
+            ("a" * 32, CANONICAL, struct.pack("128f", *[0.5] * 128)),
+        )
+        conn.commit()
+        conn.close()
+        before = store.read_bytes()
+
+        hits = memory_api.PACTMemory().search("zebra")
+        assert "b" * 32 in [hit.id for hit in hits]
+        assert store.read_bytes() == before
+        assert memory_init.get_embedding_catchup_status() is None
+        assert not (tmp_path / "marker").exists()
+
+        memory_init.ensure_memory_ready()
+        assert memory_init.get_embedding_catchup_status()["status"] == "ok"
+        assert self._vectors(store) == [
+            ("a" * 32, embeddings.EMBEDDING_DIM), ("b" * 32, embeddings.EMBEDDING_DIM)
+        ]
+
 
 class TestAReadDoesNotCreateAStore:
     """Catches `get_connection` pre-creating the file inside a read scope,
@@ -407,6 +707,9 @@ class TestAReadDefersTheEmbeddingMigration:
                             lambda: calls.append("catch-up") or {})
         monkeypatch.setattr(memory_init, "maybe_migrate_embeddings",
                             lambda: calls.append("migrate") or {})
+        # A store whose vector table is current: the read's catch-up runs.
+        # Postponing it is TestTheCatchUpOnASessionThatStartsWithARead's.
+        monkeypatch.setattr(memory_init, "_read_can_catch_up", lambda: True)
         memory_init.reset_initialization()
         with read_only_scope():
             memory_init.ensure_memory_ready()

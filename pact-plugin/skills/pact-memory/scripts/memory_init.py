@@ -45,6 +45,11 @@ _initialized = False
 # True when initialization ran inside a read scope and so skipped the
 # embedding migration; the first call outside a read scope runs it.
 _migration_deferred = False
+# True when a read postponed the embedding catch-up because it could not do its
+# work there (no vector table, or a migration due). The first call outside a
+# read scope runs it after the migration. A postponed sweep does not touch the
+# session marker, so the marker is not spent.
+_catchup_deferred = False
 
 # Outcome of this session's embedding catch-up, kept so a STATUS READER can see
 # it. `_ensure_ready()` discards `ensure_memory_ready()`'s return value, and an
@@ -166,6 +171,48 @@ def check_and_install_dependencies() -> dict:
     return {'status': status, 'installed': installed, 'failed': failed}
 
 
+def _stored_vector_dimension(conn) -> "tuple[bool, int | None]":
+    """Whether `conn`'s store has a vector table, and the dimension of one
+    stored vector (None when the table is empty). sqlite-vec must be loaded on
+    `conn`. Reads only."""
+    if conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_memories'"
+    ).fetchone() is None:
+        return False, None
+    row = conn.execute("SELECT embedding FROM vec_memories LIMIT 1").fetchone()
+    return True, (None if row is None else len(row[0]) // 4)  # 4 bytes per float
+
+
+def _read_can_catch_up() -> bool:
+    """Whether the embedding catch-up can do its work inside a read scope.
+
+    Under the read scope no vector table is created and no migration runs, so
+    the catch-up can only add vectors to a table that already exists at the
+    current dimension. With no table, or with a migration due, it is postponed
+    to the first call outside the scope. A store this cannot inspect is
+    postponed too, which writes nothing. Without sqlite-vec the catch-up writes
+    nothing and reports why, so it runs.
+    """
+    try:
+        import sqlite_vec  # noqa: F401  # availability probe
+        from .database import get_connection, load_sqlite_vec
+        from .embeddings import EMBEDDING_DIM
+    except ImportError:
+        return True
+    try:
+        conn = get_connection()
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        load_sqlite_vec(conn)
+        exists, dim = _stored_vector_dimension(conn)
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        conn.close()
+    return exists and dim in (None, EMBEDDING_DIM)
+
+
 def maybe_migrate_embeddings() -> dict:
     """
     Check if embeddings need migration due to dimension change.
@@ -199,33 +246,19 @@ def maybe_migrate_embeddings() -> dict:
         conn = get_connection()
         load_sqlite_vec(conn)
 
-        # Check if vec_memories table exists
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_memories'"
-        )
-        if cursor.fetchone() is None:
-            conn.close()
-            return result  # No table, nothing to migrate
-
         # Check actual dimension via byte-length of a stored embedding.
         # Uses len(blob)//4 (not MATCH probe) because we need the actual old
         # dimension value for the diagnostic message below.
         # Note: database.py:_check_and_migrate_vector_table uses a MATCH probe
         # instead — it only needs binary match/mismatch, not the old value.
         try:
-            row = conn.execute("SELECT embedding FROM vec_memories LIMIT 1").fetchone()
-            if row is None:
-                conn.close()
-                return result  # Empty table, nothing to migrate
-
-            actual_dim = len(row[0]) // 4  # 4 bytes per float
-            if actual_dim == expected_dim:
-                conn.close()
-                return result  # Dimensions match, no migration needed
-
+            exists, actual_dim = _stored_vector_dimension(conn)
         except Exception:
             conn.close()
             return result
+        if not exists or actual_dim in (None, expected_dim):
+            conn.close()
+            return result  # No table, an empty one, or the current dimension
 
         # Dimension mismatch detected - need to migrate
         result["status"] = "migrating"
@@ -496,7 +529,8 @@ def ensure_memory_ready() -> dict:
             - migration: dict - Migration result
             - embedding: dict - Embedding catch-up result
     """
-    global _initialized, _migration_deferred
+    global _initialized, _migration_deferred, _catchup_deferred
+    global _last_catchup_result
 
     # Fast path: already initialized this session
     if _initialized and not (_migration_deferred and not read_only_scope_active()):
@@ -507,10 +541,16 @@ def ensure_memory_ready() -> dict:
         if _initialized:
             if _migration_deferred and not read_only_scope_active():
                 _migration_deferred = False
-                return {
+                deferred = {
                     "already_initialized": True,
                     "migration": maybe_migrate_embeddings(),
                 }
+                if _catchup_deferred:
+                    # After the migration, which may have rebuilt the table.
+                    _catchup_deferred = False
+                    _last_catchup_result = maybe_embed_pending()
+                    deferred["embedding"] = _last_catchup_result
+                return deferred
             return {"already_initialized": True}
 
         result = {
@@ -531,9 +571,7 @@ def ensure_memory_ready() -> dict:
 
         # 2. Migrate embeddings if dimension changed. A READ RUNS NO MIGRATION:
         # the migration drops and recreates the vector table, so inside a read
-        # scope it waits for the first call outside one. The catch-up below
-        # still runs; under the read scope it writes vectors only into a
-        # vector table that already exists.
+        # scope it waits for the first call outside one.
         if read_only_scope_active():
             _migration_deferred = True
             migration_result = {"status": "deferred", "message": None}
@@ -544,14 +582,28 @@ def ensure_memory_ready() -> dict:
         if migration_result.get("message"):
             logger.info(f"Migration: {migration_result['message']}")
 
-        # 3. Process any unembedded memories
-        embedding_result = maybe_embed_pending()
+        # 3. Process any unembedded memories. THE ONE WRITE A READ MAY MAKE:
+        # under the read scope the catch-up runs only when a vector table
+        # exists at the current dimension, and then it adds vector rows for
+        # memories not yet embedded and changes nothing else. Without that
+        # table, or with a migration due, it cannot work there, so it is
+        # postponed without spending the session marker and runs after the
+        # migration on the first call outside the scope. Until then a read's
+        # search still returns those memories: with no vector table, search
+        # falls back to keyword matching. Running it whenever a table exists
+        # matters because search falls back to keywords only when vector search
+        # returns nothing, so an unembedded memory beside embedded ones would
+        # not be found.
+        if read_only_scope_active() and not _read_can_catch_up():
+            _catchup_deferred = True
+            embedding_result = {"status": "deferred", "message": None}
+        else:
+            embedding_result = maybe_embed_pending()
+            # Record it for `get_embedding_catchup_status()`. Assigned here
+            # rather than inside `maybe_embed_pending` so there is ONE write
+            # site instead of one per early return.
+            _last_catchup_result = embedding_result
         result["embedding"] = embedding_result
-        # Record it for `get_embedding_catchup_status()`. Assigned here rather
-        # than inside `maybe_embed_pending` so there is ONE write site instead
-        # of one per early return.
-        global _last_catchup_result
-        _last_catchup_result = embedding_result
 
         if embedding_result.get("message") and embedding_result.get("status") == "ok":
             logger.info(f"Embedding catch-up: {embedding_result['message']}")
@@ -590,10 +642,11 @@ def reset_initialization() -> None:
     on the same machine, so deleting it here would reach outside the caller.
     Call clear_embedding_marker() when the marker itself needs removing.
     """
-    global _initialized, _migration_deferred
+    global _initialized, _migration_deferred, _catchup_deferred
     with _init_lock:
         _initialized = False
         _migration_deferred = False
+        _catchup_deferred = False
 
 
 def clear_embedding_marker() -> None:

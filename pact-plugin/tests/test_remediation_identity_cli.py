@@ -804,6 +804,18 @@ class TestStatusNeverWritesIntoACorruptStore:
         captured = capfd.readouterr()
         return exit_info.value.code, captured.out + captured.err
 
+    @staticmethod
+    def _first_call_outside_the_read(store):
+        """`status` is a read, and a read postpones the catch-up on a store
+        with no vector table. The first call outside the read scope runs it,
+        so that is where the integrity check must stop it."""
+        from scripts import memory_init
+        from scripts.config import store_scope
+
+        assert memory_init._catchup_deferred, "the read did not postpone the catch-up"
+        with store_scope(store):
+            memory_init.ensure_memory_ready()
+
     def test_a_corrupt_store_is_left_byte_identical(
         self, identity_env, monkeypatch, capfd, catchup
     ):
@@ -811,11 +823,12 @@ class TestStatusNeverWritesIntoACorruptStore:
         before = store.read_bytes()
         monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
         code, rendered = self._status(store, capfd)
-        assert catchup == [], "the catch-up embedded into a corrupt store"
         assert store.read_bytes() == before
         assert code == 2, rendered
         assert "exists but cannot be opened" in rendered, rendered
         assert "names a PACT memory store" in rendered, rendered
+        self._first_call_outside_the_read(store)
+        assert catchup == [], "the catch-up embedded into a corrupt store"
 
     # The header fields a read-write open may rewrite: the file-format
     # versions (WAL), the change counter and the version-valid-for number.
@@ -830,6 +843,7 @@ class TestStatusNeverWritesIntoACorruptStore:
         before = store.read_bytes()
         monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
         code, rendered = self._status(store, capfd)
+        self._first_call_outside_the_read(store)
         after = store.read_bytes()
         assert catchup == []
         assert code == 2, rendered
@@ -869,6 +883,7 @@ class TestStatusNeverWritesIntoACorruptStore:
         assert rows != [("ok",)], "precondition: the check must report rows"
         monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
         self._status(store, capfd)
+        self._first_call_outside_the_read(store)
         assert catchup == [], "the catch-up embedded into a store that failed its check"
 
     def test_a_healthy_vector_store_still_embeds_through_the_real_catch_up(
@@ -1008,6 +1023,8 @@ class TestStatusNeverWritesIntoACorruptStore:
         before = store.read_bytes()
         monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
         code, rendered = self._status(store, capfd)
+        assert queried == [], "the read ran the pending query instead of postponing it"
+        self._first_call_outside_the_read(store)
         after = store.read_bytes()
         assert queried and queried[0], "the real pending query found no work"
         assert code == 2, rendered
@@ -1028,6 +1045,8 @@ class TestStatusNeverWritesIntoACorruptStore:
         monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
         code, rendered = self._status(store, capfd)
         assert code == 0, rendered
+        assert catchup == []
+        self._first_call_outside_the_read(store)
         assert catchup == ["m00001"]
 
 

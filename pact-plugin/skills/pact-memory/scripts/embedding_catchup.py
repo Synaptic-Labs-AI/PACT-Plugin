@@ -192,13 +192,18 @@ def get_unembedded_memories(
         return UnembeddedResult(reason=UnembeddedResult.NO_EXTENSIONS)
 
     try:
-        # ON AN EXISTING STORE THIS IS A READ, AND IT MUST WRITE NOTHING. The
-        # integrity check runs only after this query finds work, so this
+        # ON AN EXISTING STORE THIS QUERY IS A READ, AND IT MUST WRITE NOTHING.
+        # The integrity check runs only after this query finds work, so this
         # query is what a corrupt store meets first: under the read-only
         # scope `ensure_initialized` creates no vector table and runs no
-        # migration, and the first embedding's own connection creates the
-        # table (`embed_single_memory`). A store with no `memories` table yet
-        # is a first use, and is still initialised here as before.
+        # migration. The embeddings that follow write only vector rows, and
+        # only into a table that already exists: a read verb's initializer
+        # runs this sweep only when that table exists at the current
+        # dimension, and postpones it otherwise
+        # (`memory_init._read_can_catch_up`). Outside the read scope,
+        # `embed_single_memory` creates the table if it is missing. A store
+        # with no `memories` table yet is a first use, and is still
+        # initialised here as before.
         with db_connection() as conn:
             has_schema = conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'"
