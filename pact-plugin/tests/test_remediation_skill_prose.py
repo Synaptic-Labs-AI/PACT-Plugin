@@ -291,9 +291,15 @@ class TestOverrideAcceptsCanonicalIdsOnly:
     def test_the_retired_folder_name_pin_is_gone(self):
         assert "legacy folder name are both accepted" not in _body(SKILL).lower()
 
-    def test_the_documented_reason_is_one_the_reader_emits(self):
-        source = (SCRIPTS / "project_identity.py").read_text(encoding="utf-8")
-        assert '"not_canonical"' in source
+    def test_the_documented_reason_is_one_the_reader_emits(self, tmp_path):
+        """The reader reports a folder-name pin as not_canonical and keeps
+        none of it; a canonical pin beside it is kept (control)."""
+        from scripts.project_identity import read_override
+
+        (tmp_path / "pact-project-id").write_text("proj\n", encoding="utf-8")
+        assert (read_override(tmp_path).value, read_override(tmp_path).reason) == (None, "not_canonical")
+        (tmp_path / "pact-project-id").write_text("github.com/o/proj\n", encoding="utf-8")
+        assert (read_override(tmp_path).value, read_override(tmp_path).reason) == ("github.com/o/proj", None)
 
 
 class TestPercentEncodedIdsAreDocumented:
@@ -579,13 +585,44 @@ class TestRekeyRemediesNameTheirTarget:
             "target_defaulted and legacy_verdict."
         ) in row
 
-    @pytest.mark.parametrize(
-        "field",
-        ("store_absent", "from_bucket_empty", "target_defaulted", "legacy_verdict"),
-    )
-    def test_each_documented_envelope_field_is_one_the_cli_emits(self, field):
-        cli = (SCRIPTS / "cli.py").read_text(encoding="utf-8")
-        assert f'"{field}"' in cli
+    def test_each_documented_envelope_field_is_one_the_cli_emits(self, tmp_path, monkeypatch, capfd):
+        """`project-id rekey` against a store that does not exist answers
+        store_absent and from_bucket_empty, and against a present store with
+        an empty --from bucket answers from_bucket_empty; both carry
+        target_defaulted and legacy_verdict."""
+        import json
+        import sqlite3
+
+        from fixtures.identity_git import assert_outside_repository
+        from helpers import create_test_schema
+        from scripts.cli import main
+        from scripts.config import resolve_db_path
+
+        assert_outside_repository(tmp_path)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(tmp_path / "memory"))
+        (tmp_path / "memory").mkdir()
+        monkeypatch.chdir(tmp_path)
+
+        def rekey():
+            with pytest.raises(SystemExit) as exit_info:
+                main(["project-id", "rekey", "--from=github.com/o/old", "--to=github.com/o/new"])
+            captured = capfd.readouterr()
+            assert exit_info.value.code == 0, captured
+            return json.loads(captured.out)["result"]
+
+        absent = rekey()
+        assert not resolve_db_path().exists()
+        conn = sqlite3.connect(str(resolve_db_path()))
+        create_test_schema(conn)
+        conn.close()
+        present = rekey()
+        assert {key: absent.get(key) for key in ("store_absent", "from_bucket_empty")} == {
+            "store_absent": True, "from_bucket_empty": True,
+        }, absent
+        assert (present.get("store_absent"), present.get("from_bucket_empty")) == (None, True), present
+        for result in (absent, present):
+            assert {"target_defaulted", "legacy_verdict"} <= set(result), result
 
     def test_links_repointed_is_described_as_merged_rows_only(self):
         body = _body(SKILL)
@@ -608,8 +645,25 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
             "folder-name bucket. Both exit 2 and write nothing."
         ) in _body(SKILL)
 
-    def test_the_remedy_is_the_one_the_refusal_prints(self):
-        source = (SCRIPTS / "memory_api.py").read_text(encoding="utf-8")
+    def test_the_remedy_is_the_one_the_refusal_prints(self, tmp_path, monkeypatch):
+        import sqlite3
+
+        from fixtures.identity_git import assert_outside_repository, make_repo
+        from helpers import create_test_schema
+        from scripts.memory_api import PACTMemory
+
+        assert_outside_repository(tmp_path)
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.chdir(make_repo(tmp_path / "proj", remote="https://github.com/o/proj.git"))
+        store = tmp_path / "store.db"
+        conn = sqlite3.connect(str(store))
+        create_test_schema(conn)
+        conn.close()
+        with pytest.raises(ValueError) as refusal:
+            PACTMemory(session_id="s", db_path=store).save(
+                {"context": "x", "project_id": "proj"}, sync_to_claude=False
+            )
+        printed = str(refusal.value).replace("`", "")
         remedy = "project-id rekey --from=FOLDER_NAME --to=host/owner/repo"
         assert (
             "To move rows, run " + remedy + ", with the folder-name bucket and "
@@ -618,8 +672,8 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
             "reports it)."
         ) in _body(SKILL)
         assert "save from that non-repository folder" not in _body(SKILL)
-        assert remedy in source.replace("`", "")
-        assert "--to=<canonical id>" not in source
+        assert remedy in printed, printed
+        assert "--to=<canonical id>" not in printed
 
 
 class TestCalibrationCountReadsTheWholeScope:
@@ -803,9 +857,23 @@ class TestUpdateCascadeQuarantineIsDocumented:
             "last_cascade_skipped, and does not stop the rest of the re-key."
         ) in _body(SKILL)
 
-    def test_the_field_is_on_the_update_envelope(self):
-        cli = (SCRIPTS / "cli.py").read_text(encoding="utf-8")
-        assert '"last_cascade_skipped": memory.last_cascade_skipped' in cli
+    def test_the_field_is_on_the_update_envelope(self, monkeypatch, capsys):
+        """`update` reports the count the store left behind, whatever it is."""
+        import json
+        from types import SimpleNamespace
+
+        from scripts import cli
+
+        memory = SimpleNamespace(
+            update=lambda memory_id, updates, replace=False: "a" * 32,
+            last_cascade_skipped=3, last_embedding_status=None,
+        )
+        monkeypatch.setattr(cli, "PACTMemory", lambda db_path=None: memory)
+        args = cli.build_parser().parse_args(["update", "a" * 32, '{"context": "c"}'])
+        with pytest.raises(SystemExit) as exit_info:
+            cli.cmd_update(args)
+        assert exit_info.value.code == 0
+        assert json.loads(capsys.readouterr().out)["result"]["last_cascade_skipped"] == 3
 
 
 @pytest.fixture(scope="module")
@@ -1571,12 +1639,14 @@ class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
 
     def test_each_home_shape_is_measured_at_its_home(self, override_read_matrix):
         """A shared shape that documents a HOME runs every route at it, and
-        answers as the skill says: where the target (the checkout the session
-        is in) IS that HOME, a linked worktree included, the cell is a
-        home-directory root and never reads the file, the user-setting route
-        included; where the target is a worktree outside a home main
-        checkout, it is not one and reads the file. The expected verdict is
-        derived from the shape's own documented HOME, not typed per shape."""
+        answers as the skill says: where the checkout git names for the
+        target (`--show-toplevel`) IS that HOME, a linked worktree and a stray
+        `.git` at HOME included, the cell is a home-directory root and never
+        reads the file, the user-setting route included; where it is a
+        worktree outside a home main checkout, it is not one and reads the
+        file. The expected verdict is derived from the shape's own documented
+        HOME, not typed per shape, and the population holds a cell of each
+        kind: the target at HOME, only git's checkout at HOME, and neither."""
         from fixtures import identity_routes as routes
 
         home_shapes = {
@@ -1593,14 +1663,15 @@ class TestOverrideIsReadOnEveryRouteItIsSaidToBe:
         assert not_at_home == {}, f"a home shape ran away from its documented HOME: {not_at_home}"
         wrong = {}
         for key, cell in cells.items():
-            at_home = cell["target"] == cell["home_expected"] or cell["toplevel"] == cell["home_expected"]
-            expected = (True, False) if at_home else (False, True)
+            expected = (True, False) if cell["toplevel"] == cell["home_expected"] else (False, True)
             if (cell["home_root"], cell["read"]) != expected or not cell["reached"]:
                 wrong[key] = {"home_root": cell["home_root"], "read": cell["read"], "reached": cell["reached"]}
         assert wrong == {}, f"a home shape's verdict differs from the skill's: {wrong}"
-        assert any(cell["target"] == cell["home_expected"] for cell in cells.values()), (
-            "no shared home shape has its target at HOME"
-        )
+        kinds = {
+            (cell["target"] == cell["home_expected"], cell["toplevel"] == cell["home_expected"])
+            for cell in cells.values()
+        }
+        assert kinds == {(True, True), (False, True), (False, False)}, kinds
 
     def test_the_skill_names_exactly_the_measured_routes(self, override_read_matrix):
         sentence = self._sentence()
@@ -1790,7 +1861,7 @@ class _DetectionGraph:
                 for item in node.body:
                     if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
                         self.defs[(module, f"{node.name}.{item.name}")] = item
-        from test_identity_rung_parity import module_string_constants
+        from fixtures.code_readers import module_string_constants
 
         # every module-level binding of a name, by any binding form, assigns this string
         self.constants[module] = module_string_constants(tree)
@@ -3685,20 +3756,62 @@ def test_the_trace_names_its_limits(tmp_path, monkeypatch):
         assert "read_row" not in sources, (form, sources)
 
 
+def _function_table(graph, owner: str, node) -> bool:
+    """Whether `node` names a module-level dict display of `owner`, bound
+    once, whose every value names a function `owner` defines: a command
+    table such as the CLI's, from which no class can be built."""
+    import ast
+
+    if not (isinstance(node, ast.Name) and len(graph.bindings.get(owner, {}).get(node.id, ())) == 1):
+        return False
+    table = graph.values.get(owner, {}).get(node.id)
+    return isinstance(table, ast.Dict) and bool(table.values) and all(
+        isinstance(value, ast.Name) and (owner, value.id) in graph.defs
+        and value.id not in graph.classes.get(owner, {})
+        for value in table.values
+    )
+
+
 def _computed_callee_calls(graph) -> list:
     """`module.py:line` and source for each call with a positional argument
-    whose callee is computed where it is called: a subscript (`KINDS[k](x)`)
-    or the result of another call (`getattr(m, "Found")(x)`), in any def or
+    whose callee is computed: a subscript (`KINDS[k](x)`), the result of
+    another call (`getattr(m, "Found")(x)`), or a local the same function
+    binds to either (`maker = KINDS[k]; maker(x)`), in any def or
     module-level code of the loaded graph. `_field_values` cannot see which
-    class such a call builds, so a field it fills by position is not read."""
+    class such a call builds, so a field it fills by position is not read.
+    A lookup in a function table (`_function_table`) is not counted, through
+    a subscript or `.get`: it holds no class."""
     import ast
+
+    def computed(owner, value) -> bool:
+        if isinstance(value, ast.Subscript):
+            return not _function_table(graph, owner, value.value)
+        if isinstance(value, ast.Call):
+            func = value.func
+            return not (isinstance(func, ast.Attribute) and func.attr == "get"
+                        and _function_table(graph, owner, func.value))
+        return False
 
     found = []
     scopes = [(owner, node) for (owner, _name), node in graph.defs.items()]
     scopes += list(graph.import_time.items())
     for owner, node in scopes:
+        locals_ = {}
+        for statement in ast.walk(node):
+            targets = (
+                statement.targets if isinstance(statement, ast.Assign)
+                else [statement.target] if isinstance(statement, (ast.AnnAssign, ast.NamedExpr)) else []
+            )
+            for target in targets:
+                if isinstance(target, ast.Name) and getattr(statement, "value", None) is not None:
+                    locals_.setdefault(target.id, []).append(statement.value)
         for call in ast.walk(node):
-            if isinstance(call, ast.Call) and call.args and isinstance(call.func, (ast.Subscript, ast.Call)):
+            if not (isinstance(call, ast.Call) and call.args):
+                continue
+            func = call.func
+            if computed(owner, func) or (
+                isinstance(func, ast.Name) and any(computed(owner, value) for value in locals_.get(func.id, ()))
+            ):
                 found.append(f"{owner}.py:{call.lineno} {ast.unparse(call)[:80]}")
     return sorted(set(found))
 
@@ -3707,10 +3820,11 @@ def test_no_production_call_builds_through_a_computed_callee():
     """The store-work value pin lists a field filled by position through a
     class reached by a table or `getattr` as adversarial-only. No production
     module the pin reads calls a subscript or a call result with positional
-    arguments, so the listing hides no real site; a new one fails here.
-    Calls of a parameter or a local that holds a function are not counted:
-    the trace follows them through their callers (`_callables`,
-    `_arguments_for`)."""
+    arguments, directly or through a local bound to one, so the listing hides
+    no real site; a new one fails here. A call of a parameter, of a local
+    bound to a name, or of a lookup in a table of the module's own functions
+    is not counted: the trace follows a parameter through its callers
+    (`_callables`, `_arguments_for`), and a function table holds no class."""
     _questions, _problems, _allowed, graph = _store_work_taint_for(_source_fingerprint())
     assert len(graph.defs) > 500, len(graph.defs)  # control: the pin's whole graph is loaded
     sites = _computed_callee_calls(graph)
@@ -3724,8 +3838,10 @@ def test_no_production_call_builds_through_a_computed_callee():
 
 def test_a_computed_callee_call_is_found(tmp_path, monkeypatch):
     """Control for `_computed_callee_calls` on scratch code: a table lookup
-    and a getattr result called with a positional argument are found, and a
-    call of a name, a parameter or a method is not."""
+    and a getattr result called with a positional argument are found, called
+    directly or through a local; a call of a name, a parameter, a method or
+    a lookup in a table of the module's own functions is not, and a table
+    that also holds a class is not a function table."""
     import sys
 
     package = tmp_path / "pkg"
@@ -3735,13 +3851,24 @@ def test_a_computed_callee_call_is_found(tmp_path, monkeypatch):
         "import sys\n\nclass Found:\n    pass\n\nKINDS = {'found': Found}\n\n"
         "def by_table(holder):\n    return KINDS['found'](holder)\n\n"
         "def by_getattr(holder):\n    return getattr(sys.modules[__name__], 'Found')(holder)\n\n"
-        "def plain(holder, make):\n    Found()\n    make(holder)\n    return holder.copy(holder)\n"
+        "def plain(holder, make):\n    Found()\n    make(holder)\n    return holder.copy(holder)\n\n"
+        "def by_local(holder):\n    maker = KINDS['found']\n    return maker(holder)\n\n"
+        "def by_local_getattr(holder):\n    maker = getattr(sys.modules[__name__], 'Found')\n"
+        "    return maker(holder)\n\n"
+        "def run(args):\n    return args\n\n"
+        "COMMANDS = {'run': run, 'plain': plain}\n\n"
+        "def dispatch(name, args):\n    handler = COMMANDS[name]\n    COMMANDS.get(name)(args)\n"
+        "    return handler(args)\n\n"
+        "MIXED = {'run': run, 'found': Found}\n\n"
+        "def by_mixed(name, args):\n    return MIXED[name](args)\n"
     )
     monkeypatch.setattr(sys.modules[__name__], "_PROJECT_ROOTS", (tmp_path,))
     graph = _DetectionGraph()
     assert graph.load("pkg.m")
     found = _computed_callee_calls(graph)
-    assert {site.split(" ", 1)[0] for site in found} == {"pkg.m.py:9", "pkg.m.py:12"}, found
+    assert {site.split(" ", 1)[0] for site in found} == {
+        "pkg.m.py:9", "pkg.m.py:12", "pkg.m.py:21", "pkg.m.py:25", "pkg.m.py:40",
+    }, found
 
 
 def _pass_entry_problems(trees: dict) -> tuple:
@@ -4773,7 +4900,7 @@ def _traced_sources(graph, starts, unresolved=None, parents=None, barriers=froze
     (`list.append(argv, value)`, `operator.setitem`); and a value carried
     out of a function by an exception it raises. Honest code writes with a
     method of the object or an item or attribute assignment, which is
-    followed (`test_the_trace_lists_its_adversarial_only_writes_and_does_not_follow_them`).
+    followed (`test_the_trace_lists_its_adversarial_only_forms_and_does_not_follow_them`).
 
     ADVERSARIAL-ONLY, and so read as a built-in object: a local an
     `isinstance` test has proved a built-in, rebound before the read only
@@ -6196,8 +6323,11 @@ _ASKS_ABOUT_RECORDED_DIRECTORY = {
 
 
 # The exact-text pins this census keeps, each with why a behaviour check
-# cannot stand in for it. A pin of source or docstring text that is not here
-# is a change detector to replace with a check of the behaviour it states.
+# cannot stand in for it. A function here that reads Python source or a
+# docstring and looks a literal up in it (`source_text_pins`) must be listed,
+# and a listed function must still do so: a pin that is not here is a change
+# detector to replace with a check of the behaviour it states. Text read from
+# SKILL.md or the secretary's prompt is the documented contract, not source.
 _KEPT_TEXT_PINS = {
     "TestEveryRouteEntryConditionIsARoute.NOT_A_ROUTE": (
         "each row is a judgement that an input the resolver reads needs no route, which no code "
@@ -6210,29 +6340,37 @@ _KEPT_TEXT_PINS = {
         "question taking a store-work value)"
     ),
     "_AFTER_DETECTION_ASKS": "the same selector, for the one store-work flow allowed through a sink",
-    "_traced_sources": (
-        "its ADVERSARIAL-ONLY and LIMITS paragraphs are read for each listed form's anchor only, tying "
-        "each named form to the row that shows the trace does not follow it"
+    "TestNullOverridePathIsMeasured.test_the_decline_record_docstring_lists_the_always_null_causes": (
+        "the docstring's null-cause sentence is the subject: the causes it lists are compared with the "
+        "causes the matrix measures as always null, and `DOC_LEAD` only finds the sentence"
     ),
-    "route_inputs": (
-        "its ADVERSARIAL-ONLY paragraph is read for the `contextvars.copy_context()` anchor only, tied "
-        "to the row that shows the read is not reported"
+    "TestNullOverridePathIsMeasured.test_the_decline_record_docstring_names_the_location_route": (
+        "the docstring must state the outside-git-directory route exactly when a measured cell takes it"
+    ),
+    "test_the_trace_lists_its_adversarial_only_forms_and_does_not_follow_them": (
+        "`_traced_sources`' ADVERSARIAL-ONLY paragraphs are read for each listed form's anchor only, "
+        "tying each named form to the row that shows the trace does not follow it"
+    ),
+    "test_the_trace_names_its_limits": (
+        "`_traced_sources`' LIMITS paragraph is read for each form's anchor only, tied to the row that "
+        "shows the census does not read it"
+    ),
+    "test_a_context_read_through_copy_context_is_listed_not_reported": (
+        "`route_inputs`' ADVERSARIAL-ONLY paragraph is read for the `contextvars.copy_context()` anchor "
+        "only, tied to the row that shows the read is not reported"
     ),
 }
 
 
 def test_each_kept_text_pin_names_a_pin_here():
-    """`_KEPT_TEXT_PINS` names only pins this module holds, each with a
-    reason, so the table cannot outlive what it explains."""
+    """Every function here that pins Python source or docstring text is in
+    `_KEPT_TEXT_PINS` with a reason, and every function listed there still
+    pins it, so the table and the module cannot drift apart."""
     import sys
 
-    module = sys.modules[__name__]
-    for name, reason in _KEPT_TEXT_PINS.items():
-        owner = module
-        for part in name.split("."):
-            assert hasattr(owner, part), name
-            owner = getattr(owner, part)
-        assert reason, name
+    from fixtures.code_readers import kept_pin_mismatch
+
+    assert kept_pin_mismatch(sys.modules[__name__], _KEPT_TEXT_PINS) == {"unlisted": [], "stale": []}
 
 
 # The reasons `_derived_reason` computes for a build or a method call, by the

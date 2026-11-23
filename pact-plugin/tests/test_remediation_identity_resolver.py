@@ -3682,24 +3682,55 @@ def _grammar_expression_classes() -> set:
     }
 
 
-# The name pins this module keeps, each with why a behaviour check cannot
-# stand in for it. They compare hand-kept sets with the classes the compiler's
-# own module defines, not with message text, so a class Python gains fails
-# until the walk reads it.
+# The pins this module keeps, each with why a behaviour check cannot stand
+# in for it. The name pins compare hand-kept sets with the classes the
+# compiler's own module defines, so a class Python gains fails until the walk
+# reads it. A function here that reads Python source or a docstring and looks
+# a literal up in it (`source_text_pins`) must be listed, and a listed
+# function must still do so.
 _KEPT_TEXT_PINS = {
     "_BINDINGS_READ": "the binding classes the walk reads; compared with `_target_classes()`",
     "_CAPTURES_READ": "the match captures the walk reads; compared with `_capture_classes()`",
     "_ANSWER_CHILDREN": "expression classes whose children the walk reads; each must be one `_grammar_expression_classes()` builds",
+    "TestTheScopeSaysWhatDegradesAndWhatRaises.test_the_source_describes_the_decline_record_it_builds": (
+        "the docstring is the subject: it must name the StoreFaultError that "
+        "`test_a_present_store_that_is_not_a_database_raises` measures, and the retired descriptions must stay gone"
+    ),
+    "TestTheGateProseMatchesTheCode.test_the_database_docstrings": (
+        "the docstrings are the subject: each kept sentence states the admission rule this module's behaviour "
+        "arms measure (session evidence only, no rekey command for an excluded bucket), and each retired one "
+        "must stay gone"
+    ),
+    "TestTheGateProseMatchesTheCode.test_the_cli_help_and_docstring": (
+        "the help text a user reads is the subject: it must state the defaulted-`--to` rule the rekey arms "
+        "measure, and the retired wording must stay gone"
+    ),
+    "TestTheGateProseMatchesTheCode.test_the_memory_api_docstrings": (
+        "the docstrings are the subject: the detection order and the not-read rule they state are measured by "
+        "the route matrices and the scope arms, the git-call table by `TestTheDocumentedGitCallFloor`, and the "
+        "retired wording must stay gone"
+    ),
+    "TestARedirectRefusalNamesWhatWasObserved.test_the_cause_docstring_names_every_redirect_cause": (
+        "the names looked up are derived from the code (each `REDIRECT_` constant), so the docstring must name "
+        "every cause the code defines"
+    ),
+    "TestARedirectRefusalNamesWhatWasObserved.test_every_function_passing_a_listing_answer_names_each_non_record_answer": (
+        "the answers looked up are read from the listing readers, so each passing function's docstring must "
+        "name every answer the code can return"
+    ),
 }
 
 
 def test_each_kept_text_pin_names_a_pin_here():
-    """`_KEPT_TEXT_PINS` names only pins this module holds, each with a
-    reason, so the table cannot outlive what it explains."""
+    """Every function here that pins Python source or docstring text is in
+    `_KEPT_TEXT_PINS` with a reason, every function listed there still pins
+    it, and every listed name exists, so the table and the module cannot
+    drift apart."""
     import sys
 
-    module = sys.modules[__name__]
-    assert all(hasattr(module, name) and reason for name, reason in _KEPT_TEXT_PINS.items()), _KEPT_TEXT_PINS
+    from fixtures.code_readers import kept_pin_mismatch
+
+    assert kept_pin_mismatch(sys.modules[__name__], _KEPT_TEXT_PINS) == {"unlisted": [], "stale": []}
 
 
 # Calls whose value is one of their arguments, unchanged, by the callee's
@@ -3753,7 +3784,7 @@ def _listing_sentinels(trees: "dict | None" = None) -> set:
     from every binding form) a listing module's `_worktree_records` returns
     bare, where the function binds no local of that name: the answers that
     are no record list."""
-    from test_identity_rung_parity import _reader_for, module_string_constants
+    from fixtures.code_readers import _reader_for, module_string_constants
 
     sentinels = set()
     for tree in (_listing_answer_modules() if trees is None else trees).values():
@@ -4094,7 +4125,7 @@ def _listing_answer_modules() -> dict:
 
     Each tree is parsed once per process for each text its file holds
     (`_parsed_source`), so the binding reader built on it
-    (`test_identity_rung_parity._reader_for`, cached by tree) is built
+    (`fixtures.code_readers._reader_for`, cached by tree) is built
     once too. No reader edits a tree it is given."""
     plugin = Path(__file__).resolve().parent.parent
     return {
@@ -4113,7 +4144,7 @@ def _parsed_source(text: str):
 def _string_constants(tree) -> dict:
     """{name: value} for every module-level string constant in `tree`, read
     from every binding form (`module_string_constants`)."""
-    from test_identity_rung_parity import module_string_constants
+    from fixtures.code_readers import module_string_constants
 
     return module_string_constants(tree)
 
@@ -4132,7 +4163,7 @@ def _held_answers(trees: dict) -> tuple:
     sentinel_values = [readers_constants[name] for name in sorted(_listing_sentinels())]
     import builtins
 
-    from test_identity_rung_parity import _reader_for
+    from fixtures.code_readers import _reader_for
 
     # every name a module binds at module level, by any binding form
     shadowed = {name for tree in trees.values() for key, name in _reader_for(tree).sources if key is None}
@@ -4729,7 +4760,7 @@ def _rung_details() -> tuple:
     (`module_string_constants`) prints its text. Also every such expression
     that is not a string, as (line, source), so a form this reader cannot
     render is named, never skipped."""
-    from test_identity_rung_parity import chooser_elements, module_string_constants
+    from fixtures.code_readers import chooser_elements, module_string_constants
 
     tree = ast.parse(Path(memory_api.__file__).read_text(encoding="utf-8"))
     constants = module_string_constants(tree)
@@ -4776,7 +4807,7 @@ def _detail_values(expression, function, module_tree, seen=frozenset()) -> tuple
     (`_changed_containers`). Any other form, a name with any other binding
     or a table filled later included, is returned in `unresolved` as source
     text."""
-    from test_identity_rung_parity import _reader_for
+    from fixtures.code_readers import _reader_for
 
     reader = _reader_for(module_tree)
 

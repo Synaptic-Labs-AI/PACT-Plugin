@@ -2653,7 +2653,7 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
         """(forms, every use of one in the claiming modules, each place they
         can reach an `os.O_*` flag through a form this census does not
         read)."""
-        from test_identity_rung_parity import dynamic_access_forms, dynamic_reaches
+        from fixtures.code_readers import dynamic_access_forms, dynamic_reaches
 
         paths = list(_platform_claim_modules().values())
         read_outright = TestEveryOpenFlagReadInTheClaimingModulesIsPortable._read_outright()
@@ -2689,7 +2689,7 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
 
     @staticmethod
     def _flag_strings(read_outright) -> list:
-        from test_identity_rung_parity import named_anchor_strings
+        from fixtures.code_readers import named_anchor_strings
 
         paths = list(_platform_claim_modules().values())
         return named_anchor_strings(paths, re.compile(r"O_[A-Z0-9_]+").fullmatch, read_outright)
@@ -2705,12 +2705,12 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
         """FAIL CLOSED: a callee another call returned
         (`operator.methodcaller("__getattribute__", name)(os)`) can reach a
         flag by a name built at run time, which no census reads."""
-        from test_identity_rung_parity import call_result_callees
+        from fixtures.code_readers import call_result_callees
 
         assert call_result_callees(list(_platform_claim_modules().values())) == []
 
     def test_the_callee_reader_reads_every_binding_in_the_claiming_modules(self):
-        from test_identity_rung_parity import unread_bindings
+        from fixtures.code_readers import unread_bindings
 
         assert unread_bindings(list(_platform_claim_modules().values())) == []
 
@@ -2735,7 +2735,7 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
         ("VALUE = getattr(os, 'O_NOFOLLOW', 0)\n", True),
     ])
     def test_a_string_names_a_flag_only_as_a_whole_part(self, tmp_path, source, named):
-        from test_identity_rung_parity import named_anchor_strings
+        from fixtures.code_readers import named_anchor_strings
 
         path = tmp_path / "scope.py"
         path.write_text(source, encoding="utf-8")

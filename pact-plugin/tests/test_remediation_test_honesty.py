@@ -24,6 +24,7 @@ Every fixture is a real repository and a real on-disk store under tmp_path.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
@@ -505,35 +506,79 @@ class TestCommentCopiesEqualTheShippedConstants:
 
 
 class TestIdentityFilesCarryNoPlanningLabels:
-    """The shipped memory scripts, the backlog resolver that derives the same
-    identity, and this change's own test modules carry no planning labels.
+    """The files this change created, the two LLM-loaded files it edits and
+    the memory scripts and backlog resolver it edits carry no planning
+    labels, each scanned whole.
 
-    A label such as an issue number, a review-finding id, a corpus-row id or a
-    test-matrix tag points at a tracker or a document the reader of the file
-    does not have, so it explains nothing and goes stale silently. The
-    behavioural sentence beside it is what stays.
+    The population is exactly CREATED, LLM_EDITED and SCRIPTS. Any other file
+    the change edited keeps the references it already had, as the repository
+    allows outside LLM-loaded files. A label such as an issue number, a
+    review-finding id, a corpus-row id or a test-matrix tag points at a
+    tracker or a document the reader of the file does not have, so it
+    explains nothing and goes stale silently. The behavioural sentence beside
+    it is what stays.
     """
 
+    # The memory scripts and the backlog resolver this change edited.
     SCRIPTS = (
         "skills/pact-memory/scripts/memory_api.py",
-        "skills/pact-memory/scripts/project_identity.py",
         "skills/pact-memory/scripts/cli.py",
         "skills/pact-memory/scripts/database.py",
         "hooks/shared/backlog.py",
     )
-    # The test modules this change added, by the prefixes it introduced. A
-    # later module with one of these prefixes is scanned too.
-    TEST_GLOBS = (
-        "tests/test_project_identity_*.py",
-        "tests/test_identity_*_remediation.py",
-        "tests/test_remediation_*.py",
-        "tests/test_remote_parser_agreement.py",
+    # Every file this change created.
+    CREATED = (
+        "skills/pact-memory/scripts/project_identity.py",
+        "tests/fixtures/code_readers.py",
         "tests/fixtures/identity_git.py",
+        "tests/fixtures/identity_routes.py",
         "tests/fixtures/zero_create_worker.py",
+        "tests/test_admin_gitdir_fifo.py",
+        "tests/test_backlog_git_dir_start.py",
+        "tests/test_backlog_shared_git_dir_roots.py",
+        "tests/test_core_worktree_project_root.py",
+        "tests/test_identity_audit_remediation.py",
+        "tests/test_identity_rung_parity.py",
+        "tests/test_identity_security_remediation.py",
+        "tests/test_project_identity_canonical.py",
+        "tests/test_project_identity_name_provenance.py",
+        "tests/test_project_identity_override.py",
+        "tests/test_project_identity_rekey.py",
+        "tests/test_project_identity_union.py",
+        "tests/test_remediation_identity_cli.py",
+        "tests/test_remediation_identity_parser.py",
+        "tests/test_remediation_identity_resolver.py",
+        "tests/test_remediation_prune_ledger.py",
+        "tests/test_remediation_session_evidence_listing.py",
+        "tests/test_remediation_skill_prose.py",
+        "tests/test_remediation_store_rekey.py",
+        "tests/test_remediation_store_scope.py",
+        "tests/test_remediation_test_honesty.py",
+        "tests/test_remote_parser_agreement.py",
+        "tests/test_store_read_purity_and_rekey_counts.py",
+        "tests/test_store_work_git_values_runtime.py",
     )
-    # The added modules at the time this arm was written. The glob may grow;
-    # it must never match fewer, or the scan has silently lost its subject.
-    MIN_TEST_MODULES = 17
+    # The name prefixes only this change's files carry: a file matching one
+    # that CREATED does not list is a created file the scan would miss.
+    CREATED_GLOBS = (
+        "tests/test_remediation_*.py",
+        "tests/test_project_identity_*.py",
+        "tests/test_identity_*.py",
+        "tests/fixtures/identity_*.py",
+    )
+    # The LLM-loaded files this change edited, where no planning reference
+    # may stand anywhere in the file.
+    LLM_EDITED = ("skills/pact-memory/SKILL.md", "agents/pact-secretary.md")
+    # Text in the LLM-loaded files that reads as a label and is not one,
+    # each with its reason, removed before the scan.
+    LLM_EXEMPT = {
+        # The worked example of a memory's context: a fictional issue in an
+        # imagined project, not a pointer into this repository's tracker.
+        "skills/pact-memory/SKILL.md": (re.compile(r"issue " + "#" + r"234\b"),),
+        # The five numbered PACT systems (the intelligence checkpoint, the
+        # autonomy rules) are terms of the protocol the agent follows.
+        "agents/pact-secretary.md": (re.compile(r"\bS[1-5]\b"),),
+    }
 
     LABELS = (
         (re.compile(r"#\d{3,4}\b"), "issue or PR number"),
@@ -554,7 +599,9 @@ class TestIdentityFilesCarryNoPlanningLabels:
         # The same id inside a camel-case name: after a lowercase letter that
         # is not a regex escape (`\b`), and before a capital, an underscore or
         # the end of the word. A version token inside a name (as in
-        # `getV2Api`) is part of the name, not a label.
+        # `getV2Api`) is part of the name, not a label. That exemption reads
+        # every V and a digit as a version, so a V-lettered id inside a name
+        # is not flagged either: it is listed in NOT_FLAGGED.
         (re.compile(r"(?<=[a-z])(?<!\\[a-z])(?!V\d)[A-Z]-?\d{1,2}(?=[A-Z_]|\b)(?![+])"),
          "finding, corpus-row or design id"),
         # Review-process labels: a remediation cycle, a bare cycle and a
@@ -584,10 +631,8 @@ class TestIdentityFilesCarryNoPlanningLabels:
         return found
 
     @classmethod
-    def _test_modules(cls):
-        return sorted({
-            path for pattern in cls.TEST_GLOBS for path in PLUGIN_ROOT.glob(pattern)
-        })
+    def _population(cls) -> tuple:
+        return cls.SCRIPTS + cls.CREATED + cls.LLM_EDITED
 
     # Each planted label is ASSEMBLED, so this source file never contains the
     # label itself and the scan of this module stays meaningful.
@@ -633,6 +678,19 @@ class TestIdentityFilesCarryNoPlanningLabels:
         "the surface of the store, resurfaced 3 times",
     )
 
+    # ADVERSARIAL-ONLY, and so not flagged: an id whose letter is V inside a
+    # camel-case name. The version exemption cannot tell it from a version
+    # token, and naming a test after a V-lettered finding takes a deliberate
+    # choice of that letter. Assembled, as PLANTED is.
+    NOT_FLAGGED = ("class Test" + "Review" + "V" + "6IncidentFlow:",)
+
+    @pytest.mark.parametrize("line", NOT_FLAGGED)
+    def test_a_listed_adversarial_only_form_is_not_flagged(self, line):
+        """The listing is true: each form in NOT_FLAGGED passes the scan, so
+        a change that starts catching one fails here and the list is
+        revisited."""
+        assert self._hits(line) == []
+
     # Honest names that carry a version token inside a camel-case name.
     VERSION_NAMES = (
         "def getV2Api(): return api_v2",
@@ -662,23 +720,183 @@ class TestIdentityFilesCarryNoPlanningLabels:
         assert self._hits(line) == []
 
     def test_the_scan_population_is_whole(self):
-        """The glob still finds every module it was written for."""
-        modules = self._test_modules()
-        assert len(modules) >= self.MIN_TEST_MODULES, modules
-        assert all((PLUGIN_ROOT / relpath).is_file() for relpath in self.SCRIPTS)
+        """Every listed file exists, and every file with a prefix only this
+        change's files carry is listed, so a created file cannot fall out of
+        the scan."""
+        missing = [relpath for relpath in self._population() if not (PLUGIN_ROOT / relpath).is_file()]
+        assert missing == [], f"listed but absent: {missing}"
+        unlisted = sorted(
+            str(path.relative_to(PLUGIN_ROOT))
+            for pattern in self.CREATED_GLOBS for path in PLUGIN_ROOT.glob(pattern)
+            if str(path.relative_to(PLUGIN_ROOT)) not in self.CREATED
+        )
+        assert unlisted == [], f"created files missing from CREATED: {unlisted}"
 
-    @pytest.mark.parametrize(
-        "relpath",
-        SCRIPTS + tuple(TEST_GLOBS),
-    )
+    @pytest.mark.parametrize("relpath", SCRIPTS + CREATED + LLM_EDITED)
     def test_the_files_carry_no_planning_label(self, relpath):
-        paths = sorted(PLUGIN_ROOT.glob(relpath)) if "*" in relpath else [PLUGIN_ROOT / relpath]
-        assert paths, f"{relpath} matched no file"
-        found = {}
-        for path in paths:
-            text = path.read_text(encoding="utf-8")
-            assert len(text) > 200, f"{path} read as empty; the scan would pass vacuously"
-            hits = self._hits(text)
-            if hits:
-                found[str(path.relative_to(PLUGIN_ROOT))] = hits
-        assert found == {}, f"planning labels: {found}"
+        text = (PLUGIN_ROOT / relpath).read_text(encoding="utf-8")
+        assert len(text) > 200, f"{relpath} read as empty; the scan would pass vacuously"
+        for exempt in self.LLM_EXEMPT.get(relpath, ()):
+            text = exempt.sub("", text)
+        assert self._hits(text) == [], f"planning labels in {relpath}"
+
+    @pytest.mark.parametrize("relpath", sorted(LLM_EXEMPT))
+    def test_each_exemption_removes_text_the_scan_flags(self, relpath):
+        """Each exemption is needed: the file's text it removes is flagged
+        without it, and only text that pattern matches is removed."""
+        text = (PLUGIN_ROOT / relpath).read_text(encoding="utf-8")
+        for exempt in self.LLM_EXEMPT[relpath]:
+            matched = exempt.findall(text)
+            assert matched, (relpath, exempt.pattern)
+            assert all(self._hits(found) for found in set(matched)), (relpath, matched)
+
+
+# The exact-text pins this module keeps: a function here that reads Python
+# source or a docstring and looks a literal up in it must be listed with why
+# a behaviour check cannot stand in for it.
+_KEPT_TEXT_PINS = {
+    "TestTheReadScopeCacheServesTheSecondRead.test_a_commit_and_close_inside_one_tick_is_the_named_limit": (
+        "`_store_stat_key`'s docstring names a limit; the anchor is read only to tie that paragraph to the "
+        "behaviour the same test measures (a write inside one tick is not seen)"
+    ),
+}
+
+
+def test_each_kept_text_pin_names_a_pin_here():
+    """Every function here that pins Python source or docstring text is in
+    `_KEPT_TEXT_PINS` with a reason, and every function listed there still
+    pins it."""
+    import sys
+
+    from fixtures.code_readers import kept_pin_mismatch
+
+    assert kept_pin_mismatch(sys.modules[__name__], _KEPT_TEXT_PINS) == {"unlisted": [], "stale": []}
+
+
+class TestSourceTextPinsAreFound:
+    """`source_text_pins`, which the kept-pin tables are checked against,
+    finds a literal looked up in Python source or docstring text by every
+    form it names, and spares text read from any other file, code read as a
+    tree, and a value the code returns."""
+
+    PINS = {
+        "a docstring": 'def t():\n    assert "x y" in f.__doc__\n',
+        "inspect.getsource": 'def t():\n    assert "x" not in inspect.getsource(f)\n',
+        "ast.get_docstring": 'def t():\n    assert "x" in ast.get_docstring(node)\n',
+        "a .py file's text": 'def t():\n    assert "x" in (ROOT / "m.py").read_text()\n',
+        "a module's __file__": 'def t():\n    assert "x" in Path(m.__file__).read_text()\n',
+        "a module-level path": 'SRC = ROOT / "m.py"\n\ndef t():\n    assert "x" in SRC.read_text()\n',
+        "a local bound from the text": 'def t():\n    doc = " ".join(f.__doc__.split())\n    assert "x" in doc\n',
+        "a str lookup": 'def t():\n    assert f.__doc__.count("x") == 1\n',
+        "a regex": 'def t():\n    assert re.search("x", f.__doc__)\n',
+        "a value looked up": 'def t():\n    for k in ROWS:\n        assert k in f.__doc__\n',
+        "a method": 'class T:\n    def t(self):\n        assert "x" in f.__doc__\n',
+    }
+    NOT_PINS = {
+        "a Markdown file": 'def t():\n    assert "x" in (ROOT / "SKILL.md").read_text()\n',
+        "code read as a tree": (
+            'def t():\n    tree = ast.parse(Path(m.__file__).read_text())\n'
+            '    assert "x" in {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}\n'
+        ),
+        "a returned value": 'def t():\n    assert "x" in run()\n',
+        "a docstring compared whole with a computed value": 'def t():\n    assert f.__doc__ == build()\n',
+    }
+
+    @pytest.mark.parametrize("form", sorted(PINS))
+    def test_a_pin_is_found(self, form):
+        from fixtures.code_readers import source_text_pins
+
+        assert list(source_text_pins(self.PINS[form])) in (["t"], ["T.t"]), form
+
+    @pytest.mark.parametrize("form", sorted(NOT_PINS))
+    def test_an_honest_read_is_not_a_pin(self, form):
+        from fixtures.code_readers import source_text_pins
+
+        assert source_text_pins(self.NOT_PINS[form]) == {}, form
+
+    def test_a_table_is_checked_both_ways(self, tmp_path, monkeypatch):
+        """An unlisted pin and a listed function that pins nothing are both
+        reported; a listed data table is only checked to exist."""
+        import importlib
+
+        from fixtures.code_readers import kept_pin_mismatch
+
+        (tmp_path / "pinned_module.py").write_text(
+            'def f():\n    """x y"""\n\n\ndef pins():\n    assert "x" in f.__doc__\n\n\n'
+            'def honest():\n    assert f() is None\n\n\nTABLE = {"a": 1}\n',
+            encoding="utf-8",
+        )
+        monkeypatch.syspath_prepend(str(tmp_path))
+        module = importlib.import_module("pinned_module")
+        assert kept_pin_mismatch(module, {"TABLE": "a judgement"}) == {"unlisted": ["pins"], "stale": []}
+        assert kept_pin_mismatch(module, {"pins": "r", "honest": "r"}) == {"unlisted": [], "stale": ["honest"]}
+        assert kept_pin_mismatch(module, {"pins": "r"}) == {"unlisted": [], "stale": []}
+        with pytest.raises(AssertionError):
+            kept_pin_mismatch(module, {"pins": ""})
+        with pytest.raises(AssertionError):
+            kept_pin_mismatch(module, {"gone": "r"})
+
+
+class TestTheCensusProseNamesTestsThatExist:
+    """A comment or docstring in the census modules that names a test or a
+    test class names one that exists, so a rename cannot leave a pointer to
+    nothing behind it."""
+
+    MODULES = (
+        "tests/test_identity_rung_parity.py",
+        "tests/test_remediation_skill_prose.py",
+        "tests/test_remediation_test_honesty.py",
+        "tests/fixtures/code_readers.py",
+    )
+    # A name that starts like a test function or a test class, and is not a
+    # module file name (ending `.py`) or a prefix (ending `_`).
+    NAME = re.compile(r"(?<![\w.])(test_\w*[^\W_]|Test[A-Z]\w*)(?![\w.]*\.py)\b")
+
+    @classmethod
+    def _names(cls, source: str) -> set:
+        import io
+        import tokenize
+
+        prose = [
+            token.string for token in tokenize.generate_tokens(io.StringIO(source).readline)
+            if token.type in (tokenize.COMMENT, tokenize.STRING)
+        ]
+        return set(cls.NAME.findall("\n".join(prose)))
+
+    @staticmethod
+    @functools.lru_cache(maxsize=1)
+    def _defined() -> frozenset:
+        import ast
+
+        names = {path.stem for path in (PLUGIN_ROOT / "tests").rglob("*.py")}
+        for path in (PLUGIN_ROOT / "tests").rglob("*.py"):
+            try:
+                tree = ast.parse(path.read_text(encoding="utf-8"))
+            except (SyntaxError, UnicodeDecodeError):
+                continue
+            names |= {
+                node.name for node in ast.walk(tree)
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            }
+        return frozenset(names)
+
+    def test_every_named_test_exists(self):
+        defined = self._defined()
+        named = {
+            relpath: self._names((PLUGIN_ROOT / relpath).read_text(encoding="utf-8"))
+            for relpath in self.MODULES
+        }
+        assert sum(len(names) for names in named.values()) > 10, named  # control: the prose names tests
+        dangling = {relpath: sorted(names - defined) for relpath, names in named.items() if names - defined}
+        assert dangling == {}, f"prose names a test that does not exist: {dangling}"
+
+    def test_a_renamed_test_is_found(self):
+        """Control: a comment naming a test that is not defined anywhere is
+        found, and a module file name and a glob prefix are not names."""
+        source = (
+            "# see `test_" + "nothing_is_named_this` and Test" + "NoSuchClass\n"
+            "# test_identity_rung_parity.py, test_identity_*.py, test_remediation_\n"
+        )
+        assert self._names(source) - self._defined() == {
+            "test_" + "nothing_is_named_this", "Test" + "NoSuchClass",
+        }
