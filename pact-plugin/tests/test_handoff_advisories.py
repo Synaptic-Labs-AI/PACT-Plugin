@@ -217,10 +217,10 @@ class TestBothSitesAgree:
         of real traffic. Firing on either would make the advisory noise.
 
         Its job here is not to re-test the validator but to prove the call is
-        wired and neither site adds a check of its own. `memory_saved` is the
-        real secretary field, the single most common legitimate extra key.
+        wired and neither site adds a check of its own; the key is a neutral
+        stand-in for any extra key a real handoff might carry.
         """
-        handoff = dict(VALID_HANDOFF, memory_saved=["m1"])
+        handoff = dict(VALID_HANDOFF, custom_tags=["t1"])
         rules = _rules(payload_for(handoff), tmp_path, monkeypatch, pact_context)
         assert rule not in rules, (
             f"{rule} fired on a complete handoff carrying an extra key and two "

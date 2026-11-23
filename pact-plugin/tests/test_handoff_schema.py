@@ -146,7 +146,7 @@ class TestValidatorStaysSilent:
         assert validate_handoff_schema(handoff) is None
 
     def test_silent_on_extra_keys(self):
-        handoff = dict(VALID_HANDOFF, memory_saved=["m1"], findings=["f1"])
+        handoff = dict(VALID_HANDOFF, custom_tags=["t1"], findings=["f1"])
         assert validate_handoff_schema(handoff) is None
 
     def test_silent_on_present_but_empty_values(self):

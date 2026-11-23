@@ -7,8 +7,13 @@ Tests cover:
 3. SKILL.md has valid YAML frontmatter with required fields
 4. Skill names and descriptions are present
 5. SKILL.md body contains substantive content
+6. The retired memory_saved flag stays absent from every tracked Markdown
+   file across the six LLM-loaded instruction surfaces (strict token ban
+   over normalized text, per-surface file control, real temporary-Git
+   self-tests)
 """
 import ast
+import re
 import subprocess
 from pathlib import Path
 
@@ -16,7 +21,10 @@ import pytest
 
 from fixtures.tracked_files import tracked_files as _shared_tracked_files
 from helpers import parse_frontmatter
+from test_agent_memory_leaf_construction import _LLM_LOADED_DIRS
 from test_peer_review_cold_lane_pin import FORWARD_POINTER
+from test_planning_artifact_scrub import LLM_LOADED_DIRECTORIES
+from test_prose_root_gate import CENSUS_DIRS as PROSE_GATE_CENSUS
 
 PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 SKILLS_DIR = PLUGIN_ROOT / "skills"
@@ -620,6 +628,724 @@ class TestNoFirstActionFossilInSkillBodies:
             f"exists and contradicts the current `skills:` frontmatter "
             f"preload model. Replace with current-state instructions."
         )
+
+
+# Named references the decoder resolves. The map is deliberately closed:
+# separators (lowbar/underbar/under/UnderBar -> "_", hyphen/dash/minus ->
+# "-", nbsp/NBSP/NonBreakingSpace -> space), the canonical whitespace
+# names (NewLine -> LF, Tab -> TAB), and the backslash name (bsol). Any
+# name outside it stays literal, the same contract as a numeric reference
+# to a character the normalization does not fold.
+_NAMED_REFERENCES = {
+    "lowbar": "_",
+    "underbar": "_",
+    "under": "_",
+    "UnderBar": "_",
+    "hyphen": "-",
+    "dash": "-",
+    "minus": "-",
+    "nbsp": " ",
+    "NBSP": " ",
+    "NonBreakingSpace": " ",
+    "NewLine": "\n",
+    "Tab": "\t",
+    "bsol": "\\",
+}
+
+# The characters the normalization folds or strips, so a reference that
+# resolves to one changes the scanned text: separators (_ - space) and
+# Markdown delimiters (* ~ `). Whitespace joins them via str.isspace().
+_FOLDABLE = "_- *~`"
+
+# Characters the entity decoder may resolve. A backslash is not foldable
+# itself, but decoding it matters because the unescape step runs AFTER
+# this decoder and consumes it as an escape introducer.
+_ENTITY_RESOLVABLE = _FOLDABLE + "\\"
+
+
+def _foldable_entity(match):
+    """Bounded entity decoder for the memory_saved pin: numeric references
+    and the named references in _NAMED_REFERENCES are resolved when the
+    character is one the normalization folds or strips — a separator, a
+    Markdown delimiter, whitespace — or a backslash the unescape step
+    consumes. Any other reference — unlisted name, malformed, over-long
+    (past CPython's int digit limit), over-range (past chr's valid
+    range), or a character outside that set — is returned unchanged."""
+    token = match.group(1)
+    if token.startswith("#"):
+        code = token[1:]
+        try:
+            char = chr(int(code[1:], 16) if code[0] in "xX" else int(code, 10))
+        except (ValueError, OverflowError):
+            # ValueError: digit-limit or malformed digits; OverflowError:
+            # value past chr's range. Either way, leave it literal.
+            return match.group(0)
+    else:
+        char = _NAMED_REFERENCES.get(token)
+        if char is None:
+            return match.group(0)
+    return char if char in _ENTITY_RESOLVABLE or char.isspace() else match.group(0)
+
+
+# The census shared by this pin and its three siblings. The pin's population
+# below and the sibling census pins (the leaf construction pin, the
+# planning-artifact scrub pin, and the prose-root gate) all scan these six
+# directories; a drift arm in TestMemorySavedRetiredFromInstructionSurfaces
+# holds the four copies equal, so editing one without the others fails the
+# suite.
+SURFACE_DIRECTORIES = frozenset(
+    {"skills", "agents", "commands", "protocols", "reference", "templates"}
+)
+
+
+def _instruction_surface_population():
+    """Every tracked markdown file across the LLM-loaded surfaces.
+
+    The scan sequence is derived from SURFACE_DIRECTORIES — the same
+    enumeration the structural and drift arms check — so there is no second
+    literal tuple to fall out of step. Built from the collection-time
+    populations so an untracked scratch file stays invisible and the
+    installed-layout skip behavior matches the rest of the module.
+    """
+    files = []
+    for surface in sorted(SURFACE_DIRECTORIES):
+        files.extend(_collection_population(f"{PLUGIN_ROOT.name}/{surface}", "**"))
+    return sorted(p for p in files if p.suffix.lower() in (".md", ".markdown"))
+
+
+class TestMemorySavedRetiredFromInstructionSurfaces:
+    """The memory_saved flag was retired in v4.8.37: zero code readers,
+    self-reported, unenforced — the "Confirm Memory Saved" checklist step
+    in pact-agent-teams/SKILL.md and the emitter docstring caveat naming
+    the flag were both deleted. Nothing else asserted that retirement, so
+    a future reintroduction would land unpinned.
+
+    Scoped to six LLM-loaded instruction surfaces (skills/, agents/,
+    commands/, protocols/, reference/, templates/ — every tracked
+    Markdown file, .md/.markdown/.MD extensions alike): a token an LLM
+    loads as instruction re-teaches the retired flag wherever it appears.
+    The repo-root CHANGELOG's retirement note legitimately names the flag
+    and stays out of scope.
+
+    The rule is a STRICT TOKEN BAN: after normalization, any match of
+    "memory[-_ ]*saved" is an offender, with no context test.
+    Normalization decodes character references first and then unescapes
+    backslashes. An escape is a backslash before a separator, a Markdown
+    delimiter, or a line break. The decoder resolves a numeric reference,
+    or a named reference in its closed map, when the character is one
+    the normalization folds or strips — separators (_ - space), Markdown
+    delimiters (* ~ `), whitespace, or a backslash the unescape step
+    consumes; every other reference stays literal, a named reference
+    outside the map included. It then strips the Markdown delimiters
+    asterisk, tilde and backtick, collapses whitespace, and case-folds.
+    Those steps cover identifier, hyphen, space, repeated-separator,
+    escaped-separator, entity, camelCase, zero-separator and case
+    spellings, plus markup or line wrapping around the words.
+
+    The cost is deliberate: ordinary English containing "memory saved"
+    is an offender too and must be reworded, and the diagnostic says so
+    — a retired token must not appear at all in text an LLM loads.
+
+    A tracked file that is not valid UTF-8 is named by the pin rather
+    than raising a bare decode error.
+
+    WHAT THIS CANNOT CATCH, stated so that a green is read no wider than
+    it is: a population narrowed to a subset that still retains every
+    surface file stays green here — the surface-file control's guarantee
+    is member presence, not full-population size, and the companion
+    population floor covers only a collapse below its floor. That
+    residual is the tracked-file fixture's documented PARTIAL-overlap
+    boundary (tests/fixtures/tracked_files.py). The six-surface
+    enumeration is itself a curated judgment: a new instruction-surface
+    directory would not be scanned until added to it; a structural arm
+    pins the six curated directories plus the nested-recursion member, a
+    drift arm holds the four sibling censuses equal, and completeness
+    beyond that is reviewed per-PR rather than machine-checked.
+    """
+
+    # One pattern applied to normalized text, with no context test: the
+    # separator class accepts underscore, hyphen and space in any run, so
+    # an identifier, a hyphenated compound, an ordinary English phrase and
+    # a zero-separator run all match the same rule.
+    FORBIDDEN_PATTERN = re.compile(r"memory[-_ ]*saved")
+    # The escapes the pin understands: a backslash before a separator
+    # character, a Markdown delimiter, or a line break. Any other
+    # backslash stays literal.
+    _ESCAPABLE = "_*`~ -\n\r"
+    _ENTITY_REFERENCE = re.compile(
+        r"&(#(?:[xX][0-9a-fA-F]+|\d+)|[A-Za-z]+);"
+    )
+    # A population narrowed to exactly the seven SURFACE_FILES satisfies the
+    # surface-file control while every other file goes unscanned. This floor
+    # is well below the current count (119 when written) so ordinary file
+    # churn does not churn the pin, but a collapse to a handful of files
+    # fails loudly instead of reading as coverage.
+    POPULATION_FLOOR = 100
+    # The ONE surface axis: one tracked file per surface, plus the
+    # nested-recursion member. Both the real-run control and every reject
+    # arm read this constant; a narrower axis would leave whole directories
+    # unscanned without any arm noticing. SURFACE_DIRECTORIES is the
+    # curated judgment the axis is checked against, independent of the
+    # paths themselves.
+    SURFACE_FILES = (
+        "skills/pact-agent-teams/SKILL.md",
+        "skills/pact-testing-strategies/references/test-pyramid.md",
+        "agents/pact-orchestrator.md",
+        "commands/orchestrate.md",
+        "protocols/pact-protocols.md",
+        "reference/config.md",
+        "templates/environment-model.md",
+    )
+    # Every spelling form the normalization must fold into the banned
+    # token. Each is seeded verbatim on all seven surfaces by the reject
+    # arm; a normalization step that goes missing reds the forms it owns.
+    PROHIBITED_FORMS = (
+        "memory_saved",
+        "memorySaved",
+        "memory-saved",
+        "memory saved",
+        "memory\nsaved",
+        "memory  saved",
+        "memory\tsaved",
+        "memory**_**saved",
+        "memory`-`saved",
+        "`memory_saved`",
+        "**memory-saved**",
+        "MEMORY_SAVED",
+        "memory_\nsaved",
+        "memory\n_saved",
+        "memory  _  saved",
+        "memory-\nsaved",
+        "memory\n-saved",
+        "memory__saved",
+        "memory--saved",
+        r"memory\_saved",
+        r"memory\-saved",
+        r"memory\*saved",
+        r"memory\*\*saved",
+        "memory\\`saved",
+        "memory&#95;saved",
+        "memory&#x2d;saved",
+        "memory&#X2D;saved",
+        "memory&#32;saved",
+        "memory&lowbar;saved",
+        "memory&hyphen;saved",
+        "memory&NBSP;saved",
+        "memory&dash;saved",
+        "memory&minus;saved",
+        "memory&underbar;saved",
+        "memory&under;saved",
+        "memory&nbsp;saved",
+        "memory&#42;saved",
+        "memory&#x2A;saved",
+        "memory&#96;saved",
+        "memory&#x60;saved",
+        "memory&#126;saved",
+        "memory&#9;saved",
+        "memory&#10;saved",
+        "memory&#13;saved",
+        "memory&#160;saved",
+        "memory&#8194;saved",
+        "memory&UnderBar;saved",
+        "memory&NonBreakingSpace;saved",
+        "memory&NewLine;saved",
+        "memory&Tab;saved",
+        "memory&#92;_saved",
+        "memory&bsol;_saved",
+        "memory&#92;&#95;saved",
+        "memory&#92;~saved",
+        r"memory\ saved",
+        r"memory\~saved",
+        "memory\\\nsaved",
+        "memory\\\r\nsaved",
+        r"memory\&#95;saved",
+        "`memory saved`",
+        "`memory *saved*`",
+        "`memory **saved**`",
+        "`memory ~~saved~~`",
+        "memorysaved",
+        "memory** **saved",
+    )
+
+    @staticmethod
+    def _seed_tracked_repo(repo):
+        plugin = repo / "pact-plugin"
+        for relative in TestMemorySavedRetiredFromInstructionSurfaces.SURFACE_FILES:
+            path = plugin / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("clean\n", encoding="utf-8")
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(["git", "add", "--", "pact-plugin"], cwd=repo, check=True)
+        return plugin
+
+    def test_population_covers_every_surface_and_nested_skill_markdown(
+            self, tmp_path, monkeypatch):
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "skills" / "untracked.md").write_text("memory_saved\n")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        assert {
+            path.relative_to(plugin).as_posix()
+            for path in _instruction_surface_population()
+        } == set(self.SURFACE_FILES)
+
+    def test_pin_rejects_case_and_markdown_extension_variants(
+            self, tmp_path, monkeypatch):
+        """Uppercase and .markdown extensions are Markdown instruction files
+        too; the population must not let them silently escape the pin."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "skills" / "GUIDE.MD").write_text("memory_saved\n")
+        (plugin / "agents" / "NOTES.markdown").write_text("memory-saved\n")
+        subprocess.run(
+            ["git", "add", "--", "pact-plugin/skills/GUIDE.MD",
+             "pact-plugin/agents/NOTES.markdown"],
+            cwd=tmp_path, check=True,
+        )
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        with pytest.raises(AssertionError) as exc_info:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        message = str(exc_info.value)
+        assert "pact-plugin/skills/GUIDE.MD" in message
+        assert "pact-plugin/agents/NOTES.markdown" in message
+
+    @classmethod
+    def _decode_references(cls, text):
+        """Resolve character references on the raw text.
+
+        This runs BEFORE the unescape step, which is what lets an encoded
+        backslash (``&#92;``, ``&bsol;``) become the backslash that
+        escapes the next character; the decoder keeps every other
+        reference literal.
+        """
+        decoded = []
+        index = 0
+        while index < len(text):
+            if text[index] == "&":
+                reference = cls._ENTITY_REFERENCE.match(text, index)
+                if reference is not None:
+                    resolved = _foldable_entity(reference)
+                    if resolved != reference.group(0):
+                        decoded.append(resolved)
+                        index = reference.end()
+                        continue
+            decoded.append(text[index])
+            index += 1
+        return "".join(decoded)
+
+    @classmethod
+    def _unescape(cls, text):
+        """Resolve a backslash before a separator, delimiter, or line break."""
+        unescaped = []
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if (char == "\\" and index + 1 < len(text)
+                    and text[index + 1] in cls._ESCAPABLE):
+                unescaped.append(text[index + 1])
+                index += 2
+                continue
+            unescaped.append(char)
+            index += 1
+        return "".join(unescaped)
+
+    @classmethod
+    def _normalize(cls, text):
+        """Decode references, unescape backslashes, strip delimiters,
+        collapse whitespace, casefold — in that order.
+
+        The order is load-bearing: a reference that resolves to a
+        backslash must exist before the unescape step runs, and a
+        backslash-escaped delimiter must be unescaped before the strip
+        removes it (``memory\\*saved``).
+        """
+        unescaped = cls._unescape(cls._decode_references(text))
+        stripped = "".join(char for char in unescaped if char not in "*~`")
+        return " ".join(stripped.split()).casefold()
+
+    @classmethod
+    def _re_teaches_retired_flag(cls, text):
+        """True when the normalized text carries the banned token anywhere.
+
+        One rule with no context test: the token is retired, so its
+        presence in an LLM-loaded surface is the offense.
+        """
+        return cls.FORBIDDEN_PATTERN.search(cls._normalize(text)) is not None
+
+    @pytest.mark.parametrize("form", PROHIBITED_FORMS)
+    def test_pin_rejects_prohibited_form_on_every_surface(
+            self, form, tmp_path, monkeypatch):
+        """Every prohibited form is rejected, and the scan names every
+        offending surface, when all seven surfaces carry the form at once.
+
+        One seeded temporary Git repo per form, one scan per form. Seeding
+        every surface in that single scan is what binds the axis: a
+        diagnostic that names only the first offender, or a scan that stops
+        early, leaves the un-named surfaces unasserted.
+        """
+        plugin = self._seed_tracked_repo(tmp_path)
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        for surface in self.SURFACE_FILES:
+            (plugin / surface).write_text(form, encoding="utf-8")
+
+        with pytest.raises(
+                AssertionError, match="re-teach the retired") as exc_info:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        message = str(exc_info.value)
+        for surface in self.SURFACE_FILES:
+            assert f"pact-plugin/{surface}" in message, (
+                f"the pin must name every offending surface; {surface!r} "
+                f"is missing from: {message}"
+            )
+
+    def test_strict_ban_flags_ordinary_english_and_says_reword(
+            self, tmp_path, monkeypatch):
+        """The ban's cost, pinned: plain English using the phrase is an
+        offender and the diagnostic tells the author to reword.
+
+        This is intended behaviour, not a false positive. A prose carve-out
+        is the complexity this pin deliberately dropped, so an author who
+        means the ordinary English phrase changes the words, not the pin.
+        """
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "agents" / "pact-orchestrator.md").write_text(
+            "Your agent memory saved you a re-read.\n", encoding="utf-8"
+        )
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        with pytest.raises(AssertionError, match="Reword") as exc_info:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        assert "pact-plugin/agents/pact-orchestrator.md" in str(exc_info.value)
+
+    def test_scan_visits_every_population_entry(
+            self, tmp_path, monkeypatch):
+        """A truncated scan must red.
+
+        The offender is the LAST population entry, so a slice or an early
+        break that drops the tail leaves it unscanned. The surface-file
+        control cannot catch that: it checks list membership, not what the
+        loop actually read."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        offender = plugin / "templates" / "zz-last-entry.md"
+        offender.write_text("memory_saved\n", encoding="utf-8")
+        population = [plugin / relative for relative in self.SURFACE_FILES]
+        population.append(offender)
+        monkeypatch.setitem(
+            globals(), "_instruction_surface_population", lambda: population
+        )
+
+        with pytest.raises(
+                AssertionError, match="retired memory_saved flag") as exc_info:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        assert "zz-last-entry.md" in str(exc_info.value)
+
+    def test_real_population_has_not_collapsed(self):
+        """Population-size oracle the surface-file control cannot satisfy.
+
+        The surface-file control is satisfied by the seven SURFACE_FILES
+        alone, so it cannot see a population that has narrowed to exactly
+        those seven. The floor fails loudly if the population collapses
+        instead of reading as coverage."""
+        population = _instruction_surface_population()
+        assert len(population) >= self.POPULATION_FLOOR, (
+            f"the pin's population collapsed to {len(population)} files "
+            f"(floor {self.POPULATION_FLOOR}); a narrowed world that keeps "
+            f"every surface file stays green over the files it drops"
+        )
+
+    def test_population_floor_exceeds_the_surface_axis(self):
+        """The floor is meaningful only above the surface axis.
+
+        A floor at or below the seven SURFACE_FILES is satisfied by exactly
+        the world the floor exists to reject, and a floor of 0 leaves every
+        other arm green because the control alone still passes."""
+        assert self.POPULATION_FLOOR > len(self.SURFACE_FILES)
+
+    def test_surface_axis_keeps_every_curated_surface(self):
+        """A narrowed axis silently stops scanning whole directories.
+
+        Every reject arm derives its expectations from SURFACE_FILES, so
+        SURFACE_FILES[:1] otherwise leaves the suite green: the arms seed
+        and assert only the surfaces the constant still names. The curated
+        directory set is the independent oracle, and the extra member is the
+        nested-recursion file that keeps skills/** scanned."""
+        assert {
+            relative.split("/")[0] for relative in self.SURFACE_FILES
+        } == set(SURFACE_DIRECTORIES)
+        assert len(self.SURFACE_FILES) == len(SURFACE_DIRECTORIES) + 1
+
+    def test_surface_censuses_agree(self):
+        """The four six-directory censuses are one judgment, kept in four
+        modules. Drift silently narrows one pin's coverage while the
+        CHANGELOG asserts sameness, so compare all four here: this pin's
+        names, the leaf construction pin's names, the planning-artifact
+        scrub pin's directory basenames (its tuple is Path-valued), and the
+        prose-root gate's names."""
+        ours = set(SURFACE_DIRECTORIES)
+        leaf = set(_LLM_LOADED_DIRS)
+        assert leaf == ours, (
+            f"the leaf construction pin's census drifted from the "
+            f"retired-flag pin's: {sorted(leaf ^ ours)} differ"
+        )
+        scrub = {path.name for path in LLM_LOADED_DIRECTORIES}
+        assert scrub == ours, (
+            f"the planning-artifact scrub pin's census drifted from the "
+            f"retired-flag pin's: {sorted(scrub ^ ours)} differ"
+        )
+        gate = set(PROSE_GATE_CENSUS)
+        assert gate == ours, (
+            f"the prose-root gate's census drifted from the retired-flag "
+            f"pin's: {sorted(gate ^ ours)} differ"
+        )
+
+    def test_pin_names_non_utf8_surface(self, tmp_path, monkeypatch):
+        plugin = self._seed_tracked_repo(tmp_path)
+        path = plugin / "agents" / "pact-orchestrator.md"
+        path.write_bytes(b"\xff")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        with pytest.raises(AssertionError, match="is not valid UTF-8") as exc_info:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        assert "pact-plugin/agents/pact-orchestrator.md" in str(exc_info.value)
+
+    def test_pin_names_offender_and_undecodable_together(
+            self, tmp_path, monkeypatch):
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "skills" / "pact-agent-teams" / "SKILL.md").write_text(
+            "memory_saved", encoding="utf-8"
+        )
+        (plugin / "agents" / "pact-orchestrator.md").write_bytes(b"\xff")
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        with pytest.raises(AssertionError) as exc_info:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        message = str(exc_info.value)
+        assert "pact-plugin/skills/pact-agent-teams/SKILL.md" in message
+        assert "pact-plugin/agents/pact-orchestrator.md" in message
+
+    def test_pin_survives_over_long_numeric_reference(
+            self, tmp_path, monkeypatch):
+        """A numeric reference past CPython's 4300-digit int limit must fall
+        through to the literal-stays path, not kill the pin with a traceback
+        raised from the entity decoder."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "commands" / "orchestrate.md").write_text(
+            "memory&#" + "9" * 5000 + ";saved", encoding="utf-8"
+        )
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        # Completing without raising IS the assertion: with the conversion
+        # outside _foldable_entity's try, int() raises ValueError and this
+        # call dies instead of leaving the reference literal.
+        self.test_no_memory_saved_in_any_llm_loaded_surface()
+
+    @pytest.mark.parametrize(
+        "content,why",
+        [
+            ("memory&#99999999999;saved",
+             "an over-range numeric reference stays literal (chr's range "
+             "failure is caught, not propagated)"),
+            ("memory&copy;saved",
+             "a named reference outside the bounded decoder map stays "
+             "literal, even a real HTML5 name"),
+            ("memory&#zz;saved",
+             "a malformed reference matches neither the numeric nor the "
+             "named grammar and stays literal (regex never reaches the "
+             "decoder)"),
+            ("memory&#97;saved",
+             "a successfully parsed numeric reference to a character the "
+             "normalizer does not fold (a letter) stays literal (the "
+             "foldable-character guard rejects it)"),
+            ("mem&#111;ry_saved",
+             "an encoded LETTER inside the token stays literal; a guard "
+             "that resolved every reference would decode it into the "
+             "banned token and make the pin raise"),
+        ],
+        ids=["over-range", "unlisted-name", "malformed-ref", "non-separator",
+             "entity-letter"],
+    )
+    def test_pin_passes_when_reference_stays_literal(
+            self, content, why, tmp_path, monkeypatch):
+        plugin = self._seed_tracked_repo(tmp_path)
+        (plugin / "commands" / "orchestrate.md").write_text(
+            content, encoding="utf-8"
+        )
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        # The file is clean exactly because the reference stays literal: a
+        # decoder that over-resolves it (treats a non-foldable reference as
+        # foldable) makes the pin raise, and this wrapper names the
+        # contract. Faults that are not the pin's own AssertionError (an
+        # environment refusal, a pytest skip, a decoder crash) propagate
+        # unchanged rather than being misattributed to the decoder's
+        # contract.
+        try:
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+        except AssertionError as exc:
+            if "retired memory_saved flag" not in str(exc):
+                # An environment or fixture refusal is not the decoder's
+                # contract; it propagates unchanged instead of being
+                # rewritten as a decoder failure.
+                raise
+            raise AssertionError(
+                f"decoder must leave {content!r} literal: {why}. "
+                f"Decoder instead: {exc!r}"
+            ) from exc
+
+    def test_literal_stays_wrapper_lets_environment_faults_propagate(
+            self, tmp_path, monkeypatch):
+        """A git/fixture refusal must not be rewritten as the decoder's
+        contract. Catching it and answering with the decoder message makes a
+        broken environment read as a decoder regression."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+
+        def environment_refusal():
+            raise AssertionError("git is unavailable for the pin's root")
+
+        monkeypatch.setitem(
+            globals(), "_instruction_surface_population", environment_refusal
+        )
+
+        with pytest.raises(AssertionError) as exc_info:
+            self.test_pin_passes_when_reference_stays_literal(
+                "memory&#10;saved", "why", tmp_path, monkeypatch
+            )
+        assert str(exc_info.value).startswith("git is unavailable"), (
+            "an environment refusal must propagate unchanged; it was "
+            f"rewritten as: {exc_info.value}"
+        )
+
+    def test_real_run_names_a_silently_narrowed_population(
+            self, tmp_path, monkeypatch):
+        """If the tracked-file fixture narrows to a strict subset (the
+        documented PARTIAL-overlap boundary in tests/fixtures/tracked_files.py),
+        the real-tree run must fail loudly instead of passing green over a
+        narrowed world."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        monkeypatch.setitem(
+            globals(),
+            "_instruction_surface_population",
+            lambda: [plugin / "agents" / "pact-orchestrator.md"],
+        )
+
+        with pytest.raises(AssertionError, match="narrowed"):
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+
+    def test_control_fires_when_nested_recursion_member_missing(
+            self, tmp_path, monkeypatch):
+        """A narrowed world that retains the six per-surface members but
+        loses the nested-recursion member must fire the control: recursion
+        into nested skill directories is what keeps that file scanned."""
+        plugin = self._seed_tracked_repo(tmp_path)
+        monkeypatch.setitem(globals(), "REPO_ROOT", tmp_path)
+        monkeypatch.setitem(globals(), "PLUGIN_ROOT", plugin)
+        nested = "skills/pact-testing-strategies/references/test-pyramid.md"
+        six = [
+            plugin / relative for relative in self.SURFACE_FILES
+            if relative != nested
+        ]
+        monkeypatch.setitem(
+            globals(), "_instruction_surface_population", lambda: six
+        )
+
+        with pytest.raises(AssertionError, match="test-pyramid"):
+            self.test_no_memory_saved_in_any_llm_loaded_surface()
+
+    def test_no_memory_saved_in_any_llm_loaded_surface(self):
+        population = _instruction_surface_population()
+        present = {p.relative_to(PLUGIN_ROOT).as_posix() for p in population}
+        missing = [m for m in self.SURFACE_FILES if m not in present]
+        assert not missing, (
+            f"{missing} missing from the pin's enumerated population "
+            f"({len(population)} files); the surface axis names one file per "
+            f"surface, and the tracked-file fixture can answer a strict "
+            f"subset (PARTIAL overlap, tests/fixtures/tracked_files.py), so "
+            f"this run would go green vacuously over a narrowed world"
+        )
+        offenders = []
+        undecodable = []
+        for path in population:
+            try:
+                text = path.read_bytes().decode("utf-8")
+            except UnicodeDecodeError:
+                undecodable.append(path)
+                continue
+            # Strict ban: normalize, then match anywhere. Normalization order is
+            # load-bearing: character references are decoded FIRST, then
+            # backslashes are unescaped, so an encoded backslash
+            # (memory&#92;_saved, memory&bsol;_saved) becomes the escape the
+            # next character needs. The escape step resolves a backslash
+            # before a separator, a Markdown delimiter, or a line break;
+            # the entity step resolves a numeric reference, or a named
+            # reference IN _NAMED_REFERENCES, when the character is one the
+            # normalization folds or strips (separators _ - space,
+            # delimiters * ~ `, whitespace) or a backslash; every other
+            # reference stays literal. Measured out-of-contract misses,
+            # each with its reason: an escaped backslash before a
+            # separator (memory\\_saved — the surviving backslash is not
+            # folded); a double-encoded entity (memory&amp;#95;saved and
+            # memory&amp;#92;_saved — &amp; is not in the map); non-flattening
+            # markup (memory<br>saved — < and > survive); an
+            # entity-encoded letter (mem&#111;ry_saved — letters are not
+            # foldable); a reference without a semicolon (memory&#95saved —
+            # no reference grammar match); a named reference outside the
+            # map (memory&copy;saved); named whitespace references outside
+            # the map (&ensp; &emsp; &thinsp; &hairsp; &numsp; &puncsp;
+            # &MediumSpace; — their numeric forms decode, the names are not
+            # in the map; &NoBreak; is not whitespace, so its numeric form
+            # stays literal with the zero-width family); and the non-ASCII
+            # family —
+            # Unicode dashes (memory–saved reads as memory-saved to a
+            # human), zero-width joiners and spaces, soft hyphens, BOM/NUL,
+            # and homoglyph separators or letters, none of which the ASCII
+            # foldable set matches or decodes. No general HTML or escape
+            # decode happens here.
+            if self._re_teaches_retired_flag(text):
+                offenders.append(path)
+        diagnostics = []
+        if offenders:
+            names = ", ".join(
+                str(p.relative_to(PLUGIN_ROOT.parent)) for p in offenders
+            )
+            verb = "re-teaches" if len(offenders) == 1 else "re-teach"
+            diagnostics.append(
+                f"{names} {verb} the retired memory_saved flag. The flag was removed "
+                f"in v4.8.37 (zero code readers, unenforced — a task could "
+                f"attest a save no mechanism verified); reintroducing the token "
+                f"in an LLM-loaded surface revives a write-only signal. This "
+                f"pin enforces a strict token ban: after normalization a "
+                f"memory[-_ ]*saved spelling anywhere in the file is an "
+                f"offender, with no context test, so ordinary English that "
+                f"happens to use the phrase is flagged too. Reword the "
+                f"sentence, and update this pin deliberately if the flag ever "
+                f"returns with an enforcer."
+            )
+        if undecodable:
+            names = ", ".join(
+                str(p.relative_to(PLUGIN_ROOT.parent)) for p in undecodable
+            )
+            verb = "is" if len(undecodable) == 1 else "are"
+            pronoun = "it" if len(undecodable) == 1 else "them"
+            diagnostics.append(
+                f"{names} {verb} not valid UTF-8, so this pin cannot read "
+                f"{pronoun} to check for the retired memory_saved flag; "
+                f"instruction surfaces must stay UTF-8."
+            )
+        assert not diagnostics, "\n".join(diagnostics)
 
 
 class TestOrderingInvariantPhraseCount:
