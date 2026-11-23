@@ -18,6 +18,25 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.36: run the fast CI suite in parallel with fail-closed evidence
+
+### Summary
+
+The fast PR suite now runs its selected tests with four pytest-xdist workers using loadfile distribution. Serial collection remains the independent canary and the full-suite collection oracle. Fast-lane artifacts now bind the distributed run to its collection canary and the unchanged schema-v3 run record, so missing workers, narrowed collection, changed terminal node IDs, outcome mismatches and contaminated runner environments fail verification instead of producing a false green.
+
+### What landed
+
+- The real fast run uses fixed `-n 4 --dist loadfile` arguments; the canary stays serial and records every sorted, unique collected node ID.
+- Fast canary and summary artifacts move together to schema v2, adding Actions run ID and attempt, complete collected node IDs in the canary, and xfail/xpass outcomes in the run summary. The schema-v3 record format is unchanged and is now required for fast verification; the recorder's `deselected` count now comes from its own hook accumulation rather than the terminal reporter's stats.
+- The fast selector's callers resolve manifest paths against the selected repository and plugin roots. The verifier independently reconstructs both commands and the complete selection payload, requires both artifacts' selection metadata to equal that recomputation exactly, and checks SHAs, manifest paths and hashes, arithmetic, outcomes and skip accounting. Its outcome coverage accepts a legal pass followed by a teardown skip on one collected node while refusing missing coverage and extra non-skip outcomes. Worker collection aggregates are recorded by the schema-v3 recorder, which refuses the aggregate when a ready worker fails to report; the verifier gates worker completeness through that null-field refusal together with exact terminal-node set equality, and gates collection-hook narrowing separately. Full-suite skip-allowlist differences remain advisory in the selected fast lane.
+- The runner refuses every inherited `PYTEST_*` variable and a pre-set recorder-owner variable before selection, exiting 3 without writing an artifact.
+- Real xdist integration covers valid skip/xfail evidence, module-level collection skips and positive execution with one selected non-guard file. Negative controls with matched valid runs cover worker-only silent collection narrowing, same-count/different-node refusal and late worker loss with exit status zero.
+- Review-cycle hardening also lands in this batch: header-capture hardening in the runner, which now also persists the captured header line in the run artifact so the verifier re-derives the run's collected count from it instead of trusting a summary-reported count, and exits 3 without writing an artifact at all when a run carries no header, binding of that header's form to the run command's shape (the workers form beside the parallel command, the collected form beside a serial one), type-checking of the canary's `unresolvable_node_id_bases` ahead of its emptiness check so a falsy non-list cannot read as all-accounted-for, verifier-side re-checks that the canary's `missing`/`extra` delta fields are typed and empty and that the canary summary line claims no deselection or errors, verify-time binding between each artifact's `head_sha` and the workflow's `GITHUB_SHA`, a contract-pinning comment for the verifier's private imports from the full verifier, a recorder `deselected`-accumulation fix, and new refusal mutation tests, each with a control arm.
+
+### Why
+
+Parallel execution shortens the fast lane, but count-only summaries cannot prove that every worker reported or that the distributed run executed the same tests the serial canary collected. Binding all three artifacts closes that false-green window without changing the record format, the full verifier, selection logic or workflow wrapper commands. That binding detects asymmetric narrowing only: a repo-side collection hook dropping the same items from both the serial canary and the parallel run stays self-consistent by construction, a blind spot shared with the required full lane's before/after identity, and the lane stays advisory.
+
 ## v4.8.35: find order-dependent tests and isolate the state tests shared
 
 ### Summary
