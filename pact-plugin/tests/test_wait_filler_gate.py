@@ -831,7 +831,9 @@ _TIER3_REASON_PIN = (
     "validate_wait requires — with `expected_resolver` set to `lead` "
     "(you are the resolver of your own write), and end your turn with "
     "no further tool calls; a message or that resolver's own wake "
-    "resolves it."
+    "resolves it. If the event you await is anything else (a user "
+    "reply, CI, a message), end your turn with no further tool calls — "
+    "a reply or message arrives as its own turn."
 )
 
 
@@ -931,12 +933,13 @@ _TIER3_TEAMMATE_REASON_PIN = (
     "teammate, a background watcher's completion will NOT wake you — "
     "the lead's message will. If the event you await is another "
     "agent's handoff or teachback submission, something only YOU can "
-    "write (your own notes or a summary) or the lead's review or "
-    "action, do NOT arm: SET metadata.intentional_wait on every task "
-    "the wait covers — `reason`, `expected_resolver` and `since` are "
-    "the keys validate_wait requires — with `expected_resolver` set to "
-    "`lead`, and end your turn with no further tool calls; a message "
-    "or that resolver's own wake resolves it."
+    "write (your own notes or a summary), the lead's review or action "
+    "or anything else (a user reply, CI, a message), do NOT arm: SET "
+    "metadata.intentional_wait on every task the wait covers — "
+    "`reason`, `expected_resolver` and `since` are the keys "
+    "validate_wait requires — with `expected_resolver` set to `lead`, "
+    "and end your turn with no further tool calls; a message or that "
+    "resolver's own wake resolves it."
 )
 
 
@@ -993,7 +996,10 @@ _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN = (
     "covers — `reason`, `expected_resolver` and `since` are the keys "
     "validate_wait requires — with `expected_resolver` set to `lead`, "
     "and end your turn with no further tool calls; a message or that "
-    "resolver's own wake resolves it."
+    "resolver's own wake resolves it. If the event you await is "
+    "anything else (a user reply, CI, a message), end your turn with "
+    "no further tool calls — a reply or message arrives as its own "
+    "turn."
 )
 
 
@@ -1069,9 +1075,10 @@ _TIER3_SUBAGENT_REASON_PIN = (
     "report is your completion, and the lead reads it when it returns. "
     "If the event you await is another agent's handoff or teachback "
     "submission, something only YOU can write (your own notes or a "
-    "summary) or the lead's review or action, do NOT arm the "
-    "structural watcher: end the turn with no further tool calls and "
-    "put what the lead needs in your final report."
+    "summary), the lead's review or action or anything else (a user "
+    "reply, CI, a message), do NOT arm the structural watcher: end the "
+    "turn with no further tool calls and put what the lead needs in "
+    "your final report."
 )
 
 

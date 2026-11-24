@@ -151,11 +151,14 @@ _TIER2_SUFFIX = (
 #          handoff or teachback, and no other branch names that wait;
 #   R-THEN a THEN text appears only on an arm branch;
 #   R-ROLE a role whose wake a watcher cannot give has no arm branch.
-WAIT_KINDS = ("teammate_deliverable", "own_write", "lead_action")
+# "other" is the catch-all every role must carry: any wait not named above
+# (a user reply, CI, a message) still has an action.
+WAIT_KINDS = ("teammate_deliverable", "own_write", "lead_action", "other")
 WAIT_CONDITIONS = {
     "teammate_deliverable": "another agent's handoff or teachback submission",
     "own_write": "something only YOU can write (your own notes or a summary)",
     "lead_action": "the lead's review or action",
+    "other": "anything else (a user reply, CI, a message)",
 }
 # The watcher's exit vocabulary, owned here and rendered only inside an arm
 # branch.
@@ -185,8 +188,8 @@ _ACTIONS = {
         "message or that resolver's own wake resolves it"
     ),
     "end_turn": (
-        "end your turn with no further tool calls — teammate messages "
-        "arrive as their own turns"
+        "end your turn with no further tool calls — a reply or message "
+        "arrives as its own turn"
     ),
     "report": (
         "do NOT arm the structural watcher: end the turn with no further "
@@ -200,6 +203,7 @@ OUTLET = {
         "branches": [
             ("teammate_deliverable", "arm", "its completion notification re-invokes you"),
             ("own_write", "intentional_wait", None),
+            ("other", "end_turn", None),
         ],
     },
     "separate_process": {
@@ -212,6 +216,7 @@ OUTLET = {
             ("teammate_deliverable", "arm", "its completion notice starts your next turn"),
             ("own_write", "intentional_wait", None),
             ("lead_action", "intentional_wait", None),
+            ("other", "end_turn", None),
         ],
     },
     "in_process": {

@@ -755,8 +755,17 @@ def _check_r_role(table):
         assert wait_filler_gate.ARM_THEN not in text, role
 
 
+def _check_catch_all(table):
+    """Every role has a branch for the catch-all wait, so a wait the named
+    kinds do not cover (a user reply, CI, a message) still has an action."""
+    for role, entry in table.items():
+        kinds = [kind for kind, _action, _then in entry["branches"]]
+        assert kinds.count("other") == 1, role
+
+
 def test_outlet_table_satisfies_r_arm_r_then_r_role():
     table = wait_filler_gate.OUTLET
+    _check_catch_all(table)
     assert set(table) == {"lead", "separate_process", "in_process", "subagent", "no_team"}
     assert {b[0] for e in table.values() for b in e["branches"]} <= set(
         wait_filler_gate.WAIT_KINDS
@@ -811,3 +820,10 @@ def test_outlet_checks_bite_on_bad_tables():
     bad_role["subagent"]["branches"][0] = ("teammate_deliverable", "arm", "wakes")
     with pytest.raises(AssertionError):
         _check_r_role(bad_role)
+    # A role with no catch-all branch fails the catch-all check.
+    no_catch_all = copy.deepcopy(wait_filler_gate.OUTLET)
+    no_catch_all["lead"]["branches"] = [
+        b for b in no_catch_all["lead"]["branches"] if b[0] != "other"
+    ]
+    with pytest.raises(AssertionError):
+        _check_catch_all(no_catch_all)
