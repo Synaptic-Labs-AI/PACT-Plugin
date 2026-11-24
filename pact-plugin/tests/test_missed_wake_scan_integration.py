@@ -484,10 +484,12 @@ def _deadline(since_at: datetime, early_by: float = 0.0) -> datetime:
     return since_at + timedelta(seconds=teammate_idle.GRACE_SECONDS - early_by)
 
 
-# Each arm keeps about 8.5 s of the 10 s window, and measures this machine's own
-# hook start-up first, so "still running" is checked a second past start-up,
-# never on a process that is merely slow to start.
+# Each arm keeps about 8.5 s of the 10 s window and measures this machine's own
+# hook start-up first. Its checks fall CHECK_AFTER seconds past that start-up, so
+# a held run that starts up to about 2.5 s slower than its baseline still reads
+# correctly; a runner too slow to leave that room fails loudly before any launch.
 GRACE_AGE = 1.5
+CHECK_AFTER = 3.0
 
 
 def _startup_seconds(tmp_path: Path) -> float:
@@ -497,46 +499,63 @@ def _startup_seconds(tmp_path: Path) -> float:
     return elapsed
 
 
-def _require_room(startup: float, since_at: datetime) -> float:
-    """The window left at launch; fail loudly if start-up leaves no room to observe the hold."""
+def _require_room(startup: float, since_at: datetime) -> None:
+    """Fail loudly, before any launch, when start-up leaves no room to observe the hold."""
     remaining = (_deadline(since_at) - datetime.now(timezone.utc)).total_seconds()
-    assert startup + 1.5 < remaining, (
+    assert startup + CHECK_AFTER + 1.0 < remaining, (
         f"runner too slow to observe the hold: hook start-up took {startup:.2f}s "
         f"with {remaining:.2f}s of the window left"
     )
-    return remaining
+
+
+class _Launched:
+    """A started hook that is killed if the arm leaves before finishing it."""
+
+    def __init__(self, config: Path):
+        self.started = time.monotonic()
+        self.hook = _start_idle_hook(config)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        if self.hook.poll() is None:
+            self.hook.kill()
+            self.hook.wait(timeout=30)
+        return False
 
 
 class TestTeammateIdleGraceThroughRealHook:
     def test_message_landing_during_the_hold_ends_it_early(self, tmp_path):
-        """Arm A. About 8.5 s of the window remain. The lead's message lands a
-        second after this machine's measured hook start-up, so a hook still
-        running then is holding (a hook with no hold has exited by then). The
-        hook must end soon after the message lands, which proves it reached
+        """Arm A. The lead's message lands CHECK_AFTER seconds past this
+        machine's measured hook start-up. The hook must still be running then
+        and must end soon after the message lands, which proves it reached
         this inbox through the real config dir; one that cannot reach it holds
-        to the deadline."""
+        to the deadline. Arm B is the deadline-based check that a hold runs at
+        all."""
         startup = _startup_seconds(tmp_path)
         config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE)
         inbox = _grace_inbox(config)
         inbox.parent.mkdir(parents=True, exist_ok=True)
         staged = inbox.with_name("staged.tmp")
-
-        hook = _start_idle_hook(config)
         _require_room(startup, since_at)
-        time.sleep(startup + 1.0)
-        staged.write_text(json.dumps([{
-            "from": "team-lead", "text": "accepted", "read": False,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }]), encoding="utf-8")
-        still_holding = hook.poll() is None
-        os.replace(staged, inbox)
-        landed_at = datetime.now(timezone.utc)
-        output = _finish_idle_hook(hook)
-        returned_at = datetime.now(timezone.utc)
+
+        with _Launched(config) as run:
+            time.sleep(startup + CHECK_AFTER)
+            staged.write_text(json.dumps([{
+                "from": "team-lead", "text": "accepted", "read": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }]), encoding="utf-8")
+            still_running = run.hook.poll() is None
+            os.replace(staged, inbox)
+            landed_at = datetime.now(timezone.utc)
+            output = _finish_idle_hook(run.hook)
+            returned_at = datetime.now(timezone.utc)
 
         assert output == {"suppressOutput": True}, "the hold never emits a decision"
-        assert still_holding, (
-            f"the hook exited within a second of its {startup:.2f}s start-up, so it never held"
+        assert still_running, (
+            f"the hook exited within {CHECK_AFTER:.1f}s of its {startup:.2f}s "
+            "measured start-up, before the message landed"
         )
         assert (returned_at - landed_at).total_seconds() < 2.0, (
             "the real hook did not see the message in the teammate's inbox "
@@ -544,25 +563,26 @@ class TestTeammateIdleGraceThroughRealHook:
         )
 
     def test_no_queued_message_holds_to_the_original_deadline(self, tmp_path):
-        """Arm B. About 8.5 s of the window remain and the inbox is absent. The
-        hook must still be running a second after this machine's measured
-        start-up, and must not return before the deadline less one poll
-        interval. A hook that skipped the hold exits at start-up, so it fails
-        both checks however slow the machine is. Empty versus absent inboxes
-        are covered by the unit tests."""
+        """Arm B, the no-hold detector. The inbox is absent. The hook must still
+        be running CHECK_AFTER seconds past this machine's measured start-up
+        and must not return before the deadline less one poll interval. A hook
+        that skipped the hold returns at start-up, before the deadline, however
+        slow the machine is. Empty versus absent inboxes are covered by the
+        unit tests."""
         startup = _startup_seconds(tmp_path)
         config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE)
-
-        hook = _start_idle_hook(config)
         _require_room(startup, since_at)
-        time.sleep(startup + 1.0)
-        still_holding = hook.poll() is None
-        output = _finish_idle_hook(hook)
-        returned_at = datetime.now(timezone.utc)
+
+        with _Launched(config) as run:
+            time.sleep(startup + CHECK_AFTER)
+            still_running = run.hook.poll() is None
+            output = _finish_idle_hook(run.hook)
+            returned_at = datetime.now(timezone.utc)
 
         assert output == {"suppressOutput": True}
-        assert still_holding, (
-            f"the hook exited within a second of its {startup:.2f}s start-up, so it never held"
+        assert still_running, (
+            f"the hook exited within {CHECK_AFTER:.1f}s of its {startup:.2f}s "
+            "measured start-up"
         )
         assert returned_at >= _deadline(since_at, early_by=teammate_idle.POLL_SECONDS), (
             "the hook returned before the grace deadline, so it never held "
@@ -571,17 +591,19 @@ class TestTeammateIdleGraceThroughRealHook:
 
     def test_pane_teammate_is_never_held(self, tmp_path):
         """Arm C. A tmux member's idle notice is sent before this hook runs, so
-        the same eligible wait with nothing queued returns at once, well before
-        the deadline it would otherwise hold to."""
+        the same eligible wait with nothing queued returns about as soon as the
+        hook has started, rather than at the deadline about 8.5 s away."""
         startup = _startup_seconds(tmp_path)
         config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE, backend="tmux")
-
-        hook = _start_idle_hook(config)
         _require_room(startup, since_at)
-        output = _finish_idle_hook(hook)
-        returned_at = datetime.now(timezone.utc)
+
+        with _Launched(config) as run:
+            output = _finish_idle_hook(run.hook)
+            elapsed = time.monotonic() - run.started
 
         assert "decision" not in output, output
-        assert returned_at < _deadline(since_at, early_by=3), (
-            "a pane teammate's idle was held"
+        assert elapsed < startup + CHECK_AFTER, (
+            f"the pane teammate's hook ran {elapsed:.2f}s against a {startup:.2f}s "
+            "measured start-up: either its idle was held, or start-up varied by "
+            f"more than {CHECK_AFTER:.1f}s between runs"
         )
