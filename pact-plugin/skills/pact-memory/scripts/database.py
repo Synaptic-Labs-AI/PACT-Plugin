@@ -2640,6 +2640,10 @@ def search_memories_by_text(
         row[1] for row in conn.execute("PRAGMA table_info(memories)")
     }
     columns = [c for c in _TEXT_SEARCH_COLUMNS if c in present]
+    # NO `memories` TABLE, NO COLUMNS, NO ROWS: a schema-less store (a read
+    # runs no DDL) would otherwise build `WHERE ()`, an SQL syntax error.
+    if not columns:
+        return []
     query = (
         "SELECT * FROM memories WHERE ("
         + " OR ".join(f"{c} LIKE ? ESCAPE '\\'" for c in columns)
@@ -2647,10 +2651,6 @@ def search_memories_by_text(
     )
     params = [search_pattern] * len(columns)
 
-    # NO `memories` TABLE, NO COLUMNS, NO ROWS: a schema-less store (a read
-    # runs no DDL) would otherwise build `WHERE ()`, an SQL syntax error.
-    if not columns:
-        return []
     if scopes is not None:
         predicate, scope_params = project_scope_predicate("project_id", scopes)
         query += " AND " + predicate
