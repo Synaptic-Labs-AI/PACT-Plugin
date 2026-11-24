@@ -125,15 +125,12 @@ class TestValidatorFires:
 
 class TestValidatorStaysSilent:
     def test_silent_on_the_repos_own_valid_fixture(self):
-        """VALID_HANDOFF carries the five and NOT reasoning_chain. If this ever
-        fires, the required set has drifted back to six. The fixture's
-        list-typed `produced` is overridden to a string here: cold round 10
-        added the produced type gate (the watcher reads a list-typed
-        `produced` as ABSENT and burns its deadline), and the fixture itself
-        stays list-typed because five modules pin a content hash built from
-        it."""
-        handoff = dict(VALID_HANDOFF, produced="src/auth.ts")
-        assert validate_handoff_schema(handoff) is None
+        """VALID_HANDOFF carries the five and NOT reasoning_chain, with a
+        string `produced`, and the fixture itself must validate: a fixture
+        named valid that the validator refuses (a list-typed `produced`)
+        reds here. If this fires for a missing field, the required set has
+        drifted back to six."""
+        assert validate_handoff_schema(VALID_HANDOFF) is None
 
     def test_silent_when_reasoning_chain_absent(self):
         """CONSTRUCTS the absence, rather than naming a fixture that already
@@ -180,13 +177,7 @@ class TestValidatorStaysSilent:
         assert "ABSENT" in problem
 
     def test_silent_on_extra_keys(self):
-        # produced overridden to a string: cold round 10's type gate fires
-        # on the shared fixture's list-typed produced, and extra-keys
-        # silence is the property this test owns.
-        handoff = dict(
-            VALID_HANDOFF, produced="src/auth.ts",
-            memory_saved=["m1"], findings=["f1"],
-        )
+        handoff = dict(VALID_HANDOFF, memory_saved=["m1"], findings=["f1"])
         assert validate_handoff_schema(handoff) is None
 
     def test_silent_on_present_but_empty_values(self):
