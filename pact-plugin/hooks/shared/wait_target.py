@@ -214,7 +214,8 @@ def evaluate_target(
         return EVAL_TARGET_INVALID
     # Every exception the resolve/read/parse path can raise, mapped to an
     # outcome so the watcher never exits 1 on a bad file:
-    #   resolving the tasks base: RuntimeError (Path.home with no home) -> INVALID
+    #   resolving the tasks base and the team dir: RuntimeError (Path.home
+    #                             with no home, a symlink loop) -> INVALID
     #   exists() / open / read:   OSError, incl. PermissionError -> UNREADABLE
     #   not a regular file:       a FIFO, device, socket or directory -> UNREADABLE
     #   read decode:              UnicodeDecodeError (a ValueError) -> CORRUPT
@@ -224,9 +225,9 @@ def evaluate_target(
     # file and the interpreter may not survive handling it.
     try:
         base = tasks_base_dir if tasks_base_dir else str(get_claude_config_dir() / "tasks")
+        team_dir = task_dir_for(team_name, tasks_base_dir=base)
     except RuntimeError:
         return EVAL_TARGET_INVALID
-    team_dir = task_dir_for(team_name, tasks_base_dir=base)
     if team_dir is None:
         return EVAL_TARGET_INVALID
     task_file = team_dir / f"{sanitized}.json"

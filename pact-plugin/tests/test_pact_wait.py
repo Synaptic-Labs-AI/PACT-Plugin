@@ -945,3 +945,39 @@ def test_non_regular_task_file_ends_the_watch_within_its_deadline(tmp_path, kind
     )
     assert proc.returncode == pact_wait.EXIT_TERMINAL, proc.stderr
     assert "target_unreadable" in proc.stderr
+
+
+
+# --- a symlink loop under the tasks base never escapes as a crash ----------
+
+def _looped_team(tmp_path):
+    """tasks/team-a -> tasks/loop-b -> tasks/team-a: Path.resolve raises
+    RuntimeError on this loop on Python 3.12."""
+    (tmp_path / "loop-b").symlink_to(tmp_path / "team-a")
+    (tmp_path / "team-a").symlink_to(tmp_path / "loop-b")
+
+
+def test_symlink_looped_team_dir_is_invalid_not_a_crash(tmp_path):
+    from shared.task_utils import _team_dir_under, task_dir_for
+
+    _looped_team(tmp_path)
+    assert _team_dir_under(tmp_path, "team-a") is None
+    assert task_dir_for("team-a", tasks_base_dir=str(tmp_path)) is None
+    assert (
+        wait_target.evaluate_target("team-a", "7", "handoff", tasks_base_dir=str(tmp_path))
+        == wait_target.EVAL_TARGET_INVALID
+    )
+
+
+def test_symlink_looped_team_dir_ends_the_watch_terminal(tmp_path):
+    """Through the real CLI: exit 4 on the first read (a loop is a fixed
+    property of the store), never exit 1 with a traceback."""
+    _looped_team(tmp_path)
+    proc = subprocess.run(
+        [sys.executable, str(HOOKS_DIR / "pact_wait.py"), "--team", "team-a",
+         "--task", "7", "--predicate", "handoff", "--deadline", "5",
+         "--tasks-base-dir", str(tmp_path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == pact_wait.EXIT_TERMINAL, proc.stderr
+    assert "target_invalid" in proc.stderr

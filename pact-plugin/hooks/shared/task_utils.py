@@ -408,7 +408,9 @@ def _team_dir_under(base: Path, name: object) -> Path | None:
         team_dir = base / stripped
         team_dir.resolve().relative_to(base_resolved)
         return team_dir
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, RuntimeError):
+        # RuntimeError: Path.resolve raises it on a symlink loop (Python
+        # 3.12), which is an unusable name like any other.
         return None
 
 
@@ -429,7 +431,9 @@ def task_dir_for(team_name: object, tasks_base_dir: str | Path | None = None) ->
             else (get_claude_config_dir() / "tasks")
         )
         return _team_dir_under(base, team_name)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
+        # RuntimeError: Path.home() with no home directory, or a resolve
+        # symlink loop.
         return None
 
 
