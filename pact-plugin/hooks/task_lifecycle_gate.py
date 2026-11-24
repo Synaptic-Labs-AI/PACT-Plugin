@@ -359,6 +359,10 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 # the name perimeter blocks teammates from spawning under reserved
 # names that could shadow legitimate secretary spawn).
 
+# The secretary's canonical task-owner names; a secretary spawned under
+# another name is recognised by its team-config agentType instead.
+_SECRETARY_NAMES = frozenset({"secretary", "pact-secretary"})
+
 # Teachback-exempt dispatch carve-out resolution is delegated entirely to
 # is_teachback_exempt(owner, team_name) in shared.intentional_wait.
 
@@ -1561,9 +1565,10 @@ def _handoff_ready(
     member_team: str = "",
 ) -> bool:
     """HANDOFF-READY: the task is live, is not a teachback gate, is owned by
-    a specialist who is not the lead, and has no open blocker. Task records
-    come from the store team; the owner's role comes from the membership
-    team's config (they differ in a config-less substrate)."""
+    a specialist who is not the lead or the secretary, and has no open
+    blocker. Task records come from the store team; the owner's role comes
+    from the membership team's config (they differ in a config-less
+    substrate)."""
     record = read_task_json(task_id, store_team, base_fallback=False)
     owner = record.get("owner")
     member_team = member_team or store_team
@@ -1574,13 +1579,21 @@ def _handoff_ready(
         and bool(owner.strip())
         and is_pact_specialist_owner(owner, member_team)
         and not _owner_resolves_to_lead(owner, member_team)
+        and not _secretary_owned(owner, member_team)
         and not _open_blockers(record, store_team, added, done)
     )
 
 
-def _teachback_ready(task_id: str, store_team: str) -> bool:
+def _secretary_owned(owner: str, member_team: str) -> bool:
+    """True for a task the secretary owns: its canonical name, or a member
+    whose team-config agentType is teachback-exempt (the secretary). The
+    lead does not wait on the secretary's bookkeeping, so no arm."""
+    return owner.strip() in _SECRETARY_NAMES or is_teachback_exempt(owner, member_team)
+
+
+def _teachback_ready(task_id: str, store_team: str, member_team: str = "") -> bool:
     """TEACHBACK-READY: a teachback gate handed to its teammate (pending,
-    with an owner) and not yet accepted."""
+    with an owner who is not the secretary) and not yet accepted."""
     record = read_task_json(task_id, store_team, base_fallback=False)
     owner = record.get("owner")
     return (
@@ -1588,6 +1601,7 @@ def _teachback_ready(task_id: str, store_team: str) -> bool:
         and _is_teachback_subject(record.get("subject") or "")
         and isinstance(owner, str)
         and bool(owner.strip())
+        and not _secretary_owned(owner, member_team or store_team)
     )
 
 
@@ -1752,7 +1766,7 @@ def arm_candidates(
         record = read_task_json(task_id, store_team, base_fallback=False) if task_id else {}
         owner = response_task.get("owner") or record.get("owner") or tool_input.get("owner")
         if task_id and isinstance(owner, str) and owner.strip():
-            if _teachback_ready(task_id, store_team):
+            if _teachback_ready(task_id, store_team, member_team):
                 add(task_id, "teachback_submit", "teachback gate dispatched")
             elif _handoff_ready(
                 task_id, store_team, added=tool_input.get("addBlockedBy"),
@@ -1769,7 +1783,7 @@ def arm_candidates(
 
     owner = tool_input.get("owner")
     if isinstance(owner, str) and owner.strip() and _changed(tool_response, "owner"):
-        if _teachback_ready(task_id, store_team):
+        if _teachback_ready(task_id, store_team, member_team):
             add(task_id, "teachback_submit", "teachback gate dispatched")
         elif _handoff_ready(
             task_id, store_team, added=tool_input.get("addBlockedBy"),

@@ -5422,6 +5422,19 @@ _ARMING_TABLE = [
     ("6tc rejection of a completed teachback arms nothing",
      {"A": dict(subject="backend-coder: " + _TB, status="completed", owner="backend-coder")},
      [(("reject", "A", "teachback_rejection"), [])]),
+    ("14 secretary-owned work task arms nothing",
+     {"B": dict(subject="harvest handoffs", status="pending", owner="secretary")},
+     [(_w("B"), []), (("create", "B"), [])]),
+    ("14t secretary-owned teachback gate arms nothing",
+     {"A": dict(subject="secretary: " + _TB, status="pending", owner="secretary")},
+     [(_w("A"), []), (("create", "A"), [])]),
+    ("14c completing a blocker does not arm a secretary-owned dependent",
+     {"C": dict(subject="implement schema", status="in_progress", owner="database-engineer", blocks=["B"]),
+      "B": dict(subject="harvest handoffs", status="pending", owner="secretary", blockedBy=["C"])},
+     [(_done("C"), [])]),
+    ("14a work task owned by a secretary under another name arms nothing",
+     {"B": dict(subject="harvest handoffs", status="pending", owner="session-scribe")},
+     [(_w("B"), [])]),
     ("13 owner write on a claimed teachback arms nothing",
      {"A": dict(subject="backend-coder: " + _TB, status="in_progress", owner="backend-coder")},
      [(_w("A"), [])]),
@@ -5488,7 +5501,12 @@ def test_arming_invariant_truth_table(
     monkeypatch.setattr(
         tlg, "is_pact_specialist_owner",
         lambda owner, *_a, **_k: owner in ("backend-coder", "database-engineer",
-                                           "security-engineer"),
+                                           "security-engineer", "secretary",
+                                           "session-scribe"),
+    )
+    # The team config records session-scribe's agentType as the secretary's.
+    monkeypatch.setattr(
+        tlg, "is_teachback_exempt", lambda owner, *_a, **_k: owner == "session-scribe"
     )
     for tid, fields in records.items():
         _seed_task_a(tmp_path, "test-team", tid, **fields)
