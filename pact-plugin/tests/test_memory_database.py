@@ -4901,3 +4901,26 @@ class TestACallerSuppliedIdIsHeldToTheIdentifierRule:
         )
         assert len(memory_id) == 32, memory_id
         assert memory_id == memory_id.lower()
+
+
+class TestTextSearchOnSchemaLessStore:
+    """A read runs no DDL, so the text search can meet a store with no
+    `memories` table. It answers no rows; an empty column list must never
+    become `WHERE ()`, which SQLite refuses as a syntax error."""
+
+    @pytest.mark.parametrize("scope", [None, "github.com/o/r", ["github.com/o/r", "r"]])
+    def test_schema_less_store_answers_no_rows(self, tmp_path, scope):
+        from scripts.config import read_only_scope
+        from scripts.database import search_memories_by_text
+
+        conn = sqlite3.connect(str(tmp_path / "bare.db"))
+        conn.row_factory = sqlite3.Row
+        try:
+            with read_only_scope():
+                assert search_memories_by_text(conn, "foo", scope) == []
+            tables = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        finally:
+            conn.close()
+        assert tables == [], "a read created schema on a schema-less store"

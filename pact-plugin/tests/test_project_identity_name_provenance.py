@@ -519,3 +519,26 @@ class TestDeinitEdSubmoduleAdminDir:
             "a genuine live submodule stopped resolving its own id: "
             f"{memory.project_id!r}"
         )
+
+class TestCaseProbeRefusesAPlantedSymlink:
+    """`filesystem_case_insensitive` answers from the directory entry: a
+    symlink planted at the root's toggled-case name on a case-sensitive
+    filesystem is not evidence that the filesystem folds case."""
+
+    def test_a_symlink_at_the_toggled_name_answers_false(self, tmp_path):
+        root = tmp_path / "foreignproj"
+        root.mkdir()
+        planted = tmp_path / "FOREIGNPROJ"
+        if planted.exists():
+            pytest.skip("this filesystem folds case; the planted link cannot exist")
+        planted.symlink_to(root, target_is_directory=True)
+        # Control: a followed comparison is fooled by the link.
+        assert Path(root).samefile(planted)
+        assert pi.filesystem_case_insensitive(root) is False
+
+    def test_no_sibling_on_a_case_sensitive_filesystem_answers_false(self, tmp_path):
+        root = tmp_path / "foreignproj"
+        root.mkdir()
+        if (tmp_path / "FOREIGNPROJ").exists():
+            pytest.skip("this filesystem folds case")
+        assert pi.filesystem_case_insensitive(root) is False

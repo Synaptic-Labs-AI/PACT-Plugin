@@ -1445,7 +1445,7 @@ def git_dir_answer(start) -> Optional[str]:
         answer = None
     else:
         answer = one_git_answer(result)
-    if key is not None:
+    if memo is not None and key is not None:
         memo[key] = answer
     return answer
 
@@ -1890,7 +1890,8 @@ def filesystem_case_insensitive(root: Optional[Path]) -> bool:
     name two projects, and folding merges them.
 
     The probe toggles the case of the root's own basename and asks whether
-    the toggled path is the SAME file (`os.path.samefile`), which answers the
+    the toggled name is the SAME directory entry (`os.lstat` identity, so a
+    symlink planted at the toggled name is never followed), which answers the
     case question without writing anything and without `os.path.normcase`
     (a no-op on Linux, so a normcase gate would fold on a case-sensitive
     filesystem and pass on macOS by construction).
@@ -1907,7 +1908,12 @@ def filesystem_case_insensitive(root: Optional[Path]) -> bool:
         toggled = name.swapcase()
         if not name or toggled == name:
             return False
-        return os.path.samefile(path, path.parent / toggled)
+        # THE DIRECTORY ENTRY, NOT WHAT IT POINTS AT (lstat, never samefile):
+        # on a case-sensitive filesystem anyone who can write the parent can
+        # plant `ForeignProj -> foreignproj`, and a followed comparison would
+        # report a fold. On a folding filesystem the toggled name IS the
+        # root's own entry, so the two lstat answers are one inode.
+        return os.path.samestat(os.lstat(path), os.lstat(path.parent / toggled))
     except (OSError, RuntimeError, ValueError):
         return False
 

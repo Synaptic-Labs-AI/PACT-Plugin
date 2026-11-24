@@ -1513,13 +1513,13 @@ def _stable_read_only(store: str, read: Callable[[], Any]) -> Any:
         before = _store_stamp(store)
         if before is None or before[3]:
             return read()
-        moved = False
         try:
             answer = read()
         except sqlite3.DatabaseError:
-            moved = True
-        if not moved and _store_stamp(store) == before:
-            return answer
+            pass
+        else:
+            if _store_stamp(store) == before:
+                return answer
         locked = _LOCKED_READS_ONLY.set(True)
         try:
             return read()
