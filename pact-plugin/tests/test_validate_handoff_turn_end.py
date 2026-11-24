@@ -19,12 +19,14 @@ import json
 import subprocess
 import sys
 
+from shared.wait_target import arm_command
 from test_stop_background_gate import (
     HOOKS_DIR,
     LEAD_SID,
     MATE,
     TEAM,
     World,
+    _iso,
     job,
     probe_env,
     valid_wait,
@@ -187,6 +189,66 @@ def test_a_covering_wait_allows_the_teammate(tmp_path):
     world.add_record(MATE, "bmate1", ["7"])
     transcript = teammate_metadata(world)
     frame = subagent_frame(MATE, MATE_AGENT_ID, transcript, jobs=[job("bmate1")])
+
+    assert only_decision(run(world, frame)) == SUPPRESS
+
+
+# --------------------------------------------------------------------------
+# The filler gate's in-process outlet, end to end
+#
+# The tier-3 outlet tells an in-process teammate not to arm the structural
+# watcher (its completion would not wake them), but to SET intentional_wait
+# with reason, expected_resolver naming the lead and since, then end the
+# turn. These arms run that remedy through the real SubagentStop hook.
+# --------------------------------------------------------------------------
+
+
+def outlet_wait() -> dict:
+    """The wait exactly as the in-process outlet text prescribes it: the
+    three keys validate_wait requires, the lead as resolver, no covers_since."""
+    return {
+        "reason": "awaiting_teammate_deliverable",
+        "expected_resolver": "lead",
+        "since": _iso(),
+    }
+
+
+def test_the_in_process_outlet_remedy_lets_the_teammate_end_its_turn(tmp_path):
+    """The teammate holds a recorded background job of its own; the outlet's
+    wait, set after that launch, covers it and the turn end is allowed. The
+    same world without the wait is refused (the recorded-job arm above)."""
+    world = World(tmp_path)
+    world.add_task(7, MATE, wait=outlet_wait())
+    world.add_record(MATE, "bmate1", ["7"])
+    frame = subagent_frame(MATE, MATE_AGENT_ID, teammate_metadata(world), jobs=[job("bmate1")])
+
+    assert only_decision(run(world, frame)) == SUPPRESS
+    assert [t["role"] for t in world.traces(LEAD_SID)] == ["teammate"]
+
+
+def test_an_in_process_teammates_watcher_is_not_its_wake(tmp_path):
+    """An in-process teammate that armed the watcher anyway gets no
+    carve-out: the watcher's completion would not wake it, so the running
+    watcher is an unacknowledged job and the turn end is refused."""
+    world = World(tmp_path)
+    world.add_task(7, MATE)
+    world.add_record(MATE, "bwatch1", ["7"])
+    watcher = job("bwatch1", command=arm_command(TEAM, "12", "handoff", 1800))
+    frame = subagent_frame(MATE, MATE_AGENT_ID, teammate_metadata(world), jobs=[watcher])
+
+    out = only_decision(run(world, frame))
+    assert out["decision"] == "block"
+    assert "`bwatch1`" in out["reason"]
+
+
+def test_the_outlet_wait_covers_an_in_process_teammates_watcher(tmp_path):
+    """The same armed watcher, once the outlet's wait is set, is covered
+    like any other recorded job: the turn end is allowed."""
+    world = World(tmp_path)
+    world.add_task(7, MATE, wait=outlet_wait())
+    world.add_record(MATE, "bwatch1", ["7"])
+    watcher = job("bwatch1", command=arm_command(TEAM, "12", "handoff", 1800))
+    frame = subagent_frame(MATE, MATE_AGENT_ID, teammate_metadata(world), jobs=[watcher])
 
     assert only_decision(run(world, frame)) == SUPPRESS
 
