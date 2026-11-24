@@ -5154,6 +5154,106 @@ def test_wiring_arm_when_every_blocker_is_closed_or_unreadable(
     assert "--predicate handoff" in arms[0] and "--task B" in arms[0]
 
 
+def test_wiring_arm_despite_an_open_non_teachback_blocker(
+    tmp_path, monkeypatch, pact_context
+):
+    """A sequential pipeline: B waits on predecessor work task C. Only a
+    teachback acceptance re-arms later, so a non-teachback blocker must
+    not suppress the wiring arm, or B never gets one."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path, "test-team", "C",
+        subject="implement schema", status="in_progress", owner="database-engineer",
+    )
+    arms = _wire_work_task(tmp_path, monkeypatch, pact_context, [("C", None)])
+    assert len(arms) == 1
+    assert "--predicate handoff" in arms[0] and "--task B" in arms[0]
+
+
+def _accept_teachback(tmp_path, monkeypatch, pact_context, accepted, work_blockers):
+    """Seed work task B blocked by `work_blockers` ((id, subject, status)
+    triples), then drive the lead's acceptance of teachback `accepted`."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path, "test-team", "B",
+        subject="implement hook core", status="pending", owner="backend-coder",
+        blockedBy=[bid for bid, _s, _st in work_blockers],
+    )
+    for blocker_id, subject, status in work_blockers:
+        _seed_task_a(tmp_path, "test-team", blocker_id, subject=subject, status=status)
+    monkeypatch.setattr(
+        tlg, "is_pact_specialist_owner", lambda owner, *_a, **_k: owner == "backend-coder"
+    )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": accepted, "status": "completed"},
+        "tool_response": {
+            "task": {
+                "id": accepted,
+                "subject": "backend-coder: TEACHBACK for hook core",
+                "owner": "backend-coder",
+                "blocks": ["B"],
+                "metadata": {
+                    "teachback_submit": {
+                        "understanding": "u",
+                        "most_likely_wrong": "m",
+                        "least_confident_item": "l",
+                        "first_action": "f",
+                        "variety_acknowledgment": {
+                            "rationale_articulates_this_dispatch": "yes",
+                        },
+                    }
+                },
+            }
+        },
+    }
+    advisories = tlg.evaluate_lifecycle(payload)
+    return [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+
+
+def test_acceptance_arms_only_when_no_other_blocker_remains(
+    tmp_path, monkeypatch, pact_context
+):
+    """Two teachbacks gate B: accepting the first leaves the second open,
+    so B cannot start yet and no arm is supplied; accepting the second
+    (the first now completed) supplies it."""
+    first = _accept_teachback(tmp_path, monkeypatch, pact_context, "A1", [
+        ("A1", "backend-coder: TEACHBACK for hook core", "completed"),
+        ("A2", "security-engineer: TEACHBACK for hook core", "pending"),
+    ])
+    assert first == []
+    second = _accept_teachback(tmp_path, monkeypatch, pact_context, "A2", [
+        ("A1", "backend-coder: TEACHBACK for hook core", "completed"),
+        ("A2", "security-engineer: TEACHBACK for hook core", "completed"),
+    ])
+    assert len(second) == 1 and "--task B" in second[0]
+
+
+def test_acceptance_arm_waits_for_an_open_predecessor(
+    tmp_path, monkeypatch, pact_context
+):
+    """A predecessor work task still open keeps B gated after its teachback
+    is accepted: no arm at acceptance (the wiring shape supplied it)."""
+    arms = _accept_teachback(tmp_path, monkeypatch, pact_context, "A", [
+        ("A", "backend-coder: TEACHBACK for hook core", "completed"),
+        ("C", "implement schema", "in_progress"),
+    ])
+    assert arms == []
+
+
+def test_acceptance_ignores_the_accepted_teachback_itself(
+    tmp_path, monkeypatch, pact_context
+):
+    """The teachback being accepted may still read in_progress on disk if
+    the platform write lands after this frame; it is not 'another' blocker."""
+    arms = _accept_teachback(tmp_path, monkeypatch, pact_context, "A", [
+        ("A", "backend-coder: TEACHBACK for hook core", "in_progress"),
+    ])
+    assert len(arms) == 1
+
+
 def test_no_arm_supply_on_non_lead_frames(tmp_path, monkeypatch, pact_context):
     """The arm advisories are LEAD-shaped: a frame whose agent_type names a
     non-lead actor (a teammate claim/reassignment write) is suppressed on
