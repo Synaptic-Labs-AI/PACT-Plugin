@@ -584,8 +584,11 @@ def _valid_port(port: str) -> bool:
     escape into `PACTMemory.__init__`, where it turns every memory operation
     in that repository into SYSTEM_ERROR. No port has more than five digits,
     so the bound is exact rather than a heuristic.
+
+    ONLY ASCII DIGITS: `str.isdigit` also accepts `²` and other non-decimal
+    digits, which `int()` then refuses with a ValueError.
     """
-    if len(port) > 5 or not port.isdigit() or str(int(port)) != port:
+    if len(port) > 5 or not (port.isascii() and port.isdigit()) or str(int(port)) != port:
         return False
     return 1 <= int(port) <= 65535
 

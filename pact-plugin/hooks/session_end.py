@@ -81,14 +81,25 @@ def _at_or_after(ts: object, ref_ts: object) -> bool:
         return False
 
 
+# A PR number is a positive C int on GitHub, so ten digits bound it.
+_PR_NUMBER_MAX_DIGITS = 10
+
+
 def _as_pr_int(pr_number: object) -> int | None:
-    """The PR number as an int: an int (not a bool) as is, a digit string
-    converted, anything else None, which matches no wrap-up record."""
+    """The PR number as an int: an int (not a bool) as is, a string of at most
+    ten ASCII digits converted, anything else None, which matches no wrap-up
+    record. Never raises: `str.isdigit` alone accepts `²`, which `int()`
+    refuses, and `int()` refuses a decimal string past 4300 digits."""
     if isinstance(pr_number, bool):
         return None
     if isinstance(pr_number, int):
         return pr_number
-    if isinstance(pr_number, str) and pr_number.isdigit():
+    if (
+        isinstance(pr_number, str)
+        and len(pr_number) <= _PR_NUMBER_MAX_DIGITS
+        and pr_number.isascii()
+        and pr_number.isdigit()
+    ):
         return int(pr_number)
     return None
 
@@ -166,7 +177,7 @@ def check_unpaused_pr(
             handoff = metadata.get("handoff") or {}
             for value in handoff.values():
                 if isinstance(value, str):
-                    match = re.search(r'github\.com/[^/]+/[^/]+/pull/(\d+)', value)
+                    match = re.search(r'github\.com/[^/]+/[^/]+/pull/([0-9]+)', value)
                     if match:
                         pr_number = match.group(1)
                         break

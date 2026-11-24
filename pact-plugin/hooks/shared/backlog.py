@@ -164,14 +164,14 @@ _SCP_REMOTE = re.compile(r"^[^@\s/:\\]+@([^:/\s]+):(.+)\Z")
 # failed match never backtracks across a segment.
 _GITHUB_REF_URL = re.compile(
     r"^(?:https?://)?(?:www\.)?" + re.escape(_GITHUB_HOST)
-    + r"/([^/\s?#]+)/([^/\s?#]+)/(?:issues|pull)/(\d+)"
+    + r"/([^/\s?#]+)/([^/\s?#]+)/(?:issues|pull)/([0-9]+)"
     r"(?:/(?:files|commits|checks))?/?(?:[?#]\S*)?\Z",
     re.IGNORECASE,
 )
 # A ref that starts with a URL scheme. A scheme-less link (`jira.example.com/x`)
 # is recognised by `_looks_like_link` without a regex.
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
-_BARE_REF = re.compile(r"^#?(\d+)\Z")
+_BARE_REF = re.compile(r"^#?([0-9]+)\Z")
 
 # Ref bounds. A ref longer than this is refused on `add`/`set` and read as not
 # a ref without any regex work, so one bad item cannot stall or crash `show`.
@@ -1364,9 +1364,10 @@ def _classify_ref(ref: Any) -> _RefKind:
         if number is None:
             return _RefKind(_KIND_OUT_OF_RANGE)
         return _RefKind(_KIND_GITHUB, number, link.group(1), link.group(2))
-    # isdecimal, NOT isdigit: isdigit also accepts superscripts such as '²'.
+    # ASCII decimal only: isdigit also accepts superscripts such as '²', and
+    # isdecimal accepts other scripts' digits, which are no issue number.
     tail = text.lstrip("#").rstrip("/").rsplit("/", 1)[-1]
-    if not tail.isdecimal():
+    if not (tail.isascii() and tail.isdecimal()):
         return _RefKind(_KIND_OPAQUE)
     return _RefKind(_KIND_LINK if _looks_like_link(text) else _KIND_NOT_A_REF)
 

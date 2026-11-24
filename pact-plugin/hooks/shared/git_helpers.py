@@ -261,6 +261,11 @@ def git_config_bool(value: str) -> Optional[bool]:
         number = int(match["hex"], 16)
     elif match["oct"] is not None:
         number = int(match["oct"], 8)
+    elif len(match["dec"]) > len(str(_GIT_INT_MAX)):
+        # More digits than any C int has, and no leading zero (that is the
+        # octal form): out of range. Bounded BEFORE `int()`, which raises past
+        # 4300 decimal digits; hex and octal have no such limit.
+        return None
     else:
         number = int(match["dec"])
     factor = _GIT_BOOL_UNITS[match["unit"].lower()]
