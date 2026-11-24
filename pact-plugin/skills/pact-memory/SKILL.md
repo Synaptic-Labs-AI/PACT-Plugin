@@ -270,7 +270,7 @@ at another existing folder. Then the bucket is not read (`legacy_scope`
 reports it `excluded`, or `unproven` when this repository's rows are in it
 too) and a save fails with `FOLDER_NAME_BUCKET_REFUSED`, exits 1 and writes
 nothing. When the checkout's own `.git` directory can hold a pin, the message
-prints a runnable local pin command (`local/<digest>/<folder>`); the pin is
+prints a runnable local pin command (`local.invalid/<digest>/<folder>`); the pin is
 the user's to write, so ask the user instead of running it. Otherwise add an
 `origin` remote or pass `project_id`. A bucket with no evidence either way
 (only relative or vanished file rows, no recorded session) stays shared by

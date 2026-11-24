@@ -540,6 +540,7 @@ class TestIdentityFilesCarryNoPlanningLabels:
         "tests/test_identity_audit_remediation.py",
         "tests/test_identity_rung_parity.py",
         "tests/test_identity_security_remediation.py",
+        "tests/test_identity_text_and_pin.py",
         "tests/test_project_identity_canonical.py",
         "tests/test_project_identity_name_provenance.py",
         "tests/test_project_identity_override.py",

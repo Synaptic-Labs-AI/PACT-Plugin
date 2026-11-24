@@ -680,6 +680,10 @@ class TestLegacyScopeStatesAreDocumented:
             "nothing."
         ) in body
         assert "the pin is the user's to write, so ask the user" in body
+        from scripts.memory_api import local_pin_id
+
+        assert "(local.invalid/<digest>/<folder>)" in body
+        assert local_pin_id("/tmp/some/widget").startswith("local.invalid/")
         assert (
             "A bucket with no evidence either way (only relative or vanished "
             "file rows, no recorded session) stays shared by every folder of "

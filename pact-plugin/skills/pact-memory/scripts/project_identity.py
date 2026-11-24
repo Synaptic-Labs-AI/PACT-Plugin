@@ -654,8 +654,10 @@ def _ssh_path_as_git_sends_it(path: str) -> str:
     )
 
 
-def _strip_path_suffixes(path: str) -> str:
-    """Drop one trailing `/`, then one `.git`, then one exposed `/`.
+def _strip_path_suffixes(path: str) -> Tuple[str, bool]:
+    """Drop one trailing `/`, then one `.git`, then one exposed `/`, and
+    say whether a `.git` was dropped (`_identifier` strips a second
+    spelling only when none was).
 
     The `.git` is read in the last segment's normal form
     (`_normalize_segment`), so a percent-encoded spelling of it (`%2Egit`)
@@ -677,8 +679,8 @@ def _strip_path_suffixes(path: str) -> str:
     normal = _normalize_segment(last)
     if normal is not None and normal.endswith(".git"):
         last = normal[:-4]
-        path = head + separator + last if last else head
-    return path
+        return (head + separator + last if last else head), True
+    return path, False
 
 
 def _split_path(path: str) -> Optional[list]:
@@ -750,9 +752,11 @@ _CASE_INSENSITIVE_PATH_HOSTS = frozenset({"github.com"})
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-f]{2}")
 
 
-def _identifier(host: str, port: str, segments: list) -> str:
+def _identifier(host: str, port: str, segments: list, git_dropped: bool = False) -> str:
     """`host[:port]/<segments>`, after the bounded Azure DevOps Services rule
-    and the lower-cased path of a `_CASE_INSENSITIVE_PATH_HOSTS` host."""
+    and the lower-cased path of a `_CASE_INSENSITIVE_PATH_HOSTS` host.
+    `git_dropped` says the case-sensitive strip already removed a `.git`,
+    so no second one is removed: one `.git` per remote on every host."""
     azure = _azure_devops_services_id(host, port, segments)
     if azure is not None:
         host, segments = "dev.azure.com", azure
@@ -763,7 +767,12 @@ def _identifier(host: str, port: str, segments: list) -> str:
             _PERCENT_ESCAPE_RE.sub(lambda m: m.group(0).upper(), segment.lower())
             for segment in segments
         ]
-        if segments and segments[-1].endswith(".git") and len(segments[-1]) > 4:
+        if (
+            not git_dropped
+            and segments
+            and segments[-1].endswith(".git")
+            and len(segments[-1]) > 4
+        ):
             # The case-sensitive strip left a `.GIT` spelling for this host.
             segments[-1] = segments[-1][:-4]
     return f"{host}:{port}/{'/'.join(segments)}" if port else f"{host}/{'/'.join(segments)}"
@@ -914,7 +923,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # segment rule: `ssh://h/a%2Bb` and `h:a+b` share one id, `%20` stays
         # `%20`, and a decoded `%` becomes `%25`. Other schemes keep their
         # escapes.
-        path = _strip_path_suffixes(
+        path, git_dropped = _strip_path_suffixes(
             _ssh_path_as_git_sends_it(path)
             if scheme in _HOME_RELATIVE_SCHEMES
             else path
@@ -924,7 +933,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
             return None
         if scheme in _HOME_RELATIVE_SCHEMES:
             segments = _drop_home_prefix(segments)
-        identifier = _identifier(host, port, segments)
+        identifier = _identifier(host, port, segments, git_dropped)
     else:
         scp_match = _scp_match(value)
         if scp_match is None:
@@ -970,7 +979,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
             # exception: its server decodes the scp path, so its `%20` names
             # the same project as the https spelling's `%20`.
             scp_path = scp_path.replace("%", "%25")
-        path = _strip_path_suffixes(scp_path)
+        path, git_dropped = _strip_path_suffixes(scp_path)
         segments = _split_path(path)
         if not segments:
             return None
@@ -980,7 +989,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # the same endpoint, and the grammar allows a single segment;
         # declining the scp spelling while accepting the URL spelling would
         # split one repository into two ids.
-        identifier = _identifier(host, "", segments)
+        identifier = _identifier(host, "", segments, git_dropped)
 
     if len(identifier) > _max_id_length():
         return None

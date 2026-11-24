@@ -2623,7 +2623,9 @@ class FolderNameBucketRefusedError(ProjectScopeDisagreementError):
 
 def local_pin_id(repo_root: Any) -> str:
     """A canonical id for a repository with no usable remote:
-    `local/<digest>/<folder>`.
+    `local.invalid/<digest>/<folder>`. The host is under the `.invalid`
+    top-level domain (RFC 2606), which no reachable remote can use, so the
+    pin never names a bucket a real remote also derives.
 
     The digest is the first 12 hex digits of the SHA-256 of the resolved root
     path, so two folders of the same name get different ids; the folder name
@@ -2634,7 +2636,7 @@ def local_pin_id(repo_root: Any) -> str:
     root = os.path.realpath(str(repo_root)) if repo_root is not None else ""
     name = re.sub(r"[^A-Za-z0-9._~-]+", "-", os.path.basename(root)).strip("-.")[:100]
     digest = hashlib.sha256(os.fsencode(root)).hexdigest()[:12]
-    return f"local/{digest}/{name or 'repo'}"
+    return f"local.invalid/{digest}/{name or 'repo'}"
 
 
 class ProjectIdentityUnresolvedError(ProjectScopeDisagreementError):

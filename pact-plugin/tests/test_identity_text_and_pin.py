@@ -1,0 +1,64 @@
+"""
+Location: pact-plugin/tests/test_identity_text_and_pin.py
+Summary: Three small identity rules: the unproven warning for a bucket with a
+foreign row reads as one sentence (one "so"), a github.com remote drops one
+`.git` as every other host does, and the local pin's host is one no remote
+can produce.
+Used by: the test suite; no production code imports it.
+"""
+
+import logging
+
+import pytest
+
+from scripts import memory_api
+from scripts import project_identity as pi
+
+
+class TestTheForeignRowWarning:
+    @pytest.mark.parametrize("contained", [0, 2])
+    def test_the_rendered_warning_has_one_so(self, caplog, contained):
+        cause = memory_api._unproven_cause(
+            "foreign_rows", {"foreign_rows": 1, "contained_rows": contained}
+        )
+        key = ("/s.db", "widget")
+        memory_api._UNPROVEN_WARNED.discard(key)
+        with caplog.at_level(logging.WARNING, logger=memory_api.logger.name):
+            memory_api._warn_legacy_unproven("/s.db", "widget", "github.com/o/widget", 1, 3, cause)
+        memory_api._UNPROVEN_WARNED.discard(key)
+        text = " ".join(r.getMessage() for r in caplog.records if r.name == memory_api.logger.name)
+        assert "1 of its file rows lie in another checkout" in text, text
+        assert text.count(", so ") == 1, text
+
+
+class TestOneGitSuffixPerRemote:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://github.com/o/foo.git.git",
+            "git@github.com:o/foo.git.git",
+        ],
+    )
+    def test_github_drops_one_git_as_other_hosts_do(self, url):
+        github = pi.normalize_remote_url(url)
+        gitlab = pi.normalize_remote_url(url.replace("github.com", "gitlab.com"))
+        assert github == "github.com/o/foo.git"
+        assert gitlab == "gitlab.com/o/foo.git"
+
+    @pytest.mark.parametrize("url", ["https://github.com/o/Foo.GIT", "https://github.com/o/foo.git"])
+    def test_control_a_single_suffix_of_any_case_is_dropped_on_github(self, url):
+        assert pi.normalize_remote_url(url) == "github.com/o/foo"
+
+
+class TestTheLocalPin:
+    def test_the_pin_host_is_reserved(self, tmp_path):
+        pin = memory_api.local_pin_id(tmp_path / "my repo")
+        host, digest, name = pin.split("/")
+        assert host == "local.invalid"
+        assert memory_api.is_canonical(pin), pin
+        assert name == "my-repo"
+
+    def test_no_scp_remote_spelling_the_pin_names_it(self, tmp_path):
+        pin = memory_api.local_pin_id(tmp_path / "x")
+        _host, digest, name = pin.split("/")
+        assert pi.normalize_remote_url(f"git@local:{digest}/{name}") != pin
