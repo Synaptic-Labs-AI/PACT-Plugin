@@ -377,6 +377,10 @@ GRACE_CONTRACT_PINS = [
     (PROTOCOLS_SSOT, "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction"),
     (PROTOCOLS_SSOT, "The non-goal covers the lead's send path only"),
     (PROTOCOLS_SSOT, "Crossings still occur, so apply the redundant-confirm procedure above unchanged"),
+    # The hook never holds a pane or tmux teammate, so the permission is scoped.
+    (COMPLETION_AUTHORITY, "may briefly delay an in-process teammate's idle"),
+    (PROTOCOLS_SSOT, "may briefly delay an in-process teammate's idle"),
+    (SKILL, "receive-side TeammateIdle hold is permitted for in-process teammates"),
 ]
 # Each pin's inversion, as a sentence-scoped pattern over normalized text, so
 # a synonym of the opposite rule ("allowed", "feasible", "both paths", "never
@@ -420,6 +424,23 @@ GRACE_CONTRACT_INVERSIONS = {
             "Crossings never occur.",
             "Omit the redundant-confirm procedure above.",
             "Crossings rarely occur.",
+        ],
+    ),
+    "may briefly delay an in-process teammate's idle": (
+        r"\bdelay (?:a|any|every|each|all) (?:pane |tmux )?teammates?'?s? idle"
+        r"|\bdelay (?:a|any|every|each) (?:pane|tmux) teammate",
+        [
+            "A TeammateIdle hook may briefly delay a teammate's idle.",
+            "A TeammateIdle hook may briefly delay any teammate's idle.",
+            "A TeammateIdle hook may briefly delay a pane teammate's idle.",
+        ],
+    ),
+    "receive-side TeammateIdle hold is permitted for in-process teammates": (
+        r"receive-side TeammateIdle hold is permitted(?! for in-process teammates)",
+        [
+            "A receive-side TeammateIdle hold is permitted.",
+            "A receive-side TeammateIdle hold is permitted for all teammates.",
+            "A receive-side TeammateIdle hold is permitted for pane teammates.",
         ],
     ),
 }
