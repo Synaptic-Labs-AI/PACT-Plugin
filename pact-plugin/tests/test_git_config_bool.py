@@ -122,3 +122,20 @@ def test_project_scope_reads_the_variable_through_the_shared_reader(monkeypatch)
 
     assert not hasattr(project_scope, "_git_env_bool")
     assert "git_env_bool(" in inspect.getsource(project_scope)
+
+
+@pytest.mark.parametrize(
+    "value, bare",
+    [("true", True), ("yes", True), ("on", True), ("1", True), ("TRUE", True),
+     ("false", False), ("no", False), ("0", False), ("maybe", False)],
+)
+def test_core_bare_is_read_as_git_reads_a_boolean(tmp_path, value, bare):
+    """project_scope reads `core.bare` with git's boolean parser, so every
+    spelling git accepts as true marks the repository bare; a value git
+    refuses reads as not bare."""
+    common = tmp_path / "repo.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(common)], check=True)
+    subprocess.run(
+        ["git", "--git-dir", str(common), "config", "core.bare", value], check=True
+    )
+    assert project_scope._repository_is_bare(common) is bare

@@ -1121,3 +1121,57 @@ def test_a_verified_bucket_still_takes_a_defaulted_target(canonical_session, cap
     with pytest.raises(SystemExit) as exit_info:
         main(["project-id", "rekey", f"--from={NAME}", "--db-path", str(store)])
     assert exit_info.value.code == 0, capfd.readouterr().err
+
+
+
+# ---------------------------------------------------------------------------
+# Cycle 8: a row in a checkout with another name is a cross-reference
+# ---------------------------------------------------------------------------
+
+
+def test_a_folder_name_project_may_link_a_file_in_another_named_checkout(
+    tmp_path, monkeypatch, scopes_clean
+):
+    """Cold probe 1: non-git `work/notes` saves memories linking its own file
+    and `work/other/f.py`, `other` being a separate git repository. A
+    checkout named `other` could only have written bucket `other`, so the
+    row is a cross-reference: the bucket is read and saves still land."""
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    notes = tmp_path / "work" / "notes"
+    (notes / ".claude").mkdir(parents=True)
+    (notes / "a.md").write_text("x\n")
+    other = make_repo(tmp_path / "work" / "other")
+    (other / "f.py").write_text("x\n")
+    store = tmp_path / "store.db"
+    _seed(store, "notes", files=[notes / "a.md", other / "f.py"])
+    monkeypatch.chdir(notes)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._project_id == "notes"
+    assert memory._read_project_scopes() == ("notes",)
+    assert len(memory.list(limit=5)) == 1
+    assert memory._project_id_for_write() == "notes"
+
+
+def test_an_upgraded_project_keeps_a_bucket_that_links_another_named_checkout(
+    tmp_path, monkeypatch, scopes_clean
+):
+    """Cold probe 2: no-origin `proj` saved a memory linking `proj/a.md` and
+    `other/f.py`; after it gains an origin, its old bucket is verified and
+    read, not hidden as foreign."""
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    proj = make_repo(tmp_path / "proj")
+    (proj / "a.md").write_text("x\n")
+    other = make_repo(tmp_path / "other")
+    (other / "f.py").write_text("x\n")
+    store = tmp_path / "store.db"
+    _seed(store, "proj", files=[proj / "a.md", other / "f.py"])
+    run_git("remote", "add", "origin", "https://github.com/me/proj.git", cwd=proj)
+    monkeypatch.chdir(proj)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._project_id == "github.com/me/proj"
+    assert memory._read_project_scopes() == ("github.com/me/proj", "proj")
+    state = memory._legacy_scope_state
+    assert state["verified"] is True, state
+    assert state["detail"]["foreign_rows"] == 0 and state["detail"]["neutral_outside"] == 1

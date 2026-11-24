@@ -214,8 +214,9 @@ class TestCliReadEffectOnTheStore:
             conn.close()
         body = _body(SKILL)
         assert (
-            "A read does NOT create, migrate or change the journal mode of an "
-            "existing store"
+            "A read does NOT create the schema of, migrate or change the journal "
+            "mode of an existing store, but it can add vector rows for memories "
+            "not yet embedded"
         ) in body
         assert "journal_mode=WAL" not in body
 
@@ -620,8 +621,9 @@ class TestLegacyScopeStatesAreDocumented:
             "so it is not read and no rekey command is printed anywhere."
         ) in body
         assert (
-            "Rows that are gone, unreadable, relative, in an unmarked folder, or "
-            "outside any other checkout are no evidence either way."
+            "Rows that are gone, unreadable, relative, in an unmarked folder, in "
+            "a checkout with another name, or outside any other checkout are no "
+            "evidence either way."
         ) in body
         assert "excluded: its absolute file rows place it in another repository" not in body
         assert (
@@ -684,9 +686,10 @@ class TestLegacyScopeStatesAreDocumented:
             "home-directory landing and the user-scope project_id setting."
         ) in body
         assert (
-            "in another project folder of that name (one marked by .git, "
-            ".claude or a recorded session)"
+            "another checkout or project folder with that name (a git checkout, "
+            "or a folder marked by .claude or a recorded session)"
         ) in body
+        assert "A row in a checkout with another name is a cross-reference, not evidence." in body
         assert (
             "a save fails with FOLDER_NAME_BUCKET_REFUSED, exits 1 and writes "
             "nothing."
@@ -715,8 +718,8 @@ class TestLegacyScopeStatesAreDocumented:
 
     def test_foreign_rows_is_a_documented_unproven_reason(self):
         assert (
-            "foreign_rows (some of its file rows lie in another checkout or in "
-            "another project folder of its name, beside rows under this "
+            "foreign_rows (some of its file rows lie in another checkout or "
+            "project folder with its name, beside rows under this "
             "repository; detail.foreign_rows counts them, split into "
             "foreign_checkout_rows and foreign_folder_rows, and a rekey needs "
             "an explicit --to)"
@@ -7201,12 +7204,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "<call to no function shared.project_scope: _fsdecode(...).split>"): (
             "splits the text _fsdecode decodes from git's output"
-        ),
-        ("call", "<call to no function shared.project_scope: _fsdecode(...).strip>"): (
-            "strips the text _fsdecode decodes from git's output"
-        ),
-        ("call", "<call to no function shared.project_scope: _fsdecode(...).strip().lower>"): (
-            "lowercases the text _fsdecode decodes from git's output"
         ),
         ("call", "<call to no function shared.project_scope: a method of what get_claude_config_dir returns>"): (
             "a method of the config directory get_claude_config_dir returns, which the census "

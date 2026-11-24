@@ -1324,8 +1324,9 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             )
             if cause is None:
                 # READ HERE, BUT NOT PLACED WHOLE: admitted on session evidence
-                # alone, or holding rows no recorded session places. A move
-                # carries every row, so the user names the target.
+                # alone (`included_unverified`; only a `verified` bucket takes
+                # a defaulted target). A move carries every row, so the user
+                # names the target.
                 _error(
                     "REKEY_REFUSED",
                     escape_for_envelope(

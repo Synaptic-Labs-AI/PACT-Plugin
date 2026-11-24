@@ -311,14 +311,30 @@ def row_19(tmp_path, canonical):
 def row_21(tmp_path, canonical):
     """A row whose path IS another checkout's root (a tracked "." or project
     directory stores exactly that) beside a row under this root: that
-    checkout's own `.git` sits in the row's directory, not above it."""
+    checkout's own `.git` sits in the row's directory, not above it. The
+    checkout carries the bucket's name, so it is a rival."""
     root = _repo(tmp_path / "work" / B, canonical)
-    rival = make_repo(tmp_path / "rival" / "proj")
+    rival = make_repo(tmp_path / "rival" / B)
     return Layout(root, tmp_path / "store.db", files=[_touch(root / "src.py"), rival])
 
 
 def row_22(tmp_path, canonical):
     """Row 21's checkout-root row alone: positive foreign evidence, no own."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    return Layout(root, tmp_path / "store.db", files=[make_repo(tmp_path / "rival" / B)])
+
+
+def row_21n(tmp_path, canonical):
+    """Row 21 with the other checkout NOT named like the bucket: a cross-
+    reference to another project, neutral (rule (a) needs the bucket's
+    pre-change name), so the row under the root still verifies."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    other = make_repo(tmp_path / "rival" / "proj")
+    return Layout(root, tmp_path / "store.db", files=[_touch(root / "src.py"), other])
+
+
+def row_22n(tmp_path, canonical):
+    """Row 21n's cross-reference row alone: neutral, so no evidence either way."""
     root = _repo(tmp_path / "work" / B, canonical)
     return Layout(root, tmp_path / "store.db", files=[make_repo(tmp_path / "rival" / "proj")])
 
@@ -353,6 +369,8 @@ ROWS = [
     (row_19, VERIFIED, FOLDER_OK),
     (row_21, (False, "unproven", "foreign_rows", "refused"), (False, "unproven", "foreign_rows", "refused")),
     (row_22, (False, "excluded", "foreign_rows", "refused"), (False, "excluded", "foreign_rows", "refused")),
+    (row_21n, VERIFIED, FOLDER_OK),
+    (row_22n, NO_SESSION, FOLDER_OK),
 ]
 
 

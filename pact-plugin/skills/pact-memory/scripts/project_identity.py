@@ -569,15 +569,21 @@ def _valid_host(host: str) -> bool:
 def _ipv6_host(host: str) -> Optional[str]:
     """A bracketed IPv6 literal (`[2001:db8::1]`) in its one compressed,
     bracketed spelling, or None. A zone index (`%eth0`) is machine-local and
-    declines, as does anything `ipaddress` refuses."""
+    declines, as do an IPv4-mapped literal and anything `ipaddress` refuses."""
     import ipaddress
 
     if not (host.startswith("[") and host.endswith("]")) or "%" in host:
         return None
     try:
-        return "[" + ipaddress.IPv6Address(host[1:-1]).compressed + "]"
+        address = ipaddress.IPv6Address(host[1:-1])
     except ValueError:
         return None
+    # AN IPv4-MAPPED LITERAL (`[::ffff:192.0.2.1]`) DECLINES: it names an IPv4
+    # host that has a second, unbracketed spelling, so one server would get
+    # two ids.
+    if address.ipv4_mapped is not None:
+        return None
+    return "[" + address.compressed + "]"
 
 
 def _url_host(host: str) -> Optional[str]:

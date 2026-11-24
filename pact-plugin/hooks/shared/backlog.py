@@ -2218,13 +2218,16 @@ def _add_item_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 class _HeldWarnings(logging.Filter):
-    """Holds EVERY warning the memory skill logs while one command runs: a
-    decline of the canonical id, an ignored override, a HOME landing. The
-    backlog uses the memory skill only to find the project, and its key is
-    the pre-change folder name, so none of them says anything about a write
-    that succeeds: a success drops them all. A command that does not succeed
-    prints them in the order they were logged (`replay`), so a refusal still
-    shows what the memory skill observed."""
+    """Holds every record logged on the memory skill's resolver logger
+    (`scripts.memory_api`'s `logger`, the one the identity warnings use)
+    while one command runs: a decline of the canonical id, an ignored
+    override, a HOME landing. Records on the memory skill's other module
+    loggers are not held. The backlog uses the memory skill only to find the
+    project, and its key is the pre-change folder name, so none of the held
+    warnings says anything about a write that succeeds: a success drops them
+    all. A command that does not succeed prints them in the order they were
+    logged (`replay`), so a refusal still shows what the memory skill
+    observed."""
 
     def __init__(self) -> None:
         super().__init__()

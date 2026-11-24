@@ -963,9 +963,9 @@ def _warn_legacy_unproven(
     _UNPROVEN_WARNED.add(key)
     logger.warning(
         "legacy project bucket %r holds %d memor%s and %d file path%s, but "
-        "%s, so it is NOT in this read scope: its folder name alone cannot "
-        "tell this repository's rows from those of another folder of the same "
-        "name. If the rows belong here, move them explicitly with: %s",
+        "%s, so it is NOT in this read scope: its folder name alone does not "
+        "show that the rows are this repository's. If they are, move them "
+        "explicitly with: %s",
         candidate,
         memories,
         "y" if memories == 1 else "ies",
@@ -983,18 +983,17 @@ def _warn_legacy_unattributed(
 ) -> None:
     """Disclose an ADMITTED legacy bucket that holds rows no session record
     places, once per process per bucket. Such a row reads like this
-    repository's own, and nothing tells it from a row another folder of the
-    same name wrote (`_legacy_session_evidence`'s limit)."""
+    repository's own, though nothing shows it is (`_legacy_session_evidence`'s
+    limit)."""
     key = (store, candidate, "unattributed")
     if key in _UNPROVEN_WARNED:
         return
     _UNPROVEN_WARNED.add(key)
     logger.warning(
         "legacy project bucket %r is in this read scope because %s, but %d "
-        "of its memories came from no recorded session, so nothing "
-        "places them: they may belong to another folder of the same name. "
-        "If every row belongs here, file the bucket under this repository's "
-        "id with: %s",
+        "of its memories came from no recorded session, so nothing shows "
+        "they are this repository's. If every row belongs here, file the "
+        "bucket under this repository's id with: %s",
         candidate,
         f"{counts['contained_rows']} of its file rows lie under this "
         "repository and no file row places it elsewhere"

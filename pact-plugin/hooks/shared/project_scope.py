@@ -36,7 +36,13 @@ from pathlib import Path
 from typing import List, NamedTuple, Optional, Set, Tuple
 
 from . import state_file
-from .git_helpers import git_env_bool, read_git_file, run_git, worktree_admin_gitdir
+from .git_helpers import (
+    git_config_bool,
+    git_env_bool,
+    read_git_file,
+    run_git,
+    worktree_admin_gitdir,
+)
 from .pact_context import _UNSAFE_SLUG_CHARS_RE, _build_session_path, project_slug
 from .paths import get_claude_config_dir
 
@@ -423,7 +429,12 @@ def _repository_is_bare(common_dir: Path) -> bool:
         return False
     if result is None or result.returncode != 0:
         return False
-    return _fsdecode(result.stdout).strip().lower() == "true"
+    # Read as git reads a boolean (`git_config_bool`): `yes`, `on` and `1`
+    # are true too. A value git refuses reads as not bare, the direction that
+    # does not accept the checkout. Only git's own record terminator is
+    # dropped; the value itself is not stripped.
+    value = _fsdecode(result.stdout)
+    return git_config_bool(value[:-1] if value.endswith("\n") else value) is True
 
 
 def git_dir_checkout(start: str | os.PathLike[str]) -> tuple[bool, Optional[Path]]:

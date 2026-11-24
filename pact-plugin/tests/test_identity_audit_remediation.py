@@ -208,7 +208,9 @@ class TestExclusionDisclosureIsQuoted:
         # the warning.
         from fixtures.identity_git import make_repo
 
-        rival = make_repo(tmp_path / "elsewhere")
+        # Named like the bucket: a checkout with another name only
+        # cross-references it.
+        rival = make_repo(tmp_path / "elsewhere" / hostile)
         (rival / "f.py").write_text("x\n")
         _seed(store, hostile, "c" * 32, path=str(rival / "f.py"))
 

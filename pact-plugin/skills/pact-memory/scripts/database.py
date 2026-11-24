@@ -1207,13 +1207,15 @@ CANONICAL_ID_RE = re.compile(
 
 def _compressed_ipv6(text: str) -> bool:
     """Whether `text` is an IPv6 address in its compressed spelling
-    (`ipaddress`), so one address has one id."""
+    (`ipaddress`), so one address has one id. An IPv4-mapped address is
+    not: it has a second, plain IPv4 spelling."""
     import ipaddress
 
     try:
-        return ipaddress.IPv6Address(text).compressed == text
+        address = ipaddress.IPv6Address(text)
     except ValueError:
         return False
+    return address.ipv4_mapped is None and address.compressed == text
 
 
 def is_canonical_id(value: object) -> bool:
@@ -1677,11 +1679,12 @@ def _foreign_kind(
     """`"checkout"` or `"folder"` when an existing, uncontained row is
     evidence of another owner, else None.
 
-    (a) Its nearest checkout lies neither inside a gate root nor around one:
-    a checkout. A checkout AROUND a root (a `$HOME` dotfiles repository) is
-    this repository's surroundings only when its pre-change name is known and
-    is not the bucket's; otherwise it is a rival. One nested inside a root is
-    not a rival.
+    (a) Its nearest checkout is not nested inside a gate root, and that
+    checkout's pre-change name is the bucket's or cannot be read: a rival
+    checkout. Under folder-name keying a checkout with another name could
+    only have written another bucket, so a row in it is a cross-reference,
+    whether the checkout lies elsewhere or around a root (a `$HOME` dotfiles
+    repository). One nested inside a root is not a rival.
     (b) THE NAMED-DIRECTORY RULE: a STRICT ancestor directory (the row itself
     never counts) whose pre-change name is the bucket's, which is neither a
     gate root nor inside one, and which carries a project marker: a `.git`
@@ -1691,8 +1694,6 @@ def _foreign_kind(
     """
     nearest = _nearest_checkout(resolved, walk.checkouts)
     if nearest is not None and not any(_within(nearest, root) for root in roots):
-        if not any(_within(root, nearest) for root in roots):
-            return "checkout"
         name = pre_change_name(nearest, walk.names)
         if name is UNKNOWN_NAME or name == bucket:
             return "checkout"

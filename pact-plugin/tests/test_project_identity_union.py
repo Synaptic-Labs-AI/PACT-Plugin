@@ -186,10 +186,12 @@ def _seed(env, rows, files=()):
         conn.commit()
 
 
-def _rival_checkout_file(root: Path) -> Path:
-    """An existing file inside another git checkout: positive foreign
-    evidence (`bucket_evidence`'s `foreign_rows`)."""
-    rival = make_repo(root / "rival-checkout")
+def _rival_checkout_file(root: Path, bucket: str) -> Path:
+    """An existing file inside another git checkout NAMED LIKE THE BUCKET:
+    positive foreign evidence (`bucket_evidence`'s `foreign_rows`). A
+    checkout with another name could only have written another bucket, so
+    its rows are cross-references, not a rival's."""
+    rival = make_repo(root / "rival-checkout" / bucket)
     path = rival / "legacy.py"
     path.write_text("x\n", encoding="utf-8")
     return path
@@ -474,7 +476,7 @@ class TestDisclosure:
                 ("l2", "legacy two", LEGACY, "2026-01-03T00:00:00+00:00"),
             ],
             files=[
-                ("file-l1", str(_rival_checkout_file(union_env.tmp_path)), LEGACY),
+                ("file-l1", str(_rival_checkout_file(union_env.tmp_path, LEGACY)), LEGACY),
             ],
         )
         memory = _memory(union_env)
@@ -1449,7 +1451,7 @@ class TestReviewDbGateWorktreeRoots:
         (worktree / "src").mkdir(parents=True, exist_ok=True)
         (main_root / "src").mkdir(parents=True, exist_ok=True)
         linked.symlink_to(worktree, target_is_directory=True)
-        rival = _rival_checkout_file(union_env.tmp_path)
+        rival = _rival_checkout_file(union_env.tmp_path, "legacy-foreign")
 
         self._seed_row(
             union_env, "f-main", str(main_root / "src" / "m.py"),
@@ -1534,7 +1536,7 @@ class TestReviewQuoting:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         memory_api._LEGACY_SCOPE_CACHE.clear()
         memory_api._EXCLUSION_WARNED.clear()
-        _seed_hostile(store, hostile, str(_rival_checkout_file(tmp_path)))
+        _seed_hostile(store, hostile, str(_rival_checkout_file(tmp_path, hostile)))
 
         memory = PACTMemory(session_id="s", db_path=store)
         with caplog.at_level(logging.WARNING):

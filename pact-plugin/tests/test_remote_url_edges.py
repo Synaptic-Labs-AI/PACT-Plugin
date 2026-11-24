@@ -150,3 +150,24 @@ def test_a_malformed_bracketed_host_declines(url):
 @pytest.mark.parametrize("value", ["[2001:DB8::1]/o/r", "[2001:db8:0::1]/o/r", "[zz::1]/o/r"])
 def test_only_the_compressed_spelling_is_a_canonical_id(value):
     assert not pi.is_canonical(value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ssh://git@[::ffff:192.0.2.1]/o/r.git",
+        "https://[::ffff:c000:201]:8443/o/r",
+        "git@[::ffff:192.0.2.1]:o/r.git",
+    ],
+)
+def test_an_ipv4_mapped_literal_declines(url):
+    """An IPv4-mapped literal names an IPv4 host that also has a plain
+    spelling, so it would give one server two ids: it declines."""
+    assert pi.normalize_remote_url(url) is None
+    assert pi.classify_remote_origin(url)[0] == pi.OUTCOME_DECLINE
+
+
+@pytest.mark.parametrize("value", ["[::ffff:c000:201]/o/r", "[::ffff:192.0.2.1]/o/r"])
+def test_an_ipv4_mapped_id_is_not_canonical(value):
+    """Neither spelling, including the compressed one `ipaddress` prints."""
+    assert not pi.is_canonical(value)

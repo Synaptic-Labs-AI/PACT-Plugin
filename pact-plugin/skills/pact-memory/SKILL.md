@@ -68,7 +68,8 @@ included. Never add `--db-path` to a command yourself.
 ### What you must not do, and why
 
 - Do not run a pact-memory CLI verb to inspect the store. A read does NOT
-  create, migrate or change the journal mode of an existing store, but the
+  create the schema of, migrate or change the journal mode of an existing
+  store, but it can add vector rows for memories not yet embedded, and the
   first read of an absent store in the default location creates the store
   and its schema. A CLI run also reaches the same functions an import
   reaches, so it defeats the next rule.
@@ -265,9 +266,10 @@ folder-name bucket, save from a folder whose project id is that name
 
 A session whose project id is a folder name reads and saves into that bucket
 unless there is evidence another owner wrote it: a file row that exists in
-another checkout or in another project folder of that name (one marked by
-`.git`, `.claude` or a recorded session), or a session recorded at another
-existing folder. Then the bucket is not read (`legacy_scope` reports it
+another checkout or project folder with that name (a git checkout, or a folder
+marked by `.claude` or a recorded session), or a session recorded at another
+existing folder. A row in a checkout with another name is a cross-reference,
+not evidence. Then the bucket is not read (`legacy_scope` reports it
 `excluded`, or `unproven` when this folder's own rows are in it too) and a
 save fails with `FOLDER_NAME_BUCKET_REFUSED`, exits 1 and writes nothing. When
 the checkout's own `.git` directory can hold a pin, the message prints a
@@ -415,17 +417,17 @@ one of `included`, `excluded` and `unproven` is true:
   is not read and no rekey command is printed anywhere. `unproven_reason` names
   the evidence (`foreign_rows` or `recorded_elsewhere`; a bucket written only by
   sessions recorded at another existing folder is excluded). Evidence of another
-  owner is a file row that exists in another checkout or in another project
-  folder of this bucket's name (marked by `.git`, `.claude` or a recorded
-  session), or a session recorded at another existing folder. Rows that are
-  gone, unreadable, relative, in an unmarked folder, or outside any other
-  checkout are no evidence either way.
+  owner is a file row that exists in another checkout or project folder with
+  this bucket's name (a git checkout, or a folder marked by `.claude` or a
+  recorded session), or a session recorded at another existing folder. Rows
+  that are gone, unreadable, relative, in an unmarked folder, in a checkout
+  with another name, or outside any other checkout are no evidence either way.
 - `unproven`: it is not read, and its `rekey` command is printed once per
   process, with the cause (a folder-name scope has no canonical target, so it
   prints the local-pin remedy instead). `unproven_reason` names the cause:
   `recorded_elsewhere` (some of its rows were written by sessions recorded at
   another existing folder), `foreign_rows` (some of its file rows lie in another
-  checkout or in another project folder of its name, beside rows under this
+  checkout or project folder with its name, beside rows under this
   repository; `detail.foreign_rows` counts them, split into
   `foreign_checkout_rows` and `foreign_folder_rows`, and a rekey needs an
   explicit `--to`), `subfolder_launch` (no file row places it, and
