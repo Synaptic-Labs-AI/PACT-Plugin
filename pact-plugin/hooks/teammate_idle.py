@@ -201,7 +201,9 @@ def wait_for_inbox_evidence(
 
     inbox_dir = teams_root / team_name / "inboxes"
     inbox_path = inbox_dir / f"{teammate_name}.json"
-    # canonical_since truncates fractional seconds, so the budget is conservatively up to 1s shorter.
+    # The anchor is parsed to full precision, so a fractional anchor gets the exact
+    # window; one written by canonical_since is cut to the whole second, which can
+    # only shorten the remaining window (by under 1s), never lengthen it.
     deadline = monotonic() + GRACE_SECONDS - age
     while monotonic() < deadline:
         try:
