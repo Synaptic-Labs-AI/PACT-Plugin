@@ -57,7 +57,7 @@ FILE_MODE = 0o600
 DIR_MODE = 0o700
 
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-# O_PATH needs only search permission, as a plain path open does; macOS falls back to O_RDONLY.
+# Where O_PATH exists (Linux) the walk needs only search permission; elsewhere (macOS) O_RDONLY needs read.
 _DIR_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 # What a symlink or non-directory component yields under O_DIRECTORY|O_NOFOLLOW.
 _SWAPPED_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
