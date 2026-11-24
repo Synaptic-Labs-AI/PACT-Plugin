@@ -46,6 +46,7 @@ from shared.pact_context import (
     get_session_id,
     get_team_name,
     project_slug,
+    read_session_record,
 )
 from shared.session_journal import (
     _parse_ts,
@@ -608,17 +609,15 @@ def _pruned_session_line(entry: Path) -> str | None:
     """The prune-ledger line for the session folder `entry`, or None.
 
     `{session_id, project_dir, started_at}` copied from the folder's own
-    `pact-session-context.json`. None when the context is absent, a symlink or
-    malformed, when its sanitized session id is not the folder's name, when
+    `pact-session-context.json` (`read_session_record`: a bounded read of a
+    regular file). None when the context is absent, not a regular file,
+    oversized or malformed, when its sanitized session id is not the folder's name, when
     `started_at` is not a zone-aware ISO-8601 timestamp, or when `project_dir`
     no longer exists. Reads only; never raises.
     """
     try:
-        context_file = entry / "pact-session-context.json"
-        if not stat.S_ISREG(os.lstat(context_file).st_mode):
-            return None
-        context = json.loads(context_file.read_text(encoding="utf-8"))
-        if not isinstance(context, dict):
+        context = read_session_record(entry)
+        if context is None:
             return None
         session_id = context.get("session_id")
         project_dir = context.get("project_dir")
@@ -694,14 +693,17 @@ def _compact_ledger(ledger: Path, fd: int, size: int) -> None:
     unlocked reader sees the whole old file or the whole new one, never an
     empty or half-written one. A writer waiting on the old file's lock finds
     the inode changed and reopens (`_open_locked_ledger`)."""
-    os.lseek(fd, size - _PRUNE_LEDGER_KEEP_BYTES, os.SEEK_SET)
+    # Read from ONE BYTE BEFORE the window, so dropping everything through the
+    # first newline drops only a partial line: when the window starts exactly
+    # on a line boundary, that byte is the newline and the first line is kept.
+    want = _PRUNE_LEDGER_KEEP_BYTES + 1
+    os.lseek(fd, size - want, os.SEEK_SET)
     tail = b""
-    while len(tail) < _PRUNE_LEDGER_KEEP_BYTES:
-        chunk = os.read(fd, _PRUNE_LEDGER_KEEP_BYTES - len(tail))
+    while len(tail) < want:
+        chunk = os.read(fd, want - len(tail))
         if not chunk:
             break
         tail += chunk
-    # The window starts mid-line; drop that partial first line.
     tail = tail[tail.find(b"\n") + 1:]
     _remove_cut_back_leftovers(ledger)
     new_fd, new_path = _create_cut_back_file(ledger)
@@ -718,9 +720,29 @@ def _compact_ledger(ledger: Path, fd: int, size: int) -> None:
         raise
 
 
+# The ledger lock is taken non-blocking and retried for at most about one
+# second; a holder past that costs one evidence line, never a hung SessionEnd.
+_LEDGER_LOCK_ATTEMPTS = 20
+_LEDGER_LOCK_PAUSE_SECONDS = 0.05
+
+
+def _lock_ledger_bounded(fd: int) -> bool:
+    """Take the exclusive lock on `fd` within the bounded retry; False when
+    another holder kept it the whole time."""
+    for attempt in range(_LEDGER_LOCK_ATTEMPTS):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if attempt + 1 < _LEDGER_LOCK_ATTEMPTS:
+                time.sleep(_LEDGER_LOCK_PAUSE_SECONDS)
+    return False
+
+
 def _open_locked_ledger(ledger: Path) -> int | None:
     """Open the ledger for append and take its exclusive lock; return the fd,
-    or None when the path is not a regular file.
+    or None when the path is not a regular file or the lock stayed held past
+    the bounded retry (`_lock_ledger_bounded`).
 
     A compaction renames a new file over the ledger, so a writer that opened
     the old file and then waited for the lock would append to a file no one
@@ -739,7 +761,11 @@ def _open_locked_ledger(ledger: Path) -> int | None:
             if not stat.S_ISREG(held.st_mode):
                 os.close(fd)
                 return None
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            if not _lock_ledger_bounded(fd):
+                # Another session end holds the lock too long: skip this
+                # evidence line rather than hang the hook.
+                os.close(fd)
+                return None
             current = os.lstat(ledger)
         except FileNotFoundError:
             os.close(fd)

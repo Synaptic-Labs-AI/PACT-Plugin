@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import sys
 import tempfile
 import time
@@ -1580,6 +1581,47 @@ def get_session_dir() -> str:
 # (`session_end._record_pruned_session`) and the memory store's evidence reader
 # both name the file through this constant.
 PRUNE_LEDGER_NAME = "pruned-sessions.jsonl"
+
+# A session context file is a few hundred bytes; anything larger is not one.
+SESSION_CONTEXT_MAX_BYTES = 64 * 1024
+
+
+def read_session_record(folder) -> dict | None:
+    """`<folder>/pact-session-context.json` as a dict, or None. Never raises.
+
+    The two readers that take a session folder's record as evidence (the
+    reaper's prune-ledger line and the memory store's session census) read it
+    here. Only a REGULAR file is read: a symlink is refused by lstat and by
+    O_NOFOLLOW, O_NONBLOCK keeps a FIFO from blocking the open, and a file
+    larger than `SESSION_CONTEXT_MAX_BYTES` is refused rather than read.
+    """
+    path = os.path.join(folder, "pact-session-context.json")
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+        )
+    except Exception:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = b""
+        while len(data) <= SESSION_CONTEXT_MAX_BYTES:
+            chunk = os.read(fd, SESSION_CONTEXT_MAX_BYTES + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > SESSION_CONTEXT_MAX_BYTES:
+            return None
+        record = json.loads(data.decode("utf-8"))
+        return record if isinstance(record, dict) else None
+    except Exception:
+        return None
+    finally:
+        os.close(fd)
 
 
 def reconstruct_session_dir(project_dir: str, session_id: str) -> str:

@@ -168,8 +168,8 @@ KNOWN_NAME_SITES = Counter({
     ("hooks/shared/session_resume.py", "format_session_substitutions"): 1,  # docstring
     ("skills/pact-memory/scripts/pact_session.py", "_context_file_path"): 2,       # read; docstring
     ("skills/pact-memory/scripts/pact_session.py", "_context_record_on_disk"): 1,  # read
-    ("skills/pact-memory/scripts/memory_api.py", "_legacy_session_census"): 1,  # read (legacy-admission evidence)
-    ("hooks/session_end.py", "_pruned_session_line"): 2,  # read (prune-ledger evidence before a reap); docstring
+    ("hooks/shared/pact_context.py", "read_session_record"): 2,  # bounded read (legacy-admission and prune-ledger evidence); docstring
+    ("hooks/session_end.py", "_pruned_session_line"): 1,  # docstring (reads through read_session_record)
     ("hooks/shared/project_scope.py", "<module>"): 1,  # read (the record rung's _CONTEXT_FILE)
 })
 
@@ -188,9 +188,13 @@ KNOWN_SESSION_RELOCATIONS = Counter({
 })
 
 # (file, function, call): count of direct write calls in a function that any
-# other scan places at the file. None today: every such function reads the
-# file, names it, or writes it through the tracked write APIs.
-KNOWN_DIRECT_WRITES = Counter()
+# other scan places at the file. `os.open` counts whatever its flags, so a
+# read-only open is listed here with a comment saying it does not write.
+KNOWN_DIRECT_WRITES = Counter({
+    # An O_RDONLY | O_NOFOLLOW | O_NONBLOCK open for the bounded read; it
+    # never writes.
+    ("hooks/shared/pact_context.py", "read_session_record", "os.open"): 1,
+})
 
 _INSTRUCTION = (
     "session_init treats pact-session-context.json in a session's own dir as "

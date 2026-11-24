@@ -6,8 +6,13 @@ Each arm names the defect it catches and fails on the code before its fix.
 
 from __future__ import annotations
 
+import fcntl
+import json
 import logging
+import os
 import sqlite3
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -20,6 +25,7 @@ from fixtures.identity_git import (
 )
 from scripts.database import db_connection, ensure_initialized
 from scripts.memory_api import PACTMemory
+from shared import pact_context
 
 import session_end
 from scripts import memory_api
@@ -206,4 +212,113 @@ def test_an_existing_directory_outside_the_roots_is_still_elsewhere(tmp_path):
             conn, NAME, [str(repo.resolve())], (repo / ".git").resolve()
         )
     assert counts["elsewhere"] == 1, counts
+
+
+# ---------------------------------------------------------------------------
+# BR-4: the session record is read bounded, regular files only
+# ---------------------------------------------------------------------------
+
+
+def test_session_record_read_refuses_a_fifo_without_blocking(tmp_path):
+    os.mkfifo(tmp_path / "pact-session-context.json")
+    started = time.monotonic()
+    assert pact_context.read_session_record(tmp_path) is None
+    assert time.monotonic() - started < 5
+
+
+def test_session_record_read_refuses_an_oversized_file(tmp_path):
+    record = {"session_id": "s", "pad": "x" * pact_context.SESSION_CONTEXT_MAX_BYTES}
+    (tmp_path / "pact-session-context.json").write_text(json.dumps(record))
+    assert pact_context.read_session_record(tmp_path) is None
+
+
+def test_session_record_read_refuses_a_symlink_and_reads_a_regular_file(tmp_path):
+    real = tmp_path / "real.json"
+    real.write_text(json.dumps({"session_id": "s"}))
+    linked = tmp_path / "linked"
+    linked.mkdir()
+    (linked / "pact-session-context.json").symlink_to(real)
+    assert pact_context.read_session_record(linked) is None
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "pact-session-context.json").write_text(json.dumps({"session_id": "s"}))
+    assert pact_context.read_session_record(plain) == {"session_id": "s"}
+
+
+# ---------------------------------------------------------------------------
+# BR-5 / C-2: a window that starts on a line boundary keeps its first line
+# ---------------------------------------------------------------------------
+
+
+def _lines(count: int) -> bytes:
+    return b"".join(
+        json.dumps({"session_id": f"s{index}"}).encode() + b"\n"
+        for index in range(count)
+    )
+
+
+def test_ledger_reader_keeps_a_whole_first_line_on_a_boundary(tmp_path, monkeypatch):
+    data = _lines(4)
+    line = len(data) // 4
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_bytes(data)
+    monkeypatch.setattr(memory_api, "_PRUNE_LEDGER_TAIL_BYTES", 2 * line)
+    ids = [r["session_id"] for r in memory_api._pruned_session_records(ledger)]
+    assert ids == ["s2", "s3"]
+
+
+def test_ledger_reader_drops_a_partial_first_line(tmp_path, monkeypatch):
+    """Control: a window starting mid-line still drops the partial line."""
+    data = _lines(4)
+    line = len(data) // 4
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_bytes(data)
+    monkeypatch.setattr(memory_api, "_PRUNE_LEDGER_TAIL_BYTES", 2 * line + 3)
+    ids = [r["session_id"] for r in memory_api._pruned_session_records(ledger)]
+    assert ids == ["s2", "s3"]
+
+
+def test_ledger_compaction_keeps_a_whole_first_line_on_a_boundary(
+    tmp_path, monkeypatch
+):
+    data = _lines(4)
+    line = len(data) // 4
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_bytes(data)
+    monkeypatch.setattr(session_end, "_PRUNE_LEDGER_KEEP_BYTES", 2 * line)
+    fd = os.open(ledger, os.O_RDWR)
+    try:
+        session_end._compact_ledger(ledger, fd, len(data))
+    finally:
+        os.close(fd)
+    assert ledger.read_bytes() == data[2 * line:]
+
+
+# ---------------------------------------------------------------------------
+# BR-6: a held ledger lock costs the line, never a hung hook
+# ---------------------------------------------------------------------------
+
+
+def test_held_ledger_lock_skips_the_line_within_the_bound(tmp_path, monkeypatch):
+    monkeypatch.setattr(session_end, "_LEDGER_LOCK_ATTEMPTS", 3)
+    monkeypatch.setattr(session_end, "_LEDGER_LOCK_PAUSE_SECONDS", 0.01)
+    ledger = tmp_path / pact_context.PRUNE_LEDGER_NAME
+    ledger.write_bytes(b"")
+    holder = os.open(ledger, os.O_RDWR)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    # In a thread, so an unbounded lock fails this test instead of hanging it.
+    append = threading.Thread(
+        target=session_end._append_ledger_line,
+        args=(tmp_path, '{"session_id": "x"}\n'),
+    )
+    try:
+        append.start()
+        append.join(5)
+        assert not append.is_alive(), "the ledger append waited on the lock"
+    finally:
+        os.close(holder)
+        append.join()
+    assert ledger.read_bytes() == b""
+    session_end._append_ledger_line(tmp_path, '{"session_id": "x"}\n')
+    assert ledger.read_bytes() == b'{"session_id": "x"}\n'
 

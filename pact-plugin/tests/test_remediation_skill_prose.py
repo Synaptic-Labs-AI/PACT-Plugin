@@ -7007,6 +7007,14 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', 'count_project_file_paths'): (
             "counts a bucket's tracked file paths in the store for the bucket census" + _AFTER_DETECTION
         ),
+        ('call', 'read_session_record'): (
+            "reads a session folder's recorded project directory and start, as evidence for the read scope; "
+            "it reads the session file, not git or the identity" + _AFTER_DETECTION
+        ),
+        ("call", "<call to no function shared.pact_context: data.decode>"): (
+            "decodes the bounded bytes read_session_record read from a session folder's context file"
+            + _AFTER_DETECTION
+        ),
         ('call', 'count_project_memories'): (
             "counts a bucket's rows in the store for the bucket census" + _AFTER_DETECTION
         ),

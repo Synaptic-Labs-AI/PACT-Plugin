@@ -378,7 +378,8 @@ def _pruned_session_records(ledger: Path) -> List[dict]:
 
     Reads at most `_PRUNE_LEDGER_TAIL_BYTES` from the end of a REGULAR file
     (a symlink or FIFO is refused, O_NONBLOCK keeps a FIFO from blocking the
-    open), drops the partial first line of a cut read, and skips every line
+    open), drops the partial first line of a cut read (never a whole one),
+    and skips every line
     that is not a JSON object. Never raises; any failure is an empty list.
     """
     try:
@@ -392,6 +393,11 @@ def _pruned_session_records(ledger: Path) -> List[dict]:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
             return []
         offset = max(0, size - _PRUNE_LEDGER_TAIL_BYTES)
+        # A cut read starts ONE BYTE EARLY, so dropping through the first
+        # newline drops only a partial line: a window that starts exactly on
+        # a line boundary keeps its first line.
+        if offset > 0:
+            offset -= 1
         os.lseek(fd, offset, os.SEEK_SET)
         chunks = []
         remaining = size - offset
@@ -512,6 +518,7 @@ def _legacy_session_census(
     from shared.pact_context import (
         PRUNE_LEDGER_NAME,
         _UNSAFE_SLUG_CHARS_RE,
+        read_session_record,
         reconstruct_session_dir,
     )
 
@@ -592,10 +599,8 @@ def _legacy_session_census(
                 try:
                     folder = sessions_root / slug / safe_id
                     if safe_id in present if present is not None else os.path.lexists(folder):
-                        recorded = json.loads(
-                            (folder / "pact-session-context.json").read_text(encoding="utf-8")
-                        )
-                        if isinstance(recorded, dict):
+                        recorded = read_session_record(folder)
+                        if recorded is not None:
                             places.add(where(recorded))
                         continue
                     ledger = sessions_root / slug / PRUNE_LEDGER_NAME
