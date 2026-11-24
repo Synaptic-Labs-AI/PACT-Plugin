@@ -751,6 +751,14 @@ def _check_r_role(table):
         assert wait_filler_gate.ARM_THEN not in text, role
 
 
+def _check_r_lead(table):
+    """R-LEAD: the lead resolves its own waits, so no lead branch tells it
+    to set an intentional_wait that nothing would wake."""
+    assert all(
+        action != "intentional_wait" for _k, action, _t in table["lead"]["branches"]
+    )
+
+
 def _check_catch_all(table):
     """Every role has a branch for the catch-all wait, so a wait the named
     kinds do not cover (a user reply, a message) still has an action."""
@@ -769,6 +777,7 @@ def test_outlet_table_satisfies_r_arm_r_then_r_role():
     _check_r_arm(table)
     _check_r_then(table)
     _check_r_role(table)
+    _check_r_lead(table)
 
 
 def test_rendered_texts_are_the_table_render():
@@ -816,6 +825,11 @@ def test_outlet_checks_bite_on_bad_tables():
     bad_role["subagent"]["branches"][0] = ("teammate_deliverable", "arm", "wakes")
     with pytest.raises(AssertionError):
         _check_r_role(bad_role)
+    # A lead branch that sets an intentional_wait fails R-LEAD.
+    lead_wait = copy.deepcopy(wait_filler_gate.OUTLET)
+    lead_wait["lead"]["branches"][1] = ("own_write", "intentional_wait", None)
+    with pytest.raises(AssertionError):
+        _check_r_lead(lead_wait)
     # A role with no catch-all branch fails the catch-all check.
     no_catch_all = copy.deepcopy(wait_filler_gate.OUTLET)
     no_catch_all["lead"]["branches"] = [

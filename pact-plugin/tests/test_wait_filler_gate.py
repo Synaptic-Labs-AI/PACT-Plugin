@@ -826,12 +826,8 @@ _TIER3_REASON_PIN = (
     "passes without it, 4 when it cannot watch at all — and its "
     "completion notification re-invokes you. If the event you await is "
     "something only YOU can write (your own notes or a summary), do "
-    "NOT arm: SET metadata.intentional_wait on every task the wait "
-    "covers — `reason`, `expected_resolver` and `since` are the keys "
-    "validate_wait requires — with `expected_resolver` set to `lead` "
-    "(you are the resolver of your own write), and end your turn with "
-    "no further tool calls; a message or that resolver's own wake "
-    "resolves it. If the event you await is anything else (a user "
+    "NOT arm and do not wait: write it now, in this turn — nothing "
+    "wakes you later to write it. If the event you await is anything else (a user "
     "reply, a message), end your turn with no further tool calls — a "
     "reply or message arrives as its own turn."
 )
@@ -1027,14 +1023,15 @@ def test_tier3_sp_text_gates_its_watcher_tail():
 
 
 def test_tier3_lead_text_names_the_no_arm_alternative():
-    """The LEAD text carries the same no-arm alternative the teammate
-    texts do: when the awaited event is the lead's own write, arming burns
-    the deadline, so intentional_wait with `expected_resolver` set to
-    `lead` replaces it (no watcher process, no deadline burn)."""
+    """The LEAD text carries a no-arm alternative: when the awaited event
+    is the lead's own write, arming burns the deadline and an
+    intentional_wait resolved by the lead itself is never woken, so the
+    lead is told to write it now."""
     import wait_filler_gate
 
     assert "do NOT arm" in wait_filler_gate._TIER3_REASON
-    assert "expected_resolver" in wait_filler_gate._TIER3_REASON
+    assert "write it now, in this turn" in wait_filler_gate._TIER3_REASON
+    assert "intentional_wait" not in wait_filler_gate._TIER3_REASON
     # THE LEAD-SIDE DISAMBIGUATION (Bugbot Medium, cold round 12): the
     # lead's PRIMARY wait is a teammate's handoff or teachback — a
     # deliverable the lead cannot write — so a "not a deliverable you can
@@ -1891,8 +1888,7 @@ def test_every_intentional_wait_branch_names_a_concrete_resolver():
     expected_resolver set to the lead, never an abstract 'the resolver'."""
     import wait_filler_gate
 
-    for text in (wait_filler_gate._TIER3_REASON,
-                 wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON,
+    for text in (wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON,
                  wait_filler_gate._TIER3_TEAMMATE_REASON):
         assert "metadata.intentional_wait" in text
         assert "`expected_resolver` set to `lead`" in text

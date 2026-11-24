@@ -187,6 +187,10 @@ _ACTIONS = {
         "{resolver}, and end your turn with no further tool calls; a "
         "message or that resolver's own wake resolves it"
     ),
+    "write_now": (
+        "do NOT arm and do not wait: write it now, in this turn — nothing "
+        "wakes you later to write it"
+    ),
     "end_turn": (
         "end your turn with no further tool calls — a reply or message "
         "arrives as its own turn"
@@ -199,10 +203,10 @@ _ACTIONS = {
 OUTLET = {
     "lead": {
         "preamble": "",
-        "resolver": "`lead` (you are the resolver of your own write)",
+        "resolver": "`lead`",
         "branches": [
             ("teammate_deliverable", "arm", "its completion notification re-invokes you"),
-            ("own_write", "intentional_wait", None),
+            ("own_write", "write_now", None),
             ("other", "end_turn", None),
         ],
     },
