@@ -50,10 +50,14 @@ the broken wiring" -> caught by UN-MOCKING the seam, not by revert alone.
 ================================================================================
 """
 import json
+import subprocess
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from clock_shift.clock_shift_env import carry_clock_shift
 
 import missed_wake_scan as mw  # noqa: E402
 import teammate_idle  # noqa: E402
@@ -373,3 +377,111 @@ class TestTeammateIdleResolvesTeamTasks:
             "an empty read here means idle cleanup never runs"
         )
         assert {t["id"] for t in tasks} == {"3"}
+
+
+# ===========================================================================
+# IT-7 — teammate_idle inbox grace through the REAL hook process.
+#   The unit tests drive check_inbox_grace with an injected root and names,
+#   and the main()-level tests mock it, so neither covers the path main()
+#   composes from the config dir to the inbox file. This runs the hook the way
+#   hooks.json does, with nothing stubbed.
+# ===========================================================================
+GRACE_HOOK = Path(__file__).resolve().parents[1] / "hooks" / "teammate_idle.py"
+GRACE_TEAM = "pact-graceseam"
+GRACE_SID = "cccccccc-1111-2222-3333-444444444444"
+GRACE_MEMBER = "grace-coder"
+GRACE_PROJECT = "/grace-seam/project"
+
+
+def _grace_write(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _grace_root(tmp_path: Path, age_seconds: float) -> Path:
+    """A real config root: team config, session context and one task owned by
+    the teammate whose awaiting_lead_completion wait is age_seconds old."""
+    from shared.pact_context import project_slug
+
+    config = tmp_path / ".claude"
+    _grace_write(config / "teams" / GRACE_TEAM / "config.json", {
+        "leadSessionId": GRACE_SID,
+        "members": [{"name": GRACE_MEMBER,
+                     "agentId": f"{GRACE_MEMBER}@{GRACE_TEAM}",
+                     "agentType": "pact-backend-coder",
+                     "backendType": "in-process"}],
+    })
+    _grace_write(config / "pact-sessions" / project_slug(GRACE_PROJECT) / GRACE_SID
+                 / "pact-session-context.json",
+                 {"session_id": GRACE_SID, "project_dir": GRACE_PROJECT,
+                  "team_name": GRACE_TEAM})
+    since = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat()
+    _grace_write(config / "tasks" / GRACE_TEAM / "7.json", {
+        "id": "7", "owner": GRACE_MEMBER, "subject": "s", "status": "in_progress",
+        "metadata": {"intentional_wait": {
+            "reason": "awaiting_lead_completion", "expected_resolver": "lead",
+            "since": since, "covers_since": since,
+        }},
+    })
+    return config
+
+
+def _grace_inbox(config: Path) -> Path:
+    return config / "teams" / GRACE_TEAM / "inboxes" / f"{GRACE_MEMBER}.json"
+
+
+def _run_idle_hook(config: Path) -> tuple[dict, float]:
+    """Fire the real TeammateIdle hook as a subprocess; return (stdout JSON, seconds)."""
+    frame = {
+        "hook_event_name": "TeammateIdle",
+        "session_id": GRACE_SID,
+        "cwd": GRACE_PROJECT,
+        "team_name": GRACE_TEAM,
+        "teammate_name": GRACE_MEMBER,
+    }
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": str(config.parent),
+        "CLAUDE_CONFIG_DIR": str(config),
+        "CLAUDE_PROJECT_DIR": GRACE_PROJECT,
+    }
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, str(GRACE_HOOK)], input=json.dumps(frame),
+        capture_output=True, text=True, env=carry_clock_shift(env), timeout=30,
+    )
+    elapsed = time.monotonic() - started
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout), elapsed
+
+
+class TestTeammateIdleGraceThroughRealHook:
+    def test_queued_message_blocks_through_the_real_config_dir(self, tmp_path):
+        """Arm A. The wait is 8 s old: a queued message is found on the first
+        read, so the margin costs no sleep and absorbs interpreter start-up."""
+        config = _grace_root(tmp_path, age_seconds=8)
+        _grace_write(_grace_inbox(config), [{
+            "from": "team-lead", "text": "accepted", "read": False,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }])
+
+        output, _elapsed = _run_idle_hook(config)
+
+        assert output == {
+            "decision": "block", "reason": teammate_idle.INBOX_BLOCK_REASON,
+        }, "the real hook must reach the teammate's inbox under the config dir"
+
+    @pytest.mark.parametrize("inbox", [None, []], ids=["absent", "empty"])
+    def test_no_queued_message_fails_open_within_the_remaining_grace(
+        self, tmp_path, inbox
+    ):
+        """Arm B. The wait is 9.5 s old, so the real hook may poll for at most
+        about half a second before the ordinary idle path runs."""
+        config = _grace_root(tmp_path, age_seconds=9.5)
+        if inbox is not None:
+            _grace_write(_grace_inbox(config), inbox)
+
+        output, elapsed = _run_idle_hook(config)
+
+        assert output == {"suppressOutput": True}
+        assert elapsed < 2, f"no-message idle held for {elapsed:.2f}s"
