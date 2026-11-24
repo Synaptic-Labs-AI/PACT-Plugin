@@ -133,3 +133,33 @@ class TestAnAbsentFolderStillLetsTheLedgerStandIn:
         slug_dir.parent.mkdir(parents=True, exist_ok=True)
         slug_dir.write_text("not a folder", encoding="utf-8")
         assert _evidence(store, repo) is False
+
+
+class TestTheCensusBuildsNoPathPerSlugPerSession:
+    """A sessions root of many slug folders costs no path join per writing
+    session per slug: a listed slug is decided by set membership, and a path
+    is built only for a slug that holds the session or a prune ledger. Each
+    slug folder still costs the one join that lists it.
+
+    Catches the census joining `<root>/<slug>/<id>` and the ledger path for
+    every slug for every session, which cost about 0.5 s per command at the
+    3,665 slug folders one real config root holds."""
+
+    def test_unrelated_slug_folders_build_no_paths(self, tmp_path, monkeypatch):
+        import pathlib
+
+        repo, store, slug_dir = _rig(tmp_path)
+        seed_session_evidence(tmp_path / "home" / ".claude", repo, SESSION)
+        for index in range(200):
+            (slug_dir.parent / f"filler-{index:03d}" / "other-session").mkdir(parents=True)
+        joins = []
+        real = pathlib.PurePath.__truediv__
+
+        def counting(self, key):
+            joins.append(key)
+            return real(self, key)
+
+        monkeypatch.setattr(pathlib.PurePath, "__truediv__", counting)
+        assert _evidence(store, repo) is True  # control: the census ran and found the session
+        # One join per slug folder lists it; anything per session per slug is extra.
+        assert len(joins) < 201 + 100, f"{len(joins)} path joins for 201 slug folders"

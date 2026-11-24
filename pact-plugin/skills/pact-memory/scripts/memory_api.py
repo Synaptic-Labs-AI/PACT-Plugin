@@ -600,21 +600,24 @@ def _legacy_session_census(
             safe_id = _UNSAFE_SLUG_CHARS_RE.sub("_", session_id)
             for slug, present in entries.items():
                 try:
-                    folder = sessions_root / slug / safe_id
-                    if safe_id in present if present is not None else os.path.lexists(folder):
-                        recorded = read_session_record(folder)
+                    # A LISTED SLUG IS DECIDED BY SET MEMBERSHIP, and a path is
+                    # built only for a slug that answers, so a sessions root of
+                    # thousands of slugs costs no path join per session per slug.
+                    if safe_id in present if present is not None else os.path.lexists(
+                        sessions_root / slug / safe_id
+                    ):
+                        recorded = read_session_record(sessions_root / slug / safe_id)
                         if recorded is not None:
                             places.add(where(recorded))
                         continue
-                    ledger = sessions_root / slug / PRUNE_LEDGER_NAME
                     if (
                         PRUNE_LEDGER_NAME in present
                         if present is not None
-                        else os.path.lexists(ledger)
+                        else os.path.lexists(sessions_root / slug / PRUNE_LEDGER_NAME)
                     ):
-                        if str(ledger) not in ledgers:
-                            ledgers[str(ledger)] = _pruned_session_index(ledger)
-                        for record in ledgers[str(ledger)].get(session_id, ()):
+                        if slug not in ledgers:
+                            ledgers[slug] = _pruned_session_index(sessions_root / slug / PRUNE_LEDGER_NAME)
+                        for record in ledgers[slug].get(session_id, ()):
                             places.add(where(record))
                 except Exception:
                     continue
