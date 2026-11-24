@@ -125,13 +125,14 @@ def validate_handoff_schema(handoff: object) -> str | None:
       - A missing reasoning_chain is never a defect. It is recommended.
 
     ONE TYPE GATE, on `produced` only: a non-string OR
-    empty/whitespace-only `produced` fails validation (cold rounds 10 and
-    12). The deliverable watcher keys on this field and reads a list-typed,
-    empty, or whitespace-only `produced` as ABSENT — degraded-loud, per
+    empty/whitespace-only `produced` fails validation. The deliverable
+    watcher keys on this field and reads a list-typed, empty, or
+    whitespace-only `produced` as ABSENT — degraded-loud, per
     wait_target.handoff_present — so a template-shaped handoff used to pass
-    every acceptance gate and still burn the watcher's whole deadline to a
-    false EXPIRED. The acceptance-side refusal IS the remedy: the author is
-    sent back to re-write, closing the class at write time. The other
+    every check and still burn the watcher's whole deadline to a false
+    EXPIRED. The remedy is the write-time advisory this validator drives:
+    the author is told to re-write the field when the handoff is written,
+    before the lead reads it. The other
     required fields stay presence-only — the watcher does not read them,
     and the emptiness silence above keeps empty uncertainty/open_questions
     legitimate. FOR `produced` the emptiness silence does NOT apply: an

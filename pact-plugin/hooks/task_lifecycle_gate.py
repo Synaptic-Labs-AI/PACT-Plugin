@@ -1474,8 +1474,8 @@ def _owner_resolves_to_lead(owner: str, team_name: str) -> bool:
     Why this exists beside ``is_pact_specialist_owner``: the registry check
     that predicate composes admits ANY ``agents/pact-*.md`` definition —
     including the orchestrator a lead member resolves to — so it returns
-    True for the bare lead name, and a lead-owned pending parent passed
-    qualification at both shapes (cold round 2, measured live). The
+    True for the bare lead name, and a lead-owned pending parent would
+    pass qualification at both shapes (measured live). The
     specialist leg answers "is this owner a pact-* agent"; this one answers
     "is this owner THE lead", and a watch target needs the first WITHOUT the
     second. Fail-closed to False on every unresolvable path (empty inputs,
@@ -1681,11 +1681,11 @@ def evaluate_lifecycle(
         #     handoff, and keeps an absent/unreadable record from arming at
         #     all.
         # DELIBERATE ASYMMETRY between the two shapes above: the teachback
-        # arm (Task A) carries NO owner qualification — the teachback task
-        # is LEAD-OWNED by nature, and the deliverable being watched is the
-        # TEAMMATE's teachback submission landing in the lead's own task
-        # metadata, so the lead arming a watch on its own task is the
-        # intended lead-shaped wait. The lead-rejection conjunct lives only
+        # arm (Task A) carries NO owner qualification — a teachback-subject
+        # task's deliverable is the teachback submission its assigned
+        # teammate writes into that task's metadata, and the subject alone
+        # identifies it, so the owner field adds nothing to the target's
+        # validity. The lead-rejection conjunct lives only
         # on the non-teachback sibling, whose watch target is the
         # specialist-owned work task a lead-owned record must never be.
         # A duplicate arm is safe by construction (the duplicate watcher

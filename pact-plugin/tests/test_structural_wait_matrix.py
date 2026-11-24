@@ -290,9 +290,9 @@ def test_advisory_message_pinned_verbatim():
     wording is pinned the way the outlet reason is: an edit must be a
     conscious pin update, never a silent drift. Built around the live
     watcher path so only WORDING drifts redden it. The path renders
-    UNQUOTED here: cold round 11 moved the emission to shlex.quote, which
-    is a no-op on this special-char-free install path (a spaced install
-    path renders safely quoted instead)."""
+    UNQUOTED here: the emission shlex-quotes it, which is a no-op on this
+    special-char-free install path (a spaced install path renders safely
+    quoted instead)."""
     expected = (
         "PACT task_lifecycle_gate: teachback accepted — you are about to "
         "wait on a teammate deliverable. Arm the structural wait watcher "
@@ -353,11 +353,10 @@ def _store_handoff_block():
 def test_skillmd_handoff_template_values_are_string_typed():
     """Docs-vs-code, imported arm: every canonical handoff field the schema
     ships is rendered in the SKILL.md example as a JSON STRING (the value
-    opens with a quote). The STRING gate itself lives in the watcher
-    predicate, not in this acceptance path: validate_handoff_schema is
-    presence-only, while wait_target.handoff_present reads a non-string
-    `produced` — e.g. the list-typed failures this mechanism answers — as
-    ABSENT, degraded-loud per its docstring."""
+    opens with a quote). A template that taught a non-string `produced`
+    would be refused by validate_handoff_schema's produced type gate and
+    read as ABSENT by wait_target.handoff_present — the list-typed failures
+    this mechanism answers."""
     block = _store_handoff_block()
     for field in HANDOFF_CANONICAL_FIELDS:
         assert f'"{field}": "' in block, (
@@ -378,7 +377,7 @@ def test_skillmd_handoff_template_has_no_array_or_object_renders():
 
 
 def test_handoff_teaching_surfaces_render_no_array_canonical_fields():
-    """Coherence arm (cold round 9): the array-template failure class must
+    """Coherence arm: the array-template failure class must
     be dead on EVERY LLM-loaded surface that teaches handoff metadata —
     the protocols SSOT, its byte-compared task-hierarchy extract, and the
     secretary's memory-save example — not only the SKILL.md template. A
