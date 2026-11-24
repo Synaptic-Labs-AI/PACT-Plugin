@@ -776,3 +776,48 @@ def test_deeply_nested_json_is_corrupt_not_a_crash(tmp_path):
         )
         == wait_target.EVAL_TARGET_CORRUPT
     )
+
+
+# --- the production seam: default tasks base, no --tasks-base-dir ----------
+#
+# Every arm above passes --tasks-base-dir, but the arm commands the gates emit
+# never do: in production the watcher resolves its tasks base from
+# CLAUDE_CONFIG_DIR, falling back to HOME/.claude. These arms run the real
+# script as a child process over that unstubbed resolution.
+
+def _run_default_base(env_overrides: dict, drop: tuple = ()) -> subprocess.CompletedProcess:
+    env = {k: v for k, v in os.environ.items() if k not in drop}
+    env.update(env_overrides)
+    cmd = [
+        sys.executable, str(HOOKS_DIR / "pact_wait.py"),
+        "--team", "team-a", "--task", "7",
+        "--predicate", "handoff", "--deadline", "5",
+    ]
+    return subprocess.run(
+        cmd, capture_output=True, text=True, cwd="/", env=env, timeout=30
+    )
+
+
+def test_default_base_honours_claude_config_dir(tmp_path):
+    """With CLAUDE_CONFIG_DIR set, the watcher reads
+    $CLAUDE_CONFIG_DIR/tasks and fires. HOME points at an empty directory, so
+    a watcher that ignored the variable would find no task file and exit 4."""
+    config = tmp_path / "config"
+    home = tmp_path / "home"
+    home.mkdir()
+    _write_task(config / "tasks", "team-a", "7", _handoff_task("delivered"))
+    proc = _run_default_base(
+        {"CLAUDE_CONFIG_DIR": str(config), "HOME": str(home)}
+    )
+    assert proc.returncode == pact_wait.EXIT_FIRED, proc.stderr
+    assert "pact-wait FIRED" in proc.stdout
+
+
+def test_default_base_falls_back_to_home_claude(tmp_path):
+    """With CLAUDE_CONFIG_DIR absent from the environment, the watcher reads
+    $HOME/.claude/tasks and fires."""
+    home = tmp_path / "home"
+    _write_task(home / ".claude" / "tasks", "team-a", "7", _handoff_task("delivered"))
+    proc = _run_default_base({"HOME": str(home)}, drop=("CLAUDE_CONFIG_DIR",))
+    assert proc.returncode == pact_wait.EXIT_FIRED, proc.stderr
+    assert "pact-wait FIRED" in proc.stdout
