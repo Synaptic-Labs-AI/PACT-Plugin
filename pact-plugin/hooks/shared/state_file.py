@@ -29,9 +29,17 @@ stay inside the resolved `root`, so a symlinked team directory pointing outside
 symlinked config root, or a team link to another folder inside `teams/`, still
 works. Every open then uses the resolved directory, so the check and the open
 name the same place. A refused write raises OSError; a refused read raises
-FileNotFoundError, which callers already treat as "no file".
-Remaining, and adversarial-only: a process swapping a path component between
-the resolve and the open can redirect one write. That needs a deliberate race
+Refused, a FileNotFoundError that callers already treat as "no file" and a
+caller that must tell refusal from absence can catch by type.
+read_text and append_line then reach that directory from the root one
+component at a time with O_NOFOLLOW. A component that is a symlink or not a
+directory, whether swapped after the check or already a regular file before
+it, is refused rather than followed. Any other error on the walk (permission
+denied, too many open files, a missing component) is raised unchanged, as a
+plain path open would raise it.
+Remaining, and adversarial-only: locked_update (and so write_text) still opens
+by the resolved path, so a process swapping a path component between the
+resolve and the open can redirect one write. That needs a deliberate race
 inside the user's own config root by something already able to write there.
 
 Stdlib only, and nothing from `shared`: a hook that needs a state file pays
@@ -40,6 +48,7 @@ for this module and nothing else.
 
 from __future__ import annotations
 
+import errno
 import fcntl  # Unix-only; PACT supports macOS/Linux.
 import os
 import time
@@ -50,6 +59,10 @@ FILE_MODE = 0o600
 DIR_MODE = 0o700
 
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+# Where O_PATH exists (Linux) the walk needs only search permission; elsewhere (macOS) O_RDONLY needs read.
+_DIR_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+# What a symlink or non-directory component yields under O_DIRECTORY|O_NOFOLLOW.
+_SWAPPED_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
 _LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _APPEND_FLAGS = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -60,16 +73,61 @@ _LOCK_POLL_SECONDS = 0.02
 _APPEND_LOCK_TIMEOUT_SECONDS = 2.0
 
 
-def _contained_directory(path: Path, root: Path) -> Path:
-    """The resolved directory of `path`, or OSError if it leaves the resolved `root`.
+class _Refused(OSError):
+    """A state file's directory left its root, at the check or during the walk."""
 
-    The directory may equal the root: a file directly inside its root is allowed.
-    """
+
+class Refused(FileNotFoundError):
+    """read_text's refusal: the file's directory left its root, or a component on
+    the walk was a symlink or not a directory. A FileNotFoundError, so callers
+    that treat a refusal as "no file" keep working; catch it first to tell a
+    refusal from a file that is simply absent. Chained from the cause."""
+
+
+def _resolve(path: Path, root: Path) -> tuple[str, str]:
+    """The resolved root and the resolved directory of `path`; _Refused if the
+    directory leaves the root. The directory may equal the root."""
     real_root = os.path.realpath(root)
     real_directory = os.path.realpath(path.parent)
     if os.path.commonpath([real_directory, real_root]) != real_root:
-        raise OSError(f"state file {path} resolves outside its root {root}")
-    return Path(real_directory)
+        raise _Refused(f"state file {path} resolves outside its root {root}")
+    return real_root, real_directory
+
+
+def _contained_directory(path: Path, root: Path) -> Path:
+    """The resolved directory of `path`, or OSError if it leaves the resolved `root`."""
+    return Path(_resolve(path, root)[1])
+
+
+def _open_contained_directory(path: Path, root: Path) -> int:
+    """A descriptor on `path`'s resolved directory, walked from the resolved root.
+
+    Each component below the root is opened with O_NOFOLLOW relative to the one
+    above it, so a component that became a symlink (or anything but a
+    directory) after _resolve is refused with _Refused instead of followed.
+    Every other OSError, a missing component's FileNotFoundError included, is
+    raised unchanged, as the plain path open this replaces would raise it.
+    """
+    real_root, real_directory = _resolve(path, root)
+    fd = os.open(real_root, _DIR_FLAGS & ~os.O_NOFOLLOW)  # the resolved root is trusted
+    try:
+        for part in Path(os.path.relpath(real_directory, real_root)).parts:
+            if part == ".":
+                continue
+            try:
+                next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
+            except OSError as swapped:
+                if swapped.errno not in _SWAPPED_ERRNOS:
+                    raise
+                raise _Refused(
+                    f"state file {path}: {part} stopped being a directory under {root}"
+                ) from swapped
+            os.close(fd)
+            fd = next_fd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 class TooLarge(ValueError):
@@ -92,15 +150,20 @@ def _reader(fd: int) -> BinaryIO:
         raise
 
 
-def read_text(path: Path, root: Path, *, max_bytes: int | None = None) -> str:
+def read_text(
+    path: Path, root: Path, *, max_bytes: int | None = None, strict: bool = False
+) -> str:
     """Return a state file's text, reading without a lock.
 
     `root` is the directory the file must stay under; a file whose directory
-    resolves outside it reads as absent (FileNotFoundError).
+    resolves outside it, or whose walk meets a symlink or a non-directory,
+    raises Refused (a FileNotFoundError).
 
     Opens with O_NOFOLLOW, so a symlink at the path raises OSError rather than
     reading its target. Undecodable bytes are replaced rather than raised, so
-    a corrupt file parses as empty and the next write rewrites it clean.
+    a corrupt file parses as empty and the next write rewrites it clean;
+    with `strict`, they raise UnicodeDecodeError (a ValueError) instead, for a
+    caller that must tell invalid bytes from an encoded U+FFFD.
     Raises FileNotFoundError when the file does not exist.
 
     `max_bytes`, when given, bounds the READ itself: at most max_bytes + 1
@@ -110,10 +173,13 @@ def read_text(path: Path, root: Path, *, max_bytes: int | None = None) -> str:
     """
     path = Path(path)
     try:
-        directory = _contained_directory(path, root)
-    except OSError as refused:
-        raise FileNotFoundError(str(refused)) from refused
-    fd = os.open(str(directory / path.name), _READ_FLAGS)
+        dir_fd = _open_contained_directory(path, root)
+    except _Refused as refused:
+        raise Refused(str(refused)) from refused
+    try:
+        fd = os.open(path.name, _READ_FLAGS, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
     with _reader(fd) as f:
         if max_bytes is None:
             data = f.read()
@@ -121,7 +187,7 @@ def read_text(path: Path, root: Path, *, max_bytes: int | None = None) -> str:
             data = f.read(max_bytes + 1)
             if len(data) > max_bytes:
                 raise TooLarge(f"over {max_bytes} bytes")
-    return data.decode("utf-8", errors="replace")
+    return data.decode("utf-8", errors="strict" if strict else "replace")
 
 
 def _current_text(path: Path) -> str:
@@ -258,8 +324,11 @@ def append_line(path: Path, data: bytes, root: Path, *, max_file_bytes: int) -> 
     directory must already exist. A new file is created with mode 0o600.
     """
     path = Path(path)
-    target = _contained_directory(path, root) / path.name
-    fd = os.open(str(target), _APPEND_FLAGS, FILE_MODE)
+    dir_fd = _open_contained_directory(path, root)
+    try:
+        fd = os.open(path.name, _APPEND_FLAGS, FILE_MODE, dir_fd=dir_fd)
+    finally:
+        os.close(dir_fd)
     try:
         # Bounded wait (a holder keeps it for one write); held until os.close
         # below, which releases it. Past the bound: TimeoutError (an OSError).

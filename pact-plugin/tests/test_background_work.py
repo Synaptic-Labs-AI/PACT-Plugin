@@ -19,6 +19,7 @@ carrying none produces nothing.
 from __future__ import annotations
 
 import ast
+import json
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1575,3 +1576,130 @@ class TestFrameTeamAndNameReadsATeammateIdleFrame:
 
         pact_context(team_name="context-team", session_id="context-session")
         assert frame_team_and_name(self._frame()) == ("context-team", "")
+
+
+class TestTeammateIsInProcess:
+    """Only an exact in-process backendType holds; every doubt is False."""
+
+    @staticmethod
+    def _teams(tmp_path, config):
+        path = tmp_path / "teams" / "TeamRaw" / "config.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(config if isinstance(config, str) else json.dumps(config),
+                        encoding="utf-8")
+        return str(tmp_path / "teams")
+
+    @pytest.mark.parametrize("backend,expected", [
+        ("in-process", True),
+        ("tmux", False),
+        ("iterm2", False),
+        ("In-Process", False),
+        (None, False),
+    ], ids=["in-process", "tmux", "iterm2", "case", "missing-key"])
+    def test_only_an_exact_in_process_backend_is_true(self, backend, expected, tmp_path):
+        from shared.background_work import teammate_is_in_process
+
+        member = {"name": "CoderRaw"}
+        if backend is not None:
+            member["backendType"] = backend
+        teams = self._teams(tmp_path, {"members": [member]})
+
+        assert teammate_is_in_process("TeamRaw", "CoderRaw", teams) is expected
+
+    def test_missing_member_config_malformed_or_unsafe_name_is_false(self, tmp_path):
+        from shared.background_work import teammate_is_in_process
+
+        teams = self._teams(
+            tmp_path, {"members": [{"name": "other", "backendType": "in-process"}]}
+        )
+        assert teammate_is_in_process("TeamRaw", "CoderRaw", teams) is False
+        assert teammate_is_in_process("NoTeam", "CoderRaw", teams) is False
+        outside = tmp_path / "TeamRaw" / "config.json"
+        outside.parent.mkdir()
+        outside.write_text(
+            json.dumps({"members": [{"name": "other", "backendType": "in-process"}]}),
+            encoding="utf-8",
+        )
+        assert teammate_is_in_process("../TeamRaw", "other", teams) is False
+        assert teammate_is_in_process("TeamRaw", "", teams) is False
+
+        malformed = tmp_path / "bad"
+        assert teammate_is_in_process(
+            "TeamRaw", "CoderRaw", self._teams(malformed, "{not json")
+        ) is False
+
+    IN_PROCESS = {"members": [{"name": "CoderRaw", "backendType": "in-process"}]}
+
+    def test_an_oversized_config_is_false(self, tmp_path):
+        """RED WHEN the config read loses its byte bound."""
+        from shared.background_work import TEAM_CONFIG_MAX_BYTES, teammate_is_in_process
+
+        padded = dict(self.IN_PROCESS, pad="x" * TEAM_CONFIG_MAX_BYTES)
+        assert teammate_is_in_process("TeamRaw", "CoderRaw", self._teams(tmp_path, padded)) is False
+        small = tmp_path / "small"
+        assert teammate_is_in_process(
+            "TeamRaw", "CoderRaw", self._teams(small, self.IN_PROCESS)
+        ) is True, "control: the same config under the bound is in-process"
+
+    def test_a_team_directory_linked_outside_the_teams_root_is_false(self, tmp_path):
+        """RED WHEN the config read follows a team link out of the teams root."""
+        from shared.background_work import teammate_is_in_process
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "config.json").write_text(json.dumps(self.IN_PROCESS), encoding="utf-8")
+        teams = tmp_path / "teams"
+        teams.mkdir()
+        (teams / "TeamRaw").symlink_to(outside, target_is_directory=True)
+        assert teammate_is_in_process("TeamRaw", "CoderRaw", str(teams)) is False
+
+    def test_an_unsafe_team_name_that_containment_allows_is_false(self, tmp_path):
+        """RED WHEN the team-name safety check is removed: "Team.Raw" is an
+        ordinary directory under the teams root, so containment alone reads its
+        in-process config; only the safe-component check refuses it."""
+        from shared.background_work import teammate_is_in_process
+
+        teams = tmp_path / "teams"
+        for name in ("Team.Raw", "TeamSafe"):
+            (teams / name).mkdir(parents=True)
+            (teams / name / "config.json").write_text(
+                json.dumps(self.IN_PROCESS), encoding="utf-8"
+            )
+        assert teammate_is_in_process("TeamSafe", "CoderRaw", str(teams)) is True, (
+            "control: the same config under a safe name is in-process"
+        )
+        assert teammate_is_in_process("Team.Raw", "CoderRaw", str(teams)) is False
+
+    def test_an_empty_member_name_is_false_even_if_a_member_has_none(self, tmp_path):
+        """RED WHEN the empty-member-name check is removed: a config member with an
+        empty name would otherwise match an empty member name."""
+        from shared.background_work import teammate_is_in_process
+
+        teams = self._teams(
+            tmp_path, {"members": [{"name": "", "backendType": "in-process"}]}
+        )
+        assert teammate_is_in_process("TeamRaw", "", teams) is False
+
+    def test_a_team_link_inside_the_teams_root_still_reads(self, tmp_path):
+        """Guard arm: containment resolves links, so an in-root team link is read."""
+        from shared.background_work import teammate_is_in_process
+
+        teams = Path(self._teams(tmp_path, self.IN_PROCESS))
+        (teams / "LinkedTeam").symlink_to(teams / "TeamRaw", target_is_directory=True)
+        assert teammate_is_in_process("LinkedTeam", "CoderRaw", str(teams)) is True
+
+    @pytest.mark.parametrize("raw", [
+        b"\xff\xfe not utf-8",
+        b'["members"]',
+        b'{"members": {"name": "CoderRaw", "backendType": "in-process"}}',
+        b'{"members": ["CoderRaw"]}',
+        b"[" * 100000,
+    ], ids=["invalid-bytes", "non-dict", "members-not-list", "member-not-dict", "deep-nesting"])
+    def test_a_malformed_config_is_false(self, raw, tmp_path):
+        """Every malformed shape reads as not in-process, never as an exception."""
+        from shared.background_work import teammate_is_in_process
+
+        path = tmp_path / "teams" / "TeamRaw" / "config.json"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(raw)
+        assert teammate_is_in_process("TeamRaw", "CoderRaw", str(tmp_path / "teams")) is False

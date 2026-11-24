@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -162,6 +163,7 @@ import file_tracker  # noqa: E402, F401
 import merge_guard_post  # noqa: E402, F401
 import merge_guard_pre  # noqa: E402, F401
 import missed_wake_scan  # noqa: E402, F401
+import peer_inject  # noqa: E402, F401
 import postcompact_archive  # noqa: E402, F401
 import session_end  # noqa: E402, F401
 import session_init  # noqa: E402, F401
@@ -173,6 +175,37 @@ import task_lifecycle_gate  # noqa: E402, F401
 import teammate_idle  # noqa: E402, F401
 import track_files  # noqa: E402, F401
 import validate_handoff  # noqa: E402, F401
+
+
+@pytest.fixture(autouse=True)
+def _no_real_grace_sleep(monkeypatch):
+    """Fail any test that reaches the real grace sleep instead of waiting 10 seconds.
+
+    main() swallows gate errors, so the raise only ends the loop; the teardown
+    assertion is what reports the reach. Injected sleeps are unaffected, and a
+    hook run as a subprocess is out of reach by design.
+    """
+    slept = []
+    real_sleep = time.sleep
+
+    def _refuse(seconds):
+        slept.append(seconds)
+        raise AssertionError("real grace sleep reached")
+
+    def _guarded_sleep(seconds):
+        # A reload rebinds the hold's default to time.sleep, i.e. to this wrapper.
+        caller = sys._getframe(1).f_code
+        if (caller.co_name == "wait_for_inbox_evidence"
+                and caller.co_filename.endswith("teammate_idle.py")):
+            _refuse(seconds)
+        return real_sleep(seconds)
+
+    monkeypatch.setattr(time, "sleep", _guarded_sleep)
+    monkeypatch.setitem(
+        teammate_idle.wait_for_inbox_evidence.__kwdefaults__, "sleep", _refuse
+    )
+    yield slept
+    assert not slept, f"a test reached the real grace sleep: {slept}"
 
 
 # Name of the environment variable that relocates the PACT memory store.
