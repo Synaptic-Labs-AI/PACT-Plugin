@@ -6148,3 +6148,49 @@ def test_separate_process_teammate_gets_the_revision_advisory(tmp_path):
     assert "does not carry the revised metadata.handoff" in _run_lifecycle_hook(env, frame)
     frame["tool_input"]["metadata"]["handoff"] = {"produced": "v2"}
     assert "does not carry the revised" not in _run_lifecycle_hook(env, frame)
+
+
+
+@pytest.mark.parametrize(
+    "rejection_key,deliverable,body",
+    [("handoff_rejection", "handoff", {"produced": "v2"}),
+     ("teachback_rejection", "teachback_submit", {"understanding": "v2"})],
+)
+@pytest.mark.parametrize(
+    "rejected,disk_after_write,fires",
+    [
+        (1, None, True),   # revision number never raised (absent counts as 1)
+        (1, 1, True),
+        (1, 2, False),     # raised past the rejection: the watcher sees it
+        (2, 2, True),      # second rejection, number left at 2
+        (2, 3, False),
+    ],
+)
+def test_resubmission_without_a_raised_revision_is_flagged(
+    tmp_path, monkeypatch, pact_context, rejection_key, deliverable, body,
+    rejected, disk_after_write, fires,
+):
+    """A teammate re-submitting the deliverable after a rejection must leave
+    metadata.revision_number above the rejection's, or a watcher waiting on
+    the revision holds forever. The post-write disk state is what the hook
+    reads (the write's own revision_number, when it carried one, is there)."""
+    disk = {rejection_key: {"revision_number": rejected}, deliverable: body}
+    if disk_after_write is not None:
+        disk["revision_number"] = disk_after_write
+    write = {deliverable: body}
+    if disk_after_write is not None:
+        write["revision_number"] = disk_after_write
+    rules = _rev_rules(tmp_path, monkeypatch, pact_context, disk, write,
+                       agent_type="pact-backend-coder")
+    assert ("revised_deliverable_without_raised_revision" in rules) is fires, rules
+    if fires:
+        assert "revision_raised_without_deliverable" not in rules
+
+
+def test_first_submission_without_a_rejection_is_not_flagged(
+    tmp_path, monkeypatch, pact_context
+):
+    rules = _rev_rules(tmp_path, monkeypatch, pact_context,
+                       {"handoff": {"produced": "v1"}}, {"handoff": {"produced": "v1"}},
+                       agent_type="pact-backend-coder")
+    assert "revised_deliverable_without_raised_revision" not in rules

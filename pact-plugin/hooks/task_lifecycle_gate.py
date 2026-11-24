@@ -1624,7 +1624,9 @@ def revision_advisories(input_data: dict, tool_input: dict, store_team: str) -> 
     arrival or fires the watcher on the rejected original. A teammate write
     that raises metadata.revision_number must carry the revised deliverable
     in the same write; raised alone, a watcher already waiting fires on the
-    rejected original still on disk."""
+    rejected original still on disk. A teammate write that re-submits the
+    deliverable must leave metadata.revision_number above the rejection's;
+    otherwise the watcher keeps holding and never sees the revision."""
     out: list = []
     task_id = _norm_id(tool_input.get("taskId"))
     metadata = tool_input.get("metadata")
@@ -1653,13 +1655,31 @@ def revision_advisories(input_data: dict, tool_input: dict, store_team: str) -> 
                     "arrival.",
                 ))
         return out
-    if "revision_number" not in metadata:
+    raises = "revision_number" in metadata
+    delivers = any(d in metadata for d in _REVISED_DELIVERABLE.values())
+    if not raises and not delivers:
         return out
     record = read_task_json(task_id, store_team, base_fallback=False)
     on_disk = record.get("metadata") if isinstance(record, dict) else None
     on_disk = on_disk if isinstance(on_disk, dict) else {}
     for rejection_key, deliverable in _REVISED_DELIVERABLE.items():
-        if isinstance(on_disk.get(rejection_key), dict) and deliverable not in metadata:
+        rejection = on_disk.get(rejection_key)
+        if not isinstance(rejection, dict):
+            continue
+        rejected = _current_revision({"revision_number": rejection.get("revision_number")})
+        if deliverable in metadata and _current_revision(on_disk) <= rejected:
+            out.append((
+                "revised_deliverable_without_raised_revision",
+                f"PACT task_lifecycle_gate: this write re-submits Task {task_id}'s "
+                f"metadata.{deliverable} but metadata.revision_number is "
+                f"{_current_revision(on_disk)}, not above the rejected "
+                f"revision {rejected}. Raise metadata.revision_number to "
+                f"{rejected + 1} in the same TaskUpdate as the revised "
+                f"{deliverable}: a watcher waiting on the revision holds "
+                "until the number rises past the rejection's, so without it "
+                "the revision is never seen.",
+            ))
+        if raises and deliverable not in metadata:
             out.append((
                 "revision_raised_without_deliverable",
                 f"PACT task_lifecycle_gate: this write raises Task {task_id}'s "
