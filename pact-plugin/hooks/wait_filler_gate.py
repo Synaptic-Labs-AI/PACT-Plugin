@@ -205,7 +205,12 @@ OUTLET = {
         "preamble": "",
         "resolver": "`lead`",
         "branches": [
-            ("teammate_deliverable", "arm", "its completion notification re-invokes you"),
+            ("teammate_deliverable", "arm", (
+                "its completion notification re-invokes you; when the user "
+                "may be away, also schedule a recurring `CronCreate` check "
+                "keyed on the deliverable, not on whether a message arrived, "
+                "and delete it when the wait resolves"
+            )),
             ("own_write", "write_now", None),
             ("other", "end_turn", None),
         ],

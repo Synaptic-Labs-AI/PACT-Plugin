@@ -824,7 +824,10 @@ _TIER3_REASON_PIN = (
     "submission), then end your turn with no further tool calls — the "
     "watcher exits 0 when the deliverable lands, 3 when the deadline "
     "passes without it, 4 when it cannot watch at all — and its "
-    "completion notification re-invokes you. If the event you await is "
+    "completion notification re-invokes you; when the user may be away, "
+    "also schedule a recurring `CronCreate` check keyed on the "
+    "deliverable, not on whether a message arrived, and delete it when "
+    "the wait resolves. If the event you await is "
     "something only YOU can write (your own notes or a summary), do "
     "NOT arm and do not wait: write it now, in this turn — nothing "
     "wakes you later to write it. If the event you await is anything else (a user "
@@ -905,6 +908,24 @@ def test_valve_mechanism_absent_from_module():
     assert "remaining:" not in source
     assert "valve" not in source.lower().replace('"valve_budget"', "")
     assert source.count('"valve_budget"') == 1
+
+
+def test_only_the_lead_texts_name_the_cron_backstop():
+    """The lead's arm branch and the arm advisory tell the lead to back the
+    watcher with a CronCreate check keyed on the deliverable; no teammate
+    or subagent text names it."""
+    import task_lifecycle_gate
+    import wait_filler_gate
+
+    clause = "schedule a recurring `CronCreate` check keyed on the deliverable"
+    assert clause in wait_filler_gate._TIER3_REASON
+    _rule, advisory = task_lifecycle_gate._wait_arm_advisory("s", "t", "1", "handoff")
+    assert clause in advisory
+    for text in (wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON,
+                 wait_filler_gate._TIER3_TEAMMATE_REASON,
+                 wait_filler_gate._TIER3_SUBAGENT_REASON,
+                 wait_filler_gate._TIER3_NO_TEAM_REASON):
+        assert "CronCreate" not in text
 
 
 def test_outlet_reason_pinned_verbatim():

@@ -1443,7 +1443,10 @@ def _wait_arm_advisory(
         "Its completion notification re-invokes you: exit 0 deliverable "
         "landed, 3 deadline expired with it absent, 4 could not watch at "
         "all. A duplicate arm whose deliverable is already present exits "
-        "0 immediately — re-arming is safe."
+        "0 immediately — re-arming is safe. When the user may be away, also "
+        "schedule a recurring `CronCreate` check keyed on the deliverable, "
+        "not on whether a message arrived, and delete it when the wait "
+        "resolves."
     )
     return "wait_arm_supply", message
 
