@@ -188,28 +188,34 @@ def evaluate_target(
     sanitized = sanitize_task_id(task_id)
     if not sanitized:
         return EVAL_TARGET_INVALID
-    base = tasks_base_dir if tasks_base_dir else str(get_claude_config_dir() / "tasks")
+    # Every exception the resolve/read/parse path can raise, mapped to an
+    # outcome so the watcher never exits 1 on a bad file:
+    #   resolving the tasks base: RuntimeError (Path.home with no home) -> INVALID
+    #   exists() / read_text():   OSError, incl. PermissionError -> UNREADABLE
+    #   read_text() decode:       UnicodeDecodeError (a ValueError) -> CORRUPT
+    #   json.loads():             JSONDecodeError and the int-digit limit
+    #                             (both ValueError), RecursionError -> CORRUPT
+    # MemoryError is deliberately not caught: it is not a property of the
+    # file and the interpreter may not survive handling it.
+    try:
+        base = tasks_base_dir if tasks_base_dir else str(get_claude_config_dir() / "tasks")
+    except RuntimeError:
+        return EVAL_TARGET_INVALID
     team_dir = task_dir_for(team_name, tasks_base_dir=base)
     if team_dir is None:
         return EVAL_TARGET_INVALID
     task_file = team_dir / f"{sanitized}.json"
-    if not task_file.exists():
-        return EVAL_TARGET_MISSING
     try:
+        if not task_file.exists():
+            return EVAL_TARGET_MISSING
         raw = task_file.read_text(encoding="utf-8")
     except OSError:
         return EVAL_TARGET_UNREADABLE
     except ValueError:
-        # UnicodeDecodeError is a ValueError: bytes that are not valid
-        # UTF-8 are an unusable payload — CORRUPT-class, never a crash
-        # (parity with read_task_json, which catches the same ValueError
-        # family).
         return EVAL_TARGET_CORRUPT
     try:
         task = json.loads(raw)
-    except (json.JSONDecodeError, RecursionError):
-        # RecursionError: nesting deep enough to exhaust the parser's stack
-        # is an unusable payload too, and must not escape as a crash.
+    except (ValueError, RecursionError):
         return EVAL_TARGET_CORRUPT
     if not isinstance(task, dict):
         return EVAL_TARGET_CORRUPT

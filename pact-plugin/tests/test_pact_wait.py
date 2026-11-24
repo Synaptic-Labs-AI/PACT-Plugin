@@ -830,3 +830,71 @@ def test_default_base_falls_back_to_home_claude(tmp_path):
     proc = _run_default_base({"HOME": str(home)}, drop=("CLAUDE_CONFIG_DIR",))
     assert proc.returncode == pact_wait.EXIT_FIRED, proc.stderr
     assert "pact-wait FIRED" in proc.stdout
+
+
+
+# --- never-raise census: every exception the resolve/read/parse path raises -
+
+def test_oversized_integer_literal_is_corrupt_not_a_crash(tmp_path):
+    """json.loads raises ValueError (not JSONDecodeError) for an integer
+    literal past the int-string digit limit; it maps to CORRUPT."""
+    team_dir = tmp_path / "team-a"
+    team_dir.mkdir()
+    (team_dir / "7.json").write_text('{"metadata": {"x": ' + "9" * 5000 + "}}",
+                                     encoding="utf-8")
+    assert (
+        wait_target.evaluate_target("team-a", "7", "handoff", tasks_base_dir=str(tmp_path))
+        == wait_target.EVAL_TARGET_CORRUPT
+    )
+
+
+def test_oversized_integer_task_file_exits_terminal_not_crash(tmp_path):
+    """End to end: the watcher CLI exits 4 (TERMINAL after two bad reads),
+    never 1 with a traceback."""
+    team_dir = tmp_path / "team-a"
+    team_dir.mkdir()
+    (team_dir / "7.json").write_text('{"x": ' + "9" * 5000 + "}", encoding="utf-8")
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=5,
+        tasks_base_dir=str(tmp_path), poll_interval=0.01,
+    )
+    assert rc == pact_wait.EXIT_TERMINAL
+
+
+@pytest.mark.parametrize(
+    "stage,exc,outcome",
+    [
+        ("exists", PermissionError(13, "denied"), "target_unreadable"),
+        ("exists", OSError(5, "io"), "target_unreadable"),
+        ("read_text", OSError(5, "io"), "target_unreadable"),
+        ("read_text", UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"), "target_corrupt"),
+        ("loads", ValueError("Exceeds the limit"), "target_corrupt"),
+        ("loads", json.JSONDecodeError("bad", "x", 0), "target_corrupt"),
+        ("loads", RecursionError("deep"), "target_corrupt"),
+        ("base", RuntimeError("no home"), "target_invalid"),
+    ],
+)
+def test_evaluate_target_never_raises_for_any_census_exception(
+    tmp_path, monkeypatch, stage, exc, outcome
+):
+    """Census of the read path: each exception the resolve/read/parse steps
+    can raise maps to an outcome constant; none escapes the never-raise
+    contract."""
+    _write_task(tmp_path, "team-a", "7", _handoff_task("done"))
+
+    def boom(*_a, **_k):
+        raise exc
+
+    base = str(tmp_path)
+    if stage == "exists":
+        monkeypatch.setattr(Path, "exists", boom)
+    elif stage == "read_text":
+        monkeypatch.setattr(Path, "read_text", boom)
+    elif stage == "loads":
+        monkeypatch.setattr(wait_target.json, "loads", boom)
+    else:
+        monkeypatch.setattr(wait_target, "get_claude_config_dir", boom)
+        base = None
+    assert wait_target.evaluate_target(
+        "team-a", "7", "handoff", tasks_base_dir=base
+    ) == outcome
