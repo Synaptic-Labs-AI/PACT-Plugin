@@ -218,7 +218,7 @@ class TestRedirectedCheckouts:
         forged = tmp_path / "forged"
         forged.mkdir()
         (forged / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
-        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        assert pi._gitfile_redirect_detail(forged) is not None
         identity = pi.detect_id_for_root(forged, _common(victim))
         assert identity.project_id is None
         assert identity.source == "declined"
@@ -228,7 +228,7 @@ class TestRedirectedCheckouts:
         forged = tmp_path / "forged"
         forged.mkdir()
         (forged / ".git").write_text("gitdir: ../victim/.git\n", encoding="utf-8")
-        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        assert pi._gitfile_redirect_detail(forged) is not None
 
     def test_a_forged_direct_pointer_still_binds_the_victims_pin(self, tmp_path):
         """ADVERSARIAL-ONLY, pinned so it cannot widen silently: the origin is
@@ -258,7 +258,7 @@ class TestRedirectedCheckouts:
              "submodule", "add", str(src), "submod"],
             check=True, capture_output=True,
         )
-        assert pi._gitfile_points_at_foreign_gitdir(superrepo / "submod") is False
+        assert pi._gitfile_redirect_detail(superrepo / "submod") is None
 
     def test_the_measured_separate_git_dir_exception_is_refused(self, tmp_path):
         """The one legitimate layout the predicate refuses, PINNED as a known
@@ -270,7 +270,7 @@ class TestRedirectedCheckouts:
             ["git", "init", "-q", f"--separate-git-dir={store}", str(checkout)],
             check=True,
         )
-        assert pi._gitfile_points_at_foreign_gitdir(checkout) is True
+        assert pi._gitfile_redirect_detail(checkout) is not None
 
     def test_the_separate_git_dir_exception_is_recoverable_with_one_pin(self, tmp_path):
         """Catches a refusal placed BEFORE the override read, which would make
@@ -647,10 +647,10 @@ class TestSubmoduleAdminRedirect:
 
     def test_a_genuine_submodule_is_not_a_redirect(self, tmp_path):
         superrepo, checkout, _admin = self._submodule(tmp_path)
-        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
-        assert pi._admin_dir_names_another_checkout(
+        assert pi._gitfile_redirect_detail(checkout) is None
+        assert pi._admin_dir_refusal(
             superrepo / ".git" / "modules" / "submod", checkout
-        ) is False
+        ) is None
 
     def test_a_separate_git_dir_checkout_is_not_a_redirect(self, tmp_path):
         """POSITIVE CONTROL for the core.worktree discriminator: an external
@@ -668,7 +668,7 @@ class TestSubmoduleAdminRedirect:
              "https://github.com/owner/sep"],
             check=True,
         )
-        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        assert pi._gitfile_redirect_detail(checkout) is None
         identity = pi.detect_id_for_root(checkout, store.resolve())
         assert identity.project_id == "github.com/owner/sep"
         assert identity.source == "origin remote"
@@ -691,7 +691,7 @@ class TestSubmoduleAdminRedirect:
         _super, checkout, _admin = self._submodule(tmp_path)
         (checkout / "pkg").mkdir()
         monkeypatch.setattr(subprocess, "run", patient)
-        assert pi._gitfile_points_at_foreign_gitdir(checkout / "pkg") is False
+        assert pi._gitfile_redirect_detail(checkout / "pkg") is None
 
     def test_a_subdirectory_of_a_forged_pointer_is_a_redirect(self, tmp_path):
         """Catches testing only `<dir>/.git`: a declared path one level below
@@ -700,7 +700,7 @@ class TestSubmoduleAdminRedirect:
         forged = tmp_path / "forged-sub"
         (forged / "sub").mkdir(parents=True)
         (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
-        assert pi._gitfile_points_at_foreign_gitdir(forged / "sub") is True
+        assert pi._gitfile_redirect_detail(forged / "sub") is not None
 
     def test_a_gitfile_pointing_at_a_submodule_admin_dir_declines(self, tmp_path):
         """Catches a pointer at `<other>/.git/modules/<name>`: its git dir
@@ -711,7 +711,7 @@ class TestSubmoduleAdminRedirect:
         forged.mkdir()
         (forged / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
 
-        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        assert pi._gitfile_redirect_detail(forged) is not None
         identity = pi.detect_id_for_root(forged, admin.resolve())
         assert identity.project_id is None
         assert identity.source == "declined"
@@ -850,7 +850,7 @@ class TestGenuineLayoutsStillResolve:
         )
         checkout = superrepo / "submod"
         admin = superrepo / ".git" / "modules" / "submod"
-        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        assert pi._gitfile_redirect_detail(checkout) is None
         identity = pi.detect_id_for_root(checkout, admin.resolve())
         assert identity.project_id == "github.com/owner/subsrc"
 
@@ -878,9 +878,9 @@ class TestWalkBoundariesMatchGit:
         (outer / "sub").mkdir(parents=True)
         (outer / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
         monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
-        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is True
+        assert pi._gitfile_redirect_detail(outer / "sub") is not None
         monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(outer))
-        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is False
+        assert pi._gitfile_redirect_detail(outer / "sub") is None
 
     def test_a_device_boundary_stops_the_walk_unless_git_would_cross(
         self, tmp_path, monkeypatch
@@ -904,9 +904,9 @@ class TestWalkBoundariesMatchGit:
         monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
         monkeypatch.setattr(pi.os, "stat", fake_stat)
         monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
-        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is False
+        assert pi._gitfile_redirect_detail(outer / "sub") is None
         monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
-        assert pi._gitfile_points_at_foreign_gitdir(outer / "sub") is True
+        assert pi._gitfile_redirect_detail(outer / "sub") is not None
 
 
 class TestForgedWorktreeAdminViaDeclaration:

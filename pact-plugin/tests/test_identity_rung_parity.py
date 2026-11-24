@@ -3266,7 +3266,7 @@ class TestAGitPathAnswerIsNeverStripped:
         checkout = tmp_path / "checkout "
         checkout.mkdir()
         run_git("--git-dir", str(admin), "config", "core.worktree", str(checkout), cwd=tmp_path)
-        assert pi._admin_dir_names_another_checkout(admin, checkout) is False
+        assert pi._admin_dir_refusal(admin, checkout) is None
 
 
 _CONVERSION_MISSING = re.compile(r'required field "(\w+)" missing from (\w+)')

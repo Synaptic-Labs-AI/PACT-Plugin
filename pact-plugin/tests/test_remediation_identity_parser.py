@@ -470,7 +470,7 @@ class TestARedirectAtANestedSubmoduleAdminDirIsRefused:
             tmp_path, superproject / ".git" / "modules" / "vendor" / "lib"
         )
 
-        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        assert pi._gitfile_redirect_detail(forged) is not None
         memory = _memory_in(monkeypatch, forged, tmp_path / "m.db")
         assert memory.project_id is None
         assert memory._decline_reason["reason"] == "gitfile_redirect"
@@ -487,7 +487,7 @@ class TestARedirectAtANestedSubmoduleAdminDirIsRefused:
             superproject / ".git" / "worktrees" / "wt" / "modules" / "vendor" / "lib",
         )
 
-        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        assert pi._gitfile_redirect_detail(forged) is not None
         memory = _memory_in(monkeypatch, forged, tmp_path / "m.db")
         assert memory.project_id is None
         assert memory._decline_reason["reason"] == "gitfile_redirect"
@@ -501,7 +501,7 @@ class TestARedirectAtANestedSubmoduleAdminDirIsRefused:
                           cwd=superproject)
         forged = _forged_checkout(tmp_path, superproject / ".git" / "modules" / "solo")
 
-        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        assert pi._gitfile_redirect_detail(forged) is not None
 
     @pytest.mark.parametrize("where", ["main", "worktree"])
     def test_the_genuine_slash_named_submodule_still_resolves(
@@ -515,7 +515,7 @@ class TestARedirectAtANestedSubmoduleAdminDirIsRefused:
                     cwd=root / "vendor" / "lib")
         checkout = root / "vendor" / "lib"
 
-        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        assert pi._gitfile_redirect_detail(checkout) is None
         assert _memory_in(monkeypatch, checkout, tmp_path / "m.db").project_id == (
             SUBMODULE_ID
         )
@@ -535,7 +535,7 @@ class TestAWorktreeOfASubmodule:
         submodule's main checkout. git's `commondir` mark tells it apart."""
         worktree = self._submodule_worktree(tmp_path)
 
-        assert pi._gitfile_points_at_foreign_gitdir(worktree) is False
+        assert pi._gitfile_redirect_detail(worktree) is None
 
     def test_a_network_origin_worktree_canonicalises(self, tmp_path, monkeypatch):
         worktree = self._submodule_worktree(tmp_path)
@@ -898,7 +898,7 @@ class TestGitDiscoveryHonoursACeilingAsGitDoes:
         (forged / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
         monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(forged))
 
-        assert pi._gitfile_points_at_foreign_gitdir(forged) is True
+        assert pi._gitfile_redirect_detail(forged) is not None
 
 
 # ---------------------------------------------------------------------------
@@ -1613,7 +1613,7 @@ class TestASymlinkedGitMarkerIsJudgedLikeAGitfile:
         store = tmp_path / "m.db"
         _seed_relative_bucket(store, self.VICTIM_ID)
 
-        assert pi._gitfile_points_at_foreign_gitdir(delivered) is True
+        assert pi._gitfile_redirect_detail(delivered) is not None
         memory = _memory_in(monkeypatch, delivered, store)
         self._assert_refused(memory, store, monkeypatch, self.VICTIM_ID)
 
@@ -1630,7 +1630,7 @@ class TestASymlinkedGitMarkerIsJudgedLikeAGitfile:
         store = tmp_path / "m.db"
         _seed_relative_bucket(store, SUBMODULE_ID)
 
-        assert pi._gitfile_points_at_foreign_gitdir(delivered) is True
+        assert pi._gitfile_redirect_detail(delivered) is not None
         memory = _memory_in(monkeypatch, delivered, store)
         self._assert_refused(memory, store, monkeypatch, SUBMODULE_ID)
 
@@ -1643,7 +1643,7 @@ class TestASymlinkedGitMarkerIsJudgedLikeAGitfile:
         run_git("clone", "-q", "--bare", str(victim), str(bare), cwd=tmp_path)
         delivered = self._delivered(tmp_path, bare, "absolute")
 
-        assert pi._gitfile_points_at_foreign_gitdir(delivered) is False
+        assert pi._gitfile_redirect_detail(delivered) is None
         memory = _memory_in(monkeypatch, delivered, tmp_path / "m.db")
         assert memory.project_id is None
         assert memory._decline_reason["reason"] == "no_working_tree"
@@ -1663,7 +1663,7 @@ class TestASymlinkedGitMarkerIsJudgedLikeAGitfile:
         (checkout / ".git").unlink()
         (checkout / ".git").symlink_to(tmp_path / "store" / "proj.gitdir")
 
-        assert pi._gitfile_points_at_foreign_gitdir(checkout) is False
+        assert pi._gitfile_redirect_detail(checkout) is None
         assert _memory_in(monkeypatch, checkout, tmp_path / "m.db").project_id == (
             "github.com/me/moved"
         )
@@ -1674,7 +1674,7 @@ class TestASymlinkedGitMarkerIsJudgedLikeAGitfile:
         alias = tmp_path / "alias"
         alias.symlink_to(victim)
 
-        assert pi._gitfile_points_at_foreign_gitdir(alias) is False
+        assert pi._gitfile_redirect_detail(alias) is None
         assert _memory_in(monkeypatch, alias, tmp_path / "m.db").project_id == self.VICTIM_ID
 
 
@@ -2383,7 +2383,7 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
         delivered = tmp_path / "dl"
         delivered.mkdir()
         (delivered / ".git").symlink_to(tmp_path / "pointer")
-        assert pi._gitfile_points_at_foreign_gitdir(delivered) is True
+        assert pi._gitfile_redirect_detail(delivered) is not None
 
 
 class TestAnIncludeOnlyOriginDeclinesOnEveryBranch:

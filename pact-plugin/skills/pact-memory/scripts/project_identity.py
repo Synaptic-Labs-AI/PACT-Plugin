@@ -1946,10 +1946,6 @@ def _refuse_submodule_basename(
     )
 
 
-def _admin_dir_names_another_checkout(admin_dir: Path, asked_root: Path) -> bool:
-    """Whether a SUBMODULE admin dir records a checkout other than `asked_root`
-    (`_admin_dir_refusal`)."""
-    return _admin_dir_refusal(admin_dir, asked_root) is not None
 
 
 def _admin_dir_refusal(admin_dir: Path, asked_root: Path) -> Optional[str]:
@@ -2057,10 +2053,6 @@ def _git_names_toplevel(root: Path) -> bool:
         return False
 
 
-def _redirect_target_is_foreign(target: Path, marker_root: Path) -> bool:
-    """Whether a `.git` marker's resolved TARGET is another repository's git
-    dir (`_redirect_target_refusal`)."""
-    return _redirect_target_refusal(target, marker_root) is not None
 
 
 def _redirect_target_refusal(target: Path, marker_root: Path) -> Optional[str]:
@@ -2101,10 +2093,6 @@ def _redirect_target_refusal(target: Path, marker_root: Path) -> Optional[str]:
     return None
 
 
-def _gitfile_points_at_foreign_gitdir(root: Path) -> bool:
-    """Whether `<root>/.git` redirects at another repository's git dir
-    (`_gitfile_redirect_detail`)."""
-    return _gitfile_redirect_detail(root) is not None
 
 
 def _gitfile_redirect_detail(root: Path) -> Optional[str]:
