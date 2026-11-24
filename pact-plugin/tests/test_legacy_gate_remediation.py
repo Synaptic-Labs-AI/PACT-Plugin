@@ -738,3 +738,275 @@ def test_a_tracked_directory_named_like_the_bucket_is_not_its_own_rival(basename
     (tracked / ".claude").mkdir(parents=True)
     _seed(store, NAME, files=[tracked, repo / "src.py"])
     assert _basename_memory(store)._read_project_scopes() == (NAME,)
+
+
+
+# ---------------------------------------------------------------------------
+# Cycle 5: a non-git folder's refusal wording, and a separate-git-dir
+# checkout's old bucket
+# ---------------------------------------------------------------------------
+
+
+def test_a_non_git_folders_refusal_says_folder(tmp_path, monkeypatch, scopes_clean):
+    """NT-1: a gated non-git folder is called a folder, not a repository."""
+    assert_outside_repository(tmp_path)
+    folder = tmp_path / "mine" / NAME
+    (folder / ".claude").mkdir(parents=True)
+    rival = tmp_path / "theirs" / NAME
+    (rival / ".claude").mkdir(parents=True)
+    (rival / "x.py").write_text("x\n")
+    store = tmp_path / "store.db"
+    _seed(store, NAME, files=[rival / "x.py"])
+    monkeypatch.chdir(folder)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._project_id == NAME and memory._project_id_source == "cwd"
+    with pytest.raises(memory_api.FolderNameBucketRefusedError) as refused:
+        memory._project_id_for_write()
+    text = str(refused.value)
+    assert text.startswith(f"this folder's project id is its folder name '{NAME}'"), text
+    assert "this folder's memory with rows this folder does not own" in text, text
+    assert "this repository" not in text, text
+
+
+@pytest.fixture
+def separate_git_dir(tmp_path, monkeypatch, scopes_clean):
+    """Cold S1: `git init --separate-git-dir=store/proj.git work/proj`, no
+    remote. The old resolver named it `store`; the new id is `proj`."""
+    import subprocess
+
+    assert_outside_repository(tmp_path)
+    (tmp_path / "store").mkdir()
+    (tmp_path / "work").mkdir()
+    work = tmp_path / "work" / "proj"
+    subprocess.run(
+        ["git", "init", "-q", "--separate-git-dir", str(tmp_path / "store" / "proj.git"), str(work)],
+        check=True,
+    )
+    db = tmp_path / "memory.db"
+    _seed(db, "store", session_id="unrecorded")
+    monkeypatch.chdir(work)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    memory_api._UNPROVEN_WARNED.clear()
+    return work, db
+
+
+def test_a_separate_git_dir_checkout_discloses_its_old_bucket(separate_git_dir, caplog):
+    work, db = separate_git_dir
+    memory = PACTMemory(session_id="s", db_path=db)
+    assert memory._project_id == "proj" and memory._legacy_project_basename == "store"
+    with caplog.at_level(logging.WARNING):
+        assert memory._read_project_scopes() == ("proj",)
+    state = memory._legacy_scope_state
+    assert state is not None and state["candidate"] == "store", state
+    assert state["unproven"] and state["unproven_reason"] == "no_session", state
+    assert state["memory_count"] == 1
+    assert "--from=store" in caplog.text and "--to=proj" in caplog.text
+
+
+def test_a_separate_git_dir_checkout_can_move_its_old_bucket(separate_git_dir, capfd):
+    from scripts.cli import main
+
+    work, db = separate_git_dir
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "rekey", "--from=store", "--db-path", str(db)])
+    refused = json.loads(capfd.readouterr().err)
+    assert exit_info.value.code == 1 and refused["error"] == "REKEY_REFUSED", refused
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "rekey", "--from=store", "--to=proj", "--apply", "--db-path", str(db)])
+    captured = capfd.readouterr()
+    assert exit_info.value.code == 0, captured.err
+    moved = json.loads(captured.out)
+    assert moved["result"]["memories"] == 1
+    with sqlite3.connect(str(db)) as conn:
+        assert conn.execute(
+            "SELECT project_id FROM memories"
+        ).fetchall() == [("proj",)]
+
+
+def test_another_folder_name_target_is_still_refused(separate_git_dir, capfd):
+    """Control: only the session's own folder-name id is a target."""
+    from scripts.cli import main
+
+    work, db = separate_git_dir
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "rekey", "--from=store", "--to=other", "--apply", "--db-path", str(db)])
+    assert exit_info.value.code == 2, capfd.readouterr()
+
+
+
+def test_only_the_old_bucket_moves_into_the_own_folder_name_id(separate_git_dir, capfd):
+    """Control: a bucket that is not this session's legacy candidate cannot
+    be moved into its folder-name id."""
+    from scripts.cli import main
+
+    work, db = separate_git_dir
+    _seed(db, "unrelated", session_id="u2")
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "rekey", "--from=unrelated", "--to=proj", "--apply", "--db-path", str(db)])
+    assert exit_info.value.code == 2, capfd.readouterr()
+
+
+
+# ---------------------------------------------------------------------------
+# Amendment 3: clones of a local-only repository are offered a shared pin
+# ---------------------------------------------------------------------------
+
+
+def _git(*args, cwd=None):
+    import subprocess
+
+    subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _memory_in(path: Path, store: Path) -> PACTMemory:
+    os.chdir(path)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._project_id_shape == "basename", memory._project_id
+    return memory
+
+
+def _sharing_line(text: str) -> str:
+    start = text.index("To share memory with")
+    return text[start:text.index(" instead.", start) + len(" instead.")]
+
+
+@pytest.fixture
+def local_origin(tmp_path, monkeypatch, scopes_clean):
+    """A local bare repository `x/proj.git` and two clones `b/proj`, `c/proj`."""
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(tmp_path)
+    bare = tmp_path / "x" / "proj.git"
+    bare.parent.mkdir()
+    _git("init", "-q", "--bare", str(bare))
+    for name in ("b", "c"):
+        (tmp_path / name).mkdir()
+        _git("clone", "-q", str(bare), str(tmp_path / name / "proj"))
+    return tmp_path, bare
+
+
+def test_l1_clones_of_a_local_origin_share_one_pin(local_origin):
+    tmp_path, bare = local_origin
+    clone_b, clone_c = tmp_path / "b" / "proj", tmp_path / "c" / "proj"
+    (clone_b / "a.py").write_text("x\n")
+    store = tmp_path / "store.db"
+    _seed(store, "proj", files=[clone_b / "a.py"])
+    memory_c = _memory_in(clone_c, store)
+    with pytest.raises(memory_api.FolderNameBucketRefusedError) as refused:
+        memory_c._project_id_for_write()
+    text = str(refused.value)
+    shared = memory_api.local_pin_id(bare)
+    assert text.index("To keep this checkout separate") < text.index("To share memory with")
+    assert f"write {shared} instead" in text, text
+    assert _memory_in(clone_b, store)._shared_pin() == (str(bare.resolve()), shared)
+
+
+def test_l2_a_clone_of_a_source_checkout_shares_the_sources_pin(tmp_path, monkeypatch, scopes_clean):
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    source = make_repo(tmp_path / "a" / "proj")
+    (tmp_path / "b").mkdir()
+    _git("clone", "-q", str(source), str(tmp_path / "b" / "proj"))
+    memory = _memory_in(tmp_path / "b" / "proj", tmp_path / "store.db")
+    assert memory._shared_pin()[1] == memory_api.local_pin_id(source)
+
+
+def test_l3_a_relative_origin_resolves_against_the_work_tree(local_origin):
+    tmp_path, bare = local_origin
+    clone = tmp_path / "b" / "proj"
+    _git("remote", "set-url", "origin", "../../x/proj.git", cwd=clone)
+    memory = _memory_in(clone, tmp_path / "store.db")
+    assert memory._shared_pin() == (str(bare.resolve()), memory_api.local_pin_id(bare))
+
+
+def test_l4_a_file_url_is_the_same_path(local_origin):
+    tmp_path, bare = local_origin
+    clone = tmp_path / "b" / "proj"
+    _git("remote", "set-url", "origin", bare.resolve().as_uri(), cwd=clone)
+    memory = _memory_in(clone, tmp_path / "store.db")
+    assert memory._shared_pin()[1] == memory_api.local_pin_id(bare)
+
+
+@pytest.mark.parametrize("target", ["missing", "plain"])
+def test_l5_an_origin_that_is_no_repository_gets_no_sharing_line(local_origin, target):
+    tmp_path, bare = local_origin
+    clone = tmp_path / "b" / "proj"
+    (tmp_path / "plain").mkdir()
+    _git("remote", "set-url", "origin", str(tmp_path / target), cwd=clone)
+    memory = _memory_in(clone, tmp_path / "store.db")
+    assert memory._shared_pin() is None
+    assert "To share memory" not in memory._local_pin_remedy()
+
+
+def test_l6_an_scp_like_origin_is_not_local(local_origin):
+    tmp_path, bare = local_origin
+    clone = tmp_path / "b" / "proj"
+    memory = _memory_in(clone, tmp_path / "store.db")
+    _git("remote", "set-url", "origin", "host:proj", cwd=clone)
+    assert memory._shared_pin() is None
+
+
+def test_l7_one_hop_only(local_origin):
+    tmp_path, bare = local_origin
+    clone_b = tmp_path / "b" / "proj"
+    (tmp_path / "d").mkdir()
+    _git("clone", "-q", str(clone_b), str(tmp_path / "d" / "proj"))
+    memory = _memory_in(tmp_path / "d" / "proj", tmp_path / "store.db")
+    assert memory._shared_pin()[1] == memory_api.local_pin_id(clone_b)
+    assert memory._shared_pin()[1] != memory_api.local_pin_id(bare)
+
+
+@pytest.mark.parametrize("odd_name", ["pro\u202ej.git", "pro\u2028j.git"])
+def test_l8_an_origin_path_with_a_format_character_is_not_printed(local_origin, odd_name):
+    """A bidi control or a line separator in the origin path: the path is
+    omitted from the text and the pin is still printed."""
+    tmp_path, bare = local_origin
+    odd = tmp_path / "y" / odd_name
+    odd.parent.mkdir()
+    _git("init", "-q", "--bare", str(odd))
+    clone = tmp_path / "b" / "proj"
+    _git("remote", "set-url", "origin", str(odd), cwd=clone)
+    memory = _memory_in(clone, tmp_path / "store.db")
+    text = memory._local_pin_remedy()
+    line = _sharing_line(text)
+    assert "the repository this checkout's origin names" in line, line
+    assert odd_name not in text
+    assert memory_api.local_pin_id(odd) in line
+
+
+def test_l8_an_origin_path_with_a_newline_offers_no_shared_pin(local_origin):
+    """A newline in a local origin makes the classifier decline it, so the
+    path is never printed: no sharing line at all."""
+    tmp_path, bare = local_origin
+    odd = tmp_path / "y" / "pro\nj.git"
+    odd.parent.mkdir()
+    _git("init", "-q", "--bare", str(odd))
+    clone = tmp_path / "b" / "proj"
+    memory = _memory_in(clone, tmp_path / "store.db")
+    _git("remote", "set-url", "origin", str(odd), cwd=clone)
+    assert memory._shared_pin() is None
+    assert "pro\nj" not in memory._local_pin_remedy()
+
+
+def test_l9_the_sharing_line_is_text_and_never_own_id(local_origin):
+    tmp_path, bare = local_origin
+    memory = _memory_in(tmp_path / "b" / "proj", tmp_path / "store.db")
+    line = _sharing_line(memory._local_pin_remedy())
+    assert "own id" not in line and "printf" not in line and ">" not in line, line
+    assert "(this checkout's origin)" in line
+
+
+def test_l10_a_clone_of_a_victim_names_the_victim_after_isolation(tmp_path, monkeypatch, scopes_clean):
+    """A clone whose origin is a no-origin victim `/v/proj`: the sharing line
+    names the victim's path, so the user sees whose bucket it would share,
+    and the isolation line comes first."""
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    victim = make_repo(tmp_path / "v" / "proj")
+    (tmp_path / "h").mkdir()
+    _git("clone", "-q", str(victim), str(tmp_path / "h" / "proj"))
+    text = _memory_in(tmp_path / "h" / "proj", tmp_path / "store.db")._local_pin_remedy()
+    assert text.index("To keep this checkout separate") < text.index("To share memory with")
+    assert f"the repository at {victim.resolve()}" in _sharing_line(text)

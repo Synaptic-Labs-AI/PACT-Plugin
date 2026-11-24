@@ -1800,6 +1800,8 @@ def rekey_project(
     from_id: str,
     to_id: str,
     dry_run: bool = True,
+    *,
+    own_folder_name_target: bool = False,
 ) -> Dict[str, Any]:
     """Move an ENTIRE project bucket from `from_id` to `to_id`, atomically.
 
@@ -1863,6 +1865,10 @@ def rekey_project(
         from_id: The entire bucket to retire.
         to_id: The canonical id to move it to.
         dry_run: True computes and rolls back; False commits.
+        own_folder_name_target: the caller has established that `to_id` is
+            the calling session's own folder-name id and `from_id` its legacy
+            candidate (`cli._own_folder_name_target`), the one non-canonical
+            target allowed.
 
     Returns:
         The counters dict. Every key is always present.
@@ -1879,7 +1885,7 @@ def rekey_project(
     # exists to prevent. `from_id` is deliberately NOT required canonical — it
     # names the legacy bucket being retired. `from_id == to_id` is a no-op
     # that moves nothing, so it keeps working for a non-canonical id.
-    if from_id != to_id and not is_canonical_id(to_id):
+    if from_id != to_id and not is_canonical_id(to_id) and not own_folder_name_target:
         raise ValueError(
             "the rekey target must be a canonical host/owner/repo id; moving "
             "rows into a non-canonical bucket is refused. Nothing was moved."

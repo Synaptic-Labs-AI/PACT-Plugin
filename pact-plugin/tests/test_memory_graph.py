@@ -544,6 +544,20 @@ class TestGetRelatedFilesViaMemories:
         from scripts.graph import get_related_files_via_memories
         assert get_related_files_via_memories(db_conn, "/nonexistent.py") == []
 
+    def test_an_orphan_link_relates_nothing_even_unscoped(self, db_conn):
+        """A link whose memory is gone (an older store) joins no memory, so it
+        relates no file, with or without a scope, as the docstring says."""
+        from scripts.graph import (
+            track_file, link_memory_to_file, get_related_files_via_memories,
+        )
+        id1 = track_file(db_conn, "/src/a.py")
+        id2 = track_file(db_conn, "/src/b.py")
+        db_conn.execute("PRAGMA foreign_keys=OFF")
+        link_memory_to_file(db_conn, "gone", id1)
+        link_memory_to_file(db_conn, "gone", id2)
+        db_conn.execute("PRAGMA foreign_keys=ON")
+        assert get_related_files_via_memories(db_conn, "/src/a.py") == []
+
     def test_no_shared_memory_returns_empty(self, db_conn):
         from scripts.graph import track_file, get_related_files_via_memories
         track_file(db_conn, "/src/a.py")

@@ -504,6 +504,29 @@ def _legacy_session_evidence(
 _SESSION_CENSUS_KEYS = ("here", "elsewhere", "subfolder", "description_newer", "unattributed")
 
 
+# Directory listings the session census and the recorded-dir loader reuse
+# across commands in one process: {path: ((st_mtime_ns, st_ino), names)}. A
+# folder is listed again only when its stat moves (an entry added, removed or
+# renamed), so an unchanged sessions root costs one stat per folder, not one
+# listing per verdict. Writes to the store do not clear it: they change no
+# session folder.
+_DIR_LISTINGS: Dict[str, tuple] = {}
+
+
+def _listing(directory: Path) -> set:
+    """The names in `directory`, from `_DIR_LISTINGS` while its stat is
+    unchanged. Raises what `os.stat` and `os.listdir` raise."""
+    key = str(directory)
+    status = os.stat(key)
+    stamp = (status.st_mtime_ns, status.st_ino)
+    cached = _DIR_LISTINGS.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    names = set(os.listdir(key))
+    _DIR_LISTINGS[key] = (stamp, names)
+    return names
+
+
 def _legacy_session_census(
     conn: Any, candidate: str, gate_roots: list, common_dir: Optional[Path]
 ) -> Dict[str, int]:
@@ -558,9 +581,9 @@ def _legacy_session_census(
             sessions_root = Path(
                 reconstruct_session_dir(os.path.join(os.sep, "x"), "_")
             ).parent.parent
-            for slug in sorted(os.listdir(sessions_root)):
+            for slug in sorted(_listing(sessions_root)):
                 try:
-                    entries[slug] = set(os.listdir(sessions_root / slug))
+                    entries[slug] = _listing(sessions_root / slug)
                 except (FileNotFoundError, NotADirectoryError):
                     continue
                 except OSError:
@@ -596,12 +619,12 @@ def _legacy_session_census(
             # BELOW A ROOT IS A SUBFOLDER LAUNCH (neutral) unless the folder lies
             # in a separate checkout nested inside the root, which owns it. A
             # root with no `.git` (a non-git project folder) therefore never
-            # makes its own subfolders "elsewhere".
+            # makes its own subfolders "elsewhere", and neither does a gate
+            # root inside another (a linked worktree at `<main>/.worktrees/`).
             marker = find_git_marker(project_dir)
-            nested = marker is not None and any(
-                os.path.realpath(marker.parent).startswith(
-                    root if root.endswith(os.sep) else root + os.sep
-                )
+            owner = os.path.realpath(marker.parent) if marker is not None else None
+            nested = owner is not None and owner not in roots and any(
+                owner.startswith(root if root.endswith(os.sep) else root + os.sep)
                 for root in roots
             )
             return "elsewhere" if nested else "subfolder"
@@ -680,10 +703,10 @@ def _recorded_project_dirs() -> set:
 
     try:
         sessions_root = Path(reconstruct_session_dir(os.path.join(os.sep, "x"), "_")).parent.parent
-        for slug in os.listdir(sessions_root):
+        for slug in _listing(sessions_root):
             slug_dir = sessions_root / slug
             try:
-                entries = os.listdir(slug_dir)
+                entries = _listing(slug_dir)
             except OSError:
                 continue
             for entry in entries:
@@ -3395,9 +3418,8 @@ class PACTMemory:
             declined_root = declined_root or detected.identity_root
             declined_declaration = True
 
-        # Strategy 1.5: session record (inert under pytest — the discovery
-        # refuses test processes — so the replica in test_project_id.py needs
-        # no record leg to stay equivalent here).
+        # Strategy 1.5: session record (inert under pytest: the discovery
+        # refuses test processes).
         record_dir = get_project_dir_from_session_record()
         if record_dir:
             detected = PACTMemory._declared_dir_identity(record_dir, "session record")
@@ -3938,9 +3960,11 @@ class PACTMemory:
         every store, graph and search seam treats as no rows. It is never
         None, because None is the library's whole-store value and a read with
         no identity must not reach a query as an unscoped filter. A
-        NON-canonical id (a supplied
-        value, or a legacy basename) is a one-element scope: there is no
-        canonical/legacy split to reconcile.
+        NON-canonical id (a supplied value, or a folder name) is a
+        one-element scope, or none when its own bucket's verdict refuses it
+        (`_folder_name_bucket_verdict`), EXCEPT a gated folder-name id whose
+        pre-change name differs (a `--separate-git-dir` checkout): its legacy
+        candidate is judged and disclosed exactly as a canonical id's is.
 
         For a canonical id, the PRE-change basename joins the scope ONLY when
         its bucket has rows and either the plausibility gate verifies it, or
@@ -4002,7 +4026,16 @@ class PACTMemory:
             return ()
         if not is_canonical(scope):
             verdict = self._folder_name_bucket_verdict(scope, conn)
-            return (scope,) if verdict is None or verdict.read else ()
+            if verdict is not None and not verdict.read:
+                return ()
+            legacy = self._legacy_project_basename
+            if not legacy or legacy == scope or not self._folder_name_gated():
+                return (scope,)
+            # A GATED FOLDER-NAME ID WITH A DIFFERENT PRE-CHANGE NAME (a
+            # `--separate-git-dir` checkout: the old resolver named it after
+            # the external git dir's parent) has a legacy candidate like a
+            # canonical id does. It falls through to the same candidate
+            # match, verdict and disclosure, with this id as the target.
         legacy = self._legacy_project_basename
         store = str(self._db_path or resolve_db_path())
         if not legacy or legacy == scope:
@@ -4266,14 +4299,21 @@ class PACTMemory:
         remedy for this checkout's layout (`_local_pin_remedy`). `refused` is
         `"save"` for the save refusal and `"read"` for the read warning."""
         name = self._project_id
+        # A gated non-git folder is a folder, not a repository: the same test
+        # `_local_pin_remedy` uses to say "This folder is not a git repository".
+        owner = (
+            "this repository"
+            if os.path.lexists(os.path.join(str(self._project_identity_root), ".git"))
+            else "this folder"
+        )
         consequence = (
-            "so a save here would file this repository's memory with rows "
-            "this repository does not own. Nothing was written."
+            f"so a save here would file {owner}'s memory with rows {owner} "
+            "does not own. Nothing was written."
             if refused == "save"
             else "so that bucket is NOT read here."
         )
         return (
-            f"this repository's project id is its folder name {name!r}, and "
+            f"{owner}'s project id is its folder name {name!r}, and "
             f"{_unproven_cause(verdict.reason, verdict.counts, name)}, "
             f"{consequence} {self._local_pin_remedy()}"
         )
@@ -4289,6 +4329,11 @@ class PACTMemory:
         else, gets no command and no path: writing there is the user's
         decision. A folder that is no git repository gets neither pin nor git
         advice.
+
+        A CLONE OF A LOCAL-ONLY REPOSITORY is also offered the SHARED pin
+        (`_shared_pin`), after the isolation pin and as text only: every clone
+        of that origin is offered the same id, and writing it is the user's
+        choice.
         """
         root = self._project_identity_root
         pin = local_pin_id(root)
@@ -4305,22 +4350,93 @@ class PACTMemory:
             same = common is not None and os.path.realpath(str(common)) == os.path.realpath(git_path)
         except (OSError, ValueError):
             same = False
+        shared = self._shared_pin()
+        if shared is not None and shared[1] == pin:
+            shared = None
         if own_dir and same:
             command = (
                 f"printf '%s\\n' {shlex.quote(pin)} > "
                 f"{shlex.quote(os.path.join(os.path.realpath(git_path), 'pact-project-id'))}"
             )
-            return (
-                f"Give this repository its own id with a local pin: {command} . "
+            isolation = (
+                f"To keep this checkout separate, write its local pin: {command} ."
+                if shared is not None
+                else f"Give this repository its own id with a local pin: {command} ."
+            )
+            tail = (
                 "Or add an origin remote, or pass project_id. Earlier memories "
                 "in that bucket stay there; `project-id show` lists them."
             )
-        return (
-            "This checkout's git directory is outside it, so writing a pin "
-            "there is your decision after confirming that directory is yours; "
-            f"the local pin id for this checkout is {pin}. Or add an origin "
-            "remote, or pass project_id."
-        )
+        else:
+            isolation = (
+                ("To keep this checkout separate: this" if shared is not None else "This")
+                + " checkout's git directory is outside it, so writing a pin "
+                "there is your decision after confirming that directory is yours; "
+                f"the local pin id for this checkout is {pin}."
+            )
+            tail = "Or add an origin remote, or pass project_id."
+        if shared is None:
+            return f"{isolation} {tail}"
+        origin_path, shared_id = shared
+        if any(
+            unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp") for char in origin_path
+        ):
+            named = "the repository this checkout's origin names"
+        else:
+            named = f"the repository at {shlex.quote(origin_path)} (this checkout's origin)"
+        return f"{isolation} To share memory with {named}, write {shared_id} instead. {tail}"
+
+    def _shared_pin(self) -> Optional[Tuple[str, str]]:
+        """`(origin path, shared pin)` for a clone of a LOCAL-ONLY repository,
+        or None.
+
+        The origin is read with `read_origin` (the repository's own config,
+        includes skipped), never `git remote get-url`, whose `insteadOf`
+        rewrites are machine-local. It must classify as no portable origin and
+        be a local path or a `file://` URL with no host; a relative path
+        resolves against the identity root, as git resolves it. The path must
+        be a git repository by file checks alone (`.git` present, or a
+        regular `HEAD` beside an `objects` directory); no git runs inside
+        it, and its own origin is never followed (one hop). The pin is
+        `local_pin_id` of that path. Never raises.
+        """
+        common = getattr(self, "_project_common_dir", None)
+        root = self._project_identity_root
+        if common is None or root is None:
+            return None
+        try:
+            origin = project_identity.read_origin(Path(common))
+            if origin.state != "present" or not origin.value or not origin.value.strip():
+                return None
+            value = origin.value
+            outcome, _ = project_identity.classify_remote_origin(value)
+            if outcome != project_identity.OUTCOME_NO_PORTABLE_ORIGIN:
+                return None
+            if value.lower().startswith("file://"):
+                from urllib.parse import unquote, urlsplit
+
+                parts = urlsplit(value)
+                if parts.netloc not in ("", "localhost"):
+                    return None
+                path = unquote(parts.path)
+            else:
+                # `classify_remote_origin` already sent every network-shaped
+                # value, scp-like `host:path` included, elsewhere.
+                path = value
+            if not os.path.isabs(path):
+                path = os.path.join(str(root), path)
+            origin_path = os.path.realpath(path)
+            head = os.path.join(origin_path, "HEAD")
+            is_repository = os.path.lexists(os.path.join(origin_path, ".git")) or (
+                os.path.lexists(head)
+                and stat.S_ISREG(os.lstat(head).st_mode)
+                and os.path.isdir(os.path.join(origin_path, "objects"))
+            )
+            if not is_repository:
+                return None
+            return origin_path, local_pin_id(origin_path)
+        except (OSError, ValueError, AttributeError):
+            return None
 
     def _session_id_for_envelope(self) -> Optional[str]:
         """The session id a status ENVELOPE reports; the FINAL value.

@@ -231,3 +231,81 @@ def test_a_session_in_the_roots_own_subfolder_is_a_subfolder_launch(checkout, ca
     seed_session_evidence(config, sub, "sub-1")
     _scopes, state, _notices = _read(store, caplog)
     assert state["sessions"]["subfolder"] == 1 and state["sessions"]["elsewhere"] == 0, state
+
+
+def _worktree_inside(repo: Path) -> Path:
+    """A linked worktree placed inside its main checkout, at
+    `<repo>/.worktrees/wt`, with a subfolder a session can launch in."""
+    from fixtures.identity_git import run_git
+
+    worktree = repo / ".worktrees" / "wt"
+    run_git("worktree", "add", "-q", "--detach", str(worktree), cwd=repo)
+    (worktree / "sub").mkdir()
+    return worktree
+
+
+def test_a_session_in_a_nested_linked_worktrees_subfolder_is_a_subfolder_launch(checkout, caplog):
+    """A linked worktree inside its main checkout is a gate root of its own,
+    not a separate checkout nested under the root. RED WHEN a session
+    launched in a subfolder of that worktree counts as elsewhere."""
+    repo, store, config = checkout
+    worktree = _worktree_inside(repo)
+    _rows(store, [("m1", "wt-1")])
+    seed_session_evidence(config, worktree / "sub", "wt-1")
+    _scopes, state, _notices = _read(store, caplog)
+    assert state["sessions"]["subfolder"] == 1 and state["sessions"]["elsewhere"] == 0, state
+    assert state["unproven_reason"] == "subfolder_launch", state
+
+
+def test_a_folder_name_repository_keeps_its_bucket_with_a_nested_worktree_session(
+    monkeypatch, tmp_path, caplog
+):
+    """The folder-name side of the same layout: a repository with no origin
+    reads and saves into its own bucket when the bucket's rows came from a
+    session in a subfolder of its nested linked worktree."""
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    for name in ("_LEGACY_SCOPE_CACHE", "_EXCLUSION_WARNED", "_UNPROVEN_WARNED"):
+        getattr(memory_api, name).clear()
+    repo = make_repo(tmp_path / "proj")
+    monkeypatch.chdir(repo)
+    store, config = tmp_path / "store.db", tmp_path / "home" / ".claude"
+    worktree = _worktree_inside(repo)
+    _rows(store, [("m1", "wt-1")])
+    seed_session_evidence(config, worktree / "sub", "wt-1")
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._project_id == "proj", memory._project_id
+    with caplog.at_level(logging.WARNING):
+        assert memory._read_project_scopes() == ("proj",), memory._legacy_scope_state
+    assert memory._project_id_for_write() == "proj"
+
+
+def test_an_unchanged_sessions_root_is_not_listed_again(checkout, caplog, monkeypatch):
+    """The census lists the sessions root once per process while its stat is
+    unchanged: a second command, with the verdict cache cleared as a write
+    clears it, reuses the listing. A new slug folder changes the root's stat
+    and is listed. RED WHEN every uncached verdict lists the root again."""
+    import os as os_module
+
+    repo, store, config = checkout
+    _rows(store, [("m1", "here-1")])
+    seed_session_evidence(config, repo, "here-1")
+    memory_api._DIR_LISTINGS.clear()
+    listed = []
+    real_listdir = os_module.listdir
+
+    def counting_listdir(path="."):
+        listed.append(os_module.path.basename(str(path)))
+        return real_listdir(path)
+
+    monkeypatch.setattr(memory_api.os, "listdir", counting_listdir)
+    _read(store, caplog)
+    first = listed.count("pact-sessions")
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    _read(store, caplog)
+    assert first == 1, listed
+    assert listed.count("pact-sessions") == 1, listed
+    (config / "pact-sessions" / "another-slug").mkdir()
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    _read(store, caplog)
+    assert listed.count("pact-sessions") == 2, listed

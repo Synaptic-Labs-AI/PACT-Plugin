@@ -2249,6 +2249,7 @@ class TestTheEvidenceCheckScansEachRootOnce:
 
         _fresh_scope_state()
         memory_api._PRUNED_SESSION_INDEX.clear()
+        memory_api._DIR_LISTINGS.clear()
         repo = make_repo(identity_env / "proj", remote=REMOTE)
         monkeypatch.chdir(repo)
         store = identity_env / "store.db"
@@ -2319,7 +2320,8 @@ class TestTheEvidenceCheckScansEachRootOnce:
         """Repeated reads and instances in one detection pass (one command)
         list the sessions root and each slug folder under it exactly once:
         never zero (each session checked on its own) and never again for an
-        unchanged store. The next pass lists them again."""
+        unchanged store. The next pass does not list an unchanged folder
+        again either (`memory_api._listing`); a changed one is listed."""
         import os
 
         _repo, store, slug_dir, _ledger = self._rig(identity_env, monkeypatch)
@@ -2344,7 +2346,11 @@ class TestTheEvidenceCheckScansEachRootOnce:
         assert listed == once, listed
         with memory_api.detection_pass():
             PACTMemory(session_id="s", db_path=store)._read_project_scopes()
-        assert listed == once * 2, listed
+        assert listed == once, listed
+        (root / "another-slug").mkdir()
+        with memory_api.detection_pass():
+            PACTMemory(session_id="s", db_path=store)._read_project_scopes()
+        assert os.path.realpath(str(root)) in listed[len(once):], listed
 
     def test_a_present_entry_is_a_live_folder_not_a_reaped_one(
         self, identity_env, monkeypatch

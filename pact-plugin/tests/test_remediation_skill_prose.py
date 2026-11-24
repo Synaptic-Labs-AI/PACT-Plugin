@@ -702,6 +702,16 @@ class TestLegacyScopeStatesAreDocumented:
             "by every folder of that name."
         ) in body
         assert "when the gate excludes it (its file rows all lie in" not in body
+        assert (
+            "Clones of a local-only repository (its origin is a local path or a "
+            "file:// URL) are separate projects until they share a pin."
+        ) in body
+        assert "show the user the origin path and ask; never choose for them." in body
+        assert (
+            "The session's own folder-name id is the one non-canonical target a "
+            "rekey accepts, and only for its own legacy candidate when its bucket "
+            "allows a save."
+        ) in body
 
     def test_foreign_rows_is_a_documented_unproven_reason(self):
         assert (
@@ -7327,6 +7337,12 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "<name imported from a project module memory_api: UNKNOWN_NAME>"): (
             "database's marker for a pre-change name that could not be read"
+        ),
+        ("call", "<name imported from a project module memory_api: project_identity.OUTCOME_NO_PORTABLE_ORIGIN>"): (
+            "the classifier's no-portable-origin outcome, compared in the shared-pin remedy of a refusal"
+        ),
+        ("call", "<call to no function memory_api: value.lower>"): (
+            "lowercases the origin value read for the shared-pin remedy, to spot a file:// URL"
         ),
         ('call', 'link_memory_to_paths'): (
             'links a saved memory to its file paths in the store' + _AFTER_DETECTION

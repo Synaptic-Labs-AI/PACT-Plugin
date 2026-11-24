@@ -753,7 +753,7 @@ def cmd_get(args, db_path=None):
         # still resolves), and `ProjectIdentityUnresolvedError` is this
         # class's subclass. The envelope and exit code match update/delete;
         # without this clause it would reach main()'s generic handler as
-        # SYSTEM_ERROR exit 2, which sends a caller looking for a bug in the
+        # SYSTEM_ERROR exit 3, which sends a caller looking for a bug in the
         # store instead of at its own project declaration.
         _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     except PrefixTooShortError as exc:
@@ -1104,6 +1104,30 @@ _REKEY_ZERO_COUNTERS = (
 )
 
 
+def _own_folder_name_target(memory, from_id: str, to_id: str) -> bool:
+    """Whether `to_id` is this session's OWN folder-name id and `from_id` its
+    legacy candidate, the one folder-name target a rekey may take.
+
+    A gated folder-name id whose pre-change name differs (a
+    `--separate-git-dir` checkout without a portable origin) has no canonical
+    id to move its old bucket into, so its own id is the target, provided its
+    bucket's verdict allows a save there (`_project_id_for_write` raises
+    otherwise). Any other folder-name target is the misfile this command
+    exists to prevent.
+    """
+    if (
+        to_id != memory.project_id
+        or is_canonical(to_id)
+        or from_id != memory._legacy_project_basename
+        or not memory._folder_name_gated()
+    ):
+        return False
+    try:
+        return memory._project_id_for_write() == to_id
+    except (ProjectScopeDisagreementError, ValueError):
+        return False
+
+
 def _project_id_rekey(args, db_path) -> NoReturn:
     """Move one ENTIRE project bucket to a canonical id, or report the plan.
 
@@ -1161,11 +1185,20 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             exit_code=2,
         )
 
-    if args.to_id and args.to_id != from_id and not is_canonical(args.to_id):
+    store = Path(db_path) if db_path else resolve_db_path()
+    memory = PACTMemory(db_path=db_path)
+    if (
+        args.to_id
+        and args.to_id != from_id
+        and not is_canonical(args.to_id)
+        and not _own_folder_name_target(memory, from_id, args.to_id)
+    ):
         # A SUPPLIED non-canonical target is caller input, refused on the
         # bad-input channel. Moving rows into a basename bucket is the
         # misfile this whole change exists to prevent. A target equal to
-        # --from moves nothing, so it gets the no-op answer instead.
+        # --from moves nothing, so it gets the no-op answer instead. The one
+        # folder-name target allowed is this session's own
+        # (`_own_folder_name_target`).
         _error(
             "INVALID_INPUT",
             escape_for_envelope(
@@ -1175,8 +1208,6 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             exit_code=2,
         )
 
-    store = Path(db_path) if db_path else resolve_db_path()
-    memory = PACTMemory(db_path=db_path)
     target_defaulted = not args.to_id
     to_id = args.to_id or memory.project_id
     legacy_verdict = None
@@ -1197,7 +1228,9 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             else "unverified"
         )
     if target_defaulted:
-        if not to_id or not is_canonical(to_id):
+        if not to_id or not (
+            is_canonical(to_id) or _own_folder_name_target(memory, from_id, to_id)
+        ):
             # No canonical identity resolves, so there is no defensible target:
             # a detected BASENAME is exactly the bucket the move must leave.
             # A PIN IS OFFERED ONLY WHERE ONE CAN WORK: an override file the
@@ -1314,8 +1347,11 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             nullcontext() if args.apply and not noop else read_only_scope(),
             db_connection() as conn,
         ):
+            # A non-canonical target reaching here passed
+            # `_own_folder_name_target` above (explicit or defaulted).
             counters = rekey_project(
-                conn, from_id, to_id, dry_run=not args.apply
+                conn, from_id, to_id, dry_run=not args.apply,
+                own_folder_name_target=not is_canonical(to_id),
             )
     except ValueError as exc:
         # The module's bad-input channel: an id that cannot be bound is

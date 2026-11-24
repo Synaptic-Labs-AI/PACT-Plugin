@@ -164,8 +164,9 @@ class RootIdentity(NamedTuple):
     `decline_reason` is a structured {source, reason, override_path} built by
     `decline_record` for every decline with a named cause (a
     `DECLINE_REASONS` token), so `project-id show` can report it rather than
-    leaving the operator with `declined` and no remedy. `source` names the rung that declined and is
-    filled in by the caller, which is the only layer that knows it. Defaulted
+    leaving the operator with `declined` and no remedy. `source` names the
+    rung that declined and is filled in by the caller, which is the only
+    layer that knows it. Defaulted
     so the declines without a named cause keep their positional shape.
     `detail` is a FIXED sentence (one of this module's `*_DETAIL` constants,
     never user data) naming a narrower cause than the reason token, which the
@@ -415,9 +416,9 @@ def decline_record(
     `.git` file itself. A user's own `git init --separate-git-dir=<dir>/.git`
     layout is recovered by a pin the USER writes after confirming the git
     directory is theirs (the memory skill describes it); no printed text
-    names that path, because a forged pointer has the same shape. `source` is the rung that declined; this module
-    leaves it None, and the resolver in memory_api, the only layer that
-    knows the rung, fills it in.
+    names that path, because a forged pointer has the same shape. `source`
+    is the rung that declined; this module leaves it None, and the resolver
+    in memory_api, the only layer that knows the rung, fills it in.
     """
     if reason not in DECLINE_REASONS:
         raise ValueError(f"unknown decline reason: {reason!r}")

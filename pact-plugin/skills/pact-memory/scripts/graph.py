@@ -803,7 +803,9 @@ def get_related_files_via_memories(
     """
     Get files related through shared memories.
 
-    Two files are related if they are linked to the same memory.
+    Two files are related if they are linked to the same memory, and that
+    memory still exists: a `memory_files` row whose memory is gone (an
+    orphan left by an older store) relates nothing, scoped or not.
 
     Args:
         conn: Active database connection.
@@ -841,8 +843,10 @@ def get_related_files_via_memories(
     # applies to the memory and `get_graph_stats` applies to both endpoints.
     # `project_id=None` keeps this seam's existing meaning: the START resolves
     # through `get_file_ids`, where None names the NULL-project row rather than
-    # "no filter", and both scope clauses are then omitted. An empty scope has
-    # already returned above.
+    # "no filter", and both scope clauses are then omitted. The join on
+    # `memories` still applies then, so an orphan link (its memory gone)
+    # relates nothing on an unscoped call either. An empty scope has already
+    # returned above.
     cursor = conn.execute(
         f"""
         SELECT DISTINCT f.path
