@@ -275,3 +275,20 @@ class TestResolveHandoffField:
     def test_non_dict_and_unknown_field_return_none(self):
         assert resolve_handoff_field("not a handoff", "decisions") is None
         assert resolve_handoff_field({}, "produced") is None
+
+
+
+def test_empty_produced_is_named_apart_from_a_wrong_type():
+    """An empty or whitespace-only produced gets its own reason (write a
+    summary); a non-string gets the type reason (join the items)."""
+    from shared.handoff_schema import validate_handoff_schema
+
+    base = {"produced": "x", "decisions": "d", "uncertainty": "",
+            "integration": "", "open_questions": ""}
+    for empty in ("", "   \n"):
+        reason = validate_handoff_schema({**base, "produced": empty})
+        assert reason is not None and "empty or whitespace-only" in reason
+        assert "got str" not in reason
+    reason = validate_handoff_schema({**base, "produced": ["a", "b"]})
+    assert reason is not None and "got list" in reason
+    assert "empty or whitespace-only" not in reason

@@ -1593,6 +1593,79 @@ def _changed(tool_response: object, field: str) -> bool:
     return True
 
 
+_REVISED_DELIVERABLE = {
+    "handoff_rejection": "handoff",
+    "teachback_rejection": "teachback_submit",
+}
+
+
+def _current_revision(metadata: object) -> int:
+    """The teammate's current revision as the protocol writes it: a
+    positive int (bool excluded); 1 when absent or malformed."""
+    value = metadata.get("revision_number") if isinstance(metadata, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    return 1
+
+
+def revision_advisories(input_data: dict, tool_input: dict, store_team: str) -> list:
+    """Advisories that keep the watcher's revision check honest.
+
+    A lead write recording a rejection must carry the revision being
+    rejected, the teammate's current metadata.revision_number (1 when
+    absent); any other number either holds the revised deliverable past its
+    arrival or fires the watcher on the rejected original. A teammate write
+    that raises metadata.revision_number must carry the revised deliverable
+    in the same write; raised alone, a watcher already waiting fires on the
+    rejected original still on disk."""
+    out: list = []
+    task_id = _norm_id(tool_input.get("taskId"))
+    metadata = tool_input.get("metadata")
+    if not task_id or not isinstance(metadata, dict):
+        return out
+    if not _is_non_lead_frame(input_data):
+        record = read_task_json(task_id, store_team, base_fallback=False)
+        expected = _current_revision(record.get("metadata"))
+        for rejection_key in _REVISED_DELIVERABLE:
+            rejection = metadata.get(rejection_key)
+            if not isinstance(rejection, dict):
+                continue
+            written = rejection.get("revision_number")
+            if written != expected or isinstance(written, bool):
+                out.append((
+                    "rejection_revision_mismatch",
+                    f"PACT task_lifecycle_gate: Task {task_id}'s "
+                    f"{rejection_key} carries revision_number={written!r}, "
+                    f"but the revision being rejected is {expected} (the "
+                    "teammate's current metadata.revision_number, 1 when "
+                    "absent). Rewrite the rejection with "
+                    f"revision_number={expected}: the deliverable watcher "
+                    "holds the rejected deliverable until the teammate's "
+                    "revision number exceeds the rejection's, so a wrong "
+                    "number fires it early or holds the revision past its "
+                    "arrival.",
+                ))
+        return out
+    if "revision_number" not in metadata:
+        return out
+    record = read_task_json(task_id, store_team, base_fallback=False)
+    on_disk = record.get("metadata") if isinstance(record, dict) else None
+    on_disk = on_disk if isinstance(on_disk, dict) else {}
+    for rejection_key, deliverable in _REVISED_DELIVERABLE.items():
+        if isinstance(on_disk.get(rejection_key), dict) and deliverable not in metadata:
+            out.append((
+                "revision_raised_without_deliverable",
+                f"PACT task_lifecycle_gate: this write raises Task {task_id}'s "
+                f"metadata.revision_number but does not carry the revised "
+                f"metadata.{deliverable}. Re-send the full revised "
+                f"{deliverable} object and the raised revision_number in ONE "
+                "TaskUpdate: a watcher waiting on the revision fires as "
+                "soon as the number rises, and would read the rejected "
+                "original still on disk.",
+            ))
+    return out
+
+
 def _newly_completed(tool_response: object) -> bool:
     """False only when the harness's statusChange shows this completion
     did not move the task into completed (it was already completed). A
@@ -2831,6 +2904,14 @@ def evaluate_lifecycle(
             _emit_per_write_snapshot(
                 team_name, task_id, incoming_metadata, task=task_a
             )
+
+    # Revision-number coherence: the watcher holds a rejected deliverable
+    # until metadata.revision_number exceeds the rejection's, so both sides
+    # of that comparison must be written as the protocol says.
+    if tool_name == "TaskUpdate" and team_name:
+        advisories.extend(
+            revision_advisories(input_data, tool_input, team_name)
+        )
 
     # Structural wait arming: one invariant, evaluated by arm_candidates at
     # the writes that can make a task ready. ADVISORY ONLY — the lead

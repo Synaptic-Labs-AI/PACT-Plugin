@@ -5964,3 +5964,72 @@ def test_no_arm_supply_on_teachback_acceptance_without_blocks(
     assert not any(rule == "wait_arm_supply" for rule, _ in advisories), (
         f"expected no arm advisory without a blocked task, got: {advisories}"
     )
+
+
+# --- revision-number coherence advisories -----------------------------------
+
+def _rev_rules(tmp_path, monkeypatch, pact_context, disk_metadata, metadata, agent_type=None):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(tmp_path, "test-team", "9", subject="implement api",
+                 status="in_progress", owner="backend-coder", metadata=disk_metadata)
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "9", "metadata": metadata},
+        "tool_response": {"success": True, "taskId": "9", "updatedFields": ["metadata"]},
+    }
+    if agent_type:
+        payload["agent_type"] = agent_type
+    return [rule for rule, _msg in tlg.evaluate_lifecycle(payload)]
+
+
+@pytest.mark.parametrize(
+    "disk_revision,written,fires",
+    [
+        (None, 1, False),   # first rejection: absent counts as 1
+        (None, 2, True),
+        (2, 2, False),      # rejecting revision 2
+        (2, 1, True),       # stale number: would fire on the original
+        (2, 3, True),       # next number: would hold the revision
+        (None, True, True), # bool is not a revision number
+        (None, "1", True),
+    ],
+)
+@pytest.mark.parametrize("rejection_key", ["handoff_rejection", "teachback_rejection"])
+def test_rejection_must_carry_the_revision_being_rejected(
+    tmp_path, monkeypatch, pact_context, disk_revision, written, fires, rejection_key
+):
+    disk = {} if disk_revision is None else {"revision_number": disk_revision}
+    rules = _rev_rules(tmp_path, monkeypatch, pact_context, disk, {
+        rejection_key: {"reason": "r", "corrections": ["c"],
+                        "since": "2026-11-24T00:00:00+00:00", "revision_number": written},
+    })
+    assert ("rejection_revision_mismatch" in rules) is fires, rules
+
+
+@pytest.mark.parametrize(
+    "rejection_key,deliverable",
+    [("handoff_rejection", "handoff"), ("teachback_rejection", "teachback_submit")],
+)
+def test_revision_raised_without_the_deliverable_is_flagged(
+    tmp_path, monkeypatch, pact_context, rejection_key, deliverable
+):
+    """A teammate raising metadata.revision_number must carry the revised
+    deliverable in the same write; raised alone it would fire a waiting
+    watcher on the rejected original."""
+    disk = {rejection_key: {"revision_number": 1}, deliverable: {"produced": "v1"}}
+    teammate = "pact-backend-coder"
+    alone = _rev_rules(tmp_path, monkeypatch, pact_context, disk,
+                       {"revision_number": 2}, agent_type=teammate)
+    assert "revision_raised_without_deliverable" in alone
+    together = _rev_rules(tmp_path, monkeypatch, pact_context, disk,
+                          {"revision_number": 2, deliverable: {"produced": "v2"}},
+                          agent_type=teammate)
+    assert "revision_raised_without_deliverable" not in together
+    no_rejection = _rev_rules(tmp_path, monkeypatch, pact_context,
+                              {deliverable: {"produced": "v1"}},
+                              {"revision_number": 2}, agent_type=teammate)
+    assert "revision_raised_without_deliverable" not in no_rejection
+    lead_write = _rev_rules(tmp_path, monkeypatch, pact_context, disk,
+                            {"revision_number": 2})
+    assert "revision_raised_without_deliverable" not in lead_write

@@ -151,7 +151,14 @@ def validate_handoff_schema(handoff: object) -> str | None:
     missing = [f for f in HANDOFF_REQUIRED_FIELDS if f not in handoff]
     if not missing:
         produced = handoff.get("produced")
-        if not isinstance(produced, str) or not produced.strip():
+        if isinstance(produced, str) and not produced.strip():
+            return (
+                "metadata.handoff `produced` is empty or whitespace-only — "
+                "write a one-paragraph summary of what was produced; the "
+                "deliverable watcher reads an empty `produced` as ABSENT "
+                "and would burn its deadline to a false EXPIRED"
+            )
+        if not isinstance(produced, str):
             return (
                 "metadata.handoff `produced` must be a non-empty string, "
                 f"got {type(produced).__name__} — the deliverable watcher "
