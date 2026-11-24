@@ -607,8 +607,9 @@ def test_tier3_outlet_denies_instant_form_every_time(
 ):
     """The retired instant-form allowance is gone: at computed tier 3 an
     instant form denies EVERY time, and from the third call the reason
-    carries the PACT-WAIT-OUTLET arm command (watcher path, --team/--task
-    placeholders, the background-launch instruction). Attempt counts keep
+    carries the PACT-WAIT-OUTLET arm command (watcher path, the resolved
+    team substituted, the --task placeholder, the background-launch
+    instruction). Attempt counts keep
     climbing through the denials so the gradient never regresses."""
     _seed_team_registry(tmp_path, "s-grad", "backend-coder@tm-team")
     _seed_team_config(tmp_path)
@@ -620,7 +621,8 @@ def test_tier3_outlet_denies_instant_form_every_time(
         assert "PACT-WAIT-OUTLET" in reason
         assert "pact_wait.py" in reason
         assert "run_in_background" in reason
-        assert "--team <team-name>" in reason and "--task <task-id>" in reason
+        assert "--team tm-team" in reason and "--task <task-id>" in reason
+        assert "<team-name>" not in reason
     assert (
         "denied 5 times this session (5 filler calls in total)"
         in _deny_reason(results[4][1])
@@ -808,11 +810,10 @@ _TIER3_REASON_PIN = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
     "re-filling — end this wait structurally instead. FIRST arm the "
-    "deliverable watcher with ONE `Bash` call (`run_in_background: "
-    "true`), substituting your team name and the task id you are "
-    "waiting on:\n"
-    'python3 "{watcher}" --team <team-name> --task <task-id> '
-    "--predicate handoff --deadline 900\n"
+    "structural watcher with ONE `Bash` call (`run_in_background: "
+    "true`), substituting the id of the task you are waiting on for "
+    "<task-id>:\n"
+    "{command}\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
     "a teachback submission). A teammate's handoff or teachback "
     "submission is precisely the deliverable to arm on, even though you "
@@ -908,34 +909,22 @@ def test_outlet_reason_pinned_verbatim():
     assert wait_filler_gate._TIER3_REASON == _TIER3_REASON_PIN
 
 
-# The TEAMMATE tier-3 outlet, verbatim — the role branch of the same
-# mechanism. A teammate's background completion does NOT start their next
-# turn (in-process teammates collect results; nothing wakes them), so the
-# lead text's "re-invokes you" promise is false for them: their branch
-# carries the arm command TOO, but the guidance is the teammate-side one —
-# SET metadata.intentional_wait naming the watcher; messages from the lead
-# wake them.
+# The IN-PROCESS TEAMMATE tier-3 outlet, verbatim — the role branch of the
+# same mechanism. An in-process teammate's background completion does NOT
+# start their next turn, so a watcher would wake no one: the branch carries
+# NO arm command, only SET metadata.intentional_wait naming the lead;
+# messages from the lead wake them.
 _TIER3_TEAMMATE_REASON_PIN = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
-    "re-filling — end this wait structurally instead. As a teammate, "
-    "this watcher's completion will NOT wake you — messages from the "
-    "lead will. FIRST arm the deliverable watcher with ONE `Bash` call "
-    "(`run_in_background: true`), substituting your team name and the "
-    "task id you are waiting on:\n"
-    'python3 "{watcher}" --team <team-name> --task <task-id> '
-    "--predicate handoff --deadline 900\n"
-    "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). If the event you await is NOT a "
-    "deliverable you can write — for example the lead's review or "
-    "action — do NOT arm: instead SET metadata.intentional_wait on the "
-    "task the wait covers with `expected_resolver` naming the lead, "
-    "and end your turn — a message or the lead's own wake resolves it. "
-    "If you DID arm: SET metadata.intentional_wait on every task the "
-    "wait covers — `reason`, `expected_resolver` and `since` are the "
-    "keys validate_wait requires — `expected_resolver` naming the "
-    "lead; name the watcher in `reason` — and end your turn with no "
-    "further tool calls — the lead's wake resumes you."
+    "re-filling — end this wait structurally instead. As an in-process "
+    "teammate, a background watcher's completion will NOT wake you — "
+    "the lead's message will — so do NOT arm the structural watcher. "
+    "SET metadata.intentional_wait on every task the wait covers — "
+    "`reason`, `expected_resolver` and `since` are the keys "
+    "validate_wait requires — with `expected_resolver` naming the "
+    "lead, and end the turn with no further tool calls; the lead's "
+    "message resumes you."
 )
 
 
@@ -943,9 +932,9 @@ def test_tier3_teammate_text_names_the_wait_keys():
     """The in-process teammate text names the three keys validate_wait
     requires (shared/intentional_wait.py is the SSOT): a literal follower
     who copies the text verbatim must not write a malformed wait and
-    re-enter the filler loop. It also carries the neither-predicate
-    alternative route — "do NOT arm" with `expected_resolver` naming the
-    lead — for waits no shipped predicate can witness (cold round 6)."""
+    re-enter the filler loop. A background watcher would wake no one for
+    an in-process teammate, so the text forbids arming and carries no arm
+    command."""
     import wait_filler_gate
 
     for key in ("reason", "expected_resolver", "since"):
@@ -957,13 +946,11 @@ def test_tier3_teammate_text_names_the_wait_keys():
     assert "`expected_resolver` naming the lead" in (
         wait_filler_gate._TIER3_TEAMMATE_REASON
     )
-    assert "name the watcher in `reason`" in (
+    assert "do NOT arm the structural watcher" in (
         wait_filler_gate._TIER3_TEAMMATE_REASON
     )
-    assert "do NOT arm" in wait_filler_gate._TIER3_TEAMMATE_REASON
-    assert "instead SET metadata.intentional_wait" in (
-        wait_filler_gate._TIER3_TEAMMATE_REASON
-    )
+    assert "{command}" not in wait_filler_gate._TIER3_TEAMMATE_REASON
+    assert "pact_wait" not in wait_filler_gate._TIER3_TEAMMATE_REASON
     assert "do NOT arm" in (
         wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
     )
@@ -978,20 +965,21 @@ _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN = (
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
     "re-filling — end this wait structurally instead. As a "
     "separate-process teammate, this watcher's completion notice WILL "
-    "start your next turn. FIRST arm the deliverable watcher with ONE "
-    "`Bash` call (`run_in_background: true`), substituting your team "
-    "name and the task id you are waiting on:\n"
-    'python3 "{watcher}" --team <team-name> --task <task-id> '
-    "--predicate handoff --deadline 900\n"
+    "start your next turn. FIRST arm the structural watcher with ONE "
+    "`Bash` call (`run_in_background: true`), substituting the id "
+    "of the task you are waiting on for <task-id>:\n"
+    "{command}\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). If the event you await is NOT a "
-    "deliverable you can write — for example the lead's review or "
-    "action — do NOT arm: just end your turn, and a message or your "
-    "next turn boundary resolves it. If you DID arm: end your turn "
-    "with no further tool calls — the watcher exits 0 when the "
-    "deliverable lands, 3 when the deadline passes without it, 4 when "
-    "it cannot watch at all — and its completion notice starts your "
-    "next turn."
+    "a teachback submission). Another teammate's handoff or teachback "
+    "submission is precisely the deliverable to arm on, even though you "
+    "cannot write it. If the event you await is something only YOU can "
+    "write, or the lead's review or action, do NOT arm: instead SET "
+    "metadata.intentional_wait with `expected_resolver` naming the "
+    "resolver, and end the turn; a message or that resolver's own wake "
+    "resolves it. If you DID arm: end the turn with no further tool "
+    "calls — the watcher exits 0 when the deliverable lands, 3 when the "
+    "deadline passes without it, 4 when it cannot watch at all — and "
+    "its completion notice starts your next turn."
 )
 
 
@@ -1047,36 +1035,25 @@ def test_tier3_subagent_text_pinned_verbatim():
     import wait_filler_gate
 
     assert wait_filler_gate._TIER3_SUBAGENT_REASON == _TIER3_SUBAGENT_REASON_PIN
-    # The neither-predicate alternative, adapted to the subagent's wake
-    # model (cold round 12): a subagent cannot SET intentional_wait on team
-    # tasks, so the honest route is report-and-end, not the teammates'
-    # intentional_wait route.
-    assert "do NOT arm" in wait_filler_gate._TIER3_SUBAGENT_REASON
+    # A watcher would wake no one for a subagent: no arm command at all.
+    assert "Do NOT arm the structural watcher" in (
+        wait_filler_gate._TIER3_SUBAGENT_REASON
+    )
+    assert "{command}" not in wait_filler_gate._TIER3_SUBAGENT_REASON
 
 
 # The Agent-tool subagent's own text, verbatim — the role branch's fourth
 # arm. A subagent's turn end returns its report to the caller: nothing wakes
-# it, so the text carries NO wake promise of any kind — only the arm command
-# and the completion phrasing.
+# it, so the text carries NO arm command and NO wake promise — only the
+# completion phrasing.
 _TIER3_SUBAGENT_REASON_PIN = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
     "re-filling — end this wait structurally instead. As an Agent-tool "
     "subagent, nothing wakes you when your turn ends: your final report "
-    "is your completion, and the lead reads it when it returns. FIRST "
-    "arm the deliverable watcher with ONE `Bash` call "
-    "(`run_in_background: true`), substituting your team name and the "
-    "task id you are waiting on:\n"
-    'python3 "{watcher}" --team <team-name> --task <task-id> '
-    "--predicate handoff --deadline 900\n"
-    "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). If the event you await is not a "
-    "deliverable you can write — do NOT arm — your completion report is "
-    "the lead's information; end your turn. If you DID arm: end your "
-    "turn with no further tool calls — the watcher exits 0 when the "
-    "deliverable lands, 3 when the deadline passes without it, 4 when "
-    "it cannot watch at all — and put what the lead needs in your "
-    "final report."
+    "is your completion, and the lead reads it when it returns. Do NOT "
+    "arm the structural watcher: end the turn with no further tool "
+    "calls and put what the lead needs in your final report."
 )
 
 
@@ -1111,8 +1088,8 @@ def test_tier3_agent_tool_subagent_gets_completion_report_text(
 ):
     """An Agent-tool subagent is neither teammate: its subagent-shaped
     agent_id refuses member resolution — the sibling launch advisory's own
-    rule, via the same teammate_launch_name — so it gets its OWN text: the
-    arm command plus the completion phrasing, and NO wake promise (nothing
+    rule, via the same teammate_launch_name — so it gets its OWN text: no
+    arm command, the completion phrasing, and NO wake promise (nothing
     wakes a subagent whose turn ends; its final report is its completion)."""
     _seed_team_registry(tmp_path, "s-sub-outlet", "backend-coder@tm-team")
     _seed_team_config(tmp_path)
@@ -1128,7 +1105,7 @@ def test_tier3_agent_tool_subagent_gets_completion_report_text(
     assert [c for c, _p, _e in results] == [2, 2, 2]
     reason = _deny_reason(results[2][1])
     assert "PACT-WAIT-OUTLET" in reason
-    assert "pact_wait.py" in reason
+    assert "pact_wait.py" not in reason
     assert "your final report is your completion" in reason
     assert "re-invokes" not in reason
     assert "will NOT wake you" not in reason
@@ -1180,20 +1157,20 @@ def test_tier3_outlet_three_way_role_branch(tmp_path, monkeypatch, capsys):
     sp_reason = _deny_reason(results[2][1])
     assert "PACT-WAIT-OUTLET" in sp_reason
     assert "pact_wait.py" in sp_reason
-    assert "--team <team-name>" in sp_reason
+    assert "--team tm-team" in sp_reason
+    assert "<team-name>" not in sp_reason
     assert "starts your next turn" in sp_reason
     assert "will NOT wake you" not in sp_reason
-    assert "metadata.intentional_wait" not in sp_reason
 
 
 def test_tier3_outlet_branches_on_role(tmp_path, monkeypatch, capsys):
     """The tier-3 text is role-branched: a TEAMMATE frame (agent_type
-    naming a non-lead actor) gets the teammate guidance — intentional_wait
-    naming the watcher, the lead's messages as the wake — alongside the
-    SAME arm command and NEVER the lead-only completion-wakes claim; a
-    lead frame gets the lead text. Same gradient, same deny verdict, both
-    roles. Both arms resolve a team through the seeded registry so the
-    command is on for both (the no-team case is pinned separately)."""
+    naming a non-lead actor) gets the in-process guidance — intentional_wait
+    naming the lead, the lead's messages as the wake — with NO arm command
+    and NEVER the lead-only completion-wakes claim; a lead frame gets the
+    lead text with the arm command and the resolved team. Same gradient,
+    same deny verdict, both roles. Both arms resolve a team through the
+    seeded registry (the no-team case is pinned separately)."""
     _seed_team_registry(tmp_path, "s-mate-outlet", "backend-coder@tm-team")
     _seed_team_registry(tmp_path, "s-lead-outlet", "backend-coder@tm-team")
     _seed_team_config(tmp_path)
@@ -1204,8 +1181,7 @@ def test_tier3_outlet_branches_on_role(tmp_path, monkeypatch, capsys):
     assert [c for c, _p, _e in teammate] == [2, 2, 2]
     mate_reason = _deny_reason(teammate[2][1])
     assert "PACT-WAIT-OUTLET" in mate_reason
-    assert "pact_wait.py" in mate_reason
-    assert "--team <team-name>" in mate_reason
+    assert "pact_wait.py" not in mate_reason
     assert "metadata.intentional_wait" in mate_reason
     assert "will NOT wake you" in mate_reason
     assert "re-invokes you" not in mate_reason
@@ -1216,6 +1192,8 @@ def test_tier3_outlet_branches_on_role(tmp_path, monkeypatch, capsys):
     )
     lead_reason = _deny_reason(lead[2][1])
     assert "PACT-WAIT-OUTLET" in lead_reason
+    assert "pact_wait.py" in lead_reason
+    assert "--team tm-team" in lead_reason
     assert "re-invokes you" in lead_reason
     # The lead text DOES name metadata.intentional_wait (the do-NOT-arm
     # alternative, cold round 8) — the mate discriminator is the

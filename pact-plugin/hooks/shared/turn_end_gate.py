@@ -24,9 +24,10 @@ wait-loop it replaces. An IN-PROCESS teammate is deliberately NOT exempt:
 its block text is the one that says the completion notice will NOT wake
 them, so its watcher stays accountable and the remedy stays the
 intentional_wait coverage path. Classified by an anchored command shape
-(`is_wait_watcher_command`): a lookalike that merely mentions the watcher
-name, or a partial invocation missing the arm flags, still counts as a
-job to account for.
+(`is_wait_watcher_command`, defined beside the arm-command builder in
+shared/wait_target.py): a lookalike that merely mentions the watcher name,
+a partial invocation missing the arm flags, or a command composed onto the
+watcher still counts as a job to account for.
 """
 
 from __future__ import annotations
@@ -45,6 +46,9 @@ from .subagent_meta import META_MAX_BYTES, subagent_metadata  # noqa: F401  # re
 from .paths import get_claude_config_dir
 from .session_journal import append_event_checked, make_event
 from .task_utils import iter_team_task_jsons
+# Re-exported: the watcher command shape lives beside the arm-command
+# builder, so the producer and this consumer cannot drift apart.
+from .wait_target import is_wait_watcher_command  # noqa: F401
 
 TURN_END_EVENTS = ("Stop", "SubagentStop")
 TRACE_EVENT = "background_stop_gate"
@@ -68,51 +72,14 @@ JOB_LABEL_MAX_CHARS = 80
 
 _UNPRINTABLE = re.compile(r"[\x00-\x1f\x7f]+")
 
-# The command shape of an armed structural wait watcher: the pact_wait.py
-# entrypoint with the FULL arm flag set (--team/--task/--predicate/--deadline,
-# the surface its own CLI makes required). ANCHORED at the command start with
-# a closed prefix set (optional `cd ... &&`, env assignments, a python3
-# interpreter, a path-token script name), so a command that merely MENTIONS
-# the watcher (`echo "..."`, a compose string) or runs it PARTIALLY (missing
-# a required flag, reordered flags) does not match and still counts as a job
-# the ending frame must account for. The path token admits a QUOTED path
-# containing any non-quote characters, and its UNQUOTED alternative admits
-# exactly shlex.quote's no-op set — the emitted command renders the path
-# unquoted precisely when shlex.quote would, and the classifier admits that
-# same set, so a live install under a spaced or special-char path must
-# classify or its own scheduled wake would block it. Match-order and
-# composition strictness lean deliberately toward over-block: a watcher the
-# carve-out misses only ever costs one advisory block, while a non-watcher
-# the carve-out exempts would acquit the frame of a real unowned job — a
-# spaced path left UNQUOTED beyond that no-op set still counts (the shell
-# word-splits it, so it cannot be the armed command).
-_PACT_WAIT_SHAPE = re.compile(
-    r"\A\s*"
-    r"(?:cd\s+[^\n&]+&&\s*)?"
-    r"(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*"
-    r"(?:python3(?:\.\d+)?\s+)?"
-    r"(?:\"[^\"]*pact_wait\.py\"|'[^']*pact_wait\.py'"
-    r"|[A-Za-z0-9_@%+=:,./-]*pact_wait\.py)\s+"
-    r"--team\s+\S+\s+--task\s+\S+\s+"
-    r"--predicate\s+\S+\s+--deadline\s+\S+\s*\Z"
-)
-
-
-def is_wait_watcher_command(command: Any) -> bool:
-    """True iff a running job's command IS an armed pact-wait watcher —
-    the arming frame's own scheduled wake, exempt from the shell-job block
-    for the roles whose completion notice starts their next turn (see the
-    module docstring's CARVE-OUT). False for anything else, including a
-    lookalike mention or a partial invocation."""
-    return isinstance(command, str) and bool(_PACT_WAIT_SHAPE.match(command))
-
 LEAD_BLOCK_TEXT = (
     "Background work is still running in this session and nothing is "
     "scheduled to wake you: {jobs}. Its completion notice usually starts your "
     "next turn, but a notice can go undelivered. Before ending this turn, do "
     "one of these: wait for it to finish, schedule a wake with CronCreate, or "
     "stop it if it is no longer needed. If a job listed here belongs to a "
-    "teammate, end the turn again. Each job is reported once."
+    "teammate, or is a pact-wait watcher you armed (its completion is your "
+    "scheduled wake), end the turn again. Each job is reported once."
 )
 TEAMMATE_BLOCK_TEXT = (
     "You are ending your turn while background work you started is still "

@@ -5,13 +5,13 @@ ablation tables in test_wait_filler_gate.py stay as-executed records
 untouched by later additions (this file adds no row to any dated table).
 
 Seams and prose bound here:
-- emission <-> carve-out coherence: the arm command the lifecycle gate's
-  advisory and the filler gate's tier-3 outlet emit MUST satisfy the
-  turn-end carve-out's watcher shape (`is_wait_watcher_command`), or the
-  lead gets blocked over its own scheduled wake — the exact loop the
-  mechanism exists to remove. The carve-out module's fixture copies the
-  emitted shape by hand; these arms import BOTH ends so the two surfaces
-  cannot drift apart silently.
+- emission <-> carve-out coherence: every arm command an emitter produces
+  (the lifecycle gate's advisory and each arming tier-3 text, built by
+  wait_target.arm_command) MUST satisfy the turn-end carve-out's watcher
+  shape (`is_wait_watcher_command`) for any install path and team name,
+  or the arming frame gets blocked over its own scheduled wake — the exact
+  loop the mechanism exists to remove — and the same command with a
+  composed tail must NOT satisfy it.
 - emission <-> registry coherence: every `--predicate` token either surface
   emits must name a live `wait_target.PREDICATES` entry, or a correctly
   shaped arm would exit 4 TERMINAL on delivery of a real wait.
@@ -84,20 +84,89 @@ def test_emitted_advisory_command_satisfies_the_carveout_shape():
     assert is_wait_watcher_command(commands[0]), commands[0]
 
 
-def test_outlet_template_substitutes_to_the_carveout_shape():
-    """The tier-3 outlet's template command, with its placeholders filled
-    the way the text instructs (team name and task id substituted), is
-    also carve-out-exempt: a lead who follows the outlet's instructions
-    verbatim must not be blocked over the resulting watcher."""
-    template_lines = _command_lines(wait_filler_gate._TIER3_REASON)
-    assert len(template_lines) == 1, wait_filler_gate._TIER3_REASON
-    command = (
-        template_lines[0]
-        .format(watcher=wait_filler_gate._WATCHER_PATH)
-        .replace("<team-name>", "team-x")
-        .replace("<task-id>", "12")
+# Install paths and team names every emitter must survive: the shipped
+# layout, a spaced home, an apostrophe, a shell metacharacter, a quote.
+_INSTALL_PATHS = [
+    wait_target.WATCHER_PATH,
+    "/home/u/.claude/plugins/cache/pact-plugin/PACT/4.8.37/hooks/pact_wait.py",
+    "/Users/Jane Doe/.claude/plugins/cache/pact-plugin/hooks/pact_wait.py",
+    "/opt/o'brien/hooks/pact_wait.py",
+    "/opt/a;b$c/hooks/pact_wait.py",
+    '/opt/"q"/hooks/pact_wait.py',
+]
+_TEAMS = ["session-ecae8e2c", "team x", "o'k"]
+
+# The tier-3 texts that carry an arm command, and the ones that must not.
+_ARMING_TIER3 = ["_TIER3_REASON", "_TIER3_TEAMMATE_SEPARATE_PROCESS_REASON"]
+_NON_ARMING_TIER3 = [
+    "_TIER3_TEAMMATE_REASON",
+    "_TIER3_SUBAGENT_REASON",
+    "_TIER3_NO_TEAM_REASON",
+]
+
+
+def _emitted_commands(watcher, team):
+    """Every command line an emitter produces for this install path and
+    team, placeholders substituted the way the texts instruct."""
+    commands = []
+    _rule, message = tlg._wait_arm_advisory("teachback accepted", team, "12", "handoff")
+    advisory = _command_lines(message)
+    assert len(advisory) == 1, message
+    commands.append(
+        advisory[0].replace(
+            shlex.quote(wait_target.WATCHER_PATH), shlex.quote(watcher), 1
+        )
     )
-    assert is_wait_watcher_command(command), command
+    command = wait_target.arm_command(
+        team, wait_target.TASK_ID_PLACEHOLDER, "handoff",
+        wait_filler_gate._TIER3_DEADLINE, watcher=watcher,
+    )
+    for name in _ARMING_TIER3:
+        text = getattr(wait_filler_gate, name).format(
+            command=command, count=3, total=3
+        )
+        lines = _command_lines(text)
+        assert len(lines) == 1, (name, text)
+        commands.append(lines[0].replace(wait_target.TASK_ID_PLACEHOLDER, "12"))
+    return commands
+
+
+@pytest.mark.parametrize("watcher", _INSTALL_PATHS)
+@pytest.mark.parametrize("team", _TEAMS)
+def test_every_emitted_command_satisfies_the_carveout(watcher, team):
+    """Every emitter (the lifecycle advisory and each arming tier-3 text),
+    for any install path and team name, produces a command the turn-end
+    carve-out classifies as the watcher once the task id is substituted —
+    or the arming frame is blocked over its own scheduled wake."""
+    for command in _emitted_commands(watcher, team):
+        assert is_wait_watcher_command(command), command
+
+
+@pytest.mark.parametrize("watcher", _INSTALL_PATHS)
+@pytest.mark.parametrize(
+    "tail", ["; make", ";make", " && make", "&&make", " | tee x", " & sleep 1"]
+)
+def test_every_emitted_command_with_a_composed_tail_counts(watcher, tail):
+    """The same emitted commands with any command composed onto them are
+    not the bare wake, so the carve-out must not exempt them."""
+    for command in _emitted_commands(watcher, "session-ecae8e2c"):
+        assert not is_wait_watcher_command(command + tail), command + tail
+
+
+def test_emitters_use_the_one_builder():
+    """The arming tier-3 texts embed the builder's output (a {command}
+    slot, no hand-written command), and the texts for roles a watcher
+    cannot wake carry no command at all."""
+    for name in _ARMING_TIER3:
+        text = getattr(wait_filler_gate, name)
+        assert "{command}" in text, name
+        assert "pact_wait.py" not in text, name
+    for name in _NON_ARMING_TIER3:
+        text = getattr(wait_filler_gate, name)
+        assert "{command}" not in text, name
+        assert "pact_wait" not in text, name
+    assert not hasattr(tlg, "_WAIT_WATCHER_PATH")
+    assert not hasattr(wait_filler_gate, "_WATCHER_PATH")
 
 
 def test_every_emitted_predicate_names_a_live_registry_entry():
@@ -110,7 +179,10 @@ def test_every_emitted_predicate_names_a_live_registry_entry():
     site (observed: the first draft of this arm did exactly that)."""
     _rule, message = _advisory()
     emitted = set(re.findall(r"--predicate\s+(\S+)", message))
-    emitted |= set(re.findall(r"--predicate\s+(\S+)", wait_filler_gate._TIER3_REASON))
+    emitted |= set(
+        re.findall(r"--predicate\s+(\S+)", wait_filler_gate._tier3_arm_command("t"))
+    )
+    emitted |= set(re.findall(r"--predicate\s+(\w+)", wait_filler_gate._TIER3_REASON))
     assert emitted, "no predicate tokens found on either emission surface"
     assert emitted <= set(wait_target.PREDICATES), emitted - set(
         wait_target.PREDICATES
@@ -226,7 +298,7 @@ def test_advisory_message_pinned_verbatim():
         "wait on a teammate deliverable. Arm the structural wait watcher "
         "BEFORE you end this turn, with ONE `Bash` call (`run_in_background: "
         "true`):\n"
-        f"python3 {tlg._WAIT_WATCHER_PATH} --team team-x "
+        f"python3 {wait_target.WATCHER_PATH} --team team-x "
         "--task 12 --predicate handoff --deadline 1800\n"
         "Its completion notification re-invokes you: exit 0 deliverable "
         "landed, 3 deadline expired with it absent, 4 could not watch at "
@@ -245,9 +317,10 @@ def test_deadline_defaults_pinned_on_both_surfaces():
     ruled intended. The pair pin freezes BOTH numbers so neither surface
     silently adopts the other's value."""
     _rule, message = _advisory()
+    tier3 = wait_filler_gate._tier3_arm_command("t")
+    assert wait_filler_gate._TIER3_DEADLINE == 900
     assert "--deadline 1800" in message
-    assert "--deadline 900" in wait_filler_gate._TIER3_REASON
-    assert "--deadline 1800" not in wait_filler_gate._TIER3_REASON
+    assert tier3.endswith("--deadline 900")
     assert "--deadline 900" not in message
 
 

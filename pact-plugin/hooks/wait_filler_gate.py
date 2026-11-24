@@ -42,17 +42,19 @@ A session-total saturation boost (`total > 6`) escalates command-walking
 on the POST-NORMALIZATION command only — `description` is never read (a
 description-keyed counter resets when the model varies the description).
 
-OUTLET: at computed tier 3 the denial's reason carries a ready-to-run arm
-command for the structural wait watcher (hooks/pact_wait.py), ROLE-BRANCHED:
-a lead frame gets the arm command plus the completion-wakes text; a
-teammate frame gets the SAME arm command plus the teammate-side guidance
-(SET metadata.intentional_wait naming the watcher — an in-process
-teammate's background completion does NOT wake them; messages from the
-lead do). The waiting agent launches the watcher with ONE background
-`Bash` frame (`run_in_background: true`) BEFORE ending its turn. The
-tier-3 verdict is ALWAYS a denial: no hook can end a turn, so an allowed
-inert no-op only ever manufactured the next one — the productive terminal
-act is arming the watcher, then ending the turn.
+OUTLET: at computed tier 3 the denial's reason ends the wait structurally,
+ROLE-BRANCHED. A lead or a separate-process teammate — whose background
+completion starts their next turn — gets a ready-to-run arm command for
+the structural wait watcher (hooks/pact_wait.py, built by
+shared/wait_target.arm_command with the resolved team substituted) and
+launches it with ONE background `Bash` frame (`run_in_background: true`)
+before ending the turn. An in-process teammate, whose background
+completion wakes no one, gets no arm command: it SETs
+metadata.intentional_wait naming the lead and ends the turn. An Agent-tool
+subagent gets no arm command: it ends the turn and reports. A frame with
+no PACT team gets the no-command text. The tier-3 verdict is ALWAYS a
+denial: no hook can end a turn, so an allowed inert no-op only ever
+manufactured the next one.
 
 STATE: one JSON file per session_id at
 <CLAUDE_CONFIG_DIR>/pact-filler-state/<session_id>.json, agent_type
@@ -126,12 +128,9 @@ _MAX_AGENT_SECTIONS = 32
 _FILLER_STATE_DIRNAME = "pact-filler-state"
 _SAFE_SESSION_ID = re.compile(r"[A-Za-z0-9_-]+")
 
-# The structural wait watcher this hook arms the waiting agent with at
-# tier 3: the sibling entrypoint next to this file, so the path in the
-# denial reason is always the live install's real one.
-_WATCHER_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "pact_wait.py"
-)
+# The tier-3 arm command's deadline default (seconds); the agent edits it
+# when the expected wait differs.
+_TIER3_DEADLINE = 900
 
 _TIER2_SUFFIX = (
     " This exact call has now been denied {count} time{plural} this "
@@ -141,11 +140,10 @@ _TIER3_REASON = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
     "re-filling — end this wait structurally instead. FIRST arm the "
-    "deliverable watcher with ONE `Bash` call (`run_in_background: "
-    "true`), substituting your team name and the task id you are "
-    "waiting on:\n"
-    'python3 "{watcher}" --team <team-name> --task <task-id> '
-    "--predicate handoff --deadline 900\n"
+    "structural watcher with ONE `Bash` call (`run_in_background: "
+    "true`), substituting the id of the task you are waiting on for "
+    "<task-id>:\n"
+    "{command}\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
     "a teachback submission). A teammate's handoff or teachback "
     "submission is precisely the deliverable to arm on, even though you "
@@ -158,86 +156,59 @@ _TIER3_REASON = (
     "lands, 3 when the deadline passes without it, 4 when it cannot "
     "watch at all — and its completion notification re-invokes you."
 )
-# The role branch of the same outlet. An in-process teammate's background
-# completion does NOT start their next turn — they collect results; only
-# messages from the lead wake them — so the lead text's "re-invokes you"
-# claim would be false for the population most likely to hit filler-lock.
-# The teammate branch carries the SAME arm command (arming stays correct:
-# the turn-end carve-out and the intentional_wait coverage make the armed
-# watcher safe to leave running) plus the teammate-side guidance.
+# The in-process teammate's text. Their background completion does NOT
+# start their next turn — only messages from the lead wake them — so a
+# watcher would wake no one: they get NO arm command, only the
+# intentional_wait step that tells the lead to wake them.
 _TIER3_TEAMMATE_REASON = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
-    "re-filling — end this wait structurally instead. As a teammate, "
-    "this watcher's completion will NOT wake you — messages from the "
-    "lead will. FIRST arm the deliverable watcher with ONE `Bash` call "
-    "(`run_in_background: true`), substituting your team name and the "
-    "task id you are waiting on:\n"
-    'python3 "{watcher}" --team <team-name> --task <task-id> '
-    "--predicate handoff --deadline 900\n"
-    "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). If the event you await is NOT a "
-    "deliverable you can write — for example the lead's review or "
-    "action — do NOT arm: instead SET metadata.intentional_wait on the "
-    "task the wait covers with `expected_resolver` naming the lead, "
-    "and end your turn — a message or the lead's own wake resolves it. "
-    "If you DID arm: SET metadata.intentional_wait on every task the "
-    "wait covers — `reason`, `expected_resolver` and `since` are the "
-    "keys validate_wait requires — `expected_resolver` naming the "
-    "lead; name the watcher in `reason` — and end your turn with no "
-    "further tool calls — the lead's wake resumes you."
+    "re-filling — end this wait structurally instead. As an in-process "
+    "teammate, a background watcher's completion will NOT wake you — "
+    "the lead's message will — so do NOT arm the structural watcher. "
+    "SET metadata.intentional_wait on every task the wait covers — "
+    "`reason`, `expected_resolver` and `since` are the keys "
+    "validate_wait requires — with `expected_resolver` naming the "
+    "lead, and end the turn with no further tool calls; the lead's "
+    "message resumes you."
 )
 # The separate-process teammate's own text. Their completion notice DOES
 # start their next turn (shared.background_work.teammate_is_separate_process
-# is the one tmux-reader), so the in-process text's "will NOT wake you"
-# would be false for them — they get the lead-accurate wake statement with
-# the same arm command, no intentional_wait step.
+# is the one tmux-reader), so they arm exactly as the lead does, with the
+# lead-accurate wake statement.
 _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
     "re-filling — end this wait structurally instead. As a "
     "separate-process teammate, this watcher's completion notice WILL "
-    "start your next turn. FIRST arm the deliverable watcher with ONE "
-    "`Bash` call (`run_in_background: true`), substituting your team "
-    "name and the task id you are waiting on:\n"
-    'python3 "{watcher}" --team <team-name> --task <task-id> '
-    "--predicate handoff --deadline 900\n"
+    "start your next turn. FIRST arm the structural watcher with ONE "
+    "`Bash` call (`run_in_background: true`), substituting the id "
+    "of the task you are waiting on for <task-id>:\n"
+    "{command}\n"
     "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). If the event you await is NOT a "
-    "deliverable you can write — for example the lead's review or "
-    "action — do NOT arm: just end your turn, and a message or your "
-    "next turn boundary resolves it. If you DID arm: end your turn "
-    "with no further tool calls — the watcher exits 0 when the "
-    "deliverable lands, 3 when the deadline passes without it, 4 when "
-    "it cannot watch at all — and its completion notice starts your "
-    "next turn."
+    "a teachback submission). Another teammate's handoff or teachback "
+    "submission is precisely the deliverable to arm on, even though you "
+    "cannot write it. If the event you await is something only YOU can "
+    "write, or the lead's review or action, do NOT arm: instead SET "
+    "metadata.intentional_wait with `expected_resolver` naming the "
+    "resolver, and end the turn; a message or that resolver's own wake "
+    "resolves it. If you DID arm: end the turn with no further tool "
+    "calls — the watcher exits 0 when the deliverable lands, 3 when the "
+    "deadline passes without it, 4 when it cannot watch at all — and "
+    "its completion notice starts your next turn."
 )
 # The Agent-tool subagent's own text. A subagent's turn end RETURNS its
-# report to the caller: nothing wakes it, so this text carries NO wake
-# promise of any kind — only the arm command and the completion phrasing.
+# report to the caller: nothing wakes it, so a watcher would wake no one
+# and this text carries NO arm command and NO wake promise.
 _TIER3_SUBAGENT_REASON = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
     "re-filling — end this wait structurally instead. As an Agent-tool "
     "subagent, nothing wakes you when your turn ends: your final report "
-    "is your completion, and the lead reads it when it returns. FIRST "
-    "arm the deliverable watcher with ONE `Bash` call "
-    "(`run_in_background: true`), substituting your team name and the "
-    "task id you are waiting on:\n"
-    'python3 "{watcher}" --team <team-name> --task <task-id> '
-    "--predicate handoff --deadline 900\n"
-    "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). If the event you await is not a "
-    "deliverable you can write — do NOT arm — your completion report is "
-    "the lead's information; end your turn. If you DID arm: end your "
-    "turn with no further tool calls — the watcher exits 0 when the "
-    "deliverable lands, 3 when the deadline passes without it, 4 when "
-    "it cannot watch at all — and put what the lead needs in your "
-    "final report."
+    "is your completion, and the lead reads it when it returns. Do NOT "
+    "arm the structural watcher: end the turn with no further tool "
+    "calls and put what the lead needs in your final report."
 )
-# The no-team text: a frame with NO resolvable PACT team has no deliverable
-# store for a <team-name> placeholder to name, so it gets the loop-breaking
-# instruction WITHOUT the arm command.
 _TIER3_NO_TEAM_REASON = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
@@ -421,10 +392,12 @@ def _escalate(input_data, normalized):
             # teammate_launch_name refuses its subagent-shaped id); a
             # separate-process teammate gets the lead-accurate wake
             # statement; an in-process teammate gets the teammate
-            # guidance; a lead keeps the lead text. All team-bearing texts
-            # carry the same arm command.
+            # guidance; a lead keeps the lead text. Only the lead and
+            # separate-process texts carry an arm command, built by the
+            # shared builder with the resolved team substituted.
             team, member, separate = _tier3_frame_identity(input_data)
-            if not team:
+            command = _tier3_arm_command(team) if team else ""
+            if not team or not command:
                 template = _TIER3_NO_TEAM_REASON
             elif not is_teammate_frame(input_data):
                 template = _TIER3_REASON
@@ -439,7 +412,7 @@ def _escalate(input_data, normalized):
             else:
                 template = _TIER3_TEAMMATE_REASON
             return template.format(
-                watcher=_WATCHER_PATH, count=new_count, total=new_total
+                command=command, count=new_count, total=new_total
             )
         if tier == 2:
             return _DENY_REASON + _TIER2_SUFFIX.format(
@@ -579,6 +552,22 @@ def launch_advisory_applies(input_data) -> bool:
         return bool(member) and not teammate_is_separate_process(team_name, member)
     except Exception:
         return False
+
+
+def _tier3_arm_command(team_name):
+    """The tier-3 arm command for `team_name`, with the task id left as
+    the placeholder the text tells the agent to substitute; "" when the
+    shared builder cannot be loaded (the caller then falls back to the
+    no-command text). Lazy import, like _tier3_frame_identity: `shared`
+    is imported only on the tier-3 deny path."""
+    try:
+        from shared.wait_target import TASK_ID_PLACEHOLDER, arm_command
+
+        return arm_command(
+            team_name, TASK_ID_PLACEHOLDER, "handoff", _TIER3_DEADLINE
+        )
+    except Exception:
+        return ""
 
 
 def _tier3_frame_identity(input_data):

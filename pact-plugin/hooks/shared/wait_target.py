@@ -7,8 +7,10 @@ Summary: Deliverable predicate registry for the structural wait mechanism.
          predicate name in the caller's command text, never schema or output
          surgery.
 Used by: hooks/pact_wait.py (the watcher CLI: registry lookup + poll loop),
-         hooks/task_lifecycle_gate.py and hooks/wait_filler_gate.py (arm
-         command emission names these predicates), tests/test_pact_wait.py.
+         hooks/task_lifecycle_gate.py and hooks/wait_filler_gate.py (emit
+         the arm command through arm_command), shared/turn_end_gate.py
+         (classifies a running watcher through is_wait_watcher_command),
+         tests/test_pact_wait.py, tests/test_structural_wait_matrix.py.
 
 Contract: pure functions; never raise. Every filesystem error path resolves
 to an explicit outcome constant — the caller decides loudness, not this
@@ -32,11 +34,18 @@ Public surface:
 - PREDICATES — name -> predicate mapping (the registry).
 - evaluate_target(team_name, task_id, predicate_name, tasks_base_dir=None)
   — ONE pass: resolve, read, parse, evaluate.
+- WATCHER_PATH, TEAM_PLACEHOLDER, TASK_ID_PLACEHOLDER, arm_command(...) —
+  the ONE builder of the watcher arm command every emitter uses.
+- is_wait_watcher_command(command) — the ONE classifier of a running
+  watcher's command text; it accepts every form arm_command emits.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import re
+import shlex
 from typing import Any, Callable
 
 from shared.task_utils import sanitize_task_id, task_dir_for
@@ -203,3 +212,84 @@ def evaluate_target(
     if not isinstance(task, dict):
         return EVAL_TARGET_CORRUPT
     return EVAL_PRESENT if check(task) else EVAL_NOT_PRESENT
+
+
+# --- the arm command: one builder, one classifier ---------------------------
+
+# hooks/pact_wait.py, resolved from this file so an emitted command always
+# names the live install's real path.
+WATCHER_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pact_wait.py"
+)
+
+# Emitted unquoted where the emitter does not know the value; the agent
+# substitutes the real value before running the command.
+TEAM_PLACEHOLDER = "<team-name>"
+TASK_ID_PLACEHOLDER = "<task-id>"
+_PLACEHOLDERS = (TEAM_PLACEHOLDER, TASK_ID_PLACEHOLDER)
+
+
+def _arg(value: object) -> str:
+    text = str(value)
+    return text if text in _PLACEHOLDERS else shlex.quote(text)
+
+
+def arm_command(
+    team_name: str,
+    task_id: str,
+    predicate: str,
+    deadline: int,
+    watcher: str = WATCHER_PATH,
+) -> str:
+    """The ready-to-run watcher arm command. Every value is shlex-quoted
+    except a placeholder, so any install path or team name survives the
+    shell, and is_wait_watcher_command accepts the result once the
+    placeholders are substituted."""
+    return (
+        f"python3 {_arg(watcher)} --team {_arg(team_name)} "
+        f"--task {_arg(task_id)} --predicate {_arg(predicate)} "
+        f"--deadline {_arg(deadline)}"
+    )
+
+
+# The watcher command shape. Each value slot is ONE shell word built only
+# from shell-inert pieces: shlex.quote's no-op character set bare, a
+# single-quoted span, or a double-quoted span holding no expansion or
+# escape character. Adjacent pieces concatenate, which is how shlex.quote
+# renders a value containing a single quote. A ; | & < > ( ) $ or backtick
+# outside quotes cannot sit inside a word, so a command composed onto the
+# watcher (in any slot, spaced or not) does not match and still counts as
+# a job the ending frame must account for. Admitted around the invocation:
+# an optional `cd <dir> &&`, env assignments, a python3 interpreter bare
+# or by path, and a trailing `2>&1`. The script word, once the shell's
+# quote removal is applied, must name a file called exactly pact_wait.py.
+_BARE = r"[A-Za-z0-9_@%+=:,./-]"
+_PIECE = rf"""(?:{_BARE}|'[^']*'|"[^"$`\\]*")"""
+_WORD = rf"{_PIECE}+"
+_PACT_WAIT_SHAPE = re.compile(
+    r"\A\s*"
+    rf"(?:cd\s+{_WORD}\s*&&\s*)?"
+    rf"(?:[A-Za-z_][A-Za-z0-9_]*=(?:{_WORD})?\s+)*"
+    rf"(?:(?:{_BARE}*/)?python3(?:\.\d+)?\s+)?"
+    rf"(?P<script>{_WORD})\s+"
+    rf"--team\s+{_WORD}\s+--task\s+{_WORD}\s+"
+    rf"--predicate\s+{_WORD}\s+--deadline\s+{_WORD}"
+    r"(?:\s+2>&1)?\s*\Z",
+    re.ASCII,
+)
+
+
+def is_wait_watcher_command(command: Any) -> bool:
+    """True iff `command` IS an armed pact-wait watcher, in the shape
+    described above. A command that only mentions the watcher, runs it
+    partially, or composes another command onto it does not match."""
+    if not isinstance(command, str):
+        return False
+    match = _PACT_WAIT_SHAPE.match(command)
+    if match is None:
+        return False
+    try:
+        script = shlex.split(match.group("script"))
+    except ValueError:
+        return False
+    return len(script) == 1 and os.path.basename(script[0]) == "pact_wait.py"

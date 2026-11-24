@@ -76,7 +76,6 @@ from __future__ import annotations
 # ─── stdlib first (used by _emit_load_failure_advisory BEFORE wrapped imports) ─
 import json
 import os
-import shlex
 import sys
 from typing import Any, NoReturn
 
@@ -336,6 +335,7 @@ try:
         validate_reasoning_reconstruction,
     )
     from shared.tool_response import extract_tool_response
+    from shared.wait_target import arm_command
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -1419,31 +1419,18 @@ def _resolve_required_band_via_blocks(
     return _band_from_total(total)
 
 
-# The structural wait watcher this gate arms the lead with at the
-# teammate-deliverable wait shapes (dispatch wiring, teachback acceptance):
-# the sibling entrypoint next to this file, so the command in the advisory
-# is always the live install's real path. ADVISORY ONLY — this gate never
-# spawns the watcher; the process is launched solely by the lead's own
-# `Bash` frame (`run_in_background: true`), because a hook-spawned process
-# is not harness-tracked and its completion would reach nothing idle.
-_WAIT_WATCHER_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "pact_wait.py"
-)
-
-
 def _wait_arm_advisory(
     shape: str, team_name: str, task_id: str, predicate: str
 ) -> tuple[str, str]:
     """The (rule, message) advisory supplying the ready-to-run arm command
-    for one teammate-deliverable wait. The deadline is a sane default the
-    lead edits when the expected wait differs; the predicate names a
-    shared/wait_target.py registry entry, so re-keying the watcher is a
-    command-text change, never schema surgery."""
-    command = (
-        f"python3 {shlex.quote(_WAIT_WATCHER_PATH)} "
-        f"--team {shlex.quote(team_name)} "
-        f"--task {shlex.quote(task_id)} --predicate {predicate} --deadline 1800"
-    )
+    for one teammate-deliverable wait, built by shared/wait_target.py's
+    arm_command (the one builder every emitter uses). The deadline is a
+    sane default the lead edits when the expected wait differs. ADVISORY
+    ONLY: this gate never spawns the watcher; the lead launches it with its
+    own `Bash` frame (`run_in_background: true`), because a hook-spawned
+    process is not harness-tracked and its completion would reach nothing
+    idle."""
+    command = arm_command(team_name, task_id, predicate, 1800)
     message = (
         f"PACT task_lifecycle_gate: {shape} — you are about to wait on a "
         "teammate deliverable. Arm the structural wait watcher BEFORE you "

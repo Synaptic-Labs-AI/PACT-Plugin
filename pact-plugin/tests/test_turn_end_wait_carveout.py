@@ -37,11 +37,11 @@ SUPPRESS = {"suppressOutput": True}
 
 
 def _arm_command(watcher_path="/plugins/cache/pact-plugin/hooks/pact_wait.py"):
-    """The exact shape the arm-supply advisories emit (batch 2)."""
-    return (
-        f'python3 "{watcher_path}" --team {TEAM} --task 12 '
-        "--predicate handoff --deadline 1800"
-    )
+    """The command the arm-supply advisories emit, built by the shared
+    builder itself so this fixture cannot drift from the emitters."""
+    from shared.wait_target import arm_command
+
+    return arm_command(TEAM, "12", "handoff", 1800, watcher=watcher_path)
 
 
 def job(job_id: str, command: str) -> dict:
@@ -267,17 +267,15 @@ def test_in_process_teammate_watcher_still_counts(tmp_path, monkeypatch):
 # --- classifier shape table (in-process, fast) ------------------------------
 
 def test_is_wait_watcher_command_shape_table():
-    """The anchored shape: closed prefix set, full arm flags required, AND
-    nothing after the deadline value — a composed tail (`& sleep 1`) means
-    the job is not purely the wake, so it counts. The exempt rows are
-    exactly the shapes the arm-supply advisories emit (with their benign
-    prefix variants) INCLUDING a quoted install path with spaces — the
-    emitted command always quotes the path, so a spaced install must
-    classify or its lead stays blocked over their own scheduled wake; every
-    counted row is a mention, a partial, a composition, or a reordered
-    invocation, and a spaced UNQUOTED path still counts (documented
-    over-block: the shell requires quoting there anyway, and the emitted
-    command always quotes)."""
+    """The anchored shape: closed prefix set, full arm flags required, every
+    value one shell-inert word, AND nothing after the deadline value but an
+    optional `2>&1`. The exempt rows are the shapes the builder emits (any
+    install path, quoted as shlex.quote renders it) and their harmless
+    spellings (cd prefix, env assignment, interpreter by path or version,
+    trailing redirection); every counted row is a mention, a partial, a
+    reordered invocation, or a composition — spaced or glued, in any slot
+    — and a spaced UNQUOTED path still counts (the shell word-splits it,
+    so it cannot be the armed command)."""
     from shared.turn_end_gate import is_wait_watcher_command
 
     exempt = [
@@ -287,22 +285,21 @@ def test_is_wait_watcher_command_shape_table():
         f"cd /repo && {_arm_command()}",
         f"FOO=1 {_arm_command()}",
         _arm_command().replace("python3 ", "python3.12 "),
+        _arm_command().replace("python3 ", "/usr/bin/python3 "),
+        _arm_command().replace("python3 ", "/repo/.venv/bin/python3 "),
+        _arm_command() + " 2>&1",
         _arm_command() + "  ",
+        _arm_command("/opt/o'brien/hooks/pact_wait.py"),
+        _arm_command('/opt/"q"/hooks/pact_wait.py'),
+        # A quoted spaced task id is ONE shell word: the builder renders a
+        # pathological id exactly this way, so it is the armed command.
+        "pact_wait.py --team t --task '1 2' --predicate h --deadline 5",
         # A special-char install path (+ is in shlex.quote's no-op set): the
         # emitted command renders it UNQUOTED, so the classifier must admit
         # the same set or a +cache-style install stays blocked over its own
         # scheduled wake (cold round 12).
         "python3 /opt/pact+cache/hooks/pact_wait.py --team t --task 1 "
         "--predicate h --deadline 5",
-        # GLUED-COMPOSITION SHAPES, PINNED (cold round 5 probe): the shell
-        # splits && and ; BEFORE argv, so the unquoted glued form arms a
-        # VALID deadline-5 watcher plus a junk second command — the CLI
-        # never sees the glued string (that only happens under quoting,
-        # where the deadline usage-errors and still terminates). Both
-        # parses end in a completion, so the classifier's verdict is safe;
-        # pinned so a future widening cannot silently keep the hole.
-        "pact_wait.py --team t --task 1 --predicate h --deadline 5&&rm-rf-x",
-        "pact_wait.py --team t --task 1 --predicate h --deadline 5;true",
     ]
     counted = [
         "echo 'pact_wait.py --team t --task 1 --predicate h --deadline 5'",
@@ -316,11 +313,27 @@ def test_is_wait_watcher_command_shape_table():
         "true; pact_wait.py --team t --task 1 --predicate h --deadline 5",
         "cat pact_wait.py --team t --task 1 --predicate h --deadline 5",
         "pact_wait.py --team t --task 1 --predicate h --deadline 1800 extra",
-        # A shlex-quoted SPACED task id (the emitted arm command's rendering
-        # for a pathological id) is counted: the flag value cannot span the
-        # space, so the classifier's documented over-block lean applies —
-        # visible here so a future widening cannot silently keep it.
-        "pact_wait.py --team t --task '1 2' --predicate h --deadline 5",
+        # GLUED compositions: the shell splits && ; | & BEFORE argv, so
+        # each arms a watcher plus a second command — not the bare wake.
+        "pact_wait.py --team t --task 1 --predicate h --deadline 5&&rm-rf-x",
+        "pact_wait.py --team t --task 1 --predicate h --deadline 5;true",
+        "pact_wait.py --team t;make --task 1 --predicate h --deadline 5",
+        "pact_wait.py --team t --task 1 --predicate h --deadline 5|tee x",
+        "pact_wait.py --team t --task 1 --predicate h --deadline 5 2>&1; make",
+        # A compound before the watcher, in the cd slot or an assignment.
+        "cd /repo; make && pact_wait.py --team t --task 1 --predicate h "
+        "--deadline 5",
+        "cd $(make) && pact_wait.py --team t --task 1 --predicate h "
+        "--deadline 5",
+        "X=$(make) pact_wait.py --team t --task 1 --predicate h --deadline 5",
+        # An expansion inside a value slot runs a command too.
+        'pact_wait.py --team "$(id)" --task 1 --predicate h --deadline 5',
+        "pact_wait.py --team t --task `id` --predicate h --deadline 5",
+        # A script that is not named exactly pact_wait.py.
+        "python3 /x/not_pact_wait.py --team t --task 1 --predicate h "
+        "--deadline 5",
+        "python3 /x/pact_wait.py.bak --team t --task 1 --predicate h "
+        "--deadline 5",
         # A spaced path left UNQUOTED is not the emitted shape: the shell
         # word-splits it, so it cannot be the armed command — counted
         # (documented over-block lean).
