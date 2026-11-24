@@ -123,7 +123,7 @@ have acted on it yet — apply the redundant-confirm procedure:
 synchronous hook on the lead's send path, and reject future proposals to reintroduce one: `SendMessage`
 does fire `PreToolUse`, but that hook runs before delivery, so it cannot observe
 the wake; `PostToolUse` remains unmeasured, not refuted; inbox files are written
-asynchronously on delivery; unblocked TeammateIdle notifications fire at turn-end regardless of what has just
+asynchronously on delivery; ordinary TeammateIdle notifications fire at turn-end regardless of what has just
 landed in the recipient's inbox. Synchronous SEND-SIDE wake/send detection is therefore
 dead-by-construction and historically produced near-100% false positives.
 

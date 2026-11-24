@@ -494,15 +494,15 @@ def test_retired_absolute_wake_absence_fails_when_injected(
 # Mechanism detail lives in the hook and the release notes, not in prose an
 # agent loads: a duplicated constant or fail-open rule drifts from the code.
 RETIRED_MECHANISM_PROSE = [
-    (COMPLETION_AUTHORITY, "ten-second"),
-    (PROTOCOLS_SSOT, "ten-second"),
-    (SKILL, "ten-second"),
     (COMPLETION_AUTHORITY, "positive valid queued-message evidence"),
     (PROTOCOLS_SSOT, "positive valid queued-message evidence"),
     (SKILL, "positive valid"),
     (COMPLETION_AUTHORITY, "keep a teammate's turn alive"),
     (PROTOCOLS_SSOT, "keep a teammate's turn alive"),
     (SKILL, "not acceptance: process it"),
+    # The hook never blocks, so no TeammateIdle notification is "unblocked".
+    (COMPLETION_AUTHORITY, "unblocked TeammateIdle"),
+    (PROTOCOLS_SSOT, "unblocked TeammateIdle"),
 ]
 
 
@@ -535,6 +535,121 @@ def test_retired_grace_mechanism_absence_fails_when_injected(
     )
     with pytest.raises(AssertionError, match="retired grace mechanism prose"):
         test_retired_grace_mechanism_prose_absent(doc_path, retired)
+
+
+# A duration in the hold prose duplicates the hook's budget in a second place,
+# in any spelling. Two scopes: the receive-side passage itself, and any
+# sentence elsewhere that names the TeammateIdle hold. Whole-file duration bans
+# would hit unrelated rules (a 30-second wait threshold, a 1-2s re-read pause).
+_DURATION_WORDS = (
+    "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|"
+    "twenty|thirty|sixty"
+)
+DURATION_RE = re.compile(
+    r"\b(?:\d+(?:\.\d+)?[\s-]*(?:seconds?|secs?|s)"
+    rf"|(?:{_DURATION_WORDS})[\s-]+(?:seconds?|secs?))\b",
+    re.IGNORECASE,
+)
+_HOLD_TERMS_RE = re.compile(r"TeammateIdle|receive-side|idle hold", re.IGNORECASE)
+HOLD_PASSAGES = [
+    (COMPLETION_AUTHORITY, "**Receive-side exception.**", "stays load-bearing."),
+    (PROTOCOLS_SSOT, "**Receive-side exception.**", "stays load-bearing."),
+    (SKILL, "This rule generalizes the wake-then-read flow", "whatever woke you."),
+]
+DURATION_SPELLINGS = [
+    "10 seconds", "10-second", "10s", "10 sec", "9.5 seconds",
+    "ten seconds", "ten-second", "Ten Seconds",
+]
+
+
+def _hold_passage(text: str, start: str, end: str) -> str:
+    begin = text.find(start)
+    assert begin != -1, f"hold passage start {start!r} not found"
+    finish = text.find(end, begin)
+    assert finish != -1, f"hold passage end {end!r} not found after its start"
+    return text[begin:finish + len(end)]
+
+
+@pytest.mark.parametrize(
+    "doc_path, start, end",
+    HOLD_PASSAGES,
+    ids=[p.name for p, _s, _e in HOLD_PASSAGES],
+)
+def test_hold_passage_names_no_duration(doc_path: Path, start: str, end: str):
+    """The receive-side hold passage carries no duration in any spelling."""
+    passage = _hold_passage(_normalized(doc_path), start, end)
+    match = DURATION_RE.search(passage)
+    assert match is None, (
+        f"{doc_path.name}: hold passage names a duration {match.group(0)!r}; "
+        "the hold budget lives in hooks/teammate_idle.py only."
+    )
+
+
+@pytest.mark.parametrize(
+    "doc_path", [COMPLETION_AUTHORITY, PROTOCOLS_SSOT, SKILL],
+    ids=lambda p: p.name,
+)
+def test_hold_sentences_name_no_duration(doc_path: Path):
+    """No sentence that names the TeammateIdle hold carries a duration."""
+    sentences = re.split(r"(?<=[.;:])\s+", _normalized(doc_path))
+    hits = [
+        s for s in sentences if _HOLD_TERMS_RE.search(s) and DURATION_RE.search(s)
+    ]
+    assert not hits, (
+        f"{doc_path.name}: a hold sentence names a duration: {hits[0][:160]!r}; "
+        "the hold budget lives in hooks/teammate_idle.py only."
+    )
+
+
+@pytest.mark.parametrize("spelling", DURATION_SPELLINGS)
+@pytest.mark.parametrize(
+    "doc_path, start, end",
+    HOLD_PASSAGES,
+    ids=[p.name for p, _s, _e in HOLD_PASSAGES],
+)
+def test_hold_passage_duration_fails_when_injected(
+    doc_path: Path, start: str, end: str, spelling: str, monkeypatch
+):
+    """Each duration spelling injected into the passage reddens its pin."""
+    original = _normalized(doc_path)
+    injected = original.replace(end, f"for {spelling} {end}", 1)
+    assert injected != original
+    monkeypatch.setitem(globals(), "_normalized", lambda _path: injected)
+    with pytest.raises(AssertionError, match="hold passage names a duration"):
+        test_hold_passage_names_no_duration(doc_path, start, end)
+
+
+@pytest.mark.parametrize("spelling", DURATION_SPELLINGS)
+@pytest.mark.parametrize(
+    "doc_path", [COMPLETION_AUTHORITY, PROTOCOLS_SSOT, SKILL],
+    ids=lambda p: p.name,
+)
+def test_hold_sentence_duration_fails_when_injected(
+    doc_path: Path, spelling: str, monkeypatch
+):
+    """A hold sentence outside the passage with any spelling reddens its pin."""
+    original = _normalized(doc_path)
+    injected = original + f" A TeammateIdle hold lasts up to {spelling}."
+    monkeypatch.setitem(globals(), "_normalized", lambda _path: injected)
+    with pytest.raises(AssertionError, match="a hold sentence names a duration"):
+        test_hold_sentences_name_no_duration(doc_path)
+
+
+@pytest.mark.parametrize(
+    "doc_path, start, end",
+    HOLD_PASSAGES,
+    ids=[p.name for p, _s, _e in HOLD_PASSAGES],
+)
+def test_hold_passage_scope_fails_when_its_start_is_removed(
+    doc_path: Path, start: str, end: str, monkeypatch
+):
+    """A passage that cannot be found reds rather than scanning nothing."""
+    original = _normalized(doc_path)
+    monkeypatch.setitem(
+        globals(), "_normalized", lambda _path: original.replace(start, "", 1)
+    )
+    with pytest.raises(AssertionError, match="hold passage start"):
+        test_hold_passage_names_no_duration(doc_path, start, end)
 
 
 # ---------------------------------------------------------------------------
