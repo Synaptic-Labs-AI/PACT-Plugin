@@ -263,15 +263,15 @@ WATCHER_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "pact_wait.py"
 )
 
-# Emitted unquoted where the emitter does not know the value; the agent
-# substitutes the real value before running the command.
-TASK_ID_PLACEHOLDER = "<task-id>"
-_PLACEHOLDERS = (TASK_ID_PLACEHOLDER,)
+# Emitted where the emitter does not know the task id; the agent substitutes
+# the real id before running the command. A plain word with no shell
+# metacharacters, so a run that skips the substitution redirects nothing, and
+# pact_wait refuses it as a usage error instead of watching a task so named.
+TASK_ID_PLACEHOLDER = "TASK_ID"
 
 
 def _arg(value: object) -> str:
-    text = str(value)
-    return text if text in _PLACEHOLDERS else shlex.quote(text)
+    return shlex.quote(str(value))
 
 
 def arm_command(
@@ -281,10 +281,10 @@ def arm_command(
     deadline: int,
     watcher: str = WATCHER_PATH,
 ) -> str:
-    """The ready-to-run watcher arm command. Every value is shlex-quoted
-    except a placeholder, so any install path or team name survives the
-    shell, and is_wait_watcher_command accepts the result once the
-    placeholders are substituted."""
+    """The ready-to-run watcher arm command. Every value is shlex-quoted,
+    so any install path or team name survives the shell, and
+    is_wait_watcher_command accepts the result once a placeholder task id
+    is substituted."""
     return (
         f"python3 {_arg(watcher)} --team {_arg(team_name)} "
         f"--task {_arg(task_id)} --predicate {_arg(predicate)} "

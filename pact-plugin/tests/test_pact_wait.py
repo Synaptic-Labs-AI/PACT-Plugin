@@ -1005,3 +1005,35 @@ def test_symlink_looped_team_dir_ends_the_watch_terminal(tmp_path):
     assert proc.returncode == pact_wait.EXIT_TERMINAL, proc.stderr
     expected = "target_invalid" if resolve_raises else "target_missing"
     assert expected in proc.stderr, proc.stderr
+
+
+def test_placeholder_task_id_is_a_usage_error(capsys):
+    """An arm command run without substituting its task id exits 2 naming
+    the placeholder, instead of watching a task of that name."""
+    with pytest.raises(SystemExit) as exc:
+        pact_wait.main([
+            "--team", "team-a", "--task", wait_target.TASK_ID_PLACEHOLDER,
+            "--predicate", "handoff", "--deadline", "5",
+        ])
+    assert exc.value.code == 2
+    assert "substitute the id of the task you are waiting on" in capsys.readouterr().err
+
+
+def test_verbatim_tier3_command_redirects_nothing(tmp_path):
+    """The tier-3 arm command, run through bash exactly as rendered (no id
+    substituted), exits 2 and leaves the working directory untouched: the
+    placeholder carries no shell metacharacter that could read or truncate
+    a file there."""
+    import wait_filler_gate
+
+    command = wait_filler_gate._tier3_arm_command("team-a")
+    assert wait_target.TASK_ID_PLACEHOLDER in command
+    keep = tmp_path / "--predicate"
+    keep.write_text("keep", encoding="utf-8")
+    before = sorted(p.name for p in tmp_path.iterdir())
+    proc = subprocess.run(
+        ["bash", "-c", command], cwd=tmp_path, capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == 2, proc.stderr
+    assert sorted(p.name for p in tmp_path.iterdir()) == before
+    assert keep.read_text(encoding="utf-8") == "keep"

@@ -208,7 +208,13 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entrypoint. Returns the exit code per the module exit contract;
     unexpected exceptions propagate (traceback + exit 1, deliberately
     uncaught)."""
-    args = _build_parser().parse_args(argv)
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+    if args.task == wait_target.TASK_ID_PLACEHOLDER:
+        parser.error(
+            f"--task is still the placeholder {wait_target.TASK_ID_PLACEHOLDER}: "
+            "substitute the id of the task you are waiting on"
+        )
     return wait_for_deliverable(
         args.team,
         args.task,

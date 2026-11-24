@@ -176,7 +176,7 @@ _ACTIONS = {
         "arm the structural watcher — this is the wait it exists for, even "
         "though you cannot write the deliverable — with ONE `Bash` call "
         "(`run_in_background: true`), substituting the id of the task "
-        "you are waiting on for <task-id>:\n{command}\n(use --predicate "
+        "you are waiting on for TASK_ID:\n{command}\n(use --predicate "
         "teachback_submit when the awaited deliverable is a teachback "
         "submission), then end your turn with no further tool calls"
     ),

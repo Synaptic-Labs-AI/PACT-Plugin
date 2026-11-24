@@ -623,7 +623,7 @@ def test_tier3_outlet_denies_instant_form_every_time(
         assert "PACT-WAIT-OUTLET" in reason
         assert "pact_wait.py" in reason
         assert "run_in_background" in reason
-        assert "--team tm-team" in reason and "--task <task-id>" in reason
+        assert "--team tm-team" in reason and "--task TASK_ID" in reason
         assert "<team-name>" not in reason
     assert (
         "denied 5 times this session (5 filler calls in total)"
@@ -816,7 +816,7 @@ _TIER3_REASON_PIN = (
     "structural watcher — this is the wait it exists for, even though "
     "you cannot write the deliverable — with ONE `Bash` call "
     "(`run_in_background: true`), substituting the id of the task you "
-    "are waiting on for <task-id>:\n"
+    "are waiting on for TASK_ID:\n"
     "{command}\n"
     "(use --predicate "
     "teachback_submit when the awaited deliverable is a teachback "
@@ -1001,7 +1001,7 @@ _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN = (
     "this is the wait it exists for, even though you cannot write the "
     "deliverable — with ONE `Bash` call (`run_in_background: true`), "
     "substituting the id of the task you are waiting on for "
-    "<task-id>:\n"
+    "TASK_ID:\n"
     "{command}\n"
     "(use --predicate teachback_submit when the "
     "awaited deliverable is a teachback submission), then end your "
