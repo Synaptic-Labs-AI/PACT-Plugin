@@ -571,50 +571,39 @@ def _tier3_arm_command(team_name):
 
 
 def _tier3_frame_identity(input_data):
-    """(team, member, separate_process) for the tier-3 text choice — the
-    sibling launch advisory's identity path, resolved ONCE:
+    """(team, member, separate_process) for the tier-3 text choice, from
+    shared/wait_target.wait_identity — the one identity source the
+    lifecycle gate's advisory also uses, so both producers name the same
+    store:
 
-    - ``team``: the team the arm command names — the live task store's
-      directory name (``resolve_task_dir``, the route the lifecycle gate's
-      advisory takes, so both producers name the same store), else
-      ``frame_team_and_name``'s team (a separate-process teammate has no
-      session context for the store resolver); "" when neither resolves
-      (the no-command text's trigger).
-    - ``member``: ``teammate_launch_name``, "" for a lead (callers pre-gate
-      on ``is_teammate_frame``), a plain frame, or an Agent-tool subagent —
-      whose subagent-shaped ``agent_id`` is refused there, the SAME rule
-      that keeps the launch advisory off subagent frames.
-    - ``separate_process``: ``teammate_is_separate_process(team, member)``,
-      FALSE on every doubt.
+    - ``team``: the store team an arm command names; "" when no store
+      resolves (the no-command text's trigger).
+    - ``member``: this frame's teammate name, "" for a lead, a plain frame,
+      or an Agent-tool subagent (whose subagent-shaped ``agent_id`` is
+      refused, the SAME rule that keeps the launch advisory off subagent
+      frames).
+    - ``separate_process``: ``teammate_is_separate_process`` under the
+      membership team, FALSE on every doubt.
 
     The same lazy-import posture as launch_advisory_applies: `shared` is
     imported only here, on the tier-3 deny path — never on the allow fast
     path every non-filler Bash call takes."""
     try:
-        from shared.background_work import (
-            frame_team_and_name,
-            teammate_is_separate_process,
-            teammate_launch_name,
-        )
+        from shared.background_work import teammate_is_separate_process
+        from shared.wait_target import wait_identity
 
-        from shared.task_utils import resolve_task_dir
-
-        # frame_team_and_name initialises the session context first, so the
-        # store resolver below reads this frame's context.
-        frame_team, _name = frame_team_and_name(input_data)
-        task_dir = resolve_task_dir()
-        team_name = task_dir.name if task_dir else frame_team
-        if not team_name:
+        identity = wait_identity(input_data)
+        if not identity.store_team:
             return "", "", False
-        # Membership lives in the team config, keyed by the frame's team.
-        member_team = frame_team or team_name
-        member = teammate_launch_name(input_data, member_team)
-        if not member:
-            return team_name, "", False
-        return team_name, member, teammate_is_separate_process(member_team, member)
+        if not identity.member:
+            return identity.store_team, "", False
+        return (
+            identity.store_team,
+            identity.member,
+            teammate_is_separate_process(identity.member_team, identity.member),
+        )
     except Exception:
         return "", "", False
-
 
 def _normalize_filler(command: str) -> "str | None":
     """The normalization chain from the module docstring, returning the

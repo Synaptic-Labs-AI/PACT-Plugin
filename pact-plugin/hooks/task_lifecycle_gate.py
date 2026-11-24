@@ -339,7 +339,7 @@ try:
         validate_reasoning_reconstruction,
     )
     from shared.tool_response import extract_tool_response
-    from shared.wait_target import arm_command
+    from shared.wait_target import arm_command, wait_identity
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -2837,12 +2837,15 @@ def evaluate_lifecycle(
     # launches the watcher with its own Bash frame; this gate never spawns
     # a process. LEAD-SHAPED: a frame whose agent_type names a non-lead
     # actor evaluates nothing.
-    if team_name and not _is_non_lead_frame(input_data):
+    # The store comes from wait_identity, the one identity source both
+    # arm-command producers share.
+    if not _is_non_lead_frame(input_data):
+        store_team = wait_identity(input_data).store_team
         for arm_task_id, predicate, shape in arm_candidates(
-            tool_name, tool_input, tool_response, team_name
+            tool_name, tool_input, tool_response, store_team
         ):
             advisories.append(
-                _wait_arm_advisory(shape, team_name, arm_task_id, predicate)
+                _wait_arm_advisory(shape, store_team, arm_task_id, predicate)
             )
 
     return advisories

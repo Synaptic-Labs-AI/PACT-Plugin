@@ -38,6 +38,8 @@ Public surface:
   the ONE builder of the watcher arm command every emitter uses.
 - is_wait_watcher_command(command) — the ONE classifier of a running
   watcher's command text; it accepts every form arm_command emits.
+- wait_identity(input_data) — the ONE source of an arm command's store
+  team (and the membership team and member name beside it).
 """
 
 from __future__ import annotations
@@ -46,7 +48,7 @@ import json
 import os
 import re
 import shlex
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from shared.task_utils import sanitize_task_id, task_dir_for
 from shared.paths import get_claude_config_dir
@@ -296,3 +298,52 @@ def is_wait_watcher_command(command: Any) -> bool:
     except ValueError:
         return False
     return len(script) == 1 and os.path.basename(script[0]) == "pact_wait.py"
+
+
+# --- one identity source for both arm-command producers --------------------
+
+
+class WaitIdentity(NamedTuple):
+    """store_team: the team an arm command's --team names and the store the
+    lifecycle gate reads tasks from. member_team: the team whose config
+    holds membership and role (in a config-less substrate the config is
+    keyed session-<id8> while the store is the session-UUID directory, so
+    the two differ). member: this frame's teammate name, "" for a lead or a
+    frame whose name does not resolve."""
+
+    store_team: str
+    member_team: str
+    member: str
+
+
+def wait_identity(input_data: Any) -> WaitIdentity:
+    """The one resolver both producers (the lifecycle advisory and the
+    filler gate's tier-3 outlet) use for an arm command's identity. Never
+    raises; an unresolvable identity is WaitIdentity("", "", "").
+
+    The store is the live task store (resolve_task_dir). Only a frame with
+    NO session context (frame_team_and_name named a member: the registry,
+    frame-field or agent_id routes a separate-process teammate takes) falls
+    back to its frame team, and only when that team's store directory
+    exists. A frame WITH a context whose store resolver returns None (the
+    ambiguous both-names-exist case, or no store at all) stays without a
+    store: no command is better than one aimed at a guessed store."""
+    try:
+        from shared.background_work import frame_team_and_name, teammate_launch_name
+        from shared.task_utils import resolve_task_dir
+
+        frame_team, frame_name = frame_team_and_name(input_data)
+        task_dir = resolve_task_dir()
+        if task_dir is not None:
+            store_team = task_dir.name
+        elif frame_name and frame_team:
+            base = get_claude_config_dir() / "tasks"
+            frame_dir = task_dir_for(frame_team, tasks_base_dir=str(base))
+            store_team = frame_team if frame_dir is not None and frame_dir.is_dir() else ""
+        else:
+            store_team = ""
+        member_team = frame_team or store_team
+        member = teammate_launch_name(input_data, member_team) if member_team else ""
+        return WaitIdentity(store_team, member_team, member or "")
+    except Exception:
+        return WaitIdentity("", "", "")

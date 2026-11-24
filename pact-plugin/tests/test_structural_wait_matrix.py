@@ -516,3 +516,169 @@ def test_skill_states_each_roles_deliverable_wait(clause):
     tier-3 outlet tells that role: the separate-process teammate arms, the
     in-process teammate and the subagent do not."""
     assert _normalized(clause) in _self_started_section(), clause
+
+
+# --- one identity source: wait_identity cells and cross-producer --team ------
+#
+# Each cell builds the hermetic config root a live session leaves behind and
+# runs the REAL entry points as child processes (fresh interpreter caches):
+# wait_identity itself, the filler gate's tier-3 denial, and the lifecycle
+# gate's owner-wiring advisory. Both producers must name the store
+# wait_identity names, and a fail-closed cell must make neither emit.
+
+_PLUGIN = Path(__file__).resolve().parents[1]
+_HOOKS = _PLUGIN / "hooks"
+_LEAD_SID = "aaaa1111-0000-4000-8000-000000000001"
+_SP_SID = "bbbb2222-0000-4000-8000-000000000002"
+_IN_PROCESS = [
+    {"name": "team-lead", "agentType": "pact-orchestrator"},
+    {"name": "backend-coder", "agentType": "pact-backend-coder"},
+]
+_SEPARATE = [
+    {"name": "team-lead", "agentType": "pact-orchestrator"},
+    {"name": "backend-coder", "agentType": "pact-backend-coder", "backendType": "tmux"},
+]
+_LEAD_CONFIG = {"members": _IN_PROCESS, "leadSessionId": _LEAD_SID}
+_LEAD_FRAME = {"session_id": _LEAD_SID, "agent_type": "PACT:pact-orchestrator"}
+
+# (cell, world, frame, store_team, member, tier3 teams, lifecycle teams)
+_IDENTITY_CELLS = [
+    ("lead", dict(ctx_team="s-team", tasks=["s-team"], configs={"s-team": _LEAD_CONFIG}),
+     _LEAD_FRAME, "s-team", "", ["s-team"], ["s-team"]),
+    # No team config: the context names session-<id8>, the store is the
+    # session-UUID directory. No config means no specialist owner, so the
+    # lifecycle gate has nothing to arm; the outlet names the store.
+    ("lead, config-less", dict(ctx_team="session-aaaa1111", tasks=[_LEAD_SID]),
+     _LEAD_FRAME, _LEAD_SID, "", [_LEAD_SID], []),
+    ("lead, both names exist (fail closed)",
+     dict(ctx_team="persisted-team", tasks=["persisted-team", "aligned-team"],
+          configs={"aligned-team": _LEAD_CONFIG,
+                   "persisted-team": {"members": _IN_PROCESS}}),
+     _LEAD_FRAME, "", "", [], []),
+    ("in-process teammate", dict(ctx_team="s-team", tasks=["s-team"], configs={"s-team": _LEAD_CONFIG}),
+     {"session_id": _LEAD_SID, "agent_type": "backend-coder",
+      "agent_id": "abackend-coder-0123456789abcdef"},
+     "s-team", "backend-coder", [], []),
+    ("separate-process teammate", dict(tasks=["s-team"], configs={"s-team": {"members": _SEPARATE}},
+                                       registry=(_SP_SID, "backend-coder@s-team")),
+     {"session_id": _SP_SID, "agent_type": "pact-backend-coder"},
+     "s-team", "backend-coder", ["s-team"], []),
+    ("separate-process teammate, no store (fail closed)",
+     dict(configs={"s-team": {"members": _SEPARATE}}, registry=(_SP_SID, "backend-coder@s-team")),
+     {"session_id": _SP_SID, "agent_type": "pact-backend-coder"},
+     "", "backend-coder", [], []),
+    ("Agent-tool subagent", dict(ctx_team="s-team", tasks=["s-team"], configs={"s-team": _LEAD_CONFIG}),
+     {"session_id": _LEAD_SID, "agent_type": "general-purpose", "agent_id": "ad2b1261fdd77c958"},
+     "s-team", "", [], []),
+    ("nothing resolves", dict(), {"session_id": "cccc3333-0000-4000-8000-000000000003"},
+     "", "", [], []),
+]
+
+
+def _identity_world(root, ctx_team=None, tasks=(), configs=None, registry=None):
+    import os
+
+    project = root / "proj"
+    project.mkdir()
+    config = root / "config"
+    if ctx_team is not None:
+        session_dir = config / "pact-sessions" / project.resolve().name / _LEAD_SID
+        session_dir.mkdir(parents=True)
+        (session_dir / "pact-session-context.json").write_text(json.dumps({
+            "team_name": ctx_team, "session_id": _LEAD_SID,
+            "project_dir": str(project), "plugin_root": str(_PLUGIN),
+            "started_at": "2026-11-24T00:00:00Z",
+        }))
+    for team in tasks:
+        (config / "tasks" / team).mkdir(parents=True, exist_ok=True)
+    for team, team_config in (configs or {}).items():
+        (config / "teams" / team).mkdir(parents=True, exist_ok=True)
+        (config / "teams" / team / "config.json").write_text(json.dumps(team_config))
+    if registry:
+        (config / "pact-sessions").mkdir(parents=True, exist_ok=True)
+        (config / "pact-sessions" / ".teammate-registry.jsonl").write_text(
+            json.dumps({"session_id": registry[0], "value": registry[1]}) + "\n"
+        )
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"}
+    env.update(CLAUDE_CONFIG_DIR=str(config), CLAUDE_PROJECT_DIR=str(project),
+               CLAUDE_PLUGIN_ROOT=str(_PLUGIN))
+    return env, config
+
+
+def _run(args, env, stdin=None):
+    import subprocess
+    import sys
+
+    return subprocess.run(
+        [sys.executable, *args], input=stdin, capture_output=True, text=True,
+        env=env, cwd="/", timeout=60, check=False,
+    )
+
+
+def _teams_in(text):
+    return [ln.split("--team ")[1].split(" ")[0]
+            for ln in text.splitlines() if ln.startswith("python3")]
+
+
+@pytest.mark.parametrize(
+    "cell,world,frame,store_team,member,tier3_teams,lifecycle_teams",
+    _IDENTITY_CELLS, ids=[c[0] for c in _IDENTITY_CELLS],
+)
+def test_wait_identity_cells_and_cross_producer_team(
+    tmp_path, cell, world, frame, store_team, member, tier3_teams, lifecycle_teams
+):
+    env, config = _identity_world(tmp_path, **world)
+    probe = (
+        "import sys, json; sys.path.insert(0, sys.argv[1]); "
+        "from shared.wait_target import wait_identity; "
+        "print(json.dumps(list(wait_identity(json.loads(sys.argv[2])))))"
+    )
+    identity = _run(["-c", probe, str(_HOOKS), json.dumps(frame)], env)
+    assert identity.returncode == 0, identity.stderr
+    got_store, _member_team, got_member = json.loads(identity.stdout)
+    assert (got_store, got_member) == (store_team, member), cell
+
+    bash = dict(frame, tool_name="Bash", tool_input={"command": "true"},
+                hook_event_name="PreToolUse")
+    for _ in range(3):
+        denied = _run([str(_HOOKS / "wait_filler_gate.py")], env, json.dumps(bash))
+    reason = json.loads(denied.stdout)["hookSpecificOutput"]["permissionDecisionReason"]
+    assert _teams_in(reason) == tier3_teams, (cell, reason)
+
+    if store_team:
+        (config / "tasks" / store_team / "B.json").write_text(json.dumps({
+            "id": "B", "subject": "implement x", "status": "pending",
+            "owner": "backend-coder",
+        }))
+    wiring = dict(frame, hook_event_name="PostToolUse", tool_name="TaskUpdate",
+                  tool_input={"taskId": "B", "owner": "backend-coder"},
+                  tool_response={"success": True, "taskId": "B",
+                                 "updatedFields": ["owner"]})
+    wired = _run([str(_HOOKS / "task_lifecycle_gate.py")], env, json.dumps(wiring))
+    assert wired.returncode == 0, wired.stderr
+    advisory = (json.loads(wired.stdout).get("hookSpecificOutput", {})
+                .get("additionalContext", "") if wired.stdout.strip() else "")
+    assert _teams_in(advisory) == lifecycle_teams, (cell, advisory)
+    # Cross-producer: every emitted --team is the one identity's store.
+    assert set(_teams_in(reason)) | set(_teams_in(advisory)) <= {store_team}
+
+
+def test_both_producers_take_the_store_from_wait_identity():
+    """Lead frames resolve the same store through either route today, so
+    the cells above cannot tell a producer that bypasses wait_identity from
+    one that calls it. This pin keeps a future change to the identity route
+    landing in both producers at once: each producer's arm path calls
+    wait_identity, and neither resolves the store any other way."""
+    import ast
+    import inspect
+
+    lifecycle_src = inspect.getsource(tlg.evaluate_lifecycle)
+    assert "wait_identity(input_data).store_team" in lifecycle_src
+    filler_src = inspect.getsource(wait_filler_gate._tier3_frame_identity)
+    assert "wait_identity(input_data)" in filler_src
+    calls = {
+        node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
+        for node in ast.walk(ast.parse(filler_src)) if isinstance(node, ast.Call)
+    }
+    assert "resolve_task_dir" not in calls
+    assert "frame_team_and_name" not in calls

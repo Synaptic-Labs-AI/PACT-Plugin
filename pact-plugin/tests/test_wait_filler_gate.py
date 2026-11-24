@@ -590,9 +590,12 @@ def _seed_team_registry(tmp_path, session_id, value):
 
 def _seed_team_config(tmp_path, team="tm-team", tmux_member=None):
     """Seed a team config with one member; `tmux_member` names a member
-    that runs backendType tmux (the separate-process shape)."""
+    that runs backendType tmux (the separate-process shape). The team's
+    task store is created too, as a live team has one: a frame without a
+    session context gets an arm command only when its store exists."""
     config_dir = tmp_path / "teams" / team
     config_dir.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tasks" / team).mkdir(parents=True, exist_ok=True)
     members = [{"name": "backend-coder", "agentType": "pact-backend-coder"}]
     if tmux_member:
         members.append({"name": tmux_member, "agentType": "pact-backend-coder",
@@ -1129,6 +1132,7 @@ def test_tier3_outlet_separate_process_teammate_branch(tmp_path, monkeypatch, ca
             "backendType": "tmux",
         }],
     }), encoding="utf-8")
+    (tmp_path / "tasks" / "tm-team").mkdir(parents=True)  # the live store
     # The measured separate-process frame resolves its member through the
     # session REGISTRY (no team_name/teammate_name fields, no agent_id) —
     # seed that route, not a fabricated field shape.
