@@ -629,11 +629,13 @@ def test_wait_identity_cells_and_cross_producer_team(
 ):
     env, config = _identity_world(tmp_path, **world)
     probe = (
-        "import sys, json; sys.path.insert(0, sys.argv[1]); "
+        "import sys, json; "
         "from shared.wait_target import wait_identity; "
-        "print(json.dumps(list(wait_identity(json.loads(sys.argv[2])))))"
+        "print(json.dumps(list(wait_identity(json.loads(sys.argv[1])))))"
     )
-    identity = _run(["-c", probe, str(_HOOKS), json.dumps(frame)], env)
+    # The child imports shared.* from the hooks dir through PYTHONPATH.
+    probe_env = dict(env, PYTHONPATH=str(_HOOKS))
+    identity = _run(["-c", probe, json.dumps(frame)], probe_env)
     assert identity.returncode == 0, identity.stderr
     got_store, _member_team, got_member = json.loads(identity.stdout)
     assert (got_store, got_member) == (store_team, member), cell
