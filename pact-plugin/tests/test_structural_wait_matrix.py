@@ -757,7 +757,7 @@ def _check_r_role(table):
 
 def _check_catch_all(table):
     """Every role has a branch for the catch-all wait, so a wait the named
-    kinds do not cover (a user reply, CI, a message) still has an action."""
+    kinds do not cover (a user reply, a message) still has an action."""
     for role, entry in table.items():
         kinds = [kind for kind, _action, _then in entry["branches"]]
         assert kinds.count("other") == 1, role

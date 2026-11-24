@@ -832,8 +832,8 @@ _TIER3_REASON_PIN = (
     "(you are the resolver of your own write), and end your turn with "
     "no further tool calls; a message or that resolver's own wake "
     "resolves it. If the event you await is anything else (a user "
-    "reply, CI, a message), end your turn with no further tool calls — "
-    "a reply or message arrives as its own turn."
+    "reply, a message), end your turn with no further tool calls — a "
+    "reply or message arrives as its own turn."
 )
 
 
@@ -934,7 +934,7 @@ _TIER3_TEAMMATE_REASON_PIN = (
     "the lead's message will. If the event you await is another "
     "agent's handoff or teachback submission, something only YOU can "
     "write (your own notes or a summary), the lead's review or action "
-    "or anything else (a user reply, CI, a message), do NOT arm: SET "
+    "or anything else (a user reply, a message), do NOT arm: SET "
     "metadata.intentional_wait on every task the wait covers — "
     "`reason`, `expected_resolver` and `since` are the keys "
     "validate_wait requires — with `expected_resolver` set to `lead`, "
@@ -997,9 +997,8 @@ _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN = (
     "validate_wait requires — with `expected_resolver` set to `lead`, "
     "and end your turn with no further tool calls; a message or that "
     "resolver's own wake resolves it. If the event you await is "
-    "anything else (a user reply, CI, a message), end your turn with "
-    "no further tool calls — a reply or message arrives as its own "
-    "turn."
+    "anything else (a user reply, a message), end your turn with no "
+    "further tool calls — a reply or message arrives as its own turn."
 )
 
 
@@ -1076,7 +1075,7 @@ _TIER3_SUBAGENT_REASON_PIN = (
     "If the event you await is another agent's handoff or teachback "
     "submission, something only YOU can write (your own notes or a "
     "summary), the lead's review or action or anything else (a user "
-    "reply, CI, a message), do NOT arm the structural watcher: end the "
+    "reply, a message), do NOT arm the structural watcher: end the "
     "turn with no further tool calls and put what the lead needs in "
     "your final report."
 )
@@ -1898,3 +1897,18 @@ def test_every_intentional_wait_branch_names_a_concrete_resolver():
         assert "metadata.intentional_wait" in text
         assert "`expected_resolver` set to `lead`" in text
         assert "naming the resolver" not in text
+
+
+
+def test_catch_all_names_no_ci_wait():
+    """A finished CI run arrives as no turn, so the catch-all branch (end
+    the turn and let the reply arrive) must not name CI as one of its
+    waits; no rendered outlet text names it."""
+    import re
+
+    import wait_filler_gate
+
+    assert not re.search(r"\bCI\b", wait_filler_gate.WAIT_CONDITIONS["other"])
+    for role in wait_filler_gate.OUTLET:
+        text = wait_filler_gate.render_outlet(wait_filler_gate.OUTLET[role])
+        assert not re.search(r"\bCI\b", text), role
