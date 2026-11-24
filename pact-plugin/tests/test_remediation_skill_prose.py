@@ -1756,6 +1756,32 @@ def _script_module(name: str) -> str:
     return name
 
 
+# The node types `_DetectionGraph._bindings` reads; every other node falls
+# through all of its branches.
+_BINDING_NODE_TYPES = (
+    "Assign", "AnnAssign", "NamedExpr", "AugAssign", "For", "AsyncFor", "comprehension",
+    "With", "AsyncWith", "ExceptHandler", "Match", "FunctionDef", "AsyncFunctionDef",
+    "Lambda", "ClassDef", "Import", "ImportFrom", "Global", "Nonlocal",
+)
+_BINDING_NODES: dict = {}
+
+
+def _binding_nodes(scope) -> tuple:
+    """The nodes of `scope` that can bind a name, in `ast.walk` order, found
+    once per scope: `_bindings` is asked about one scope for many names. A
+    scope is never changed after it is parsed, and it is held beside its
+    nodes, so its id is never reused."""
+    import ast
+
+    entry = _BINDING_NODES.get(id(scope))
+    if entry is None or entry[0] is not scope:
+        kinds = tuple(getattr(ast, kind) for kind in _BINDING_NODE_TYPES)
+        entry = _BINDING_NODES[id(scope)] = (
+            scope, tuple(sub for sub in ast.walk(scope) if isinstance(sub, kinds)),
+        )
+    return entry[1]
+
+
 class _DetectionGraph:
     """The project modules the detection path reaches, parsed on demand: each
     module's top-level functions and methods, its import aliases and its
@@ -2043,6 +2069,18 @@ class _DetectionGraph:
         self._parameter_classes[(key, name, depth)] = found
         return found
 
+    def _methods_named(self, module: str, method: str) -> list:
+        """(owner, qualified, class) for every def of `module` whose name
+        after its first dot is `method`, in `self.defs` order. The index is
+        rebuilt whenever `self.defs` has grown, since `load` only adds."""
+        if getattr(self, "_method_index_size", None) != len(self.defs):
+            index: dict = {}
+            for owner, qualified in self.defs:
+                cls, _, name = qualified.partition(".")
+                index.setdefault((owner, name), []).append((owner, qualified, cls))
+            self._method_index, self._method_index_size = index, len(self.defs)
+        return self._method_index.get((module, method), [])
+
     def refers_to(self, func, module: str):
         """The (module, def) the expression `func` names, as `target`."""
         import ast
@@ -2055,9 +2093,8 @@ class _DetectionGraph:
             return self.follow(self.aliases[module].get(func.id, ""))
         if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name):
             base = func.value.id
-            for (owner, qualified) in list(self.defs):
-                cls, _, method = qualified.partition(".")
-                if owner == module and method == func.attr and base in (cls, "self", "cls"):
+            for owner, qualified, cls in self._methods_named(module, func.attr):
+                if base in (cls, "self", "cls"):
                     return owner, qualified
             other = self.aliases[module].get(base, "")
             if other:
@@ -2165,7 +2202,7 @@ class _DetectionGraph:
                     else:
                         unpack(element, expression, "from")
 
-        for sub in ast.walk(scope):
+        for sub in _binding_nodes(scope):
             if isinstance(sub, ast.Assign):
                 for target in sub.targets:
                     unpack(target, sub.value, "value")

@@ -65,8 +65,10 @@ def make_repo(
     """
     path.mkdir(parents=True, exist_ok=True)
     run_git("init", "-q", ".", cwd=path)
-    run_git("config", "user.email", "identity-test@example.invalid", cwd=path)
-    run_git("config", "user.name", "Identity Test", cwd=path)
+    # The bytes two `git config user.*` calls write, without two more git
+    # processes: this runs for every repository the identity suites build.
+    with open(path / ".git" / "config", "a", encoding="utf-8") as config:
+        config.write("[user]\n\temail = identity-test@example.invalid\n\tname = Identity Test\n")
     (path / "README").write_text("seed\n", encoding="utf-8")
     run_git("add", "README", cwd=path)
     if commit:

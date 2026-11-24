@@ -1758,17 +1758,33 @@ def _bindings(tree, name: str) -> int:
     class, an `except ... as`, a match capture, a parameter). An identifier
     that binds nothing (an attribute or keyword named the same) is counted
     too, so the count can only be too high, never too low."""
-    count = 0
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Constant):
-            continue
-        if isinstance(node, ast.Name):
-            count += node.id == name and not isinstance(node.ctx, ast.Load)
-            continue
-        for _, value in ast.iter_fields(node):
-            for item in value if isinstance(value, list) else [value]:
-                count += isinstance(item, str) and item.split(".")[0] == name
-    return count
+    return _binding_counts(tree)[name]
+
+
+# The last tree counted and its counts. Callers ask about one tree for many
+# names in a row, so one walk answers all of them; one slot keeps no tree
+# alive past the next.
+_LAST_BINDING_COUNTS: list = [None, None]
+
+
+def _binding_counts(tree) -> "collections.Counter":
+    """{name: the count `_bindings` gives} for every name in `tree`, from
+    one walk."""
+    if _LAST_BINDING_COUNTS[0] is not tree:
+        counts = collections.Counter()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant):
+                continue
+            if isinstance(node, ast.Name):
+                if not isinstance(node.ctx, ast.Load):
+                    counts[node.id] += 1
+                continue
+            for _, value in ast.iter_fields(node):
+                for item in value if isinstance(value, list) else [value]:
+                    if isinstance(item, str):
+                        counts[item.split(".")[0]] += 1
+        _LAST_BINDING_COUNTS[:] = [tree, counts]
+    return _LAST_BINDING_COUNTS[1]
 
 
 def _is_refusal(function, defined: dict, seen: frozenset, tree=None) -> bool:
