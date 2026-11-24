@@ -866,8 +866,9 @@ def test_oversized_integer_task_file_exits_terminal_not_crash(tmp_path):
     [
         ("exists", PermissionError(13, "denied"), "target_unreadable"),
         ("exists", OSError(5, "io"), "target_unreadable"),
-        ("read_text", OSError(5, "io"), "target_unreadable"),
-        ("read_text", UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"), "target_corrupt"),
+        ("open", OSError(5, "io"), "target_unreadable"),
+        ("read", OSError(5, "io"), "target_unreadable"),
+        ("read", UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"), "target_corrupt"),
         ("loads", ValueError("Exceeds the limit"), "target_corrupt"),
         ("loads", json.JSONDecodeError("bad", "x", 0), "target_corrupt"),
         ("loads", RecursionError("deep"), "target_corrupt"),
@@ -888,8 +889,10 @@ def test_evaluate_target_never_raises_for_any_census_exception(
     base = str(tmp_path)
     if stage == "exists":
         monkeypatch.setattr(Path, "exists", boom)
-    elif stage == "read_text":
-        monkeypatch.setattr(Path, "read_text", boom)
+    elif stage == "open":
+        monkeypatch.setattr(wait_target.os, "open", boom)
+    elif stage == "read":
+        monkeypatch.setattr(wait_target, "_read_regular_file", boom)
     elif stage == "loads":
         monkeypatch.setattr(wait_target.json, "loads", boom)
     else:
@@ -898,3 +901,47 @@ def test_evaluate_target_never_raises_for_any_census_exception(
     assert wait_target.evaluate_target(
         "team-a", "7", "handoff", tasks_base_dir=base
     ) == outcome
+
+
+
+# --- only regular files are read: a FIFO or a device cannot hold the watch --
+
+def _special_target(tmp_path, kind):
+    import os
+
+    team_dir = tmp_path / "team-a"
+    team_dir.mkdir()
+    target = team_dir / "7.json"
+    if kind == "fifo":
+        os.mkfifo(target)
+    elif kind == "dev_zero":
+        target.symlink_to("/dev/zero")
+    else:
+        target.mkdir()
+    return target
+
+
+@pytest.mark.parametrize("kind", ["fifo", "dev_zero", "directory"])
+def test_non_regular_task_file_is_unreadable_not_read(tmp_path, kind):
+    """A FIFO blocks a reader until a writer appears and /dev/zero never
+    ends; neither is opened for reading. Each reads as UNREADABLE."""
+    _special_target(tmp_path, kind)
+    assert (
+        wait_target.evaluate_target("team-a", "7", "handoff", tasks_base_dir=str(tmp_path))
+        == wait_target.EVAL_TARGET_UNREADABLE
+    )
+
+
+@pytest.mark.parametrize("kind", ["fifo", "dev_zero"])
+def test_non_regular_task_file_ends_the_watch_within_its_deadline(tmp_path, kind):
+    """Through the real CLI: the watch ends TERMINAL (one grace read, then
+    exit 4) inside its 1 s deadline instead of blocking on the read."""
+    _special_target(tmp_path, kind)
+    proc = subprocess.run(
+        [sys.executable, str(HOOKS_DIR / "pact_wait.py"), "--team", "team-a",
+         "--task", "7", "--predicate", "handoff", "--deadline", "1",
+         "--tasks-base-dir", str(tmp_path)],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert proc.returncode == pact_wait.EXIT_TERMINAL, proc.stderr
+    assert "target_unreadable" in proc.stderr

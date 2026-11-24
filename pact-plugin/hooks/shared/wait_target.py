@@ -48,6 +48,7 @@ import json
 import os
 import re
 import shlex
+import stat
 from typing import Any, Callable, NamedTuple
 
 from shared.task_utils import sanitize_task_id, task_dir_for
@@ -155,6 +156,29 @@ PREDICATES: dict[str, Callable[[dict[str, Any]], bool]] = {
 }
 
 
+def _read_regular_file(path) -> "str | None":
+    """The file's UTF-8 text, or None when the path is not a regular file.
+
+    Only a regular file is read: a FIFO blocks a reader until a writer
+    appears and a device such as /dev/zero never ends, either of which
+    would hold the watcher past its deadline. The check runs on the opened
+    descriptor (open non-blocking, then fstat), so the file read is the
+    file checked even if the path is replaced in between. Raises OSError
+    and ValueError (UnicodeDecodeError) for the caller to map."""
+    flags = os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
+    fd = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        os.set_blocking(fd, True)
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def evaluate_target(
     team_name: str,
     task_id: str,
@@ -191,8 +215,9 @@ def evaluate_target(
     # Every exception the resolve/read/parse path can raise, mapped to an
     # outcome so the watcher never exits 1 on a bad file:
     #   resolving the tasks base: RuntimeError (Path.home with no home) -> INVALID
-    #   exists() / read_text():   OSError, incl. PermissionError -> UNREADABLE
-    #   read_text() decode:       UnicodeDecodeError (a ValueError) -> CORRUPT
+    #   exists() / open / read:   OSError, incl. PermissionError -> UNREADABLE
+    #   not a regular file:       a FIFO, device, socket or directory -> UNREADABLE
+    #   read decode:              UnicodeDecodeError (a ValueError) -> CORRUPT
     #   json.loads():             JSONDecodeError and the int-digit limit
     #                             (both ValueError), RecursionError -> CORRUPT
     # MemoryError is deliberately not caught: it is not a property of the
@@ -208,11 +233,13 @@ def evaluate_target(
     try:
         if not task_file.exists():
             return EVAL_TARGET_MISSING
-        raw = task_file.read_text(encoding="utf-8")
+        raw = _read_regular_file(task_file)
     except OSError:
         return EVAL_TARGET_UNREADABLE
     except ValueError:
         return EVAL_TARGET_CORRUPT
+    if raw is None:
+        return EVAL_TARGET_UNREADABLE
     try:
         task = json.loads(raw)
     except (ValueError, RecursionError):
