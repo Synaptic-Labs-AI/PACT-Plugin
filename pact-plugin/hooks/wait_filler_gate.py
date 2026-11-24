@@ -356,8 +356,8 @@ def _escalate(input_data, normalized):
             if gradient is None:
                 return text, False, None
             tier, new_count, new_total = gradient
-            # Repair-and-persist for the soft `pairs` field (Bugbot-1,
-            # review cycle 2): a non-dict pairs value — truthy or falsy —
+            # Repair-and-persist for the soft `pairs` field: a non-dict
+            # pairs value — truthy or falsy —
             # coerces to {} instead of raising, matching the guard
             # _compute_gradient already applies and the documented
             # repair-on-write contract. dict(x or {}) alone raised on
@@ -372,7 +372,7 @@ def _escalate(input_data, normalized):
             pairs[key] = new_count
             # Preserve unknown keys: copy the section and overwrite the
             # two known fields, so a rewrite by an OLDER hook never
-            # strips fields a NEWER version wrote (bc-F1 — review cycle 1).
+            # strips fields a NEWER version wrote.
             new_section = dict(section) if isinstance(section, dict) else {}
             new_section["pairs"] = pairs
             new_section["total"] = new_total
@@ -574,8 +574,12 @@ def _tier3_frame_identity(input_data):
     """(team, member, separate_process) for the tier-3 text choice — the
     sibling launch advisory's identity path, resolved ONCE:
 
-    - ``team``: ``frame_team_and_name``, "" when no PACT team is
-      resolvable for this frame (the no-command text's trigger).
+    - ``team``: the team the arm command names — the live task store's
+      directory name (``resolve_task_dir``, the route the lifecycle gate's
+      advisory takes, so both producers name the same store), else
+      ``frame_team_and_name``'s team (a separate-process teammate has no
+      session context for the store resolver); "" when neither resolves
+      (the no-command text's trigger).
     - ``member``: ``teammate_launch_name``, "" for a lead (callers pre-gate
       on ``is_teammate_frame``), a plain frame, or an Agent-tool subagent —
       whose subagent-shaped ``agent_id`` is refused there, the SAME rule
@@ -593,13 +597,21 @@ def _tier3_frame_identity(input_data):
             teammate_launch_name,
         )
 
-        team_name, _name = frame_team_and_name(input_data)
+        from shared.task_utils import resolve_task_dir
+
+        # frame_team_and_name initialises the session context first, so the
+        # store resolver below reads this frame's context.
+        frame_team, _name = frame_team_and_name(input_data)
+        task_dir = resolve_task_dir()
+        team_name = task_dir.name if task_dir else frame_team
         if not team_name:
             return "", "", False
-        member = teammate_launch_name(input_data, team_name)
+        # Membership lives in the team config, keyed by the frame's team.
+        member_team = frame_team or team_name
+        member = teammate_launch_name(input_data, member_team)
         if not member:
             return team_name, "", False
-        return team_name, member, teammate_is_separate_process(team_name, member)
+        return team_name, member, teammate_is_separate_process(member_team, member)
     except Exception:
         return "", "", False
 

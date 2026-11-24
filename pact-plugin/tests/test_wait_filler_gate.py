@@ -1201,6 +1201,38 @@ def test_tier3_outlet_branches_on_role(tmp_path, monkeypatch, capsys):
     assert "will NOT wake you" not in lead_reason
 
 
+def test_tier3_command_names_the_live_task_store_without_team_config(
+    tmp_path, monkeypatch, capsys, pact_context
+):
+    """Config-less substrate: the context names session-<id8>, but the live
+    task store is the session-UUID directory and no team config exists.
+    The tier-3 command must name the store the lifecycle advisory names
+    (resolve_task_dir), or the watcher is aimed at a team with no task
+    files and exits 4."""
+    import shutil
+
+    from shared.paths import get_claude_config_dir
+
+    session_uuid = "aaaa1111-0000-4000-8000-000000000001"
+    pact_context(team_name="session-aaaa1111", session_id=session_uuid)
+    root = get_claude_config_dir()
+    shutil.rmtree(root / "tasks" / "session-aaaa1111")
+    shutil.rmtree(root / "teams" / "session-aaaa1111")
+    (root / "tasks" / session_uuid).mkdir(parents=True)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(root))
+    frame = json.dumps({
+        "tool_name": "Bash",
+        "tool_input": {"command": "true"},
+        "session_id": session_uuid,
+    })
+    results = [_invoke(frame, capsys) for _ in range(3)]
+    reason = _deny_reason(results[2][1])
+    commands = [ln for ln in reason.splitlines() if ln.startswith("python3")]
+    assert len(commands) == 1, reason
+    assert f"--team {session_uuid} " in commands[0]
+    assert "session-aaaa1111" not in commands[0]
+
+
 def test_counts_climb_through_denials_and_budget_field_gone(
     tmp_path, monkeypatch, capsys
 ):
