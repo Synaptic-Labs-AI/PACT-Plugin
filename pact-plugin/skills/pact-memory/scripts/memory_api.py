@@ -917,12 +917,17 @@ def decide_bucket(
             else "no_session"
         )
     read = state in (None, "verified", "included_unverified")
+    # A DEFAULTED REKEY MOVES THE WHOLE BUCKET, so it needs file rows that
+    # place it here (`verified`). A bucket read on session evidence alone
+    # (`included_unverified`) can carry many rows no session places, so it
+    # moves only with an explicit --to the user has read.
+    rekey_default = read and scope_kind == "canonical" and state == "verified"
     # Positional, in field order: read, save, rekey_default, state, reason,
     # counts, sessions_counted.
     return BucketVerdict(
         read,
         read if scope_kind == "folder_name" else True,
-        read and scope_kind == "canonical",
+        rekey_default,
         state,
         reason,
         counts,

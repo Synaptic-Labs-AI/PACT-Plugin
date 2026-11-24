@@ -543,8 +543,9 @@ class TestCliSurface:
 
     def test_rekey_dry_run_then_apply_then_noop(self, rekey_env, capfd):
         _seed(rekey_env, [("l1", LEGACY)])
-        # A defaulted --to moves only an ADMITTED bucket: a recorded session
-        # of this checkout wrote the row (an unproven one is refused).
+        # A recorded session of this checkout wrote the row, which admits the
+        # bucket to reads; a bucket read on session evidence alone moves only
+        # with an explicit --to.
         seed_session_evidence(
             rekey_env.tmp_path / "home" / ".claude", rekey_env.repo, "s"
         )
@@ -554,6 +555,8 @@ class TestCliSurface:
                 "rekey",
                 "--from",
                 LEGACY,
+                "--to",
+                CANONICAL,
                 "--db-path",
                 str(rekey_env.store),
             ],
@@ -572,6 +575,8 @@ class TestCliSurface:
                 "rekey",
                 "--from",
                 LEGACY,
+                "--to",
+                CANONICAL,
                 "--apply",
                 "--db-path",
                 str(rekey_env.store),
@@ -590,6 +595,8 @@ class TestCliSurface:
                 "rekey",
                 "--from",
                 LEGACY,
+                "--to",
+                CANONICAL,
                 "--apply",
                 "--db-path",
                 str(rekey_env.store),

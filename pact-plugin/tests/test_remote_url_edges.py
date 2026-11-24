@@ -110,3 +110,43 @@ def test_the_backlog_parser_reads_an_ssh_plus_git_remote():
 
     assert backlog._slug_from_remote_url("ssh+git://git@github.com/o/r.git") == ("o", "r")
     assert backlog._REMOTE_SCHEMES >= {"ssh", "git+ssh", "ssh+git"}
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("ssh://git@[2001:db8::1]/o/r.git", "[2001:db8::1]/o/r"),
+        ("ssh://git@[2001:DB8:0::1]:22/o/r.git", "[2001:db8::1]/o/r"),
+        ("ssh://git@[2001:db8::1]:2222/o/r.git", "[2001:db8::1]:2222/o/r"),
+        ("https://[2001:db8::1]/o/r", "[2001:db8::1]/o/r"),
+        ("https://[2001:db8::1]:8443/o/r", "[2001:db8::1]:8443/o/r"),
+        ("git@[2001:db8::1]:o/r.git", "[2001:db8::1]/o/r"),
+    ],
+)
+def test_a_bracketed_ipv6_host_is_one_canonical_id(url, expected):
+    """An IPv6 literal keeps its brackets and takes its one compressed
+    spelling, so every spelling of one address names one id; a default port
+    is dropped as for a name."""
+    assert pi.normalize_remote_url(url) == expected
+    assert pi.classify_remote_origin(url)[0] == pi.OUTCOME_CANONICAL
+    assert pi.is_canonical(expected)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "ssh://git@[2001:db8::1/o/r",
+        "ssh://git@[zz::1]/o/r",
+        "ssh://git@[fe80::1%eth0]/o/r",
+        "https://[2001:db8::1]x/o/r",
+        "https://[2001:db8::1]:0/o/r",
+    ],
+)
+def test_a_malformed_bracketed_host_declines(url):
+    assert pi.normalize_remote_url(url) is None
+    assert pi.classify_remote_origin(url)[0] == pi.OUTCOME_DECLINE
+
+
+@pytest.mark.parametrize("value", ["[2001:DB8::1]/o/r", "[2001:db8:0::1]/o/r", "[zz::1]/o/r"])
+def test_only_the_compressed_spelling_is_a_canonical_id(value):
+    assert not pi.is_canonical(value)

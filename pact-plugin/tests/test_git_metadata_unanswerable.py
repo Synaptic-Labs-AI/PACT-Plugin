@@ -392,14 +392,18 @@ def test_the_boolean_parse_matches_git_for_every_spelling(value):
         capture_output=True, text=True, timeout=30, check=True,
     ).stdout.strip()
 
-    assert project_scope._git_env_bool(value) is (git_says == "true")
+    from shared.git_helpers import git_env_bool
+
+    assert git_env_bool(value) is (git_says == "true")
 
 
 def test_an_unset_or_unparseable_boolean(monkeypatch):
     """Unset is false. A value git cannot parse makes git refuse to run, so
     the walk reads it as true: it counts more metadata (fail closed)."""
-    assert project_scope._git_env_bool(None) is False
-    assert project_scope._git_env_bool("maybe") is True
+    from shared.git_helpers import git_env_bool
+
+    assert git_env_bool(None) is False
+    assert git_env_bool("maybe") is True
 
 
 def test_an_unresolved_ceiling_after_an_empty_entry_reaches_a_broken_gitfile(

@@ -41,6 +41,8 @@ pact-memory now files a project's memories under the repository they belong to, 
 - github.com owner and repository names are lower-cased, because GitHub treats them case-insensitively; every other host, GitHub Enterprise included, keeps the path's case, so two case spellings there are two ids until rekeyed.
 - Percent-encoded and non-ASCII path segments are kept as uppercase `%XX`, and the Azure DevOps https, ssh and `visualstudio.com` spellings of one repository share one id. `ssh+git://` is accepted. An ssh host alias stays in the id, because git cannot tell an alias from a host.
 - A remote whose host is `invalid` or ends in `.invalid` (RFC 2606) now declines (`origin_unrepresentable`) instead of deriving an id, so no remote can produce a `local.invalid/...` local-pin id. A pin file holding `local.invalid/...` is still accepted.
+- A remote with a bracketed IPv6 host (`ssh://git@[2001:db8::1]/o/r.git`, `https://[2001:db8::1]:8443/o/r`, `git@[2001:db8::1]:o/r`) now gives a canonical id, the address in its one compressed spelling inside brackets, instead of declining. A zone index (`%eth0`) still declines.
+- A `GIT_DISCOVERY_ACROSS_FILESYSTEM` value git cannot parse is now read the same way, as true (fail closed), by both the identity resolver and the CLAUDE.md project-root walk; before, one read it as false.
 - A github.com remote ending in `.git.git` now drops one `.git`, as every other host does (it used to drop two).
 - A relative and an absolute scp path are one id, as are two logins on one host and path.
 - The remote is read with `git config --local --includes --show-origin -z --get-all remote.origin.url`, and the first value from the repository's own config file is used, so a machine-local `insteadOf` rewrite does not change the id. A url that only an included config file sets refuses, because it can change with the branch.
@@ -67,6 +69,7 @@ pact-memory now files a project's memories under the repository they belong to, 
 ### Hooks and agents
 
 - `hooks/session_end.py` appends one line per session folder it deletes to `pruned-sessions.jsonl`, so the evidence for an old bucket outlives the folder. The ledger is trimmed to its last 1 MiB past 2 MiB, by writing a new file and renaming it over the old one, without dropping a complete line. A writer skips its line after about one second rather than waiting on the lock indefinitely, and session records are read only as bounded regular files.
+- `project-id rekey` no longer accepts an omitted `--to` for a legacy bucket read on session evidence alone, so one recorded session cannot move rows no session places; pass `--to` explicitly.
 - A repository session's refused write into a folder-name bucket now reports `LEGACY_BUCKET_WRITE_REFUSED` (exit 2) without the unrelated field-validation note.
 - The local pin remedy no longer prints a command whose path holds a control or format character; it names the pin id instead.
 - When a folder-name save is refused in a clone of a local-only repository (origin is a local path or `file://` URL), the refusal also offers a shared pin naming that origin, so the user can choose to give every clone of it one id; it is printed after the isolation pin, as text, never as a command.
@@ -74,7 +77,9 @@ pact-memory now files a project's memories under the repository they belong to, 
 - A session launched in a subfolder of a linked worktree that sits inside its main checkout (for example `<main>/.worktrees/<wt>/sub`) counts as a subfolder launch again, not as another owner, so a repository with that layout keeps reading and saving its own folder-name bucket.
 - Removing a linked worktree no longer pushes the repository's own pre-upgrade bucket out of reads with a false "another checkout" warning: a session whose recorded directory no longer exists counts as unattributed.
 - The session-end PR check and backlog issue refs accept only ASCII digits: a superscript or other-script digit is no longer read as a PR or issue number, and an over-long PR number no longer raises.
+- A backlog command that succeeds prints no memory-identity warnings (decline, ignored override, HOME landing), because the backlog keys on the folder name; a refusal still prints them, in the order they were logged.
 - `hooks/shared/backlog.py` records only worktrees whose `.git` and admin entry name each other, reads the listing with the memory skill's reader, and refuses with the memory skill's cause when the checkout cannot be confirmed.
+- The CLAUDE.md migration drops an old memory-section comment only inside a memory section; a line reading the same in a user's own section is kept.
 - The Working Memory comment in `CLAUDE.md` says the section is keyed by the repository identity. The secretary reads the projection by `read_scope`, sends a null `project_id` to `project-id show`, and counts calibration records across every id in the scope.
 
 ### Tests

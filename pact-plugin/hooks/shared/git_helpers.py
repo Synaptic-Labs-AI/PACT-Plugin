@@ -273,3 +273,20 @@ def git_config_bool(value: str) -> Optional[bool]:
     if number > limit // factor:
         return None
     return number != 0
+
+
+def git_env_bool(value: Optional[str]) -> bool:
+    """A git boolean environment value (`GIT_DISCOVERY_ACROSS_FILESYSTEM`),
+    read as git reads it (`git_config_bool`). THE ONE READER for every
+    marker walk, so the walks agree.
+
+    Unset is false. A value git cannot parse makes git itself refuse to run,
+    and it reads as TRUE here: a walk then crosses the boundary and counts
+    more metadata, and every git question it leads to fails and declines,
+    the fail-closed direction. Reading it as false would stop a walk short
+    and could let a folder read as holding no repository.
+    """
+    if value is None:
+        return False
+    parsed = git_config_bool(value)
+    return True if parsed is None else parsed

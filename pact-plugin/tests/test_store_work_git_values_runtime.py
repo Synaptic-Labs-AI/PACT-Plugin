@@ -18,7 +18,8 @@ and with `--claude-md-root`; list; get; status; update and `update
 project-file; `project-id show`; rekey with `--candidates`, with `--apply`,
 with `--dry-run`, with an explicit `--to` and no mode flag, with `--from`
 alone on another repository's canonical bucket, which refuses, and with
-`--from` alone on the checkout's own legacy bucket, whose `--to` defaults;
+`--from` on the checkout's own legacy bucket with its `--to` named, as a
+bucket read on session evidence alone requires;
 delete). Positional JSON input and `--limit` are not run separately: they
 change only how a value arrives, or how many rows come back.
 
@@ -98,7 +99,7 @@ ROUTES = (
     "rekey --candidates", "rekey", "rekey --dry-run", "rekey --from (canonical, refused)", "delete",
     "save, disagreeing record", "update, disagreeing record", "delete, disagreeing record",
     "sync, disagreeing record", "list, legacy bucket vouched for",
-    "rekey --from (legacy, --to defaulted)",
+    "rekey --from (legacy, explicit --to)",
 )
 # The legacy bucket's rows, read only once a session record vouches for it.
 LEGACY_ROWS = tuple(f"{MARK}-row-{row_id}" for row_id in ("l1", "l2", "l3"))
@@ -302,7 +303,11 @@ def rig(tmp_path_factory):
             "UPDATE memories SET session_id = ? WHERE id IN ('l2', 'l3')", (LEGACY_LIVE,)
         )
     run("list, legacy bucket vouched for", "list", "--limit", "50")
-    run("rekey --from (legacy, --to defaulted)", "project-id", "rekey", "--from", "proj")
+    # The bucket is read on session evidence alone (no file row places it), so
+    # a defaulted --to is refused; the move names its target, and the legacy
+    # scope it reads is the same.
+    run("rekey --from (legacy, explicit --to)", "project-id", "rekey", "--from", "proj",
+        "--to", canonical)
     return {
         "runs": runs, "recorded": recorded, "read_log": read_log, "base": base,
         "documents": documents,

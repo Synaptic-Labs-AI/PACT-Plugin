@@ -1149,10 +1149,10 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     --to` is a no-op success.
 
     A DEFAULTED `--to` is the detected canonical id, and it is accepted only
-    for THIS checkout's own legacy candidate that is neither excluded nor
-    unproven:
-    a defaulted target applied to any other bucket moves rows the session
-    cannot show are its own. Every other move names its target.
+    for THIS checkout's own legacy candidate when it is verified (a file row
+    places it here): a defaulted target applied to any other bucket, or to
+    one read on session evidence alone, moves rows the session cannot show
+    are its own. Every other move names its target.
 
     Exit codes: 0 for a clean plan or an applied move, 1 for a refusal (no
     canonical identity, a defaulted target the gate does not support, or a
@@ -1301,10 +1301,14 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             # (`_unproven_cause`), so this text and the read warning cannot
             # disagree.
             sessions = state.get("sessions")
-            cause = _unproven_cause(
-                state["unproven_reason"],
-                {**(sessions or {}), **(state.get("detail") or {})},
-                from_id,
+            cause = (
+                _unproven_cause(
+                    state["unproven_reason"],
+                    {**(sessions or {}), **(state.get("detail") or {})},
+                    from_id,
+                )
+                if state.get("unproven_reason")
+                else None
             )
             census = (
                 f" Of its memories, {sessions['here']} came from sessions "
@@ -1318,6 +1322,20 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 if sessions is not None
                 else ""
             )
+            if cause is None:
+                # READ HERE, BUT NOT PLACED WHOLE: admitted on session evidence
+                # alone, or holding rows no recorded session places. A move
+                # carries every row, so the user names the target.
+                _error(
+                    "REKEY_REFUSED",
+                    escape_for_envelope(
+                        f"--from={from_id!r} is read here on session evidence "
+                        "alone: no file row places it here, so a defaulted --to "
+                        f"cannot claim the whole bucket.{census} "
+                        "Pass --to explicitly after confirming the rows belong "
+                        "here. Nothing was moved."
+                    ),
+                )
             reading = (
                 "is unproven" if legacy_verdict == "unproven" else "was excluded"
             )
@@ -1796,7 +1814,7 @@ def build_parser():
             "`--dry-run` is the default and reports the plan by running it "
             "inside a rolled-back savepoint. Name both ends: an omitted `--to` "
             "is accepted only when `--from` is this checkout's own legacy "
-            "bucket and it is neither excluded nor unproven. Run --apply only "
+            "bucket and it is verified (a file row places it here). Run --apply only "
             "with the user's "
             "explicit approval, and never for an excluded bucket or another "
             "repository's id: the move merges rows and cannot be undone. Exit "
@@ -1820,7 +1838,7 @@ def build_parser():
         help=(
             "Target canonical id. Name it: it defaults only for this "
             "checkout's own legacy bucket, and only when that bucket is "
-            "neither excluded nor unproven."
+            "verified (a file row places it here)."
         ),
     )
     project_id_rekey_parser.add_argument(

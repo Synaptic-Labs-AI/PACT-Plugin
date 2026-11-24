@@ -222,3 +222,23 @@ class TestTheCommentIsSpelledInOnePlacePerConstant:
             f"constant assignment. A second spelling is a twin inside one "
             f"file, and the two writers here drifted apart that way before."
         )
+
+
+class TestOnlyTheMemorySectionsOwnCommentsAreDropped:
+    """A migration drops a stale section comment only inside a memory
+    section, where the rebuilt section writes the current one. A line that
+    reads the same in a user's own section is the user's text."""
+
+    USER_COPY = "<!-- Auto-managed by pact-memory skill. A note I keep here. -->"
+
+    def test_a_copy_in_a_user_section_survives(self):
+        source = _old_format() + "\n## My Notes\n" + self.USER_COPY + "\nkeep me\n"
+        out = _build_migrated_content(source)
+        assert self.USER_COPY in out, out
+        assert "keep me" in out
+
+    def test_an_old_comment_in_a_memory_section_is_still_replaced(self):
+        old = "<!-- Auto-managed by pact-memory skill. Keyed by folder name, an old wording. -->\n"
+        out = _build_migrated_content(_old_format(wm_lead=old))
+        assert "an old wording" not in out, out
+        assert WORKING_MEMORY_COMMENT in out

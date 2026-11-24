@@ -538,8 +538,8 @@ class TestGitEnvBoolMatchesGit:
             ("NO", False),
             ("off", False),
             ("", False),
-            ("maybe", False),
-            (" true", False),
+            ("maybe", True),
+            (" true", True),
         ],
     )
     def test_boolean_values(self, value, expected, monkeypatch):
@@ -589,9 +589,15 @@ class TestGitEnvBoolMatchesGit:
         monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "1")
         assert memory_api._unanswerable_repository(inner) == outer / ".git"
 
-        for false_value in ("0", "false", "no", "off", "maybe"):
+        for false_value in ("0", "false", "no", "off"):
             monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", false_value)
             assert memory_api._unanswerable_repository(inner) is None, false_value
+
+        # A value git refuses crosses (fail closed): every git question the
+        # walk leads to then fails, so the directory declines rather than
+        # reading as holding no repository.
+        monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", "maybe")
+        assert memory_api._unanswerable_repository(inner) == outer / ".git"
 
 
 # ---------------------------------------------------------------------------

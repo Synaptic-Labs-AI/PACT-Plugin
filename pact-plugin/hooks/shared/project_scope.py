@@ -36,7 +36,7 @@ from pathlib import Path
 from typing import List, NamedTuple, Optional, Set, Tuple
 
 from . import state_file
-from .git_helpers import git_config_bool, read_git_file, run_git, worktree_admin_gitdir
+from .git_helpers import git_env_bool, read_git_file, run_git, worktree_admin_gitdir
 from .pact_context import _UNSAFE_SLUG_CHARS_RE, _build_session_path, project_slug
 from .paths import get_claude_config_dir
 
@@ -218,20 +218,6 @@ def _unanswered_cause(given: Path) -> str:
     )
 
 
-def _git_env_bool(value: Optional[str]) -> bool:
-    """A git boolean environment value, read as git reads it
-    (`git_helpers.git_config_bool`).
-
-    Unset is false. A value git cannot parse makes git itself refuse to run,
-    so it reads as true here: the walk then counts more metadata, which is
-    the fail-closed direction.
-    """
-    if value is None:
-        return False
-    parsed = git_config_bool(value)
-    return True if parsed is None else parsed
-
-
 def _git_ceiling_directories() -> Set[str]:
     """The GIT_CEILING_DIRECTORIES entries git honours, in both spellings.
 
@@ -284,7 +270,7 @@ def _git_metadata_at_or_above(directory: Path) -> bool:
     except (OSError, ValueError):
         return True
     ceilings = _git_ceiling_directories()
-    across_filesystems = _git_env_bool(
+    across_filesystems = git_env_bool(
         os.environ.get("GIT_DISCOVERY_ACROSS_FILESYSTEM")
     )
     while True:

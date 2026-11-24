@@ -101,14 +101,24 @@ def test_beyond_a_c_int_is_refused_by_every_git(value):
 
 
 @pytest.mark.parametrize("value", [" 1", "0x1", "1k", "2m", "1 ", "maybe", "0"])
-def test_both_callers_read_the_shared_answer(value, monkeypatch):
-    """project_scope reads an unknown value as true (it counts more metadata,
-    failing closed); project_identity reads it as false (git cannot answer
-    the directory then, so the resolver declines it either way). A known
-    value is git's answer in both."""
+def test_both_walks_read_one_shared_answer(value, monkeypatch):
+    """Both marker walks read GIT_DISCOVERY_ACROSS_FILESYSTEM through the one
+    shared reader: a known value is git's answer, and a value git refuses is
+    true in both (fail closed), so the two walks never disagree."""
     from scripts.project_identity import _git_env_bool as identity_bool
+    from shared.git_helpers import git_env_bool
 
     git = _git_answer(value)
-    monkeypatch.setenv("PACT_PROBE_BOOL", value)
-    assert identity_bool("PACT_PROBE_BOOL") is (git is True)
-    assert project_scope._git_env_bool(value) is (True if git is None else git)
+    expected = True if git is None else git
+    monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", value)
+    assert identity_bool("GIT_DISCOVERY_ACROSS_FILESYSTEM") is expected
+    assert git_env_bool(value) is expected
+
+
+def test_project_scope_reads_the_variable_through_the_shared_reader(monkeypatch):
+    """project_scope's walk takes its cross-filesystem answer from the one
+    shared reader, not a copy of its own."""
+    import inspect
+
+    assert not hasattr(project_scope, "_git_env_bool")
+    assert "git_env_bool(" in inspect.getsource(project_scope)

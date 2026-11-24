@@ -2957,11 +2957,12 @@ def test_every_other_listing_read_that_raises_gives_what_no_listing_gives(tmp_pa
 
 
 @pytest.mark.parametrize("outcome", ["success", "refusal", "raise"])
-def test_only_the_identity_decline_is_held_and_only_a_success_drops_it(monkeypatch, caplog, outcome):
-    """While one command runs, the memory skill's identity decline is held
-    and every other warning it logs prints at once. A success drops the
-    decline; a refusal or a raise prints it after them. The holder leaves
-    the memory skill's logger as it found it.
+def test_every_memory_warning_is_held_and_only_a_success_drops_them(monkeypatch, caplog, outcome):
+    """While one command runs, every warning the memory skill logs is held:
+    the decline, and any other identity warning (an ignored override, a HOME
+    landing). A success drops them all, since the backlog keys on the folder
+    name; a refusal or a raise prints them in the order they were logged.
+    The holder leaves the memory skill's logger as it found it.
 
     The command is the stand-in; the decline is the memory skill's own."""
     import logging
@@ -2987,9 +2988,9 @@ def test_only_the_identity_decline_is_held_and_only_a_success_drops_it(monkeypat
                for r in caplog.records if r.name == memory_api.logger.name]
 
     expected = {
-        "success": (backlog._EXIT_OK, ["another warning"]),
-        "refusal": (backlog._EXIT_REFUSED, ["another warning", "decline"]),
-        "raise": (raised, ["another warning", "decline"]),
+        "success": (backlog._EXIT_OK, []),
+        "refusal": (backlog._EXIT_REFUSED, ["decline", "another warning"]),
+        "raise": (raised, ["decline", "another warning"]),
     }[outcome]
     assert (result, printed, memory_api.logger.filters) == (*expected, filters)
 

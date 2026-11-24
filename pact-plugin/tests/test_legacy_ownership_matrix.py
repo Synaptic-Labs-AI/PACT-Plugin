@@ -335,7 +335,9 @@ ROWS = [
     (row_3, (False, "excluded", "foreign_rows", "refused"), (False, "excluded", "foreign_rows", "refused")),
     (row_4, (False, "unproven", "foreign_rows", "refused"), (False, "unproven", "foreign_rows", "refused")),
     (row_5, NO_SESSION, FOLDER_OK),
-    (row_6, (True, "included_unverified", None, "ok"), FOLDER_OK),
+    # Read on session evidence alone: a defaulted --to cannot claim the whole
+    # bucket, so the defaulted rekey is refused (an explicit --to still moves it).
+    (row_6, (True, "included_unverified", None, "refused"), FOLDER_OK),
     (row_7, VERIFIED, FOLDER_OK),
     (row_8, NO_SESSION, FOLDER_OK),
     (row_9, VERIFIED, FOLDER_OK),
@@ -731,7 +733,7 @@ def _sessions(**counts):
 # scope (n/a), rekey_default is None for a folder-name scope (n/a).
 DECISIONS = [
     ("canonical", _evidence(contained=1), _sessions(), (True, None, True, "verified", None)),
-    ("canonical", _evidence(neutral_outside=1), _sessions(here=1), (True, None, True, "included_unverified", None)),
+    ("canonical", _evidence(neutral_outside=1), _sessions(here=1), (True, None, False, "included_unverified", None)),
     ("canonical", _evidence(contained=1, foreign=1), None, (False, None, False, "unproven", "foreign_rows")),
     ("canonical", _evidence(contained=1), _sessions(elsewhere=1), (False, None, False, "unproven", "recorded_elsewhere")),
     ("canonical", _evidence(foreign=1), None, (False, None, False, "excluded", "foreign_rows")),

@@ -2686,10 +2686,11 @@ class TestTheGateProseMatchesTheCode:
         from scripts import cli
 
         source = Path(cli.__file__).read_text(encoding="utf-8")
-        assert "bucket and it is neither excluded nor unproven. Run --apply only" in source
+        assert "bucket and it is verified (a file row places it here). Run --apply only" in source
         assert "bucket and it is not excluded. Run --apply" not in source
-        assert "only when that bucket is " in source and "neither excluded nor unproven." in source
-        assert "own legacy candidate that is neither excluded nor\n    unproven" in cli._project_id_rekey.__doc__
+        assert "neither excluded nor unproven" not in source
+        assert "only when that bucket is " in source and '"verified (a file row places it here)."' in source
+        assert "own legacy candidate when it is verified (a file row\n    places it here)" in cli._project_id_rekey.__doc__
         assert "every populated bucket with its rekey command." not in source
 
     def test_the_memory_api_docstrings(self):

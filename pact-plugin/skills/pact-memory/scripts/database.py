@@ -1196,11 +1196,24 @@ CANONICAL_ID_MAX_LENGTH = 255
 # dropped by the parser; a value that still carries one is not an id.
 # An uppercase `%XX` is an RFC 3986 percent-encoding of a byte outside the
 # unreserved and sub-delimiter set.
+# A host is a DNS name, or an IPv6 literal in brackets in its one compressed
+# spelling (`is_canonical_id` checks the spelling).
 CANONICAL_ID_RE = re.compile(
-    r"[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?"
-    r"(?::([1-9][0-9]{0,4}))?"
+    r"(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?|\[(?P<ipv6>[0-9a-f:.]+)\])"
+    r"(?::(?P<port>[1-9][0-9]{0,4}))?"
     r"(?:/(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-F]{2})+)+"
 )
+
+
+def _compressed_ipv6(text: str) -> bool:
+    """Whether `text` is an IPv6 address in its compressed spelling
+    (`ipaddress`), so one address has one id."""
+    import ipaddress
+
+    try:
+        return ipaddress.IPv6Address(text).compressed == text
+    except ValueError:
+        return False
 
 
 def is_canonical_id(value: object) -> bool:
@@ -1224,8 +1237,10 @@ def is_canonical_id(value: object) -> bool:
     match = CANONICAL_ID_RE.fullmatch(value)
     if match is None:
         return False
-    port = match.group(1)
+    port = match.group("port")
     if port is not None and int(port) > 65535:
+        return False
+    if match.group("ipv6") is not None and not _compressed_ipv6(match.group("ipv6")):
         return False
     path = value.split("/", 1)[1]
     return not any(segment in (".", "..") for segment in path.split("/"))

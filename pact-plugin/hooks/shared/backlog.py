@@ -2218,13 +2218,13 @@ def _add_item_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 class _HeldWarnings(logging.Filter):
-    """Holds the memory skill's identity decline warnings
-    (`is_decline_record`) while one command runs. A command that succeeds
-    drops them: its project name came from the pre-change folder-name key,
-    so a decline of the canonical id says nothing about the write. A command
-    that does not succeed prints them (`replay`), so a refusal still shows
-    the cause the memory skill observed. Every other warning prints when it
-    is logged."""
+    """Holds EVERY warning the memory skill logs while one command runs: a
+    decline of the canonical id, an ignored override, a HOME landing. The
+    backlog uses the memory skill only to find the project, and its key is
+    the pre-change folder name, so none of them says anything about a write
+    that succeeds: a success drops them all. A command that does not succeed
+    prints them in the order they were logged (`replay`), so a refusal still
+    shows what the memory skill observed."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -2232,13 +2232,10 @@ class _HeldWarnings(logging.Filter):
         self.records: List[logging.LogRecord] = []
         self.replayed = False
         self.logger = memory_api.logger
-        self.is_decline = memory_api.is_decline_record
 
     def filter(self, record: logging.LogRecord) -> bool:
-        if self.is_decline(record):
-            self.records.append(record)
-            return False
-        return True
+        self.records.append(record)
+        return False
 
     def __enter__(self) -> "_HeldWarnings":
         self.logger.addFilter(self)

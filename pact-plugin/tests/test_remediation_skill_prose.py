@@ -107,8 +107,8 @@ class TestExitCodeThreeCoversBothVerbs:
         assert (
             "project-id rekey exits 1 when it refuses \u2014 --to is omitted and no "
             "canonical identity resolves, or --to is omitted and --from is not "
-            "this checkout's own legacy candidate that is neither excluded nor "
-            "unproven, or --db-path names a store that is not present \u2014 and 2 "
+            "this checkout's own verified legacy candidate, or --db-path names a "
+            "store that is not present \u2014 and 2 "
             "for bad input"
         ) in _body(SKILL)
 
@@ -780,8 +780,11 @@ class TestRekeyRemediesNameTheirTarget:
     def test_a_defaulted_target_is_only_for_the_own_candidate(self):
         assert (
             "An omitted --to is accepted only when --from is this checkout's "
-            "own legacy candidate and it is neither excluded nor unproven; "
-            "otherwise the move is refused with REKEY_REFUSED"
+            "own legacy candidate and the bucket is verified (a file row places "
+            "it here). A bucket read on session evidence alone "
+            "(included_unverified) moves only with an explicit --to, and so does "
+            "one that is excluded or unproven; otherwise the move is refused "
+            "with REKEY_REFUSED"
         ) in _body(SKILL)
 
     def test_a_named_absent_store_is_refused_not_reported_absent(self):
@@ -7031,10 +7034,6 @@ class TestEveryRouteEntryConditionIsARoute:
             "a method on a local the census cannot type; every project object built on "
             "the path is a named build"
         ),
-        ("call", "<call to no function project_identity: host.lower>"): (
-            "a method on a local the census cannot type; every project object built on "
-            "the path is a named build"
-        ),
         ("call", "<call to no function project_identity: scp_path.startswith>"): (
             "a method on a local the census cannot type; every project object built on "
             "the path is a named build"
@@ -7130,10 +7129,10 @@ class TestEveryRouteEntryConditionIsARoute:
             "parses the text read_git_file returned as git reads a .git file; its own "
             "body is read like any reached function"
         ),
-        ("call", "git_config_bool"): (
-            "parses the value of a git boolean environment variable the way git does; "
-            "the variable is the input, and its own body is read like any reached "
-            "function"
+        ("call", "git_env_bool"): (
+            "parses the value of a git boolean environment variable the way git does "
+            "(the one shared reader); the variable is the input, and its own body is "
+            "read like any reached function"
         ),
         ("call", "<call to no function shared.git_helpers: PASS_GIT_RESULTS.get>"): (
             "reads the pass's memo of git results, set only by git_results_pass"

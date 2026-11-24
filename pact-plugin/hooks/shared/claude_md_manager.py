@@ -378,9 +378,10 @@ _STALE_ORCHESTRATOR_LINE_RE = re.compile(
 )
 
 # The prefix of a memory section's own comment, in this and every earlier
-# release. A migration drops each row that is one such comment, found by the
-# finder as a marker line, and the rebuilt section gets the current comment,
-# so an earlier release's wording is never kept beside it.
+# release. A migration drops each row that is one such comment INSIDE A MEMORY
+# SECTION (`_in_memory_section`), found by the finder as a marker line, and
+# the rebuilt section gets the current comment, so an earlier release's
+# wording is never kept beside it. A copy in a user's section stays.
 _SECTION_COMMENT_PREFIX = "<!-- Auto-managed by pact-memory skill."
 
 
@@ -873,10 +874,29 @@ def _legacy_line_spans(doc: Document) -> list[tuple[int, int]]:
     loader_rows = [row for row in doc.find_lines(_STALE_ORCHESTRATOR_LINE_RE)
                    if not doc.lines[row].in_html]
     # FOUND, DUPLICATE and a stray's MALFORMED all carry the clean comment
-    # rows as spans; an UNKNOWN reading carries none, and drops nothing.
+    # rows as spans; an UNKNOWN reading carries none, and drops nothing. ONLY
+    # a comment inside a memory section is the section's own: a copy in a
+    # user's section is the user's text and stays.
     comment = doc.find_marker(_SECTION_COMMENT_PREFIX)
-    rows = sorted({*loader_rows, *(first for first, _ in comment.spans)})
+    boundaries = [row for row in doc.find_lines(_SECTION_BOUNDARY_RE) if not doc.lines[row].in_html]
+    memory_headings = {
+        row for pattern in _MEMORY_HEADING_RES.values() for row in doc.find_lines(pattern)
+        if not doc.lines[row].in_html
+    }
+    comment_rows = [
+        first for first, _ in comment.spans
+        if _in_memory_section(first, boundaries, memory_headings)
+    ]
+    rows = sorted({*loader_rows, *comment_rows})
     return [(doc.row_start(row), doc.lines[row].end) for row in rows]
+
+
+def _in_memory_section(row: int, boundaries: list[int], memory_headings: set[int]) -> bool:
+    """Whether `row` lies in a memory section: the nearest visible `# ` or
+    `## ` heading above it (`boundaries`, from the finder) is one of the
+    memory headings the migration rebuilds (`memory_headings`)."""
+    above = [heading for heading in boundaries if heading < row]
+    return bool(above) and above[-1] in memory_headings
 
 
 

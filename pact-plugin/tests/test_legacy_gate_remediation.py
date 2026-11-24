@@ -1012,7 +1012,6 @@ def test_l10_a_clone_of_a_victim_names_the_victim_after_isolation(tmp_path, monk
     assert f"the repository at {victim.resolve()}" in _sharing_line(text)
 
 
-
 # ---------------------------------------------------------------------------
 # Cycle 6: an unprintable pin path, the scope docstring, the legacy-write
 # refusal envelope
@@ -1083,3 +1082,42 @@ def test_a_legacy_bucket_update_is_refused_with_its_own_envelope(canonical_sessi
     assert code == 2, envelope
     assert envelope["error"] == "LEGACY_BUCKET_WRITE_REFUSED", envelope
     assert "allowed_fields" not in envelope and "Note:" not in envelope["message"]
+
+
+
+# ---------------------------------------------------------------------------
+# Cycle 7: a bucket read on session evidence alone needs an explicit --to
+# ---------------------------------------------------------------------------
+
+
+def test_a_session_admitted_bucket_needs_an_explicit_target(canonical_session, tmp_path, capfd):
+    """One session recorded here plus many rows no session places: the bucket
+    is read (`included_unverified`), but a defaulted rekey would move every
+    row on that one session's word, so it is refused; an explicit --to moves."""
+    from scripts.cli import main
+
+    repo, store = canonical_session
+    seed_session_evidence(tmp_path / "home" / ".claude", repo, "here-session")
+    _seed(store, NAME, session_id="here-session")
+    for index in range(5):
+        _seed(store, NAME, session_id=f"unrecorded-{index}")
+    code, envelope = _cli_err(["project-id", "rekey", f"--from={NAME}", "--apply", "--db-path", str(store)], capfd)
+    assert code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
+    assert "session evidence alone" in envelope["message"]
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "rekey", f"--from={NAME}", f"--to={CANONICAL}", "--apply", "--db-path", str(store)])
+    assert exit_info.value.code == 0, capfd.readouterr().err
+    assert json.loads(capfd.readouterr().out)["result"]["memories"] == 6
+
+
+def test_a_verified_bucket_still_takes_a_defaulted_target(canonical_session, capfd):
+    """Control: file rows that place the bucket here keep the default."""
+    from scripts.cli import main
+
+    repo, store = canonical_session
+    (repo / "a.py").write_text("x\n")
+    _seed(store, NAME, files=[repo / "a.py"])
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "rekey", f"--from={NAME}", "--db-path", str(store)])
+    assert exit_info.value.code == 0, capfd.readouterr().err

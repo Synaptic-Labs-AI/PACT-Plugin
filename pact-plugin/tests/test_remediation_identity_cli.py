@@ -1263,14 +1263,25 @@ class TestADefaultedTargetRefusesAnUnprovenBucket:
     def test_the_same_bucket_with_session_evidence_moves(
         self, identity_env, store, monkeypatch, capfd
     ):
-        """Control: a recorded session admits it, and the default then works."""
+        """Control: a recorded session admits it to reads, but a bucket read on
+        session evidence alone moves only with an explicit --to."""
+        from scripts.memory_api import PACTMemory
+
         self._rig(identity_env, monkeypatch, store, evidence=True)
         code, envelope = _cli(
             ["project-id", "rekey", "--from=proj", "--apply", "--db-path", str(store)], capfd
         )
+        assert code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
+        assert "session evidence alone" in envelope["message"], envelope
+        target = PACTMemory(db_path=store).project_id
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", f"--to={target}", "--apply",
+             "--db-path", str(store)],
+            capfd,
+        )
         assert code == 0, envelope
         assert envelope["result"]["memories"] == 1
-        assert envelope["result"]["target_defaulted"] is True
+        assert envelope["result"]["target_defaulted"] is False
 
 
 class TestAPrintedRekeyCommandRunsAsPrinted:
@@ -1441,8 +1452,10 @@ class TestRekeyInputAndStoreEdges:
         assert PACTMemory(db_path=store)._read_project_scopes() == (
             "github.com/o/proj", "proj",
         )
+        # Admitted on session evidence alone, so the move names its target.
         code, envelope = _cli(
-            ["project-id", "rekey", "--from=proj", "--apply", "--db-path", str(store)],
+            ["project-id", "rekey", "--from=proj", "--to=github.com/o/proj", "--apply",
+             "--db-path", str(store)],
             capfd,
         )
         assert code == 0, envelope

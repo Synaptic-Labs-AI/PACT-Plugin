@@ -78,7 +78,7 @@ _SCHEME_PREFIX_RE = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://")
 # (`host:`) still matches, so it classifies as a network remote and DECLINES.
 # The one exception, a Windows drive path, is applied by `_scp_match`.
 _SCP_FORM_RE = re.compile(
-    r"^(?P<user>[^@\s/:\\]+@)?(?P<host>[^@:/\s\\]+):(?P<path>.*)$"
+    r"^(?P<user>[^@\s/:\\]+@)?(?P<host>\[[^\]@/\s\\]+\]|[^@:/\s\\]+):(?P<path>.*)$"
 )
 
 _HOST_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789.-")
@@ -441,19 +441,13 @@ def _server_identity_impl() -> tuple:
 
 
 def _git_env_bool(name: str) -> bool:
-    """A git boolean environment variable, read as git reads it
-    (`shared.git_helpers.git_config_bool`; Python truthiness is wrong here,
-    since git reads "0", "false", "no" and "off" as false).
+    """The git boolean environment variable `name`, read by the one shared
+    reader (`shared.git_helpers.git_env_bool`), so this module's marker
+    walk and `shared.project_scope`'s agree: unset is false, a value git
+    refuses is true (fail closed), and Python truthiness is never used."""
+    from shared.git_helpers import git_env_bool
 
-    An UNSET variable is the default, which is false for both git variables
-    this module reads. A value git refuses (git stops with a fatal error) is
-    false here: git cannot answer this directory then, so the git questions
-    the resolver asks decline it whichever way the walk goes.
-    """
-    from shared.git_helpers import git_config_bool
-
-    raw = os.environ.get(name)
-    return raw is not None and bool(git_config_bool(raw))
+    return git_env_bool(os.environ.get(name))
 
 
 def _git_ceiling_directories() -> set:
@@ -570,6 +564,32 @@ def _valid_host(host: str) -> bool:
     if not host or not host[0].isalnum() or not host[-1].isalnum():
         return False
     return all(char in _HOST_CHARS for char in host)
+
+
+def _ipv6_host(host: str) -> Optional[str]:
+    """A bracketed IPv6 literal (`[2001:db8::1]`) in its one compressed,
+    bracketed spelling, or None. A zone index (`%eth0`) is machine-local and
+    declines, as does anything `ipaddress` refuses."""
+    import ipaddress
+
+    if not (host.startswith("[") and host.endswith("]")) or "%" in host:
+        return None
+    try:
+        return "[" + ipaddress.IPv6Address(host[1:-1]).compressed + "]"
+    except ValueError:
+        return None
+
+
+def _url_host(host: str) -> Optional[str]:
+    """The host as it goes into an id: a bracketed IPv6 literal compressed,
+    a name lower-cased and checked; None for anything else (including a host
+    in the reserved `.invalid` namespace)."""
+    if host.startswith("["):
+        return _ipv6_host(host)
+    host = host.lower()
+    if not _valid_host(host) or _reserved_host(host):
+        return None
+    return host
 
 
 def _reserved_host(host: str) -> bool:
@@ -912,16 +932,28 @@ def normalize_remote_url(url: object) -> Optional[str]:
             return None
         if "@" in authority:
             authority = authority.rsplit("@", 1)[1]
-        if ":" in authority:
+        if authority.startswith("["):
+            # An IPv6 literal: its colons are inside the brackets, and a port
+            # can only follow the closing bracket.
+            close = authority.find("]")
+            if close < 0:
+                return None
+            host, rest = authority[:close + 1], authority[close + 1:]
+            if rest and not rest.startswith(":"):
+                return None
+            port = rest[1:]
+            if rest and not _valid_port(port):
+                return None
+        elif ":" in authority:
             host, _, port = authority.rpartition(":")
             if not _valid_port(port):
                 return None
-            if _DEFAULT_PORTS.get(scheme) == int(port):
-                port = ""
         else:
             host, port = authority, ""
-        host = host.lower()
-        if not _valid_host(host) or _reserved_host(host):
+        if port and _DEFAULT_PORTS.get(scheme) == int(port):
+            port = ""
+        host = _url_host(host)
+        if host is None:
             return None
         # git percent-decodes an ssh url's WHOLE path before sending it
         # (measured: `ssh://h/srv/a%2Bb` sends `/srv/a+b`, `%2F` sends a
@@ -948,8 +980,8 @@ def normalize_remote_url(url: object) -> Optional[str]:
             # Neither a URL nor scp syntax: indistinguishable from a relative
             # local path, which is NO PORTABLE ORIGIN.
             return None
-        host = scp_match.group("host").lower()
-        if not _valid_host(host) or _reserved_host(host):
+        host = _url_host(scp_match.group("host"))
+        if host is None:
             return None
         # RELATIVE AND ABSOLUTE SCP PATHS ARE DELIBERATELY ONE ID.
         # `git@host:srv/repo`, `git@host:/srv/repo` and `ssh://git@host/srv/repo`
