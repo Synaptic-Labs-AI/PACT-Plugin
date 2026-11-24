@@ -1653,6 +1653,33 @@ class TestTeammateIsInProcess:
         (teams / "TeamRaw").symlink_to(outside, target_is_directory=True)
         assert teammate_is_in_process("TeamRaw", "CoderRaw", str(teams)) is False
 
+    def test_an_unsafe_team_name_that_containment_allows_is_false(self, tmp_path):
+        """RED WHEN the team-name safety check is removed: "Team.Raw" is an
+        ordinary directory under the teams root, so containment alone reads its
+        in-process config; only the safe-component check refuses it."""
+        from shared.background_work import teammate_is_in_process
+
+        teams = tmp_path / "teams"
+        for name in ("Team.Raw", "TeamSafe"):
+            (teams / name).mkdir(parents=True)
+            (teams / name / "config.json").write_text(
+                json.dumps(self.IN_PROCESS), encoding="utf-8"
+            )
+        assert teammate_is_in_process("TeamSafe", "CoderRaw", str(teams)) is True, (
+            "control: the same config under a safe name is in-process"
+        )
+        assert teammate_is_in_process("Team.Raw", "CoderRaw", str(teams)) is False
+
+    def test_an_empty_member_name_is_false_even_if_a_member_has_none(self, tmp_path):
+        """RED WHEN the empty-member-name check is removed: a config member with an
+        empty name would otherwise match an empty member name."""
+        from shared.background_work import teammate_is_in_process
+
+        teams = self._teams(
+            tmp_path, {"members": [{"name": "", "backendType": "in-process"}]}
+        )
+        assert teammate_is_in_process("TeamRaw", "", teams) is False
+
     def test_a_team_link_inside_the_teams_root_still_reads(self, tmp_path):
         """Guard arm: containment resolves links, so an in-root team link is read."""
         from shared.background_work import teammate_is_in_process
