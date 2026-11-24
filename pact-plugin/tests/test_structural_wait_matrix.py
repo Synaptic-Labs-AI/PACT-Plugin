@@ -474,7 +474,11 @@ SELF_STARTED_HEADING = "### Wait Discipline for Self-Started Work"
 # "does not arm"), so inverting any role's rule reddens its own row.
 ROLE_WAIT_CLAUSES = [
     "A separate-process teammate (tmux teammateMode) arms the structural "
-    "watcher with one Bash call (run_in_background: true) and ends the turn",
+    "watcher only with the arm command a wait_filler_gate denial gives it: "
+    "it runs that command verbatim with one Bash call "
+    "(run_in_background: true) and ends the turn.",
+    "Without that command, it SETs intentional_wait with expected_resolver "
+    "naming the lead and ends the turn.",
     "An in-process teammate does not arm a watcher: it SETs intentional_wait "
     "with expected_resolver naming the lead and ends the turn.",
     "An Agent-tool subagent does not arm a watcher; it puts what the lead "
@@ -500,7 +504,7 @@ def _self_started_section():
     return _normalized("\n".join(body))
 
 
-@pytest.mark.parametrize("clause", ROLE_WAIT_CLAUSES, ids=["separate", "in-process", "subagent"])
+@pytest.mark.parametrize("clause", ROLE_WAIT_CLAUSES, ids=["separate", "separate-no-command", "in-process", "subagent"])
 def test_skill_states_each_roles_deliverable_wait(clause):
     """Each role's wait on another teammate's deliverable matches what the
     tier-3 outlet tells that role: the separate-process teammate arms, the
