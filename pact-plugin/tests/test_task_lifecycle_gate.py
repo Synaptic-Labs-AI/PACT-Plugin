@@ -5087,6 +5087,73 @@ def test_no_wiring_arm_on_completed_work_task(
     )
 
 
+def _wire_work_task(tmp_path, monkeypatch, pact_context, blockers, **tool_extra):
+    """Seed work task B (blockedBy the given ids) and each blocker record,
+    then drive the owner-only wiring write; returns the arm advisories."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path, "test-team", "B",
+        subject="implement hook core", status="pending",
+        owner="backend-coder", blockedBy=[bid for bid, _s in blockers],
+    )
+    for blocker_id, status in blockers:
+        if status is not None:
+            _seed_task_a(
+                tmp_path, "test-team", blocker_id,
+                subject="backend-coder: TEACHBACK for hook core", status=status,
+            )
+    payload = {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "B", "owner": "backend-coder", **tool_extra},
+        "tool_response": {},
+    }
+    monkeypatch.setattr(tlg, "is_pact_specialist_owner", lambda *_a, **_k: True)
+    advisories = tlg.evaluate_lifecycle(payload)
+    return [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+
+
+@pytest.mark.parametrize("status", ["pending", "in_progress"])
+def test_no_wiring_arm_while_a_blocker_is_open(
+    tmp_path, monkeypatch, pact_context, status
+):
+    """A work task still gated behind its teachback cannot start, so a
+    handoff watch armed at wiring would spend its deadline on the gate.
+    The wiring shape stays silent; the acceptance shape arms it later."""
+    arms = _wire_work_task(tmp_path, monkeypatch, pact_context, [("A", status)])
+    assert arms == []
+
+
+def test_no_wiring_arm_when_this_write_adds_an_open_blocker(
+    tmp_path, monkeypatch, pact_context
+):
+    """The composite owner+addBlockedBy write gates the task in the same
+    write, so the blocker named in addBlockedBy holds the arm too."""
+    arms = _wire_work_task(
+        tmp_path, monkeypatch, pact_context, [], addBlockedBy=["A"]
+    )
+    assert len(arms) == 1  # A has no record yet: nothing gates the task
+    _seed_task_a(
+        tmp_path, "test-team", "A",
+        subject="backend-coder: TEACHBACK for hook core", status="pending",
+    )
+    arms = _wire_work_task(
+        tmp_path, monkeypatch, pact_context, [], addBlockedBy=["A"]
+    )
+    assert arms == []
+
+
+@pytest.mark.parametrize("status", ["completed", None])
+def test_wiring_arm_when_every_blocker_is_closed_or_unreadable(
+    tmp_path, monkeypatch, pact_context, status
+):
+    """A completed blocker no longer gates the task, and a blocker with no
+    readable record can never complete: the wiring arm is supplied."""
+    arms = _wire_work_task(tmp_path, monkeypatch, pact_context, [("A", status)])
+    assert len(arms) == 1
+    assert "--predicate handoff" in arms[0] and "--task B" in arms[0]
+
+
 def test_no_arm_supply_on_non_lead_frames(tmp_path, monkeypatch, pact_context):
     """The arm advisories are LEAD-shaped: a frame whose agent_type names a
     non-lead actor (a teammate claim/reassignment write) is suppressed on
@@ -5179,6 +5246,17 @@ def test_arm_supply_on_teachback_acceptance(tmp_path, monkeypatch, pact_context)
     assert "--predicate handoff" in arms[0]
     assert "--task B" in arms[0]
     assert "--team test-team" in arms[0]
+    # A teammate that claimed the work task before the lead accepted the
+    # teachback leaves it in_progress: the handoff is still the wait.
+    _seed_task_a(
+        tmp_path, "test-team", "B",
+        subject="implement hook core", status="in_progress",
+        owner="backend-coder",
+    )
+    advisories = tlg.evaluate_lifecycle(payload)
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, f"expected one arm on in_progress, got: {advisories}"
+    assert "--task B" in arms[0]
 
 
 def test_acceptance_arm_rejects_lead_owned_parent_real_predicate(

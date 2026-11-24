@@ -1500,6 +1500,26 @@ def _owner_resolves_to_lead(owner: str, team_name: str) -> bool:
         return False
 
 
+def _has_open_blocker(task: dict, team_name: str, added: object = None) -> bool:
+    """True iff `task` is still gated: some blocker named in its on-disk
+    `blockedBy` (or in this write's `addBlockedBy`) has a readable
+    record whose status is not completed. A blocker with no readable
+    record does not hold the gate (nothing can complete it), and the
+    platform may drop completed blockers from `blockedBy` or keep them;
+    both read as open only while the blocker record says so."""
+    ids: list = []
+    for source in (task.get("blockedBy"), added):
+        if isinstance(source, list):
+            ids.extend(source)
+    for blocker_id in ids:
+        if not isinstance(blocker_id, str) or not blocker_id.strip():
+            continue
+        blocker = read_task_json(blocker_id, team_name, base_fallback=False)
+        if blocker and blocker.get("status") != "completed":
+            return True
+    return False
+
+
 def evaluate_lifecycle(
     input_data: dict, *, decision: dict | None = None
 ) -> list[tuple[str, str]]:
@@ -1645,7 +1665,11 @@ def evaluate_lifecycle(
         #     re-advising mid-flight.
         #   Task B (work task) wired — an owner-bearing write on a
         #     live (pending/in_progress) non-teachback task with a
-        #     specialist owner that is not the lead. The SPLIT wiring real
+        #     specialist owner that is not the lead, and NO open blocker:
+        #     a task still gated behind another (its teachback, typically)
+        #     cannot start, so a watch armed now would spend its deadline
+        #     on the gate; the acceptance shape below arms it when the
+        #     gate opens. The SPLIT wiring real
         #     arcs use lands `owner` in one TaskUpdate while the blockers
         #     landed at creation or a separate update —
         #     shared/dispatch_helpers.py measures the owner+addBlockedBy
@@ -1692,6 +1716,9 @@ def evaluate_lifecycle(
                     wired.get("status") in ("pending", "in_progress")
                     and is_pact_specialist_owner(wiring_owner, team_name)
                     and not _owner_resolves_to_lead(wiring_owner, team_name)
+                    and not _has_open_blocker(
+                        wired, team_name, tool_input.get("addBlockedBy")
+                    )
                 ):
                     # The live-status whitelist is load-bearing twice over:
                     # it rejects a COMPLETED task (a late owner fix on a
@@ -1962,7 +1989,8 @@ def evaluate_lifecycle(
         # parent), and a parent is lead-owned — watching it burns the
         # deadline toward a misleading EXPIRED, or false-fires if the
         # parent ever gains an unrelated handoff. An entry qualifies when
-        # its on-disk record is still pending and carries a specialist
+        # its on-disk record is still live (pending, or in_progress when
+        # the teammate claimed it first) and carries a specialist
         # owner that is NOT the lead (the registry glob admits the
         # orchestrator, so the specialist leg alone would admit lead-owned
         # parents); one advisory per qualifying entry (duplicate arms are
@@ -1978,7 +2006,7 @@ def evaluate_lifecycle(
                     )
                     blocked_owner = blocked.get("owner")
                     if (
-                        blocked.get("status") == "pending"
+                        blocked.get("status") in ("pending", "in_progress")
                         and isinstance(blocked_owner, str)
                         and blocked_owner.strip()
                         and is_pact_specialist_owner(blocked_owner, team_name)
