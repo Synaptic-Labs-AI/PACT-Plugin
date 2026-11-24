@@ -484,74 +484,104 @@ def _deadline(since_at: datetime, early_by: float = 0.0) -> datetime:
     return since_at + timedelta(seconds=teammate_idle.GRACE_SECONDS - early_by)
 
 
+# Each arm keeps about 8.5 s of the 10 s window, and measures this machine's own
+# hook start-up first, so "still running" is checked a second past start-up,
+# never on a process that is merely slow to start.
+GRACE_AGE = 1.5
+
+
+def _startup_seconds(tmp_path: Path) -> float:
+    """Wall time of the same real hook with a wait too old to hold: start-up only."""
+    baseline, _since = _grace_root(tmp_path / "baseline", age_seconds=60)
+    _output, elapsed = _run_idle_hook(baseline)
+    return elapsed
+
+
+def _require_room(startup: float, since_at: datetime) -> float:
+    """The window left at launch; fail loudly if start-up leaves no room to observe the hold."""
+    remaining = (_deadline(since_at) - datetime.now(timezone.utc)).total_seconds()
+    assert startup + 1.5 < remaining, (
+        f"runner too slow to observe the hold: hook start-up took {startup:.2f}s "
+        f"with {remaining:.2f}s of the window left"
+    )
+    return remaining
+
+
 class TestTeammateIdleGraceThroughRealHook:
     def test_message_landing_during_the_hold_ends_it_early(self, tmp_path):
-        """Arm A. The wait is 5 s old, so about 5 s of grace remain. The lead's
-        message lands half a second after launch, while the hook process is
-        still running. The hook must end early, at least a second before the
-        deadline, which proves it reached this inbox through the real config
-        dir; one that cannot reach it holds to the deadline. Still running at
-        0.5 s does not prove the hold had started, since the process may still
-        be starting up; arm B is the evidence that a hold runs."""
-        config, since_at = _grace_root(tmp_path, age_seconds=5)
+        """Arm A. About 8.5 s of the window remain. The lead's message lands a
+        second after this machine's measured hook start-up, so a hook still
+        running then is holding (a hook with no hold has exited by then). The
+        hook must end soon after the message lands, which proves it reached
+        this inbox through the real config dir; one that cannot reach it holds
+        to the deadline."""
+        startup = _startup_seconds(tmp_path)
+        config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE)
         inbox = _grace_inbox(config)
         inbox.parent.mkdir(parents=True, exist_ok=True)
         staged = inbox.with_name("staged.tmp")
 
         hook = _start_idle_hook(config)
-        time.sleep(0.5)
+        _require_room(startup, since_at)
+        time.sleep(startup + 1.0)
         staged.write_text(json.dumps([{
             "from": "team-lead", "text": "accepted", "read": False,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }]), encoding="utf-8")
         still_holding = hook.poll() is None
         os.replace(staged, inbox)
+        landed_at = datetime.now(timezone.utc)
         output = _finish_idle_hook(hook)
         returned_at = datetime.now(timezone.utc)
 
         assert output == {"suppressOutput": True}, "the hold never emits a decision"
         assert still_holding, (
-            "the hook process exited before the message landed"
+            f"the hook exited within a second of its {startup:.2f}s start-up, so it never held"
         )
-        assert returned_at < _deadline(since_at, early_by=1), (
+        assert (returned_at - landed_at).total_seconds() < 2.0, (
             "the real hook did not see the message in the teammate's inbox "
-            "under the config dir, so it held to the grace deadline"
+            "under the config dir, so it kept holding after the message landed"
         )
 
     def test_no_queued_message_holds_to_the_original_deadline(self, tmp_path):
-        """Arm B. The wait is 7 s old and the inbox is absent, so the real hook
-        holds for about 3 s. It must still be running 1.5 s after launch, well
-        before the deadline, and must not return before the deadline less one
-        poll interval. A hook that skipped the hold has exited by the check.
-        Empty versus absent inboxes are covered by the unit tests."""
-        config, since_at = _grace_root(tmp_path, age_seconds=7)
+        """Arm B. About 8.5 s of the window remain and the inbox is absent. The
+        hook must still be running a second after this machine's measured
+        start-up, and must not return before the deadline less one poll
+        interval. A hook that skipped the hold exits at start-up, so it fails
+        both checks however slow the machine is. Empty versus absent inboxes
+        are covered by the unit tests."""
+        startup = _startup_seconds(tmp_path)
+        config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE)
 
-        started = time.monotonic()
         hook = _start_idle_hook(config)
-        time.sleep(1.5)
+        _require_room(startup, since_at)
+        time.sleep(startup + 1.0)
         still_holding = hook.poll() is None
         output = _finish_idle_hook(hook)
-        elapsed = time.monotonic() - started
         returned_at = datetime.now(timezone.utc)
 
         assert output == {"suppressOutput": True}
-        assert still_holding, "the hook exited 1.5 s into a 3 s hold"
+        assert still_holding, (
+            f"the hook exited within a second of its {startup:.2f}s start-up, so it never held"
+        )
         assert returned_at >= _deadline(since_at, early_by=teammate_idle.POLL_SECONDS), (
             "the hook returned before the grace deadline, so it never held "
             "the eligible wait"
         )
-        assert elapsed < 6, f"no-message idle held for {elapsed:.2f}s"
 
     def test_pane_teammate_is_never_held(self, tmp_path):
         """Arm C. A tmux member's idle notice is sent before this hook runs, so
-        the same eligible wait with nothing queued returns at once, at least a
-        second before the deadline it would otherwise hold to."""
-        config, since_at = _grace_root(tmp_path, age_seconds=5, backend="tmux")
+        the same eligible wait with nothing queued returns at once, well before
+        the deadline it would otherwise hold to."""
+        startup = _startup_seconds(tmp_path)
+        config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE, backend="tmux")
 
-        output, _elapsed = _run_idle_hook(config)
+        hook = _start_idle_hook(config)
+        _require_room(startup, since_at)
+        output = _finish_idle_hook(hook)
         returned_at = datetime.now(timezone.utc)
 
         assert "decision" not in output, output
-        assert returned_at < _deadline(since_at, early_by=1), (
+        assert returned_at < _deadline(since_at, early_by=3), (
             "a pane teammate's idle was held"
         )
