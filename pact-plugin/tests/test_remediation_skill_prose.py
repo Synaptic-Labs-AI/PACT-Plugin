@@ -191,6 +191,44 @@ class TestExitCodeTableMatchesTheCli:
         assert "exit code 2, error type SYSTEM_ERROR" not in body
 
 
+class TestCliReadEffectOnTheStore:
+    """What SKILL.md says a CLI read does to the store is what a real read
+    does: an existing store keeps its journal mode, and the first read of an
+    absent default store creates it."""
+
+    _cli = TestExitCodeTableMatchesTheCli()
+
+    def test_a_read_keeps_an_existing_stores_journal_mode(self, tmp_path):
+        import sqlite3
+
+        store = self._cli._store(tmp_path)
+        conn = sqlite3.connect(store)
+        conn.execute("PRAGMA journal_mode=DELETE")
+        conn.close()
+        result = self._cli._run(tmp_path, "list", "--db-path", str(store))
+        assert result.returncode == 0, result.stderr
+        conn = sqlite3.connect(f"file:{store}?mode=ro", uri=True)
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+        finally:
+            conn.close()
+        body = _body(SKILL)
+        assert (
+            "A read does NOT create, migrate or change the journal mode of an "
+            "existing store"
+        ) in body
+        assert "journal_mode=WAL" not in body
+
+    def test_the_first_read_of_an_absent_default_store_creates_it(self, tmp_path):
+        result = self._cli._run(tmp_path, "list")
+        assert result.returncode == 0, result.stderr
+        assert (tmp_path / "memory-home" / "memory.db").exists()
+        assert (
+            "the first read of an absent store in the default location creates "
+            "the store and its schema"
+        ) in _body(SKILL)
+
+
 class TestSecretaryProjectionKey:
     """The secretary's Working Memory step reads the projection by its
     `read_scope` and sends a decline to `project-id show` instead of
@@ -612,7 +650,15 @@ class TestLegacyScopeStatesAreDocumented:
         assert (
             "A session whose project id is a folder name refuses to save into "
             "that bucket when the gate excludes it (its file rows all lie in "
-            "another checkout): the save exits 2 and writes nothing."
+            "another checkout): the save fails with FOLDER_NAME_BUCKET_REFUSED, "
+            "exits 1 and writes nothing."
+        ) in _body(SKILL)
+        assert "the pin is the user's to write, so ask the user" in _body(SKILL)
+
+    def test_foreign_rows_is_a_documented_unproven_reason(self):
+        assert (
+            "foreign_rows (some of its file rows lie in another checkout; "
+            "detail.foreign_rows counts them, and a rekey needs an explicit --to)"
         ) in _body(SKILL)
 
     def test_the_suppression_reason_is_documented_only_there(self):

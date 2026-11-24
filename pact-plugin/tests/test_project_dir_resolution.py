@@ -16,9 +16,8 @@ Used by/with:
   channel under test.
 - tests/fixtures/project_dir.py: umbrella factory, context writer, discovery
   enabler, subprocess env builder.
-- tests/test_project_id.py: the replica/equivalence pins for the pre-existing
-  strategies; this file owns the record-rung coverage the replica deliberately
-  omits.
+- tests/test_project_id.py: the pre-existing strategies, run through the real
+  detector; this file owns the record-rung coverage that module leaves out.
 
 HOW THE RECORD ROUTE IS EXERCISED: in-process rows use
 enable_record_discovery (the test_session_discovery_route pattern — the

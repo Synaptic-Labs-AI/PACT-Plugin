@@ -28,12 +28,12 @@ pact-memory now files a project's memories under the repository they belong to, 
 
 - **The id.** It is `host/owner/repo` from the repository's `origin` remote. ssh, scp and https spellings of one remote give one id; the host is lower-cased; the login, a trailing `.git` and a scheme's default port are dropped, and any other port is kept. A folder with no remote, or a local-path remote, keeps its folder name as before.
 - **An explicit pin.** A user can write a canonical id to `<git-common-dir>/pact-project-id`, shared by every worktree of the repository. It outranks the remote. An in-tree `.pact/project-id` is ignored, because a clone can plant one, and a folder-name value is ignored and reported as `override_ignored`.
-- **A folder-name id stays out of other checkouts' buckets.** A repository with no origin (its id is its folder name) no longer reads or saves into a same-name bucket whose file rows all lie in another checkout; the read discloses the exclusion and the save is refused (exit 2) with the remedy: add an origin remote, a `pact-project-id` pin, or pass `project_id`. A bucket whose rows name paths that no longer exist is still read.
+- **A folder-name id stays out of other checkouts' buckets.** A repository with no origin (its id is its folder name) no longer reads or saves into a same-name bucket whose file rows all lie in another checkout. The read discloses the exclusion; the save fails with `FOLDER_NAME_BUCKET_REFUSED` (exit 1) and prints a ready-to-run local pin (`local/<digest>/<folder>`), so the repository can get its own id without inventing a remote. A bucket whose rows name paths that no longer exist is still read.
 - **Old memories.** Reads also cover this checkout's old folder-name bucket while it holds rows, when a file row places it in this repository or a session started at this repository's root wrote into it. Any other old bucket is reported as `unproven` and is not read; `list`, `search` and `project-id show` name it with the command that moves it. Every new save goes to the new id.
 - **New commands.** `project-id show` reports the id, how it was chosen, what reads cover, every populated bucket and a runnable rekey command where one is safe. `project-id rekey --from=<id> --to=<id>` moves a whole bucket (memories, file rows, links and vectors) in one transaction. It is a dry run unless you pass `--apply`, and a second apply changes nothing.
 - **Refusals instead of guesses.** A remote that cannot be represented, a `.git` git cannot answer for, a `.git` that points into another repository, or a submodule with no usable remote refuses with the cause and the fix. `project-id show` and `status` carry it as `decline_reason`.
 - **Exit codes.** Every command now exits 3 for an operational fault: a store that cannot be opened, read or written, a failed `setup`, a `save` whose read-back found no row, or an unexpected internal error. These exited 2 before; exit 2 now means bad input only.
-- **Reads leave the store alone.** `list`, `search`, `sync`, `status`, `get` and `project-id show` no longer create or migrate a store's schema; a read can still create the `-wal` and `-shm` files beside a store that holds data.
+- **Reads leave an existing store alone.** `list`, `search`, `sync`, `status`, `get` and `project-id show` no longer create, migrate or change the journal mode of an existing store. The first `list`, `search`, `status` or `get` of an absent store in the default location creates it with its schema and answers empty; `project-id show` creates nothing.
 - **The backlog file name** stays keyed by the folder name, because it is a path and a canonical id contains slashes.
 
 ### Identity details
@@ -41,12 +41,14 @@ pact-memory now files a project's memories under the repository they belong to, 
 - github.com owner and repository names are lower-cased, because GitHub treats them case-insensitively; every other host, GitHub Enterprise included, keeps the path's case, so two case spellings there are two ids until rekeyed.
 - Percent-encoded and non-ASCII path segments are kept as uppercase `%XX`, and the Azure DevOps https, ssh and `visualstudio.com` spellings of one repository share one id. `ssh+git://` is accepted. An ssh host alias stays in the id, because git cannot tell an alias from a host.
 - A relative and an absolute scp path are one id, as are two logins on one host and path.
-- The remote is read with `git config --get remote.origin.url` from the repository's own config, so a machine-local `insteadOf` rewrite does not change the id. A url that only an included config file sets refuses, because it can change with the branch.
+- The remote is read with `git config --local --includes --show-origin -z --get-all remote.origin.url`, and the first value from the repository's own config file is used, so a machine-local `insteadOf` rewrite does not change the id. A url that only an included config file sets refuses, because it can change with the branch.
 - Every route that resolves an identity runs the same guards: a `.git` file, symlink or admin pointer naming another repository's git directory, a submodule admin directory with `core.worktree` unset, a bare repository, and a `.git` git refuses to read. `.git` and `gitdir` files are read as git reads them, at most 1 MiB, never through a FIFO.
 - The legacy-bucket case check no longer counts a symlink at the other-case folder name as proof that the filesystem ignores case, so a planted link cannot pull another project's folder-name bucket into the read scope.
 - A home directory that is a git repository keeps its folder name and a warning, as before. A user-scope `project_id` in the memory `config.json` answers only when nothing was declared and no repository was found, whatever store `--db-path` names.
 - Worktree listings are read with NUL separators, or checked field by field on a git older than 2.36. An older git that lacks an option refuses rather than falling back to a folder name. `GIT_CEILING_DIRECTORIES` and folder names holding newlines or trailing spaces resolve as git resolves them.
 - Each git question is asked once per command.
+- A repository whose origin URL has a non-ASCII digit in its port (a superscript two, for example) no longer makes every memory command fail with `SYSTEM_ERROR`; the identity declines instead.
+- A `GIT_DISCOVERY_ACROSS_FILESYSTEM` value longer than 4300 digits is read as an invalid boolean instead of raising.
 
 ### Store, search and rekey
 
@@ -54,6 +56,8 @@ pact-memory now files a project's memories under the repository they belong to, 
 - Rekey merges file rows that collide on `UNIQUE(path, project_id)` and copies vectors by blob. A link it cannot re-track is quarantined and counted rather than aborting the move. Its counters (`links_repointed`, `links_conflicted`, `vectors_moved`, `from_bucket_empty` and the NULL-row counts) are exact on a dry run, which never creates or initialises a store.
 - The first memory read on a new derived store now answers empty and leaves the store with its schema, even when the embedding catch-up is skipped for the session.
 - Read-only memory reads no longer open a store immutably while a rollback journal (`-journal`) from a crashed writer is present.
+- A legacy folder-name bucket holding rows from this repository and from another checkout is no longer read whole or moved by a defaulted `project-id rekey`; it is reported unproven (`foreign_rows`) with the number of foreign file rows.
+- The legacy-bucket session check no longer slows every memory command on a large sessions folder: at 3,665 session folders it took about 0.5 s per command and now takes under 0.1 s.
 - Text search on a memory store that has no tables yet now returns no results instead of failing with an SQL syntax error.
 - A store that is not a SQLite database gets a named remedy from every command. The embedding catch-up checks the store first and waits for a due dimension migration.
 - A session in a repository with a canonical id can no longer file a memory into a folder-name bucket, or change the session of a row stored in one.
@@ -62,6 +66,7 @@ pact-memory now files a project's memories under the repository they belong to, 
 
 - `hooks/session_end.py` appends one line per session folder it deletes to `pruned-sessions.jsonl`, so the evidence for an old bucket outlives the folder. The ledger is trimmed to its last 1 MiB past 2 MiB, by writing a new file and renaming it over the old one, without dropping a complete line. A writer skips its line after about one second rather than waiting on the lock indefinitely, and session records are read only as bounded regular files.
 - Removing a linked worktree no longer pushes the repository's own pre-upgrade bucket out of reads with a false "another checkout" warning: a session whose recorded directory no longer exists counts as unattributed.
+- The session-end PR check and backlog issue refs accept only ASCII digits: a superscript or other-script digit is no longer read as a PR or issue number, and an over-long PR number no longer raises.
 - `hooks/shared/backlog.py` records only worktrees whose `.git` and admin entry name each other, reads the listing with the memory skill's reader, and refuses with the memory skill's cause when the checkout cannot be confirmed.
 - The Working Memory comment in `CLAUDE.md` says the section is keyed by the repository identity. The secretary reads the projection by `read_scope`, sends a null `project_id` to `project-id show`, and counts calibration records across every id in the scope.
 

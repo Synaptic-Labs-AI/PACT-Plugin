@@ -68,12 +68,10 @@ included. Never add `--db-path` to a command yourself.
 ### What you must not do, and why
 
 - Do not run a pact-memory CLI verb to inspect the store. A read does NOT
-  create or migrate the schema of an existing store, but it still opens the
-  store READ-WRITE and, on a store holding data, runs `PRAGMA
-  journal_mode=WAL`, which can create `memory.db-wal` and `memory.db-shm`.
-  That is a write to the store directory even though no row is written. A CLI
-  run also reaches the same functions an import reaches, so it defeats the
-  next rule.
+  create, migrate or change the journal mode of an existing store, but the
+  first read of an absent store in the default location creates the store
+  and its schema. A CLI run also reaches the same functions an import
+  reaches, so it defeats the next rule.
 - Do not import a module below `skills/pact-memory/scripts/`. In that package,
   functions create the live store directory as a side result of a path
   resolution, so an import puts each of them one call away. Do not read an
@@ -267,8 +265,10 @@ folder-name bucket, save from a folder whose project id is that name
 
 A session whose project id is a folder name refuses to save into that bucket
 when the gate excludes it (its file rows all lie in another checkout): the
-save exits 2 and writes nothing. Add an `origin` remote, ask the user for a
-`pact-project-id` pin, or pass `project_id`.
+save fails with `FOLDER_NAME_BUCKET_REFUSED`, exits 1 and writes nothing. Its
+message prints a local pin (`local/<digest>/<folder>`) that gives this
+repository its own id; the pin is the user's to write, so ask the user
+instead of writing it. Otherwise add an `origin` remote or pass `project_id`.
 
 A `project_id` or `session_id` DETECTED from the environment or the session
 context is held to the same rule, and the outcome depends on the operation. A
@@ -333,7 +333,7 @@ Addressing mode, not the verb name, decides scope: `list`, `search` and `search_
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
-| `project-id show` | Report the detected project id, its `id_shape`, its `source`, the resolved read scope, and every populated bucket in `candidates`. Each candidate row is `{id, memory_count, relation, rekey}`, with `relation` one of `current`, `legacy_candidate`, `case_variant` or `other`; only a `legacy_candidate` row that is not excluded and a `case_variant` row carry a `rekey` command, and every other row's `rekey` is `null`. `repo_root` is the IDENTITY root this verb resolved and the legacy gate compared rows against; `process_repo_root` is the repository the process itself sits in — they differ in a declared-repo session, and `repo_root` is the one that explains the id. `decline_reason` is `{source, reason, override_path}` whenever resolution declined for a named cause, and `null` otherwise: `source` is the rung that declined, `reason` is one of `origin_unreadable`, `origin_unrepresentable`, `gitfile_redirect`, `broken_git_marker`, `no_working_tree`, `submodule_checkout` or `declaration_unresolved`, and `override_path` is the `<git-common-dir>/pact-project-id` file that remedies it, or `null` in two cases. First, when no override file can remedy the decline: that is the case for `gitfile_redirect`, `no_working_tree`, `broken_git_marker` and `declaration_unresolved`. Second, for any other cause when the checkout's `.git` points at a git directory outside it that is neither a linked worktree's nor a submodule's admin directory: a pin there may remedy the decline, but the path is withheld because a forged pointer looks the same, so pinning that git directory is the user's decision, as for `gitfile_redirect` below. For `gitfile_redirect`: Check that git can answer for this checkout (`git rev-parse --git-dir`, `git worktree list`), or run from the repository the `.git` points at. A `git init --separate-git-dir` layout of your own is a user decision: see the pact-memory skill. Such a layout is recovered by a pin at `<dir>/.git/pact-project-id`, in the git directory its `.git` file names, but only the user writes it, after confirming that directory is theirs. An agent never writes this pin and asks the user instead: a forged `.git` file naming another repository's git directory has the same shape, and the pin would re-pin that repository. When the detail says git lists the worktree entry the `.git` names at another path, which git marks prunable, and not at this checkout, the remedy adds: A linked worktree you moved is re-registered by running `git worktree repair` in it; the user runs that, not an agent. `case_variant` lists a case-differing bucket the case gate did NOT include (present-but-not-included, with its rekey command), distinct from `excluded`, which means the plausibility gate disproved it. Reads an existing store and creates none | `{"project_id": "...", "id_shape": "canonical", "source": "...", "decline_reason": null, "repo_root": "...", "process_repo_root": "...", "read_scope": [...], "legacy_scope": {"candidate": "...", "case_variant": [], "case_variant_rekey": [], ...}, "candidates": [{"id": "...", "memory_count": N, "relation": "legacy_candidate", "rekey": "..."}]}` |
+| `project-id show` | Report the detected project id, its `id_shape`, its `source`, the resolved read scope, and every populated bucket in `candidates`. Each candidate row is `{id, memory_count, relation, rekey}`, with `relation` one of `current`, `legacy_candidate`, `case_variant` or `other`; only a `legacy_candidate` row that is not excluded and a `case_variant` row carry a `rekey` command, and every other row's `rekey` is `null`. `repo_root` is the IDENTITY root this verb resolved and the legacy gate compared rows against; `process_repo_root` is the repository the process itself sits in — they differ in a declared-repo session, and `repo_root` is the one that explains the id. `decline_reason` is `{source, reason, override_path}` whenever resolution declined for a named cause, and `null` otherwise: `source` is the rung that declined, `reason` is one of `origin_unreadable`, `origin_unrepresentable`, `gitfile_redirect`, `broken_git_marker`, `no_working_tree`, `submodule_checkout` or `declaration_unresolved`, and `override_path` is the `<git-common-dir>/pact-project-id` file that remedies it, or `null` in two cases. First, when no override file can remedy the decline: that is the case for `gitfile_redirect`, `no_working_tree`, `broken_git_marker` and `declaration_unresolved`. Second, for any other cause when the checkout's `.git` points at a git directory outside it that is neither a linked worktree's nor a submodule's admin directory: a pin there may remedy the decline, but the path is withheld because a forged pointer looks the same, so pinning that git directory is the user's decision, as for `gitfile_redirect` below. For `gitfile_redirect`: Check that git can answer for this checkout (`git rev-parse --git-dir`, `git worktree list`), or run from the repository the `.git` points at. A `git init --separate-git-dir` layout of your own is a user decision: see the pact-memory skill. In this skill, that is the next sentence. Such a layout is recovered by a pin at `<dir>/.git/pact-project-id`, in the git directory its `.git` file names, but only the user writes it, after confirming that directory is theirs. An agent never writes this pin and asks the user instead: a forged `.git` file naming another repository's git directory has the same shape, and the pin would re-pin that repository. When the detail says git lists the worktree entry the `.git` names at another path, which git marks prunable, and not at this checkout, the remedy adds: A linked worktree you moved is re-registered by running `git worktree repair` in it; the user runs that, not an agent. `case_variant` lists a case-differing bucket the case gate did NOT include (present-but-not-included, with its rekey command), distinct from `excluded`, which means the plausibility gate disproved it. Reads an existing store and creates none | `{"project_id": "...", "id_shape": "canonical", "source": "...", "decline_reason": null, "repo_root": "...", "process_repo_root": "...", "read_scope": [...], "legacy_scope": {"candidate": "...", "case_variant": [], "case_variant_rekey": [], ...}, "candidates": [{"id": "...", "memory_count": N, "relation": "legacy_candidate", "rekey": "..."}]}` |
 | `project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply]`, or `project-id rekey --candidates` alone | Move an ENTIRE project bucket to a canonical id in one transaction: memories, file rows, graph links and vector partitions. `--dry-run` is the default posture. `--candidates` lists the buckets as `show` does and takes no other option. An omitted `--to` is accepted only when `--from` is this checkout's own legacy candidate and it is neither excluded nor unproven; otherwise the move is refused with `REKEY_REFUSED`. Exit codes: 0 clean plan or applied move, 1 refused (`REKEY_REFUSED`; `PROJECT_IDENTITY_UNRESOLVED` when no canonical identity resolves; `DB_PATH_NOT_FOUND` when `--db-path` names a store that is not present, and nothing is created), 2 bad input, 3 operational failure (nothing moved). When the default store does not exist yet, the command answers `store_absent: true` and creates nothing; a `--from` bucket with no rows answers `from_bucket_empty: true`. The envelope also carries `target_defaulted` and `legacy_verdict`. A merged memory link keeps the TARGET's relationship; `links_repointed` counts the links on file rows merged into an existing target row, and `links_conflicted` counts relationship types dropped | `{"from": "...", "to": "...", "dry_run": true, "memories": N, "links_repointed": N, "links_conflicted": N, "vectors_moved": N, "from_bucket_empty": false, "target_defaulted": true, "legacy_verdict": "verified", ...}` |
 
 WHEN A PROJECT RETURNS NO MEMORIES, run `project-id show` before concluding
@@ -370,7 +370,8 @@ legacy candidate to report. When `candidate` is set, exactly
 one of `included`, `excluded` and `unproven` is true:
 
 - `included`: the whole bucket is read. `verified` means an absolute file row
-  places it in this repository. `included_unverified` means no file row places
+  places it in this repository and no existing file row places it in another
+  checkout. `included_unverified` means no file row places
   it but a recorded session from this repository wrote into it
   (`session_evidence` is `true`). A recorded session counts only when it was
   launched at the root of this repository or of one of its linked worktrees (a
@@ -390,7 +391,9 @@ one of `included`, `excluded` and `unproven` is true:
 - `unproven`: it is not read, and its `rekey` command is printed once per
   process, with the cause. `unproven_reason` names the cause:
   `recorded_elsewhere` (some of its rows were written by sessions recorded at
-  an existing directory outside this repository), `subfolder_launch` (no file row places it, and
+  an existing directory outside this repository), `foreign_rows` (some of its
+  file rows lie in another checkout; `detail.foreign_rows` counts them, and a
+  rekey needs an explicit `--to`), `subfolder_launch` (no file row places it, and
   its writing sessions were launched in a subfolder of this repository),
   `description_newer` (no file row places it, and `description` changed after
   its writing sessions started) or `no_session` (no file row places it and no
@@ -483,7 +486,7 @@ memories. Check the read scope and any excluded bucket with the
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | User error or refusal (bad args, invalid JSON, not found, a too-short or ambiguous prefix, no project identity resolved, a `--db-path` store that is not present) |
+| 1 | User error or refusal (bad args, invalid JSON, not found, a too-short or ambiguous prefix, no project identity resolved, a `--db-path` store that is not present, a save refused with `FOLDER_NAME_BUCKET_REFUSED`) |
 | 2 | Bad input: a usage error; a validation error (unknown field name, unknown sub-object key; unusable supplied `project_id` or `session_id` on `save` or `update`), whose envelope includes an `allowed_fields` list; a missing or invalid `project-id` option; or a test process (`PYTEST_CURRENT_TEST` set) opening the default store without `--db-path` |
 | 3 | Operational fault on any verb: the store cannot be opened, read or written (the message names the store's remedy when it has one), `setup` failed, a `save` whose read-back found no row, or an unexpected internal error. `project-file`: this session's project memory file is unavailable; the printed line names why. `project-id rekey`: an operational failure; nothing was moved |
 
