@@ -25,8 +25,9 @@ Public surface:
     EVAL_TARGET_CORRUPT     task file read but not a JSON object
     EVAL_UNKNOWN_PREDICATE  predicate_name not in PREDICATES
 - handoff_present(task) — `handoff` predicate: metadata.handoff with a
-  non-empty `produced` STRING.
-- teachback_submit_present(task) — `teachback_submit` predicate.
+  non-empty `produced` STRING, not the one a handoff_rejection rejected.
+- teachback_submit_present(task) — `teachback_submit` predicate, not the
+  one a teachback_rejection rejected.
 - PREDICATES — name -> predicate mapping (the registry).
 - evaluate_target(team_name, task_id, predicate_name, tasks_base_dir=None)
   — ONE pass: resolve, read, parse, evaluate.
@@ -52,9 +53,37 @@ EVAL_TARGET_CORRUPT = "target_corrupt"
 EVAL_UNKNOWN_PREDICATE = "unknown_predicate"
 
 
+def _revision(value: Any) -> int:
+    """A revision number as the rejection protocol writes it: a positive int
+    (bool excluded). Anything else counts as 1, the first submission."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
+        return value
+    return 1
+
+
+def _awaiting_revision(metadata: dict[str, Any], rejection_key: str) -> bool:
+    """True while the deliverable on disk is the one the lead REJECTED.
+
+    The rejection record stays on disk after the teammate re-submits, so
+    presence of the deliverable alone cannot tell a revision from the
+    rejected original. The rejection carries the revision it rejected
+    (`revision_number`, 1 on the first rejection) and the teammate raises
+    `metadata.revision_number` past it when re-submitting (absent counts
+    as 1). The deliverable counts as delivered again only once
+    `metadata.revision_number` exceeds the rejection's.
+    """
+    rejection = metadata.get(rejection_key)
+    if not isinstance(rejection, dict):
+        return False
+    return _revision(metadata.get("revision_number")) <= _revision(
+        rejection.get("revision_number")
+    )
+
+
 def handoff_present(task: dict[str, Any]) -> bool:
     """The `handoff` predicate: True iff the task carries a HANDOFF whose
-    `produced` field is a non-empty STRING.
+    `produced` field is a non-empty STRING and that HANDOFF is not the one
+    a `metadata.handoff_rejection` rejected (see _awaiting_revision).
 
     Keying per hooks/shared/handoff_schema.py: `produced` is a REQUIRED
     canonical field and the watch keys on the canonical key only. It does
@@ -73,6 +102,8 @@ def handoff_present(task: dict[str, Any]) -> bool:
     metadata = task.get("metadata")
     if not isinstance(metadata, dict):
         return False
+    if _awaiting_revision(metadata, "handoff_rejection"):
+        return False
     handoff = metadata.get("handoff")
     if not isinstance(handoff, dict):
         return False
@@ -82,16 +113,19 @@ def handoff_present(task: dict[str, Any]) -> bool:
 
 def teachback_submit_present(task: dict[str, Any]) -> bool:
     """The `teachback_submit` predicate: True iff the task carries a
-    metadata.teachback_submit object with at least one field.
+    metadata.teachback_submit object with at least one field, and that
+    object is not the one a `metadata.teachback_rejection` rejected.
 
-    Presence of the sub-object is the witness, not its schema conformance:
-    a submitted teachback that the lead later rejects REPLACES the object
-    (same key), so the watch cannot distinguish accepted from rejected —
-    and must not try. Rejection is signalled to the arming lead by the
-    wake itself, not by the watcher.
+    Presence of the sub-object is the witness, not its schema conformance.
+    A rejected teachback stays on disk under the same key until the
+    teammate rewrites it, so a watch armed after a rejection must not fire
+    on it: the revision-number comparison in _awaiting_revision holds the
+    watch until the teammate re-submits.
     """
     metadata = task.get("metadata")
     if not isinstance(metadata, dict):
+        return False
+    if _awaiting_revision(metadata, "teachback_rejection"):
         return False
     teachback = metadata.get("teachback_submit")
     return isinstance(teachback, dict) and len(teachback) > 0

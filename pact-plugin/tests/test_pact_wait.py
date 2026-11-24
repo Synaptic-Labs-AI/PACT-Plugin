@@ -6,7 +6,8 @@ Verification-level coverage binding the exit contract (the numbers are the
 contract — a crash must never masquerade as EXPIRED):
 - predicates: handoff (non-empty `produced` STRING; list-typed produced reads
   absent — that shape is the live failure class this mechanism answers),
-  teachback_submit (non-empty object).
+  teachback_submit (non-empty object); both read absent while a rejection
+  record holds the unrevised original (revision_number comparison).
 - evaluate_target outcomes: present / not_present / target_missing (incl.
   unsafe team name) / target_unreadable / target_corrupt / unknown_predicate.
 - wait_for_deliverable: fast-exit on already-present, fires after delayed
@@ -107,6 +108,71 @@ def test_teachback_predicate():
         {"metadata": {"teachback_submit": "not-a-dict"}}
     )
     assert not wait_target.teachback_submit_present({"metadata": {}})
+
+
+_PREDICATE_REJECTION = [
+    ("handoff", "handoff", "handoff_rejection", {"produced": "p", "decisions": "d"}),
+    ("teachback_submit", "teachback_submit", "teachback_rejection", {"understanding": "u"}),
+]
+
+
+@pytest.mark.parametrize("predicate,key,rejection_key,deliverable", _PREDICATE_REJECTION)
+def test_rejected_deliverable_reads_absent_until_revised(
+    predicate, key, rejection_key, deliverable
+):
+    """The rejected original stays on disk beside its rejection record, so
+    presence alone would fire a post-rejection watch on the stale copy.
+    The teammate's re-submission raises metadata.revision_number past the
+    rejection's; only then does the deliverable count again."""
+    check = wait_target.PREDICATES[predicate]
+    rejected = {"metadata": {key: deliverable, rejection_key: {"revision_number": 1}}}
+    assert not check(rejected)
+    rejected["metadata"]["revision_number"] = 1
+    assert not check(rejected)
+    rejected["metadata"]["revision_number"] = 2
+    assert check(rejected)
+    # A second rejection of revision 2 holds the watch again until revision 3.
+    rejected["metadata"][rejection_key] = {"revision_number": 2}
+    assert not check(rejected)
+    rejected["metadata"]["revision_number"] = 3
+    assert check(rejected)
+
+
+@pytest.mark.parametrize("predicate,key,rejection_key,deliverable", _PREDICATE_REJECTION)
+@pytest.mark.parametrize("bad", [None, "2", True, 0, -1, 1.5])
+def test_malformed_revision_numbers_count_as_the_first_submission(
+    predicate, key, rejection_key, deliverable, bad
+):
+    """A revision number that is not a positive int counts as 1 on either
+    side: a malformed rejection still holds a watch on the unrevised
+    original, and a malformed teammate count never passes a rejection."""
+    check = wait_target.PREDICATES[predicate]
+    malformed_rejection = {
+        "metadata": {key: deliverable, rejection_key: {"revision_number": bad}}
+    }
+    assert not check(malformed_rejection)
+    malformed_rejection["metadata"]["revision_number"] = 2
+    assert check(malformed_rejection)
+    malformed_count = {
+        "metadata": {
+            key: deliverable,
+            rejection_key: {"revision_number": 1},
+            "revision_number": bad,
+        }
+    }
+    assert not check(malformed_count)
+
+
+@pytest.mark.parametrize("predicate,key,rejection_key,deliverable", _PREDICATE_REJECTION)
+def test_only_its_own_rejection_kind_holds_a_predicate(
+    predicate, key, rejection_key, deliverable
+):
+    """Each predicate reads only its own rejection record; a non-dict
+    rejection value is no rejection."""
+    check = wait_target.PREDICATES[predicate]
+    other = "teachback_rejection" if rejection_key == "handoff_rejection" else "handoff_rejection"
+    assert check({"metadata": {key: deliverable, other: {"revision_number": 1}}})
+    assert check({"metadata": {key: deliverable, rejection_key: "rejected"}})
 
 
 # --- evaluate_target -------------------------------------------------------

@@ -34,7 +34,10 @@ byte-identical after each) is recorded in the TEST-phase HANDOFF.
 import json
 import re
 import shlex
+import threading
 from pathlib import Path
+
+import pytest
 
 import pact_wait  # noqa: E402
 import task_lifecycle_gate as tlg  # noqa: E402
@@ -354,3 +357,47 @@ def test_no_team_context_skips_the_arm_advisory_silently(tmp_path, monkeypatch):
     monkeypatch.setattr(tlg, "is_pact_specialist_owner", lambda *_a, **_k: True)
     advisories = tlg.evaluate_lifecycle(payload)
     assert not any(rule == "wait_arm_supply" for rule, _ in advisories)
+
+
+# --- post-rejection wait: reject -> arm -> not fired -> revise -> fired -----
+
+@pytest.mark.parametrize(
+    "predicate,key,rejection_key,deliverable",
+    [
+        ("handoff", "handoff", "handoff_rejection", {"produced": "p", "decisions": "d"}),
+        ("teachback_submit", "teachback_submit", "teachback_rejection", {"understanding": "u"}),
+    ],
+)
+def test_watch_armed_after_a_rejection_fires_only_on_the_revision(
+    tmp_path, predicate, key, rejection_key, deliverable
+):
+    """A watch armed after the lead rejects a deliverable must not fire on
+    the rejected original still on disk, and must fire once the teammate
+    re-submits with metadata.revision_number raised past the rejection's
+    (the rejection protocol). Driven through the real watcher loop."""
+    team_dir = tmp_path / "team-x"
+    team_dir.mkdir()
+    task_file = team_dir / "12.json"
+    rejected = {"metadata": {key: deliverable, rejection_key: {"revision_number": 1}}}
+    task_file.write_text(json.dumps(rejected), encoding="utf-8")
+
+    # Not fired: the stale original alone runs the watch to EXPIRED.
+    assert pact_wait.wait_for_deliverable(
+        "team-x", "12", predicate, deadline=0.2,
+        tasks_base_dir=str(tmp_path), poll_interval=0.05,
+    ) == pact_wait.EXIT_EXPIRED
+
+    revised = {"metadata": {**rejected["metadata"], "revision_number": 2}}
+    timer = threading.Timer(
+        0.15,
+        lambda: task_file.write_text(json.dumps(revised), encoding="utf-8"),
+    )
+    timer.start()
+    try:
+        rc = pact_wait.wait_for_deliverable(
+            "team-x", "12", predicate, deadline=5,
+            tasks_base_dir=str(tmp_path), poll_interval=0.05,
+        )
+    finally:
+        timer.join()
+    assert rc == pact_wait.EXIT_FIRED
