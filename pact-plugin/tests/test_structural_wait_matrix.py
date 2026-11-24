@@ -682,3 +682,86 @@ def test_both_producers_take_the_store_from_wait_identity():
     }
     assert "resolve_task_dir" not in calls
     assert "frame_team_and_name" not in calls
+
+
+# --- tier-3 outlet table: the five mechanical checks ------------------------
+
+_ARMING_ROLES = ("lead", "separate_process")
+
+
+def _check_r_arm(table):
+    """R-ARM: each arming role arms exactly on another agent's deliverable,
+    and no other branch of it names that wait."""
+    for role in _ARMING_ROLES:
+        deliverable = [b for b in table[role]["branches"]
+                       if b[0] == "teammate_deliverable"]
+        assert len(deliverable) == 1 and deliverable[0][1] == "arm", role
+
+
+def _check_r_then(table):
+    """R-THEN: a THEN text exists exactly on arm branches."""
+    for role, entry in table.items():
+        for kind, action, then in entry["branches"]:
+            assert (then is not None) == (action == "arm"), (role, kind)
+
+
+def _check_r_role(table):
+    """R-ROLE: a role a watcher cannot wake has no arm branch, and its
+    rendered text carries no command slot and no exit clause."""
+    for role, entry in table.items():
+        if role in _ARMING_ROLES:
+            continue
+        assert all(action != "arm" for _k, action, _t in entry["branches"]), role
+        text = wait_filler_gate.render_outlet(entry)
+        assert "{command}" not in text, role
+        assert wait_filler_gate.ARM_THEN not in text, role
+
+
+def test_outlet_table_satisfies_r_arm_r_then_r_role():
+    table = wait_filler_gate.OUTLET
+    assert set(table) == {"lead", "separate_process", "in_process", "subagent", "no_team"}
+    assert {b[0] for e in table.values() for b in e["branches"]} <= set(
+        wait_filler_gate.WAIT_KINDS
+    )
+    _check_r_arm(table)
+    _check_r_then(table)
+    _check_r_role(table)
+
+
+def test_rendered_texts_are_the_table_render():
+    """Check 4: each module text IS the render of its table entry, so a
+    hand edit to a rendered string that bypasses the table goes red. The
+    arming texts carry the {command} slot exactly once."""
+    by_role = {
+        "lead": wait_filler_gate._TIER3_REASON,
+        "separate_process": wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON,
+        "in_process": wait_filler_gate._TIER3_TEAMMATE_REASON,
+        "subagent": wait_filler_gate._TIER3_SUBAGENT_REASON,
+        "no_team": wait_filler_gate._TIER3_NO_TEAM_REASON,
+    }
+    for role, text in by_role.items():
+        assert text == wait_filler_gate.render_outlet(wait_filler_gate.OUTLET[role]), role
+    for role in _ARMING_ROLES:
+        assert by_role[role].count("{command}") == 1, role
+        assert by_role[role].count(wait_filler_gate.ARM_THEN) == 1, role
+
+
+def test_outlet_checks_bite_on_bad_tables():
+    """Check 5, negative controls: a table that maps another agent's
+    deliverable to intentional_wait in an arming role fails R-ARM, and one
+    with a THEN text on a non-arm branch fails R-THEN, so both checks are
+    live."""
+    import copy
+
+    bad_arm = copy.deepcopy(wait_filler_gate.OUTLET)
+    bad_arm["lead"]["branches"][0] = ("teammate_deliverable", "intentional_wait", None)
+    with pytest.raises(AssertionError):
+        _check_r_arm(bad_arm)
+    bad_then = copy.deepcopy(wait_filler_gate.OUTLET)
+    bad_then["in_process"]["branches"][0] = ("teammate_deliverable", "intentional_wait", "exits")
+    with pytest.raises(AssertionError):
+        _check_r_then(bad_then)
+    bad_role = copy.deepcopy(wait_filler_gate.OUTLET)
+    bad_role["subagent"]["branches"][0] = ("teammate_deliverable", "arm", "wakes")
+    with pytest.raises(AssertionError):
+        _check_r_role(bad_role)

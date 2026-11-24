@@ -812,22 +812,25 @@ _FROZEN_TIER1 = (
 _TIER3_REASON_PIN = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
-    "re-filling — end this wait structurally instead. FIRST arm the "
-    "structural watcher with ONE `Bash` call (`run_in_background: "
-    "true`), substituting the id of the task you are waiting on for "
-    "<task-id>:\n"
+    "re-filling — end this wait structurally instead. If the event you "
+    "await is another agent's handoff or teachback submission, arm the "
+    "structural watcher — this is the wait it exists for, even though "
+    "you cannot write the deliverable — with ONE `Bash` call "
+    "(`run_in_background: true`), substituting the id of the task you "
+    "are waiting on for <task-id>:\n"
     "{command}\n"
-    "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). A teammate's handoff or teachback "
-    "submission is precisely the deliverable to arm on, even though you "
-    "cannot write it. If the event you await is something only YOU can "
-    "write — your own notes or a summary — do NOT arm: instead set "
-    "metadata.intentional_wait with `expected_resolver` naming the "
-    "resolver, and end your turn; a message or that resolver's own "
-    "wake resolves it. If you DID arm: end your turn with no "
-    "further tool calls — the watcher exits 0 when the deliverable "
-    "lands, 3 when the deadline passes without it, 4 when it cannot "
-    "watch at all — and its completion notification re-invokes you."
+    "(use --predicate "
+    "teachback_submit when the awaited deliverable is a teachback "
+    "submission), then end your turn with no further tool calls — the "
+    "watcher exits 0 when the deliverable lands, 3 when the deadline "
+    "passes without it, 4 when it cannot watch at all — and its "
+    "completion notification re-invokes you. If the event you await is "
+    "something only YOU can write (your own notes or a summary), do "
+    "NOT arm: SET metadata.intentional_wait on every task the wait "
+    "covers — `reason`, `expected_resolver` and `since` are the keys "
+    "validate_wait requires — with `expected_resolver` naming the "
+    "resolver, and end your turn with no further tool calls; a message "
+    "or that resolver's own wake resolves it."
 )
 
 
@@ -922,12 +925,14 @@ _TIER3_TEAMMATE_REASON_PIN = (
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
     "re-filling — end this wait structurally instead. As an in-process "
     "teammate, a background watcher's completion will NOT wake you — "
-    "the lead's message will — so do NOT arm the structural watcher. "
-    "SET metadata.intentional_wait on every task the wait covers — "
-    "`reason`, `expected_resolver` and `since` are the keys "
-    "validate_wait requires — with `expected_resolver` naming the "
-    "lead, and end the turn with no further tool calls; the lead's "
-    "message resumes you."
+    "the lead's message will. If the event you await is another "
+    "agent's handoff or teachback submission, something only YOU can "
+    "write (your own notes or a summary) or the lead's review or "
+    "action, do NOT arm: SET metadata.intentional_wait on every task "
+    "the wait covers — `reason`, `expected_resolver` and `since` are "
+    "the keys validate_wait requires — with `expected_resolver` naming "
+    "the lead, and end your turn with no further tool calls; a message "
+    "or that resolver's own wake resolves it."
 )
 
 
@@ -949,9 +954,7 @@ def test_tier3_teammate_text_names_the_wait_keys():
     assert "`expected_resolver` naming the lead" in (
         wait_filler_gate._TIER3_TEAMMATE_REASON
     )
-    assert "do NOT arm the structural watcher" in (
-        wait_filler_gate._TIER3_TEAMMATE_REASON
-    )
+    assert "do NOT arm" in wait_filler_gate._TIER3_TEAMMATE_REASON
     assert "{command}" not in wait_filler_gate._TIER3_TEAMMATE_REASON
     assert "pact_wait" not in wait_filler_gate._TIER3_TEAMMATE_REASON
     assert "do NOT arm" in (
@@ -967,22 +970,26 @@ _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
     "re-filling — end this wait structurally instead. As a "
-    "separate-process teammate, this watcher's completion notice WILL "
-    "start your next turn. FIRST arm the structural watcher with ONE "
-    "`Bash` call (`run_in_background: true`), substituting the id "
-    "of the task you are waiting on for <task-id>:\n"
+    "separate-process teammate, a watcher's completion notice WILL "
+    "start your next turn. If the event you await is another agent's "
+    "handoff or teachback submission, arm the structural watcher — "
+    "this is the wait it exists for, even though you cannot write the "
+    "deliverable — with ONE `Bash` call (`run_in_background: true`), "
+    "substituting the id of the task you are waiting on for "
+    "<task-id>:\n"
     "{command}\n"
-    "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). Another teammate's handoff or teachback "
-    "submission is precisely the deliverable to arm on, even though you "
-    "cannot write it. If the event you await is something only YOU can "
-    "write, or the lead's review or action, do NOT arm: instead SET "
-    "metadata.intentional_wait with `expected_resolver` naming the "
-    "resolver, and end the turn; a message or that resolver's own wake "
-    "resolves it. If you DID arm: end the turn with no further tool "
-    "calls — the watcher exits 0 when the deliverable lands, 3 when the "
-    "deadline passes without it, 4 when it cannot watch at all — and "
-    "its completion notice starts your next turn."
+    "(use --predicate teachback_submit when the "
+    "awaited deliverable is a teachback submission), then end your "
+    "turn with no further tool calls — the watcher exits 0 when the "
+    "deliverable lands, 3 when the deadline passes without it, 4 when "
+    "it cannot watch at all — and its completion notice starts your "
+    "next turn. If the event you await is something only YOU can write "
+    "(your own notes or a summary) or the lead's review or action, do "
+    "NOT arm: SET metadata.intentional_wait on every task the wait "
+    "covers — `reason`, `expected_resolver` and `since` are the keys "
+    "validate_wait requires — with `expected_resolver` naming the "
+    "lead, and end your turn with no further tool calls; a message or "
+    "that resolver's own wake resolves it."
 )
 
 
@@ -996,17 +1003,17 @@ def test_tier3_sp_text_pinned_verbatim():
 
 
 def test_tier3_sp_text_gates_its_watcher_tail():
-    """CONTRADICTION-CLASS PIN (Bugbot Medium, cold round 8): the SP text's
-    watcher-exit/wake descriptions must be gated on having armed — its
-    do-NOT-arm route resolves without any watcher, and an ungated THEN
-    clause would describe watcher exits for a watcher that was never
-    launched. "If you DID arm" present; the ungated "THEN end your turn"
-    absent. The then-present state is the pre-fix text — this pin was red
-    on it."""
+    """The SP text's watcher-exit and wake clauses sit inside its arm
+    sentence only: the exit vocabulary appears once, after the arm
+    instruction and before the do-NOT-arm sentence, so a reader who does
+    not arm is never told about a watcher's exits."""
     import wait_filler_gate
 
     sp = wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON
-    assert "If you DID arm" in sp
+    then = wait_filler_gate.ARM_THEN
+    assert sp.count(then) == 1
+    assert sp.index("arm the structural watcher") < sp.index(then)
+    assert sp.index(then) < sp.index("do NOT arm")
     assert "THEN end your turn" not in sp
 
 
@@ -1028,7 +1035,9 @@ def test_tier3_lead_text_names_the_no_arm_alternative():
     # teammate-written deliverable as the ARM-ON case and scope the
     # do-NOT-arm route to what only the lead can write.
     assert "something only YOU can write" in wait_filler_gate._TIER3_REASON
-    assert "even though you cannot write it" in wait_filler_gate._TIER3_REASON
+    assert "even though you cannot write the deliverable" in (
+        wait_filler_gate._TIER3_REASON
+    )
 
 
 def test_tier3_subagent_text_pinned_verbatim():
@@ -1039,7 +1048,7 @@ def test_tier3_subagent_text_pinned_verbatim():
 
     assert wait_filler_gate._TIER3_SUBAGENT_REASON == _TIER3_SUBAGENT_REASON_PIN
     # A watcher would wake no one for a subagent: no arm command at all.
-    assert "Do NOT arm the structural watcher" in (
+    assert "do NOT arm the structural watcher" in (
         wait_filler_gate._TIER3_SUBAGENT_REASON
     )
     assert "{command}" not in wait_filler_gate._TIER3_SUBAGENT_REASON
@@ -1053,10 +1062,13 @@ _TIER3_SUBAGENT_REASON_PIN = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
     "re-filling — end this wait structurally instead. As an Agent-tool "
-    "subagent, nothing wakes you when your turn ends: your final report "
-    "is your completion, and the lead reads it when it returns. Do NOT "
-    "arm the structural watcher: end the turn with no further tool "
-    "calls and put what the lead needs in your final report."
+    "subagent, nothing wakes you when your turn ends: your final "
+    "report is your completion, and the lead reads it when it returns. "
+    "If the event you await is another agent's handoff or teachback "
+    "submission, something only YOU can write (your own notes or a "
+    "summary) or the lead's review or action, do NOT arm the "
+    "structural watcher: end the turn with no further tool calls and "
+    "put what the lead needs in your final report."
 )
 
 

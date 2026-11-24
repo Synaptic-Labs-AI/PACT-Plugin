@@ -365,3 +365,32 @@ def test_is_wait_watcher_command_shape_table():
     ]
     assert all(is_wait_watcher_command(c) for c in exempt)
     assert not any(is_wait_watcher_command(c) for c in counted)
+
+
+def _separator_variants():
+    """Every single-space separator of the fullest admitted arm command (a
+    cd prefix, an env assignment, the interpreter, the script, each flag
+    and value, and the trailing 2>&1), found from the rendered command's
+    own token boundaries rather than a hand-written list."""
+    command = f"cd /repo && FOO=1 {_arm_command()} 2>&1"
+    positions = [i for i, ch in enumerate(command) if ch == " "]
+    return command, positions
+
+
+def test_newline_at_every_separator_counts_and_tab_classifies():
+    """A newline ends a shell command, so replacing ANY one separator with a
+    newline makes a second job and must not classify; a tab is the same
+    separator to the shell and must classify. A leading or trailing
+    newline runs nothing and classifies."""
+    from shared.turn_end_gate import is_wait_watcher_command
+
+    command, positions = _separator_variants()
+    assert is_wait_watcher_command(command)
+    assert len(positions) >= 14, positions
+    for i in positions:
+        newline = command[:i] + "\n" + command[i + 1:]
+        tab = command[:i] + "\t" + command[i + 1:]
+        assert not is_wait_watcher_command(newline), repr(newline)
+        assert is_wait_watcher_command(tab), repr(tab)
+    assert is_wait_watcher_command("\n" + command)
+    assert is_wait_watcher_command(command + "\n")

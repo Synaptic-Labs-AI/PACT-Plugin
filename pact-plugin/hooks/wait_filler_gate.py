@@ -136,87 +136,146 @@ _TIER2_SUFFIX = (
     " This exact call has now been denied {count} time{plural} this "
     "session ({total} filler calls in total)."
 )
-_TIER3_REASON = (
+# --- tier-3 outlet texts: rendered from one closed table --------------------
+#
+# Each role's text is a preamble plus branches. A branch pairs one wait kind
+# (what the waiting agent is waiting on) with one action; only an "arm"
+# branch carries a THEN text (the watcher's exits and the wake it gives).
+# The texts are rendered from this table, never hand-written, so the rules
+# below are properties of the table a test can check:
+#   R-ARM  an arming role arms exactly when the wait is another agent's
+#          handoff or teachback, and no other branch names that wait;
+#   R-THEN a THEN text appears only on an arm branch;
+#   R-ROLE a role whose wake a watcher cannot give has no arm branch.
+WAIT_KINDS = ("teammate_deliverable", "own_write", "lead_action")
+WAIT_CONDITIONS = {
+    "teammate_deliverable": "another agent's handoff or teachback submission",
+    "own_write": "something only YOU can write (your own notes or a summary)",
+    "lead_action": "the lead's review or action",
+}
+# The watcher's exit vocabulary, owned here and rendered only inside an arm
+# branch.
+ARM_THEN = (
+    "the watcher exits 0 when the deliverable lands, 3 when the deadline "
+    "passes without it, 4 when it cannot watch at all"
+)
+_TIER3_HEADER = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
-    "re-filling — end this wait structurally instead. FIRST arm the "
-    "structural watcher with ONE `Bash` call (`run_in_background: "
-    "true`), substituting the id of the task you are waiting on for "
-    "<task-id>:\n"
-    "{command}\n"
-    "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). A teammate's handoff or teachback "
-    "submission is precisely the deliverable to arm on, even though you "
-    "cannot write it. If the event you await is something only YOU can "
-    "write — your own notes or a summary — do NOT arm: instead set "
-    "metadata.intentional_wait with `expected_resolver` naming the "
-    "resolver, and end your turn; a message or that resolver's own "
-    "wake resolves it. If you DID arm: end your turn with no "
-    "further tool calls — the watcher exits 0 when the deliverable "
-    "lands, 3 when the deadline passes without it, 4 when it cannot "
-    "watch at all — and its completion notification re-invokes you."
+    "re-filling — end this wait structurally instead."
 )
-# The in-process teammate's text. Their background completion does NOT
-# start their next turn — only messages from the lead wake them — so a
-# watcher would wake no one: they get NO arm command, only the
-# intentional_wait step that tells the lead to wake them.
-_TIER3_TEAMMATE_REASON = (
-    "FILLER-LOCK: this exact call has been denied {count} times this "
-    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
-    "re-filling — end this wait structurally instead. As an in-process "
-    "teammate, a background watcher's completion will NOT wake you — "
-    "the lead's message will — so do NOT arm the structural watcher. "
-    "SET metadata.intentional_wait on every task the wait covers — "
-    "`reason`, `expected_resolver` and `since` are the keys "
-    "validate_wait requires — with `expected_resolver` naming the "
-    "lead, and end the turn with no further tool calls; the lead's "
-    "message resumes you."
-)
-# The separate-process teammate's own text. Their completion notice DOES
-# start their next turn (shared.background_work.teammate_is_separate_process
-# is the one tmux-reader), so they arm exactly as the lead does, with the
-# lead-accurate wake statement.
-_TIER3_TEAMMATE_SEPARATE_PROCESS_REASON = (
-    "FILLER-LOCK: this exact call has been denied {count} times this "
-    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
-    "re-filling — end this wait structurally instead. As a "
-    "separate-process teammate, this watcher's completion notice WILL "
-    "start your next turn. FIRST arm the structural watcher with ONE "
-    "`Bash` call (`run_in_background: true`), substituting the id "
-    "of the task you are waiting on for <task-id>:\n"
-    "{command}\n"
-    "(use --predicate teachback_submit when the awaited deliverable is "
-    "a teachback submission). Another teammate's handoff or teachback "
-    "submission is precisely the deliverable to arm on, even though you "
-    "cannot write it. If the event you await is something only YOU can "
-    "write, or the lead's review or action, do NOT arm: instead SET "
-    "metadata.intentional_wait with `expected_resolver` naming the "
-    "resolver, and end the turn; a message or that resolver's own wake "
-    "resolves it. If you DID arm: end the turn with no further tool "
-    "calls — the watcher exits 0 when the deliverable lands, 3 when the "
-    "deadline passes without it, 4 when it cannot watch at all — and "
-    "its completion notice starts your next turn."
-)
-# The Agent-tool subagent's own text. A subagent's turn end RETURNS its
-# report to the caller: nothing wakes it, so a watcher would wake no one
-# and this text carries NO arm command and NO wake promise.
-_TIER3_SUBAGENT_REASON = (
-    "FILLER-LOCK: this exact call has been denied {count} times this "
-    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
-    "re-filling — end this wait structurally instead. As an Agent-tool "
-    "subagent, nothing wakes you when your turn ends: your final report "
-    "is your completion, and the lead reads it when it returns. Do NOT "
-    "arm the structural watcher: end the turn with no further tool "
-    "calls and put what the lead needs in your final report."
-)
-_TIER3_NO_TEAM_REASON = (
-    "FILLER-LOCK: this exact call has been denied {count} times this "
-    "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
-    "re-filling — end this wait structurally instead. No PACT team is "
-    "resolvable for this frame, so there is no deliverable store to "
-    "watch and no arm command to run: end your turn with no further "
-    "tool calls — teammate messages arrive as their own turns."
-)
+_ACTIONS = {
+    "arm": (
+        "arm the structural watcher — this is the wait it exists for, even "
+        "though you cannot write the deliverable — with ONE `Bash` call "
+        "(`run_in_background: true`), substituting the id of the task "
+        "you are waiting on for <task-id>:\n{command}\n(use --predicate "
+        "teachback_submit when the awaited deliverable is a teachback "
+        "submission), then end your turn with no further tool calls"
+    ),
+    "intentional_wait": (
+        "do NOT arm: SET metadata.intentional_wait on every task the wait "
+        "covers — `reason`, `expected_resolver` and `since` are the "
+        "keys validate_wait requires — with `expected_resolver` naming "
+        "{resolver}, and end your turn with no further tool calls; a "
+        "message or that resolver's own wake resolves it"
+    ),
+    "end_turn": (
+        "end your turn with no further tool calls — teammate messages "
+        "arrive as their own turns"
+    ),
+    "report": (
+        "do NOT arm the structural watcher: end the turn with no further "
+        "tool calls and put what the lead needs in your final report"
+    ),
+}
+OUTLET = {
+    "lead": {
+        "preamble": "",
+        "resolver": "the resolver",
+        "branches": [
+            ("teammate_deliverable", "arm", "its completion notification re-invokes you"),
+            ("own_write", "intentional_wait", None),
+        ],
+    },
+    "separate_process": {
+        "preamble": (
+            "As a separate-process teammate, a watcher's completion notice "
+            "WILL start your next turn."
+        ),
+        "resolver": "the lead",
+        "branches": [
+            ("teammate_deliverable", "arm", "its completion notice starts your next turn"),
+            ("own_write", "intentional_wait", None),
+            ("lead_action", "intentional_wait", None),
+        ],
+    },
+    "in_process": {
+        "preamble": (
+            "As an in-process teammate, a background watcher's completion "
+            "will NOT wake you — the lead's message will."
+        ),
+        "resolver": "the lead",
+        "branches": [(kind, "intentional_wait", None) for kind in WAIT_KINDS],
+    },
+    "subagent": {
+        "preamble": (
+            "As an Agent-tool subagent, nothing wakes you when your turn "
+            "ends: your final report is your completion, and the lead reads "
+            "it when it returns."
+        ),
+        "resolver": "the lead",
+        "branches": [(kind, "report", None) for kind in WAIT_KINDS],
+    },
+    "no_team": {
+        "preamble": (
+            "No PACT team is resolvable for this frame, so there is no "
+            "deliverable store to watch and no arm command to run."
+        ),
+        "resolver": "the lead",
+        "branches": [(kind, "end_turn", None) for kind in WAIT_KINDS],
+    },
+}
+
+
+def _join_conditions(kinds) -> str:
+    conditions = [WAIT_CONDITIONS[kind] for kind in kinds]
+    if len(conditions) == 1:
+        return conditions[0]
+    return ", ".join(conditions[:-1]) + " or " + conditions[-1]
+
+
+def render_outlet(entry: dict) -> str:
+    """One role's tier-3 text from its table entry: the header, the
+    preamble, then each run of consecutive branches sharing an action and
+    THEN text as one "If the event you await is ..., <action>." sentence.
+    The result keeps {count}, {total} and (on an arm branch) {command} as
+    format slots for the caller."""
+    parts = [_TIER3_HEADER]
+    if entry["preamble"]:
+        parts.append(entry["preamble"])
+    groups: list = []
+    for kind, action, then in entry["branches"]:
+        if groups and groups[-1][1:] == (action, then):
+            groups[-1][0].append(kind)
+        else:
+            groups.append(([kind], action, then))
+    for kinds, action, then in groups:
+        sentence = (
+            f"If the event you await is {_join_conditions(kinds)}, "
+            + _ACTIONS[action].replace("{resolver}", entry["resolver"])
+        )
+        if then is not None:
+            sentence += f" — {ARM_THEN} — and {then}"
+        parts.append(sentence + ".")
+    return " ".join(parts)
+
+
+_TIER3_REASON = render_outlet(OUTLET["lead"])
+_TIER3_TEAMMATE_SEPARATE_PROCESS_REASON = render_outlet(OUTLET["separate_process"])
+_TIER3_TEAMMATE_REASON = render_outlet(OUTLET["in_process"])
+_TIER3_SUBAGENT_REASON = render_outlet(OUTLET["subagent"])
+_TIER3_NO_TEAM_REASON = render_outlet(OUTLET["no_team"])
 
 
 def _pair_key(normalized_command: str) -> str:
