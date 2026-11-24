@@ -845,7 +845,10 @@ class TestSessionEvidenceAdmitsAnUnverifiedBucket:
         seed_session_evidence(_config_root(identity_env), elsewhere, "legacy-session")
         memory = PACTMemory(session_id="s", db_path=store)
         assert memory._read_project_scopes() == (CANONICAL,)
-        assert memory._legacy_scope_state["unproven"]
+        # Elsewhere-only evidence and nothing placing it here: excluded.
+        assert memory._legacy_scope_state["excluded"]
+        assert memory._legacy_scope_state["unproven_reason"] == "recorded_elsewhere"
+        assert memory._legacy_scope_state["rekey"] is None
 
     def test_a_session_that_did_not_write_the_bucket_is_no_evidence(
         self, identity_env, monkeypatch
@@ -1349,7 +1352,8 @@ class TestLegacyScopeHasOneKeySet:
         )
 
         checkout("unp")
-        _seed(identity_env / "unp.db", "unp")
+        # A session with no record anywhere: no evidence either way.
+        _seed(identity_env / "unp.db", "unp", session_id="unrecorded-session")
         states["unproven"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "unp.db"))
 
         checkout("exc")
@@ -5493,18 +5497,18 @@ def _git_dir_layouts(root: Path) -> dict:
     """Each start inside a git dir, and the separate-git-dir linked worktree:
     {name: (start, expected checkout or None)}. Real repositories with fake
     origins; nothing is fetched."""
-    main = make_repo(root / "main", remote="https://example.invalid/o/main.git")
+    main = make_repo(root / "main", remote="https://example.com/o/main.git")
     make_worktree(main, root / "wt")
     hub = root / "hub.git"
     run_git("clone", "-q", "--bare", str(main), str(hub), cwd=root)
     sep = make_separate_git_dir_repo(root / "sep", root / "store" / "repo.git")
-    run_git("remote", "add", "origin", "https://example.invalid/o/sep.git", cwd=sep)
+    run_git("remote", "add", "origin", "https://example.com/o/sep.git", cwd=sep)
     make_worktree(sep, root / "sepwt")
     other = root / "other"
     other.mkdir()
     twin = make_separate_git_dir_repo(root / "twin", other / ".git")
-    run_git("remote", "add", "origin", "https://example.invalid/o/twin.git", cwd=twin)
-    superproject = make_repo(root / "super", remote="https://example.invalid/o/super.git")
+    run_git("remote", "add", "origin", "https://example.com/o/twin.git", cwd=twin)
+    superproject = make_repo(root / "super", remote="https://example.com/o/super.git")
     run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(main), "sub", cwd=superproject)
     forged = root / "forged"
     forged.mkdir()
@@ -5546,14 +5550,14 @@ class TestAStartInsideAGitDirIsItsCheckout:
             root, cause = project_scope.memory_root_of(start)
             answers[name] = (mapped, detected.project_id, detected.decline_reason and detected.decline_reason["reason"],
                              root, cause)
-        main_id, sep_id = "example.invalid/o/main", "example.invalid/o/sep"
+        main_id, sep_id = "example.com/o/main", "example.com/o/sep"
         main, unverified = identity_env / "main", project_scope.ROOT_CAUSE_UNVERIFIED
         expected = {
             "main/.git": ((True, main.resolve()), main_id, None, main.resolve(), None),
             "main/.git/refs": ((True, main.resolve()), main_id, None, main.resolve(), None),
             "a linked worktree's admin dir": ((True, (identity_env / "wt").resolve()), main_id, None,
                                               main.resolve(), None),
-            "the twin's other/.git": ((True, (identity_env / "other").resolve()), "example.invalid/o/twin", None,
+            "the twin's other/.git": ((True, (identity_env / "other").resolve()), "example.com/o/twin", None,
                                       (identity_env / "other").resolve(), None),
             "the bare hub": ((True, None), None, "no_working_tree", None, unverified),
             "a separate-git-dir store": ((True, None), None, "no_working_tree", None, unverified),
@@ -5579,15 +5583,15 @@ class TestAStartInsideAGitDirIsItsCheckout:
             detected = PACTMemory._detect_project_identity_with_legacy()
             answers[name] = (detected.project_id,
                              detected.decline_reason and detected.decline_reason["reason"])
-        main_id = "example.invalid/o/main"
+        main_id = "example.com/o/main"
         assert answers == {
             "main/.git": (main_id, None),
             "main/.git/refs": (main_id, None),
             "a linked worktree's admin dir": (main_id, None),
-            "the twin's other/.git": ("example.invalid/o/twin", None),
+            "the twin's other/.git": ("example.com/o/twin", None),
             "the bare hub": (None, "no_working_tree"),
             "a separate-git-dir store": (None, "no_working_tree"),
             "a submodule's git dir": (None, "submodule_checkout"),
-            "a separate-git-dir linked worktree": ("example.invalid/o/sep", None),
+            "a separate-git-dir linked worktree": ("example.com/o/sep", None),
             "a .git file naming that worktree's admin dir": (None, "gitfile_redirect"),
         }

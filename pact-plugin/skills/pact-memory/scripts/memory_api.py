@@ -65,6 +65,8 @@ from .database import (
     MEMORY_ID_LENGTH,
     SQLITE_EXTENSIONS_ENABLED,
     BUCKET_EVIDENCE_KEYS,
+    UNKNOWN_NAME,
+    pre_change_name,
     validate_identifier_for_write,
 )
 from .embeddings import (
@@ -197,6 +199,9 @@ class _DetectedIdentity(NamedTuple):
     # places it inside ANOTHER repository makes git, asked there, answer
     # for that repository.
     identity_common_dir: Optional[Path] = None
+    # True when the id came from the HOME-landing branch: a folder-name id the
+    # user chose by working at HOME, which the legacy gate does not judge.
+    home_landing: bool = False
 
 
 # `_read_project_scopes` result cache, held for ONE DETECTION PASS: (store,
@@ -564,6 +569,8 @@ def _legacy_session_census(
             sessions_root = None
     ledgers: Dict[str, Dict[str, List[dict]]] = {}
 
+    names: Dict[str, Any] = {}
+
     def where(record: Any) -> Optional[str]:
         try:
             project_dir = os.path.realpath(record.get("project_dir"))
@@ -586,20 +593,28 @@ def _legacy_session_census(
             project_dir.startswith(root if root.endswith(os.sep) else root + os.sep)
             for root in roots
         ):
-            # BELOW A ROOT IS NOT ENOUGH: a folder inside a separate checkout
-            # nested under the root (or under a root at `/`, which holds every
-            # path) belongs to that checkout. Only a folder whose nearest
-            # `.git` marker is a gate root's own is a subfolder launch.
+            # BELOW A ROOT IS A SUBFOLDER LAUNCH (neutral) unless the folder lies
+            # in a separate checkout nested inside the root, which owns it. A
+            # root with no `.git` (a non-git project folder) therefore never
+            # makes its own subfolders "elsewhere".
             marker = find_git_marker(project_dir)
-            if marker is not None and os.path.realpath(marker.parent) in roots:
-                return "subfolder"
+            nested = marker is not None and any(
+                os.path.realpath(marker.parent).startswith(
+                    root if root.endswith(os.sep) else root + os.sep
+                )
+                for root in roots
+            )
+            return "elsewhere" if nested else "subfolder"
         if any(
             root.startswith(project_dir if project_dir.endswith(os.sep) else project_dir + os.sep)
             for root in roots
         ):
-            # A FOLDER THAT ENCLOSES A ROOT (a session launched in `$HOME`) is
-            # this repository's surroundings, not a rival owner: neutral.
-            return None
+            # A FOLDER AROUND A ROOT (a session launched in `$HOME`) is this
+            # repository's surroundings, neutral, unless its pre-change name is
+            # the bucket's (a linked worktree of that project around the root)
+            # or cannot be read.
+            name = pre_change_name(project_dir, names)
+            return "elsewhere" if name is UNKNOWN_NAME or name == candidate else None
         return "elsewhere"
 
     for session_id, count in named:
@@ -636,6 +651,52 @@ def _legacy_session_census(
         else:
             counts["unattributed"] += count
     return counts
+
+
+def _recorded_project_dirs() -> set:
+    """The resolved `project_dir` of every recorded session: each live
+    session folder's context file and each slug's prune ledger. Rule (b)'s
+    session-record marker (`bucket_evidence`) loads it only for a folder
+    named like the bucket that has no `.git` or `.claude`; cached while a
+    detection pass is open. Never raises; a failure is an empty set."""
+    key = ("recorded_dirs",)
+    in_pass = project_identity.DETECTION_ANSWERS.get() is not None
+    if in_pass and key in _LEGACY_SCOPE_CACHE:
+        return _LEGACY_SCOPE_CACHE[key]
+    from shared.pact_context import (
+        PRUNE_LEDGER_NAME,
+        read_session_record,
+        reconstruct_session_dir,
+    )
+
+    found: set = set()
+
+    def add(record: Any) -> None:
+        try:
+            if isinstance(record, dict) and isinstance(record.get("project_dir"), str):
+                found.add(os.path.realpath(record["project_dir"]))
+        except (OSError, ValueError):
+            pass
+
+    try:
+        sessions_root = Path(reconstruct_session_dir(os.path.join(os.sep, "x"), "_")).parent.parent
+        for slug in os.listdir(sessions_root):
+            slug_dir = sessions_root / slug
+            try:
+                entries = os.listdir(slug_dir)
+            except OSError:
+                continue
+            for entry in entries:
+                if entry == PRUNE_LEDGER_NAME:
+                    for record in _pruned_session_records(slug_dir / entry):
+                        add(record)
+                elif (slug_dir / entry).is_dir():
+                    add(read_session_record(slug_dir / entry))
+    except Exception:
+        pass
+    if in_pass:
+        _LEGACY_SCOPE_CACHE[key] = found
+    return found
 
 
 def _warn_legacy_excluded(
@@ -698,6 +759,7 @@ def _printed_rekey_remedy(commands: list) -> str:
 # text prints for it (`_unproven_cause`). "another checkout" is said only
 # when a file row lies in one; a session folder need not be a checkout.
 _UNPROVEN_CAUSES = {
+    # Rendered by `_foreign_rows_clause`, which names each kind of rival.
     "foreign_rows": "{foreign_rows} of its file rows lie in another checkout",
     "recorded_elsewhere": (
         "{elsewhere} of its memories were written by sessions recorded at "
@@ -722,11 +784,32 @@ _UNPROVEN_CAUSES = {
 }
 
 
-def _unproven_cause(reason: str, counts: Optional[Dict[str, Any]]) -> str:
+def _foreign_rows_clause(values: Dict[str, Any], bucket: Optional[str]) -> str:
+    """The `foreign_rows` clause, naming each kind of rival that holds rows:
+    a checkout, a marked project folder named like the bucket, or both."""
+    checkout = values["foreign_checkout_rows"]
+    folder = values["foreign_folder_rows"]
+    if not checkout and not folder:
+        checkout = values["foreign_rows"]
+    named = f"another project folder named {bucket!r}"
+    if checkout and folder:
+        return (
+            f"{checkout} of its file rows lie in another checkout and {folder} "
+            f"lie in {named}"
+        )
+    if folder:
+        return f"{folder} of its file rows lie in {named}"
+    return f"{checkout} of its file rows lie in another checkout"
+
+
+def _unproven_cause(
+    reason: str, counts: Optional[Dict[str, Any]], bucket: Optional[str] = None
+) -> str:
     """The clause for a verdict's `reason`, filled from its counts
-    (`decide_bucket`). THE ONE TEXT HELPER: the read warnings, the
-    folder-name refusal and the rekey refusal all print it, so they cannot
-    disagree. A shared bucket (`foreign_rows` with rows here too) says so in
+    (`decide_bucket`); `bucket` is the bucket's id, which the folder-kind
+    clause names. THE ONE TEXT HELPER: the read warnings, the folder-name
+    refusal and the rekey refusal all print it, so they cannot disagree. A
+    shared bucket (`foreign_rows` with rows here too) says so in
     parentheses, never with a "so" that the templates' own "so" would
     double."""
     values: Dict[str, Any] = {
@@ -734,7 +817,11 @@ def _unproven_cause(reason: str, counts: Optional[Dict[str, Any]]) -> str:
         **dict.fromkeys(BUCKET_EVIDENCE_KEYS, 0),
         **(counts or {}),
     }
-    clause = _UNPROVEN_CAUSES[reason].format(**values)
+    clause = (
+        _foreign_rows_clause(values, bucket)
+        if reason == "foreign_rows"
+        else _UNPROVEN_CAUSES[reason].format(**values)
+    )
     if reason == "foreign_rows" and values["contained_rows"]:
         clause += (
             f" ({values['contained_rows']} under this repository: the bucket "
@@ -791,7 +878,7 @@ def decide_bucket(
         state, reason = ("unproven" if contained else "excluded"), "foreign_rows"
     elif counts["elsewhere"]:
         own = contained or counts["here"]
-        state = "unproven" if (own or scope_kind == "canonical") else "excluded"
+        state = "unproven" if own else "excluded"
         reason = "recorded_elsewhere"
     elif scope_kind == "folder_name":
         state, reason = None, None
@@ -1646,6 +1733,10 @@ def _stable_read_only(store: str, read: Callable[[], Any]) -> Any:
         else:
             if _store_stamp(store) == before:
                 return answer
+        # THE REPEAT RE-DECIDES: a verdict cached from the moved read is
+        # dropped, so the locked repeat counts the bucket again.
+        for key in [key for key in _LEGACY_SCOPE_CACHE if key[:2] == ("verdict", store)]:
+            _LEGACY_SCOPE_CACHE.pop(key, None)
         locked = _LOCKED_READS_ONLY.set(True)
         try:
             return read()
@@ -2749,6 +2840,7 @@ class PACTMemory:
             # therefore no gate root to carry. PINNED, not coded around.
             self._project_identity_root = None
             self._project_common_dir = None
+            self._project_home_landing = False
             self._git_rung_root = None
             self._decline_reason = None
             self._decline_detail = None
@@ -2785,6 +2877,7 @@ class PACTMemory:
             # would exclude the declared repo's own legacy bucket.
             self._project_identity_root = detected.identity_root
             self._project_common_dir = detected.identity_common_dir
+            self._project_home_landing = detected.home_landing
             # THE GIT RUNG RESOLVED FROM THE PROCESS'S OWN LOCATION, so its
             # identity root IS the working directory's repository root: the
             # divergence check reuses it instead of asking git again.
@@ -3222,6 +3315,7 @@ class PACTMemory:
                 legacy_basename=legacy_name,
                 override_ignored=None,
                 identity_root=landing,
+                home_landing=True,
             )
         # One pass reads a root's identity (override and origin) once.
         identity = project_identity.detection_answer(
@@ -3711,7 +3805,10 @@ class PACTMemory:
         if cached is not None:
             return cached
         roots, common = self._legacy_gate_roots(repo_root)
-        evidence = bucket_evidence(connection, bucket, roots or None, root_common=common)
+        evidence = bucket_evidence(
+            connection, bucket, roots or None, root_common=common,
+            recorded_dirs=_recorded_project_dirs,
+        )
         sessions = (
             None
             if evidence["foreign_rows"]
@@ -3722,16 +3819,30 @@ class PACTMemory:
             _LEGACY_SCOPE_CACHE[key] = verdict
         return verdict
 
+    def _folder_name_gated(self) -> bool:
+        """Whether this folder-name id is judged by the ownership rule.
+
+        Every folder-name id is, a non-git cwd-marker folder included (its
+        name is whoever made the folder's choice), EXCEPT the sources the user
+        chose and no repository controls: a supplied id, the user-scope
+        `project_id` setting, and a HOME landing. Those keep sharing their
+        bucket as before the change.
+        """
+        return (
+            self._project_id_source not in ("supplied", "user setting")
+            and not getattr(self, "_project_home_landing", False)
+        )
+
     def _folder_name_bucket_verdict(
         self, scope: str, conn: Any = None, disclose: bool = True
     ) -> Optional[BucketVerdict]:
         """The verdict for a DETECTED folder-name id's own bucket, or None when
-        it is not judged: a supplied id, no identity root, an absent store or
-        a store with no schema. With `disclose`, a verdict that does not read
+        it is not judged: an ungated source (`_folder_name_gated`), no
+        identity root, an absent store or a store with no schema. With `disclose`, a verdict that does not read
         is disclosed in `_legacy_scope_state` and by one warning; the save
         guard passes False because its refusal says the same."""
         repo_root = self._project_identity_root
-        if self._project_id_source == "supplied" or repo_root is None:
+        if repo_root is None or not self._folder_name_gated():
             return None
         store = str(self._db_path or resolve_db_path())
         if _store_stat_key(store) is None:
@@ -4073,12 +4184,12 @@ class PACTMemory:
                 if state_name == "excluded":
                     _warn_legacy_excluded(
                         store, candidate, memory_count, file_paths or 0,
-                        _unproven_cause(verdict.reason, verdict.counts),
+                        _unproven_cause(verdict.reason, verdict.counts, candidate),
                     )
                 elif state_name == "unproven":
                     _warn_legacy_unproven(
                         store, candidate, scope, memory_count, file_paths or 0,
-                        _unproven_cause(verdict.reason, verdict.counts),
+                        _unproven_cause(verdict.reason, verdict.counts, candidate),
                     )
                 elif verdict.counts["unattributed"]:
                     _warn_legacy_unattributed(store, candidate, scope, verdict.counts)
@@ -4163,7 +4274,7 @@ class PACTMemory:
         )
         return (
             f"this repository's project id is its folder name {name!r}, and "
-            f"{_unproven_cause(verdict.reason, verdict.counts)}, "
+            f"{_unproven_cause(verdict.reason, verdict.counts, name)}, "
             f"{consequence} {self._local_pin_remedy()}"
         )
 
@@ -4210,6 +4321,7 @@ class PACTMemory:
             f"the local pin id for this checkout is {pin}. Or add an origin "
             "remote, or pass project_id."
         )
+
     def _session_id_for_envelope(self) -> Optional[str]:
         """The session id a status ENVELOPE reports; the FINAL value.
 

@@ -244,6 +244,8 @@ def excluded_rig(identity_env, store, monkeypatch):
     one = make_repo(identity_env / "one" / "proj", remote="https://github.com/o/one.git")
     two = identity_env / "two" / "proj"
     two.mkdir(parents=True)
+    # A project marker: an unmarked folder named like the bucket is neutral.
+    (two / ".claude").mkdir()
     # The file EXISTS: a vanished row is neutral and would not exclude.
     (two / "secret.py").write_text("x\n")
     _seed(store, "proj", memory_id="victim0001", path=str(two / "secret.py"))
@@ -1245,7 +1247,9 @@ class TestADefaultedTargetRefusesAnUnprovenBucket:
         )
         assert code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
         message = envelope["message"]
-        assert f"--from='proj' is unproven: {clause}" in message, message
+        # Elsewhere-only evidence with nothing placing it here is excluded.
+        reading = "was excluded" if cause == "recorded_elsewhere" else "is unproven"
+        assert f"--from='proj' {reading}: {clause}" in message, message
         here, subfolder, newer, elsewhere_count, unattributed = counts
         assert (
             f"Of its memories, {here} came from sessions recorded here, "
@@ -2106,19 +2110,19 @@ class TestEachCliCommandAsksGitEachQuestionOnce:
         # `root` is the checkout a session declares and syncs; `start` is where
         # each command runs. They differ only inside a checkout's .git, where
         # the session declares nothing.
-        main = make_repo(identity_env / "main", remote="https://example.invalid/o/r.git").resolve()
+        main = make_repo(identity_env / "main", remote="https://example.com/o/r.git").resolve()
         if layout == "linked worktree":
             root = make_worktree(main, identity_env / "wt").resolve()
         elif layout == "linked worktree of a bare repository":
             run_git("clone", "-q", "--bare", str(main), str(identity_env / "hub.git"), cwd=identity_env)
             # A URL origin, as a hub cloned from a server has; a clone of a
             # local path has a path origin, which resolves to no canonical id.
-            run_git("remote", "set-url", "origin", "https://example.invalid/o/hub.git", cwd=identity_env / "hub.git")
+            run_git("remote", "set-url", "origin", "https://example.com/o/hub.git", cwd=identity_env / "hub.git")
             run_git("worktree", "add", "-q", str(identity_env / "hubwt"), "-b", "w", cwd=identity_env / "hub.git")
             root = (identity_env / "hubwt").resolve()
         elif layout == "separate-git-dir linked worktree":
             other = make_separate_git_dir_repo(identity_env / "sep", identity_env / "store.git")
-            run_git("remote", "add", "origin", "https://example.invalid/o/sep.git", cwd=other)
+            run_git("remote", "add", "origin", "https://example.com/o/sep.git", cwd=other)
             root = make_worktree(other, identity_env / "sepwt").resolve()
         else:
             root = main

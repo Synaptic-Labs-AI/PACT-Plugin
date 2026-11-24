@@ -96,11 +96,11 @@ def test_first_read_on_absent_derived_store_answers_empty_with_schema(
 @pytest.fixture
 def basename_env(tmp_path, monkeypatch, scopes_clean):
     """A repository with no origin, so its id is its folder name, and a
-    same-named checkout elsewhere."""
+    same-named project folder elsewhere (non-git, marked by `.claude`)."""
     assert_outside_repository(tmp_path)
     repo = make_repo(tmp_path / "mine" / NAME)
     other = tmp_path / "theirs" / NAME
-    other.mkdir(parents=True)
+    (other / ".claude").mkdir(parents=True)
     (other / "src.py").write_text("x\n")
     (repo / "src.py").write_text("x\n")
     monkeypatch.chdir(repo)
@@ -160,7 +160,7 @@ def test_folder_name_save_into_another_checkouts_bucket_is_refused(basename_env)
     repo, other, store = basename_env
     _seed(store, NAME, files=[other / "src.py"])
     memory = _basename_memory(store)
-    with pytest.raises(memory_api.FolderNameBucketRefusedError, match="another checkout"):
+    with pytest.raises(memory_api.FolderNameBucketRefusedError, match="another project folder"):
         memory.save({"context": "new"})
     with sqlite3.connect(str(store)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
@@ -545,16 +545,53 @@ def test_an_enclosing_checkout_is_not_a_rival(tmp_path, monkeypatch, scopes_clea
     assert memory._legacy_scope_state["detail"]["neutral_outside"] == 1
 
 
-def test_a_plain_folder_named_like_the_bucket_is_a_rival(basename_env):
-    """Rule (b): `other` is a plain folder, no git, but it carries the
-    bucket's name, so its existing rows exclude the bucket."""
+def test_a_marked_plain_folder_named_like_the_bucket_is_a_rival(basename_env, caplog):
+    """Rule (b): `other` is a plain folder, no git, marked as a project by
+    `.claude` and named like the bucket, so its existing rows exclude the
+    bucket, and the clause names the folder kind."""
     repo, other, store = basename_env
     assert not (other / ".git").exists()
     _seed(store, NAME, files=[other / "src.py"])
     memory = _basename_memory(store)
-    assert memory._read_project_scopes() == ()
-    assert memory._legacy_scope_state["detail"]["foreign_rows"] == 1
+    with caplog.at_level(logging.WARNING):
+        assert memory._read_project_scopes() == ()
+    detail = memory._legacy_scope_state["detail"]
+    assert detail["foreign_folder_rows"] == 1 and detail["foreign_checkout_rows"] == 0
+    assert f"1 of its file rows lie in another project folder named '{NAME}'" in caplog.text
+    assert "another checkout" not in caplog.text
 
+
+def test_an_unmarked_folder_named_like_the_bucket_is_neutral(basename_env):
+    """Rule (b) needs a marker: a bare `~/.config/<B>`-like folder is
+    neutral, so the folder-name scope keeps reading its bucket."""
+    repo, other, store = basename_env
+    (other / ".claude").rmdir()
+    _seed(store, NAME, files=[other / "src.py"])
+    memory = _basename_memory(store)
+    assert memory._read_project_scopes() == (NAME,)
+
+
+def test_a_file_named_like_the_bucket_is_never_a_rival_folder(basename_env):
+    """Rule (b) walks strict ancestors only: a tracked FILE named like the
+    bucket, even in a marked folder, is neutral."""
+    repo, other, store = basename_env
+    notes = other.parent / "notes"
+    (notes / ".claude").mkdir(parents=True)
+    (notes / NAME).write_text("x\n")
+    _seed(store, NAME, files=[notes / NAME, repo / "src.py"])
+    assert _basename_memory(store)._read_project_scopes() == (NAME,)
+
+
+def test_a_session_record_marks_an_unmarked_folder(basename_env, tmp_path):
+    """Rule (b)'s third marker: a session recorded at an unmarked folder named
+    like the bucket makes it a project folder."""
+    repo, other, store = basename_env
+    (other / ".claude").rmdir()
+    seed_session_evidence(tmp_path / "home" / ".claude", other, "theirs-session")
+    _seed(store, NAME, files=[other / "src.py"], session_id="mine-unrecorded")
+    memory = _basename_memory(store)
+    assert memory._read_project_scopes() == ()
+    assert memory._legacy_scope_state["detail"]["foreign_folder_rows"] == 1
 
 def test_a_hostile_root_nested_in_the_victim_does_not_read_it(tmp_path, monkeypatch, scopes_clean):
     """Rule (b): a root planted inside the victim's checkout
@@ -588,3 +625,116 @@ def test_a_session_folder_enclosing_the_root_is_neutral(tmp_path):
         )
     assert counts["elsewhere"] == 0 and counts["unattributed"] == 1, counts
 
+
+
+
+# ---------------------------------------------------------------------------
+# Amendment 2: pre-change names, the gated sources, the census subfolder rule
+# and the re-decide on a moved store
+# ---------------------------------------------------------------------------
+
+
+def test_the_pre_change_name_follows_the_old_resolver(tmp_path):
+    """A checkout's name, a linked worktree's main name, a separate git dir's
+    parent name, a submodule's none, and an unreadable `.git` file unknown."""
+    import subprocess
+
+    from scripts.database import UNKNOWN_NAME, pre_change_name
+
+    assert_outside_repository(tmp_path)
+    main = make_repo(tmp_path / "proj")
+    worktree = make_worktree(main, tmp_path / "proj-feat")
+    plain = tmp_path / "plain" / "folder"
+    plain.mkdir(parents=True)
+    (tmp_path / "gitdirs").mkdir()
+    sep = tmp_path / "sep"
+    subprocess.run(
+        ["git", "init", "-q", "--separate-git-dir", str(tmp_path / "gitdirs" / "store"), str(sep)],
+        check=True,
+    )
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    os.mkfifo(broken / ".git")
+    assert pre_change_name(str(main)) == "proj"
+    assert pre_change_name(str(worktree.resolve())) == "proj"
+    assert pre_change_name(str(plain)) == "folder"
+    assert pre_change_name(str(sep)) == "gitdirs"
+    assert pre_change_name(str(broken)) is UNKNOWN_NAME
+    source = make_repo(tmp_path / "subsrc")
+    run_git(
+        "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-f",
+        str(source), "vendor/lib", cwd=main,
+    )
+    assert pre_change_name(str(main / "vendor" / "lib")) is None
+
+
+@pytest.mark.parametrize(
+    "source, landing, gated",
+    [
+        ("git root", False, True),
+        ("cwd", False, True),
+        ("user setting", False, False),
+        ("supplied", False, False),
+        ("cwd", True, False),
+    ],
+)
+def test_only_user_chosen_sources_are_ungated(source, landing, gated):
+    memory = PACTMemory.__new__(PACTMemory)
+    memory._project_id_source = source
+    memory._project_home_landing = landing
+    assert memory._folder_name_gated() is gated
+
+
+def test_a_non_git_roots_own_subfolder_session_is_a_subfolder(tmp_path):
+    """Census: a non-git project folder never makes its own subfolders
+    "elsewhere"; a separate checkout nested inside it still is."""
+    assert_outside_repository(tmp_path)
+    root = tmp_path / NAME
+    (root / "sub").mkdir(parents=True)
+    nested = make_repo(root / "vendor" / "other")
+    config = tmp_path / "home" / ".claude"
+    seed_session_evidence(config, root / "sub", "sub-session")
+    seed_session_evidence(config, nested, "nested-session")
+    store = tmp_path / "store.db"
+    _seed(store, NAME, session_id="sub-session")
+    _seed(store, NAME, files=["rel.py"], session_id="nested-session")
+    with sqlite3.connect(str(store)) as conn:
+        counts = memory_api._legacy_session_census(conn, NAME, [str(root.resolve())], None)
+    assert counts["subfolder"] == 1 and counts["elsewhere"] == 1, counts
+
+
+def test_a_moved_store_re_decides_the_verdict(basename_env, monkeypatch):
+    """C1-style: when the stable read repeats with locking, the cached verdict
+    is dropped and the bucket is counted again."""
+    repo, other, store = basename_env
+    _seed(store, NAME, files=[repo / "src.py"])
+    calls = []
+    real = memory_api._legacy_session_census
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(memory_api, "_legacy_session_census", counted)
+    # Two stamps that differ, neither with a journal: the read "moved".
+    stamps = iter([(1, 1, 1, False), (1, 1, 2, False)])
+    real_stamp = memory_api._store_stamp
+    monkeypatch.setattr(
+        memory_api, "_store_stamp",
+        lambda path: next(stamps, None) or real_stamp(path),
+    )
+    with memory_api.detection_pass():
+        memory = _basename_memory(store)
+        assert memory._read_project_scopes() == (NAME,)
+    assert len(calls) == 2, calls
+
+
+
+def test_a_tracked_directory_named_like_the_bucket_is_not_its_own_rival(basename_env):
+    """Rule (b) starts at the row's parent: a row that IS a marked directory
+    named like the bucket does not make itself a rival folder."""
+    repo, other, store = basename_env
+    tracked = other.parent / "tracked" / NAME
+    (tracked / ".claude").mkdir(parents=True)
+    _seed(store, NAME, files=[tracked, repo / "src.py"])
+    assert _basename_memory(store)._read_project_scopes() == (NAME,)

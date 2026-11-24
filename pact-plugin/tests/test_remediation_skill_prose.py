@@ -617,13 +617,17 @@ class TestLegacyScopeStatesAreDocumented:
         body = _body(SKILL)
         assert (
             "excluded: evidence places it elsewhere and nothing places it here, "
-            "so it is not read and no rekey command is printed."
+            "so it is not read and no rekey command is printed anywhere."
         ) in body
         assert (
-            "Rows that are gone, unreadable, relative, or outside any other "
-            "checkout are no evidence either way."
+            "Rows that are gone, unreadable, relative, in an unmarked folder, or "
+            "outside any other checkout are no evidence either way."
         ) in body
         assert "excluded: its absolute file rows place it in another repository" not in body
+        assert (
+            "a bucket written only by sessions recorded at another existing "
+            "folder is excluded"
+        ) in body
 
     def test_the_documented_detail_counts_are_the_code_key_set(self):
         from scripts.database import BUCKET_EVIDENCE_KEYS
@@ -676,6 +680,14 @@ class TestLegacyScopeStatesAreDocumented:
             "that bucket unless there is evidence another owner wrote it"
         ) in body
         assert (
+            "Two folder-name ids are never judged and are shared as before: the "
+            "home-directory landing and the user-scope project_id setting."
+        ) in body
+        assert (
+            "in another project folder of that name (one marked by .git, "
+            ".claude or a recorded session)"
+        ) in body
+        assert (
             "a save fails with FOLDER_NAME_BUCKET_REFUSED, exits 1 and writes "
             "nothing."
         ) in body
@@ -686,17 +698,18 @@ class TestLegacyScopeStatesAreDocumented:
         assert local_pin_id("/tmp/some/widget").startswith("local.invalid/")
         assert (
             "A bucket with no evidence either way (only relative or vanished "
-            "file rows, no recorded session) stays shared by every folder of "
-            "that name."
+            "file rows, an unmarked folder, no recorded session) stays shared "
+            "by every folder of that name."
         ) in body
         assert "when the gate excludes it (its file rows all lie in" not in body
 
     def test_foreign_rows_is_a_documented_unproven_reason(self):
         assert (
-            "foreign_rows (some of its file rows lie in another checkout or "
-            "under another folder of its name, beside rows under this "
-            "repository; detail.foreign_rows counts them, and a rekey needs an "
-            "explicit --to)"
+            "foreign_rows (some of its file rows lie in another checkout or in "
+            "another project folder of its name, beside rows under this "
+            "repository; detail.foreign_rows counts them, split into "
+            "foreign_checkout_rows and foreign_folder_rows, and a rekey needs "
+            "an explicit --to)"
         ) in _body(SKILL)
 
     def test_the_suppression_reason_is_documented_only_there(self):
@@ -7307,6 +7320,13 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "<name imported from a project module memory_api: BUCKET_EVIDENCE_KEYS>"): (
             "database's tuple of the evidence count names a verdict carries"
+        ),
+        ('call', 'pre_change_name'): (
+            "reads the folder name the pre-change resolver gave a recorded session folder from its "
+            "`.git` files, for the session census; it asks git nothing" + _AFTER_DETECTION
+        ),
+        ("call", "<name imported from a project module memory_api: UNKNOWN_NAME>"): (
+            "database's marker for a pre-change name that could not be read"
         ),
         ('call', 'link_memory_to_paths'): (
             'links a saved memory to its file paths in the store' + _AFTER_DETECTION

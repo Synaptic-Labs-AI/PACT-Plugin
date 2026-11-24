@@ -159,7 +159,7 @@ def rig(tmp_path_factory):
     """Run every store-work command once on marked values; return what each
     run logged, printed and opened."""
     base = tmp_path_factory.mktemp("store-work-rig")
-    repo = make_repo(base / "proj", remote="https://example.invalid/o/proj.git")
+    repo = make_repo(base / "proj", remote="https://example.com/o/proj.git")
     recorded = make_repo(base / RECORDED_DIR_NAME)
     home = base / "home"
     config = home / ".claude"
@@ -277,7 +277,7 @@ def rig(tmp_path_factory):
     run("rekey --dry-run", "project-id", "rekey", "--from", "proj", "--to", canonical, "--dry-run")
     # Another repository's canonical bucket: a defaulted --to here is this
     # checkout's identity, so --from equal to it would be a no-op success.
-    run("rekey --from (canonical, refused)", "project-id", "rekey", "--from", "example.invalid/o/other")
+    run("rekey --from (canonical, refused)", "project-id", "rekey", "--from", "example.com/o/other")
     run("delete", "delete", second)
     for label, argv, stdin in (
         ("save", ("save", "--stdin", "--claude-md-root", repo), json.dumps({"context": "x"})),

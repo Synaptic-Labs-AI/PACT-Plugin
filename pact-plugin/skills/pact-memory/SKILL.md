@@ -265,15 +265,18 @@ folder-name bucket, save from a folder whose project id is that name
 
 A session whose project id is a folder name reads and saves into that bucket
 unless there is evidence another owner wrote it: a file row that exists in
-another checkout or under another folder of that name, or a session recorded
-at another existing folder. Then the bucket is not read (`legacy_scope`
-reports it `excluded`, or `unproven` when this repository's rows are in it
-too) and a save fails with `FOLDER_NAME_BUCKET_REFUSED`, exits 1 and writes
-nothing. When the checkout's own `.git` directory can hold a pin, the message
-prints a runnable local pin command (`local.invalid/<digest>/<folder>`); the pin is
-the user's to write, so ask the user instead of running it. Otherwise add an
-`origin` remote or pass `project_id`. A bucket with no evidence either way
-(only relative or vanished file rows, no recorded session) stays shared by
+another checkout or in another project folder of that name (one marked by
+`.git`, `.claude` or a recorded session), or a session recorded at another
+existing folder. Then the bucket is not read (`legacy_scope` reports it
+`excluded`, or `unproven` when this folder's own rows are in it too) and a
+save fails with `FOLDER_NAME_BUCKET_REFUSED`, exits 1 and writes nothing. When
+the checkout's own `.git` directory can hold a pin, the message prints a
+runnable local pin command (`local.invalid/<digest>/<folder>`); the pin is the
+user's to write, so ask the user instead of running it. Otherwise add an
+`origin` remote or pass `project_id`. Two folder-name ids are never judged and
+are shared as before: the home-directory landing and the user-scope
+`project_id` setting. A bucket with no evidence either way (only relative or
+vanished file rows, an unmarked folder, no recorded session) stays shared by
 every folder of that name.
 
 A `project_id` or `session_id` DETECTED from the environment or the session
@@ -392,31 +395,35 @@ one of `included`, `excluded` and `unproven` is true:
   once per process, that gives their count (`sessions.unattributed`) and the
   rekey command.
 - `excluded`: evidence places it elsewhere and nothing places it here, so it
-  is not read and no rekey command is printed. `unproven_reason` names the
-  evidence (`foreign_rows` or `recorded_elsewhere`). Evidence of another owner
-  is a file row that exists in another checkout or under another folder of
-  this bucket's name, or a session recorded at another existing folder. Rows
-  that are gone, unreadable, relative, or outside any other checkout are no
-  evidence either way.
+  is not read and no rekey command is printed anywhere. `unproven_reason` names
+  the evidence (`foreign_rows` or `recorded_elsewhere`; a bucket written only by
+  sessions recorded at another existing folder is excluded). Evidence of another
+  owner is a file row that exists in another checkout or in another project
+  folder of this bucket's name (marked by `.git`, `.claude` or a recorded
+  session), or a session recorded at another existing folder. Rows that are
+  gone, unreadable, relative, in an unmarked folder, or outside any other
+  checkout are no evidence either way.
 - `unproven`: it is not read, and its `rekey` command is printed once per
   process, with the cause (a folder-name scope has no canonical target, so it
   prints the local-pin remedy instead). `unproven_reason` names the cause:
   `recorded_elsewhere` (some of its rows were written by sessions recorded at
   another existing folder), `foreign_rows` (some of its file rows lie in another
-  checkout or under another folder of its name, beside rows under this
-  repository; `detail.foreign_rows` counts them, and a rekey needs an explicit
-  `--to`), `subfolder_launch` (no file row places it, and
+  checkout or in another project folder of its name, beside rows under this
+  repository; `detail.foreign_rows` counts them, split into
+  `foreign_checkout_rows` and `foreign_folder_rows`, and a rekey needs an
+  explicit `--to`), `subfolder_launch` (no file row places it, and
   its writing sessions were launched in a subfolder of this repository),
   `description_newer` (no file row places it, and `description` changed after
   its writing sessions started) or `no_session` (no file row places it and no
   session launched at the root of this repository or of one of its linked
   worktrees wrote it). `sessions` counts the bucket's memories by where their
   writing session is recorded: `here`, `elsewhere`, `subfolder`,
-  `description_newer` and `unattributed`; it is `null` when a file row in
-  another checkout already decided the bucket, or there is no candidate.
+  `description_newer` and `unattributed`; it is `null` when a file row placing it
+  elsewhere already decided the bucket, or there is no candidate.
   `detail` counts the bucket's file rows: `file_rows`, `absolute_rows`,
-  `contained_rows`, `foreign_rows`, `neutral_outside`, `vanished`,
-  `unresolvable`, `relative` and `roots`. A repository that was moved, copied,
+  `contained_rows`, `foreign_rows`, `foreign_checkout_rows`,
+  `foreign_folder_rows`, `neutral_outside`, `vanished`, `unresolvable`,
+  `relative` and `roots`. A repository that was moved, copied,
   restored or cloned again, and a folder that is not a repository, read as
   `unproven` too. A
   session folder that an earlier version of the plugin removed left no line,

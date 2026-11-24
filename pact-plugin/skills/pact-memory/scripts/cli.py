@@ -1258,6 +1258,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             cause = _unproven_cause(
                 state["unproven_reason"],
                 {**(sessions or {}), **(state.get("detail") or {})},
+                from_id,
             )
             census = (
                 f" Of its memories, {sessions['here']} came from sessions "

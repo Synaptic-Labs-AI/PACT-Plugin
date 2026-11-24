@@ -20,11 +20,12 @@ import json
 import logging
 import os
 import re
+import stat
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 # Try to import pysqlite3 which has extension loading enabled.
 # Standard library sqlite3 has enable_load_extension disabled for security.
@@ -1556,40 +1557,151 @@ def _within(path: str, root: str) -> bool:
     return path == root or path.startswith(prefix)
 
 
-def _is_foreign_row(
-    resolved: str, bucket: str, roots: Tuple[str, ...], cache: Dict[str, Optional[str]]
-) -> bool:
-    """Whether an existing, uncontained row is evidence of another owner.
+# The pre-change name of a directory whose `.git` could not be read or
+# resolved. It equals no name, and an enclosing checkout carrying it gets no
+# neutral carve-out (`_foreign_kind`): falling back to the folder name would
+# silently reopen the worktree-nest case.
+UNKNOWN_NAME = object()
 
-    (a) Its nearest checkout neither encloses a gate root nor lies inside one:
-    an enclosing checkout (a `$HOME` dotfiles repository) is this
-    repository's environment, and one nested inside a root is not a rival
-    owner of this folder name. (b) THE NAMED-DIRECTORY RULE: an ancestor
-    directory carries the bucket's exact name and is neither a gate root nor
-    inside one, git checkout or not, and even when it encloses a gate root.
-    (b) catches a plain folder of that name and a hostile root planted inside
-    the victim's checkout, which (a) alone reads as neutral.
-    """
-    nearest = _nearest_checkout(resolved, cache)
-    if nearest is not None and not any(
-        _within(root, nearest) or _within(nearest, root) for root in roots
-    ):
-        return True
-    directory = resolved
-    while True:
-        if os.path.basename(directory) == bucket and not any(
-            _within(directory, root) for root in roots
-        ):
+
+def _submodule_admin_path(path: str) -> bool:
+    """Whether `path` is a submodule admin dir: a `.git` component followed
+    by `modules`, directly or after `worktrees/<name>`. The twin of
+    `project_identity._submodule_admin_dir`, kept here because this module
+    must not import `project_identity`."""
+    parts = Path(path).parts
+    for index, component in enumerate(parts):
+        if component != ".git":
+            continue
+        following = parts[index + 1:]
+        if following[:1] == ("modules",):
             return True
+        if following[:1] == ("worktrees",) and following[2:3] == ("modules",):
+            return True
+    return False
+
+
+def _read_pre_change_name(directory: str) -> Any:
+    """The name the pre-change resolver gave `directory`: the parent folder
+    name of its common dir, as `PACTMemory._legacy_project_name` computes it
+    (`common_dir.resolve().parent.name`), derived from files with no git call.
+
+    No `.git`: the folder's own name. A `.git` directory: the folder's name.
+    A `.git` symlink: its target's parent. A `.git` file: the git dir it
+    names, then that git dir's `commondir` (a linked worktree's common dir is
+    its main checkout's `.git`), read bounded through `read_git_file`. A
+    submodule admin dir has no name (None), as the old resolver suppressed
+    it. `UNKNOWN_NAME` when a `.git` cannot be read or resolved. Never
+    raises.
+    """
+    from shared.git_helpers import read_git_file
+
+    marker = os.path.join(directory, ".git")
+    try:
+        info = os.lstat(marker)
+    except FileNotFoundError:
+        return os.path.basename(directory)
+    except (OSError, ValueError):
+        return UNKNOWN_NAME
+    try:
+        if stat.S_ISDIR(info.st_mode):
+            common = marker
+        elif stat.S_ISLNK(info.st_mode):
+            common = os.path.realpath(marker)
+        else:
+            target = _gitfile_target(marker)
+            if target is None:
+                return UNKNOWN_NAME
+            commondir = os.path.join(target, "commondir")
+            if os.path.lexists(commondir):
+                text = read_git_file(commondir)
+                if text is None or not text.strip():
+                    return UNKNOWN_NAME
+                common = os.path.realpath(os.path.join(target, text.strip()))
+            else:
+                common = target
+    except (OSError, ValueError):
+        return UNKNOWN_NAME
+    if _submodule_admin_path(common):
+        return None
+    return os.path.basename(os.path.dirname(common))
+
+
+def pre_change_name(directory: str, cache: Optional[Dict[str, Any]] = None) -> Any:
+    """`_read_pre_change_name`, cached per directory in `cache`."""
+    if cache is None:
+        return _read_pre_change_name(directory)
+    if directory not in cache:
+        cache[directory] = _read_pre_change_name(directory)
+    return cache[directory]
+
+
+class _EvidenceWalk:
+    """The per-call caches one `bucket_evidence` call shares across rows."""
+
+    def __init__(self, recorded_dirs: Optional[Callable[[], Any]]):
+        self.checkouts: Dict[str, Optional[str]] = {}
+        self.names: Dict[str, Any] = {}
+        self._recorded_dirs = recorded_dirs
+        self._recorded: Optional[Any] = None
+
+    def recorded(self, directory: str) -> bool:
+        """Whether a session record names `directory` as its project_dir,
+        loaded on first use only."""
+        if self._recorded is None:
+            try:
+                self._recorded = set(self._recorded_dirs()) if self._recorded_dirs else set()
+            except Exception:
+                self._recorded = set()
+        return directory in self._recorded
+
+
+def _foreign_kind(
+    resolved: str, bucket: str, roots: Tuple[str, ...], walk: _EvidenceWalk
+) -> Optional[str]:
+    """`"checkout"` or `"folder"` when an existing, uncontained row is
+    evidence of another owner, else None.
+
+    (a) Its nearest checkout lies neither inside a gate root nor around one:
+    a checkout. A checkout AROUND a root (a `$HOME` dotfiles repository) is
+    this repository's surroundings only when its pre-change name is known and
+    is not the bucket's; otherwise it is a rival. One nested inside a root is
+    not a rival.
+    (b) THE NAMED-DIRECTORY RULE: a STRICT ancestor directory (the row itself
+    never counts) whose pre-change name is the bucket's, which is neither a
+    gate root nor inside one, and which carries a project marker: a `.git`
+    (a checkout), or a `.claude` or a session record naming it (a folder).
+    It applies even around a gate root (a hostile root planted inside the
+    victim). An unmarked `~/.config/<B>` or `/etc/<B>` is neutral.
+    """
+    nearest = _nearest_checkout(resolved, walk.checkouts)
+    if nearest is not None and not any(_within(nearest, root) for root in roots):
+        if not any(_within(root, nearest) for root in roots):
+            return "checkout"
+        name = pre_change_name(nearest, walk.names)
+        if name is UNKNOWN_NAME or name == bucket:
+            return "checkout"
+    directory = os.path.dirname(resolved)
+    while True:
+        if not any(_within(directory, root) for root in roots):
+            has_git = os.path.lexists(os.path.join(directory, ".git"))
+            if has_git or os.path.basename(directory) == bucket:
+                name = pre_change_name(directory, walk.names)
+                if name is not UNKNOWN_NAME and name == bucket:
+                    if has_git:
+                        return "checkout"
+                    if os.path.lexists(os.path.join(directory, ".claude")) or walk.recorded(directory):
+                        return "folder"
         parent = os.path.dirname(directory)
         if parent == directory:
-            return False
+            return None
         directory = parent
 
 
 # The classes a bucket's `files.path` rows fall in (`bucket_evidence`).
 BUCKET_EVIDENCE_KEYS = (
     "file_rows", "absolute_rows", "contained_rows", "foreign_rows",
+    "foreign_checkout_rows", "foreign_folder_rows",
     "neutral_outside", "vanished", "unresolvable", "relative", "roots",
 )
 
@@ -1600,6 +1712,7 @@ def bucket_evidence(
     roots: Optional[Union[Path, str, Sequence[Union[Path, str]]]],
     *,
     root_common: Optional[Union[Path, str]] = None,
+    recorded_dirs: Optional[Callable[[], Any]] = None,
 ) -> Dict[str, int]:
     """Count a bucket's file rows by what they show about its owner.
 
@@ -1616,7 +1729,8 @@ def bucket_evidence(
         repository still places the bucket here;
       - `vanished`: not contained, and the path no longer exists;
       - `foreign_rows`: exists, not contained, and evidence of another owner
-        (`_is_foreign_row`);
+        (`_foreign_kind`), split into `foreign_checkout_rows` (the rival is
+        a git checkout) and `foreign_folder_rows` (a marked non-git folder);
       - `neutral_outside`: exists, not contained, not foreign: in no
         checkout, in a checkout that encloses a root, or in one nested inside
         a root.
@@ -1629,7 +1743,9 @@ def bucket_evidence(
     root. `root_common` is the common dir git reported for them, which
     exempts the roots' own submodules from the nested-checkout rule; None
     exempts none, the fail-closed direction. Containment resolves both sides
-    and compares literally, with no case folding.
+    and compares literally, with no case folding. `recorded_dirs` returns the
+    resolved `project_dir` of every recorded session; it is called at most
+    once, and only when a folder named like the bucket has no other marker.
 
     PRECONDITION: the store's schema is present (a read-only identity
     primitive: it never runs `ensure_initialized`; on a store without the
@@ -1641,7 +1757,7 @@ def bucket_evidence(
     )
     root_paths = _gate_root_paths(roots)
     nested: Dict[tuple, bool] = {}
-    checkouts: Dict[str, Optional[str]] = {}
+    walk = _EvidenceWalk(recorded_dirs)
     verified_common: Optional[str] = None
     if root_common:
         try:
@@ -1669,10 +1785,13 @@ def bucket_evidence(
             counts["contained_rows"] += 1
         elif not os.path.lexists(resolved):
             counts["vanished"] += 1
-        elif _is_foreign_row(resolved, bucket, root_paths, checkouts):
-            counts["foreign_rows"] += 1
         else:
-            counts["neutral_outside"] += 1
+            kind = _foreign_kind(resolved, bucket, root_paths, walk)
+            if kind is None:
+                counts["neutral_outside"] += 1
+            else:
+                counts["foreign_rows"] += 1
+                counts[f"foreign_{kind}_rows"] += 1
     return counts
 
 
