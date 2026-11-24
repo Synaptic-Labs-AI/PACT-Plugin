@@ -15,14 +15,16 @@ Used by: the lead's arm command (supplied ready-to-run by
          hooks/wait_filler_gate.py tier-3 outlet); hooks/shared/wait_target.py
          (predicate registry + one-pass evaluation); tests/test_pact_wait.py.
 
-Exit contract (loud by design; a running watch NEVER exits 1 or 2):
+Exit contract (loud by design; the watch outcomes are 0, 3 and 4 — 2 and 1
+belong to argument parsing and crashes):
     0  FIRED — the deliverable is present (checked before the first sleep,
        so a duplicate watcher armed after delivery fast-exits here)
     3  EXPIRED — the watch RAN to completion and the deadline passed with
        the deliverable absent
-    4  TERMINAL — the watch cannot do its job at all (unknown predicate,
-       unresolvable team/task target, missing task file, unreadable task
-       file, persistently unparseable task file)
+    4  TERMINAL — the watch cannot do its job at all: an unknown
+       predicate or an unusable team/task target (on the first read), or a
+       task file that is absent, unreadable or unparseable on two
+       consecutive reads
     2  usage error — missing/invalid CLI arguments (argparse; caller bug,
        surfaces before any watching starts)
     1  unexpected runtime error — an uncaught exception escapes with its
@@ -48,12 +50,29 @@ from shared import wait_target
 # harness and to the lead's own flow.
 POLL_INTERVAL_SECONDS = 5.0
 
-# A task file that fails to parse on CONSECUTIVE polls past this count is
-# corrupt, not mid-rewrite: the platform rewrites task files in milliseconds,
-# so a parse failure persisting to the second consecutive poll is a broken
+# A task file that is absent, unreadable or unparseable on this many
+# CONSECUTIVE polls is broken, not mid-rewrite: a rewrite finishes in
+# milliseconds, so a bad read that persists to the next poll is a broken
 # precondition and exits TERMINAL instead of burning the deadline toward a
-# misleading EXPIRED.
-MAX_CONSECUTIVE_CORRUPT_READS = 2
+# misleading EXPIRED. One bad read alone is tolerated.
+MAX_CONSECUTIVE_BAD_READS = 2
+
+# The deadline ceiling (24 h). A larger deadline is a usage error: the
+# expiry leg of the wake contract must fire within a working session.
+MAX_DEADLINE_SECONDS = 86400.0
+
+# Outcomes that cannot change between polls: TERMINAL on the first read.
+_FIXED_FAILURES = (
+    wait_target.EVAL_UNKNOWN_PREDICATE,
+    wait_target.EVAL_TARGET_INVALID,
+)
+# Outcomes a concurrent rewrite can produce for one read: TERMINAL only
+# when they persist for MAX_CONSECUTIVE_BAD_READS consecutive reads.
+_TRANSIENT_FAILURES = (
+    wait_target.EVAL_TARGET_MISSING,
+    wait_target.EVAL_TARGET_UNREADABLE,
+    wait_target.EVAL_TARGET_CORRUPT,
+)
 
 EXIT_FIRED = 0
 EXIT_EXPIRED = 3
@@ -61,9 +80,9 @@ EXIT_TERMINAL = 4
 
 
 def _positive_float(text: str) -> float:
-    """argparse type for REQUIRED-nonzero numeric arguments. Rejects
-    non-numbers, any value <= 0, and any non-finite value as usage errors
-    (exit 2). Non-finite is load-bearing: `nan` fails every remaining <= 0
+    """argparse type for the deadline. Rejects non-numbers, any value
+    <= 0, any value above MAX_DEADLINE_SECONDS, and any non-finite value as
+    usage errors (exit 2). Non-finite is load-bearing: `nan` fails every remaining <= 0
     comparison and `inf` never runs out, so either arms a watcher that can
     never emit EXPIRED — the deadline leg of the wake contract would die."""
     try:
@@ -74,6 +93,10 @@ def _positive_float(text: str) -> float:
         raise argparse.ArgumentTypeError(f"must be finite, got {text!r}")
     if value <= 0:
         raise argparse.ArgumentTypeError(f"must be > 0, got {text!r}")
+    if value > MAX_DEADLINE_SECONDS:
+        raise argparse.ArgumentTypeError(
+            f"must be <= {MAX_DEADLINE_SECONDS:g}, got {text!r}"
+        )
     return value
 
 
@@ -131,12 +154,13 @@ def wait_for_deliverable(
     deadline — total watch time never exceeds the deadline by more than the
     final truncated sleep.
 
-    Terminal outcomes (exit 4) surface immediately, except a parse failure,
-    which is tolerated as a possible mid-rewrite until it persists across
-    MAX_CONSECUTIVE_CORRUPT_READS consecutive polls.
+    Terminal outcomes (exit 4): an unknown predicate or an unusable
+    target surfaces on the first read. An absent, unreadable or unparseable
+    task file is tolerated as a possible mid-rewrite until it persists
+    across MAX_CONSECUTIVE_BAD_READS consecutive polls.
     """
     deadline_at = time.monotonic() + deadline
-    corrupt_streak = 0
+    bad_streak = 0
     while True:
         outcome = wait_target.evaluate_target(
             team_name, task_id, predicate_name, tasks_base_dir=tasks_base_dir
@@ -147,45 +171,33 @@ def wait_for_deliverable(
                 f"for task {task_id} (team {team_name})"
             )
             return EXIT_FIRED
-        # MISSING stays IMMEDIATE while corrupt gets the two-poll window —
-        # a deliberate asymmetry. A mid-rewrite absence is bounded by the
-        # platform's millisecond rewrites, and a MISSING that persists is a
-        # broken precondition (wrong task id, wrong team): fail fast to
-        # TERMINAL rather than burn the whole deadline toward an EXPIRED
-        # that would read as "the deliverable never came" when the truth is
-        # "the watch was aimed at nothing".
-        if outcome in (
-            wait_target.EVAL_TARGET_MISSING,
-            wait_target.EVAL_TARGET_UNREADABLE,
-            wait_target.EVAL_UNKNOWN_PREDICATE,
-        ):
+        if outcome in _FIXED_FAILURES:
             print(
                 f"pact-wait TERMINAL: cannot watch task {task_id} "
                 f"(team {team_name}, predicate '{predicate_name}'): {outcome}",
                 file=sys.stderr,
             )
             return EXIT_TERMINAL
-        if outcome == wait_target.EVAL_TARGET_CORRUPT:
-            corrupt_streak += 1
-            if corrupt_streak >= MAX_CONSECUTIVE_CORRUPT_READS:
+        if outcome in _TRANSIENT_FAILURES:
+            bad_streak += 1
+            if bad_streak >= MAX_CONSECUTIVE_BAD_READS:
                 print(
-                    f"pact-wait TERMINAL: task file for task {task_id} "
-                    f"(team {team_name}, predicate '{predicate_name}') "
-                    f"unparseable on "
-                    f"{corrupt_streak} consecutive reads — corrupt, "
-                    "not mid-rewrite",
+                    f"pact-wait TERMINAL: cannot watch task {task_id} "
+                    f"(team {team_name}, predicate '{predicate_name}'): "
+                    f"{outcome} on {bad_streak} consecutive reads — "
+                    "broken, not mid-rewrite",
                     file=sys.stderr,
                 )
                 return EXIT_TERMINAL
         else:
-            corrupt_streak = 0
+            bad_streak = 0
         remaining = deadline_at - time.monotonic()
         if remaining <= 0:
             print(
                 f"pact-wait EXPIRED: deadline {deadline}s reached with the "
                 f"deliverable absent (predicate '{predicate_name}', "
-                f"task {task_id}, team {team_name}) — check the task file "
-                "manually",
+                f"task {task_id}, team {team_name}) — re-arm the watcher "
+                "to keep waiting, or escalate if the teammate has stalled",
                 file=sys.stderr,
             )
             return EXIT_EXPIRED

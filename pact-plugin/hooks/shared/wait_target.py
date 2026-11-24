@@ -20,7 +20,8 @@ Public surface:
 - EVAL_* outcome constants — one evaluation pass, mutually exclusive:
     EVAL_PRESENT            deliverable present (predicate satisfied)
     EVAL_NOT_PRESENT        task file parsed, predicate not satisfied
-    EVAL_TARGET_MISSING     team dir unresolvable or task file absent
+    EVAL_TARGET_INVALID     team name or task id unusable (no file to watch)
+    EVAL_TARGET_MISSING     task file absent
     EVAL_TARGET_UNREADABLE  task file exists but cannot be read (OSError)
     EVAL_TARGET_CORRUPT     task file read but not a JSON object
     EVAL_UNKNOWN_PREDICATE  predicate_name not in PREDICATES
@@ -47,6 +48,7 @@ from shared.paths import get_claude_config_dir
 # the first two are "keep polling or declare fired", the rest are terminal.
 EVAL_PRESENT = "present"
 EVAL_NOT_PRESENT = "not_present"
+EVAL_TARGET_INVALID = "target_invalid"
 EVAL_TARGET_MISSING = "target_missing"
 EVAL_TARGET_UNREADABLE = "target_unreadable"
 EVAL_TARGET_CORRUPT = "target_corrupt"
@@ -171,14 +173,14 @@ def evaluate_target(
     if check is None:
         return EVAL_UNKNOWN_PREDICATE
     if not isinstance(task_id, str) or not task_id:
-        return EVAL_TARGET_MISSING
+        return EVAL_TARGET_INVALID
     sanitized = sanitize_task_id(task_id)
     if not sanitized:
-        return EVAL_TARGET_MISSING
+        return EVAL_TARGET_INVALID
     base = tasks_base_dir if tasks_base_dir else str(get_claude_config_dir() / "tasks")
     team_dir = task_dir_for(team_name, tasks_base_dir=base)
     if team_dir is None:
-        return EVAL_TARGET_MISSING
+        return EVAL_TARGET_INVALID
     task_file = team_dir / f"{sanitized}.json"
     if not task_file.exists():
         return EVAL_TARGET_MISSING
@@ -194,7 +196,9 @@ def evaluate_target(
         return EVAL_TARGET_CORRUPT
     try:
         task = json.loads(raw)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
+        # RecursionError: nesting deep enough to exhaust the parser's stack
+        # is an unusable payload too, and must not escape as a crash.
         return EVAL_TARGET_CORRUPT
     if not isinstance(task, dict):
         return EVAL_TARGET_CORRUPT

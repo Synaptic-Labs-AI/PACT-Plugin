@@ -201,12 +201,12 @@ def test_evaluate_missing_file_and_unsafe_team(tmp_path):
         == wait_target.EVAL_TARGET_MISSING
     )
     # Traversal-shaped team name resolves through the containment seam to no
-    # safe dir -> missing, never a crash.
+    # safe dir -> invalid (no file can ever exist there), never a crash.
     assert (
         wait_target.evaluate_target(
             "../escape", "7", "handoff", tasks_base_dir=str(tmp_path)
         )
-        == wait_target.EVAL_TARGET_MISSING
+        == wait_target.EVAL_TARGET_INVALID
     )
 
 
@@ -255,6 +255,21 @@ def test_finite_positive_deadlines_still_accepted():
     assert pact_wait._positive_float("1") == 1.0
     assert pact_wait._positive_float("0.5") == 0.5
     assert pact_wait._positive_float("1800") == 1800.0
+    assert pact_wait._positive_float("86400") == pact_wait.MAX_DEADLINE_SECONDS
+
+
+@pytest.mark.parametrize("text", ["86401", "86400.5", "1e9"])
+def test_deadline_above_the_ceiling_is_a_usage_error(text, tmp_path):
+    """The expiry leg must fire within a working session: a finite but
+    enormous deadline is refused before any watching starts (exit 2)."""
+    with pytest.raises(argparse.ArgumentTypeError):
+        pact_wait._positive_float(text)
+    with pytest.raises(SystemExit) as excinfo:
+        pact_wait.main([
+            "--team", "team-a", "--task", "7", "--predicate", "handoff",
+            "--deadline", text, "--tasks-base-dir", str(tmp_path),
+        ])
+    assert excinfo.value.code == 2
 
 
 @pytest.mark.skipif(
@@ -326,6 +341,10 @@ def test_expires_loud_at_deadline(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "EXPIRED" in captured.err
     assert "team-a" in captured.err and "7" in captured.err
+    # The remedy is to re-arm or escalate, never to poll the file by hand.
+    assert "re-arm the watcher" in captured.err
+    assert "escalate" in captured.err
+    assert "manually" not in captured.err
 
 
 def test_terminal_on_missing_target(tmp_path):
@@ -532,9 +551,10 @@ def test_alternating_corrupt_reads_expire_never_turn_terminal(tmp_path):
 
 
 def test_terminal_outcomes_surface_well_before_the_deadline(tmp_path):
-    """Terminal is IMMEDIATE (the docstring's contract): a watch that
-    cannot do its job at all must not silently burn its deadline before
-    saying so — the lead's re-arm decision depends on learning this fast."""
+    """Terminal surfaces within MAX_CONSECUTIVE_BAD_READS polls (the
+    docstring's contract), never at the deadline: a watch that cannot do
+    its job at all must not silently burn its deadline before saying so —
+    the lead's re-arm decision depends on learning this fast."""
     start = time.monotonic()
     rc = pact_wait.wait_for_deliverable(
         "team-a", "7", "handoff", deadline=30,
@@ -638,4 +658,121 @@ def test_handoff_predicate_never_keys_on_a_recommended_only_field():
     # present (keying is on `produced`, never on a required superset).
     assert wait_target.handoff_present(
         {"metadata": {"handoff": {"produced": "p", "reasoning_chain": "r"}}}
+    )
+
+
+# --- bad-read grace: one absent/unreadable/corrupt read is tolerated ---------
+
+def _scripted_outcomes(monkeypatch, outcomes):
+    """Replace evaluate_target with a fixed outcome sequence; returns the
+    list of calls made, so the arms can count reads without timing."""
+    calls = []
+    queue = list(outcomes)
+
+    def _next(*_args, **_kwargs):
+        calls.append(1)
+        return queue.pop(0)
+
+    monkeypatch.setattr(pact_wait.wait_target, "evaluate_target", _next)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        wait_target.EVAL_TARGET_MISSING,
+        wait_target.EVAL_TARGET_UNREADABLE,
+        wait_target.EVAL_TARGET_CORRUPT,
+    ],
+)
+def test_one_bad_read_is_tolerated_then_fires(monkeypatch, bad):
+    calls = _scripted_outcomes(monkeypatch, [bad, wait_target.EVAL_PRESENT])
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=5, poll_interval=0.01,
+    )
+    assert rc == pact_wait.EXIT_FIRED
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        (wait_target.EVAL_TARGET_MISSING, wait_target.EVAL_TARGET_MISSING),
+        (wait_target.EVAL_TARGET_UNREADABLE, wait_target.EVAL_TARGET_UNREADABLE),
+        (wait_target.EVAL_TARGET_MISSING, wait_target.EVAL_TARGET_CORRUPT),
+    ],
+)
+def test_two_consecutive_bad_reads_are_terminal(monkeypatch, capsys, first, second):
+    calls = _scripted_outcomes(monkeypatch, [first, second])
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=5, poll_interval=0.01,
+    )
+    assert rc == pact_wait.EXIT_TERMINAL
+    assert len(calls) == 2
+    assert "2 consecutive reads" in capsys.readouterr().err
+
+
+def test_a_good_read_resets_the_bad_read_streak(monkeypatch):
+    _scripted_outcomes(
+        monkeypatch,
+        [
+            wait_target.EVAL_TARGET_MISSING,
+            wait_target.EVAL_NOT_PRESENT,
+            wait_target.EVAL_TARGET_UNREADABLE,
+            wait_target.EVAL_PRESENT,
+        ],
+    )
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=5, poll_interval=0.01,
+    )
+    assert rc == pact_wait.EXIT_FIRED
+
+
+@pytest.mark.parametrize(
+    "fixed",
+    [wait_target.EVAL_TARGET_INVALID, wait_target.EVAL_UNKNOWN_PREDICATE],
+)
+def test_fixed_failures_are_terminal_on_the_first_read(monkeypatch, fixed):
+    """An unusable target or unknown predicate cannot heal between polls,
+    so it gets no grace read."""
+    calls = _scripted_outcomes(monkeypatch, [fixed])
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=5, poll_interval=0.01,
+    )
+    assert rc == pact_wait.EXIT_TERMINAL
+    assert len(calls) == 1
+
+
+def test_file_absent_on_first_read_then_delivered_fires(tmp_path):
+    """Real-file form of the grace: the task file appears between the
+    first and second poll (a rewrite caught mid-flight)."""
+    task_file = tmp_path / "team-a" / "7.json"
+    timer = threading.Timer(
+        0.05,
+        lambda: _write_task(tmp_path, "team-a", "7", _handoff_task("landed")),
+    )
+    timer.start()
+    try:
+        rc = pact_wait.wait_for_deliverable(
+            "team-a", "7", "handoff", deadline=5,
+            tasks_base_dir=str(tmp_path), poll_interval=0.3,
+        )
+    finally:
+        timer.join()
+    assert task_file.exists()
+    assert rc == pact_wait.EXIT_FIRED
+
+
+def test_deeply_nested_json_is_corrupt_not_a_crash(tmp_path):
+    """json.loads raises RecursionError (not JSONDecodeError) on nesting
+    deep enough to exhaust the parser's stack; evaluate_target's
+    never-raise contract maps it to CORRUPT."""
+    team_dir = tmp_path / "team-a"
+    team_dir.mkdir()
+    (team_dir / "7.json").write_text("[" * 200000, encoding="utf-8")
+    assert (
+        wait_target.evaluate_target(
+            "team-a", "7", "handoff", tasks_base_dir=str(tmp_path)
+        )
+        == wait_target.EVAL_TARGET_CORRUPT
     )
