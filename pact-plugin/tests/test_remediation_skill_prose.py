@@ -7097,6 +7097,9 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<name imported from a project module cli: PrefixTooShortError>"): (
             "database's error class, caught by a command"
         ),
+        ("call", "<name imported from a project module cli: FolderNameBucketRefusedError>"): (
+            "memory_api's error class, caught by a command"
+        ),
         ("call", "<name imported from a project module cli: ProjectIdentityUnresolvedError>"): (
             "memory_api's error class, caught by a command"
         ),

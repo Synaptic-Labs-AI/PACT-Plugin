@@ -21,9 +21,11 @@ from __future__ import annotations
 
 import contextvars
 import functools
+import hashlib
 import json
 import logging
 import os
+import re
 import shlex
 import stat
 import struct
@@ -2536,6 +2538,29 @@ def _declared_path_exists(declared_dir: str) -> bool:
         return False
 
 
+class FolderNameBucketRefusedError(ProjectScopeDisagreementError):
+    """A SAVE was refused because the folder-name project id names a bucket
+    whose file rows place it in another checkout
+    (`PACTMemory._basename_bucket_excluded`). A refusal, not bad input: the
+    CLI reports it as `FOLDER_NAME_BUCKET_REFUSED` with exit 1."""
+
+
+def local_pin_id(repo_root: Any) -> str:
+    """A canonical id for a repository with no usable remote:
+    `local/<digest>/<folder>`.
+
+    The digest is the first 12 hex digits of the SHA-256 of the resolved root
+    path, so two folders of the same name get different ids; the folder name
+    keeps it readable, with every character the id grammar does not allow
+    turned into `-`. The user writes it to the pin file; nothing writes it
+    for them.
+    """
+    root = os.path.realpath(str(repo_root)) if repo_root is not None else ""
+    name = re.sub(r"[^A-Za-z0-9._~-]+", "-", os.path.basename(root)).strip("-.")[:100]
+    digest = hashlib.sha256(os.fsencode(root)).hexdigest()[:12]
+    return f"local/{digest}/{name or 'repo'}"
+
+
 class ProjectIdentityUnresolvedError(ProjectScopeDisagreementError):
     """A WRITE was refused because no project identity could be resolved.
 
@@ -4014,8 +4039,8 @@ class PACTMemory:
 
     def _project_id_for_write(self) -> Optional[str]:
         """The project id a WRITE may bind; ValueError for an unusable one,
-        or for a folder-name id whose bucket belongs to another checkout
-        (`_basename_bucket_excluded`).
+        FolderNameBucketRefusedError for a folder-name id whose bucket
+        belongs to another checkout (`_basename_bucket_excluded`).
 
         This is the write ingress's remedy channel: a detected value that no
         utf-8 TEXT column can hold refuses HERE, naming the detection source
@@ -4039,15 +4064,39 @@ class PACTMemory:
                 lambda: self._basename_bucket_excluded(self._project_id),
             )
         ):
-            raise ValueError(
-                f"the folder-name project id {self._project_id!r} names a "
-                "bucket whose file rows all lie in another checkout, so a "
-                "save here would file this repository's memory with that "
-                "checkout's. Give this repository its own id: add an origin "
-                "remote, write a canonical id to <git-common-dir>/"
-                "pact-project-id, or pass project_id. Nothing was written."
-            )
+            raise FolderNameBucketRefusedError(self._folder_name_refusal())
         return self._project_id
+
+    def _folder_name_refusal(self) -> str:
+        """The folder-name save refusal's text, with a runnable local pin.
+
+        THE REMEDY NEEDS NO INVENTED REMOTE. A repository with no usable
+        origin can pin a `local/<digest>/<folder>` id (`local_pin_id`), which
+        is canonical, unique to this checkout's path, and asks the user for
+        nothing. The command is printed only when git named the common dir;
+        otherwise the text says where the file goes.
+        """
+        name = self._project_id
+        pin = local_pin_id(self._project_identity_root)
+        common = getattr(self, "_project_common_dir", None)
+        where = (
+            f"printf '%s\\n' {shlex.quote(pin)} > "
+            f"{shlex.quote(str(Path(common) / 'pact-project-id'))}"
+            if common is not None
+            else (
+                f"write {pin} to the file pact-project-id in the directory "
+                "`git rev-parse --git-common-dir` prints"
+            )
+        )
+        return (
+            f"this repository's project id is its folder name {name!r}, and "
+            f"the file rows of the {name!r} bucket all lie in another "
+            "checkout, so a save here would file this repository's memory "
+            "with that checkout's. Nothing was written. Give this repository "
+            f"its own id with a local pin: {where} . Or add an origin remote, "
+            f"or pass project_id. Earlier memories in the {name!r} bucket stay "
+            "there; `project-id show` lists them."
+        )
 
     def _session_id_for_envelope(self) -> Optional[str]:
         """The session id a status ENVELOPE reports; the FINAL value.

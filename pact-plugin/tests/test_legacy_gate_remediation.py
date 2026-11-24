@@ -147,7 +147,7 @@ def test_folder_name_save_into_another_checkouts_bucket_is_refused(basename_env)
     repo, other, store = basename_env
     _seed(store, NAME, files=[other / "src.py"])
     memory = _basename_memory(store)
-    with pytest.raises(ValueError, match="another checkout"):
+    with pytest.raises(memory_api.FolderNameBucketRefusedError, match="another checkout"):
         memory.save({"context": "new"})
     with sqlite3.connect(str(store)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0] == 1
@@ -430,6 +430,47 @@ def test_a_foreign_row_whose_path_is_gone_is_no_evidence(shared_bucket, monkeypa
     assert memory._read_project_scopes() == (CANONICAL, NAME)
     assert memory._legacy_scope_state["verified"] is True
 
+
+# ---------------------------------------------------------------------------
+# CS-10 / CS-11: the folder-name save refusal is a refusal with a usable remedy
+# ---------------------------------------------------------------------------
+
+
+def test_the_folder_name_save_refusal_is_a_refusal_with_a_local_pin(
+    shared_bucket, monkeypatch, capfd
+):
+    from scripts.cli import main
+
+    mine, theirs, store = shared_bucket
+    lonely = make_repo(theirs.parent / "lonely" / NAME)
+    with db_connection(store) as conn:
+        conn.execute("DELETE FROM files WHERE path = ?", (str(theirs / "src.py"),))
+        conn.commit()
+    monkeypatch.chdir(lonely)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["save", json.dumps({"context": "c"}), "--db-path", str(store)])
+    envelope = json.loads(capfd.readouterr().err)
+    assert exit_info.value.code == 1, envelope
+    assert envelope["error"] == "FOLDER_NAME_BUCKET_REFUSED"
+    assert "allowed_fields" not in envelope
+    assert "Note:" not in envelope["message"]
+    assert "<U+" not in envelope["message"]
+    pin = memory_api.local_pin_id(lonely)
+    assert pin in envelope["message"]
+
+
+def test_the_printed_local_pin_gives_the_repository_its_own_id(tmp_path, monkeypatch):
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "my repo")
+    pin = memory_api.local_pin_id(repo)
+    assert memory_api.is_canonical(pin), pin
+    assert pin != memory_api.local_pin_id(make_repo(tmp_path / "b" / "my repo"))
+    (repo / ".git" / "pact-project-id").write_text(pin + "\n")
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    memory = PACTMemory(session_id="s", db_path=tmp_path / "s.db")
+    assert memory._project_id == pin
+    assert memory._project_id_for_write() == pin
 
 
 def test_the_gate_calls_a_shared_bucket_unverified(shared_bucket):

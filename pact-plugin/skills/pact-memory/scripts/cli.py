@@ -59,6 +59,7 @@ from scripts.database import (
     escape_for_envelope,
 )
 from scripts.memory_api import (
+    FolderNameBucketRefusedError,
     PACTMemory,
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
@@ -603,6 +604,9 @@ def cmd_save(args, db_path=None):
         # THE SAME RENDERER as the disagreement arm below: one escaping
         # discipline for every rendered refusal message.
         _error("PROJECT_IDENTITY_UNRESOLVED", _scope_disagreement_message(exc))
+    except FolderNameBucketRefusedError as exc:
+        # A refusal, exit 1: the caller's input was fine.
+        _error("FOLDER_NAME_BUCKET_REFUSED", _scope_disagreement_message(exc))
     except ProjectScopeDisagreementError as exc:
         # An env/session-record disagreement remains distinct from an
         # unresolved identity, whose subclass is caught above.
