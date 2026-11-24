@@ -180,7 +180,7 @@ _ACTIONS = {
     "intentional_wait": (
         "do NOT arm: SET metadata.intentional_wait on every task the wait "
         "covers — `reason`, `expected_resolver` and `since` are the "
-        "keys validate_wait requires — with `expected_resolver` naming "
+        "keys validate_wait requires — with `expected_resolver` set to "
         "{resolver}, and end your turn with no further tool calls; a "
         "message or that resolver's own wake resolves it"
     ),
@@ -196,7 +196,7 @@ _ACTIONS = {
 OUTLET = {
     "lead": {
         "preamble": "",
-        "resolver": "the resolver",
+        "resolver": "`lead` (you are the resolver of your own write)",
         "branches": [
             ("teammate_deliverable", "arm", "its completion notification re-invokes you"),
             ("own_write", "intentional_wait", None),
@@ -207,7 +207,7 @@ OUTLET = {
             "As a separate-process teammate, a watcher's completion notice "
             "WILL start your next turn."
         ),
-        "resolver": "the lead",
+        "resolver": "`lead`",
         "branches": [
             ("teammate_deliverable", "arm", "its completion notice starts your next turn"),
             ("own_write", "intentional_wait", None),
@@ -219,7 +219,7 @@ OUTLET = {
             "As an in-process teammate, a background watcher's completion "
             "will NOT wake you — the lead's message will."
         ),
-        "resolver": "the lead",
+        "resolver": "`lead`",
         "branches": [(kind, "intentional_wait", None) for kind in WAIT_KINDS],
     },
     "subagent": {
@@ -228,7 +228,7 @@ OUTLET = {
             "ends: your final report is your completion, and the lead reads "
             "it when it returns."
         ),
-        "resolver": "the lead",
+        "resolver": "`lead`",
         "branches": [(kind, "report", None) for kind in WAIT_KINDS],
     },
     "no_team": {
@@ -236,7 +236,7 @@ OUTLET = {
             "No PACT team is resolvable for this frame, so there is no "
             "deliverable store to watch and no arm command to run."
         ),
-        "resolver": "the lead",
+        "resolver": "`lead`",
         "branches": [(kind, "end_turn", None) for kind in WAIT_KINDS],
     },
 }

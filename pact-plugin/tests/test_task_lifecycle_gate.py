@@ -4923,25 +4923,17 @@ def test_bounded_error_text_genuine_str_name_unchanged_by_cycle4():
 
 
 # =============================================================================
-# wait_arm_supply — structural wait arming at the teammate-deliverable shapes
+# wait_arm_supply — the watcher arm command supplied as an advisory
 #
-# Three shapes supply the ready-to-run pact-wait arm command as an advisory
-# (ADVISORY ONLY — the command text is the whole deliverable; nothing is
-# spawned, the lead launches the watcher with its own Bash frame). All three
-# are LEAD-shaped: a frame whose agent_type names a non-lead actor is
-# suppressed, so a teammate write never receives the arm instruction:
-#   Task A dispatch — owner-bearing update on a PENDING teachback-subject
-#     task -> predicate teachback_submit on that task;
-#   Task B wiring — an owner-bearing write (the SPLIT wiring real arcs use:
-#     owner in one TaskUpdate, blockers at creation or a separate update)
-#     on a non-completed non-teachback work task with a specialist owner
-#     -> predicate handoff on that task;
-#   teachback acceptance — status=completed on a teachback-subject task
-#     -> predicate handoff per QUALIFYING blocked entry (specialist owner,
-#     still pending), one advisory per qualifying entry — a duplicate arm
-#     fast-exits 0, so N arms are safe. blocks[0] is NOT trusted: the
-#     pair-with-parent shape blocks the parent aggregation task FIRST, and
-#     a parent is lead-owned, never a watch target.
+# ADVISORY ONLY: the command text is the whole deliverable; nothing is
+# spawned, the lead launches the watcher with its own Bash frame. Supplied
+# by arm_candidates under one readiness invariant (a work task the write
+# made ready for its specialist, or a teachback gate handed to its
+# teammate), evaluated only on lead frames at the writes that can change an
+# input to it; the full case table is test_arming_invariant_truth_table.
+# The arms below pin individual shapes: dispatch of a pending teachback
+# gate, owner wiring of a ready work task, acceptance of the last open
+# teachback, and lead-owned parents never becoming watch targets.
 # =============================================================================
 
 

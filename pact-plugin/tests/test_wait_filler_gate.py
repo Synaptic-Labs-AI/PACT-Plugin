@@ -828,9 +828,10 @@ _TIER3_REASON_PIN = (
     "something only YOU can write (your own notes or a summary), do "
     "NOT arm: SET metadata.intentional_wait on every task the wait "
     "covers — `reason`, `expected_resolver` and `since` are the keys "
-    "validate_wait requires — with `expected_resolver` naming the "
-    "resolver, and end your turn with no further tool calls; a message "
-    "or that resolver's own wake resolves it."
+    "validate_wait requires — with `expected_resolver` set to `lead` "
+    "(you are the resolver of your own write), and end your turn with "
+    "no further tool calls; a message or that resolver's own wake "
+    "resolves it."
 )
 
 
@@ -933,8 +934,8 @@ _TIER3_TEAMMATE_REASON_PIN = (
     "write (your own notes or a summary) or the lead's review or "
     "action, do NOT arm: SET metadata.intentional_wait on every task "
     "the wait covers — `reason`, `expected_resolver` and `since` are "
-    "the keys validate_wait requires — with `expected_resolver` naming "
-    "the lead, and end your turn with no further tool calls; a message "
+    "the keys validate_wait requires — with `expected_resolver` set to "
+    "`lead`, and end your turn with no further tool calls; a message "
     "or that resolver's own wake resolves it."
 )
 
@@ -954,7 +955,7 @@ def test_tier3_teammate_text_names_the_wait_keys():
     # LEAD — a watcher name would leave the resolver vocabulary and drop
     # the teammate from the resolver-scoped stall scans — while the
     # watcher's name belongs in `reason`.
-    assert "`expected_resolver` naming the lead" in (
+    assert "`expected_resolver` set to `lead`" in (
         wait_filler_gate._TIER3_TEAMMATE_REASON
     )
     assert "do NOT arm" in wait_filler_gate._TIER3_TEAMMATE_REASON
@@ -990,9 +991,9 @@ _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN = (
     "(your own notes or a summary) or the lead's review or action, do "
     "NOT arm: SET metadata.intentional_wait on every task the wait "
     "covers — `reason`, `expected_resolver` and `since` are the keys "
-    "validate_wait requires — with `expected_resolver` naming the "
-    "lead, and end your turn with no further tool calls; a message or "
-    "that resolver's own wake resolves it."
+    "validate_wait requires — with `expected_resolver` set to `lead`, "
+    "and end your turn with no further tool calls; a message or that "
+    "resolver's own wake resolves it."
 )
 
 
@@ -1021,11 +1022,10 @@ def test_tier3_sp_text_gates_its_watcher_tail():
 
 
 def test_tier3_lead_text_names_the_no_arm_alternative():
-    """The LEAD text carries the same neither-predicate alternative the
-    teammate texts do: when the awaited event is not a deliverable the
-    lead can write, arming burns the deadline — intentional_wait with
-    `expected_resolver` naming the resolver replaces it (cold round 8,
-    bounded-cost: no watcher process, no deadline burn)."""
+    """The LEAD text carries the same no-arm alternative the teammate
+    texts do: when the awaited event is the lead's own write, arming burns
+    the deadline, so intentional_wait with `expected_resolver` set to
+    `lead` replaces it (no watcher process, no deadline burn)."""
     import wait_filler_gate
 
     assert "do NOT arm" in wait_filler_gate._TIER3_REASON
@@ -1877,3 +1877,17 @@ def test_legacy_budget_is_always_written_as_zero(tmp_path, monkeypatch, capsys, 
     written = json.loads(state.read_text(encoding="utf-8"))[""]
     assert written["valve_budget"] == 0
     assert type(written["valve_budget"]) is int
+
+
+
+def test_every_intentional_wait_branch_names_a_concrete_resolver():
+    """Each non-arm intentional_wait instruction gives the value to write:
+    expected_resolver set to the lead, never an abstract 'the resolver'."""
+    import wait_filler_gate
+
+    for text in (wait_filler_gate._TIER3_REASON,
+                 wait_filler_gate._TIER3_TEAMMATE_SEPARATE_PROCESS_REASON,
+                 wait_filler_gate._TIER3_TEAMMATE_REASON):
+        assert "metadata.intentional_wait" in text
+        assert "`expected_resolver` set to `lead`" in text
+        assert "naming the resolver" not in text

@@ -1902,53 +1902,6 @@ def evaluate_lifecycle(
                         ah_task_id, {"audit_summary_authored": incoming_audit}
                     )
 
-        # Structural wait arming at the DISPATCH-WIRING shapes: the lead's
-        # next stage after wiring a dispatch is idling on a teammate
-        # deliverable, so the advisory supplies the ready-to-run watcher
-        # arm command. ADVISORY ONLY — the lead launches the watcher with
-        # its own `Bash` frame; this gate never spawns a process.
-        # LEAD-SHAPED: a frame whose agent_type names a non-lead actor is
-        # suppressed (a teammate claim/reassignment write never receives
-        # the arm instruction). is_lead is deliberately NOT the gate: it
-        # returns False for a lead launched with no --agent flag, which
-        # would re-darken the supply the same way the shape below once was.
-        # Two shapes:
-        #   Task A (teachback gate) dispatched — an owner-bearing update on
-        #     a teachback-subject task that is still pending: the lead's
-        #     wait is the teammate's teachback submission landing in THIS
-        #     task's metadata (predicate teachback_submit). Pending-only
-        #     keeps a later teammate claim (owner + in_progress) from
-        #     re-advising mid-flight.
-        #   Task B (work task) wired — an owner-bearing write on a
-        #     live (pending/in_progress) non-teachback task with a
-        #     specialist owner that is not the lead, and NO open TEACHBACK
-        #     blocker: a task still gated behind its teachback cannot
-        #     start, so a watch armed now would spend its deadline on the
-        #     gate, and the acceptance shape below arms it when that gate
-        #     opens. A non-teachback blocker (a sequential pipeline) does
-        #     not suppress the arm: no later shape would supply it. The
-        #     SPLIT wiring real
-        #     arcs use lands `owner` in one TaskUpdate while the blockers
-        #     landed at creation or a separate update —
-        #     shared/dispatch_helpers.py measures the owner+addBlockedBy
-        #     composite as never occurring on a real arc, so keying the
-        #     composite left this supply dark at the exact lead stage it
-        #     names. The owner-bearing write is what actually witnesses the
-        #     dispatch; the live-status whitelist keeps a late owner fix on
-        #     a closed task from arming a watch that cannot produce a
-        #     handoff, and keeps an absent/unreadable record from arming at
-        #     all.
-        # DELIBERATE ASYMMETRY between the two shapes above: the teachback
-        # arm (Task A) carries NO owner qualification — a teachback-subject
-        # task's deliverable is the teachback submission its assigned
-        # teammate writes into that task's metadata, and the subject alone
-        # identifies it, so the owner field adds nothing to the target's
-        # validity. The lead-rejection conjunct lives only
-        # on the non-teachback sibling, whose watch target is the
-        # specialist-owned work task a lead-owned record must never be.
-        # A duplicate arm is safe by construction (the duplicate watcher
-        # fast-exits 0 when the deliverable is already present), which is
-        # why this needs no dedup marker.
     # ② TaskCreate rules — teachback addBlocks + work-task addBlockedBy
     if tool_name == "TaskCreate":
         subject = (tool_input.get("subject") or "")
