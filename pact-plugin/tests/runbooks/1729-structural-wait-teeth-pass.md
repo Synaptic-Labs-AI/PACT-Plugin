@@ -66,3 +66,31 @@ Each mutation re-applied against the NEW teeth file, scoped run, restored:
 | `POLL_INTERVAL_SECONDS` 5.0 → 500.0 | 1 (magnitude arm) | 1 failed — magnitude arm |
 | `POLL_INTERVAL_SECONDS` 5.0 → 0.5 | 1 (magnitude arm; the hardcoded documented value defeats self-confirmation) | 1 failed — magnitude arm |
 | `time.sleep(min(poll_interval, remaining))` → `time.sleep(poll_interval)` (truncation removed) | 1 (truncation arm) | 1 failed — truncation arm |
+
+## Teeth pass (2026-11-24) — the list-typed `produced` reversal
+
+**Tree:** `issue-1729-structural-wait` @ `235226f8`; mutations ran in
+git-archive copies of that commit, never the shared checkout. **Operator:**
+test-reviewer.
+
+**What changed since M-b:** row M-b above records a string-only `handoff`
+predicate, under which a list-typed `produced` read as absent (its
+`[produced3]` kill was a list). At `235226f8` the predicate wakes on a
+list holding at least one non-empty string: a handoff in that shape is
+still flagged by the schema advisory, but the lead is woken to read it
+instead of the watcher burning its deadline to a false EXPIRED. An empty
+list, or one holding only empty, whitespace-only or non-string items, still
+reads as absent. Row M-b stays as the 2026-11-21 record; the two rows below
+are the mutations that guard the current predicate.
+
+Prediction-first; each observed kill set matched its prediction exactly.
+Scope: `tests/test_pact_wait.py`, `tests/test_handoff_schema.py`,
+`tests/test_structural_wait_matrix.py` (unmutated copy: 217 passed).
+
+| # | Site (at 235226f8) | Mutation | Predicted | Observed kills |
+|---|--------------------|----------|-----------|----------------|
+| M-h | `hooks/shared/wait_target.py:129-130` | list handling removed: `items = …; return any(…)` → `return isinstance(produced, str) and produced.strip() != ""` (the 2026-11-21 string-only check) | 2 | 2: `test_handoff_predicate_string_or_non_empty_list_produced_is_present` params `[produced1]` (`["a summary"]`) and `[produced2]` (`["", "f.py"]`); the plain-string param stays green |
+| M-i | `hooks/shared/wait_target.py:130` | item string-gate off: `isinstance(item, str) and item.strip() != ""` → `item is not None` | 8 | 8: `test_handoff_predicate_non_string_or_empty_produced_is_absent` params `[]` (empty string), `[   ]` (whitespace), `[produced4]` (`[""]`), `[produced5]` (`["  ", None]`), `[produced6]` (`[["nested"]]`), `[0]`, `[False]`, `[produced9]` (`{"a": "b"}`); `None` and `[produced3]` (`[]`) correctly stay green |
+
+Total observed: 10 kills across 2 classes (list acceptance, item string
+gate), no zero-kill mutation.
