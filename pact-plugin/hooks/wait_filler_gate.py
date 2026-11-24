@@ -218,7 +218,7 @@ OUTLET = {
         "resolver": "`lead`",
         "branches": [
             ("teammate_deliverable", "arm", "its completion notice starts your next turn"),
-            ("own_write", "intentional_wait", None),
+            ("own_write", "write_now", None),
             ("lead_action", "intentional_wait", None),
             ("other", "end_turn", None),
         ],
@@ -229,7 +229,12 @@ OUTLET = {
             "will NOT wake you — the lead's message will."
         ),
         "resolver": "`lead`",
-        "branches": [(kind, "intentional_wait", None) for kind in WAIT_KINDS],
+        "branches": [
+            ("own_write", "write_now", None),
+            ("teammate_deliverable", "intentional_wait", None),
+            ("lead_action", "intentional_wait", None),
+            ("other", "intentional_wait", None),
+        ],
     },
     "subagent": {
         "preamble": (

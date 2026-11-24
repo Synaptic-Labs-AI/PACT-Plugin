@@ -763,6 +763,14 @@ def _check_r_lead(table):
     )
 
 
+def _check_r_own(table):
+    """R-OWN: nothing wakes an agent to do its own write, so every role
+    that can write maps its own-write wait to write_now."""
+    for role in ("lead", "separate_process", "in_process"):
+        own = [a for k, a, _t in table[role]["branches"] if k == "own_write"]
+        assert own == ["write_now"], role
+
+
 def _check_catch_all(table):
     """Every role has a branch for the catch-all wait, so a wait the named
     kinds do not cover (a user reply, a message) still has an action."""
@@ -782,6 +790,7 @@ def test_outlet_table_satisfies_r_arm_r_then_r_role():
     _check_r_then(table)
     _check_r_role(table)
     _check_r_lead(table)
+    _check_r_own(table)
 
 
 def test_rendered_texts_are_the_table_render():
@@ -834,6 +843,15 @@ def test_outlet_checks_bite_on_bad_tables():
     lead_wait["lead"]["branches"][1] = ("own_write", "intentional_wait", None)
     with pytest.raises(AssertionError):
         _check_r_lead(lead_wait)
+    # A teammate own-write branch that sets an intentional_wait fails R-OWN.
+    for role in ("separate_process", "in_process"):
+        own_wait = copy.deepcopy(wait_filler_gate.OUTLET)
+        own_wait[role]["branches"] = [
+            (k, "intentional_wait" if k == "own_write" else a, t)
+            for k, a, t in own_wait[role]["branches"]
+        ]
+        with pytest.raises(AssertionError):
+            _check_r_own(own_wait)
     # A role with no catch-all branch fails the catch-all check.
     no_catch_all = copy.deepcopy(wait_filler_gate.OUTLET)
     no_catch_all["lead"]["branches"] = [

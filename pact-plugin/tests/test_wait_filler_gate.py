@@ -920,17 +920,19 @@ def test_outlet_reason_pinned_verbatim():
 # The IN-PROCESS TEAMMATE tier-3 outlet, verbatim — the role branch of the
 # same mechanism. An in-process teammate's background completion does NOT
 # start their next turn, so a watcher would wake no one: the branch carries
-# NO arm command, only SET metadata.intentional_wait naming the lead;
-# messages from the lead wake them.
+# NO arm command. Their own write is done now; every other wait sets
+# metadata.intentional_wait naming the lead, whose messages wake them.
 _TIER3_TEAMMATE_REASON_PIN = (
     "FILLER-LOCK: this exact call has been denied {count} times this "
     "session ({total} filler calls in total). PACT-WAIT-OUTLET: stop "
     "re-filling — end this wait structurally instead. As an in-process "
     "teammate, a background watcher's completion will NOT wake you — "
-    "the lead's message will. If the event you await is another "
-    "agent's handoff or teachback submission, something only YOU can "
-    "write (your own notes or a summary), the lead's review or action "
-    "or anything else (a user reply, a message), do NOT arm: SET "
+    "the lead's message will. If the event you await is something only "
+    "YOU can write (your own notes or a summary), do NOT arm and do not "
+    "wait: write it now, in this turn — nothing wakes you later to write "
+    "it. If the event you await is another agent's handoff or teachback "
+    "submission, the lead's review or action or anything else (a user "
+    "reply, a message), do NOT arm: SET "
     "metadata.intentional_wait on every task the wait covers — "
     "`reason`, `expected_resolver` and `since` are the keys "
     "validate_wait requires — with `expected_resolver` set to `lead`, "
@@ -987,7 +989,9 @@ _TIER3_TEAMMATE_SEPARATE_PROCESS_REASON_PIN = (
     "deliverable lands, 3 when the deadline passes without it, 4 when "
     "it cannot watch at all — and its completion notice starts your "
     "next turn. If the event you await is something only YOU can write "
-    "(your own notes or a summary) or the lead's review or action, do "
+    "(your own notes or a summary), do NOT arm and do not wait: write it "
+    "now, in this turn — nothing wakes you later to write it. If the "
+    "event you await is the lead's review or action, do "
     "NOT arm: SET metadata.intentional_wait on every task the wait "
     "covers — `reason`, `expected_resolver` and `since` are the keys "
     "validate_wait requires — with `expected_resolver` set to `lead`, "
