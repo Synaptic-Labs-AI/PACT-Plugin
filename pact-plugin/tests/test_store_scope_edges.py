@@ -1,9 +1,10 @@
 """
 Location: pact-plugin/tests/test_store_scope_edges.py
-Summary: Three edges of the legacy-scope reader and its store gate: the
-read-only probe closes a connection it opened when its schema check fails, a
-save filed under a payload-supplied id reports that bucket's own prior count,
-and a repository at the filesystem root contains its own rows.
+Summary: Edges of the legacy-scope reader and its store gate: the read-only
+probe closes a connection it opened when its schema check fails, a save filed
+under a payload-supplied id reports that bucket's own prior count, a
+repository at the filesystem root contains its own rows, and the read-only
+connection itself creates no store and refuses a write.
 Used by: the test suite; no production code imports it.
 """
 
@@ -108,3 +109,32 @@ def test_a_git_marker_that_cannot_be_examined_is_refused_not_read_as_absent(tmp_
         assert detected.decline_reason["reason"] == "broken_git_marker", detected
     finally:
         os.chmod(repo, 0o755)
+
+
+class TestTheReadOnlyConnectionWritesNothing:
+    """`_read_only_connection` alone, without the existence checks its callers
+    make first: it never creates a store and never writes through one. The
+    errors are the store module's own `sqlite3` (pysqlite3 where installed)."""
+
+    def test_a_missing_store_raises_and_creates_no_file(self, tmp_path):
+        folder = tmp_path / "stores"
+        folder.mkdir()
+        store = folder / "absent.db"
+        with pytest.raises(memory_api.sqlite3.OperationalError):
+            memory_api._read_only_connection(str(store)).close()
+        assert list(folder.iterdir()) == []
+
+    def test_a_write_through_it_is_refused_and_the_file_is_unchanged(self, tmp_path):
+        store = tmp_path / "settled.db"
+        setup = memory_api.sqlite3.connect(str(store))
+        setup.execute("CREATE TABLE t (x)")
+        setup.commit()
+        setup.close()
+        before = store.read_bytes()
+        connection = memory_api._read_only_connection(str(store))
+        try:
+            with pytest.raises(memory_api.sqlite3.OperationalError, match="readonly"):
+                connection.execute("INSERT INTO t VALUES (1)")
+        finally:
+            connection.close()
+        assert store.read_bytes() == before

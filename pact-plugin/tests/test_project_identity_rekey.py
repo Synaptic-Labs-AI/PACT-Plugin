@@ -385,6 +385,27 @@ class TestVectorMove:
         finally:
             conn.close()
 
+    def test_a_dry_run_counts_the_vector_move_and_rolls_it_back(
+        self, rekey_env, monkeypatch
+    ):
+        """A dry run moves the vector inside its savepoint, so it reports the
+        apply's `vectors_moved`, then rolls the move back. Catches a dry run
+        that leaves the vector under the target partition, and one that skips
+        the vector work and under-reports what an apply would move."""
+        conn, blob = _vec_store(rekey_env)
+        monkeypatch.setattr(db, "_init_vector_table", lambda connection: True)
+        try:
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=True)
+            row = conn.execute(
+                "SELECT project_id, embedding FROM vec_memories WHERE memory_id = 'm1'"
+            ).fetchone()
+            assert counters["vectors_moved"] == 1
+            assert counters["vectors_pending"] == 0
+            assert row["project_id"] == LEGACY
+            assert bytes(row["embedding"]) == blob
+        finally:
+            conn.close()
+
     def test_a_memory_without_a_vector_row_is_skipped_not_pending(
         self, rekey_env, monkeypatch
     ):

@@ -1936,6 +1936,81 @@ class TestTheSubmoduleCheckRefusesWhatItCannotCheck:
         monkeypatch.setattr(pi, "_resolved_git_dir", lambda asked: Path("/somewhere"))
         assert pi._submodule_checkout(submodule, Path("bad\0common"), submodule) is True
 
+    def test_real_git_reaches_the_non_refusing_git_dir_exit(self, tmp_path):
+        """The same exit from real git, with nothing patched. A hand-written
+        `.git` file names an admin dir whose `commondir` is the submodule's,
+        so git answers with the submodule's common dir but a git dir that is
+        neither that admin dir nor one of its `worktrees/<name>`."""
+        superproject = _superproject_with_submodule(tmp_path)
+        module_dir = superproject / ".git" / "modules" / "vendor" / "lib"
+        admin = tmp_path / "fake" / "admin"
+        admin.mkdir(parents=True)
+        checkout = tmp_path / "checkout"
+        checkout.mkdir()
+        (admin / "HEAD").write_bytes((module_dir / "HEAD").read_bytes())
+        (admin / "commondir").write_text(f"{module_dir}\n", encoding="utf-8")
+        (checkout / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        (admin / "gitdir").write_text(f"{checkout / '.git'}\n", encoding="utf-8")
+        answer = Path(run_git("rev-parse", "--git-common-dir", cwd=checkout))
+        common = (answer if answer.is_absolute() else checkout / answer).resolve()
+        assert common == module_dir.resolve()  # control: git reports the submodule's common dir
+        assert pi._submodule_admin_dir(common)  # control: leg 1 holds
+        assert pi._submodule_checkout(checkout, common, checkout) is False
+
+    def test_a_git_dir_that_is_neither_the_admin_dir_nor_its_worktree_keeps_the_basename(
+        self, tmp_path, monkeypatch
+    ):
+        """The one non-refusing exit after legs 1 and 3 hold: git names a git
+        dir that is neither the admin dir nor one of its `worktrees/<name>`,
+        so the check answers False and the basename ruling continues."""
+        submodule, common = self._submodule(tmp_path)
+        elsewhere = tmp_path / "elsewhere" / "git"
+        elsewhere.mkdir(parents=True)
+        monkeypatch.setattr(pi, "_resolved_git_dir", lambda asked: elsewhere.resolve())
+        assert pi._submodule_checkout(submodule, common, submodule) is False
+
+
+class TestTheCaseProbe:
+    """`filesystem_case_insensitive` answers True only on a positive answer;
+    every undeterminable state answers False, the no-fold direction."""
+
+    def test_the_probe_agrees_with_an_independent_case_lookup(self, tmp_path):
+        """On a case-sensitive filesystem (Linux CI) this answers False; on a
+        folding one (macOS default) True. The oracle is a plain lookup of the
+        other spelling, not the probe."""
+        folder = tmp_path / "proj"
+        folder.mkdir()
+        folds = (tmp_path / "PROJ").exists()
+        assert pi.filesystem_case_insensitive(folder) is folds
+
+    def test_the_same_entry_under_the_other_spelling_answers_true(self, tmp_path, monkeypatch):
+        """What a folding filesystem answers: the toggled name's `lstat` IS the
+        root's own entry. Faked by answering the toggled name's `lstat` with
+        the root's, since a case-sensitive filesystem cannot give one entry
+        two spellings (a planted symlink is a different entry: see
+        TestCaseProbeRefusesAPlantedSymlink)."""
+        folder = tmp_path / "proj"
+        folder.mkdir()
+        toggled = tmp_path / "PROJ"
+        real_lstat = os.lstat
+        monkeypatch.setattr(
+            pi.os, "lstat",
+            lambda path, *args, **kwargs: real_lstat(folder if Path(path) == toggled else path, *args, **kwargs),
+        )
+        assert pi.filesystem_case_insensitive(folder) is True
+
+    @pytest.mark.parametrize("name", ["123", "-_."])
+    def test_a_basename_with_no_cased_character_answers_false(self, tmp_path, name):
+        folder = tmp_path / name
+        folder.mkdir()
+        assert pi.filesystem_case_insensitive(folder) is False
+
+    def test_a_missing_path_answers_false(self, tmp_path):
+        assert pi.filesystem_case_insensitive(tmp_path / "gone") is False
+
+    def test_no_root_answers_false(self):
+        assert pi.filesystem_case_insensitive(None) is False
+
 
 # A sparse file this large takes no disk, and reading it whole would take
 # this much memory.

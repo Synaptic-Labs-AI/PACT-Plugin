@@ -1306,12 +1306,14 @@ class TestAPrintedRekeyCommandRunsAsPrinted:
     def test_the_case_variant_warning_command_moves_the_bucket(
         self, identity_env, store, monkeypatch, capfd, caplog
     ):
-        from scripts.project_identity import filesystem_case_insensitive
+        from scripts import project_identity
 
+        # The variant warning is printed only on a case-SENSITIVE filesystem.
+        # Forcing the probe's answer keeps this arm running on every platform;
+        # the probe itself is pinned by TestTheCaseProbe.
+        monkeypatch.setattr(project_identity, "filesystem_case_insensitive", lambda _root: False)
         _clear_disclosure_memos()
         repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
-        if filesystem_case_insensitive(repo):
-            pytest.skip("case variants are suppressed only on a case-sensitive filesystem")
         _seed(store, "Proj", memory_id="variant001", path="src/relative.py")
         monkeypatch.chdir(repo)
         caplog.clear()
