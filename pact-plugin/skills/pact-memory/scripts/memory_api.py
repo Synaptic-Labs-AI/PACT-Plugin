@@ -64,6 +64,7 @@ from .database import (
     _unusable_identifier,
     MEMORY_ID_LENGTH,
     SQLITE_EXTENSIONS_ENABLED,
+    BUCKET_EVIDENCE_KEYS,
     validate_identifier_for_write,
 )
 from .embeddings import (
@@ -592,6 +593,13 @@ def _legacy_session_census(
             marker = find_git_marker(project_dir)
             if marker is not None and os.path.realpath(marker.parent) in roots:
                 return "subfolder"
+        if any(
+            root.startswith(project_dir if project_dir.endswith(os.sep) else project_dir + os.sep)
+            for root in roots
+        ):
+            # A FOLDER THAT ENCLOSES A ROOT (a session launched in `$HOME`) is
+            # this repository's surroundings, not a rival owner: neutral.
+            return None
         return "elsewhere"
 
     for session_id, count in named:
@@ -631,13 +639,14 @@ def _legacy_session_census(
 
 
 def _warn_legacy_excluded(
-    store: str, candidate: str, memories: int, file_paths: int, repo_root: Any
+    store: str, candidate: str, memories: int, file_paths: int, cause: str
 ) -> None:
     """Disclose an EXCLUDED legacy bucket, once per process per bucket.
 
-    NO COMMAND IS RENDERED. The gate excluded it because its absolute rows lie
-    outside this repository, so they belong to the repository their paths
-    name; a printed move into THIS id would file another checkout's rows here.
+    NO COMMAND IS RENDERED: an excluded bucket has positive evidence of
+    another owner and none of this repository (`decide_bucket`), so a printed
+    move into this id would file that owner's rows here. `cause` is
+    `_unproven_cause`'s clause for the verdict's reason.
     """
     key = (store, candidate)
     if key in _EXCLUSION_WARNED:
@@ -645,18 +654,15 @@ def _warn_legacy_excluded(
     _EXCLUSION_WARNED.add(key)
     logger.warning(
         "legacy project bucket %r holds %d memor%s and %d file path%s, but "
-        "none of its absolute file rows could be located under %r, so it is "
-        "NOT in this read scope: its rows belong to the repository their "
-        "paths name. Run "
-        "the `project-id show` verb from that repository to move them. A row "
-        "the gate could not READ has an unknown location, not a known one — "
-        "check for a corrupt or unreadable file row before hunting paths.",
+        "%s, and nothing places it here, so it is NOT in this read scope. No "
+        "rekey command is printed: its rows belong where that evidence "
+        "points, and the `project-id show` verb run there can move them.",
         candidate,
         memories,
         "y" if memories == 1 else "ies",
         file_paths,
         "" if file_paths == 1 else "s",
-        str(repo_root) if repo_root is not None else "none",
+        cause,
     )
 
 
@@ -688,17 +694,14 @@ def _printed_rekey_remedy(commands: list) -> str:
     return " ; ".join(commands)
 
 
-# Why an unproven bucket was not read: the `unproven_reason` value and the
-# clause the warning prints for it.
+# Why a bucket was not read: the verdict's `reason` and the clause every
+# text prints for it (`_unproven_cause`). "another checkout" is said only
+# when a file row lies in one; a session folder need not be a checkout.
 _UNPROVEN_CAUSES = {
-    "foreign_rows": (
-        "{foreign_rows} of its file rows lie in another checkout "
-        "({contained_rows} under this repository), so it is shared with "
-        "that checkout"
-    ),
+    "foreign_rows": "{foreign_rows} of its file rows lie in another checkout",
     "recorded_elsewhere": (
-        "{elsewhere} of its memories came from sessions recorded at "
-        "another checkout ({here} from sessions recorded here)"
+        "{elsewhere} of its memories were written by sessions recorded at "
+        "another existing folder ({here} by sessions recorded here)"
     ),
     "subfolder_launch": (
         "no file row places it, and the sessions recorded as writing it were "
@@ -719,33 +722,114 @@ _UNPROVEN_CAUSES = {
 }
 
 
-def _unproven_reason(
-    outcome: str, sessions: Dict[str, int], detail: Optional[Dict[str, int]] = None
-) -> str:
-    """The `_UNPROVEN_CAUSES` key for a bucket that is not read."""
-    if (detail or {}).get("foreign_rows"):
-        return "foreign_rows"
-    if sessions["elsewhere"]:
-        return "recorded_elsewhere"
-    if outcome == "unverified" and sessions["subfolder"]:
-        return "subfolder_launch"
-    if outcome == "unverified" and sessions["description_newer"]:
-        return "description_newer"
-    return "no_session"
+def _unproven_cause(reason: str, counts: Optional[Dict[str, Any]]) -> str:
+    """The clause for a verdict's `reason`, filled from its counts
+    (`decide_bucket`). THE ONE TEXT HELPER: the read warnings, the
+    folder-name refusal and the rekey refusal all print it, so they cannot
+    disagree. A shared bucket (`foreign_rows` with rows here too) says so in
+    parentheses, never with a "so" that the templates' own "so" would
+    double."""
+    values: Dict[str, Any] = {
+        **dict.fromkeys(_SESSION_CENSUS_KEYS, 0),
+        **dict.fromkeys(BUCKET_EVIDENCE_KEYS, 0),
+        **(counts or {}),
+    }
+    clause = _UNPROVEN_CAUSES[reason].format(**values)
+    if reason == "foreign_rows" and values["contained_rows"]:
+        clause += (
+            f" ({values['contained_rows']} under this repository: the bucket "
+            "is shared)"
+        )
+    return clause
 
 
-def _unproven_cause(
-    reason: str,
-    sessions: Optional[Dict[str, int]],
-    detail: Optional[Dict[str, int]] = None,
-) -> str:
-    """The `_UNPROVEN_CAUSES` clause for `reason`, filled from the session
-    census and the gate's row counts. The read warning and the rekey refusal
-    both print it, so they cannot disagree."""
-    return _UNPROVEN_CAUSES[reason].format(
-        **(sessions or dict.fromkeys(_SESSION_CENSUS_KEYS, 0)),
-        **{"contained_rows": 0, "foreign_rows": 0, **(detail or {})},
+class BucketVerdict(NamedTuple):
+    """`decide_bucket`'s answer; every consumer reads only this."""
+
+    read: bool
+    save: bool
+    rekey_default: bool
+    state: Optional[str]
+    reason: Optional[str]
+    counts: Dict[str, Any]
+    sessions_counted: bool
+
+
+def decide_bucket(
+    scope_kind: str, evidence: Dict[str, int], sessions: Optional[Dict[str, int]]
+) -> BucketVerdict:
+    """THE ONE OWNERSHIP RULE: what every consumer does with a bucket.
+
+    `scope_kind` is `"canonical"` (the bucket is a canonical id's legacy
+    candidate) or `"folder_name"` (the bucket is the session's own id, no
+    canonical id having resolved). `evidence` is `bucket_evidence`'s counts;
+    `sessions` the session census, or None when it was skipped because file
+    rows already showed another owner.
+
+    FOREIGN = `foreign_rows` or `elsewhere`; OWN = `contained_rows` or
+    `here`. A canonical scope reads the bucket only with OWN and no FOREIGN;
+    a folder-name scope reads (and saves into) its own bucket unless FOREIGN.
+    A bucket that is not read is `excluded` when the foreign evidence stands
+    alone and `unproven` when this repository's evidence is there too; with
+    foreign file rows the census is skipped and `contained_rows` alone
+    decides that label. `excluded` always has foreign evidence: neutral
+    rows (vanished, unresolvable, relative, outside any rival) never exclude.
+
+    Returns a `BucketVerdict` (read, save, rekey_default, state, reason,
+    counts, sessions_counted): `state` is
+    `verified`, `included_unverified`, `unproven`, `excluded`, or None for
+    a folder-name bucket that is read; `reason` keys `_UNPROVEN_CAUSES`.
+    Pure: no I/O.
+    """
+    counts: Dict[str, Any] = {
+        **dict.fromkeys(_SESSION_CENSUS_KEYS, 0),
+        **(sessions or {}),
+        **evidence,
+    }
+    contained = evidence.get("contained_rows", 0)
+    if evidence.get("foreign_rows", 0):
+        state, reason = ("unproven" if contained else "excluded"), "foreign_rows"
+    elif counts["elsewhere"]:
+        own = contained or counts["here"]
+        state = "unproven" if (own or scope_kind == "canonical") else "excluded"
+        reason = "recorded_elsewhere"
+    elif scope_kind == "folder_name":
+        state, reason = None, None
+    elif contained:
+        state, reason = "verified", None
+    elif counts["here"]:
+        state, reason = "included_unverified", None
+    else:
+        state = "unproven"
+        reason = (
+            "subfolder_launch" if counts["subfolder"]
+            else "description_newer" if counts["description_newer"]
+            else "no_session"
+        )
+    read = state in (None, "verified", "included_unverified")
+    # Positional, in field order: read, save, rekey_default, state, reason,
+    # counts, sessions_counted.
+    return BucketVerdict(
+        read,
+        read if scope_kind == "folder_name" else True,
+        read and scope_kind == "canonical",
+        state,
+        reason,
+        counts,
+        sessions is not None,
     )
+
+
+def _census_part(verdict: BucketVerdict) -> Optional[Dict[str, int]]:
+    """The session census counts of a verdict, or None when it was skipped."""
+    if not verdict.sessions_counted:
+        return None
+    return {key: verdict.counts[key] for key in _SESSION_CENSUS_KEYS}
+
+
+def _evidence_part(verdict: BucketVerdict) -> Dict[str, int]:
+    """The file-row evidence counts of a verdict (`bucket_evidence`)."""
+    return {key: verdict.counts[key] for key in BUCKET_EVIDENCE_KEYS}
 
 
 def _warn_legacy_unproven(
@@ -754,22 +838,19 @@ def _warn_legacy_unproven(
     target: str,
     memories: int,
     file_paths: int,
-    reason: str = "no_session",
-    sessions: Optional[Dict[str, int]] = None,
-    detail: Optional[Dict[str, int]] = None,
+    cause: str,
 ) -> None:
     """Disclose an UNPROVEN legacy bucket, once per process per bucket, with
-    the reason it was not read (`_UNPROVEN_CAUSES`)."""
+    the reason it was not read (`_unproven_cause`)."""
     key = (store, candidate)
     if key in _UNPROVEN_WARNED:
         return
     _UNPROVEN_WARNED.add(key)
-    cause = _unproven_cause(reason, sessions, detail)
     logger.warning(
         "legacy project bucket %r holds %d memor%s and %d file path%s, but "
         "%s, so it is NOT in this read scope: its folder name alone cannot "
-        "tell this checkout's rows from another checkout of the same name. "
-        "If the rows belong here, move them explicitly with: %s",
+        "tell this repository's rows from those of another folder of the same "
+        "name. If the rows belong here, move them explicitly with: %s",
         candidate,
         memories,
         "y" if memories == 1 else "ies",
@@ -783,17 +864,12 @@ def _warn_legacy_unproven(
 
 
 def _warn_legacy_unattributed(
-    store: str,
-    candidate: str,
-    target: str,
-    verified: bool,
-    sessions: Dict[str, int],
-    detail: Optional[Dict[str, int]] = None,
+    store: str, candidate: str, target: str, counts: Dict[str, Any]
 ) -> None:
     """Disclose an ADMITTED legacy bucket that holds rows no session record
     places, once per process per bucket. Such a row reads like this
-    repository's own, and nothing can tell it from a row another checkout of
-    the same name wrote (`_legacy_session_evidence`'s limit)."""
+    repository's own, and nothing tells it from a row another folder of the
+    same name wrote (`_legacy_session_evidence`'s limit)."""
     key = (store, candidate, "unattributed")
     if key in _UNPROVEN_WARNED:
         return
@@ -801,18 +877,15 @@ def _warn_legacy_unattributed(
     logger.warning(
         "legacy project bucket %r is in this read scope because %s, but %d "
         "of its memories came from no recorded session, so nothing "
-        "places them: they may belong to another checkout of the same name. "
+        "places them: they may belong to another folder of the same name. "
         "If every row belongs here, file the bucket under this repository's "
         "id with: %s",
         candidate,
-        f"{(detail or {}).get('contained_rows', 0)} of its file rows lie under "
-        "this repository and none in another checkout"
-        if verified
-        else (
-            f"{sessions['here']} of its memories came from sessions "
-            "recorded here"
-        ),
-        sessions["unattributed"],
+        f"{counts['contained_rows']} of its file rows lie under this "
+        "repository and no file row places it elsewhere"
+        if counts["contained_rows"]
+        else f"{counts['here']} of its memories came from sessions recorded here",
+        counts["unattributed"],
         _printed_rekey_remedy(
             [runnable_rekey_command(candidate, target, db_path=store)]
         ),
@@ -2544,7 +2617,7 @@ def _declared_path_exists(declared_dir: str) -> bool:
 class FolderNameBucketRefusedError(ProjectScopeDisagreementError):
     """A SAVE was refused because the folder-name project id names a bucket
     whose file rows place it in another checkout
-    (`PACTMemory._basename_bucket_excluded`). A refusal, not bad input: the
+    (`PACTMemory._folder_name_bucket_verdict`). A refusal, not bad input: the
     CLI reports it as `FOLDER_NAME_BUCKET_REFUSED` with exit 1."""
 
 
@@ -3608,48 +3681,84 @@ class PACTMemory:
             with db_connection() as connection:
                 ensure_initialized(connection)
 
-    def _basename_bucket_excluded(self, scope: str, conn: Any = None) -> bool:
-        """Whether a DETECTED folder-name id names a bucket that belongs to
-        another checkout: it holds absolute file rows whose paths exist, and
-        none lies under this repository or its linked worktrees (the
-        plausibility gate's `excluded`, with `existing_only`). Disclosed by
-        `_warn_legacy_excluded` and in `_legacy_scope_state`.
+    def _bucket_verdict(
+        self, connection: Any, store: str, bucket: str, scope_kind: str
+    ) -> BucketVerdict:
+        """`decide_bucket`'s verdict for `bucket`, from this repository's gate
+        roots, computed ONCE PER COMMAND.
 
-        ONLY THE EXCLUSION ARM. A folder-name id is this repository's only id,
-        so a bucket the gate cannot place (no absolute rows, or rows naming
-        paths that are gone) stays readable; only positive evidence of another
-        checkout keeps it out. A supplied id, an id with no identity root, an
-        absent store and a store with no schema are not judged.
+        The evidence is counted on `connection` (`bucket_evidence`), and the
+        session census runs only when no file row already shows another owner,
+        so it runs at most once per bucket per command. The verdict is cached
+        while a detection pass is open, keyed on the store, the identity root,
+        the scope kind and the bucket, so a folder-name save and the reads
+        around it share one answer; every in-process write clears it
+        (`_invalidate_legacy_scope_cache`).
         """
+        from .database import bucket_evidence
+
+        repo_root = self._project_identity_root
+        # NOT KEYED ON THE STORE'S STAT, unlike the scope cache: a save opens
+        # the store read-write between its guard and its own scope read,
+        # which moves the stat with no row changed, and would run the census
+        # twice. In-process writes clear this cache; a change another process
+        # makes mid-command is seen by the next command.
+        key = ("verdict", store, str(repo_root), scope_kind, bucket)
+        in_pass = project_identity.DETECTION_ANSWERS.get() is not None
+        cached = _LEGACY_SCOPE_CACHE.get(key) if in_pass else None
+        if cached is not None:
+            return cached
+        roots, common = self._legacy_gate_roots(repo_root)
+        evidence = bucket_evidence(connection, bucket, roots or None, root_common=common)
+        sessions = (
+            None
+            if evidence["foreign_rows"]
+            else _legacy_session_census(connection, bucket, roots, common)
+        )
+        verdict = decide_bucket(scope_kind, evidence, sessions)
+        if in_pass:
+            _LEGACY_SCOPE_CACHE[key] = verdict
+        return verdict
+
+    def _folder_name_bucket_verdict(
+        self, scope: str, conn: Any = None, disclose: bool = True
+    ) -> Optional[BucketVerdict]:
+        """The verdict for a DETECTED folder-name id's own bucket, or None when
+        it is not judged: a supplied id, no identity root, an absent store or
+        a store with no schema. With `disclose`, a verdict that does not read
+        is disclosed in `_legacy_scope_state` and by one warning; the save
+        guard passes False because its refusal says the same."""
         repo_root = self._project_identity_root
         if self._project_id_source == "supplied" or repo_root is None:
-            return False
+            return None
         store = str(self._db_path or resolve_db_path())
         if _store_stat_key(store) is None:
-            return False
-        from .database import count_project_memories, legacy_candidate_plausibility
+            return None
+        from .database import count_project_memories
 
         with _legacy_probe_context(store, conn) as (connection, _degraded):
             if connection is None:
-                return False
-            roots, common = self._legacy_gate_roots(repo_root)
-            outcome, detail = legacy_candidate_plausibility(
-                connection, scope, roots or None, root_common=common,
-                existing_only=True,
-            )
-            if outcome != "excluded":
-                return False
+                return None
+            verdict = self._bucket_verdict(connection, store, scope, "folder_name")
+            if verdict.read or not disclose:
+                return verdict
             memory_count = count_project_memories(connection, scope)
             file_paths = count_project_file_paths(connection, scope)
         self._legacy_scope_state = _legacy_scope_record(
             candidate=scope,
             memory_count=memory_count,
             file_paths=file_paths,
-            excluded=True,
-            detail=detail,
+            excluded=verdict.state == "excluded",
+            unproven=verdict.state == "unproven",
+            unproven_reason=verdict.reason,
+            sessions=_census_part(verdict),
+            detail=_evidence_part(verdict),
         )
-        _warn_legacy_excluded(store, scope, memory_count, file_paths, repo_root)
-        return True
+        key = (store, scope, "folder_name")
+        if key not in _EXCLUSION_WARNED:
+            _EXCLUSION_WARNED.add(key)
+            logger.warning("%s", self._folder_name_refusal(verdict, refused="read"))
+        return verdict
 
     def _legacy_gate_roots(self, repo_root: Any) -> tuple:
         """`(gate roots, gate common dir)` for the plausibility gate and the
@@ -3773,11 +3882,14 @@ class PACTMemory:
                 lambda: self._read_project_scopes(),
             )
         self._legacy_scope_state = None
+        # The canonical legacy candidate's verdict, read by the defaulted rekey.
+        self._legacy_verdict = None
         scope = self._project_scope()
         if scope is None:
             return ()
         if not is_canonical(scope):
-            return () if self._basename_bucket_excluded(scope, conn) else (scope,)
+            verdict = self._folder_name_bucket_verdict(scope, conn)
+            return (scope,) if verdict is None or verdict.read else ()
         legacy = self._legacy_project_basename
         store = str(self._db_path or resolve_db_path())
         if not legacy or legacy == scope:
@@ -3808,12 +3920,11 @@ class PACTMemory:
         in_pass = project_identity.DETECTION_ANSWERS.get() is not None
         cached = _LEGACY_SCOPE_CACHE.get(cache_key) if in_pass else None
         if cached is not None:
-            self._legacy_scope_state = cached[1]
+            self._legacy_scope_state, self._legacy_verdict = cached[1], cached[2]
             return cached[0]
 
         from .database import (
             count_project_memories,
-            legacy_candidate_plausibility,
             project_bucket_counts,
         )
 
@@ -3921,85 +4032,54 @@ class PACTMemory:
                 # it appends the cwd repository's checkouts to the declared
                 # one's gate, and it refuses with a write-oriented error that
                 # must never escape a read.
-                deduped, gate_common = self._legacy_gate_roots(repo_root)
-                outcome, detail = legacy_candidate_plausibility(
-                    connection, candidate, deduped or None, root_common=gate_common
-                )
-                # ADMISSION. `excluded` is not read. A `verified` bucket is
-                # read, and an UNVERIFIED one (no absolute file row places it)
-                # only when a recorded session from one of these roots wrote
-                # into it: its folder name alone cannot tell this checkout's
-                # rows from a same-named checkout's. Either way a bucket
-                # holding rows whose session is recorded at another checkout
-                # stays out, as `unproven` with that reason.
-                sessions = (
-                    _legacy_session_census(
-                        connection, candidate, deduped, gate_common
-                    )
-                    if outcome != "excluded"
-                    else None
-                )
-                session_evidence = (
-                    bool(sessions and sessions["here"])
-                    if outcome == "unverified"
-                    else None
-                )
-                # FOREIGN EVIDENCE OF EITHER KIND KEEPS IT OUT: a row written
-                # by a session recorded at another checkout, or a file row
-                # whose existing path lies in another checkout.
-                foreign = bool(sessions and sessions["elsewhere"]) or bool(
-                    detail.get("foreign_rows")
-                )
-                included = (
-                    outcome == "verified" or bool(session_evidence)
-                ) and not foreign
-                unproven = outcome != "excluded" and not included
-                unproven_reason = (
-                    _unproven_reason(outcome, sessions, detail) if unproven else None
-                )
+                verdict = self._bucket_verdict(connection, store, candidate, "canonical")
+                self._legacy_verdict = verdict
+                included = verdict.read
+                state_name = verdict.state
                 memory_count = buckets.get(candidate, 0)
+                sessions = _census_part(verdict)
                 state = _legacy_scope_record(
                     candidate=candidate,
                     memory_count=memory_count,
                     # DISTINCT PATHS, not rows: one path can carry a row in
                     # each bucket of a union.
                     file_paths=file_paths,
-                    # An EXCLUDED bucket's rows belong elsewhere, so it gets
-                    # no runnable command anywhere.
+                    # An EXCLUDED bucket has another owner, so it gets no
+                    # runnable command anywhere.
                     rekey=(
                         None
-                        if outcome == "excluded"
+                        if state_name == "excluded"
                         else runnable_rekey_command(candidate, scope, db_path=store)
                     ),
                     included=included,
-                    verified=included and outcome == "verified",
-                    included_unverified=included and outcome != "verified",
+                    verified=state_name == "verified",
+                    included_unverified=state_name == "included_unverified",
                     # LOAD-BEARING: the exclusion disclosure fires on this
                     # field. Without it a populated legacy bucket can be
                     # dropped with no notice at all.
-                    excluded=outcome == "excluded",
-                    unproven=unproven,
-                    session_evidence=session_evidence,
+                    excluded=state_name == "excluded",
+                    unproven=state_name == "unproven",
+                    session_evidence=(
+                        bool(sessions["here"]) if sessions is not None else None
+                    ),
                     sessions=sessions,
-                    unproven_reason=unproven_reason,
+                    unproven_reason=verdict.reason,
                     ambiguous=ambiguous,
                     canonical_count=canonical_count,
-                    detail=detail,
+                    detail=_evidence_part(verdict),
                 )
-                if outcome == "excluded":
+                if state_name == "excluded":
                     _warn_legacy_excluded(
-                        store, candidate, memory_count, file_paths, repo_root,
+                        store, candidate, memory_count, file_paths or 0,
+                        _unproven_cause(verdict.reason, verdict.counts),
                     )
-                elif unproven:
+                elif state_name == "unproven":
                     _warn_legacy_unproven(
                         store, candidate, scope, memory_count, file_paths or 0,
-                        unproven_reason, sessions, detail,
+                        _unproven_cause(verdict.reason, verdict.counts),
                     )
-                elif sessions and sessions["unattributed"]:
-                    _warn_legacy_unattributed(
-                        store, candidate, scope, outcome == "verified", sessions,
-                        detail,
-                    )
+                elif verdict.counts["unattributed"]:
+                    _warn_legacy_unattributed(store, candidate, scope, verdict.counts)
                 result = (scope, candidate) if included else (scope,)
         self._legacy_scope_state = state
         # PRUNE superseded stamps for this same store/scope/legacy pair: the
@@ -4011,7 +4091,7 @@ class PACTMemory:
                 if key != cache_key and key[:1] == (store,) and key[3:] == (scope, legacy)
             ]:
                 _LEGACY_SCOPE_CACHE.pop(stale, None)
-            _LEGACY_SCOPE_CACHE[cache_key] = (result, state)
+            _LEGACY_SCOPE_CACHE[cache_key] = (result, state, self._legacy_verdict)
         return result
 
     def _detected_identity_is_canonical(self) -> bool:
@@ -4042,8 +4122,8 @@ class PACTMemory:
 
     def _project_id_for_write(self) -> Optional[str]:
         """The project id a WRITE may bind; ValueError for an unusable one,
-        FolderNameBucketRefusedError for a folder-name id whose bucket
-        belongs to another checkout (`_basename_bucket_excluded`).
+        FolderNameBucketRefusedError for a folder-name id whose bucket's
+        verdict refuses the save (`_folder_name_bucket_verdict`).
 
         This is the write ingress's remedy channel: a detected value that no
         utf-8 TEXT column can hold refuses HERE, naming the detection source
@@ -4059,48 +4139,75 @@ class PACTMemory:
                 "explicitly, or fix the project directory name or session "
                 "record it was derived from. Nothing was written."
             )
-        if (
-            self._project_id is not None
-            and not is_canonical(self._project_id)
-            and _stable_read_only(
+        if self._project_id is not None and not is_canonical(self._project_id):
+            verdict = _stable_read_only(
                 str(self._db_path or resolve_db_path()),
-                lambda: self._basename_bucket_excluded(self._project_id),
+                lambda: self._folder_name_bucket_verdict(self._project_id, disclose=False),
             )
-        ):
-            raise FolderNameBucketRefusedError(self._folder_name_refusal())
+            if verdict is not None and not verdict.save:
+                raise FolderNameBucketRefusedError(self._folder_name_refusal(verdict))
         return self._project_id
 
-    def _folder_name_refusal(self) -> str:
-        """The folder-name save refusal's text, with a runnable local pin.
-
-        THE REMEDY NEEDS NO INVENTED REMOTE. A repository with no usable
-        origin can pin a `local/<digest>/<folder>` id (`local_pin_id`), which
-        is canonical, unique to this checkout's path, and asks the user for
-        nothing. The command is printed only when git named the common dir;
-        otherwise the text says where the file goes.
-        """
+    def _folder_name_refusal(self, verdict: BucketVerdict, refused: str = "save") -> str:
+        """The folder-name refusal's text: what the evidence shows, then the
+        remedy for this checkout's layout (`_local_pin_remedy`). `refused` is
+        `"save"` for the save refusal and `"read"` for the read warning."""
         name = self._project_id
-        pin = local_pin_id(self._project_identity_root)
-        common = getattr(self, "_project_common_dir", None)
-        where = (
-            f"printf '%s\\n' {shlex.quote(pin)} > "
-            f"{shlex.quote(str(Path(common) / 'pact-project-id'))}"
-            if common is not None
-            else (
-                f"write {pin} to the file pact-project-id in the directory "
-                "`git rev-parse --git-common-dir` prints"
-            )
+        consequence = (
+            "so a save here would file this repository's memory with rows "
+            "this repository does not own. Nothing was written."
+            if refused == "save"
+            else "so that bucket is NOT read here."
         )
         return (
             f"this repository's project id is its folder name {name!r}, and "
-            f"the file rows of the {name!r} bucket all lie in another "
-            "checkout, so a save here would file this repository's memory "
-            "with that checkout's. Nothing was written. Give this repository "
-            f"its own id with a local pin: {where} . Or add an origin remote, "
-            f"or pass project_id. Earlier memories in the {name!r} bucket stay "
-            "there; `project-id show` lists them."
+            f"{_unproven_cause(verdict.reason, verdict.counts)}, "
+            f"{consequence} {self._local_pin_remedy()}"
         )
 
+    def _local_pin_remedy(self) -> str:
+        """The remedy for a refused folder-name id, by checkout layout.
+
+        A RUNNABLE PIN COMMAND ONLY INTO THIS CHECKOUT'S OWN GIT DIR: the
+        identity root's `.git` is a directory on lstat (a `.git` symlink does
+        not qualify) and git's common dir is that directory. A linked
+        worktree's identity root is its main checkout, so it qualifies the same
+        way. A `.git` that is a file or a symlink, or a common dir anywhere
+        else, gets no command and no path: writing there is the user's
+        decision. A folder that is no git repository gets neither pin nor git
+        advice.
+        """
+        root = self._project_identity_root
+        pin = local_pin_id(root)
+        git_path = os.path.join(str(root), ".git")
+        try:
+            own_dir = stat.S_ISDIR(os.lstat(git_path).st_mode)
+        except OSError:
+            return (
+                "This folder is not a git repository: pass project_id, or make "
+                "it a repository with an origin remote."
+            )
+        common = getattr(self, "_project_common_dir", None)
+        try:
+            same = common is not None and os.path.realpath(str(common)) == os.path.realpath(git_path)
+        except (OSError, ValueError):
+            same = False
+        if own_dir and same:
+            command = (
+                f"printf '%s\\n' {shlex.quote(pin)} > "
+                f"{shlex.quote(os.path.join(os.path.realpath(git_path), 'pact-project-id'))}"
+            )
+            return (
+                f"Give this repository its own id with a local pin: {command} . "
+                "Or add an origin remote, or pass project_id. Earlier memories "
+                "in that bucket stay there; `project-id show` lists them."
+            )
+        return (
+            "This checkout's git directory is outside it, so writing a pin "
+            "there is your decision after confirming that directory is yours; "
+            f"the local pin id for this checkout is {pin}. Or add an origin "
+            "remote, or pass project_id."
+        )
     def _session_id_for_envelope(self) -> Optional[str]:
         """The session id a status ENVELOPE reports; the FINAL value.
 
@@ -4697,7 +4804,12 @@ class PACTMemory:
             # rather than letting the value die at the TEXT bind. A supplied
             # payload project is a warrant, was validated above, and never
             # consults the adopted value.
-            project_for_write = self._project_id_for_write()
+            try:
+                project_for_write = self._project_id_for_write()
+            except FolderNameBucketRefusedError:
+                # A refusal like its siblings below: the status says so.
+                self._last_sync_status = SyncResult.REFUSED
+                raise
             if project_for_write is None:
                 self._last_sync_status = SyncResult.REFUSED
                 raise ProjectIdentityUnresolvedError(

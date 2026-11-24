@@ -203,9 +203,14 @@ class TestExclusionDisclosureIsQuoted:
         hostile = "Legacy; echo PWNED"
         store = tmp_path / "excluded.db"
         _make_store(store)
-        # An ABSOLUTE file row that lies OUTSIDE the identity root: the gate
-        # excludes the bucket, which is what emits the warning.
-        _seed(store, hostile, "c" * 32, path=str(tmp_path / "elsewhere" / "f.py"))
+        # An EXISTING file row in another checkout and nothing under the
+        # identity root: the verdict excludes the bucket, which is what emits
+        # the warning.
+        from fixtures.identity_git import make_repo
+
+        rival = make_repo(tmp_path / "elsewhere")
+        (rival / "f.py").write_text("x\n")
+        _seed(store, hostile, "c" * 32, path=str(rival / "f.py"))
 
         monkeypatch.setattr(
             PACTMemory,
@@ -222,8 +227,8 @@ class TestExclusionDisclosureIsQuoted:
             memory._read_project_scopes()
 
         text = caplog.text
-        # The rows belong to the repository their paths name, so the warning
-        # hands the reader no command to paste here.
+        # The rows lie in another checkout, so the warning hands the reader no
+        # command to paste here.
         assert "legacy project bucket" in text, text
         assert "project-id rekey" not in text and "--from" not in text, text
         assert memory._legacy_scope_state["rekey"] is None

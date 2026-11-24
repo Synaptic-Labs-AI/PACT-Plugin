@@ -1386,11 +1386,6 @@ def bucket_session_counts(
     return [(row[0], row[1]) for row in cursor.fetchall()]
 
 
-LEGACY_PLAUSIBLE_VERIFIED = "verified"
-LEGACY_PLAUSIBLE_UNVERIFIED = "unverified"
-LEGACY_PLAUSIBLE_EXCLUDED = "excluded"
-
-
 def _gate_root_paths(roots: Any) -> Tuple[str, ...]:
     """Resolve the containment roots the legacy gate accepts.
 
@@ -1526,13 +1521,15 @@ def _contained_by_root(
     return True
 
 
-def _inside_a_checkout(resolved: str, cache: Dict[str, bool]) -> bool:
-    """Whether a directory above `resolved` holds a `.git` (a checkout owns
-    the path). `cache` keeps each directory's answer for one gate call.
-    Never raises."""
-    directory = os.path.dirname(resolved)
+def _nearest_checkout(resolved: str, cache: Dict[str, Optional[str]]) -> Optional[str]:
+    """The nearest directory at or above `resolved` that holds a `.git`
+    (the checkout that owns the path), or None. The walk starts at the path
+    itself, so a row that IS a checkout's root (a tracked "." or project
+    directory) belongs to that checkout. `cache` keeps each directory's
+    answer for one evidence call. Never raises."""
+    directory = resolved
     seen = []
-    found = False
+    found: Optional[str] = None
     while True:
         if directory in cache:
             found = cache[directory]
@@ -1540,7 +1537,7 @@ def _inside_a_checkout(resolved: str, cache: Dict[str, bool]) -> bool:
         seen.append(directory)
         try:
             if os.path.lexists(os.path.join(directory, ".git")):
-                found = True
+                found = directory
                 break
         except (OSError, ValueError):
             break
@@ -1553,153 +1550,130 @@ def _inside_a_checkout(resolved: str, cache: Dict[str, bool]) -> bool:
     return found
 
 
-def legacy_candidate_plausibility(
+def _within(path: str, root: str) -> bool:
+    """Whether `path` is `root` or lies under it (both resolved)."""
+    prefix = root if root.endswith(os.sep) else root + os.sep
+    return path == root or path.startswith(prefix)
+
+
+def _is_foreign_row(
+    resolved: str, bucket: str, roots: Tuple[str, ...], cache: Dict[str, Optional[str]]
+) -> bool:
+    """Whether an existing, uncontained row is evidence of another owner.
+
+    (a) Its nearest checkout neither encloses a gate root nor lies inside one:
+    an enclosing checkout (a `$HOME` dotfiles repository) is this
+    repository's environment, and one nested inside a root is not a rival
+    owner of this folder name. (b) THE NAMED-DIRECTORY RULE: an ancestor
+    directory carries the bucket's exact name and is neither a gate root nor
+    inside one, git checkout or not, and even when it encloses a gate root.
+    (b) catches a plain folder of that name and a hostile root planted inside
+    the victim's checkout, which (a) alone reads as neutral.
+    """
+    nearest = _nearest_checkout(resolved, cache)
+    if nearest is not None and not any(
+        _within(root, nearest) or _within(nearest, root) for root in roots
+    ):
+        return True
+    directory = resolved
+    while True:
+        if os.path.basename(directory) == bucket and not any(
+            _within(directory, root) for root in roots
+        ):
+            return True
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            return False
+        directory = parent
+
+
+# The classes a bucket's `files.path` rows fall in (`bucket_evidence`).
+BUCKET_EVIDENCE_KEYS = (
+    "file_rows", "absolute_rows", "contained_rows", "foreign_rows",
+    "neutral_outside", "vanished", "unresolvable", "relative", "roots",
+)
+
+
+def bucket_evidence(
     conn: sqlite3.Connection,
-    candidate_id: str,
+    bucket: str,
     roots: Optional[Union[Path, str, Sequence[Union[Path, str]]]],
     *,
     root_common: Optional[Union[Path, str]] = None,
-    existing_only: bool = False,
-) -> Tuple[str, Dict[str, int]]:
-    """Whether a legacy basename bucket plausibly belongs to `roots`.
+) -> Dict[str, int]:
+    """Count a bucket's file rows by what they show about its owner.
 
-    The gate decides whether a populated legacy bucket joins the read scope.
-    Evidence is the bucket's own absolute `files.path` rows: `_normalize_path`
-    stores an absolute path as given, so such a row records where the bucket
-    was actually used. A RELATIVE path carries no location and is not
-    evidence — it is counted but never used to decide.
+    COUNTS ONLY. The decision is `memory_api.decide_bucket`'s; nothing here
+    says whether the bucket is read.
 
-    `roots` IS A SEQUENCE, NOT ONE ROOT, AND THAT IS THE WORKTREE FIX. The
-    identity root a linked worktree resolves to is the MAIN checkout — by
-    design, so every worktree of one repository shares one id — but a row
-    saved while the process sat in the worktree records the WORKTREE's
-    absolute path. Gating on the main checkout alone then calls the bucket
-    `excluded` and collapses the read scope to the canonical id, so the
-    operator's own pre-upgrade rows disappear from reads and the disclosure
-    tells them to rekey a bucket that is already theirs. The CALLER computes
-    the set (the identity root plus every non-bare path from
-    `git worktree list --porcelain`) and passes it in; this module does not
-    run git. A single `Path`/`str` is still accepted and treated as a
-    one-element sequence, so an existing single-root caller keeps working.
+    Each `files.path` row of `bucket` falls in exactly one class:
+      - `relative`: not absolute; it carries no location;
+      - `unresolvable`: absolute, but `realpath` raises (an embedded NUL);
+      - `contained_rows`: its resolved path lies under a gate root, and no
+        directory strictly between the root and the row is a separate
+        checkout (`_contained_by_root`; the root's own submodules stay
+        contained). Existence is not required: a deleted file inside this
+        repository still places the bucket here;
+      - `vanished`: not contained, and the path no longer exists;
+      - `foreign_rows`: exists, not contained, and evidence of another owner
+        (`_is_foreign_row`);
+      - `neutral_outside`: exists, not contained, not foreign: in no
+        checkout, in a checkout that encloses a root, or in one nested inside
+        a root.
+    `foreign_rows` is the only class against this repository and
+    `contained_rows` the only class for it; the rest are disclosed only.
+    `absolute_rows` counts every absolute row; `roots` the gate roots.
 
-    Returns `(outcome, detail)` where outcome is one of:
-      - `verified`   — at least one absolute row lies under SOME root, and
-                       no row is foreign (`foreign_rows` below);
-      - `unverified` — no roots, or no absolute rows exist at all, so the
-                       store cannot judge; the caller reads the bucket only
-                       on session evidence (a recorded session from this
-                       repository wrote into it), disclosed as
-                       `included_unverified`, and otherwise reports it
-                       `unproven` and does not read it;
-      - `excluded`   — absolute rows exist and none lies under ANY root.
+    `roots` is the identity root plus its two-way-linked worktrees, which the
+    caller computes (this module runs no git); a single `Path`/`str` is one
+    root. `root_common` is the common dir git reported for them, which
+    exempts the roots' own submodules from the nested-checkout rule; None
+    exempts none, the fail-closed direction. Containment resolves both sides
+    and compares literally, with no case folding.
 
-    A FOREIGN ROW IS POSITIVE EVIDENCE OF ANOTHER CHECKOUT: an absolute row
-    whose path exists, lies under no root, and lies inside some checkout (a
-    `.git` at one of its parent directories). A bucket holding rows under a
-    root AND foreign rows is shared with another checkout, so it is
-    `unverified`, not `verified`, and `detail["foreign_rows"]` counts the
-    foreign rows; the caller must not admit it whole. A row whose path no
-    longer exists is never foreign.
-
-    A ROW UNDER A NESTED CHECKOUT IS NOT CONTAINED. A row counts for a root
-    only when no directory strictly between the root and the row is a
-    separate checkout (`_contained_by_root`): an identity root that is an
-    ANCESTOR of another checkout must not claim that checkout's rows. The
-    root's own registered submodules are part of it, not separate, and
-    "registered" is judged against `root_common`: the common dir GIT reported
-    for the roots (the identity root and its listed worktrees share one). The
-    caller passes it; this module never derives it. Without it no nested
-    `.git` is exempt, the fail-closed direction.
-
-    Containment RESOLVES BOTH SIDES (`realpath` on the row path and on each
-    root) and then does a literal prefix comparison, with no case folding: a
-    row written through a symlinked spelling resolves to its target, so it
-    matches a root spelled either way, while a fold would pass on a
-    case-insensitive filesystem and miss on a case-sensitive one. Resolution
-    also normalises `..`, so a path escaping a root cannot be counted as
-    inside it.
-
-    AN UNRESOLVABLE ROW IS EVIDENCE AND IS NEVER CONTAINED, AND IT NEVER
-    RAISES. `realpath` raises `ValueError` for a path carrying an embedded NUL
-    byte (a corrupt or hostile `files.path`), and this gate runs on every
-    read, so letting it escape would fail EVERY read for the project from a
-    check that only decides whether to WIDEN the scope. Swallowing it silently
-    is the other failure: a row the store cannot read would then buy the
-    bucket an INCLUDE. So the row counts in `absolute_rows` and can never count
-    in `contained_rows`: a bucket whose only absolute rows are unreadable lands
-    in `excluded`, which is DISCLOSED with its counts and no rekey command
-    (its rows are taken to belong to the repository their paths name),
-    rather than being read on the strength of a row nobody can judge. The write
-    seam (`graph.track_file`) refuses a NUL path so such rows cannot be created
-    in the first place; this is the read-side backstop for rows already stored.
-
-    PRECONDITION: the store's schema is present. This is an identity read
-    primitive, reached from read-only probes, so it never calls
-    `ensure_initialized` (which would attempt migrations and the vector-table
-    CREATE); on a store without the table it raises
-    `sqlite3.OperationalError`, and the caller checks the schema first.
-
-    `existing_only` SKIPS A ROW WHOSE PATH NO LONGER EXISTS: it is neither
-    absolute evidence nor contained. The basename-primary scope passes it, so a
-    bucket whose rows all name a moved or deleted checkout is not excluded.
+    PRECONDITION: the store's schema is present (a read-only identity
+    primitive: it never runs `ensure_initialized`; on a store without the
+    table it raises `sqlite3.OperationalError`). Never raises on a row.
     """
     cursor = conn.execute(
         "SELECT path FROM files WHERE project_id = ?",
-        (candidate_id,),
+        (bucket,),
     )
     root_paths = _gate_root_paths(roots)
     nested: Dict[tuple, bool] = {}
+    checkouts: Dict[str, Optional[str]] = {}
     verified_common: Optional[str] = None
     if root_common:
         try:
             verified_common = os.path.realpath(str(root_common))
         except (OSError, ValueError):
             verified_common = None
-    file_rows = 0
-    absolute_rows = 0
-    contained_rows = 0
-    foreign_rows = 0
-    checkouts: Dict[str, bool] = {}
+    counts = dict.fromkeys(BUCKET_EVIDENCE_KEYS, 0)
+    counts["roots"] = len(root_paths)
     for row in cursor.fetchall():
-        file_rows += 1
+        counts["file_rows"] += 1
         path = row["path"]
         if not path or not os.path.isabs(path):
+            counts["relative"] += 1
             continue
-        if existing_only and not os.path.lexists(path):
-            continue
-        absolute_rows += 1
+        counts["absolute_rows"] += 1
         try:
             resolved = os.path.realpath(path)
         except (OSError, ValueError):
-            # Counted as absolute evidence above; never as contained. See AN
-            # UNRESOLVABLE ROW above.
+            counts["unresolvable"] += 1
             continue
         if any(
             _contained_by_root(resolved, root, nested, verified_common)
             for root in root_paths
         ):
-            contained_rows += 1
-        elif os.path.lexists(resolved) and _inside_a_checkout(resolved, checkouts):
-            foreign_rows += 1
-
-    detail = {
-        "file_rows": file_rows,
-        "absolute_rows": absolute_rows,
-        "contained_rows": contained_rows,
-        "foreign_rows": foreign_rows,
-        "roots": len(root_paths),
-    }
-    if not root_paths or absolute_rows == 0:
-        # Nothing to test against, or no absolute row to test: not proof
-        # either way. A bucket holding ONLY relative paths is the measured
-        # case for this repo's own legacy bucket, and it must never be
-        # reported as verified OR excluded.
-        return LEGACY_PLAUSIBLE_UNVERIFIED, detail
-    if contained_rows > 0:
-        if foreign_rows > 0:
-            return LEGACY_PLAUSIBLE_UNVERIFIED, detail
-        return LEGACY_PLAUSIBLE_VERIFIED, detail
-    return LEGACY_PLAUSIBLE_EXCLUDED, detail
+            counts["contained_rows"] += 1
+        elif not os.path.lexists(resolved):
+            counts["vanished"] += 1
+        elif _is_foreign_row(resolved, bucket, root_paths, checkouts):
+            counts["foreign_rows"] += 1
+        else:
+            counts["neutral_outside"] += 1
+    return counts
 
 
 def rekey_project(

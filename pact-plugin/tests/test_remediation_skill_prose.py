@@ -613,16 +613,39 @@ class TestLegacyScopeStatesAreDocumented:
             "this repository was moved into it."
         ) in _body(SKILL)
 
-    def test_excluded_is_not_read(self):
+    def test_excluded_needs_evidence_of_another_owner(self):
+        body = _body(SKILL)
         assert (
-            "excluded: its absolute file rows place it in another repository, "
-            "and it is not read"
-        ) in _body(SKILL)
+            "excluded: evidence places it elsewhere and nothing places it here, "
+            "so it is not read and no rekey command is printed."
+        ) in body
+        assert (
+            "Rows that are gone, unreadable, relative, or outside any other "
+            "checkout are no evidence either way."
+        ) in body
+        assert "excluded: its absolute file rows place it in another repository" not in body
+
+    def test_the_documented_detail_counts_are_the_code_key_set(self):
+        from scripts.database import BUCKET_EVIDENCE_KEYS
+
+        body = _body(SKILL)
+        lead = "detail counts the bucket's file rows: "
+        start = body.index(lead) + len(lead)
+        listed = body[start:body.index(".", start)].replace(" and ", ", ")
+        assert {n.strip() for n in listed.split(",") if n.strip()} == set(BUCKET_EVIDENCE_KEYS)
+
+    def test_the_documented_unproven_reasons_are_the_code_reasons(self):
+        from scripts.memory_api import _UNPROVEN_CAUSES
+
+        body = _body(SKILL)
+        for reason in _UNPROVEN_CAUSES:
+            assert reason + " (" in body, reason
 
     def test_unproven_is_not_read_and_names_its_command(self):
         assert (
             "unproven: it is not read, and its rekey command is printed once "
-            "per process, with the cause."
+            "per process, with the cause (a folder-name scope has no canonical "
+            "target, so it prints the local-pin remedy instead)."
         ) in _body(SKILL)
 
     def test_an_unattributed_row_is_read_with_a_warning(self):
@@ -646,19 +669,30 @@ class TestLegacyScopeStatesAreDocumented:
             "checkout), does not block it"
         ) in _body(SKILL)
 
-    def test_a_folder_name_session_refuses_an_excluded_bucket(self):
+    def test_a_folder_name_session_is_refused_only_on_another_owners_evidence(self):
+        body = _body(SKILL)
         assert (
-            "A session whose project id is a folder name refuses to save into "
-            "that bucket when the gate excludes it (its file rows all lie in "
-            "another checkout): the save fails with FOLDER_NAME_BUCKET_REFUSED, "
-            "exits 1 and writes nothing."
-        ) in _body(SKILL)
-        assert "the pin is the user's to write, so ask the user" in _body(SKILL)
+            "A session whose project id is a folder name reads and saves into "
+            "that bucket unless there is evidence another owner wrote it"
+        ) in body
+        assert (
+            "a save fails with FOLDER_NAME_BUCKET_REFUSED, exits 1 and writes "
+            "nothing."
+        ) in body
+        assert "the pin is the user's to write, so ask the user" in body
+        assert (
+            "A bucket with no evidence either way (only relative or vanished "
+            "file rows, no recorded session) stays shared by every folder of "
+            "that name."
+        ) in body
+        assert "when the gate excludes it (its file rows all lie in" not in body
 
     def test_foreign_rows_is_a_documented_unproven_reason(self):
         assert (
-            "foreign_rows (some of its file rows lie in another checkout; "
-            "detail.foreign_rows counts them, and a rekey needs an explicit --to)"
+            "foreign_rows (some of its file rows lie in another checkout or "
+            "under another folder of its name, beside rows under this "
+            "repository; detail.foreign_rows counts them, and a rekey needs an "
+            "explicit --to)"
         ) in _body(SKILL)
 
     def test_the_suppression_reason_is_documented_only_there(self):
@@ -7146,6 +7180,9 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<name imported from a project module cli: FolderNameBucketRefusedError>"): (
             "memory_api's error class, caught by a command"
         ),
+        ("call", "<class of its own module used as a value memory_api: FolderNameBucketRefusedError>"): (
+            "the save refusal's error class, caught by save to record the refused status before re-raising"
+        ),
         ("call", "<name imported from a project module cli: ProjectIdentityUnresolvedError>"): (
             "memory_api's error class, caught by a command"
         ),
@@ -7261,8 +7298,11 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', 'graph_enhanced_search'): (
             "searches the store's rows" + _AFTER_DETECTION
         ),
-        ('call', 'legacy_candidate_plausibility'): (
-            "judges from the store's rows whether a legacy bucket belongs to this project, for the read scope; it asks git nothing" + _AFTER_DETECTION
+        ('call', 'bucket_evidence'): (
+            "counts from the store's rows what a legacy bucket's file rows show about its owner, for the read scope; it asks git nothing" + _AFTER_DETECTION
+        ),
+        ("call", "<name imported from a project module memory_api: BUCKET_EVIDENCE_KEYS>"): (
+            "database's tuple of the evidence count names a verdict carries"
         ),
         ('call', 'link_memory_to_paths'): (
             'links a saved memory to its file paths in the store' + _AFTER_DETECTION

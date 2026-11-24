@@ -1216,13 +1216,13 @@ class TestProjectIdShowRoots:
 # ---------------------------------------------------------------------------
 
 class TestExclusionWarningHedgesTheLocation:
-    def test_the_warning_says_could_be_located_not_lies_under(
+    def test_the_warning_claims_no_owner_it_cannot_show(
         self, tmp_path, monkeypatch, caplog
     ):
-        """Catches a warning that asserts an unverified fact: for a row the
-        gate could not READ, whether it sits under the root is UNKNOWN, and
-        'none ... lies under' sends an operator hunting paths when the cause
-        is a corrupt row."""
+        """Catches a warning that asserts an unverified fact: a row whose file
+        is gone shows no owner, so the warning must say nothing places the
+        bucket, never that its rows lie in another checkout or belong to the
+        repository their paths name."""
         from scripts.database import create_memory, db_connection
         from scripts.graph import track_file
 
@@ -1249,9 +1249,9 @@ class TestExclusionWarningHedgesTheLocation:
             memory._read_project_scopes()
 
         text = "\n".join(record.getMessage() for record in caplog.records)
-        assert "could be located under" in text, text
-        assert "lies under" not in text, text
-        assert "unknown location" in text, text
+        assert "no file row places it" in text, text
+        assert "another checkout" not in text, text
+        assert "their paths name" not in text, text
 
 
 # ---------------------------------------------------------------------------

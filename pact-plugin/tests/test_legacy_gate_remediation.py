@@ -125,14 +125,27 @@ def test_folder_name_read_excludes_a_bucket_placed_in_another_checkout(
         assert memory._read_project_scopes() == ()
     assert memory.list(limit=5) == []
     assert memory._legacy_scope_state["excluded"] is True
-    assert "NOT in this read scope" in caplog.text
+    assert "NOT read here" in caplog.text
 
 
 def test_folder_name_read_keeps_a_bucket_placed_here(basename_env):
     """Control: a row under this repository keeps the bucket."""
     repo, other, store = basename_env
-    _seed(store, NAME, files=[repo / "src.py", other / "src.py"])
+    _seed(store, NAME, files=[repo / "src.py"])
     assert _basename_memory(store)._read_project_scopes() == (NAME,)
+
+
+def test_folder_name_read_refuses_a_bucket_shared_with_another_folder(basename_env):
+    """A row here and a row in another folder of this name: the bucket is
+    shared, so the folder-name scope neither reads nor saves into it."""
+    repo, other, store = basename_env
+    _seed(store, NAME, files=[repo / "src.py", other / "src.py"])
+    memory = _basename_memory(store)
+    assert memory._read_project_scopes() == ()
+    assert memory._legacy_scope_state["unproven"] is True
+    assert memory._legacy_scope_state["unproven_reason"] == "foreign_rows"
+    with pytest.raises(memory_api.FolderNameBucketRefusedError):
+        memory._project_id_for_write()
 
 
 def test_folder_name_read_keeps_a_bucket_whose_paths_are_gone(basename_env):
@@ -412,13 +425,19 @@ def test_a_defaulted_rekey_refuses_the_shared_bucket(shared_bucket, monkeypatch,
     assert exit_info.value.code == 0, capfd.readouterr()
 
 
-def test_the_other_checkout_still_reads_its_rows(shared_bucket, monkeypatch):
+def test_the_other_checkout_no_longer_reads_the_shared_bucket(shared_bucket, monkeypatch):
+    """The folder-name side of the shared bucket: its own row and the canonical
+    checkout's row make it shared, so it is neither read nor saved into, and
+    the refusal offers this checkout its own local pin."""
     mine, theirs, store = shared_bucket
     monkeypatch.chdir(theirs)
     memory = PACTMemory(session_id="s", db_path=store)
     assert memory._project_id == NAME
-    assert memory._read_project_scopes() == (NAME,)
-    assert len(memory.list(limit=5)) == 1
+    assert memory._read_project_scopes() == ()
+    assert memory.list(limit=5) == []
+    with pytest.raises(memory_api.FolderNameBucketRefusedError) as refused:
+        memory._project_id_for_write()
+    assert memory_api.local_pin_id(theirs) in str(refused.value)
 
 
 def test_a_foreign_row_whose_path_is_gone_is_no_evidence(shared_bucket, monkeypatch):
@@ -476,14 +495,15 @@ def test_the_printed_local_pin_gives_the_repository_its_own_id(tmp_path, monkeyp
 def test_the_gate_calls_a_shared_bucket_unverified(shared_bucket):
     """The gate itself: a row here plus an existing row in another checkout is
     not `verified`."""
-    from scripts.database import legacy_candidate_plausibility
+    from scripts.database import bucket_evidence
 
     mine, theirs, store = shared_bucket
     with sqlite3.connect(str(store)) as conn:
         conn.row_factory = sqlite3.Row
-        outcome, detail = legacy_candidate_plausibility(conn, NAME, [str(mine.resolve())])
-    assert outcome == "unverified", detail
+        detail = bucket_evidence(conn, NAME, [str(mine.resolve())])
     assert detail["foreign_rows"] == 1 and detail["contained_rows"] == 1, detail
+    verdict = memory_api.decide_bucket("canonical", detail, None)
+    assert verdict.state == "unproven" and not verdict.read, verdict
 
 
 def test_session_evidence_does_not_admit_a_shared_bucket(
@@ -496,5 +516,75 @@ def test_session_evidence_does_not_admit_a_shared_bucket(
     monkeypatch.chdir(mine)
     memory = PACTMemory(session_id="s", db_path=store)
     assert memory._read_project_scopes() == (CANONICAL,)
-    assert memory._legacy_scope_state["sessions"]["here"] == 1
     assert memory._legacy_scope_state["unproven_reason"] == "foreign_rows"
+    # The census is skipped once a foreign file row decides.
+    assert memory._legacy_scope_state["sessions"] is None
+
+
+
+# ---------------------------------------------------------------------------
+# Ownership rule: the two foreign-row rules and the census enclosing folder
+# (the matrix, S1-S3 and R1-R4 live in test_legacy_ownership_matrix.py)
+# ---------------------------------------------------------------------------
+
+def test_an_enclosing_checkout_is_not_a_rival(tmp_path, monkeypatch, scopes_clean):
+    """Rule (a): a `.git` above both the row and the root (`$HOME` dotfiles)
+    is this repository's surroundings, so its rows are neutral."""
+    assert_outside_repository(tmp_path)
+    home = make_repo(tmp_path / "home-repo")
+    root = make_repo(home / "code" / NAME, remote=ORIGIN)
+    (home / "notes").mkdir()
+    (home / "notes" / "n.md").write_text("x\n")
+    (root / "src.py").write_text("x\n")
+    store = tmp_path / "store.db"
+    _seed(store, NAME, files=[home / "notes" / "n.md", root / "src.py"])
+    monkeypatch.chdir(root)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._read_project_scopes() == (CANONICAL, NAME)
+    assert memory._legacy_scope_state["detail"]["neutral_outside"] == 1
+
+
+def test_a_plain_folder_named_like_the_bucket_is_a_rival(basename_env):
+    """Rule (b): `other` is a plain folder, no git, but it carries the
+    bucket's name, so its existing rows exclude the bucket."""
+    repo, other, store = basename_env
+    assert not (other / ".git").exists()
+    _seed(store, NAME, files=[other / "src.py"])
+    memory = _basename_memory(store)
+    assert memory._read_project_scopes() == ()
+    assert memory._legacy_scope_state["detail"]["foreign_rows"] == 1
+
+
+def test_a_hostile_root_nested_in_the_victim_does_not_read_it(tmp_path, monkeypatch, scopes_clean):
+    """Rule (b): a root planted inside the victim's checkout
+    (`victim/vendor/victim`) sees the victim's rows as foreign."""
+    assert_outside_repository(tmp_path)
+    victim = make_repo(tmp_path / NAME)
+    (victim / "secret.py").write_text("x\n")
+    hostile = make_repo(victim / "vendor" / NAME)
+    store = tmp_path / "store.db"
+    _seed(store, NAME, files=[victim / "secret.py"])
+    monkeypatch.chdir(hostile)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._project_id == NAME
+    assert memory._read_project_scopes() == ()
+    with pytest.raises(memory_api.FolderNameBucketRefusedError):
+        memory._project_id_for_write()
+
+
+def test_a_session_folder_enclosing_the_root_is_neutral(tmp_path):
+    """Census: a session launched in a folder that encloses the root (`$HOME`)
+    is not `elsewhere`."""
+    assert_outside_repository(tmp_path)
+    root = make_repo(tmp_path / "outer" / NAME)
+    seed_session_evidence(tmp_path / "home" / ".claude", tmp_path / "outer", "up")
+    store = tmp_path / "store.db"
+    _seed(store, NAME, session_id="up")
+    with sqlite3.connect(str(store)) as conn:
+        counts = memory_api._legacy_session_census(
+            conn, NAME, [str(root.resolve())], (root / ".git").resolve()
+        )
+    assert counts["elsewhere"] == 0 and counts["unattributed"] == 1, counts
+

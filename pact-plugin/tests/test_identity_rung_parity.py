@@ -3073,7 +3073,7 @@ class TestTheIdentityIsAskedOfItsOwnRepository:
 
         listed, anchors = [], []
         real_roots = memory_api.project_identity.verified_worktree_roots
-        real_plausibility = database.legacy_candidate_plausibility
+        real_plausibility = database.bucket_evidence
 
         def roots(repo_root, common_dir, listing=None):
             found = real_roots(repo_root, common_dir, listing)
@@ -3088,7 +3088,7 @@ class TestTheIdentityIsAskedOfItsOwnRepository:
         _fresh_scope_state()
         monkeypatch.chdir(project)
         monkeypatch.setattr(memory_api.project_identity, "verified_worktree_roots", roots)
-        monkeypatch.setattr(database, "legacy_candidate_plausibility", plausibility)
+        monkeypatch.setattr(database, "bucket_evidence", plausibility)
         memory = PACTMemory(session_id="s", db_path=store)
         assert memory._project_id == "github.com/own/project", memory._project_id
         memory._read_project_scopes()

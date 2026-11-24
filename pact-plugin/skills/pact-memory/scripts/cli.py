@@ -1244,41 +1244,43 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                     "belong here. Nothing was moved."
                 ),
             )
-        if legacy_verdict == "unproven":
-            # THE READ GATE REFUSED IT, SO A DEFAULTED TARGET MUST TOO. The
-            # cause and the row counts are the read gate's own, so this text
-            # and the read warning cannot disagree.
-            sessions = state["sessions"]
+        bucket_verdict = getattr(memory, "_legacy_verdict", None)
+        if (
+            legacy_verdict is not None
+            and bucket_verdict is not None
+            and not bucket_verdict.rekey_default
+        ):
+            # THE VERDICT REFUSES A DEFAULTED TARGET (`rekey_default`), as it
+            # refuses the read. The cause and the counts are the verdict's own
+            # (`_unproven_cause`), so this text and the read warning cannot
+            # disagree.
+            sessions = state.get("sessions")
             cause = _unproven_cause(
-                state["unproven_reason"], sessions, state.get("detail")
+                state["unproven_reason"],
+                {**(sessions or {}), **(state.get("detail") or {})},
+            )
+            census = (
+                f" Of its memories, {sessions['here']} came from sessions "
+                f"recorded here, {sessions['subfolder']} from sessions "
+                "launched in a subfolder of this repository, "
+                f"{sessions['description_newer']} from sessions that started "
+                "before its `description` file last changed, "
+                f"{sessions['elsewhere']} from sessions recorded at another "
+                f"existing folder, and {sessions['unattributed']} from no "
+                "recorded session."
+                if sessions is not None
+                else ""
+            )
+            reading = (
+                "is unproven" if legacy_verdict == "unproven" else "was excluded"
             )
             _error(
                 "REKEY_REFUSED",
                 escape_for_envelope(
-                    f"--from={from_id!r} is unproven: {cause}, so it is not "
-                    "read here and a defaulted --to cannot claim it. Of its "
-                    f"memories, {sessions['here']} came from sessions "
-                    f"recorded here, {sessions['subfolder']} from sessions "
-                    "launched in a subfolder of this repository, "
-                    f"{sessions['description_newer']} from sessions that "
-                    "started before its `description` file last changed, "
-                    f"{sessions['elsewhere']} from sessions recorded at another "
-                    f"checkout, and {sessions['unattributed']} from no recorded "
-                    "session. Pass "
-                    "--to explicitly after confirming the rows belong here. "
-                    "Nothing was moved."
-                ),
-            )
-        if legacy_verdict == "excluded":
-            detail = state.get("detail") or {}
-            _error(
-                "REKEY_REFUSED",
-                escape_for_envelope(
-                    f"--from={from_id!r} was excluded: its absolute file rows "
-                    f"({detail}) lie outside this repository, so they belong "
-                    "to the repository their paths name. Run `project-id "
-                    "show` there, or pass --to explicitly if you have "
-                    "confirmed otherwise. Nothing was moved."
+                    f"--from={from_id!r} {reading}: {cause}, so it is not "
+                    f"read here and a defaulted --to cannot claim it.{census} "
+                    "Pass --to explicitly after confirming the rows belong "
+                    "here. Nothing was moved."
                 ),
             )
 

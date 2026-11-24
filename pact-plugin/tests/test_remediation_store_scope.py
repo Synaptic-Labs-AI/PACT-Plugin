@@ -166,10 +166,16 @@ def _gate_store(tmp_path, bucket, path):
 
 
 def _gate(store, bucket, roots, **kwargs):
-    from scripts.database import db_connection, legacy_candidate_plausibility
+    """(canonical verdict state, evidence) for a bucket with no sessions. A
+    row in a checkout nested inside the root is not contained and is no rival
+    owner, so a bucket of only such rows is `unproven`, never `verified`."""
+    from scripts import memory_api
+    from scripts.database import bucket_evidence, db_connection
 
     with db_connection(store) as conn:
-        return legacy_candidate_plausibility(conn, bucket, roots, **kwargs)
+        evidence = bucket_evidence(conn, bucket, roots, **kwargs)
+    sessions = None if evidence["foreign_rows"] else {}
+    return memory_api.decide_bucket("canonical", evidence, sessions).state, evidence
 
 
 def _git(*args, cwd):
@@ -238,7 +244,6 @@ class TestTheSubmoduleExemptionTrustsOnlyGitsCommonDir:
         RED WHEN the gate re-derives the common dir from the root's files:
         the nested checkout's row then verifies the bucket."""
         from fixtures.identity_git import make_repo
-        from scripts.database import LEGACY_PLAUSIBLE_EXCLUDED
 
         donor = make_repo(outside_repo / "donor")
         git_dir = donor / ".git"
@@ -253,7 +258,7 @@ class TestTheSubmoduleExemptionTrustsOnlyGitsCommonDir:
         )
         store = _gate_store(outside_repo, "proj", nested / "x.py")
         outcome, detail = _gate(store, "proj", [root])
-        assert outcome == LEGACY_PLAUSIBLE_EXCLUDED, detail
+        assert outcome == "unproven" and detail["contained_rows"] == 0, detail
 
     def test_a_symlinked_git_dir_keeps_its_submodule_rows(
         self, outside_repo, monkeypatch
@@ -291,7 +296,6 @@ class TestTheSubmoduleExemptionTrustsOnlyGitsCommonDir:
         the root's common dir is. RED WHEN supplying `root_common` widens the
         exemption past gitfiles under the root's modules."""
         from fixtures.identity_git import make_repo
-        from scripts.database import LEGACY_PLAUSIBLE_EXCLUDED
 
         root = make_repo(outside_repo / "proj")
         nested = make_repo(root / "vendor" / "other")
@@ -299,7 +303,7 @@ class TestTheSubmoduleExemptionTrustsOnlyGitsCommonDir:
         outcome, detail = _gate(
             store, "proj", [root], root_common=_git_common_dir(root)
         )
-        assert outcome == LEGACY_PLAUSIBLE_EXCLUDED, detail
+        assert outcome == "unproven" and detail["contained_rows"] == 0, detail
 
     def test_the_read_scope_passes_gits_common_dir_for_a_real_submodule(
         self, outside_repo, monkeypatch
@@ -367,7 +371,6 @@ class TestALinkedWorktreesSubmoduleIsItsOwn:
         submodule. RED WHEN the branch accepts any `worktrees/<name>/modules/`
         without checking that `<name>` is the admin dir of the root it
         guards."""
-        from scripts.database import LEGACY_PLAUSIBLE_EXCLUDED
 
         superproject, _worktree = self._superproject_with_worktree_submodule(outside_repo)
         common = _git_common_dir(superproject)
@@ -378,4 +381,4 @@ class TestALinkedWorktreesSubmoduleIsItsOwn:
         )
         store = _gate_store(outside_repo, "super", stray / "x.py")
         outcome, detail = _gate(store, "super", [superproject], root_common=common)
-        assert outcome == LEGACY_PLAUSIBLE_EXCLUDED, detail
+        assert outcome == "unproven" and detail["contained_rows"] == 0, detail

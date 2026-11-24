@@ -186,6 +186,15 @@ def _seed(env, rows, files=()):
         conn.commit()
 
 
+def _rival_checkout_file(root: Path) -> Path:
+    """An existing file inside another git checkout: positive foreign
+    evidence (`bucket_evidence`'s `foreign_rows`)."""
+    rival = make_repo(root / "rival-checkout")
+    path = rival / "legacy.py"
+    path.write_text("x\n", encoding="utf-8")
+    return path
+
+
 def _ids(memories):
     return [memory.id for memory in memories]
 
@@ -431,7 +440,7 @@ class TestTheCountsReadAsWords:
         store = str(tmp_path / "store.db")
         with caplog.at_level(logging.WARNING):
             memory_api._warn_legacy_excluded(
-                store, LEGACY, memories, file_paths, tmp_path / "repo"
+                store, LEGACY, memories, file_paths, "1 of its file rows lie in another checkout"
             )
         assert f"holds {words}" in caplog.text, caplog.text
 
@@ -440,7 +449,8 @@ class TestTheCountsReadAsWords:
         store = str(tmp_path / "store.db")
         with caplog.at_level(logging.WARNING):
             memory_api._warn_legacy_unproven(
-                store, LEGACY, CANONICAL, memories, file_paths
+                store, LEGACY, CANONICAL, memories, file_paths,
+                memory_api._unproven_cause("no_session", None),
             )
         assert f"holds {words}" in caplog.text, caplog.text
 
@@ -464,7 +474,7 @@ class TestDisclosure:
                 ("l2", "legacy two", LEGACY, "2026-01-03T00:00:00+00:00"),
             ],
             files=[
-                ("file-l1", "/tmp/elsewhere/legacy.py", LEGACY),
+                ("file-l1", str(_rival_checkout_file(union_env.tmp_path)), LEGACY),
             ],
         )
         memory = _memory(union_env)
@@ -477,8 +487,8 @@ class TestDisclosure:
         assert state["included"] is False
         assert state["canonical_count"] == 1
         assert LEGACY in caplog.text
-        # Its rows belong to the repository their paths name, so the notice
-        # hands the reader no command to paste here.
+        # Its rows lie in another checkout, so the notice hands the reader no
+        # command to paste here.
         assert "project-id rekey" not in caplog.text
         assert state["rekey"] is None
         # The warning carries the file count the disclosure requires, so the operator
@@ -1340,28 +1350,29 @@ class TestReviewDbGateWorktreeRoots:
             )
             conn.commit()
 
-    def test_an_unreadable_path_is_evidence_and_fails_closed(self, union_env):
+    @staticmethod
+    def _canonical_state(conn, bucket, roots):
+        """The canonical verdict's state for a bucket with no sessions."""
+        from scripts.database import bucket_evidence
+
+        evidence = bucket_evidence(conn, bucket, roots)
+        sessions = None if evidence["foreign_rows"] else {}
+        return memory_api.decide_bucket("canonical", evidence, sessions).state, evidence
+
+    def test_an_unreadable_path_is_neutral_and_never_raises(self, union_env):
         """A `files.path` with an embedded NUL makes `os.path.realpath` raise
         ValueError. This gate runs on every read, so letting that escape fails
         every read for the project from a check that only decides whether to
-        widen the scope. Swallowing it as non-evidence is the opposite
-        failure: a row nobody can judge would buy the bucket an INCLUDE.
+        widen the scope.
 
-        Ruling: an unreadable absolute row counts as `absolute_rows` and can
-        never count as `contained_rows`, so a bucket whose only absolute rows
-        are unreadable lands in EXCLUDED (disclosed with its counts; an
-        excluded bucket gets no rekey command).
+        Ruling: an unreadable row is NEUTRAL. It is counted in `unresolvable`
+        and never in `contained_rows`, so it cannot place a bucket here, and it
+        is not foreign, so it cannot exclude one: a bucket whose only absolute
+        rows are unreadable is `unproven` (not read without OWN evidence).
 
-        RED WHEN: the realpath call is unguarded (ValueError escapes) or the
-        unreadable row is dropped from `absolute_rows` (the bucket then lands
-        in `unverified`, the state session evidence can admit).
+        RED WHEN: the realpath call is unguarded (ValueError escapes), the
+        unreadable row is counted as contained, or it excludes the bucket.
         """
-        from scripts.database import (
-            LEGACY_PLAUSIBLE_EXCLUDED,
-            LEGACY_PLAUSIBLE_VERIFIED,
-            legacy_candidate_plausibility,
-        )
-
         nul_path = "/tmp/x\x00y.py"
         self._seed_row(union_env, "f-nul", nul_path, "legacy-nul")
         self._seed_row(union_env, "f-nul2", nul_path, "legacy-nul-plus")
@@ -1378,47 +1389,37 @@ class TestReviewDbGateWorktreeRoots:
         )
 
         with db_connection(union_env.store) as conn:
-            only_nul = legacy_candidate_plausibility(
-                conn, "legacy-nul", [union_env.repo]
-            )
-            nul_plus_real = legacy_candidate_plausibility(
-                conn, "legacy-nul-plus", [union_env.repo]
-            )
-            nul_plus_contained = legacy_candidate_plausibility(
+            only_nul = self._canonical_state(conn, "legacy-nul", [union_env.repo])
+            nul_plus_real = self._canonical_state(conn, "legacy-nul-plus", [union_env.repo])
+            nul_plus_contained = self._canonical_state(
                 conn, "legacy-nul-contained", [union_env.repo]
             )
 
-        assert only_nul[0] == LEGACY_PLAUSIBLE_EXCLUDED, (
-            "a bucket whose only absolute row is unreadable must FAIL CLOSED "
-            f"(excluded, disclosed), not be read: {only_nul}"
-        )
+        assert only_nul[0] == "unproven", only_nul
         assert only_nul[1]["file_rows"] == 1
-        assert only_nul[1]["absolute_rows"] == 1, (
-            "the unreadable row was dropped from absolute evidence, so it "
-            f"bought the bucket an include: {only_nul[1]}"
-        )
+        assert only_nul[1]["unresolvable"] == 1, only_nul[1]
         assert only_nul[1]["contained_rows"] == 0
-        assert nul_plus_real[0] == LEGACY_PLAUSIBLE_EXCLUDED, (
-            "a judgeable row outside every root must still exclude: "
+        assert nul_plus_real[0] == "unproven", (
+            "a vanished row outside every root is neutral, never excluding: "
             f"{nul_plus_real}"
         )
-        assert nul_plus_real[1]["absolute_rows"] == 2
+        assert nul_plus_real[1]["vanished"] == 1
         assert nul_plus_real[1]["contained_rows"] == 0
-        assert nul_plus_contained[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+        assert nul_plus_contained[0] == "verified", (
             "an unreadable row must not veto a bucket that also holds a "
             f"contained row: {nul_plus_contained}"
         )
-        assert nul_plus_contained[1]["absolute_rows"] == 2
         assert nul_plus_contained[1]["contained_rows"] == 1
 
     def test_a_nul_path_row_does_not_break_the_read(self, union_env):
         """The user-visible shape: one corrupt `files.path` must not make
-        `list` (or any read) raise for the WHOLE project, and the bucket it
-        makes unjudgeable must be EXCLUDED and disclosed, so the project's
-        canonical rows still come back.
+        `list` (or any read) raise for the WHOLE project. The row is neutral,
+        so the session recorded here (`union_env`'s "s") decides: the bucket
+        is read as `included_unverified` and the corrupt row is disclosed in
+        `detail`.
 
         RED WHEN: the gate's realpath call is unguarded (this call raises
-        ValueError) or the exclusion is not disclosed in `legacy_scope`.
+        ValueError) or the unreadable row is not counted.
         """
         _seed(
             union_env,
@@ -1435,33 +1436,20 @@ class TestReviewDbGateWorktreeRoots:
             ids = _ids(memory.list(limit=10))
         legacy_state = memory._legacy_scope_state
 
-        assert ids == ["c1"], (
-            "the read did not return exactly the canonical row; the legacy "
-            f"bucket should be excluded and the call should not raise: {ids}"
-        )
-        assert legacy_state["excluded"] is True, (
-            f"the exclusion was not disclosed: {legacy_state}"
-        )
+        assert sorted(ids) == ["c1", "l1"], ids
+        assert legacy_state["included_unverified"] is True, legacy_state
+        assert legacy_state["detail"]["unresolvable"] == 1
         assert legacy_state["memory_count"] == 1
         assert legacy_state["file_paths"] == 1
-        assert legacy_state["rekey"] is None, (
-            "an excluded bucket must carry no runnable command"
-        )
 
     def test_the_gate_accepts_every_checkout_and_nothing_else(self, union_env):
-        from scripts.database import (
-            LEGACY_PLAUSIBLE_EXCLUDED,
-            LEGACY_PLAUSIBLE_UNVERIFIED,
-            LEGACY_PLAUSIBLE_VERIFIED,
-            legacy_candidate_plausibility,
-        )
-
         main_root = union_env.repo
         worktree = union_env.tmp_path / "feature-wt"
         linked = union_env.tmp_path / "linked"
         (worktree / "src").mkdir(parents=True, exist_ok=True)
         (main_root / "src").mkdir(parents=True, exist_ok=True)
         linked.symlink_to(worktree, target_is_directory=True)
+        rival = _rival_checkout_file(union_env.tmp_path)
 
         self._seed_row(
             union_env, "f-main", str(main_root / "src" / "m.py"),
@@ -1470,11 +1458,7 @@ class TestReviewDbGateWorktreeRoots:
         self._seed_row(
             union_env, "f-wt", str(worktree / "src" / "x.py"), LEGACY
         )
-        self._seed_row(
-            union_env, "f-foreign",
-            str(union_env.tmp_path / "elsewhere" / "src" / "z.py"),
-            "legacy-foreign",
-        )
+        self._seed_row(union_env, "f-foreign", str(rival), "legacy-foreign")
         self._seed_row(
             union_env, "f-relative", "src/rel.py", "legacy-relative"
         )
@@ -1484,56 +1468,44 @@ class TestReviewDbGateWorktreeRoots:
             "legacy-linked",
         )
 
+        state = self._canonical_state
         with db_connection(union_env.store) as conn:
-            main_only = legacy_candidate_plausibility(
-                conn, "legacy-main", [main_root]
-            )
-            only_main_against_worktree_row = legacy_candidate_plausibility(
-                conn, LEGACY, main_root
-            )
-            checkout_set = legacy_candidate_plausibility(
-                conn, LEGACY, [main_root, worktree]
-            )
-            single_path = legacy_candidate_plausibility(conn, LEGACY, worktree)
-            as_string = legacy_candidate_plausibility(
-                conn, LEGACY, str(worktree)
-            )
-            foreign = legacy_candidate_plausibility(
-                conn, "legacy-foreign", [main_root, worktree]
-            )
-            relative_only = legacy_candidate_plausibility(
-                conn, "legacy-relative", [main_root, worktree]
-            )
-            through_link = legacy_candidate_plausibility(
-                conn, "legacy-linked", [main_root, worktree]
-            )
+            main_only = state(conn, "legacy-main", [main_root])
+            only_main_against_worktree_row = state(conn, LEGACY, main_root)
+            checkout_set = state(conn, LEGACY, [main_root, worktree])
+            single_path = state(conn, LEGACY, worktree)
+            as_string = state(conn, LEGACY, str(worktree))
+            foreign = state(conn, "legacy-foreign", [main_root, worktree])
+            relative_only = state(conn, "legacy-relative", [main_root, worktree])
+            through_link = state(conn, "legacy-linked", [main_root, worktree])
 
-        assert main_only[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+        assert main_only[0] == "verified", (
             f"a row under the main root did not verify: {main_only}"
         )
-        assert only_main_against_worktree_row[0] == LEGACY_PLAUSIBLE_EXCLUDED, (
-            "the single-main-root control did not reproduce the linked-worktree exclusion: "
-            f"{only_main_against_worktree_row}"
+        assert only_main_against_worktree_row[0] == "unproven", (
+            "the single-main-root control did not reproduce the linked-worktree "
+            f"miss: {only_main_against_worktree_row}"
         )
-        assert checkout_set[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+        assert checkout_set[0] == "verified", (
             "a row written from the linked worktree did not verify against "
             f"the checkout set: {checkout_set}"
         )
-        assert single_path[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+        assert single_path[0] == "verified", (
             "a single Path root is no longer accepted as a one-element set"
         )
-        assert as_string[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+        assert as_string[0] == "verified", (
             "a single STRING root was not treated as one root; it must not "
             "be iterated as characters"
         )
-        assert foreign[0] == LEGACY_PLAUSIBLE_EXCLUDED, (
-            f"a row outside every root was called plausible: {foreign}"
+        assert foreign[0] == "excluded", (
+            f"an existing row in another checkout did not exclude: {foreign}"
         )
-        assert relative_only[0] == LEGACY_PLAUSIBLE_UNVERIFIED, (
-            "a bucket with no absolute row must be unverified, never "
+        assert foreign[1]["foreign_rows"] == 1
+        assert relative_only[0] == "unproven", (
+            "a bucket with no absolute row must be unproven, never "
             f"excluded: {relative_only}"
         )
-        assert through_link[0] == LEGACY_PLAUSIBLE_VERIFIED, (
+        assert through_link[0] == "verified", (
             "a row written through a symlinked spelling did not resolve to "
             f"the real worktree root: {through_link}"
         )
@@ -1562,7 +1534,7 @@ class TestReviewQuoting:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         memory_api._LEGACY_SCOPE_CACHE.clear()
         memory_api._EXCLUSION_WARNED.clear()
-        _seed_hostile(store, hostile, str(tmp_path / "elsewhere" / "x.py"))
+        _seed_hostile(store, hostile, str(_rival_checkout_file(tmp_path)))
 
         memory = PACTMemory(session_id="s", db_path=store)
         with caplog.at_level(logging.WARNING):

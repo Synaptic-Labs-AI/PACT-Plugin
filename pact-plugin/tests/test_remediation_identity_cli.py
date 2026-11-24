@@ -244,6 +244,8 @@ def excluded_rig(identity_env, store, monkeypatch):
     one = make_repo(identity_env / "one" / "proj", remote="https://github.com/o/one.git")
     two = identity_env / "two" / "proj"
     two.mkdir(parents=True)
+    # The file EXISTS: a vanished row is neutral and would not exclude.
+    (two / "secret.py").write_text("x\n")
     _seed(store, "proj", memory_id="victim0001", path=str(two / "secret.py"))
     _seed(store, "github.com/o/one", memory_id="own00001", path=str(one / "a.py"))
     monkeypatch.chdir(one)
@@ -1194,8 +1196,8 @@ class TestADefaultedTargetRefusesAnUnprovenBucket:
             ),
             (
                 "recorded_elsewhere",
-                "1 of its memories came from sessions recorded at another "
-                "checkout (0 from sessions recorded here)",
+                "1 of its memories were written by sessions recorded at "
+                "another existing folder (0 by sessions recorded here)",
                 (0, 0, 0, 1, 0),
             ),
             (
@@ -1250,7 +1252,7 @@ class TestADefaultedTargetRefusesAnUnprovenBucket:
             f"{subfolder} from sessions launched in a subfolder of this repository, "
             f"{newer} from sessions that started before its `description` file "
             f"last changed, {elsewhere_count} from sessions recorded at another "
-            f"checkout, and {unattributed} from no recorded session."
+            f"existing folder, and {unattributed} from no recorded session."
         ) in message, message
         assert message.endswith("Nothing was moved."), message
 

@@ -13,7 +13,7 @@ The rekey is the only row-rewriting surface in the memory store
   table, and an empty source bucket is reported as such.
 
 It also pins the identity READ primitives beside it (`count_project_memories`,
-`project_bucket_counts`, `bucket_session_counts`, `legacy_candidate_plausibility`
+`project_bucket_counts`, `bucket_session_counts`, `bucket_evidence`
 and `graph.count_project_file_paths`): they never run the write-path
 initialiser, so a read-only probe cannot attempt DDL through them.
 
@@ -28,7 +28,7 @@ from helpers import create_test_schema
 from scripts.database import (
     bucket_session_counts,
     count_project_memories,
-    legacy_candidate_plausibility,
+    bucket_evidence,
     project_bucket_counts,
     rekey_project,
 )
@@ -416,8 +416,8 @@ class TestIdentityReadPrimitivesNeverInitialise:
             pytest.param(project_bucket_counts, id="project_bucket_counts"),
             pytest.param(lambda conn: bucket_session_counts(conn, LEGACY), id="bucket_session_counts"),
             pytest.param(
-                lambda conn: legacy_candidate_plausibility(conn, LEGACY, "/tmp"),
-                id="legacy_candidate_plausibility",
+                lambda conn: bucket_evidence(conn, LEGACY, "/tmp"),
+                id="bucket_evidence",
             ),
             pytest.param(lambda conn: count_project_file_paths(conn, LEGACY), id="count_project_file_paths"),
         ],

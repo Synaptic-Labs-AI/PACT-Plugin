@@ -1353,7 +1353,10 @@ class TestLegacyScopeHasOneKeySet:
         states["unproven"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "unp.db"))
 
         checkout("exc")
-        _seed(identity_env / "exc.db", "exc", path="/elsewhere/x.py")
+        rival = make_repo(identity_env / "rival")
+        (rival / "x.py").write_text("x\n")
+        # An EXISTING row in another checkout: the only thing that excludes.
+        _seed(identity_env / "exc.db", "exc", path=str(rival / "x.py"))
         states["excluded"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "exc.db"))
 
         checkout("case")
@@ -2015,18 +2018,19 @@ class TestAnAncestorRootDoesNotClaimANestedCheckout:
 
     @staticmethod
     def _gate(store, bucket, roots, **kwargs):
-        from scripts.database import db_connection, legacy_candidate_plausibility
+        """(canonical verdict state, evidence) for a bucket with no sessions."""
+        from scripts.database import bucket_evidence, db_connection
 
         with db_connection(store) as conn:
-            return legacy_candidate_plausibility(conn, bucket, roots, **kwargs)
+            evidence = bucket_evidence(conn, bucket, roots, **kwargs)
+        sessions = None if evidence["foreign_rows"] else {}
+        return memory_api.decide_bucket("canonical", evidence, sessions).state, evidence
 
     def test_a_registered_submodules_rows_stay_the_superprojects(self, identity_env):
         """A superproject session that saved a memory naming a file inside its
         own submodule: that row is the superproject's, so its bucket still
         verifies. Catches the nested-checkout rule excluding a genuine
         superproject bucket whose rows all sit in submodules."""
-        from scripts.database import LEGACY_PLAUSIBLE_VERIFIED
-
         source = make_repo(identity_env / "subsrc")
         superproject = make_repo(identity_env / "super", remote=REMOTE)
         run_git(
@@ -2039,16 +2043,16 @@ class TestAnAncestorRootDoesNotClaimANestedCheckout:
             "rev-parse", "--path-format=absolute", "--git-common-dir", cwd=superproject
         )
         outcome, detail = self._gate(store, "super", [superproject], root_common=common)
-        assert outcome == LEGACY_PLAUSIBLE_VERIFIED, detail
+        assert outcome == "verified", detail
 
     def test_a_nested_gitfile_naming_a_foreign_git_dir_is_a_separate_checkout(
         self, identity_env
     ):
         """A `.git` FILE that names a git dir outside the root's modules (a
         linked worktree of another repository, say) still ends the root's
-        claim: only the root's own submodules are exempt."""
-        from scripts.database import LEGACY_PLAUSIBLE_EXCLUDED
-
+        claim: only the root's own submodules are exempt. The row is not
+        contained, and the checkout lies inside the root, so it is no rival
+        owner either: neutral, so the bucket is unproven, never verified."""
         other = make_repo(identity_env / "other", remote="https://github.com/o/other.git")
         outer = make_repo(identity_env / "outer", remote=REMOTE)
         worktree = make_worktree(other, outer / "proj")
@@ -2056,18 +2060,17 @@ class TestAnAncestorRootDoesNotClaimANestedCheckout:
         store = identity_env / "store.db"
         _seed(store, "outer", path=str(worktree / "x.py"))
         outcome, detail = self._gate(store, "outer", [outer])
-        assert outcome == LEGACY_PLAUSIBLE_EXCLUDED, detail
+        assert outcome == "unproven", detail
+        assert detail["contained_rows"] == 0, detail
 
     def test_a_row_in_the_roots_own_tree_still_verifies(self, identity_env):
         """Control: a nested plain directory (no `.git`) is still the root's."""
-        from scripts.database import LEGACY_PLAUSIBLE_VERIFIED
-
         repo = make_repo(identity_env / "proj", remote=REMOTE)
         (repo / "a" / "b").mkdir(parents=True)
         store = identity_env / "store.db"
         _seed(store, "proj", path=str(repo / "a" / "b" / "c.py"))
         outcome, detail = self._gate(store, "proj", [repo])
-        assert outcome == LEGACY_PLAUSIBLE_VERIFIED, detail
+        assert outcome == "verified", detail
 
 
 class TestTheScopeSaysWhatDegradesAndWhatRaises:
@@ -2661,10 +2664,10 @@ class TestTheGateProseMatchesTheCode:
     def test_the_database_docstrings(self):
         from scripts import database
 
-        gate = database.legacy_candidate_plausibility.__doc__
-        assert "reads the bucket only\n                       on session evidence" in gate
+        gate = database.bucket_evidence.__doc__
+        assert "COUNTS ONLY" in gate
+        assert "Existence is not required" in gate
         assert "the caller INCLUDES the bucket" not in gate
-        assert "counts and no rekey command" in gate
         assert "counts and the rekey command" not in gate
         assert "`description` file last changed" in database.bucket_session_counts.__doc__
         assert "was created" not in database.bucket_session_counts.__doc__
