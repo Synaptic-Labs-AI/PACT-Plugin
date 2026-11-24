@@ -322,3 +322,31 @@ def test_held_ledger_lock_skips_the_line_within_the_bound(tmp_path, monkeypatch)
     session_end._append_ledger_line(tmp_path, '{"session_id": "x"}\n')
     assert ledger.read_bytes() == b'{"session_id": "x"}\n'
 
+
+# ---------------------------------------------------------------------------
+# C-8: a hot rollback journal blocks the immutable open
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-journal"])
+def test_a_journal_beside_the_store_blocks_the_immutable_open(
+    tmp_path, monkeypatch, suffix
+):
+    store = tmp_path / "store.db"
+    with sqlite3.connect(str(store)) as conn:
+        conn.execute("CREATE TABLE t (x)")
+    opened = []
+    real_connect = sqlite3.connect
+
+    def spy(database, *args, **kwargs):
+        opened.append(database)
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(memory_api.sqlite3, "connect", spy)
+    memory_api._read_only_connection(str(store)).close()
+    assert "immutable=1" in opened[-1]
+    stamp_without = memory_api._store_stamp(str(store))
+    Path(str(store) + suffix).write_bytes(b"")
+    memory_api._read_only_connection(str(store)).close()
+    assert "immutable=1" not in opened[-1]
+    assert memory_api._store_stamp(str(store)) != stamp_without

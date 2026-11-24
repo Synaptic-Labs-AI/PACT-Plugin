@@ -206,10 +206,11 @@ class _DetectedIdentity(NamedTuple):
 # the repository's `description`, row paths). Keying on the store's stat is
 # what makes a rekey performed by ANOTHER process during the pass observable;
 # an in-process write clears it (`_invalidate_legacy_scope_cache`).
-# ponytail: one module dict, so two passes running at once in threads would
-# share it; no production caller runs passes concurrently (the memory CLI and
-# the backlog command each run one pass per process). A ContextVar like the
-# other pass memos if that changes.
+# SINGLE-THREAD CONTRACT: this is one module-level dict, so detection passes
+# running at once in two threads would share it. Run at most one pass at a
+# time per process (the memory CLI and the backlog command each run one); a
+# caller that needs concurrent passes must first move this into a ContextVar
+# like the other pass memos.
 _LEGACY_SCOPE_CACHE: Dict[tuple, tuple] = {}
 
 # Exclusion notices already emitted, keyed by (store, candidate). A warning
@@ -1463,6 +1464,15 @@ _STABLE_READ_ACTIVE: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
 )
 
 
+def _journal_present(real: str) -> bool:
+    """Whether a `-wal` or a rollback `-journal` sits beside the store's
+    REAL file. Either means the file alone is not the whole database: a
+    `-wal` holds commits not yet checkpointed, and a hot `-journal` left by a
+    crashed DELETE-mode writer holds pages SQLite must roll back first. An
+    immutable open would skip both."""
+    return os.path.lexists(real + "-wal") or os.path.lexists(real + "-journal")
+
+
 def _read_only_connection(store: str):
     """Open `store` READ-ONLY; raises sqlite3.OperationalError on failure.
 
@@ -1472,8 +1482,8 @@ def _read_only_connection(store: str):
     contradicting the verb's own "creates none" contract. The URI form with
     `mode=ro` refuses those writes instead.
 
-    NO SIDECARS ON A SETTLED STORE. When no `-wal` exists beside the store's
-    real file (a symlinked store's journal is beside its target) the open is
+    NO SIDECARS ON A SETTLED STORE. When no `-wal` and no `-journal` exist
+    beside the store's real file (a symlinked store's journal is beside its target) the open is
     also `immutable=1`, so SQLite takes no lock and creates no `-wal` or
     `-shm`. Immutable means SQLite trusts the file not to change, and a
     writer in another process can change it during the read (measured: an
@@ -1489,7 +1499,7 @@ def _read_only_connection(store: str):
     uri = real.as_uri() + "?mode=ro"
     # The `-wal` SQLite reads sits beside the real file, not beside a
     # symlink naming it.
-    if not _LOCKED_READS_ONLY.get() and not os.path.lexists(str(real) + "-wal"):
+    if not _LOCKED_READS_ONLY.get() and not _journal_present(str(real)):
         uri += "&immutable=1"
     connection = sqlite3.connect(uri, uri=True)
     connection.row_factory = sqlite3.Row
@@ -1498,14 +1508,15 @@ def _read_only_connection(store: str):
 
 def _store_stamp(store: str):
     """What an immutable read relies on staying put: the store's inode,
-    size and mtime, and whether a `-wal` exists. None when unreadable."""
+    size and mtime, and whether a `-wal` or `-journal` exists
+    (`_journal_present`). None when unreadable."""
     try:
         main = os.stat(store)
     except OSError:
         return None
     return (
         main.st_ino, main.st_size, main.st_mtime_ns,
-        os.path.lexists(os.path.realpath(store) + "-wal"),
+        _journal_present(os.path.realpath(store)),
     )
 
 
