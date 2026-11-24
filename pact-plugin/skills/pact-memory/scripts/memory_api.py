@@ -2728,6 +2728,13 @@ def _declared_path_exists(declared_dir: str) -> bool:
         return False
 
 
+class LegacyBucketWriteRefusedError(ValueError):
+    """A repository session's write into a folder-name bucket was refused
+    (`PACTMemory._refuse_legacy_write`). Caller input the session may not
+    write, so a ValueError, but not a field-validation error: the CLI reports
+    it as `LEGACY_BUCKET_WRITE_REFUSED`, exit 2, with no field list."""
+
+
 class FolderNameBucketRefusedError(ProjectScopeDisagreementError):
     """A SAVE was refused because the folder-name project id names a bucket
     whose file rows place it in another checkout
@@ -4005,8 +4012,8 @@ class PACTMemory:
         rekey elsewhere during it, which is the silent-loss class this change
         exists to remove. `-shm` is deliberately EXCLUDED: it is
         shared-memory churn and would defeat the cache with spurious
-        recomputes. When the `-wal` is absent, the key lets a read-only open
-        create it before stamping, so the read itself cannot move the key (see
+        recomputes. When the `-wal` is absent, a read-only open is immutable
+        and creates none, so the read itself cannot move the key (see
         `_store_stat_key`). An in-process write clears the cache as well, so a save
         that changes the bucket set is observed immediately.
         """
@@ -4255,9 +4262,10 @@ class PACTMemory:
         BUCKET. A canonical session that filed (or relabelled) a row there
         could create the session evidence that admits that bucket to its own
         reads, so a delivered checkout sharing a folder name could read
-        another project's memories.
+        another project's memories. A refusal of caller input
+        (`LegacyBucketWriteRefusedError`, exit 2).
         """
-        raise ValueError(
+        raise LegacyBucketWriteRefusedError(
             f"{what}: this session's project id is {self._project_id!r} (a "
             "repository identity), and a repository session does not write "
             "into a folder-name bucket. Nothing was written. To move rows, "
@@ -4353,11 +4361,24 @@ class PACTMemory:
         shared = self._shared_pin()
         if shared is not None and shared[1] == pin:
             shared = None
-        if own_dir and same:
-            command = (
-                f"printf '%s\\n' {shlex.quote(pin)} > "
-                f"{shlex.quote(os.path.join(os.path.realpath(git_path), 'pact-project-id'))}"
+        pin_path = os.path.join(os.path.realpath(git_path), "pact-project-id")
+        # A COMMAND HOLDING A CONTROL OR FORMAT CHARACTER IS NOT PRINTED, as in
+        # `_printed_rekey_remedy`: in a log line or a terminal it would forge
+        # a line or reorder the text around it.
+        printable = not any(
+            unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp")
+            for char in pin + pin_path
+        )
+        if own_dir and same and not printable:
+            isolation = (
+                ("To keep this checkout separate: this" if shared is not None else "This")
+                + " checkout's path holds a control or format character, so no "
+                "command is printed; the local pin id for this checkout is "
+                f"{pin}, for the pact-project-id file in its git directory."
             )
+            tail = "Or add an origin remote, or pass project_id."
+        elif own_dir and same:
+            command = f"printf '%s\\n' {shlex.quote(pin)} > {shlex.quote(pin_path)}"
             isolation = (
                 f"To keep this checkout separate, write its local pin: {command} ."
                 if shared is not None

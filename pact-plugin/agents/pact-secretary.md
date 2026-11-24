@@ -99,15 +99,20 @@ You are **exempted from the standard teachback** at spawn — your bootstrap tas
 3. **Report the calibration gate**: The gate for Learning II is a count of
    calibration records. Get that count from the store, read-only.
 
-   Before you open the store, check that `memory.db-wal` and `memory.db-shm`
-   are absent. Name the two files in full. If one of them is present, do not
-   open the store. Report the gate state `not determined`, give the full name
-   of the sidecar that is present, and continue the briefing.
+   First run the pact-memory `project-id show` command and take `read_scope`
+   from its output. This is the one CLI verb this step runs, and it is an
+   exception to the STORE ACCESS rule against CLI verbs: it reports the read
+   scope without creating or changing the store, and it is not the inspection.
+   Run it whether or not `sync` ran in this briefing. If it fails, or its
+   `read_scope` is empty, do not inspect the store and report the gate state
+   `not determined`.
 
-   If the two sidecar files are absent, run the pact-memory `project-id show`
-   command and take `read_scope` from its output. Run it whether or not `sync`
-   ran in this briefing: it reads without creating the store. Then open the
-   store with `mode=ro` and `immutable=1`, and run this count:
+   Then, as the STORE ACCESS rule requires, in ONE command against ONE resolved
+   path: check that `memory.db-wal` and `memory.db-shm` are both absent by their
+   full names, then open the store with `mode=ro` and `immutable=1` and run this
+   count. If a sidecar is present, do not open the store: report the gate state
+   `not determined`, give the full name of the sidecar that is present, and
+   continue the briefing.
 
    ```sql
    SELECT COUNT(*) FROM memories

@@ -67,6 +67,8 @@ pact-memory now files a project's memories under the repository they belong to, 
 ### Hooks and agents
 
 - `hooks/session_end.py` appends one line per session folder it deletes to `pruned-sessions.jsonl`, so the evidence for an old bucket outlives the folder. The ledger is trimmed to its last 1 MiB past 2 MiB, by writing a new file and renaming it over the old one, without dropping a complete line. A writer skips its line after about one second rather than waiting on the lock indefinitely, and session records are read only as bounded regular files.
+- A repository session's refused write into a folder-name bucket now reports `LEGACY_BUCKET_WRITE_REFUSED` (exit 2) without the unrelated field-validation note.
+- The local pin remedy no longer prints a command whose path holds a control or format character; it names the pin id instead.
 - When a folder-name save is refused in a clone of a local-only repository (origin is a local path or `file://` URL), the refusal also offers a shared pin naming that origin, so the user can choose to give every clone of it one id; it is printed after the isolation pin, as text, never as a command.
 - A `--separate-git-dir` checkout without a portable origin no longer silently drops its pre-upgrade bucket: the old bucket is disclosed as its legacy candidate, and `project-id rekey` can move it into the checkout's own folder-name id.
 - A session launched in a subfolder of a linked worktree that sits inside its main checkout (for example `<main>/.worktrees/<wt>/sub`) counts as a subfolder launch again, not as another owner, so a repository with that layout keeps reading and saving its own folder-name bucket.

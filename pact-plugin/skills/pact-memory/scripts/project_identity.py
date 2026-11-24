@@ -166,8 +166,8 @@ class RootIdentity(NamedTuple):
     `DECLINE_REASONS` token), so `project-id show` can report it rather than
     leaving the operator with `declined` and no remedy. `source` names the
     rung that declined and is filled in by the caller, which is the only
-    layer that knows it. Defaulted
-    so the declines without a named cause keep their positional shape.
+    layer that knows it. It defaults to None, so the declines without a named
+    cause keep their positional shape.
     `detail` is a FIXED sentence (one of this module's `*_DETAIL` constants,
     never user data) naming a narrower cause than the reason token, which the
     resolver appends to its decline warning and refusal text. None otherwise.

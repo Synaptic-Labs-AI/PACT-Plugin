@@ -858,7 +858,8 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
             "never writes into a folder-name bucket: save and update refuse a "
             "payload project_id that is not a canonical host/owner/repo id, "
             "and update refuses a session_id change on a row stored under a "
-            "folder-name bucket. Both exit 2 and write nothing."
+            "folder-name bucket. Both fail with LEGACY_BUCKET_WRITE_REFUSED, "
+            "exit 2 and write nothing."
         ) in _body(SKILL)
 
     def test_the_remedy_is_the_one_the_refusal_prints(self, tmp_path, monkeypatch):
@@ -1005,6 +1006,26 @@ class TestCalibrationCountReadsTheWholeScope:
         finally:
             ro.close()
         assert counted == 2
+
+    def test_the_count_step_obeys_the_store_access_bar(self):
+        """The show call is named as the bar's one exception, and the sidecar
+        check and the open are one command against one path, as the bar
+        requires; the retired order (check, then a CLI verb, then open) is
+        gone."""
+        body = _body(SECRETARY)
+        assert (
+            "This is the one CLI verb this step runs, and it is an exception to "
+            "the STORE ACCESS rule against CLI verbs"
+        ) in body
+        assert (
+            "in ONE command against ONE resolved path: check that memory.db-wal "
+            "and memory.db-shm are both absent by their full names, then open "
+            "the store with mode=ro and immutable=1 and run this count."
+        ) in body
+        assert "If the two sidecar files are absent, run the pact-memory" not in body
+        show = body.index("First run the pact-memory project-id show command")
+        check = body.index("in ONE command against ONE resolved path")
+        assert show < check
 
     def test_no_scope_means_not_determined(self):
         assert (
@@ -7205,6 +7226,9 @@ class TestEveryRouteEntryConditionIsARoute:
             "database's error class, caught by a command"
         ),
         ("call", "<name imported from a project module cli: FolderNameBucketRefusedError>"): (
+            "memory_api's error class, caught by a command"
+        ),
+        ("call", "<name imported from a project module cli: LegacyBucketWriteRefusedError>"): (
             "memory_api's error class, caught by a command"
         ),
         ("call", "<class of its own module used as a value memory_api: FolderNameBucketRefusedError>"): (

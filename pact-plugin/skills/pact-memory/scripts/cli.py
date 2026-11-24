@@ -60,6 +60,7 @@ from scripts.database import (
 )
 from scripts.memory_api import (
     FolderNameBucketRefusedError,
+    LegacyBucketWriteRefusedError,
     PACTMemory,
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
@@ -316,7 +317,7 @@ def _own_stderr_for_envelope():
         capture.close()
 
 
-def _success(result):
+def _success(result) -> NoReturn:
     """Print a success JSON envelope to stdout and exit 0.
 
     PAYLOADS ARE DATA, MESSAGES ARE DISPLAY. A success payload is a machine
@@ -607,6 +608,12 @@ def cmd_save(args, db_path=None):
     except FolderNameBucketRefusedError as exc:
         # A refusal, exit 1: the caller's input was fine.
         _error("FOLDER_NAME_BUCKET_REFUSED", _scope_disagreement_message(exc))
+    except LegacyBucketWriteRefusedError as exc:
+        # The payload names a folder-name bucket this session may not write:
+        # caller input, exit 2, but no field list and no field-validation note.
+        _error(
+            "LEGACY_BUCKET_WRITE_REFUSED", _scope_disagreement_message(exc), exit_code=2
+        )
     except ProjectScopeDisagreementError as exc:
         # An env/session-record disagreement remains distinct from an
         # unresolved identity, whose subclass is caught above.
@@ -853,6 +860,12 @@ def cmd_update(args, db_path=None):
     except ProjectScopeDisagreementError as exc:
         # Same deliberate refusal shape as cmd_save: both values + remedy.
         _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
+    except LegacyBucketWriteRefusedError as exc:
+        # Before the field-validation ValueError arm below, for the same
+        # envelope as cmd_save's.
+        _error(
+            "LEGACY_BUCKET_WRITE_REFUSED", _scope_disagreement_message(exc), exit_code=2
+        )
     except PrefixTooShortError as exc:
         # Order: PrefixTooShortError IS a ValueError; catch it before the
         # field-validation ValueError handler below.

@@ -1010,3 +1010,76 @@ def test_l10_a_clone_of_a_victim_names_the_victim_after_isolation(tmp_path, monk
     text = _memory_in(tmp_path / "h" / "proj", tmp_path / "store.db")._local_pin_remedy()
     assert text.index("To keep this checkout separate") < text.index("To share memory with")
     assert f"the repository at {victim.resolve()}" in _sharing_line(text)
+
+
+
+# ---------------------------------------------------------------------------
+# Cycle 6: an unprintable pin path, the scope docstring, the legacy-write
+# refusal envelope
+# ---------------------------------------------------------------------------
+
+
+def test_a_pin_path_with_a_newline_prints_no_command(tmp_path, monkeypatch, scopes_clean):
+    """The pin command is not printed when its path holds a control character;
+    the pin id is still given."""
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    repo = make_repo(tmp_path / "odd\nparent" / NAME)
+    monkeypatch.chdir(repo)
+    memory = PACTMemory(session_id="s", db_path=tmp_path / "store.db")
+    assert memory._project_id == NAME
+    text = memory._local_pin_remedy()
+    assert "printf" not in text and "odd\nparent" not in text, text
+    assert memory_api.local_pin_id(repo) in text
+    assert "control or format character" in text
+
+
+def test_the_scope_docstring_claims_no_wal_creation():
+    doc = PACTMemory._read_project_scopes.__doc__
+    assert "create it before stamping" not in doc
+    assert "a read-only open is immutable" in doc
+
+
+@pytest.fixture
+def canonical_session(tmp_path, monkeypatch, scopes_clean):
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / NAME, remote=ORIGIN)
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    return repo, tmp_path / "store.db"
+
+
+def _cli_err(argv, capfd):
+    from scripts.cli import main
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(argv)
+    return exit_info.value.code, json.loads(capfd.readouterr().err)
+
+
+def test_a_legacy_bucket_save_is_refused_with_its_own_envelope(canonical_session, capfd):
+    repo, store = canonical_session
+    _seed(store, CANONICAL)
+    code, envelope = _cli_err(
+        ["save", json.dumps({"context": "c", "project_id": "folder"}), "--db-path", str(store)],
+        capfd,
+    )
+    assert code == 2, envelope
+    assert envelope["error"] == "LEGACY_BUCKET_WRITE_REFUSED", envelope
+    assert "allowed_fields" not in envelope and "Note:" not in envelope["message"]
+    assert "does not write into a folder-name bucket" in envelope["message"]
+
+
+def test_a_legacy_bucket_update_is_refused_with_its_own_envelope(canonical_session, capfd):
+    repo, store = canonical_session
+    _seed(store, CANONICAL)
+    row_id = "a" * 32
+    with sqlite3.connect(str(store)) as conn:
+        conn.execute("UPDATE memories SET id = ?", (row_id,))
+    code, envelope = _cli_err(
+        ["update", row_id, json.dumps({"project_id": "folder"}), "--db-path", str(store)],
+        capfd,
+    )
+    assert code == 2, envelope
+    assert envelope["error"] == "LEGACY_BUCKET_WRITE_REFUSED", envelope
+    assert "allowed_fields" not in envelope and "Note:" not in envelope["message"]
