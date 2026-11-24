@@ -996,6 +996,7 @@ def _call_grace(tasks, tmp_path, clock, now=_GRACE_NOW,
         now=now,
         monotonic=clock.monotonic,
         sleep=clock.sleep,
+        in_process=lambda: True,
     )
 
 
@@ -1498,6 +1499,42 @@ class TestInboxGraceGate:
         assert clock.sleeps[:-1] == pytest.approx([0.1] * 47)
         assert clock.sleeps[-1] == pytest.approx(0.084)
 
+    def test_the_mode_gate_is_a_required_argument(self, tmp_path):
+        """Counter-test: a default gate lets a caller that omits it hold a pane teammate."""
+        from teammate_idle import wait_for_inbox_evidence
+
+        with pytest.raises(TypeError, match="in_process"):
+            wait_for_inbox_evidence(
+                [_grace_task()], "CoderRaw", "TeamRaw", tmp_path / "teams", now=_GRACE_NOW
+            )
+
+    def test_time_spent_in_the_mode_gate_shortens_the_hold(self, tmp_path):
+        """Counter-test: measuring the window after the gate lets a slow config read lengthen it."""
+        from teammate_idle import wait_for_inbox_evidence
+
+        class _OffsetClock(_FakeGraceClock):
+            offset = 0.0
+
+            def monotonic(self):
+                return super().monotonic() + self.offset
+
+        clock = _OffsetClock()
+
+        def _slow_gate():
+            clock.offset = 3.0  # the mode check takes 3 seconds
+            return True
+
+        with patch("teammate_idle.state_file.read_text", return_value="[]") as read:
+            seen = wait_for_inbox_evidence(
+                [_grace_task(age=0)], "CoderRaw", "TeamRaw", tmp_path / "teams",
+                now=_GRACE_NOW, monotonic=clock.monotonic, sleep=clock.sleep,
+                in_process=_slow_gate,
+            )
+
+        assert seen is False
+        assert math.fsum(clock.sleeps) == pytest.approx(7.0)
+        assert read.call_count == 70
+
     def test_a_false_mode_gate_means_no_hold_after_eligibility(self, tmp_path):
         """Counter-test: ignoring the gate holds a pane teammate."""
         from teammate_idle import wait_for_inbox_evidence
@@ -1751,7 +1788,8 @@ class TestMainInboxHold:
         assert reloaded is not teammate_idle
         with pytest.raises(AssertionError, match="real grace sleep reached"):
             reloaded.wait_for_inbox_evidence(
-                [_grace_task()], "CoderRaw", "TeamRaw", tmp_path / "teams", now=_GRACE_NOW
+                [_grace_task()], "CoderRaw", "TeamRaw", tmp_path / "teams",
+                now=_GRACE_NOW, in_process=lambda: True,
             )
 
         assert _no_real_grace_sleep == [0.1]

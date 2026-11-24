@@ -18,11 +18,12 @@ Used by: hooks.json TeammateIdle hook
 # hook, polling at 0.1-second intervals, until a valid unread message is
 # visible or 10 seconds pass from its `covers_since` anchor. The window falls
 # back to `since` only when `covers_since` is absent; an unreadable
-# `covers_since` means no hold. A wait that carries `covers_since` cannot
-# restart that budget; without one, each re-stamp of `since` gives one more
-# 10-second budget, and each idle inside it holds for the remaining time.
-# The hold never emits a decision, so the runtime delivers a message that
-# lands during it. Exits deterministically on every code path. Does NOT
+# `covers_since` means no hold. The window is measured from `covers_since`, so
+# re-stamping `since` alone does not restart it while `covers_since` is kept;
+# without `covers_since`, each re-stamp of `since` gives one more 10-second
+# budget, and each idle inside it holds for the remaining time. The hold never
+# emits a decision, so a message that lands during it can be delivered before
+# the idle is announced. Exits deterministically on every code path. Does NOT
 # consume intentional_wait.
 
 Idle cleanup: Track consecutive idle events for completed agents. After 3,
@@ -159,7 +160,7 @@ def _select_grace_task(
             or wait.get("reason") != "awaiting_lead_completion"
         ):
             continue
-        # covers_since survives a re-SET of a held wait, so a re-stamped since cannot restart grace.
+        # A re-SET that keeps covers_since does not restart grace by re-stamping since.
         since, anchor_class = wait_scope_anchor(wait)
         if since is None or anchor_class == ANCHOR_CLASS_MALFORMED:
             continue
@@ -186,14 +187,17 @@ def wait_for_inbox_evidence(
     now: datetime | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
-    in_process: Callable[[], bool] = lambda: True,
+    in_process: Callable[[], bool],
 ) -> bool | None:
     """None when no hold runs; else True once a valid queued message is visible, False at the deadline.
 
-    `in_process` is consulted only once an eligible wait is found, so an idle
+    `in_process` is required (no default, so no caller can hold a pane teammate by
+    omission) and is consulted only once an eligible wait is found, so an idle
     without one never pays for the team-config read behind it.
     """
     wall_now = now if now is not None else datetime.now(timezone.utc)
+    # Read with wall_now, so time spent selecting and in in_process() comes out of the window.
+    started = monotonic()
     selected = _select_grace_task(tasks, teammate_name, wall_now)
     if selected is None:
         return None
@@ -211,7 +215,7 @@ def wait_for_inbox_evidence(
     # The anchor is parsed to full precision, so a fractional anchor gets the exact
     # window; one written by canonical_since is cut to the whole second, which can
     # only shorten the remaining window (by under 1s), never lengthen it.
-    deadline = monotonic() + GRACE_SECONDS - age
+    deadline = started + GRACE_SECONDS - age
     while monotonic() < deadline:
         try:
             inbox_json = state_file.read_text(
