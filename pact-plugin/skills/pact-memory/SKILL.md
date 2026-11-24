@@ -265,6 +265,11 @@ with the folder-name bucket and the canonical id filled in; to write a
 folder-name bucket, save from a folder whose project id is that name
 (`project-id show` reports it).
 
+A session whose project id is a folder name refuses to save into that bucket
+when the gate excludes it (its file rows all lie in another checkout): the
+save exits 2 and writes nothing. Add an `origin` remote, ask the user for a
+`pact-project-id` pin, or pass `project_id`.
+
 A `project_id` or `session_id` DETECTED from the environment or the session
 context is held to the same rule, and the outcome depends on the operation. A
 write that would bind the value is refused at that point, and the message
@@ -359,8 +364,9 @@ that every row belongs here.
 `included_unverified`, `excluded`, `unproven`, `unproven_reason`,
 `session_evidence`, `sessions`, `ambiguous`, `canonical_count`, `detail`,
 `case_variant`, `case_variant_rekey`, `suppressed`, `suppressed_candidate` and
-`degraded`. It is `null` only when no
-identity resolves or the id is not canonical. When `candidate` is set, exactly
+`degraded`. It is `null` when no identity resolves, when the id is not
+canonical, when the store does not exist yet, or when this checkout has no
+legacy candidate to report. When `candidate` is set, exactly
 one of `included`, `excluded` and `unproven` is true:
 
 - `included`: the whole bucket is read. `verified` means an absolute file row
@@ -373,17 +379,18 @@ one of `included`, `excluded` and `unproven` is true:
   repository has no `description` file. A session folder that was cleaned up
   counts the same way through the line recorded for it when it was removed.
   Neither kind is read when any of its rows was written by a session recorded
-  outside this repository and its linked worktrees: it is then `unproven`. A
-  row with no recorded session does not block it, because nothing tells such
-  rows apart: an included bucket that holds such rows is read with a warning,
+  at an existing directory outside this repository and its linked worktrees:
+  it is then `unproven`. A row with no recorded session, or whose session's
+  recorded directory no longer exists (a removed worktree or a deleted
+  checkout), does not block it, because nothing tells such rows apart: an included bucket that holds such rows is read with a warning,
   once per process, that gives their count (`sessions.unattributed`) and the
   rekey command.
 - `excluded`: its absolute file rows place it in another repository, and it is
   not read.
 - `unproven`: it is not read, and its `rekey` command is printed once per
   process, with the cause. `unproven_reason` names the cause:
-  `recorded_elsewhere` (some of its rows were written by sessions recorded
-  outside this repository), `subfolder_launch` (no file row places it, and
+  `recorded_elsewhere` (some of its rows were written by sessions recorded at
+  an existing directory outside this repository), `subfolder_launch` (no file row places it, and
   its writing sessions were launched in a subfolder of this repository),
   `description_newer` (no file row places it, and `description` changed after
   its writing sessions started) or `no_session` (no file row places it and no
@@ -451,25 +458,10 @@ Two operator surfaces answer, and they are deliberately ordered:
   the identity of every session it answers for, so an agent asks the user
   instead of writing it.
 
-A project id keeps its remote's percent-encoding, so it can contain an
-uppercase `%XX`, for example `dev.azure.com/fabrikam/My%20Project/_git/repo`.
-Azure DevOps Services spells one repository several ways (https, ssh, and the
-older `visualstudio.com` hosts), and all of them resolve to that one
-`dev.azure.com/<org>/<project>/_git/<repo>` id.
-
-One repository can still produce two ids, and two repositories can share one.
-The host is lowercased, and on github.com, whose owner and repository names
-are case-insensitive, so is the path: `https://GitHub.com/Owner/Repo` and
-`https://github.com/owner/repo` are one id, `github.com/owner/repo`. On every
-other host the path keeps its case, so two spellings that differ only in path
-case are two ids: `project-id show` lists the other spelling as an ordinary
-bucket with no command, and only an explicit
-`project-id rekey --from=<id> --to=<id>` joins them. A relative and an absolute
-scp path are one id (`git@host:srv/repo` and `git@host:/srv/repo` both give
-`host/srv/repo`), so two different repositories at `~/srv/repo` and
-`/srv/repo` on one plain ssh server share a bucket. The login is dropped too,
-so `alice@host:repo` and `bob@host:repo` are one id even when each names a
-repository in its own home directory.
+Two spellings of one repository can resolve to two ids; `project-id show` then
+lists the other spelling as an ordinary bucket with no command. Join them with
+`project-id rekey --from=<id> --to=<id>`, and run it with `--apply` only with
+the user's explicit approval.
 
 On `update`, an omitted `project_id` leaves the row's project unchanged and an explicit `null` is refused; on `save`, `null` or omission auto-detects. A valid non-empty `project_id` re-keys the row: the memory's file links are re-pointed to a `(path, new project)` file row created on demand, and its vector is re-stored under the new project. A file link whose recorded path cannot be re-tracked stays on the old project, is counted in the `update` envelope's `last_cascade_skipped`, and does not stop the rest of the re-key. The old file row is left in place, so `file_relations` recorded against it stay there and are invisible from the new project, and the old project still counts that row in its file total. A `session_id` value changes the row's session only, moving no links or vectors. Supplied identifiers on either verb must satisfy the rule stated under `save` in Memory Structure.
 
@@ -491,9 +483,9 @@ memories. Check the read scope and any excluded bucket with the
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | User error (bad args, invalid JSON, not found) |
-| 2 | Validation error (unknown field name, unknown sub-object key; unusable supplied `project_id` or `session_id` on `save` or `update`) — the error envelope includes an `allowed_fields` list |
-| 3 | `project-file`: this session's project memory file is unavailable; the printed line names why. `project-id rekey`: an operational failure; nothing was moved |
+| 1 | User error or refusal (bad args, invalid JSON, not found, a too-short or ambiguous prefix, no project identity resolved, a `--db-path` store that is not present) |
+| 2 | Bad input: a usage error; a validation error (unknown field name, unknown sub-object key; unusable supplied `project_id` or `session_id` on `save` or `update`), whose envelope includes an `allowed_fields` list; a missing or invalid `project-id` option; or a test process (`PYTEST_CURRENT_TEST` set) opening the default store without `--db-path` |
+| 3 | Operational fault on any verb: the store cannot be opened, read or written (the message names the store's remedy when it has one), `setup` failed, a `save` whose read-back found no row, or an unexpected internal error. `project-file`: this session's project memory file is unavailable; the printed line names why. `project-id rekey`: an operational failure; nothing was moved |
 
 `project-id rekey` exits 1 when it refuses — `--to` is omitted and no canonical identity resolves, or `--to` is omitted and `--from` is not this checkout's own legacy candidate that is neither excluded nor unproven, or `--db-path` names a store that is not present — and 2 for bad input.
 
@@ -713,7 +705,7 @@ The Working Memory section of CLAUDE.md is a derived view of the store. `sync` r
 5. **Search Before Acting**: Check for relevant past context before starting work
 6. **Write Complete Sentences**: Context should be a full description, not a fragment
 7. **Be Specific in Lessons**: "X didn't work because Y" is better than "X didn't work"
-8. **Check Save Results**: The `save` command verifies persistence by reading back the saved memory. If verification fails (exit code 2, error type `SYSTEM_ERROR`), the save silently failed — retry or check system status
+8. **Check Save Results**: The `save` command verifies persistence by reading back the saved memory. If verification fails (exit code 3, error type `SYSTEM_ERROR`), the save silently failed — retry or check system status
 
 ## Memory Layers: pact-memory vs Auto-Memory
 

@@ -113,12 +113,89 @@ class TestExitCodeThreeCoversBothVerbs:
         ) in _body(SKILL)
 
 
+class TestExitCodeTableMatchesTheCli:
+    """Each documented exit code is the code a real CLI run returns for the
+    case its row names. A row that drifts from the CLI, or a CLI that moves
+    a case to another code, fails here."""
+
+    CLI = SCRIPTS / "cli.py"
+
+    def _run(self, tmp_path, *args, test_process=False):
+        import os
+        import subprocess
+        import sys
+
+        env = dict(os.environ)
+        env.pop("PYTEST_CURRENT_TEST", None)
+        if test_process:
+            env["PYTEST_CURRENT_TEST"] = "exit-code-table (call)"
+        env["PACT_TEST_MEMORY_DIR"] = str(tmp_path / "memory-home")
+        project = tmp_path / "project"
+        (project / ".claude").mkdir(parents=True, exist_ok=True)
+        env["CLAUDE_PROJECT_DIR"] = str(project)
+        return subprocess.run(
+            [sys.executable, str(self.CLI), *args],
+            capture_output=True, text=True, timeout=120, env=env, cwd=project,
+        )
+
+    @staticmethod
+    def _store(tmp_path):
+        from scripts.database import db_connection, ensure_initialized
+
+        store = tmp_path / "store.db"
+        with db_connection(store) as conn:
+            ensure_initialized(conn)
+        return store
+
+    def test_zero_is_success(self, tmp_path):
+        store = self._store(tmp_path)
+        result = self._run(tmp_path, "list", "--db-path", str(store))
+        assert result.returncode == 0, result.stderr
+        assert "| 0 | Success |" in SKILL.read_text(encoding="utf-8")
+
+    def test_one_is_an_absent_db_path_store(self, tmp_path):
+        result = self._run(tmp_path, "list", "--db-path", str(tmp_path / "absent.db"))
+        assert result.returncode == 1, result.stderr
+        assert "a --db-path store that is not present" in _table_row(SKILL, "1")
+
+    def test_two_is_an_unknown_field(self, tmp_path):
+        store = self._store(tmp_path)
+        result = self._run(tmp_path, "save", '{"foo": 1}', "--db-path", str(store))
+        assert result.returncode == 2, result.stderr
+        assert "unknown field name" in _table_row(SKILL, "2")
+
+    def test_two_is_a_test_process_opening_the_default_store(self, tmp_path):
+        result = self._run(tmp_path, "list", test_process=True)
+        assert result.returncode == 2, result.stderr
+        assert "UNSCOPED_TEST_DB" in result.stderr
+        assert (
+            "a test process (PYTEST_CURRENT_TEST set) opening the default store "
+            "without --db-path"
+        ) in _table_row(SKILL, "2")
+
+    def test_three_is_a_store_fault_on_any_verb(self, tmp_path):
+        store = tmp_path / "corrupt.db"
+        store.write_bytes(b"this is not a sqlite database" * 64)
+        result = self._run(tmp_path, "list", "--db-path", str(store))
+        assert result.returncode == 3, result.stderr
+        row = _table_row(SKILL, "3")
+        assert (
+            "Operational fault on any verb: the store cannot be opened, read or "
+            "written"
+        ) in row
+        assert "an unexpected internal error" in row
+
+    def test_a_failed_save_read_back_is_exit_three(self):
+        body = _body(SKILL)
+        assert "If verification fails (exit code 3, error type SYSTEM_ERROR)" in body
+        assert "exit code 2, error type SYSTEM_ERROR" not in body
+
+
 class TestSecretaryProjectionKey:
-    """The secretary's Working Memory step names the key the store uses. Each
-    case its sentences name is run on a real layout, and the identity the
-    resolver gives there is the one the sentence states; a short phrase of
-    the sentence ties each case to its prose, so a sentence that drops a case
-    or a resolver that changes one fails here."""
+    """The secretary's Working Memory step reads the projection by its
+    `read_scope` and sends a decline to `project-id show` instead of
+    restating the resolver. The resolver cases the step used to restate are
+    still run on real layouts here, so the identities agents see stay pinned."""
 
     _CANONICAL = "github.com/acme/widget"
     _OVERRIDE = "override.example.com/team/pinned"
@@ -208,7 +285,6 @@ class TestSecretaryProjectionKey:
         from fixtures.identity_git import assert_outside_repository
         from scripts.memory_api import PACTMemory
 
-        assert phrase in " ".join(_body(SECRETARY).split()), phrase
         assert_outside_repository(tmp_path)
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
@@ -223,22 +299,30 @@ class TestSecretaryProjectionKey:
         project_id, _source = PACTMemory._detect_project_id_with_source()
         assert project_id == (folder.name if stated == "folder" else stated), (case, project_id)
 
-    def test_every_case_the_projection_sentence_names_is_run(self):
-        """Control: the rows cover every clause of the two sentences, so a
-        clause added to the prose without a row fails here."""
-        body = " ".join(_body(SECRETARY).split())
-        start = body.index("The projection is keyed by")
-        passage = body[start:body.index("nothing is projected.", start)]
-        clauses = {phrase for phrase, *_rest in self.CASES}
-        assert all(phrase in passage for phrase in clauses), clauses
-        assert passage.count("keys it instead") == 1 and passage.count("declines instead") == 1, passage
+    def test_the_step_reads_the_projection_by_its_read_scope(self):
+        assert (
+            "The projection reads every id in the envelope's read_scope, which "
+            "can include this checkout's legacy folder-name bucket"
+        ) in _body(SECRETARY)
+
+    def test_a_null_project_id_sends_the_secretary_to_show(self):
+        assert (
+            "A null project_id means no project identity resolved: run the "
+            "pact-memory project-id show command and put its decline_reason "
+            "in the briefing."
+        ) in _body(SECRETARY)
+
+    def test_the_resolver_restatement_is_gone(self):
+        """The rule lives in SKILL.md and the code; a copy here drifts."""
+        body = _body(SECRETARY)
+        assert "The projection is keyed by" not in body
+        assert "An admitted bucket is shared with every checkout" not in body
 
     @pytest.mark.parametrize("launched_in, counts", [("", True), ("sub", False)], ids=["root", "subfolder"])
     def test_the_legacy_bucket_is_read_only_on_evidence(self, tmp_path, launched_in, counts):
         """A session that wrote into the legacy bucket counts as evidence
         when it was launched at the repository's root, and not when it was
-        launched in a subfolder, as the sentence states; its phrases tie the
-        rule to the prose, and the retired "until it is rekeyed" stays gone."""
+        launched in a subfolder, as SKILL.md's included bullet states."""
         from datetime import datetime, timezone
 
         from fixtures.identity_git import make_repo, seed_session_evidence
@@ -246,15 +330,6 @@ class TestSecretaryProjectionKey:
 
         from scripts import memory_api
 
-        body = _body(SECRETARY)
-        for phrase in ("only when a file row places it under this repository or its linked worktrees",
-                       "a session launched at the root of this repository or of one of its linked worktrees "
-                       "wrote into it",
-                       "and no row in it was written by a session recorded outside this repository and its "
-                       "linked worktrees",
-                       "An admitted bucket is shared with every checkout whose root folder has that name"):
-            assert phrase in body, phrase
-        assert "until it is rekeyed" not in body.lower()
         memory_api._PRUNED_SESSION_INDEX.clear()
         repo = make_repo(tmp_path / "proj", remote="https://github.com/o/proj.git")
         (repo / "sub").mkdir()
@@ -302,26 +377,37 @@ class TestOverrideAcceptsCanonicalIdsOnly:
         assert (read_override(tmp_path).value, read_override(tmp_path).reason) == ("github.com/o/proj", None)
 
 
-class TestPercentEncodedIdsAreDocumented:
-    """The percent-encoded and Azure DevOps forms the canonicaliser produces."""
+class TestCanonicaliserSpellings:
+    """The percent-encoded, Azure DevOps and case forms the canonicaliser
+    produces, and the one instruction SKILL.md gives about them."""
 
     EXAMPLE = "dev.azure.com/fabrikam/My%20Project/_git/repo"
 
-    def test_the_note_names_the_percent_encoded_form(self):
+    def test_two_spellings_are_joined_by_an_approved_rekey(self):
         assert (
-            "A project id keeps its remote's percent-encoding, so it can "
-            "contain an uppercase %XX, for example " + self.EXAMPLE
+            "Two spellings of one repository can resolve to two ids; project-id "
+            "show then lists the other spelling as an ordinary bucket with no "
+            "command. Join them with project-id rekey --from=<id> --to=<id>, and "
+            "run it with --apply only with the user's explicit approval."
         ) in _body(SKILL)
+
+    def test_the_canonicaliser_limit_notes_are_not_in_the_skill(self):
+        """Limits no agent acts on live in the release notes, not here."""
+        body = _body(SKILL)
+        for gone in ("keeps its remote's percent-encoding",
+                     "On every other host the path keeps its case",
+                     "on one plain ssh server share a bucket",
+                     "The login is dropped too"):
+            assert gone not in body, gone
 
     def test_the_example_is_a_canonical_id(self):
         from scripts.project_identity import is_canonical
 
         assert is_canonical(self.EXAMPLE)
 
-    def test_the_path_case_split_is_documented_and_measured(self):
+    def test_the_path_case_split_is_measured(self):
         from scripts.project_identity import normalize_remote_url
 
-        assert "On every other host the path keeps its case" in _body(SKILL)
         github = {normalize_remote_url("https://GitHub.com/Owner/Repo"),
                   normalize_remote_url("https://github.com/owner/repo")}
         assert github == {"github.com/owner/repo"}
@@ -329,34 +415,17 @@ class TestPercentEncodedIdsAreDocumented:
         assert other == "gitlab.com/Owner/Repo"
         assert other != normalize_remote_url("https://gitlab.com/owner/repo")
 
-    def test_the_scp_relative_absolute_collision_is_documented_and_measured(self):
+    def test_the_scp_relative_absolute_collision_is_measured(self):
         from scripts.project_identity import normalize_remote_url
 
-        assert (
-            "A relative and an absolute scp path are one id "
-            "(git@host:srv/repo and git@host:/srv/repo both give "
-            "host/srv/repo), so two different repositories at ~/srv/repo and "
-            "/srv/repo on one plain ssh server share a bucket."
-        ) in _body(SKILL)
         assert normalize_remote_url("git@host:srv/repo") == "host/srv/repo"
         assert normalize_remote_url("git@host:/srv/repo") == "host/srv/repo"
 
-    def test_the_login_strip_collision_is_documented_and_measured(self):
+    def test_the_login_strip_collision_is_measured(self):
         from scripts.project_identity import normalize_remote_url
 
-        assert (
-            "The login is dropped too, so alice@host:repo and bob@host:repo "
-            "are one id even when each names a repository in its own home "
-            "directory."
-        ) in _body(SKILL)
         assert normalize_remote_url("alice@host:repo") == "host/repo"
         assert normalize_remote_url("bob@host:repo") == "host/repo"
-
-    def test_the_azure_spellings_share_one_id(self):
-        assert (
-            "all of them resolve to that one "
-            "dev.azure.com/<org>/<project>/_git/<repo> id"
-        ) in _body(SKILL)
 
     @pytest.mark.parametrize(
         "url",
@@ -417,7 +486,7 @@ class TestLegacyScopeStatesAreDocumented:
     """The `legacy_scope` key set and its three exclusive states."""
 
     KEY_LIST_START = "legacy_scope carries the same keys in every state:"
-    KEY_LIST_END = ". It is null only when no identity resolves"
+    KEY_LIST_END = ". It is null when no identity resolves"
 
     def _documented_keys(self) -> set:
         body = _body(SKILL)
@@ -430,6 +499,32 @@ class TestLegacyScopeStatesAreDocumented:
         from scripts.memory_api import LEGACY_SCOPE_KEYS
 
         assert self._documented_keys() == set(LEGACY_SCOPE_KEYS)
+
+    def test_an_absent_store_reports_a_null_legacy_scope(self, tmp_path):
+        """A canonical id with no store yet answers null, as the sentence
+        states, and the read creates no store."""
+        import json
+        import os
+        import subprocess
+        import sys
+
+        from fixtures.identity_git import make_repo
+
+        assert "when the store does not exist yet" in _body(SKILL)
+        repo = make_repo(tmp_path / "proj", remote="https://github.com/o/proj.git")
+        home = tmp_path / "memory-home"
+        env = dict(os.environ, PACT_TEST_MEMORY_DIR=str(home), CLAUDE_PROJECT_DIR=str(repo))
+        env.pop("PYTEST_CURRENT_TEST", None)
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "cli.py"), "project-id", "show"],
+            capture_output=True, text=True, timeout=120, env=env, cwd=repo,
+        )
+        assert result.returncode == 0, result.stderr
+        envelope = json.loads(result.stdout)
+        payload = envelope.get("result", envelope)
+        assert payload["project_id"] == "github.com/o/proj", payload
+        assert payload["legacy_scope"] is None, payload["legacy_scope"]
+        assert not (home / "memory.db").exists()
 
     def test_exactly_one_state_is_true_when_a_candidate_is_set(self):
         assert (
@@ -502,8 +597,22 @@ class TestLegacyScopeStatesAreDocumented:
     def test_a_foreign_row_keeps_either_kind_out(self):
         assert (
             "Neither kind is read when any of its rows was written by a session "
-            "recorded outside this repository and its linked worktrees: it is "
-            "then unproven."
+            "recorded at an existing directory outside this repository and its "
+            "linked worktrees: it is then unproven."
+        ) in _body(SKILL)
+
+    def test_a_vanished_recorded_directory_is_unattributed(self):
+        assert (
+            "A row with no recorded session, or whose session's recorded "
+            "directory no longer exists (a removed worktree or a deleted "
+            "checkout), does not block it"
+        ) in _body(SKILL)
+
+    def test_a_folder_name_session_refuses_an_excluded_bucket(self):
+        assert (
+            "A session whose project id is a folder name refuses to save into "
+            "that bucket when the gate excludes it (its file rows all lie in "
+            "another checkout): the save exits 2 and writes nothing."
         ) in _body(SKILL)
 
     def test_the_suppression_reason_is_documented_only_there(self):
