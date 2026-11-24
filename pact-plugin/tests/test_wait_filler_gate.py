@@ -1104,7 +1104,7 @@ def test_tier3_no_team_frame_gets_no_command(tmp_path, monkeypatch, capsys):
     assert "PACT-WAIT-OUTLET" in reason
     assert "pact_wait.py" not in reason
     assert "--team <team-name>" not in reason
-    assert "No PACT team is resolvable" in reason
+    assert "No task store resolves for this frame" in reason
 
 
 def test_tier3_agent_tool_subagent_gets_completion_report_text(
@@ -1257,7 +1257,7 @@ def test_tier3_command_names_the_live_task_store_without_team_config(
     assert "session-aaaa1111" not in commands[0]
 
 
-def test_counts_climb_through_denials_and_budget_field_gone(
+def test_counts_climb_through_denials_and_budget_field_zero(
     tmp_path, monkeypatch, capsys
 ):
     """The budget bookkeeping is retired: counts climb through DENIALS

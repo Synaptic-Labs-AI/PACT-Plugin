@@ -626,7 +626,7 @@ def test_traversal_shaped_task_id_stays_contained(tmp_path):
         encoding="utf-8",
     )
     # The escaped join's target: tasks/7.json, OUTSIDE the team dir. Its
-    # handoff is deliberately predicate-FAILING (list-typed produced), so a
+    # handoff is deliberately predicate-FAILING (a list-typed handoff), so a
     # mutation that drops the sanitizer reads THIS file and flips the arm
     # to NOT_PRESENT.
     (tmp_path / "7.json").write_text(

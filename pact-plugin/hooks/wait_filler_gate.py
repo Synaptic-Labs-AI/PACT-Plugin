@@ -238,8 +238,9 @@ OUTLET = {
     },
     "no_team": {
         "preamble": (
-            "No PACT team is resolvable for this frame, so there is no "
-            "deliverable store to watch and no arm command to run."
+            "No task store resolves for this frame (there is no PACT team, "
+            "or its task store is ambiguous), so there is nothing to watch "
+            "and no arm command to run."
         ),
         "resolver": "`lead`",
         "branches": [(kind, "end_turn", None) for kind in WAIT_KINDS],
@@ -677,6 +678,7 @@ def _tier3_frame_identity(input_data):
         )
     except Exception:
         return "", "", False
+
 
 def _normalize_filler(command: str) -> "str | None":
     """The normalization chain from the module docstring, returning the

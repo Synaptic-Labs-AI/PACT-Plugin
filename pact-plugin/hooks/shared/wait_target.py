@@ -56,8 +56,10 @@ from shared.paths import get_claude_config_dir
 
 
 # Outcome constants (plain strings, not an Enum, matching the house style of
-# intentional_wait's vocabulary constants). Membership groups in the CLI:
-# the first two are "keep polling or declare fired", the rest are terminal.
+# intentional_wait's vocabulary constants). How the CLI treats them: PRESENT
+# fires and NOT_PRESENT keeps polling; MISSING, UNREADABLE and CORRUPT are
+# tolerated for one read (a rewrite in flight) and end the watch on the
+# second consecutive one; INVALID and UNKNOWN_PREDICATE end it at once.
 EVAL_PRESENT = "present"
 EVAL_NOT_PRESENT = "not_present"
 EVAL_TARGET_INVALID = "target_invalid"
