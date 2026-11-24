@@ -1,9 +1,10 @@
 """The session-evidence check's slug-folder listing is a speedup, not the answer.
 
 Location: pact-plugin/tests/test_remediation_session_evidence_listing.py.
-`memory_api._legacy_session_evidence` lists each gate root's session folder
-once and treats a listed entry as a live session folder. Only an ABSENT
-entry lets the prune ledger stand in for a session. These arms pin that a
+`memory_api._legacy_session_census` (which `_legacy_session_evidence` reads)
+lists every slug folder under the sessions root once per call, not only the
+gate roots', and treats a listed entry as a live session folder. Only an
+ABSENT entry lets that slug folder's prune ledger stand in for a session. These arms pin that a
 folder the listing cannot read changes nothing: the check then falls back to
 the per-session existence test, exactly as before the listing existed.
 """

@@ -2225,8 +2225,8 @@ class TestUpdateFindsTheRowBeforeItRefuses:
 
 
 class TestTheEvidenceCheckScansEachRootOnce:
-    """The session-evidence check lists each root's session folder once per
-    command and parses an unchanged prune ledger once per process.
+    """The session-evidence check lists each slug folder under the sessions
+    root once per command and parses an unchanged prune ledger once per process.
 
     Catches the evidence check building and resolving a session path for
     every writing session, and re-reading the ledger on every read while a
@@ -4865,6 +4865,19 @@ def _detail_values(expression, function, module_tree, seen=frozenset()) -> tuple
 # refusal printers.
 _DETAIL_CARRIERS = {"cause_detail", "decline_detail", "_decline_detail"}
 
+# What a maintainer does when `_printer_details` cannot follow a detail. The
+# census fails closed, so a behaviour-neutral refactor (a decline moved into a
+# helper that takes its detail as a parameter) reds it too.
+_UNRESOLVED_DETAIL_REMEDY = (
+    "each (module, source) listed is a printed decline detail the census cannot "
+    "follow to its text: a function parameter, an attribute or a call it "
+    "cannot read. Fix the code or the census, never the list: build the "
+    "RootIdentity or set the carrier where the detail is a string, a module "
+    "constant, a local holding only those or a call to a module function "
+    "returning them; or, for a helper parameter, teach `_printer_details` / "
+    "`_detail_values` in this module to follow the callers that bind it."
+)
+
 
 def _printer_details() -> tuple:
     """(texts, unresolved) for every detail the decline printers can append,
@@ -5308,7 +5321,7 @@ class TestARedirectRefusalNamesWhatWasObserved:
         from scripts import project_identity as pi
 
         details, unresolved = _printer_details()
-        assert unresolved == [], unresolved  # every detail source is followed to its text
+        assert unresolved == [], f"{unresolved}: {_UNRESOLVED_DETAIL_REMEDY}"  # every detail source is followed to its text
         assert pi.EMPTY_URL_ENTRY_DETAIL in details, sorted(details)  # control: origin details are read
         messages = [" ".join(message.split()) for message in _printed_identity_messages(monkeypatch, caplog)]
         remedies = [
