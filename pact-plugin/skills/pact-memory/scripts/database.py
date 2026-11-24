@@ -1532,6 +1532,7 @@ def legacy_candidate_plausibility(
     roots: Optional[Union[Path, str, Sequence[Union[Path, str]]]],
     *,
     root_common: Optional[Union[Path, str]] = None,
+    existing_only: bool = False,
 ) -> Tuple[str, Dict[str, int]]:
     """Whether a legacy basename bucket plausibly belongs to `roots`.
 
@@ -1601,6 +1602,10 @@ def legacy_candidate_plausibility(
     `ensure_initialized` (which would attempt migrations and the vector-table
     CREATE); on a store without the table it raises
     `sqlite3.OperationalError`, and the caller checks the schema first.
+
+    `existing_only` SKIPS A ROW WHOSE PATH NO LONGER EXISTS: it is neither
+    absolute evidence nor contained. The basename-primary scope passes it, so a
+    bucket whose rows all name a moved or deleted checkout is not excluded.
     """
     cursor = conn.execute(
         "SELECT path FROM files WHERE project_id = ?",
@@ -1621,6 +1626,8 @@ def legacy_candidate_plausibility(
         file_rows += 1
         path = row["path"]
         if not path or not os.path.isabs(path):
+            continue
+        if existing_only and not os.path.lexists(path):
             continue
         absolute_rows += 1
         try:

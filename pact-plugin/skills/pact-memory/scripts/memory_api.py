@@ -2008,13 +2008,6 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
         return None
 
 
-def _verified_worktree_roots(
-    repo_root: Path, common_dir: Optional[Path], listing: Optional[list] = None
-) -> List[Path]:
-    """`project_identity.verified_worktree_roots`, under the name the legacy
-    read gate calls."""
-    return project_identity.verified_worktree_roots(repo_root, common_dir, listing)
-
 
 # `_worktree_redirect_cause`'s answers when the check refuses.
 REDIRECT_UNLISTED = "unlisted"
@@ -3570,6 +3563,107 @@ class PACTMemory:
             with db_connection() as connection:
                 ensure_initialized(connection)
 
+    def _basename_bucket_excluded(self, scope: str, conn: Any = None) -> bool:
+        """Whether a DETECTED folder-name id names a bucket that belongs to
+        another checkout: it holds absolute file rows whose paths exist, and
+        none lies under this repository or its linked worktrees (the
+        plausibility gate's `excluded`, with `existing_only`). Disclosed by
+        `_warn_legacy_excluded` and in `_legacy_scope_state`.
+
+        ONLY THE EXCLUSION ARM. A folder-name id is this repository's only id,
+        so a bucket the gate cannot place (no absolute rows, or rows naming
+        paths that are gone) stays readable; only positive evidence of another
+        checkout keeps it out. A supplied id, an id with no identity root, an
+        absent store and a store with no schema are not judged.
+        """
+        repo_root = self._project_identity_root
+        if self._project_id_source == "supplied" or repo_root is None:
+            return False
+        store = str(self._db_path or resolve_db_path())
+        if _store_stat_key(store) is None:
+            return False
+        from .database import count_project_memories, legacy_candidate_plausibility
+
+        with _legacy_probe_context(store, conn) as (connection, _degraded):
+            if connection is None:
+                return False
+            roots, common = self._legacy_gate_roots(repo_root)
+            outcome, detail = legacy_candidate_plausibility(
+                connection, scope, roots or None, root_common=common,
+                existing_only=True,
+            )
+            if outcome != "excluded":
+                return False
+            memory_count = count_project_memories(connection, scope)
+            file_paths = count_project_file_paths(connection, scope)
+        self._legacy_scope_state = _legacy_scope_record(
+            candidate=scope,
+            memory_count=memory_count,
+            file_paths=file_paths,
+            excluded=True,
+            detail=detail,
+        )
+        _warn_legacy_excluded(store, scope, memory_count, file_paths, repo_root)
+        return True
+
+    def _legacy_gate_roots(self, repo_root: Any) -> tuple:
+        """`(gate roots, gate common dir)` for the plausibility gate and the
+        session census: the identity root plus its two-way-linked worktrees,
+        deduplicated, and the common dir git reported for the identity root
+        (None when git failed). An empty list when `repo_root` is None.
+        Never raises."""
+        gate_roots = []
+        # The common dir GIT reported for the identity root. It anchors
+        # the worktree listing and the gate's submodule exemption, and
+        # its `description` dates the repository for session evidence;
+        # None (git failed) only narrows the gate, never fails the read.
+        gate_common = None
+        if repo_root is not None:
+            try:
+                # THE COMMON DIR THE IDENTITY WAS READ FROM, when a
+                # rung recorded one, so the listing and the exemption
+                # describe the repository the id came from. Otherwise
+                # the detection pass's answer for the same directory
+                # is taken ONCE, by the first read; a later read asks
+                # `main_repo_common_dir`, answered from an open pass
+                # when it already asked about that directory, and by
+                # git otherwise.
+                passed = getattr(self, "_detection_common_dirs", None) or {}
+                key = os.path.realpath(str(repo_root))
+                gate_common = (
+                    self._project_common_dir
+                    if getattr(self, "_project_common_dir", None) is not None
+                    else passed.pop(key) if key in passed
+                    else main_repo_common_dir(str(repo_root))
+                )
+            except Exception:
+                gate_common = None
+            # ONLY TWO-WAY-LINKED worktrees widen the gate: a listed
+            # entry is what the repository's own `.git` CLAIMS, and a
+            # delivered `.git` can claim another project's checkout.
+            # The detection pass's listing of the same common dir,
+            # spelled as git was given it, is taken ONCE, by the first
+            # read; a later read lists again, answered from an open
+            # pass's git results when it already listed that common
+            # dir, and by git otherwise.
+            try:
+                listings = getattr(self, "_detection_listings", None) or {}
+                gate_roots.extend(
+                    str(root)
+                    for root in project_identity.verified_worktree_roots(
+                        Path(repo_root),
+                        gate_common,
+                        listings.pop(str(gate_common), None)
+                        if gate_common is not None
+                        else None,
+                    )
+                )
+            except Exception:
+                # A listing failure must narrow the gate to the
+                # identity root alone, never fail the read.
+                gate_roots = [str(Path(repo_root).resolve())]
+        return list(dict.fromkeys(gate_roots)), gate_common
+
     def _read_project_scopes(self, conn: Any = None) -> tuple:
         """The project ids a READ may bind: the canonical id plus its legacy bucket.
 
@@ -3638,7 +3732,7 @@ class PACTMemory:
         if scope is None:
             return ()
         if not is_canonical(scope):
-            return (scope,)
+            return () if self._basename_bucket_excluded(scope, conn) else (scope,)
         legacy = self._legacy_project_basename
         store = str(self._db_path or resolve_db_path())
         if not legacy or legacy == scope:
@@ -3782,57 +3876,7 @@ class PACTMemory:
                 # it appends the cwd repository's checkouts to the declared
                 # one's gate, and it refuses with a write-oriented error that
                 # must never escape a read.
-                gate_roots = []
-                # The common dir GIT reported for the identity root. It anchors
-                # the worktree listing and the gate's submodule exemption, and
-                # its `description` dates the repository for session evidence;
-                # None (git failed) only narrows the gate, never fails the read.
-                gate_common = None
-                if repo_root is not None:
-                    try:
-                        # THE COMMON DIR THE IDENTITY WAS READ FROM, when a
-                        # rung recorded one, so the listing and the exemption
-                        # describe the repository the id came from. Otherwise
-                        # the detection pass's answer for the same directory
-                        # is taken ONCE, by the first read; a later read asks
-                        # `main_repo_common_dir`, answered from an open pass
-                        # when it already asked about that directory, and by
-                        # git otherwise.
-                        passed = getattr(self, "_detection_common_dirs", None) or {}
-                        key = os.path.realpath(str(repo_root))
-                        gate_common = (
-                            self._project_common_dir
-                            if getattr(self, "_project_common_dir", None) is not None
-                            else passed.pop(key) if key in passed
-                            else main_repo_common_dir(str(repo_root))
-                        )
-                    except Exception:
-                        gate_common = None
-                    # ONLY TWO-WAY-LINKED worktrees widen the gate: a listed
-                    # entry is what the repository's own `.git` CLAIMS, and a
-                    # delivered `.git` can claim another project's checkout.
-                    # The detection pass's listing of the same common dir,
-                    # spelled as git was given it, is taken ONCE, by the first
-                    # read; a later read lists again, answered from an open
-                    # pass's git results when it already listed that common
-                    # dir, and by git otherwise.
-                    try:
-                        listings = getattr(self, "_detection_listings", None) or {}
-                        gate_roots.extend(
-                            str(root)
-                            for root in _verified_worktree_roots(
-                                Path(repo_root),
-                                gate_common,
-                                listings.pop(str(gate_common), None)
-                                if gate_common is not None
-                                else None,
-                            )
-                        )
-                    except Exception:
-                        # A listing failure must narrow the gate to the
-                        # identity root alone, never fail the read.
-                        gate_roots = [str(Path(repo_root).resolve())]
-                deduped = list(dict.fromkeys(gate_roots))
+                deduped, gate_common = self._legacy_gate_roots(repo_root)
                 outcome, detail = legacy_candidate_plausibility(
                     connection, candidate, deduped or None, root_common=gate_common
                 )
@@ -3946,7 +3990,9 @@ class PACTMemory:
         )
 
     def _project_id_for_write(self) -> Optional[str]:
-        """The project id a WRITE may bind; ValueError for an unusable one.
+        """The project id a WRITE may bind; ValueError for an unusable one,
+        or for a folder-name id whose bucket belongs to another checkout
+        (`_basename_bucket_excluded`).
 
         This is the write ingress's remedy channel: a detected value that no
         utf-8 TEXT column can hold refuses HERE, naming the detection source
@@ -3961,6 +4007,22 @@ class PACTMemory:
                 "surrogates; refusing to write it. Supply project_id "
                 "explicitly, or fix the project directory name or session "
                 "record it was derived from. Nothing was written."
+            )
+        if (
+            self._project_id is not None
+            and not is_canonical(self._project_id)
+            and _stable_read_only(
+                str(self._db_path or resolve_db_path()),
+                lambda: self._basename_bucket_excluded(self._project_id),
+            )
+        ):
+            raise ValueError(
+                f"the folder-name project id {self._project_id!r} names a "
+                "bucket whose file rows all lie in another checkout, so a "
+                "save here would file this repository's memory with that "
+                "checkout's. Give this repository its own id: add an origin "
+                "remote, write a canonical id to <git-common-dir>/"
+                "pact-project-id, or pass project_id. Nothing was written."
             )
         return self._project_id
 

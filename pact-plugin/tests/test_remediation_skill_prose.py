@@ -7621,7 +7621,7 @@ class TestEveryRouteEntryConditionIsARoute:
         assert len(common) == 1, common
         module, key, call = common[0]
         caller = next(node for (owner, name), node in graph.defs.items()
-                      if (owner, name) == ("memory_api", "PACTMemory._read_project_scopes"))
+                      if (owner, name) == ("memory_api", "PACTMemory._legacy_gate_roots"))
         site = next(sub.lineno for sub in ast.walk(caller) if isinstance(sub, ast.Call)
                     and ast.unparse(sub.func) == "main_repo_common_dir")
         sources = {f"{owner}.py:{source.lineno}" for owner, source in _value_sources(graph, module, graph.defs[key], call.args[0])}

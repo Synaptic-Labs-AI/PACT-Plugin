@@ -2948,7 +2948,7 @@ class TestTheGateTrustsOnlyLinkedWorktrees:
         store = identity_env / "store.db"
         _seed(store, "proj", path=str(victim / "secret.py"))
         monkeypatch.chdir(delivered)
-        assert memory_api._verified_worktree_roots(
+        assert memory_api.project_identity.verified_worktree_roots(
             delivered, delivered / ".git"
         ) == [delivered.resolve()]
         memory = PACTMemory(session_id="s", db_path=store)
@@ -2975,7 +2975,7 @@ class TestTheGateTrustsOnlyLinkedWorktrees:
         store = identity_env / "store.db"
         _seed(store, "proj", path=str(victim / "secret.py"))
         monkeypatch.chdir(delivered)
-        assert memory_api._verified_worktree_roots(
+        assert memory_api.project_identity.verified_worktree_roots(
             delivered, delivered / ".git"
         ) == [delivered.resolve()]
         memory = PACTMemory(session_id="s", db_path=store)
@@ -3001,7 +3001,7 @@ class TestTheGateTrustsOnlyLinkedWorktrees:
         (forged / "gitdir").write_text(f"{worktree / '.git'}\n", encoding="utf-8")
         (forged / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
         (forged / "commondir").write_text("../..\n", encoding="utf-8")
-        assert memory_api._verified_worktree_roots(repo, repo / ".git") == [
+        assert memory_api.project_identity.verified_worktree_roots(repo, repo / ".git") == [
             repo.resolve()
         ]
 
@@ -3012,7 +3012,7 @@ class TestTheGateTrustsOnlyLinkedWorktrees:
         store = identity_env / "store.db"
         _seed(store, "proj", path=str(worktree / "a.py"))
         monkeypatch.chdir(repo)
-        assert worktree.resolve() in memory_api._verified_worktree_roots(
+        assert worktree.resolve() in memory_api.project_identity.verified_worktree_roots(
             repo, repo / ".git"
         )
         memory = PACTMemory(session_id="s", db_path=store)
@@ -3025,7 +3025,7 @@ class TestTheGateTrustsOnlyLinkedWorktrees:
         repo = make_repo(identity_env / "proj", remote=REMOTE)
         worktree = make_worktree(repo, identity_env / "proj-wt")
         shutil.rmtree(worktree)
-        assert memory_api._verified_worktree_roots(repo, repo / ".git") == [
+        assert memory_api.project_identity.verified_worktree_roots(repo, repo / ".git") == [
             repo.resolve()
         ]
 

@@ -831,7 +831,7 @@ NO_IDENTITY_BOUND = {
     ("skills/pact-memory/scripts/memory_api.py", "_location_divergence_warning", "main_repo_root"): (
         1, "compares the process's repository with the id already bound; binds nothing",
     ),
-    ("skills/pact-memory/scripts/memory_api.py", "_read_project_scopes", "main_repo_common_dir"): (
+    ("skills/pact-memory/scripts/memory_api.py", "_legacy_gate_roots", "main_repo_common_dir"): (
         1, "the common dir of the root the resolver already chose, for the legacy gate",
     ),
     ("skills/pact-memory/scripts/memory_api.py", "_legacy_suppression", "main_repo_common_dir"): (
@@ -3028,7 +3028,7 @@ class TestTheIdentityIsAskedOfItsOwnRepository:
         from scripts import database
 
         listed, anchors = [], []
-        real_roots = memory_api._verified_worktree_roots
+        real_roots = memory_api.project_identity.verified_worktree_roots
         real_plausibility = database.legacy_candidate_plausibility
 
         def roots(repo_root, common_dir, listing=None):
@@ -3043,7 +3043,7 @@ class TestTheIdentityIsAskedOfItsOwnRepository:
         _clear(monkeypatch)
         _fresh_scope_state()
         monkeypatch.chdir(project)
-        monkeypatch.setattr(memory_api, "_verified_worktree_roots", roots)
+        monkeypatch.setattr(memory_api.project_identity, "verified_worktree_roots", roots)
         monkeypatch.setattr(database, "legacy_candidate_plausibility", plausibility)
         memory = PACTMemory(session_id="s", db_path=store)
         assert memory._project_id == "github.com/own/project", memory._project_id
@@ -3238,7 +3238,7 @@ class TestAGitPathAnswerIsNeverStripped:
         main = make_repo(tmp_path / "ma\nin")
         worktree = tmp_path / "wt"
         run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
-        roots = memory_api._verified_worktree_roots(main, (main / ".git").resolve())
+        roots = memory_api.project_identity.verified_worktree_roots(main, (main / ".git").resolve())
         assert roots == [main.resolve(), worktree.resolve()]
 
     def test_a_recorded_worktree_keeps_a_trailing_space(self, tmp_path):

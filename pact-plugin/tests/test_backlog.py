@@ -2936,7 +2936,7 @@ def test_every_other_listing_read_that_raises_gives_what_no_listing_gives(tmp_pa
 
     def readers():
         outcomes = []
-        for read in (lambda: memory_api._verified_worktree_roots(main, common),
+        for read in (lambda: memory_api.project_identity.verified_worktree_roots(main, common),
                      lambda: backlog._branch_and_worktree_names(str(main))):
             try:
                 outcomes.append(read())

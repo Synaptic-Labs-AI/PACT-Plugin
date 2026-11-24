@@ -2022,14 +2022,14 @@ class TestAnOversizedGitFileIsNotReadWhole:
         worktree = tmp_path / "wt"
         run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
         listing = memory_api.project_identity.worktree_records(["--git-dir", str(common)])
-        assert memory_api._verified_worktree_roots(main, common, listing) == [
+        assert memory_api.project_identity.verified_worktree_roots(main, common, listing) == [
             main.resolve(), worktree.resolve(),
         ]  # control: the worktree is a gate root while its files are whole
         if oversized == "dotgit":
             _sparse(worktree / ".git", f"gitdir: {common / 'worktrees' / 'wt'}\n")
         else:
             _sparse(common / "worktrees" / "wt" / "gitdir", f"{worktree / '.git'}\n")
-        return main, _peak_bytes(lambda: memory_api._verified_worktree_roots(main, common, listing))
+        return main, _peak_bytes(lambda: memory_api.project_identity.verified_worktree_roots(main, common, listing))
 
     def test_the_read_gates_dotgit_reader(self, tmp_path):
         main, (roots, peak) = self._gate_roots(tmp_path, "dotgit")
@@ -2229,7 +2229,7 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
         worktree = tmp_path / "wt"
         run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
         listing = memory_api.project_identity.worktree_records(["--git-dir", str(common)])
-        assert memory_api._verified_worktree_roots(main, common, listing) == [
+        assert memory_api.project_identity.verified_worktree_roots(main, common, listing) == [
             main.resolve(), worktree.resolve(),
         ]  # control: the worktree is a gate root while its admin file is whole
         (common / "worktrees" / "wt" / "gitdir").unlink()
@@ -2237,7 +2237,7 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
         assert _in_child(
             "import json\nfrom pathlib import Path\nfrom scripts import memory_api\n"
             "main, common, listing = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])\n"
-            "print(memory_api._verified_worktree_roots(Path(main), Path(common), listing))",
+            "print(memory_api.project_identity.verified_worktree_roots(Path(main), Path(common), listing))",
             str(main), str(common), json.dumps(listing),
         ) == str([main.resolve()])
 
