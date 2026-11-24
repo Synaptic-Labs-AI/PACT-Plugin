@@ -1597,14 +1597,20 @@ def _teachback_ready(
     member_team: str = "",
     done: frozenset = frozenset(),
     added: object = None,
+    claimed: bool = False,
 ) -> bool:
     """TEACHBACK-READY: a teachback gate handed to its teammate (pending,
     with an owner who is not the secretary), not yet accepted, and with no
-    open blocker."""
+    open blocker. With `claimed` (a blocker's completion), a gate the
+    teammate already claimed counts too while it carries no
+    teachback_submit: the teammate could not start it until now."""
     record = read_task_json(task_id, store_team, base_fallback=False)
     owner = record.get("owner")
+    status = record.get("status")
+    metadata = record.get("metadata")
+    submitted = isinstance(metadata, dict) and bool(metadata.get("teachback_submit"))
     return (
-        record.get("status") == "pending"
+        (status == "pending" or (claimed and status == "in_progress" and not submitted))
         and _is_teachback_subject(record.get("subject") or "")
         and isinstance(owner, str)
         and bool(owner.strip())
@@ -1815,7 +1821,7 @@ def arm_candidates(
         for dependent in dependents:
             if dependent == task_id:
                 continue
-            if _teachback_ready(dependent, store_team, member_team, done):
+            if _teachback_ready(dependent, store_team, member_team, done, claimed=True):
                 add(dependent, "teachback_submit", "blocker completed")
             elif _handoff_ready(
                 dependent, store_team, done, member_team=member_team
