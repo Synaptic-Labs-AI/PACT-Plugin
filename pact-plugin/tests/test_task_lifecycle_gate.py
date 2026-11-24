@@ -6184,6 +6184,31 @@ _MEMBERS = [
 ]
 
 
+def test_a_list_valued_blocker_file_does_not_fail_the_gate(tmp_path):
+    """Through the real hook: a blocker whose task file holds a JSON list is
+    no record, so it gates nothing; the wiring write arms the work task
+    instead of failing the whole gate for the turn."""
+    sid = "aaaa1111-0000-4000-8000-000000000001"
+    env, config = _hook_world(
+        tmp_path, ctx_team="s-team", session_id=sid, tasks=["s-team"],
+        configs={"s-team": {"leadSessionId": sid, "members": _MEMBERS}},
+    )
+    store = config / "tasks" / "s-team"
+    (store / "B.json").write_text(json.dumps({
+        "id": "B", "subject": "implement x", "status": "pending",
+        "owner": "backend-coder", "blockedBy": ["X"],
+    }))
+    (store / "X.json").write_text(json.dumps([1]))
+    context = _run_lifecycle_hook(env, {
+        "session_id": sid, "agent_type": "PACT:pact-orchestrator",
+        "hook_event_name": "PostToolUse", "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "B", "owner": "backend-coder"},
+        "tool_response": {"success": True, "taskId": "B", "updatedFields": ["owner"]},
+    })
+    assert "runtime failure" not in context, context
+    assert "--task B --predicate handoff" in context, context
+
+
 def test_config_under_session_id8_arms_against_the_uuid_store(tmp_path):
     """The context and the team config are keyed session-<id8> while the
     task store is the session-UUID directory. Task records come from the

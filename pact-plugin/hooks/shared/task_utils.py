@@ -660,8 +660,9 @@ def read_task_json(
 
     Returns:
         Full task dict from the JSON file, or empty dict on any failure
-        (missing file, malformed JSON, IO error). Fail-open by design —
-        callers treat "no task data" as a signal to bypass, not crash.
+        (missing file, malformed JSON, IO error, or a JSON value that is not
+        an object). Fail-open by design — callers treat "no task data" as a
+        signal to bypass, not crash.
     """
     if not task_id:
         return {}
@@ -723,7 +724,9 @@ def read_task_json(
         # the turn (advisory-suppression DoS).
         try:
             if task_file.exists():
-                return json.loads(task_file.read_text(encoding="utf-8"))
+                task = json.loads(task_file.read_text(encoding="utf-8"))
+                # A list or scalar file is no task: callers .get() the result.
+                return task if isinstance(task, dict) else {}
         except (json.JSONDecodeError, IOError, ValueError):
             return {}
 

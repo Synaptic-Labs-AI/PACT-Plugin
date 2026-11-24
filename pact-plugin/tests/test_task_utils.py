@@ -826,3 +826,16 @@ class TestReadTaskJsonBaseFallback:
             "5", "team-a", tasks_base_dir=str(base), base_fallback=False
         )
         assert result.get("subject") == "OWN"
+
+
+@pytest.mark.parametrize("body", ["[1]", '"text"', "7", "null", "true"])
+def test_read_task_json_returns_empty_for_a_non_object_file(tmp_path, body):
+    """A task file holding valid JSON that is not an object reads as no task
+    ({}), the same as a missing or malformed file, so a caller's .get()
+    never meets a list or a scalar."""
+    from task_utils import read_task_json
+
+    team_dir = tmp_path / "team-a"
+    team_dir.mkdir()
+    (team_dir / "7.json").write_text(body, encoding="utf-8")
+    assert read_task_json("7", "team-a", tasks_base_dir=str(tmp_path)) == {}
