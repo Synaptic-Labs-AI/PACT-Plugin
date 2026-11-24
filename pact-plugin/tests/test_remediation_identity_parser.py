@@ -1724,7 +1724,7 @@ class TestTheRedirectCheckRefusesWhatItCannotCheck:
 
         assert_outside_repository(tmp_path)
         worktree, common = self._linked(tmp_path)
-        monkeypatch.setattr(memory_api, "_listed_worktree_records", lambda *a, **k: None)
+        monkeypatch.setattr(memory_api.project_identity, "listed_worktree_records", lambda *a, **k: None)
         assert memory_api._worktree_redirect_cause(worktree, common) == memory_api.REDIRECT_UNLISTABLE
 
     def test_a_listing_that_cannot_be_read_whole_is_named(self, tmp_path, monkeypatch):
@@ -1733,8 +1733,8 @@ class TestTheRedirectCheckRefusesWhatItCannotCheck:
         assert_outside_repository(tmp_path)
         worktree, common = self._linked(tmp_path)
         monkeypatch.setattr(
-            memory_api, "_listed_worktree_records",
-            lambda *a, **k: memory_api.UNREADABLE_LISTING,
+            memory_api.project_identity, "listed_worktree_records",
+            lambda *a, **k: memory_api.project_identity.UNREADABLE_LISTING,
         )
         assert memory_api._worktree_redirect_cause(worktree, common) == (
             memory_api.REDIRECT_UNREADABLE_LISTING
@@ -1748,7 +1748,7 @@ class TestTheRedirectCheckRefusesWhatItCannotCheck:
         assert_outside_repository(tmp_path)
         worktree, common = self._linked(tmp_path)
         assert memory_api._worktree_redirect_cause(worktree, common) is None
-        monkeypatch.setattr(memory_api, "_listed_worktree_records", lambda *a, **k: [])
+        monkeypatch.setattr(memory_api.project_identity, "listed_worktree_records", lambda *a, **k: [])
         assert memory_api._worktree_redirect_cause(worktree, common) == memory_api.REDIRECT_UNLISTED
 
 
@@ -2021,7 +2021,7 @@ class TestAnOversizedGitFileIsNotReadWhole:
         common = (main / ".git").resolve()
         worktree = tmp_path / "wt"
         run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
-        listing = memory_api._worktree_records(["--git-dir", str(common)])
+        listing = memory_api.project_identity.worktree_records(["--git-dir", str(common)])
         assert memory_api._verified_worktree_roots(main, common, listing) == [
             main.resolve(), worktree.resolve(),
         ]  # control: the worktree is a gate root while its files are whole
@@ -2228,7 +2228,7 @@ class TestAGitFileThatIsNotARegularFileNamesNothing:
         common = (main / ".git").resolve()
         worktree = tmp_path / "wt"
         run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
-        listing = memory_api._worktree_records(["--git-dir", str(common)])
+        listing = memory_api.project_identity.worktree_records(["--git-dir", str(common)])
         assert memory_api._verified_worktree_roots(main, common, listing) == [
             main.resolve(), worktree.resolve(),
         ]  # control: the worktree is a gate root while its admin file is whole

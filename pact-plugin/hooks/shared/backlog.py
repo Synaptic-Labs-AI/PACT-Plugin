@@ -248,7 +248,7 @@ _PROJECT_NAMES: Dict[tuple, Optional[str]] = {}
 
 def _project_name() -> Optional[str]:
     """This location's pre-change project name, detected once per input."""
-    detector = _memory_api().PACTMemory._detect_project_basename
+    detector = _memory_api().PACTMemory.detect_project_basename
     try:
         cwd: Optional[str] = os.getcwd()
     except OSError:
@@ -394,7 +394,7 @@ def _root_and_common_dir(
     root = (
         memory_api.main_repo_root(
             project_dir, common=common,
-            listing=memory_api._LISTING_UNASKED if listing is _LISTING_NOT_READ else listing,
+            listing=memory_api.project_identity.LISTING_UNASKED if listing is _LISTING_NOT_READ else listing,
         )
         if common is not None else None
     )
@@ -425,7 +425,7 @@ def _root_and_common_dir(
         # directory.
         refusal = memory_api.root_check_refusal(
             Path(project_dir), common,
-            listing=memory_api._LISTING_UNASKED if listing is _LISTING_NOT_READ else listing,
+            listing=memory_api.project_identity.LISTING_UNASKED if listing is _LISTING_NOT_READ else listing,
         )
         if refusal is not None:
             cause, remedy = refusal
@@ -500,7 +500,7 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     serving both still needs a mode flag.
     """
     # ONLY TWO-WAY-LINKED worktrees, as the memory skill's read gate keeps
-    # them (`_verified_worktree_roots`): a listed path is what this
+    # them (`project_identity.verified_worktree_roots`): a listed path is what this
     # repository's admin entries claim, and a path cut at a newline or a
     # delivered `.git` can name another repository's checkout. A listing git
     # did not give, or one that cannot be read whole, adds no listed root.
@@ -526,7 +526,7 @@ def checkout_roots(recorded: Any = None) -> List[str]:
     # listing, as a git that failed does.
     anchor = _project_anchor()
     records = (
-        memory_api._listed_worktree_records(None, git_dir=Path(anchor[2]))
+        memory_api.project_identity.listed_worktree_records(None, git_dir=Path(anchor[2]))
         if anchor[2] is not None else None
     )
     root, common = _root_and_common_dir(anchor, records)
@@ -536,7 +536,7 @@ def checkout_roots(recorded: Any = None) -> List[str]:
         if not isinstance(records, list) or not _lists_first(records, root, common):
             roots = [str(Path(root).resolve())]
         else:
-            roots = [str(path) for path in memory_api._verified_worktree_roots(root, common, records)]
+            roots = [str(path) for path in memory_api.project_identity.verified_worktree_roots(root, common, records)]
             for record in records[1:]:
                 path = record[0][len("worktree "):]
                 if not os.path.lexists(path):
@@ -2041,7 +2041,7 @@ def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
     # repository's listing, and its worktree folders are not this project's.
     # A listing read that raises gives no listing, as a git that failed does.
     try:
-        worktrees = memory_api._worktree_records(at)
+        worktrees = memory_api.project_identity.worktree_records(at)
         ours = isinstance(worktrees, list) and _lists_first(
             worktrees, project_path, memory_api.main_repo_common_dir(project_path)
         )

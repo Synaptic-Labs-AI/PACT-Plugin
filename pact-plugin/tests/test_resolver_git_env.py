@@ -168,8 +168,8 @@ _ROOT_MODULE = "hooks/shared/project_scope.py"
 # fewer is not reading the module it names (a parse or detection regression),
 # so the floor fails it rather than letting an empty scan pass.
 _GIT_CALL_FLOORS = {
-    "memory_api.py": 4,
-    "project_identity.py": 3,
+    "memory_api.py": 3,
+    "project_identity.py": 4,
     "project_scope.py": 5,
 }
 # Every other plugin module that runs git, or a command the scan cannot

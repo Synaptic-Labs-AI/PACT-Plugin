@@ -1651,7 +1651,7 @@ def test_an_unresolvable_project_id_refuses_to_write(monkeypatch, tmp_path):
             # `store_path` asks for the BASENAME deliberately: the canonical
             # id contains `/` and cannot be a path component.
             @staticmethod
-            def _detect_project_basename():
+            def detect_project_basename():
                 return None
 
     monkeypatch.setattr(backlog, "_memory_api", lambda: _Stub)
@@ -2274,7 +2274,7 @@ def test_a_separate_git_dir_checkout_is_one_of_its_own_roots(tmp_path, monkeypat
 
     listed = {
         str(Path(record[0][len("worktree "):]).resolve())
-        for record in backlog._memory_api()._worktree_records(["-C", str(main)])
+        for record in backlog._memory_api().project_identity.worktree_records(["-C", str(main)])
     }
     roots = backlog.checkout_roots()
 
@@ -2486,7 +2486,7 @@ def test_a_folder_naming_another_folders_git_dir_carries_its_worktrees(tmp_path,
     folder.mkdir()
     (folder / ".git").write_text(f"gitdir: {other / '.git'}\n")
     _root_is(monkeypatch, folder.resolve())
-    listed = [record[0] for record in backlog._memory_api()._worktree_records(["-C", str(folder)])]
+    listed = [record[0] for record in backlog._memory_api().project_identity.worktree_records(["-C", str(folder)])]
     assert f"worktree {(tmp_path / 'other-wt').resolve()}" in listed, f"control: {listed}"
 
     assert backlog.checkout_roots() == [str(folder.resolve()), str((tmp_path / "other-wt").resolve())]
@@ -2762,7 +2762,7 @@ def test_a_listing_with_no_record_to_read_gives_one_answer(tmp_path, monkeypatch
     _root_is(monkeypatch, wt)
     _git_listing(tmp_path, monkeypatch, _LISTINGS_WITH_NO_RECORD[listing])
 
-    read = backlog._memory_api()._worktree_records(["--git-dir", str(store)])
+    read = backlog._memory_api().project_identity.worktree_records(["--git-dir", str(store)])
     try:
         roots = backlog.checkout_roots([str(main), str(wt)])
     except Exception as error:  # a raise is the answer under test, not a harness failure
@@ -2861,7 +2861,7 @@ def test_a_listing_read_that_raises_gives_the_answer_no_listing_gives(tmp_path, 
     def raising(*_args):
         raise error("the listing read raised")
 
-    monkeypatch.setattr(memory_api, "_worktree_records", raising)
+    monkeypatch.setattr(memory_api.project_identity, "worktree_records", raising)
     outcome = _roots_or_refusal(recorded)
 
     if layout == "main checkout":
@@ -2909,7 +2909,7 @@ def test_a_first_write_whose_listing_read_raises_gives_a_later_writes_answer(
     def raising(*_args):
         raise error("the listing read raised")
 
-    monkeypatch.setattr(memory_api, "_worktree_records", raising)
+    monkeypatch.setattr(memory_api.project_identity, "worktree_records", raising)
     first, later = _first_write_or_refusal(new), _roots_or_refusal()
 
     if layout == "main checkout":
@@ -2945,14 +2945,14 @@ def test_every_other_listing_read_that_raises_gives_what_no_listing_gives(tmp_pa
         return outcomes
 
     listed = readers()
-    monkeypatch.setattr(memory_api, "_worktree_records", lambda *_args: None)
+    monkeypatch.setattr(memory_api.project_identity, "worktree_records", lambda *_args: None)
     unlisted = readers()
     assert all(len(a) > len(b) for a, b in zip(listed, unlisted)), "control: the listing adds to each"
 
     def raising(*_args):
         raise error("the listing read raised")
 
-    monkeypatch.setattr(memory_api, "_worktree_records", raising)
+    monkeypatch.setattr(memory_api.project_identity, "worktree_records", raising)
     assert readers() == unlisted
 
 
@@ -3381,7 +3381,7 @@ def test_one_write_reads_a_raised_listing_once(tmp_path, monkeypatch, raising_re
     _project_dir_is(monkeypatch, (tmp_path / "wt").resolve())
     monkeypatch.setattr(backlog, "_PROJECT_NAMES", {})
     memory_api = backlog._memory_api()
-    read, check = memory_api._worktree_records, memory_api._worktree_redirect_cause
+    read, check = memory_api.project_identity.worktree_records, memory_api._worktree_redirect_cause
     reads, causes = [], []
 
     def raising_on_one_read(*args):
@@ -3394,7 +3394,7 @@ def test_one_write_reads_a_raised_listing_once(tmp_path, monkeypatch, raising_re
         causes.append(check(*args, **kwargs))
         return causes[-1]
 
-    monkeypatch.setattr(memory_api, "_worktree_records", raising_on_one_read)
+    monkeypatch.setattr(memory_api.project_identity, "worktree_records", raising_on_one_read)
     monkeypatch.setattr(memory_api, "_worktree_redirect_cause", recording)
     store = tmp_path / "store"
     store.mkdir()
@@ -3746,7 +3746,7 @@ def test_a_listed_worktree_whose_git_does_not_name_it_back_is_not_a_root(
 
     listed = {
         str(Path(record[0][len("worktree "):]).resolve())
-        for record in backlog._memory_api()._worktree_records(["-C", str(main)])
+        for record in backlog._memory_api().project_identity.worktree_records(["-C", str(main)])
     }
     roots = backlog.checkout_roots()
 
@@ -3900,7 +3900,7 @@ def test_an_unreadable_listing_with_no_branches_flags_nothing(tmp_path, monkeypa
 
     memory_api = backlog._memory_api()
     monkeypatch.setattr(
-        memory_api, "_worktree_records", lambda at: memory_api.UNREADABLE_LISTING
+        memory_api.project_identity, "worktree_records", lambda at: memory_api.project_identity.UNREADABLE_LISTING
     )
     assert backlog._branch_and_worktree_names(str(repo)) is None
     assert backlog._abandoned_flags(stale, str(repo)) == [], (
@@ -4006,7 +4006,7 @@ def test_a_folder_naming_another_folders_git_dir_reads_its_worktree_names(tmp_pa
     folder = tmp_path / "folder"
     folder.mkdir()
     (folder / ".git").write_text(f"gitdir: {other / '.git'}\n")
-    listed = [record[0] for record in backlog._memory_api()._worktree_records(["-C", str(folder)])]
+    listed = [record[0] for record in backlog._memory_api().project_identity.worktree_records(["-C", str(folder)])]
     assert f"worktree {(tmp_path / 'theirs-8').resolve()}" in listed, f"control: {listed}"
 
     names = backlog._branch_and_worktree_names(str(folder))
@@ -6711,7 +6711,7 @@ def test_a_directory_inside_a_repository_git_cannot_read_still_refuses(tmp_path,
         # The refusal's own cause comes from the real root check, which asks
         # no git when git gave no common dir.
         root_check_refusal = staticmethod(real.root_check_refusal)
-        _LISTING_UNASKED = real._LISTING_UNASKED
+        project_identity = real.project_identity
         # `main` holds the memory skill's decline warnings on its own logger,
         # and runs the command in one detection pass.
         logger = real.logger
@@ -8068,7 +8068,7 @@ def test_each_worktree_listing_reads_to_its_answer(
     paths["d"].mkdir()
     nul, plain = (text.format(**paths) for text in (nul, plain))
     _canned_git(tmp_path, monkeypatch, nul, plain)
-    ours = backlog._memory_api()._worktree_records(["-C", str(tmp_path)])
+    ours = backlog._memory_api().project_identity.worktree_records(["-C", str(tmp_path)])
     if isinstance(readable, tuple):
         assert isinstance(ours, list), (name, ours)
         read = [record[0] for record in ours]
@@ -8158,7 +8158,7 @@ def test_every_layout_git_lists_reads_whole(tmp_path, monkeypatch, nul):
         separate: [tmp_path / "store", tmp_path / "separate-wt"],
     }
     for where, paths in kept.items():
-        ours = memory_api._worktree_records(["-C", str(where)])
+        ours = memory_api.project_identity.worktree_records(["-C", str(where)])
         assert isinstance(ours, list), (where, ours)
         read = [Path(record[0][len("worktree "):]).resolve() for record in ours]
         assert sorted(read) == sorted(path.resolve() for path in paths), (where, read)

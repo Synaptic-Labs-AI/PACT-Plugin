@@ -1421,8 +1421,8 @@ def _gate_root_paths(roots: Any) -> Tuple[str, ...]:
 
 def _gitfile_target(marker: str) -> Optional[str]:
     """The real path a `gitdir: <path>` file names, read whole as git reads
-    it (`project_identity.gitfile_target`), or None. Never raises."""
-    from .project_identity import gitfile_target, read_git_file
+    it (`shared.git_helpers.gitfile_target`), or None. Never raises."""
+    from shared.git_helpers import gitfile_target, read_git_file
 
     try:
         text = read_git_file(marker)
@@ -1445,7 +1445,7 @@ def _worktree_admin_of(root: str, root_common: str, name: str) -> bool:
     Read from the COMMON DIR's side, never from the root's own `.git`: the
     admin dir's `gitdir` file must name `<root>/.git` back. Never raises.
     """
-    from .project_identity import read_git_file, worktree_admin_gitdir
+    from shared.git_helpers import read_git_file, worktree_admin_gitdir
 
     admin = os.path.join(root_common, "worktrees", name)
     try:

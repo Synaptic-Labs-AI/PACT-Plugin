@@ -35,6 +35,7 @@ from scripts.memory_api import PACTMemory
 from shared import backlog
 
 from scripts import memory_api
+from scripts import project_identity
 
 MEMORY_API = Path(memory_api.__file__)
 CREATED_AT = "2026-01-01T00:00:00+00:00"
@@ -507,7 +508,7 @@ PRE_CHANGE_CASES = [
 
 
 class TestThePreChangeName:
-    """`_detect_project_basename` returns what the pre-change resolver did.
+    """`detect_project_basename` returns what the pre-change resolver did.
 
     Catches a backlog file renamed by the upgrade (a submodule's `vendor.json`
     becoming `lib.json`, a redirected checkout named after itself) and a
@@ -543,7 +544,7 @@ class TestThePreChangeName:
         self, name_rig, monkeypatch, case, cwd, declared, record, expected
     ):
         self._place(name_rig, monkeypatch, cwd, declared, record)
-        assert PACTMemory._detect_project_basename() == expected
+        assert PACTMemory.detect_project_basename() == expected
 
     def test_the_home_landing_case_takes_the_home_branch(
         self, name_rig, monkeypatch, caplog
@@ -552,7 +553,7 @@ class TestThePreChangeName:
         fire: a `.claude` marker walk also names `home`, without the warning."""
         self._place(name_rig, monkeypatch, "home_notes", None, None)
         with caplog.at_level(logging.WARNING):
-            assert PACTMemory._detect_project_basename() == "home"
+            assert PACTMemory.detect_project_basename() == "home"
         assert any("HOME directory" in record.getMessage() for record in caplog.records)
 
     def test_the_user_setting_rung_keeps_the_folder_name(
@@ -565,7 +566,7 @@ class TestThePreChangeName:
         )
         detected = PACTMemory._detect_project_identity_with_legacy()
         assert detected.source == "user setting"
-        assert PACTMemory._detect_project_basename() == "x"
+        assert PACTMemory.detect_project_basename() == "x"
 
     def test_a_deleted_cwd_has_no_name(self, tmp_path, monkeypatch):
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
@@ -573,7 +574,7 @@ class TestThePreChangeName:
         doomed.mkdir()
         monkeypatch.chdir(doomed)
         doomed.rmdir()
-        assert PACTMemory._detect_project_basename() is None
+        assert PACTMemory.detect_project_basename() is None
 
     def test_the_real_writer_refuses_where_the_pre_change_resolver_did(
         self, name_rig, monkeypatch, tmp_path
@@ -2472,7 +2473,7 @@ class TestOneConstructionAsksGitEachQuestionOnce:
         def watching():
             seen.append(tuple(id(var.get()) for var in (
                 memory_api._DETECTION_COMMON_DIRS, memory_api.project_identity.DETECTION_GIT_DIRS,
-                memory_api._DETECTION_ANSWERS, memory_api._DETECTION_LISTINGS,
+                project_identity.DETECTION_ANSWERS, project_identity.DETECTION_LISTINGS,
             )))
             return detect()
 
@@ -2608,7 +2609,7 @@ class TestOneConstructionAsksGitEachQuestionOnce:
 
         variables = (
             memory_api._DETECTION_COMMON_DIRS, memory_api.project_identity.DETECTION_GIT_DIRS,
-            memory_api._DETECTION_ANSWERS, memory_api._DETECTION_LISTINGS,
+            project_identity.DETECTION_ANSWERS, project_identity.DETECTION_LISTINGS,
         )
 
         def held():
@@ -3777,7 +3778,7 @@ def _target_classes() -> set:
 
 def _listing_sentinels(trees: "dict | None" = None) -> set:
     """Every module-level string constant (`module_string_constants`, read
-    from every binding form) a listing module's `_worktree_records` returns
+    from every binding form) a listing module's `worktree_records` returns
     bare, where the function binds no local of that name: the answers that
     are no record list."""
     from fixtures.code_readers import _reader_for, module_string_constants
@@ -3786,7 +3787,7 @@ def _listing_sentinels(trees: "dict | None" = None) -> set:
     for tree in (_listing_answer_modules() if trees is None else trees).values():
         constants, reader = module_string_constants(tree), _reader_for(tree)
         for node in tree.body:
-            if isinstance(node, ast.FunctionDef) and node.name == "_worktree_records":
+            if isinstance(node, ast.FunctionDef) and node.name == "worktree_records":
                 sentinels |= {
                     ret.value.id for ret in ast.walk(node)
                     if isinstance(ret, ast.Return) and isinstance(ret.value, ast.Name)
@@ -4114,8 +4115,9 @@ def _answer_passers(tree) -> dict:
 
 
 def _listing_answer_modules() -> dict:
-    """{path relative to the plugin root: tree} for the two modules that read
-    or pass a worktree listing: the memory skill's and the backlog's. Keyed by
+    """{path relative to the plugin root: tree} for the modules that read or
+    pass a worktree listing: the identity module's reader, the memory skill's
+    and the backlog's. Keyed by
     path, not file name, so two modules of one name could not hide each
     other.
 
@@ -4127,7 +4129,7 @@ def _listing_answer_modules() -> dict:
     return {
         Path(module.__file__).resolve().relative_to(plugin).as_posix():
             _parsed_source(Path(module.__file__).read_text(encoding="utf-8"))
-        for module in (memory_api, backlog)
+        for module in (project_identity, memory_api, backlog)
     }
 
 
@@ -4255,15 +4257,15 @@ class TestTheListingAnswerWalkFollowsEveryForm:
         assert sentinels <= set(vars(memory_api)), sentinels - set(vars(memory_api))
 
     def test_the_answers_are_every_string_the_readers_return_bare(self):
-        """Control: the names `_worktree_records` returns bare whose value in
+        """Control: the names `worktree_records` returns bare whose value in
         the imported module is a string are exactly the answers read from
         the source, so a sentinel bound by a form the table cannot read is
         missed loudly."""
         returned = set()
-        for module in (memory_api, backlog):
+        for module in (project_identity, memory_api, backlog):
             tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
             for node in tree.body:
-                if isinstance(node, ast.FunctionDef) and node.name == "_worktree_records":
+                if isinstance(node, ast.FunctionDef) and node.name == "worktree_records":
                     returned |= {
                         ret.value.id for ret in ast.walk(node)
                         if isinstance(ret, ast.Return) and isinstance(ret.value, ast.Name)
@@ -4273,12 +4275,12 @@ class TestTheListingAnswerWalkFollowsEveryForm:
         assert _listing_sentinels() == returned, _listing_sentinels() ^ returned
 
     @pytest.mark.parametrize("source, sentinels", [
-        ("EMPTY_LISTING = 'empty'\ndef _worktree_records():\n    return EMPTY_LISTING\n", {"EMPTY_LISTING"}),
-        ("EMPTY_LISTING: Final = 'empty'\ndef _worktree_records():\n    return EMPTY_LISTING\n", {"EMPTY_LISTING"}),
-        ("EMPTY_LISTING = 'empty'\nEMPTY_LISTING += 'x'\ndef _worktree_records():\n    return EMPTY_LISTING\n", set()),
-        ("EMPTY_LISTING = 'empty'\ndef _worktree_records():\n    EMPTY_LISTING = g()\n    return EMPTY_LISTING\n",
+        ("EMPTY_LISTING = 'empty'\ndef worktree_records():\n    return EMPTY_LISTING\n", {"EMPTY_LISTING"}),
+        ("EMPTY_LISTING: Final = 'empty'\ndef worktree_records():\n    return EMPTY_LISTING\n", {"EMPTY_LISTING"}),
+        ("EMPTY_LISTING = 'empty'\nEMPTY_LISTING += 'x'\ndef worktree_records():\n    return EMPTY_LISTING\n", set()),
+        ("EMPTY_LISTING = 'empty'\ndef worktree_records():\n    EMPTY_LISTING = g()\n    return EMPTY_LISTING\n",
          set()),
-        ("def _worktree_records(records):\n    return records\n", set()),
+        ("def worktree_records(records):\n    return records\n", set()),
     ])
     def test_an_answer_is_a_constant_by_every_binding_form(self, source, sentinels):
         assert _listing_sentinels({"m": ast.parse(source)}) == sentinels
@@ -4459,10 +4461,10 @@ class TestTheListingAnswerWalkFollowsEveryForm:
 
 def _listing_readers() -> dict:
     """{module name: reader} for every module that reads the worktree
-    listing itself (has a `_worktree_records`)."""
+    listing itself (has a `worktree_records`)."""
     return {
-        module.__name__: module._worktree_records
-        for module in (memory_api, backlog) if hasattr(module, "_worktree_records")
+        module.__name__: module.worktree_records
+        for module in (project_identity, memory_api, backlog) if hasattr(module, "worktree_records")
     }
 
 
@@ -4478,7 +4480,7 @@ class TestAnUnknownZFieldIsMatchedByItsWholeKey:
 
     @staticmethod
     def _keys():
-        known = {key.rstrip() for key, _rank in memory_api._PORCELAIN_ORDER}
+        known = {key.rstrip() for key, _rank in memory_api.project_identity._PORCELAIN_ORDER}
         built = {
             "".join(letters)
             for key in known for end in range(1, len(key) + 1) for extension in ("", "x")
@@ -5069,7 +5071,7 @@ LOCAL_SHAPES = {
 }
 
 # How a linked worktree comes to carry each field git prints in its listing
-# record (`memory_api._PORCELAIN_ORDER`): the git commands run after `git
+# record (`memory_api.project_identity._PORCELAIN_ORDER`): the git commands run after `git
 # worktree add`, and whether the worktree is added detached.
 _RECORD_FIELD_SETUP = {
     "branch ": ((), False),
@@ -5127,7 +5129,7 @@ class TestARelocatedWorktreeIsMovedOnlyWhereGitSaysSo:
     def test_every_record_field_is_set_up_or_named(self):
         from scripts import memory_api
 
-        fields = {key for key, _place in memory_api._PORCELAIN_ORDER}
+        fields = {key for key, _place in memory_api.project_identity._PORCELAIN_ORDER}
         assert fields == set(_RECORD_FIELD_SETUP) | _RECORD_FIELDS_NOT_SET_UP, fields
 
     def test_control_git_marks_some_moved_entries_and_not_others(self, tmp_path):
@@ -5273,7 +5275,7 @@ class TestARedirectRefusalNamesWhatWasObserved:
         a docstring, names there every answer that is no record list
         (`_listing_sentinels`, read from the readers)."""
         passers, _taking = _walk_answers(_listing_answer_modules())
-        assert ("skills/pact-memory/scripts/memory_api.py", "_worktree_records") in passers, sorted(passers)  # control
+        assert ("skills/pact-memory/scripts/project_identity.py", "worktree_records") in passers, sorted(passers)  # control
         named = [f"`{sentinel}`" for sentinel in sorted(_listing_sentinels())]
         wrong = {
             key: (ast.unparse(function.returns) if function.returns else None, ast.get_docstring(function))

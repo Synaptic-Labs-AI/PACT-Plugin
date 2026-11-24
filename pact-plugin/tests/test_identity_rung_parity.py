@@ -3228,7 +3228,7 @@ class TestAGitPathAnswerIsNeverStripped:
         main = make_repo(tmp_path / "main")
         worktree = tmp_path / "w\nt"
         run_git("worktree", "add", "-q", str(worktree), "-b", "wt", cwd=main)
-        listed = memory_api._worktree_toplevels(memory_api._ask_worktree_records(None, main / ".git"))
+        listed = memory_api.project_identity.worktree_toplevels(memory_api.project_identity._ask_worktree_records(None, main / ".git"))
         assert listed == {main.resolve(), worktree.resolve()}
 
     def test_the_verified_worktrees_keep_a_newline_in_the_admin_path(self, tmp_path):

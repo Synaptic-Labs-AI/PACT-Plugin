@@ -210,6 +210,18 @@ def worktree_admin_gitdir(text: str) -> str:
     return text.rstrip(" \t\n\v\f\r")
 
 
+def gitfile_target(text: str) -> Optional[str]:
+    """The git dir a `.git` file names, read as git reads it
+    (`read_gitfile_gently`): the whole file must start with `gitdir: `,
+    exactly one space included; every trailing newline and carriage return
+    is dropped; the rest is the path, verbatim. None when the file does not
+    start with `gitdir: `, names no path, or is larger than the 1 MiB git
+    reads."""
+    if len(os.fsencode(text)) > GIT_FILE_LIMIT or not text.startswith("gitdir: "):
+        return None
+    return text.rstrip("\r\n")[len("gitdir: "):] or None
+
+
 _GIT_BOOL_TRUE = frozenset({"true", "yes", "on"})
 _GIT_BOOL_FALSE = frozenset({"", "false", "no", "off"})
 # git's integer form (`git_parse_signed`): C whitespace, an optional sign,

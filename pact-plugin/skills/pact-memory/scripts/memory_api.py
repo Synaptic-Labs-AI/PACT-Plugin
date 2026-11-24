@@ -77,6 +77,8 @@ from .graph import (
 from .models import MemoryObject, memory_from_db_row
 from . import project_identity
 from .project_identity import (
+    EMPTY_LISTING,
+    UNREADABLE_LISTING,
     _submodule_admin_dir,
     decline_record,
     detect_id_for_root,
@@ -1019,7 +1021,7 @@ _TOPLEVEL_UNASKED: Any = object()
 # The default for `listing` in `main_repo_root`, `root_check_refusal` and
 # the redirect check: the caller holds no worktree listing, so the check
 # asks git itself.
-_LISTING_UNASKED: Any = object()
+_LISTING_UNASKED: Any = project_identity.LISTING_UNASKED
 
 
 def _root_guard(
@@ -1131,7 +1133,7 @@ def root_check_refusal(
     `asked_root`, as one sentence each, or None when the root passes. The
     arm is `_root_guard_arm`'s, as for `_root_guard`; nothing is logged.
 
-    `listing` is the caller's `_worktree_records` answer for `--git-dir
+    `listing` is the caller's `project_identity.worktree_records` answer for `--git-dir
     <common_dir>`, when it holds one, for the redirect check; left out, the
     check asks git."""
     arm = _root_guard_arm(asked_root, common_dir, listing=listing)
@@ -1862,29 +1864,10 @@ _DETECTION_COMMON_DIRS: "contextvars.ContextVar[Optional[Dict[str, Optional[Path
     contextvars.ContextVar("_DETECTION_COMMON_DIRS", default=None)
 )
 
-# THE PASS'S OTHER GIT ANSWERS (`rev-parse` questions and worktree listings,
-# keyed by the question and the resolved directory it is asked in, and a
-# root's identity read, keyed ('identity', root, common dir, asked root)), a
-# failed answer included. Set by `detection_pass` beside `_DETECTION_COMMON_DIRS` and
-# reset when the pass ends; unlike that memo it is not handed to the first
-# legacy read. A forged worktree pointer is checked twice in one pass, by the
-# root finder and by the rung's guard, and without this each check lists the
-# worktrees and asks the toplevel again.
-_DETECTION_ANSWERS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
-    "_DETECTION_ANSWERS", default=None
-)
-
-
-# THE PASS'S WORKTREE LISTINGS, keyed by the `--git-dir` argument exactly as
-# git was given it, each the records `_worktree_records` read. Only a listing
-# git gave is kept. Set by `detection_pass` beside `_DETECTION_ANSWERS`, and
-# handed by a construction to its FIRST legacy read, whose gate asks for the
-# same listing of the same common dir; a later read lists again, answered
-# from an open pass's git results (`git_helpers.PASS_GIT_RESULTS`) when that
-# pass already listed the same common dir, and by git otherwise.
-_DETECTION_LISTINGS: "contextvars.ContextVar[Optional[dict]]" = contextvars.ContextVar(
-    "_DETECTION_LISTINGS", default=None
-)
+# THE PASS'S OTHER GIT ANSWERS AND ITS WORKTREE LISTINGS live in
+# `project_identity` (`DETECTION_ANSWERS`, `DETECTION_LISTINGS`) beside its
+# git-dir memo, because its worktree listing reader fills them; this module
+# opens and closes them in `detection_pass`.
 
 
 @contextmanager
@@ -1908,20 +1891,20 @@ def detection_pass():
     it reads one answer."""
     from shared.git_helpers import git_results_pass
 
-    if _DETECTION_ANSWERS.get() is not None:
+    if project_identity.DETECTION_ANSWERS.get() is not None:
         yield {
             "common_dirs": _DETECTION_COMMON_DIRS.get(),
             "git_dirs": project_identity.DETECTION_GIT_DIRS.get(),
-            "answers": _DETECTION_ANSWERS.get(),
-            "listings": _DETECTION_LISTINGS.get(),
+            "answers": project_identity.DETECTION_ANSWERS.get(),
+            "listings": project_identity.DETECTION_LISTINGS.get(),
         }
         return
     memos = {"common_dirs": {}, "git_dirs": {}, "answers": {}, "listings": {}}
     tokens = (
         (_DETECTION_COMMON_DIRS, _DETECTION_COMMON_DIRS.set(memos["common_dirs"])),
         (project_identity.DETECTION_GIT_DIRS, project_identity.DETECTION_GIT_DIRS.set(memos["git_dirs"])),
-        (_DETECTION_ANSWERS, _DETECTION_ANSWERS.set(memos["answers"])),
-        (_DETECTION_LISTINGS, _DETECTION_LISTINGS.set(memos["listings"])),
+        (project_identity.DETECTION_ANSWERS, project_identity.DETECTION_ANSWERS.set(memos["answers"])),
+        (project_identity.DETECTION_LISTINGS, project_identity.DETECTION_LISTINGS.set(memos["listings"])),
     )
     try:
         with git_results_pass():
@@ -1930,25 +1913,6 @@ def detection_pass():
         for var, token in reversed(tokens):
             var.reset(token)
         _LEGACY_SCOPE_CACHE.clear()
-
-
-def _detection_answer(question: tuple, ask):
-    """`ask()`'s answer, asked once per detection pass for each question.
-    Outside a pass every call asks."""
-    memo = _DETECTION_ANSWERS.get()
-    if memo is None:
-        return ask()
-    if question not in memo:
-        memo[question] = ask()
-    return memo[question]
-
-
-def _where(start) -> str:
-    """The resolved directory a git question is asked in (the cwd for None)."""
-    try:
-        return os.path.realpath(start if start is not None else os.getcwd())
-    except (OSError, ValueError):
-        return str(start)
 
 
 def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
@@ -2044,312 +2008,12 @@ def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
         return None
 
 
-
-def _listed_worktree_records(
-    start, *, git_dir: Optional[Path] = None
-) -> "Optional[List[List[str]] | str]":
-    """Every record `git worktree list` reports for `start`'s repository.
-
-    With `git_dir`, the listing is of THAT repository (`--git-dir`), which is
-    the only form that reaches a submodule's own worktrees: run from a
-    directory, git discovers the enclosing repository instead.
-
-    `None` when git cannot enumerate, or the read raises — a failed ANSWER,
-    not a failed verification, so callers must not treat it as proof of a
-    redirect. `EMPTY_LISTING` or `UNREADABLE_LISTING` when git printed a
-    listing that is no record list (`_worktree_records`).
-    """
-    target = ("--git-dir", _where(git_dir)) if git_dir is not None else ("-C", _where(start))
-
-    def ask():
-        # A read that raises gives no listing, as a git that failed does, and
-        # that answer is the pass's: every later reader sees the same failure.
-        try:
-            return _ask_worktree_records(start, git_dir)
-        except (OSError, RuntimeError, ValueError):
-            return None
-
-    return _detection_answer(("worktree list", target), ask)
-
-
-def _worktree_toplevels(records) -> "Optional[set | str]":
-    """The resolved path of every record; an answer that is no record list
-    (`None`, `EMPTY_LISTING`, `UNREADABLE_LISTING`) is returned as it is. A
-    path that will not resolve is skipped."""
-    if not isinstance(records, list):
-        return records
-    toplevels = set()
-    for record in records:
-        for field in record:
-            if not field.startswith("worktree "):
-                continue
-            try:
-                toplevels.add(Path(field[len("worktree "):]).resolve())
-            except (OSError, RuntimeError):
-                continue
-    return toplevels
-
-
-# git's exit status for a usage error (parse-options), which is how a git
-# older than 2.36 answers `worktree list -z`: that option did not exist yet.
-_GIT_USAGE_ERROR = 129
-
-# The fields `git worktree list --porcelain` prints, one per line, each a
-# key and a value (ending in a space here) or a bare flag, with its place
-# in the order git prints a record (builtin/worktree.c,
-# show_worktree_porcelain): `worktree`, then `bare` or `HEAD`, then
-# `detached` or `branch`, then `locked`, then `prunable`, which git prints
-# only with a reason.
-_PORCELAIN_ORDER = (
-    ("worktree ", 0), ("bare", 1), ("HEAD ", 1), ("detached", 2),
-    ("branch ", 2), ("locked", 3), ("locked ", 3), ("prunable ", 4),
-)
-
-# `_worktree_records`' answers for a listing git printed that is no record
-# list (None is a listing git did not give): one holding no record or an
-# empty record, and one whose records are not git's fields in git's order.
-EMPTY_LISTING = "empty"
-UNREADABLE_LISTING = "unreadable"
-
-
-def _worktree_records(prefix: list) -> "Optional[List[List[str]] | str]":
-    """`git <prefix> worktree list --porcelain` as records, each the list of
-    its fields; `EMPTY_LISTING` when git printed no record or an empty one;
-    `UNREADABLE_LISTING` when git printed records that are not git's fields
-    in git's order; or None when no listing can be had.
-
-    `-z` is asked first: every field then ends in NUL and an empty field ends
-    a record, so a path holding a newline stays whole. A git older than 2.36
-    rejects `-z` as a usage error, and the listing is asked again without
-    it; that listing is one field per line, with a blank line ending each
-    record, and git prints a path there unquoted, so a path holding a newline
-    is cut into lines.
-
-    With `-z`, a field whose key git did not print when this reader was
-    written is skipped (`_porcelain_key_known`). Either way, a record whose
-    fields are not git's, in git's order (`_record_fields_in_order`), makes
-    the listing `UNREADABLE_LISTING`, not records. An empty record or a
-    listing with no record is `EMPTY_LISTING`: git always lists the main
-    worktree first. Without `-z`, a `bare` record that is not the main
-    repository's directory also makes the listing `UNREADABLE_LISTING`, and
-    a linked worktree's record is dropped when its folder is present but
-    holds no `.git`; a record whose folder is absent is kept
-    (`_plain_records_kept`). None is a failed or timed-out git. A caller
-    reads neither string as an empty listing.
-    """
-    from shared.git_helpers import answered_once
-    from shared.project_scope import git_env_without_location
-
-    def ask(extra: list):
-        argv = ["git", *prefix, "worktree", "list", "--porcelain", *extra]
-        return answered_once(
-            argv,
-            lambda: subprocess.run(
-                argv, capture_output=True, text=False, timeout=5,
-                env=git_env_without_location(),
-            ),
-            text=False,
-            env=git_env_without_location(),
-        )
-
-    try:
-        result = ask(["-z"])
-        nul = result.returncode != _GIT_USAGE_ERROR
-        if not nul:
-            result = ask([])
-    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
-        return None
-    if result.returncode != 0:
-        return None
-    # The text after the last terminator is "" when git ended the listing
-    # with one; it is not an empty field.
-    *fields, tail = os.fsdecode(result.stdout).split("\0" if nul else "\n")
-    records, current = [], []
-    for field in fields + ([tail] if tail else []):
-        if field:
-            current.append(field)
-        elif current:
-            records.append(current)
-            current = []
-        else:
-            return EMPTY_LISTING
-    if current:
-        records.append(current)
-    if not records:
-        return EMPTY_LISTING
-    if nul:
-        records = [[f for f in record if _porcelain_key_known(f)] for record in records]
-    if not all(_record_fields_in_order(record) for record in records):
-        return UNREADABLE_LISTING
-    if not nul:
-        kept = _plain_records_kept(records)
-        if kept is None:
-            return UNREADABLE_LISTING
-        records = kept
-    # git prints the path a worktree's admin entry holds; a NUL in that file
-    # can leave it empty or relative, and such a path would resolve against
-    # the process cwd. It names no directory, so its record is dropped.
-    return [record for record in records if os.path.isabs(record[0][len("worktree "):])]
-
-
-def _porcelain_key_known(field: str) -> bool:
-    """Whether a `-z` listing field's key is one `_PORCELAIN_ORDER` names.
-
-    A field with any other key is one git added after this reader (as git
-    2.31 added `locked` and `prunable`), and is skipped. With `-z` no path is
-    cut, so such a field is never part of a path; without `-z` it can be,
-    and every field must be known."""
-    key = field.split(" ", 1)[0]
-    return any(key == known.rstrip() for known, _ in _PORCELAIN_ORDER)
-
-
-def _record_fields_in_order(record: List[str]) -> bool:
-    """Whether a listing record holds only fields git prints, in the order
-    git prints them (`_PORCELAIN_ORDER`), with or without `-z`.
-
-    git prints a record's `worktree` field first and its `bare` or `HEAD`
-    field second. Without `-z`, a path cut at a newline puts the rest of the
-    folder name between those two lines, or ends the record after the
-    `worktree` line; with `-z`, a listing cut short or holding a stray NUL
-    does the same. Either record is refused here.
-    """
-    places = []
-    for field in record:
-        place = next(
-            (
-                rank for key, rank in _PORCELAIN_ORDER
-                if (field.startswith(key) if key.endswith(" ") else field == key)
-            ),
-            None,
-        )
-        if place is None:
-            return False
-        places.append(place)
-    if places[:2] != [0, 1] or any(a >= b for a, b in zip(places, places[1:])):
-        return False
-    return record[1] != "bare" or 2 not in places
-
-
-def _plain_records_kept(records: List[List[str]]) -> Optional[List[List[str]]]:
-    """The records of a listing without `-z` that name a checkout, or None
-    when the listing cannot be read: one stat per record, no git call.
-
-    The main repository's record is kept: git derives its path from the
-    repository itself, and with `--separate-git-dir` that path is the git
-    directory, which holds no `.git`. If it says `bare`, its path must be a
-    directory; `bare` in any other record is not git's. A linked worktree's
-    record is dropped when its folder is present but holds no `.git`: git
-    still lists a worktree whose folder lost its `.git`, and a path cut at a
-    newline can name a present folder git did not list. A dropped record
-    cannot be the asked checkout and adds no root. A record whose folder is
-    absent is kept, as the `-z` listing keeps it: a worktree on a drive not
-    mounted now, or one moved or deleted (git before 2.31 prints no
-    `prunable` or `locked` line to tell them apart). An absent folder names
-    no other repository's checkout.
-    """
-    kept = []
-    for index, record in enumerate(records):
-        path = record[0][len("worktree "):]
-        if "bare" in record:
-            if index != 0 or not os.path.isdir(path):
-                return None
-        elif (
-            index != 0
-            and not os.path.lexists(os.path.join(path, ".git"))
-            and os.path.lexists(path)
-        ):
-            continue
-        kept.append(record)
-    return kept
-
-
-def _ask_worktree_records(start, git_dir: Optional[Path]) -> "Optional[List[List[str]] | str]":
-    prefix = (
-        ["--git-dir", str(git_dir)] if git_dir is not None
-        else ["-C", str(start)] if start is not None
-        else []
-    )
-    records = _worktree_records(prefix)
-    # KEEP THIS `if not isinstance(records, list): return` ABOVE THE STORE
-    # BELOW, and bind `records` nowhere between them. A listing answer may be
-    # stored in a container only where such a test, or the body of `if
-    # isinstance(records, list):`, has excluded every answer that is not a
-    # record list; a test fails a store of a listing answer neither guards.
-    if not isinstance(records, list):
-        return records
-    listings = _DETECTION_LISTINGS.get()
-    if listings is not None and git_dir is not None:
-        listings[str(git_dir)] = records
-    return records
-
-
 def _verified_worktree_roots(
     repo_root: Path, common_dir: Optional[Path], listing: Optional[list] = None
 ) -> List[Path]:
-    """The gate roots: the identity root plus every TWO-WAY-LINKED worktree.
-
-    `git worktree list` reports whatever `<common>/worktrees/*/gitdir` names,
-    and a delivered archive with its own `.git` can name ANY directory there,
-    including another project's real checkout, which would then place that
-    project's absolute rows "under" this repository. A listed worktree W is
-    kept only when (a) git does not call it prunable, (b) `W/.git` is a FILE
-    whose `gitdir:` is `<common>/worktrees/<name>`, and (c) that admin dir's
-    `gitdir` names `W/.git` back. Anything else is dropped, which can only
-    narrow the gate; no listing (git failed, or the read raised), or a
-    listing that is no record list (`EMPTY_LISTING`, `UNREADABLE_LISTING`),
-    narrows it to the identity root.
-
-    `listing`, the records (`_worktree_records`) the detection pass got for
-    this same `common_dir`, is used instead of asking git again.
-    """
-    roots = [Path(repo_root).resolve()]
-    if common_dir is None:
-        return roots
-    try:
-        records = listing if listing is not None else _worktree_records(["--git-dir", str(common_dir)])
-    except (OSError, RuntimeError, ValueError):
-        # A read that raises gives no listing, as a git that failed does.
-        records = None
-    if not isinstance(records, list):
-        return roots
-    try:
-        admin_parent = (Path(common_dir) / "worktrees").resolve()
-    except (OSError, RuntimeError, ValueError):
-        return roots
-    for record in records[1:]:  # the first record is the main worktree
-        worktree = next(
-            (f[len("worktree "):] for f in record if f.startswith("worktree ")), None
-        )
-        if worktree is None or any(
-            f == "prunable" or f.startswith("prunable ") for f in record
-        ):
-            continue
-        try:
-            marker = Path(worktree) / ".git"
-            if not marker.is_file():
-                continue
-            text = project_identity.read_git_file(marker)
-            target = project_identity.gitfile_target(text) if text is not None else None
-            if target is None:
-                continue
-            admin = Path(target)
-            if not admin.is_absolute():
-                admin = Path(worktree) / admin
-            admin = admin.resolve()
-            if admin.parent != admin_parent:
-                continue
-            back_text = project_identity.read_git_file(admin / "gitdir")
-            if back_text is None:
-                continue
-            back = Path(project_identity.worktree_admin_gitdir(back_text))
-            if not back.is_absolute():
-                back = admin / back
-            if back.resolve() != marker.resolve():
-                continue
-            roots.append(Path(worktree).resolve())
-        except (OSError, RuntimeError, ValueError):
-            continue
-    return list(dict.fromkeys(roots))
+    """`project_identity.verified_worktree_roots`, under the name the legacy
+    read gate calls."""
+    return project_identity.verified_worktree_roots(repo_root, common_dir, listing)
 
 
 # `_worktree_redirect_cause`'s answers when the check refuses.
@@ -2417,14 +2081,14 @@ def _worktree_redirect_cause(
 
     `git_dir` and `toplevel`, when the caller already holds git's answers
     for `asked_root`, are used instead of asking git again. So is `listing`,
-    the caller's `_worktree_records` answer for `--git-dir <common_dir>`
+    the caller's `project_identity.worktree_records` answer for `--git-dir <common_dir>`
     (any answer it gave, None included).
 
     MISSING EVIDENCE REFUSES, and the cause names what was missing:
     `REDIRECT_UNLISTED` (git's listing does not hold the checkout),
     `REDIRECT_NO_GIT_DIR` (git gave no git dir), `REDIRECT_UNRESOLVABLE` (a
     path would not resolve), `REDIRECT_UNLISTABLE` (no listing:
-    `_listed_worktree_records` is None), `REDIRECT_EMPTY_LISTING` (git
+    `project_identity.listed_worktree_records` is None), `REDIRECT_EMPTY_LISTING` (git
     printed a listing with no record or an empty one: `EMPTY_LISTING`) or
     `REDIRECT_UNREADABLE_LISTING` (git printed records that are not git's
     fields in git's order: `UNREADABLE_LISTING`). An unlisted
@@ -2454,7 +2118,7 @@ def _worktree_redirect_cause(
     # admin dir sits inside the superproject's `.git`, so a listing run from
     # a directory would report the SUPERPROJECT's worktrees.
     records = (
-        _listed_worktree_records(None, git_dir=common_path)
+        project_identity.listed_worktree_records(None, git_dir=common_path)
         if listing is _LISTING_UNASKED else listing
     )
     if records is None:
@@ -2472,7 +2136,7 @@ def _worktree_redirect_cause(
         toplevel = Path(toplevel).resolve()
     except (OSError, RuntimeError, ValueError):
         return REDIRECT_UNRESOLVABLE
-    if toplevel in _worktree_toplevels(records):
+    if toplevel in project_identity.worktree_toplevels(records):
         return None
     return REDIRECT_MOVED if _entry_listed_as_moved(git_dir, records) else REDIRECT_UNLISTED
 
@@ -2586,8 +2250,8 @@ def _git_rev_parse(start: Optional[str], *args: str) -> Optional[str]:
         # One answer per directory inside a detection pass, shared with the
         # identity layer's submodule check (`git_dir_answer`).
         return project_identity.git_dir_answer(start)
-    return _detection_answer(
-        ("rev-parse", _where(start), args), lambda: _ask_rev_parse(start, args)
+    return project_identity.detection_answer(
+        ("rev-parse", project_identity.question_dir(start), args), lambda: _ask_rev_parse(start, args)
     )
 
 
@@ -2596,8 +2260,8 @@ def _git_dir_and_toplevel(start: Optional[str]) -> "tuple[Optional[str], Optiona
     --absolute-git-dir --show-toplevel`, either None when git gave no
     answer. A bare repository answers its git dir and then exits non-zero
     on the top level, so the git dir is kept and the top level is None."""
-    return _detection_answer(
-        ("rev-parse", _where(start), ("--absolute-git-dir", "--show-toplevel")),
+    return project_identity.detection_answer(
+        ("rev-parse", project_identity.question_dir(start), ("--absolute-git-dir", "--show-toplevel")),
         lambda: _ask_git_dir_and_toplevel(start),
     )
 
@@ -2746,7 +2410,7 @@ def main_repo_root(
             a duplicate `rev-parse`; `None` resolves it here.
         toplevel: The caller's `--show-toplevel` answer for `start` (None: git
             gave none), when it holds one; left out, it is asked here.
-        listing: The caller's `_worktree_records` answer for
+        listing: The caller's `project_identity.worktree_records` answer for
             `--git-dir <common>`, when it holds one, for the redirect check a
             linked worktree runs; left out, the check asks git.
 
@@ -2978,7 +2642,7 @@ class PACTMemory:
             self._legacy_suppressed = None
             self._legacy_suppressed_name = None
         else:
-            joined = _DETECTION_ANSWERS.get() is not None
+            joined = project_identity.DETECTION_ANSWERS.get() is not None
             with detection_pass() as memos:
                 detected = self._detect_project_identity_with_legacy()
                 # THE SUPPRESSION DISCLOSURE ASKS INSIDE THE SAME PASS: its
@@ -3447,8 +3111,8 @@ class PACTMemory:
                 identity_root=landing,
             )
         # One pass reads a root's identity (override and origin) once.
-        identity = _detection_answer(
-            ("identity", _where(root), str(common_dir), str(asked_root)),
+        identity = project_identity.detection_answer(
+            ("identity", project_identity.question_dir(root), str(common_dir), str(asked_root)),
             lambda: detect_id_for_root(root, common_dir, asked_root=asked_root),
         )
         PACTMemory._warn_override_ignored(identity)
@@ -3723,7 +3387,7 @@ class PACTMemory:
                     # carried. Dropping it would silently strand every row
                     # filed under the folder name (the union has no legacy
                     # candidate to widen to) and would make
-                    # `_detect_project_basename()` return None, which makes the
+                    # `detect_project_basename()` return None, which makes the
                     # backlog writer refuse to write at all.
                     # `_find_project_root` falls back to the cwd itself, which
                     # is exactly the value the pre-change resolver produced for
@@ -3767,7 +3431,7 @@ class PACTMemory:
         return PACTMemory._detect_project_id_with_source()[0]
 
     @staticmethod
-    def _detect_project_basename() -> Optional[str]:
+    def detect_project_basename() -> Optional[str]:
         """The FOLDER-NAME id the PRE-change resolver produced here, or None.
 
         For callers that use the id as a FILE NAME. A canonical id contains
@@ -3996,7 +3660,7 @@ class PACTMemory:
         # while gating against DIFFERENT roots. Omitting it serves one root's
         # include/exclude verdict for the other.
         cache_key = (store, stat_key, str(self._project_identity_root), scope, legacy)
-        in_pass = _DETECTION_ANSWERS.get() is not None
+        in_pass = project_identity.DETECTION_ANSWERS.get() is not None
         cached = _LEGACY_SCOPE_CACHE.get(cache_key) if in_pass else None
         if cached is not None:
             self._legacy_scope_state = cached[1]

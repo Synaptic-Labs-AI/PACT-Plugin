@@ -80,6 +80,10 @@ EXEMPT = {
     "track_file": "records a path on the instance, and opens no store",
     "get_tracked_files": "reads the paths recorded on the instance",
     "clear_tracked_files": "clears the paths recorded on the instance",
+    "detect_project_basename": (
+        "a static read of the folder-name project id from the session's "
+        "location and git; it opens no store"
+    ),
 }
 
 

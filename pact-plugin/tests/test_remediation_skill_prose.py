@@ -6679,12 +6679,6 @@ class TestEveryRouteEntryConditionIsARoute:
             "get_user_memory_dir restores the store scope; the user-setting route "
             "replaces get_user_memory_dir"
         ),
-        ("call", "<call to no function memory_api: _DETECTION_ANSWERS.get>"): (
-            "the constructor's per-pass answer memo"
-        ),
-        ("call", "<call to no function memory_api: _DETECTION_LISTINGS.get>"): (
-            "the constructor's per-pass worktree-listing memo"
-        ),
         ("call", "<call to no function memory_api: _DETECTION_COMMON_DIRS.get>"): (
             "the constructor's per-pass common-dir memo"
         ),
@@ -6706,12 +6700,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "<call to no function memory_api: project_identity.DETECTION_GIT_DIRS.set>"): (
             "detection_pass starts the per-pass git-dir memo empty in an outermost pass"
-        ),
-        ("call", "<call to no function memory_api: _DETECTION_ANSWERS.set>"): (
-            "detection_pass starts the per-pass answer memo empty in an outermost pass"
-        ),
-        ("call", "<call to no function memory_api: _DETECTION_LISTINGS.set>"): (
-            "detection_pass starts the per-pass worktree-listing memo empty in an outermost pass"
         ),
         ("call", "git_results_pass"): (
             "detection_pass opens the pass's memo of git results; git_results_pass is read as a root"
@@ -6812,6 +6800,61 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "worktree_admin_gitdir"): (
             "trims the text read_git_file returned; its own body is read like any reached "
             "function"
+        ),
+        ("call", "<call to no function memory_api: project_identity.DETECTION_ANSWERS.get>"): (
+            "the constructor's per-pass answer memo"
+        ),
+        ("call", "<call to no function memory_api: project_identity.DETECTION_LISTINGS.get>"): (
+            "the constructor's per-pass worktree-listing memo"
+        ),
+        ("call", "<call to no function memory_api: project_identity.DETECTION_ANSWERS.set>"): (
+            "detection_pass starts the per-pass answer memo empty in an outermost pass"
+        ),
+        ("call", "<call to no function memory_api: project_identity.DETECTION_LISTINGS.set>"): (
+            "detection_pass starts the per-pass worktree-listing memo empty in an outermost pass"
+        ),
+        ("call", "<name imported from a project module memory_api: project_identity.DETECTION_ANSWERS>"): (
+            "detection_pass names the identity layer's per-pass answer memo, to start it and to hand it back on a join"
+        ),
+        ("call", "<name imported from a project module memory_api: project_identity.DETECTION_LISTINGS>"): (
+            "detection_pass names the identity layer's per-pass worktree-listing memo, to start it and to hand it back on a join"
+        ),
+        ("call", "<name imported from a project module memory_api: project_identity.LISTING_UNASKED>"): (
+            "the identity layer's sentinel for a listing the caller did not read, the default of the listing parameters"
+        ),
+        ("call", "<name imported from a project module memory_api: EMPTY_LISTING>"): (
+            "the identity layer's answer for a worktree listing with no record, compared to name the redirect cause"
+        ),
+        ("call", "<name imported from a project module memory_api: UNREADABLE_LISTING>"): (
+            "the identity layer's answer for a worktree listing that is no record list, compared to name the redirect cause"
+        ),
+        ("call", "<call to no function project_identity: DETECTION_ANSWERS.get>"): (
+            "the per-pass answer memo, set only by detection_pass"
+        ),
+        ("call", "<call to no function project_identity: DETECTION_LISTINGS.get>"): (
+            "the per-pass worktree-listing memo, set only by detection_pass"
+        ),
+        ('call', '<call to no function project_identity: back.is_absolute>'): (
+            "a method of the path a worktree's gitdir file names, which the census cannot type; it checks that a listed worktree points back at its marker, for the read scope" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function project_identity: back.resolve>'): (
+            "a method of the path a worktree's gitdir file names, which the census cannot type; it checks that a listed worktree points back at its marker, for the read scope" + _AFTER_DETECTION
+        ),
+        ("call", "<call to no function project_identity: admin.is_absolute>"): (
+            "a method of the path a listed worktree's .git file names, which the census cannot type; it checks that the worktree's admin dir sits under the common dir, for the read scope" + _AFTER_DETECTION
+        ),
+        ("call", "<call to no function project_identity: admin.resolve>"): (
+            "a method of the path a listed worktree's .git file names, which the census cannot type; it checks that the worktree's admin dir sits under the common dir, for the read scope" + _AFTER_DETECTION
+        ),
+        ("call", "<call to no function project_identity: resolved.is_absolute>"): (
+            "a method of the path a .git file's gitdir line names, which the census cannot type; it finds where a redirected checkout's git dir is"
+        ),
+        ("call", "<call to no function project_identity: resolved.resolve>"): (
+            "a method of the path a .git file's gitdir line names, which the census cannot type; it finds where a redirected checkout's git dir is"
+        ),
+        ("call", "gitfile_target"): (
+            "parses the text read_git_file returned as git reads a .git file; its own "
+            "body is read like any reached function"
         ),
         ("call", "git_config_bool"): (
             "parses the value of a git boolean environment variable the way git does; "
@@ -7134,12 +7177,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ('call', '<call to no function memory_api: a method of what project_bucket_counts returns>'): (
             "reads a bucket's row count from the bucket census" + _AFTER_DETECTION
-        ),
-        ('call', '<call to no function memory_api: back.is_absolute>'): (
-            "a method of the path a worktree's gitdir file names, which the census cannot type; it checks that a listed worktree points back at its marker, for the read scope" + _AFTER_DETECTION
-        ),
-        ('call', '<call to no function memory_api: back.resolve>'): (
-            "a method of the path a worktree's gitdir file names, which the census cannot type; it checks that a listed worktree points back at its marker, for the read scope" + _AFTER_DETECTION
         ),
         ('call', '<call to no function memory_api: before_snapshot.get>'): (
             "reads a field of a memory's row from before an update" + _AFTER_DETECTION
