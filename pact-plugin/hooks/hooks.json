@@ -209,7 +209,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/teammate_idle.py\""
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/hooks/teammate_idle.py\"",
+            "timeout": 20
           }
         ]
       }

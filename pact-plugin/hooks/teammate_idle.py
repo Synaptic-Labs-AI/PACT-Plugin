@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
 Location: pact-plugin/hooks/teammate_idle.py
-Summary: TeammateIdle hook — resource-management for zombie teammates.
+Summary: TeammateIdle hook — resource-management for zombie teammates and a
+         bounded, non-blocking inbox hold for an in-process teammate's fresh
+         lead-completion wait.
          Tracks consecutive idle events for teammates whose task is
          completed; at threshold N=3 suggests shutdown, at N=5 advises the
          team-lead to `TaskStop` the teammate.
@@ -12,29 +14,33 @@ Used by: hooks.json TeammateIdle hook
 # boundaries — not every idle tick. Above IDLE_FORCE_THRESHOLD the stop
 # advisory is re-emitted per tick until the team-lead processes it and the
 # teammate is stopped (safety is protocol-level, not a structural cap).
-# Exits deterministically on every code path. Does NOT consume
-# intentional_wait.
+# For an in-process teammate, a fresh awaiting_lead_completion wait holds the
+# hook, polling at 0.1-second intervals, until a valid unread message is
+# visible or 10 seconds pass from its `covers_since` anchor. The window falls
+# back to `since` only when `covers_since` is absent; an unreadable
+# `covers_since` means no hold. The window is measured from `covers_since`, so
+# re-stamping `since` alone does not restart it while `covers_since` is kept;
+# without `covers_since`, each re-stamp of `since` gives one more 10-second
+# budget, and each idle inside it holds for the remaining time. The hold never
+# emits a decision, so a message that lands during it can be delivered before
+# the idle is announced. Exits deterministically on every code path. Does NOT
+# consume intentional_wait.
 
 Idle cleanup: Track consecutive idle events for completed agents. After 3,
 suggest shutdown. After 5, advise the team-lead to `TaskStop` the teammate.
 
 Input: JSON from stdin with teammate_name, team_name
-Output: JSON with systemMessage (shutdown suggestion / stop advisory)
+Output: JSON with systemMessage (shutdown suggestion / stop advisory); never
+        a decision
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    # Annotation-only. This file has `from __future__ import annotations`, so
-    # the type below is a string at runtime and this import never executes --
-    # which is what keeps a per-session hook from paying for a type.
-    from datetime import datetime
-
 import json
 import sys
+import time
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Add hooks directory to path for shared package imports
@@ -42,10 +48,17 @@ _hooks_dir = Path(__file__).parent
 if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
-from shared.error_output import hook_error_json
+from shared.error_output import ERROR_MAX_CHARS, hook_error_json
 import shared.pact_context as pact_context
-from shared.background_work import frame_team_and_name
+from shared.background_work import (
+    ANCHOR_CLASS_MALFORMED,
+    frame_team_and_name,
+    teammate_is_in_process,
+    wait_scope_anchor,
+)
+from shared.intentional_wait import validate_wait
 from shared.paths import get_claude_config_dir
+from shared.session_state import is_safe_path_component
 from shared.task_utils import iter_team_task_jsons
 from shared import state_file
 
@@ -101,6 +114,140 @@ def find_teammate_task(
                 completed = task
 
     return in_progress or completed
+
+
+GRACE_SECONDS = 10.0
+POLL_SECONDS = 0.1
+INBOX_MAX_BYTES = 1024 * 1024
+
+
+def _is_clean_text(value) -> bool:
+    """A non-empty string holding no lone surrogate from a JSON escape."""
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and not any("\ud800" <= character <= "\udfff" for character in value)
+    )
+
+
+def _has_valid_inbox_message(messages: list) -> bool:
+    """Only an unread entry with clean `from` and `text` counts; payload text is never used."""
+    return any(
+        isinstance(message, dict)
+        and message.get("read") is not True
+        and _is_clean_text(message.get("from"))
+        and _is_clean_text(message.get("text"))
+        for message in messages
+    )
+
+
+def _select_grace_task(
+    tasks: list[dict], teammate_name: str, wall_now: datetime
+) -> tuple[dict, float] | None:
+    """Select the oldest eligible wait (the shortest remaining hold), breaking ties by numeric task ID."""
+    candidates = []
+    for task in tasks:
+        if (
+            task.get("owner") != teammate_name
+            or task.get("status") not in {"in_progress", "completed"}
+        ):
+            continue
+        metadata = task.get("metadata")
+        wait = metadata.get("intentional_wait") if isinstance(metadata, dict) else None
+        if (
+            not isinstance(wait, dict)
+            or not validate_wait(wait)
+            or wait.get("reason") != "awaiting_lead_completion"
+        ):
+            continue
+        # A re-SET that keeps covers_since does not restart grace by re-stamping since.
+        since, anchor_class = wait_scope_anchor(wait)
+        if since is None or anchor_class == ANCHOR_CLASS_MALFORMED:
+            continue
+        age = (wall_now - since).total_seconds()
+        if not 0 <= age < GRACE_SECONDS:
+            continue
+        try:
+            task_id = int(task.get("id", "0"))
+        except (ValueError, TypeError):
+            task_id = 0
+        candidates.append((since, task_id, task, age))
+    if not candidates:
+        return None
+    _since, _task_id, task, age = min(candidates, key=lambda item: (item[0], item[1]))
+    return task, age
+
+
+def wait_for_inbox_evidence(
+    tasks: list[dict],
+    teammate_name: str,
+    team_name: str,
+    teams_root: Path,
+    *,
+    now: datetime | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    in_process: Callable[[], bool],
+) -> bool | None:
+    """None when no hold runs; else True once a valid queued message is visible, False at the deadline.
+
+    `in_process` is required (no default, so no caller can hold a pane teammate by
+    omission) and is consulted only once an eligible wait is found, so an idle
+    without one never pays for the team-config read behind it.
+    """
+    wall_now = now if now is not None else datetime.now(timezone.utc)
+    # Read with wall_now, so time spent selecting and in in_process() comes out of the window.
+    started = monotonic()
+    selected = _select_grace_task(tasks, teammate_name, wall_now)
+    if selected is None:
+        return None
+    _task, age = selected
+    if not (
+        is_safe_path_component(team_name)
+        and is_safe_path_component(teammate_name)
+    ):
+        return None
+    if not in_process():
+        return None
+
+    inbox_dir = teams_root / team_name / "inboxes"
+    inbox_path = inbox_dir / f"{teammate_name}.json"
+    # The anchor is parsed to full precision, so a fractional anchor gets the exact
+    # window; one written by canonical_since is cut to the whole second, which can
+    # only shorten the remaining window (by under 1s), never lengthen it.
+    deadline = started + GRACE_SECONDS - age
+    while monotonic() < deadline:
+        try:
+            inbox_json = state_file.read_text(
+                inbox_path, root=teams_root, max_bytes=INBOX_MAX_BYTES, strict=True
+            )
+        except state_file.Refused:
+            return False
+        except FileNotFoundError:
+            # A missing inbox file, inboxes directory or team directory retries;
+            # a containment refusal ended above.
+            inbox_json = "[]"
+        except UnicodeDecodeError:
+            # A half-written non-ASCII message fails strict decoding; retry it like
+            # unparseable JSON (the empty text parses as invalid and is never evidence).
+            inbox_json = ""
+        except (OSError, ValueError):
+            # ValueError here is TooLarge.
+            return False
+        try:
+            messages = json.loads(inbox_json)
+        except (json.JSONDecodeError, RecursionError):
+            pass
+        else:
+            if not isinstance(messages, list):
+                return False
+            if _has_valid_inbox_message(messages):
+                return True
+
+        remaining = deadline - monotonic()
+        if remaining > 0:
+            sleep(min(POLL_SECONDS, remaining))
+    return False
 
 
 def _state_root(path: Path, root: Path | None) -> Path:
@@ -461,6 +608,25 @@ def main():
 
         teams_root = get_claude_config_dir() / "teams"
         idle_counts_path = str(teams_root / team_name / "idle_counts.json")
+
+        # A hold, never a block: a pane teammate's idle notice is already sent,
+        # so only an in-process teammate's runtime can deliver a message that lands now.
+        try:
+            if wait_for_inbox_evidence(
+                tasks, teammate_name, team_name, teams_root,
+                in_process=lambda: teammate_is_in_process(
+                    team_name, teammate_name, str(teams_root)
+                ),
+            ) is not None:
+                # The hold may have outlived task changes; cleanup must see current state.
+                tasks = list(iter_team_task_jsons(team_name))
+        except Exception as hold_error:
+            # Fall through to the ordinary output; stderr only, so stdout and exit stay unchanged.
+            # Non-printables (ANSI ESC, BEL, line breaks) become spaces: one plain, bounded line.
+            detail = " ".join("".join(
+                ch if ch.isprintable() else " " for ch in str(hold_error)[:ERROR_MAX_CHARS]
+            ).split())
+            print(f"Hook warning (teammate_idle): {detail}", file=sys.stderr)
 
         messages = []
         cleanup_msg, should_shutdown = None, False

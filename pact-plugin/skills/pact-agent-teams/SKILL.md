@@ -524,9 +524,9 @@ message body itself.
 
 This rule generalizes the wake-then-read flow of §On Rejection to every wait
 resolution, and it is what makes the team-lead's wake message redundant-by-design:
-ordering-immune at every seam, with no hook required (a synchronous wake-detection
-hook cannot exist — see the non-goal note in
-[pact-completion-authority](../../protocols/pact-completion-authority.md#crossed-wake-idles-discriminate-by-timestamp-direction)).
+ordering-immune at every seam. A synchronous SEND-SIDE wake-detection hook remains prohibited;
+a receive-side `TeammateIdle` hold is permitted for in-process teammates — see
+[pact-completion-authority](../../protocols/pact-completion-authority.md#crossed-wake-idles-discriminate-by-timestamp-direction).
 A content-carrying wake's message is not redundant — it is the content channel —
 and its disk read runs as confirmation. The no-poll discipline is unchanged: you
 still cannot poll while idle; this rule fires ON wake, whatever woke you.

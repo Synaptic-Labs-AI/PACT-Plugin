@@ -20,6 +20,8 @@ import json
 # Matches the _ERROR_MAX_CHARS = 200 cap used by failure_log.append_failure.
 _ERROR_MAX_CHARS = 200
 _HOOK_NAME_MAX_CHARS = 50
+# Public alias for hooks that bound a stderr warning to the same cap.
+ERROR_MAX_CHARS = _ERROR_MAX_CHARS
 
 
 def hook_error_json(hook_name: str, error: Exception) -> str:

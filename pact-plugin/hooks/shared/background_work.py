@@ -1151,6 +1151,39 @@ def teammate_is_separate_process(team_name: Any, member_name: Any) -> bool:
     )
 
 
+TEAM_CONFIG_MAX_BYTES = 1024 * 1024
+
+
+def teammate_is_in_process(
+    team_name: Any, member_name: Any, teams_dir: str | None = None
+) -> bool:
+    """True iff `member_name`'s `backendType` is exactly "in-process"; every doubt is False.
+
+    Reads the team config through state_file: bounded, and contained under the
+    teams root, so a team directory linked outside it reads as no config.
+    """
+    if not isinstance(team_name, str) or not isinstance(member_name, str) or not member_name:
+        return False
+    from .session_state import is_safe_path_component
+
+    if not is_safe_path_component(team_name):
+        return False
+    root = Path(teams_dir) if teams_dir else _teams_root()
+    try:
+        config = json.loads(state_file.read_text(
+            root / team_name / "config.json", root, max_bytes=TEAM_CONFIG_MAX_BYTES
+        ))
+    except (OSError, ValueError, RecursionError):
+        return False
+    members = config.get("members") if isinstance(config, dict) else None
+    if not isinstance(members, list):
+        return False
+    return any(
+        isinstance(m, dict) and m.get("name") == member_name and m.get("backendType") == "in-process"
+        for m in members
+    )
+
+
 def teammate_launch_name(input_data: Any, team_name: str) -> str:
     """The member name of the teammate of `team_name` acting in this frame, or "".
 

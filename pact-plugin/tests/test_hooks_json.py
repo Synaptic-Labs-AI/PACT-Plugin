@@ -232,6 +232,21 @@ class TestNewSDKOptimizationEntries:
             "teammate_idle.py not found in TeammateIdle hooks"
         )
 
+    def test_teammate_idle_timeout_outlasts_grace(self, hooks_config):
+        """One synchronous binding leaves 10 seconds above the grace loop."""
+        from teammate_idle import GRACE_SECONDS
+
+        hooks = [
+            hook
+            for entry in hooks_config["hooks"].get("TeammateIdle", [])
+            for hook in entry.get("hooks", [])
+            if "teammate_idle.py" in hook.get("command", "")
+        ]
+        assert len(hooks) == 1, hooks
+        assert hooks[0].get("async", False) is not True
+        assert hooks[0].get("timeout") == 20
+        assert hooks[0]["timeout"] - GRACE_SECONDS >= 10
+
     def test_session_end_is_async(self, hooks_config):
         """SessionEnd hook should be async (fire-and-forget)."""
         entries = hooks_config["hooks"].get("SessionEnd", [])

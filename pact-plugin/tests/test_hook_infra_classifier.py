@@ -376,7 +376,8 @@ class TestClosureOracleIsNonVacuous:
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Seam hook -> the non-mocked L2 integration test file that exercises its real
-# seam. teammate_idle's coverage is the IT-6 smoke inside the missed_wake file.
+# seam. teammate_idle's coverage in the missed_wake file is the IT-6 smoke and
+# IT-7, which runs the real hook as a subprocess through its inbox hold.
 TESTS_DIR = Path(__file__).parent
 COVERED_L2 = {
     "missed_wake_scan": "test_missed_wake_scan_integration.py",

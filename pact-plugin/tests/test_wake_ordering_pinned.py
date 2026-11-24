@@ -17,10 +17,10 @@ wake/idle delivery-ordering race:
   lead-side (protocols/pact-completion-authority.md + its byte-mirrored
   region in protocols/pact-protocols.md, and agents/pact-orchestrator.md):
     - "Crossed-Wake Idles: Discriminate by Timestamp Direction" — including
-      the behavioral non-goal note that synchronous wake/send detection is
-      dead-by-construction, and the pre-directive idle-straggler
-      discrimination (a tick predating the directive send is a straggler,
-      never a stall signal).
+      the behavioral non-goal for synchronous SEND-SIDE wake/send detection,
+      the RECEIVE-SIDE TeammateIdle hold permission, and the
+      pre-directive idle-straggler discrimination (a tick predating the
+      directive send is a straggler, never a stall signal).
     - "Directive-Reflection Check" — mid-turn directives verified against
       boundary-message deliverables before acting.
   stall-detection (protocols/pact-agent-stall.md + its byte-mirrored
@@ -255,14 +255,13 @@ PHRASE_PINS = [
     (SKILL, "revise it on the same task without waiting to be asked"),
     # --- lead-side completion-authority (+ byte-mirrored SSOT region) ---
     (COMPLETION_AUTHORITY, "exactly ONE redundant confirm"),
-    # The behavioral no-hook non-goal note: PreToolUse fires, but inbox
+    # The behavioral SEND-SIDE non-goal note: PreToolUse fires, but inbox
     # delivery is asynchronous and PostToolUse remains unmeasured, so no
-    # synchronous hook can close the delivery-ordering race.
+    # synchronous hook on the lead's send path can close the race.
     (COMPLETION_AUTHORITY, "SendMessage does fire PreToolUse"),
     (COMPLETION_AUTHORITY, "that hook runs before delivery, so it cannot observe the wake"),
     (COMPLETION_AUTHORITY, "PostToolUse remains unmeasured, not refuted"),
     (COMPLETION_AUTHORITY, "inbox files are written asynchronously on delivery"),
-    (COMPLETION_AUTHORITY, "Synchronous wake/send detection is therefore dead-by-construction"),
     (COMPLETION_AUTHORITY, "in-process and tmux teammateMode"),
     (COMPLETION_AUTHORITY, "boundary-drain: inbox empty"),
     # The evidence bar for escalating an idle to stall diagnosis.
@@ -319,7 +318,6 @@ PHRASE_PINS = [
     (PROTOCOLS_SSOT, "that hook runs before delivery, so it cannot observe the wake"),
     (PROTOCOLS_SSOT, "PostToolUse remains unmeasured, not refuted"),
     (PROTOCOLS_SSOT, "inbox files are written asynchronously on delivery"),
-    (PROTOCOLS_SSOT, "Synchronous wake/send detection is therefore dead-by-construction"),
     (PROTOCOLS_SSOT, "in-process and tmux teammateMode"),
     (PROTOCOLS_SSOT, "boundary-drain: inbox empty"),
     (PROTOCOLS_SSOT, "task-file-mtime plus sustained-silence"),
@@ -371,6 +369,102 @@ PHRASE_PINS = [
 ]
 
 
+GRACE_CONTRACT_PINS = [
+    (SKILL, "synchronous SEND-SIDE wake-detection hook remains prohibited"),
+    (COMPLETION_AUTHORITY, "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction"),
+    (COMPLETION_AUTHORITY, "The non-goal covers the lead's send path only"),
+    (COMPLETION_AUTHORITY, "Crossings still occur, so apply the redundant-confirm procedure above unchanged"),
+    (PROTOCOLS_SSOT, "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction"),
+    (PROTOCOLS_SSOT, "The non-goal covers the lead's send path only"),
+    (PROTOCOLS_SSOT, "Crossings still occur, so apply the redundant-confirm procedure above unchanged"),
+    # The hook never holds a pane or tmux teammate, so the permission is scoped.
+    (COMPLETION_AUTHORITY, "may briefly delay an in-process teammate's idle"),
+    (PROTOCOLS_SSOT, "may briefly delay an in-process teammate's idle"),
+    (SKILL, "receive-side TeammateIdle hold is permitted for in-process teammates"),
+    # The hold delays only the hook's return, so delivery is possible, not promised.
+    (COMPLETION_AUTHORITY, "can be delivered before the idle is announced"),
+    (PROTOCOLS_SSOT, "can be delivered before the idle is announced"),
+]
+# Each pin's inversion, as a sentence-scoped pattern over normalized text, so
+# a synonym of the opposite rule ("allowed", "feasible", "both paths", "never
+# occur") reds as surely as the literal one. Each lists sample inversions that
+# its injection control appends beside the intact original.
+GRACE_CONTRACT_INVERSIONS = {
+    "synchronous SEND-SIDE wake-detection hook remains prohibited": (
+        r"SEND-SIDE wake[\w/-]*detection hook[^.;]{0,40}"
+        r"\b(?:permitted|allowed|acceptable|fine|ok)\b"
+        r"|SEND-SIDE wake[\w/-]*detection hook[^.;]{0,20}\bmay\b",
+        [
+            "A synchronous SEND-SIDE wake-detection hook remains permitted.",
+            "A synchronous SEND-SIDE wake-detection hook is allowed.",
+            "A synchronous SEND-SIDE wake-detection hook may be added.",
+        ],
+    ),
+    "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction": (
+        r"SEND-SIDE wake/send detection is therefore[^.;]{0,30}"
+        r"\b(?:viable|possible|feasible|workable|achievable|practical)\b",
+        [
+            "Synchronous SEND-SIDE wake/send detection is therefore viable.",
+            "Synchronous SEND-SIDE wake/send detection is therefore feasible.",
+            "Synchronous SEND-SIDE wake/send detection is therefore quite possible.",
+        ],
+    ),
+    "The non-goal covers the lead's send path only": (
+        r"non-goal covers[^.;]{0,60}"
+        r"\b(?:receive path|receive side|both paths|both sides|every path|all paths)\b",
+        [
+            "The non-goal covers the lead's send path and the receive path.",
+            "The non-goal covers both paths.",
+            "The non-goal covers the receive side too.",
+        ],
+    ),
+    "Crossings still occur, so apply the redundant-confirm procedure above unchanged": (
+        r"\bCrossings\b[^.;]{0,20}"
+        r"\b(?:no longer|never|cannot|can't|do not|don't|rarely)\b[^.;]{0,10}\boccur"
+        r"|\b(?:skip|omit|drop|ignore|bypass)\b[^.;]{0,20}\bredundant-confirm\b",
+        [
+            "Crossings no longer occur, so skip the redundant-confirm procedure above.",
+            "Crossings never occur.",
+            "Omit the redundant-confirm procedure above.",
+            "Crossings rarely occur.",
+        ],
+    ),
+    "may briefly delay an in-process teammate's idle": (
+        r"\bdelay (?:a|any|every|each|all) (?:pane |tmux )?teammates?'?s? idle"
+        r"|\bdelay (?:a|any|every|each) (?:pane|tmux) teammate",
+        [
+            "A TeammateIdle hook may briefly delay a teammate's idle.",
+            "A TeammateIdle hook may briefly delay any teammate's idle.",
+            "A TeammateIdle hook may briefly delay a pane teammate's idle.",
+        ],
+    ),
+    "receive-side TeammateIdle hold is permitted for in-process teammates": (
+        r"receive-side TeammateIdle hold is permitted(?! for in-process teammates)",
+        [
+            "A receive-side TeammateIdle hold is permitted.",
+            "A receive-side TeammateIdle hold is permitted for all teammates.",
+            "A receive-side TeammateIdle hold is permitted for pane teammates.",
+        ],
+    ),
+    "can be delivered before the idle is announced": (
+        r"\b(?:is|are|will be|is always|always) delivered "
+        r"(?:without (?:an|any) idle (?:notification|notice)|before the idle is announced)"
+        r"|\bguarantee[sd]?\b[^.;]{0,40}\bdeliver",
+        [
+            "A message arriving meanwhile is delivered without an idle notification.",
+            "A message arriving meanwhile will be delivered before the idle is announced.",
+            "The hold guarantees the message is delivered first.",
+        ],
+    ),
+}
+_INVERSION_CASES = [
+    (doc, phrase, sample)
+    for doc, phrase in GRACE_CONTRACT_PINS
+    for sample in GRACE_CONTRACT_INVERSIONS[phrase][1]
+]
+PHRASE_PINS.extend(GRACE_CONTRACT_PINS)
+
+
 @pytest.mark.parametrize(
     "doc_path, phrase",
     PHRASE_PINS,
@@ -390,6 +484,259 @@ def test_rule_phrase_present(doc_path: Path, phrase: str):
         f"wake-ordering rule this phrase carries is missing from a "
         f"runtime-loaded surface."
     )
+
+
+@pytest.mark.parametrize(
+    "doc_path, phrase",
+    GRACE_CONTRACT_PINS,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in GRACE_CONTRACT_PINS],
+)
+def test_grace_contract_pin_fails_when_phrase_is_removed(
+    doc_path: Path, phrase: str, monkeypatch
+):
+    """Removing each new or narrowed contract phrase must redden its pin."""
+    original = _normalized(doc_path)
+    needle = _phrase(phrase)
+    assert needle in original
+    monkeypatch.setitem(
+        globals(), "_normalized", lambda _path: original.replace(needle, "", 1)
+    )
+    with pytest.raises(AssertionError, match="rule phrase"):
+        test_rule_phrase_present(doc_path, phrase)
+
+
+@pytest.mark.parametrize(
+    "doc_path, phrase",
+    GRACE_CONTRACT_PINS,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in GRACE_CONTRACT_PINS],
+)
+def test_grace_contract_inversion_absent(doc_path: Path, phrase: str):
+    """No wording of the opposite rule appears on the surface, so an inverted
+    rule (in any listed synonym) added beside the intact original still reds."""
+    match = re.search(
+        GRACE_CONTRACT_INVERSIONS[phrase][0], _normalized(doc_path), re.IGNORECASE
+    )
+    assert match is None, (
+        f"{doc_path.name}: inverted contract wording {match.group(0)!r} is "
+        f"present beside or instead of {phrase!r}."
+    )
+
+
+@pytest.mark.parametrize(
+    "doc_path, phrase, sample",
+    _INVERSION_CASES,
+    ids=[f"{p.name}::{s[:40]}" for p, _ph, s in _INVERSION_CASES],
+)
+def test_grace_contract_inversion_fails_when_added_beside_original(
+    doc_path: Path, phrase: str, sample: str, monkeypatch
+):
+    """Appending each inverted wording while the original stays must red."""
+    original = _normalized(doc_path)
+    assert _phrase(phrase) in original
+    monkeypatch.setitem(
+        globals(), "_normalized", lambda _path: original + " " + _phrase(sample)
+    )
+    with pytest.raises(AssertionError, match="inverted contract wording"):
+        test_grace_contract_inversion_absent(doc_path, phrase)
+
+
+RETIRED_ABSOLUTE_WAKE_PINS = [
+    (COMPLETION_AUTHORITY, "Non-goal — no synchronous hook-based detection"),
+    (PROTOCOLS_SSOT, "Non-goal — no synchronous hook-based detection"),
+    (SKILL, "a synchronous wake-detection hook cannot exist"),
+]
+
+
+@pytest.mark.parametrize(
+    "doc_path, retired",
+    RETIRED_ABSOLUTE_WAKE_PINS,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in RETIRED_ABSOLUTE_WAKE_PINS],
+)
+def test_retired_absolute_wake_prohibition_absent(doc_path: Path, retired: str):
+    """The retired wording prohibits the permitted receive-side gate too."""
+    assert _phrase(retired) not in _normalized(doc_path), (
+        f"{doc_path.name}: retired absolute wake prohibition {retired!r} "
+        "reappeared; prohibit only synchronous SEND-SIDE detection."
+    )
+
+
+@pytest.mark.parametrize(
+    "doc_path, retired",
+    RETIRED_ABSOLUTE_WAKE_PINS,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in RETIRED_ABSOLUTE_WAKE_PINS],
+)
+def test_retired_absolute_wake_absence_fails_when_injected(
+    doc_path: Path, retired: str, monkeypatch
+):
+    """Injecting each retired absolute phrase must redden its absence pin."""
+    original = _normalized(doc_path)
+    assert _phrase(retired) not in original
+    monkeypatch.setitem(
+        globals(), "_normalized", lambda _path: original + " " + _phrase(retired)
+    )
+    with pytest.raises(AssertionError, match="retired absolute wake prohibition"):
+        test_retired_absolute_wake_prohibition_absent(doc_path, retired)
+
+
+# Mechanism detail lives in the hook and the release notes, not in prose an
+# agent loads: a duplicated constant or fail-open rule drifts from the code.
+RETIRED_MECHANISM_PROSE = [
+    (COMPLETION_AUTHORITY, "positive valid queued-message evidence"),
+    (PROTOCOLS_SSOT, "positive valid queued-message evidence"),
+    (SKILL, "positive valid"),
+    (COMPLETION_AUTHORITY, "keep a teammate's turn alive"),
+    (PROTOCOLS_SSOT, "keep a teammate's turn alive"),
+    (SKILL, "not acceptance: process it"),
+    # The hook never blocks, so no TeammateIdle notification is "unblocked".
+    (COMPLETION_AUTHORITY, "unblocked TeammateIdle"),
+    (PROTOCOLS_SSOT, "unblocked TeammateIdle"),
+]
+
+
+@pytest.mark.parametrize(
+    "doc_path, retired",
+    RETIRED_MECHANISM_PROSE,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in RETIRED_MECHANISM_PROSE],
+)
+def test_retired_grace_mechanism_prose_absent(doc_path: Path, retired: str):
+    """The grace mechanism is described by the hook, not by loaded prose."""
+    assert _phrase(retired) not in _normalized(doc_path), (
+        f"{doc_path.name}: retired grace mechanism prose {retired!r} "
+        "reappeared; keep mechanism detail in hooks/teammate_idle.py."
+    )
+
+
+@pytest.mark.parametrize(
+    "doc_path, retired",
+    RETIRED_MECHANISM_PROSE,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in RETIRED_MECHANISM_PROSE],
+)
+def test_retired_grace_mechanism_absence_fails_when_injected(
+    doc_path: Path, retired: str, monkeypatch
+):
+    """Injecting each retired mechanism phrase must redden its absence pin."""
+    original = _normalized(doc_path)
+    assert _phrase(retired) not in original
+    monkeypatch.setitem(
+        globals(), "_normalized", lambda _path: original + " " + _phrase(retired)
+    )
+    with pytest.raises(AssertionError, match="retired grace mechanism prose"):
+        test_retired_grace_mechanism_prose_absent(doc_path, retired)
+
+
+# A duration in the hold prose duplicates the hook's budget in a second place,
+# in any spelling. Two scopes: the receive-side passage itself, and any
+# sentence elsewhere that names the TeammateIdle hold. Whole-file duration bans
+# would hit unrelated rules (a 30-second wait threshold, a 1-2s re-read pause).
+_DURATION_WORDS = (
+    "one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|"
+    "twenty|thirty|sixty"
+)
+DURATION_RE = re.compile(
+    r"\b(?:\d+(?:\.\d+)?[\s-]*(?:seconds?|secs?|s)"
+    rf"|(?:{_DURATION_WORDS})[\s-]+(?:seconds?|secs?))\b",
+    re.IGNORECASE,
+)
+_HOLD_TERMS_RE = re.compile(r"TeammateIdle|receive-side|idle hold", re.IGNORECASE)
+HOLD_PASSAGES = [
+    (COMPLETION_AUTHORITY, "**Receive-side exception.**", "stays load-bearing."),
+    (PROTOCOLS_SSOT, "**Receive-side exception.**", "stays load-bearing."),
+    (SKILL, "This rule generalizes the wake-then-read flow", "whatever woke you."),
+]
+DURATION_SPELLINGS = [
+    "10 seconds", "10-second", "10s", "10 sec", "9.5 seconds",
+    "ten seconds", "ten-second", "Ten Seconds",
+]
+
+
+def _hold_passage(text: str, start: str, end: str) -> str:
+    begin = text.find(start)
+    assert begin != -1, f"hold passage start {start!r} not found"
+    finish = text.find(end, begin)
+    assert finish != -1, f"hold passage end {end!r} not found after its start"
+    return text[begin:finish + len(end)]
+
+
+@pytest.mark.parametrize(
+    "doc_path, start, end",
+    HOLD_PASSAGES,
+    ids=[p.name for p, _s, _e in HOLD_PASSAGES],
+)
+def test_hold_passage_names_no_duration(doc_path: Path, start: str, end: str):
+    """The receive-side hold passage carries no duration in any spelling."""
+    passage = _hold_passage(_normalized(doc_path), start, end)
+    match = DURATION_RE.search(passage)
+    assert match is None, (
+        f"{doc_path.name}: hold passage names a duration {match.group(0)!r}; "
+        "the hold budget lives in hooks/teammate_idle.py only."
+    )
+
+
+@pytest.mark.parametrize(
+    "doc_path", [COMPLETION_AUTHORITY, PROTOCOLS_SSOT, SKILL],
+    ids=lambda p: p.name,
+)
+def test_hold_sentences_name_no_duration(doc_path: Path):
+    """No sentence that names the TeammateIdle hold carries a duration."""
+    sentences = re.split(r"(?<=[.;:])\s+", _normalized(doc_path))
+    hits = [
+        s for s in sentences if _HOLD_TERMS_RE.search(s) and DURATION_RE.search(s)
+    ]
+    assert not hits, (
+        f"{doc_path.name}: a hold sentence names a duration: {hits[0][:160]!r}; "
+        "the hold budget lives in hooks/teammate_idle.py only."
+    )
+
+
+@pytest.mark.parametrize("spelling", DURATION_SPELLINGS)
+@pytest.mark.parametrize(
+    "doc_path, start, end",
+    HOLD_PASSAGES,
+    ids=[p.name for p, _s, _e in HOLD_PASSAGES],
+)
+def test_hold_passage_duration_fails_when_injected(
+    doc_path: Path, start: str, end: str, spelling: str, monkeypatch
+):
+    """Each duration spelling injected into the passage reddens its pin."""
+    original = _normalized(doc_path)
+    injected = original.replace(end, f"for {spelling} {end}", 1)
+    assert injected != original
+    monkeypatch.setitem(globals(), "_normalized", lambda _path: injected)
+    with pytest.raises(AssertionError, match="hold passage names a duration"):
+        test_hold_passage_names_no_duration(doc_path, start, end)
+
+
+@pytest.mark.parametrize("spelling", DURATION_SPELLINGS)
+@pytest.mark.parametrize(
+    "doc_path", [COMPLETION_AUTHORITY, PROTOCOLS_SSOT, SKILL],
+    ids=lambda p: p.name,
+)
+def test_hold_sentence_duration_fails_when_injected(
+    doc_path: Path, spelling: str, monkeypatch
+):
+    """A hold sentence outside the passage with any spelling reddens its pin."""
+    original = _normalized(doc_path)
+    injected = original + f" A TeammateIdle hold lasts up to {spelling}."
+    monkeypatch.setitem(globals(), "_normalized", lambda _path: injected)
+    with pytest.raises(AssertionError, match="a hold sentence names a duration"):
+        test_hold_sentences_name_no_duration(doc_path)
+
+
+@pytest.mark.parametrize(
+    "doc_path, start, end",
+    HOLD_PASSAGES,
+    ids=[p.name for p, _s, _e in HOLD_PASSAGES],
+)
+def test_hold_passage_scope_fails_when_its_start_is_removed(
+    doc_path: Path, start: str, end: str, monkeypatch
+):
+    """A passage that cannot be found reds rather than scanning nothing."""
+    original = _normalized(doc_path)
+    monkeypatch.setitem(
+        globals(), "_normalized", lambda _path: original.replace(start, "", 1)
+    )
+    with pytest.raises(AssertionError, match="hold passage start"):
+        test_hold_passage_names_no_duration(doc_path, start, end)
 
 
 # ---------------------------------------------------------------------------

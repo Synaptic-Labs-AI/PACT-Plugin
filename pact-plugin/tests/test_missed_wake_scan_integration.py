@@ -50,10 +50,15 @@ the broken wiring" -> caught by UN-MOCKING the seam, not by revert alone.
 ================================================================================
 """
 import json
+import os
+import subprocess
+import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
+from clock_shift.clock_shift_env import carry_clock_shift
 
 import missed_wake_scan as mw  # noqa: E402
 import teammate_idle  # noqa: E402
@@ -373,3 +378,241 @@ class TestTeammateIdleResolvesTeamTasks:
             "an empty read here means idle cleanup never runs"
         )
         assert {t["id"] for t in tasks} == {"3"}
+
+
+# ===========================================================================
+# IT-7 — teammate_idle inbox grace through the REAL hook process.
+#   The unit tests drive wait_for_inbox_evidence with an injected root and
+#   names, and the main()-level tests mock it, so neither covers the path
+#   main() composes from the config dir to the inbox file. This runs the hook
+#   the way hooks.json does, with nothing stubbed. The hold never emits a
+#   decision, so each arm reads WHEN the hook returned: early on evidence, at
+#   the deadline without it, and at once for a pane teammate.
+# ===========================================================================
+GRACE_HOOK = Path(__file__).resolve().parents[1] / "hooks" / "teammate_idle.py"
+GRACE_TEAM = "pact-graceseam"
+GRACE_SID = "cccccccc-1111-2222-3333-444444444444"
+GRACE_MEMBER = "grace-coder"
+GRACE_PROJECT = "/grace-seam/project"
+
+
+def _grace_write(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _grace_root(
+    tmp_path: Path, age_seconds: float, backend: str = "in-process"
+) -> tuple[Path, datetime]:
+    """A real config root: team config, session context and one task owned by
+    the teammate whose awaiting_lead_completion wait is age_seconds old. Only a
+    member whose backendType is exactly "in-process" is held."""
+    from shared.pact_context import project_slug
+
+    config = tmp_path / ".claude"
+    _grace_write(config / "teams" / GRACE_TEAM / "config.json", {
+        "leadSessionId": GRACE_SID,
+        "members": [{"name": GRACE_MEMBER,
+                     "agentId": f"{GRACE_MEMBER}@{GRACE_TEAM}",
+                     "agentType": "pact-backend-coder",
+                     "backendType": backend}],
+    })
+    _grace_write(config / "pact-sessions" / project_slug(GRACE_PROJECT) / GRACE_SID
+                 / "pact-session-context.json",
+                 {"session_id": GRACE_SID, "project_dir": GRACE_PROJECT,
+                  "team_name": GRACE_TEAM})
+    since_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    since = since_at.isoformat()
+    _grace_write(config / "tasks" / GRACE_TEAM / "7.json", {
+        "id": "7", "owner": GRACE_MEMBER, "subject": "s", "status": "in_progress",
+        "metadata": {"intentional_wait": {
+            "reason": "awaiting_lead_completion", "expected_resolver": "lead",
+            "since": since, "covers_since": since,
+        }},
+    })
+    return config, since_at
+
+
+def _grace_inbox(config: Path) -> Path:
+    return config / "teams" / GRACE_TEAM / "inboxes" / f"{GRACE_MEMBER}.json"
+
+
+def _idle_frame_and_env(config: Path) -> tuple[dict, dict]:
+    frame = {
+        "hook_event_name": "TeammateIdle",
+        "session_id": GRACE_SID,
+        "cwd": GRACE_PROJECT,
+        "team_name": GRACE_TEAM,
+        "teammate_name": GRACE_MEMBER,
+    }
+    env = {
+        "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+        "HOME": str(config.parent),
+        "CLAUDE_CONFIG_DIR": str(config),
+        "CLAUDE_PROJECT_DIR": GRACE_PROJECT,
+    }
+    return frame, carry_clock_shift(env)
+
+
+def _start_idle_hook(config: Path) -> subprocess.Popen:
+    """Launch the real TeammateIdle hook as a subprocess and feed its frame."""
+    frame, env = _idle_frame_and_env(config)
+    hook = subprocess.Popen(
+        [sys.executable, str(GRACE_HOOK)], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+    )
+    hook.stdin.write(json.dumps(frame))
+    hook.stdin.close()
+    return hook
+
+
+def _finish_idle_hook(hook: subprocess.Popen) -> dict:
+    stdout = hook.stdout.read()
+    stderr = hook.stderr.read()
+    assert hook.wait(timeout=30) == 0, stderr
+    return json.loads(stdout)
+
+
+def _run_idle_hook(config: Path) -> tuple[dict, float]:
+    """Run the real TeammateIdle hook to completion; return (stdout JSON, seconds)."""
+    started = time.monotonic()
+    output = _finish_idle_hook(_start_idle_hook(config))
+    return output, time.monotonic() - started
+
+
+def _deadline(since_at: datetime, early_by: float = 0.0) -> datetime:
+    return since_at + timedelta(seconds=teammate_idle.GRACE_SECONDS - early_by)
+
+
+# Each arm keeps about 8.5 s of the 10 s window and measures this machine's own
+# hook start-up first. Its checks fall CHECK_AFTER seconds past that start-up, so
+# a held run that starts up to about 2.5 s slower than its baseline still reads
+# correctly; a runner too slow to leave that room fails loudly before any launch.
+GRACE_AGE = 1.5
+CHECK_AFTER = 3.0
+# Arm A: the hook must return this soon after the message lands. Its wait is
+# younger, and its room check adds this bound plus a second, so the deadline a
+# hook that never reads the inbox holds to always falls well after the bound.
+RETURN_BOUND = 2.0
+GRACE_AGE_A = 0.5
+
+
+def _startup_seconds(tmp_path: Path) -> float:
+    """Wall time of the same real hook with a wait too old to hold: start-up only."""
+    baseline, _since = _grace_root(tmp_path / "baseline", age_seconds=60)
+    _output, elapsed = _run_idle_hook(baseline)
+    return elapsed
+
+
+def _require_room(startup: float, since_at: datetime, extra: float = 0.0) -> None:
+    """Fail loudly, before any launch, when start-up leaves no room to observe the hold.
+
+    `extra` is the time an arm still needs after its check point (arm A: the
+    return bound), so a deadline inside that span can never pass for the hold.
+    """
+    remaining = (_deadline(since_at) - datetime.now(timezone.utc)).total_seconds()
+    assert startup + CHECK_AFTER + extra + 1.0 < remaining, (
+        f"runner too slow to observe the hold: hook start-up took {startup:.2f}s "
+        f"with {remaining:.2f}s of the window left"
+    )
+
+
+class _Launched:
+    """A started hook that is killed if the arm leaves before finishing it."""
+
+    def __init__(self, config: Path):
+        self.started = time.monotonic()
+        self.hook = _start_idle_hook(config)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        if self.hook.poll() is None:
+            self.hook.kill()
+            self.hook.wait(timeout=30)
+        return False
+
+
+class TestTeammateIdleGraceThroughRealHook:
+    def test_message_landing_during_the_hold_ends_it_early(self, tmp_path):
+        """Arm A. The lead's message lands CHECK_AFTER seconds past this
+        machine's measured hook start-up. The hook must still be running then
+        and must end soon after the message lands, which proves it reached
+        this inbox through the real config dir; one that cannot reach it holds
+        to the deadline. Arm B is the deadline-based check that a hold runs at
+        all."""
+        startup = _startup_seconds(tmp_path)
+        config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE_A)
+        inbox = _grace_inbox(config)
+        inbox.parent.mkdir(parents=True, exist_ok=True)
+        staged = inbox.with_name("staged.tmp")
+        _require_room(startup, since_at, extra=RETURN_BOUND)
+
+        with _Launched(config) as run:
+            time.sleep(startup + CHECK_AFTER)
+            staged.write_text(json.dumps([{
+                "from": "team-lead", "text": "accepted", "read": False,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }]), encoding="utf-8")
+            still_running = run.hook.poll() is None
+            os.replace(staged, inbox)
+            landed_at = datetime.now(timezone.utc)
+            output = _finish_idle_hook(run.hook)
+            returned_at = datetime.now(timezone.utc)
+
+        assert output == {"suppressOutput": True}, "the hold never emits a decision"
+        assert still_running, (
+            f"the hook exited within {CHECK_AFTER:.1f}s of its {startup:.2f}s "
+            "measured start-up, before the message landed"
+        )
+        assert (returned_at - landed_at).total_seconds() < RETURN_BOUND, (
+            "the real hook did not see the message in the teammate's inbox "
+            "under the config dir, so it kept holding after the message landed"
+        )
+
+    def test_no_queued_message_holds_to_the_original_deadline(self, tmp_path):
+        """Arm B, the no-hold detector. The inbox is absent. The hook must still
+        be running CHECK_AFTER seconds past this machine's measured start-up
+        and must not return before the deadline less one poll interval. A hook
+        that skipped the hold returns at start-up, before the deadline, however
+        slow the machine is. Empty versus absent inboxes are covered by the
+        unit tests."""
+        startup = _startup_seconds(tmp_path)
+        config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE)
+        _require_room(startup, since_at)
+
+        with _Launched(config) as run:
+            time.sleep(startup + CHECK_AFTER)
+            still_running = run.hook.poll() is None
+            output = _finish_idle_hook(run.hook)
+            returned_at = datetime.now(timezone.utc)
+
+        assert output == {"suppressOutput": True}
+        assert still_running, (
+            f"the hook exited within {CHECK_AFTER:.1f}s of its {startup:.2f}s "
+            "measured start-up"
+        )
+        assert returned_at >= _deadline(since_at, early_by=teammate_idle.POLL_SECONDS), (
+            "the hook returned before the grace deadline, so it never held "
+            "the eligible wait"
+        )
+
+    def test_pane_teammate_is_never_held(self, tmp_path):
+        """Arm C. A tmux member's idle notice is sent before this hook runs, so
+        the same eligible wait with nothing queued returns about as soon as the
+        hook has started, rather than at the deadline about 8.5 s away."""
+        startup = _startup_seconds(tmp_path)
+        config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE, backend="tmux")
+        _require_room(startup, since_at)
+
+        with _Launched(config) as run:
+            output = _finish_idle_hook(run.hook)
+            elapsed = time.monotonic() - run.started
+
+        assert "decision" not in output, output
+        assert elapsed < startup + CHECK_AFTER, (
+            f"the pane teammate's hook ran {elapsed:.2f}s against a {startup:.2f}s "
+            "measured start-up: either its idle was held, or start-up varied by "
+            f"more than {CHECK_AFTER:.1f}s between runs"
+        )

@@ -367,6 +367,274 @@ def test_a_file_directly_in_its_root_still_writes(tmp_path):
     assert state_file.read_text(root / "session.json", root) == '{"files": []}'
 
 
+# ---------------------------------------------------------------------------
+# Strict decode: a caller can tell invalid bytes from an encoded U+FFFD.
+# ---------------------------------------------------------------------------
+
+
+def test_strict_read_raises_on_an_invalid_byte(tmp_path):
+    """RED WHEN strict no longer selects errors="strict"."""
+    (tmp_path / "s.json").write_bytes(b'["ok \xff"]')
+    with pytest.raises(UnicodeDecodeError):
+        state_file.read_text(tmp_path / "s.json", tmp_path, strict=True)
+
+
+def test_default_read_still_replaces_an_invalid_byte(tmp_path):
+    """Guard arm: every existing caller keeps the replacing decode."""
+    (tmp_path / "s.json").write_bytes(b'["ok \xff"]')
+    assert state_file.read_text(tmp_path / "s.json", tmp_path) == '["ok \ufffd"]'
+
+
+def test_strict_read_accepts_an_encoded_replacement_character(tmp_path):
+    """Guard arm: U+FFFD written as valid UTF-8 is content, not corruption."""
+    (tmp_path / "s.json").write_bytes('["ok \ufffd"]'.encode("utf-8"))
+    assert state_file.read_text(tmp_path / "s.json", tmp_path, strict=True) == '["ok \ufffd"]'
+
+
+# ---------------------------------------------------------------------------
+# The walk: a component swapped for a symlink after the check is refused.
+# ---------------------------------------------------------------------------
+
+
+def _open_descriptors() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def _swap_after_resolve(monkeypatch, component: Path, target: Path) -> None:
+    """Let _resolve pass, then replace `component` with a symlink to `target`."""
+    real_resolve = state_file._resolve
+
+    def resolve_then_swap(path, root):
+        resolved = real_resolve(path, root)
+        component.rename(component.with_name(component.name + ".moved"))
+        component.symlink_to(target, target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr(state_file, "_resolve", resolve_then_swap)
+
+
+def _team_and_outside(tmp_path: Path) -> tuple[Path, Path, Path]:
+    root = tmp_path / "teams"
+    team = root / TEAM / "inboxes"
+    team.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    return root, root / TEAM, outside
+
+
+def test_a_component_swapped_after_the_check_reads_nothing(tmp_path, monkeypatch):
+    """RED WHEN the walk opens components without O_NOFOLLOW, or read_text opens
+    the resolved path string again: the read then follows the swapped link."""
+    root, team, outside = _team_and_outside(tmp_path)
+    (outside / "inboxes").mkdir()
+    (outside / "inboxes" / "w.json").write_text('["outside"]', encoding="utf-8")
+    (team / "inboxes" / "w.json").write_text('["inside"]', encoding="utf-8")
+    _swap_after_resolve(monkeypatch, team, outside)
+    before = _open_descriptors()
+    with pytest.raises(FileNotFoundError) as refused:
+        state_file.read_text(team / "inboxes" / "w.json", root)
+    assert isinstance(refused.value.__cause__, OSError), (
+        "a refusal must chain its cause, so callers can tell it from absence"
+    )
+    assert _open_descriptors() == before, "the refused walk leaked a descriptor"
+
+
+def test_a_component_swapped_after_the_check_appends_nothing(tmp_path, monkeypatch):
+    """RED WHEN append_line opens the resolved path string instead of walking."""
+    root, team, outside = _team_and_outside(tmp_path)
+    (outside / "inboxes").mkdir()
+    _swap_after_resolve(monkeypatch, team, outside)
+    with pytest.raises(OSError):
+        state_file.append_line(team / "inboxes" / "log.jsonl", b"x\n", root, max_file_bytes=100)
+    assert list((outside / "inboxes").iterdir()) == [], "the append followed the swapped link"
+
+
+def _swap_after_walk(monkeypatch, component: Path, target: Path) -> None:
+    """Let the walk open its directory, then replace `component` with a symlink."""
+    real_walk = state_file._open_contained_directory
+
+    def walk_then_swap(path, root):
+        fd = real_walk(path, root)
+        component.rename(component.with_name(component.name + ".moved"))
+        component.symlink_to(target, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(state_file, "_open_contained_directory", walk_then_swap)
+
+
+def test_a_swap_after_the_walk_still_reads_the_walked_directory(tmp_path, monkeypatch):
+    """RED WHEN read_text opens by path instead of relative to the walked descriptor."""
+    root, team, outside = _team_and_outside(tmp_path)
+    (outside / "inboxes").mkdir()
+    (outside / "inboxes" / "w.json").write_text('["outside"]', encoding="utf-8")
+    (team / "inboxes" / "w.json").write_text('["inside"]', encoding="utf-8")
+    _swap_after_walk(monkeypatch, team, outside)
+    assert state_file.read_text(team / "inboxes" / "w.json", root) == '["inside"]'
+
+
+def test_a_swap_after_the_walk_still_appends_to_the_walked_directory(tmp_path, monkeypatch):
+    """RED WHEN append_line opens by path instead of relative to the walked descriptor."""
+    root, team, outside = _team_and_outside(tmp_path)
+    (outside / "inboxes").mkdir()
+    _swap_after_walk(monkeypatch, team, outside)
+    assert state_file.append_line(team / "inboxes" / "log.jsonl", b"x\n", root, max_file_bytes=100)
+    assert list((outside / "inboxes").iterdir()) == [], "the append followed the swapped link"
+
+
+_NOT_ROOT = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root bypasses directory permission checks"
+)
+
+
+@_NOT_ROOT
+def test_a_search_only_directory_on_the_walk_still_reads(tmp_path):
+    """RED WHEN the walk opens components O_RDONLY where O_PATH exists: a
+    plain path open needs only search permission, and so must the walk."""
+    if not hasattr(os, "O_PATH"):
+        pytest.skip("no O_PATH: the walk opens components O_RDONLY here")
+    root = tmp_path / "teams"
+    team = root / TEAM
+    (team / "inboxes").mkdir(parents=True)
+    (team / "inboxes" / "w.json").write_text("[]", encoding="utf-8")
+    team.chmod(0o111)
+    try:
+        assert state_file.read_text(team / "inboxes" / "w.json", root) == "[]"
+    finally:
+        team.chmod(0o755)
+
+
+@_NOT_ROOT
+def test_permission_denied_on_the_walk_raises_permission_error_unwrapped(tmp_path):
+    """RED WHEN the walk reports every OSError as a refusal: a directory the
+    reader may not search raises PermissionError, as a plain path open does."""
+    root = tmp_path / "teams"
+    team = root / TEAM
+    (team / "inboxes").mkdir(parents=True)
+    team.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError) as denied:
+            state_file.read_text(team / "inboxes" / "w.json", root)
+        assert not isinstance(denied.value, FileNotFoundError)
+    finally:
+        team.chmod(0o755)
+
+
+@pytest.mark.parametrize("operation", ["read_text", "append_line"])
+def test_another_os_error_on_the_walk_is_raised_unchanged(operation, tmp_path, monkeypatch):
+    """RED WHEN the walk maps an error other than ELOOP/ENOTDIR to a refusal."""
+    root = tmp_path / "teams"
+    (root / TEAM / "inboxes").mkdir(parents=True)
+    real_open = os.open
+
+    def no_descriptors(path, flags, *args, **kwargs):
+        if kwargs.get("dir_fd") is not None and flags & os.O_DIRECTORY:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(state_file.os, "open", no_descriptors)
+    before = _open_descriptors()
+    target = root / TEAM / "inboxes" / "w.json"
+    with pytest.raises(OSError) as raised:
+        if operation == "read_text":
+            state_file.read_text(target, root)
+        else:
+            state_file.append_line(target, b"x\n", root, max_file_bytes=100)
+    assert raised.value.errno == errno.EMFILE and raised.value.__cause__ is None
+    assert _open_descriptors() == before, "the failed walk leaked the root descriptor"
+
+
+@pytest.mark.parametrize("code", [errno.ELOOP, errno.ENOTDIR], ids=["ELOOP", "ENOTDIR"])
+def test_a_symlink_or_non_directory_errno_on_the_walk_is_a_refusal(code, tmp_path, monkeypatch):
+    """RED WHEN either errno leaves the refusal set. Linux reports a swapped
+    symlink as ENOTDIR; other kernels report ELOOP, so both are injected."""
+    root = tmp_path / "teams"
+    (root / TEAM / "inboxes").mkdir(parents=True)
+    real_open = os.open
+
+    def swapped(path, flags, *args, **kwargs):
+        if kwargs.get("dir_fd") is not None and flags & os.O_DIRECTORY:
+            raise OSError(code, os.strerror(code))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(state_file.os, "open", swapped)
+    with pytest.raises(FileNotFoundError) as refused:
+        state_file.read_text(root / TEAM / "inboxes" / "w.json", root)
+    assert isinstance(refused.value.__cause__, OSError)
+
+
+def test_a_component_swapped_for_a_file_is_refused(tmp_path, monkeypatch):
+    """RED WHEN ENOTDIR leaves the refusal set."""
+    root, team, _outside = _team_and_outside(tmp_path)
+    real_resolve = state_file._resolve
+
+    def resolve_then_replace(path, root_):
+        resolved = real_resolve(path, root_)
+        team.rename(team.with_name(team.name + ".moved"))
+        team.write_text("not a directory", encoding="utf-8")
+        return resolved
+
+    monkeypatch.setattr(state_file, "_resolve", resolve_then_replace)
+    with pytest.raises(FileNotFoundError) as refused:
+        state_file.read_text(team / "inboxes" / "w.json", root)
+    assert isinstance(refused.value.__cause__, OSError)
+
+
+def _refusal_case(case: str, tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """A read target under root that read_text must refuse, for each refusal shape."""
+    root, team, outside = _team_and_outside(tmp_path)
+    if case == "out-of-root":
+        team.rename(team.with_name(team.name + ".moved"))
+        team.symlink_to(outside, target_is_directory=True)
+    elif case == "swapped-to-symlink":
+        _swap_after_resolve(monkeypatch, team, outside)
+    elif case == "already-a-file":
+        team.rename(team.with_name(team.name + ".moved"))
+        team.write_text("not a directory", encoding="utf-8")
+    return root, team / "inboxes" / "w.json"
+
+
+@pytest.mark.parametrize("case", ["out-of-root", "swapped-to-symlink", "already-a-file"])
+def test_a_refused_read_raises_the_public_refused_type(case, tmp_path, monkeypatch):
+    """RED WHEN read_text raises a plain FileNotFoundError for a refusal: a caller
+    could then tell refusal from absence only by its cause."""
+    root, target = _refusal_case(case, tmp_path, monkeypatch)
+    with pytest.raises(state_file.Refused) as refused:
+        state_file.read_text(target, root)
+    assert isinstance(refused.value, FileNotFoundError), "callers treating it as absent keep working"
+    assert isinstance(refused.value.__cause__, OSError)
+
+
+def test_absence_is_not_a_refusal(tmp_path):
+    """Guard arm: a missing file and a missing directory raise a plain
+    FileNotFoundError, never Refused, so an absence-retrying caller retries."""
+    root = tmp_path / "teams"
+    (root / TEAM).mkdir(parents=True)
+    for target in (root / TEAM / "w.json", root / TEAM / "inboxes" / "w.json"):
+        with pytest.raises(FileNotFoundError) as absent:
+            state_file.read_text(target, root)
+        assert not isinstance(absent.value, state_file.Refused)
+
+
+def test_a_missing_directory_reads_as_plain_absence(tmp_path):
+    """Guard arm: a directory that does not exist yet is absence, not refusal,
+    so a caller that retries on absence still retries."""
+    root = tmp_path / "teams"
+    root.mkdir()
+    with pytest.raises(FileNotFoundError) as absent:
+        state_file.read_text(root / TEAM / "inboxes" / "w.json", root)
+    assert absent.value.__cause__ is None
+
+
+def test_a_team_link_inside_the_root_still_reads(tmp_path):
+    """Guard arm: the walk follows the resolved path, so an in-root link still reads."""
+    root = tmp_path / "teams"
+    real_team = root / "real-team"
+    real_team.mkdir(parents=True)
+    (root / TEAM).symlink_to(real_team, target_is_directory=True)
+    (real_team / "s.json").write_text("{}", encoding="utf-8")
+    assert state_file.read_text(root / TEAM / "s.json", root) == "{}"
+
+
 @pytest.mark.parametrize("reader", ["read_text", "_current_text"])
 def test_a_directory_at_the_path_raises_and_leaks_no_descriptor(reader, tmp_path, monkeypatch):
     """`os.open` succeeds on a directory and `os.fdopen` then raises
