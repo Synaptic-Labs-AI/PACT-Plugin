@@ -18,7 +18,7 @@ wake/idle delivery-ordering race:
   region in protocols/pact-protocols.md, and agents/pact-orchestrator.md):
     - "Crossed-Wake Idles: Discriminate by Timestamp Direction" — including
       the behavioral non-goal for synchronous SEND-SIDE wake/send detection,
-      the bounded RECEIVE-SIDE TeammateIdle grace contract, and the
+      the RECEIVE-SIDE TeammateIdle hold permission, and the
       pre-directive idle-straggler discrimination (a tick predating the
       directive send is a straggler, never a stall signal).
     - "Directive-Reflection Check" — mid-turn directives verified against
@@ -371,26 +371,25 @@ PHRASE_PINS = [
 
 GRACE_CONTRACT_PINS = [
     (SKILL, "synchronous SEND-SIDE wake-detection hook remains prohibited"),
-    (SKILL, "bounded RECEIVE-SIDE TeammateIdle grace gate"),
     (COMPLETION_AUTHORITY, "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction"),
-    (COMPLETION_AUTHORITY, "Bounded RECEIVE-SIDE exception — TeammateIdle grace"),
-    (COMPLETION_AUTHORITY, "positive valid queued-message evidence"),
-    (COMPLETION_AUTHORITY, "never infers acceptance, sends no message, and writes no task or inbox state"),
-    (COMPLETION_AUTHORITY, "original ten-second budget"),
-    (COMPLETION_AUTHORITY, "fails open to the existing fallback"),
-    (COMPLETION_AUTHORITY, "genuinely missing inbox retries within that budget"),
-    (COMPLETION_AUTHORITY, "persistent absence fails open at timeout"),
-    (COMPLETION_AUTHORITY, "unsafe or unreadable input fails open to the existing fallback immediately"),
+    (COMPLETION_AUTHORITY, "The non-goal covers the lead's send path only"),
+    (COMPLETION_AUTHORITY, "Crossings still occur, so apply the redundant-confirm procedure above unchanged"),
     (PROTOCOLS_SSOT, "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction"),
-    (PROTOCOLS_SSOT, "Bounded RECEIVE-SIDE exception — TeammateIdle grace"),
-    (PROTOCOLS_SSOT, "positive valid queued-message evidence"),
-    (PROTOCOLS_SSOT, "never infers acceptance, sends no message, and writes no task or inbox state"),
-    (PROTOCOLS_SSOT, "original ten-second budget"),
-    (PROTOCOLS_SSOT, "fails open to the existing fallback"),
-    (PROTOCOLS_SSOT, "genuinely missing inbox retries within that budget"),
-    (PROTOCOLS_SSOT, "persistent absence fails open at timeout"),
-    (PROTOCOLS_SSOT, "unsafe or unreadable input fails open to the existing fallback immediately"),
+    (PROTOCOLS_SSOT, "The non-goal covers the lead's send path only"),
+    (PROTOCOLS_SSOT, "Crossings still occur, so apply the redundant-confirm procedure above unchanged"),
 ]
+# Each pin's meaning-inverting rewrite: the pin must red when its negation or
+# scope word is flipped, not only when the whole phrase is deleted.
+GRACE_CONTRACT_INVERSIONS = {
+    "synchronous SEND-SIDE wake-detection hook remains prohibited":
+        "synchronous SEND-SIDE wake-detection hook remains permitted",
+    "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction":
+        "Synchronous SEND-SIDE wake/send detection is therefore viable",
+    "The non-goal covers the lead's send path only":
+        "The non-goal covers the lead's send path and the receive path",
+    "Crossings still occur, so apply the redundant-confirm procedure above unchanged":
+        "Crossings no longer occur, so skip the redundant-confirm procedure above",
+}
 PHRASE_PINS.extend(GRACE_CONTRACT_PINS)
 
 
@@ -434,6 +433,26 @@ def test_grace_contract_pin_fails_when_phrase_is_removed(
         test_rule_phrase_present(doc_path, phrase)
 
 
+@pytest.mark.parametrize(
+    "doc_path, phrase",
+    GRACE_CONTRACT_PINS,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in GRACE_CONTRACT_PINS],
+)
+def test_grace_contract_pin_fails_when_phrase_is_inverted(
+    doc_path: Path, phrase: str, monkeypatch
+):
+    """Flipping each contract phrase's meaning must redden its pin."""
+    original = _normalized(doc_path)
+    needle = _phrase(phrase)
+    inverted = _phrase(GRACE_CONTRACT_INVERSIONS[phrase])
+    assert needle in original and inverted != needle
+    monkeypatch.setitem(
+        globals(), "_normalized", lambda _path: original.replace(needle, inverted, 1)
+    )
+    with pytest.raises(AssertionError, match="rule phrase"):
+        test_rule_phrase_present(doc_path, phrase)
+
+
 RETIRED_ABSOLUTE_WAKE_PINS = [
     (COMPLETION_AUTHORITY, "Non-goal — no synchronous hook-based detection"),
     (PROTOCOLS_SSOT, "Non-goal — no synchronous hook-based detection"),
@@ -470,6 +489,52 @@ def test_retired_absolute_wake_absence_fails_when_injected(
     )
     with pytest.raises(AssertionError, match="retired absolute wake prohibition"):
         test_retired_absolute_wake_prohibition_absent(doc_path, retired)
+
+
+# Mechanism detail lives in the hook and the release notes, not in prose an
+# agent loads: a duplicated constant or fail-open rule drifts from the code.
+RETIRED_MECHANISM_PROSE = [
+    (COMPLETION_AUTHORITY, "ten-second"),
+    (PROTOCOLS_SSOT, "ten-second"),
+    (SKILL, "ten-second"),
+    (COMPLETION_AUTHORITY, "positive valid queued-message evidence"),
+    (PROTOCOLS_SSOT, "positive valid queued-message evidence"),
+    (SKILL, "positive valid"),
+    (COMPLETION_AUTHORITY, "keep a teammate's turn alive"),
+    (PROTOCOLS_SSOT, "keep a teammate's turn alive"),
+    (SKILL, "not acceptance: process it"),
+]
+
+
+@pytest.mark.parametrize(
+    "doc_path, retired",
+    RETIRED_MECHANISM_PROSE,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in RETIRED_MECHANISM_PROSE],
+)
+def test_retired_grace_mechanism_prose_absent(doc_path: Path, retired: str):
+    """The grace mechanism is described by the hook, not by loaded prose."""
+    assert _phrase(retired) not in _normalized(doc_path), (
+        f"{doc_path.name}: retired grace mechanism prose {retired!r} "
+        "reappeared; keep mechanism detail in hooks/teammate_idle.py."
+    )
+
+
+@pytest.mark.parametrize(
+    "doc_path, retired",
+    RETIRED_MECHANISM_PROSE,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in RETIRED_MECHANISM_PROSE],
+)
+def test_retired_grace_mechanism_absence_fails_when_injected(
+    doc_path: Path, retired: str, monkeypatch
+):
+    """Injecting each retired mechanism phrase must redden its absence pin."""
+    original = _normalized(doc_path)
+    assert _phrase(retired) not in original
+    monkeypatch.setitem(
+        globals(), "_normalized", lambda _path: original + " " + _phrase(retired)
+    )
+    with pytest.raises(AssertionError, match="retired grace mechanism prose"):
+        test_retired_grace_mechanism_prose_absent(doc_path, retired)
 
 
 # ---------------------------------------------------------------------------

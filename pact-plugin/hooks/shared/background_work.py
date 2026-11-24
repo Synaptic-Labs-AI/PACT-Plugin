@@ -1151,6 +1151,23 @@ def teammate_is_separate_process(team_name: Any, member_name: Any) -> bool:
     )
 
 
+def teammate_is_in_process(
+    team_name: Any, member_name: Any, teams_dir: str | None = None
+) -> bool:
+    """True iff `member_name`'s `backendType` is exactly "in-process"; every doubt is False."""
+    if not isinstance(team_name, str) or not isinstance(member_name, str) or not member_name:
+        return False
+    from .pact_context import iter_team_members
+    from .session_state import is_safe_path_component
+
+    if not is_safe_path_component(team_name):
+        return False
+    return any(
+        m.get("name") == member_name and m.get("backendType") == "in-process"
+        for m in iter_team_members(team_name, teams_dir=teams_dir)
+    )
+
+
 def teammate_launch_name(input_data: Any, team_name: str) -> str:
     """The member name of the teammate of `team_name` acting in this frame, or "".
 

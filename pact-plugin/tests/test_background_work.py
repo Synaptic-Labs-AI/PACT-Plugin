@@ -19,6 +19,7 @@ carrying none produces nothing.
 from __future__ import annotations
 
 import ast
+import json
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -1575,3 +1576,54 @@ class TestFrameTeamAndNameReadsATeammateIdleFrame:
 
         pact_context(team_name="context-team", session_id="context-session")
         assert frame_team_and_name(self._frame()) == ("context-team", "")
+
+
+class TestTeammateIsInProcess:
+    """Only an exact in-process backendType holds; every doubt is False."""
+
+    @staticmethod
+    def _teams(tmp_path, config):
+        path = tmp_path / "teams" / "TeamRaw" / "config.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(config if isinstance(config, str) else json.dumps(config),
+                        encoding="utf-8")
+        return str(tmp_path / "teams")
+
+    @pytest.mark.parametrize("backend,expected", [
+        ("in-process", True),
+        ("tmux", False),
+        ("iterm2", False),
+        ("In-Process", False),
+        (None, False),
+    ], ids=["in-process", "tmux", "iterm2", "case", "missing-key"])
+    def test_only_an_exact_in_process_backend_is_true(self, backend, expected, tmp_path):
+        from shared.background_work import teammate_is_in_process
+
+        member = {"name": "CoderRaw"}
+        if backend is not None:
+            member["backendType"] = backend
+        teams = self._teams(tmp_path, {"members": [member]})
+
+        assert teammate_is_in_process("TeamRaw", "CoderRaw", teams) is expected
+
+    def test_missing_member_config_malformed_or_unsafe_name_is_false(self, tmp_path):
+        from shared.background_work import teammate_is_in_process
+
+        teams = self._teams(
+            tmp_path, {"members": [{"name": "other", "backendType": "in-process"}]}
+        )
+        assert teammate_is_in_process("TeamRaw", "CoderRaw", teams) is False
+        assert teammate_is_in_process("NoTeam", "CoderRaw", teams) is False
+        outside = tmp_path / "TeamRaw" / "config.json"
+        outside.parent.mkdir()
+        outside.write_text(
+            json.dumps({"members": [{"name": "other", "backendType": "in-process"}]}),
+            encoding="utf-8",
+        )
+        assert teammate_is_in_process("../TeamRaw", "other", teams) is False
+        assert teammate_is_in_process("TeamRaw", "", teams) is False
+
+        malformed = tmp_path / "bad"
+        assert teammate_is_in_process(
+            "TeamRaw", "CoderRaw", self._teams(malformed, "{not json")
+        ) is False

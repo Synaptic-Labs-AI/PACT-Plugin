@@ -19,6 +19,7 @@ Tests cover:
 - Concurrent multi-agent tracking independence.
 """
 import json
+import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -945,25 +946,16 @@ def test_teammate_idle_takes_its_team_from_frame_team_and_name():
 # ---------------------------------------------------------------------------
 
 _GRACE_NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
-_BLOCK_DECISION = {
-    "decision": "block",
-    "reason": (
-        "A valid teammate message is queued. Process the inbox normally now, "
-        "then fresh-read the current task JSON before any completion action. "
-        "The queued message is not proof of acceptance; do not send a redundant "
-        "confirmation merely because this continuation fired."
-    ),
-}
-
 
 class _FakeGraceClock:
-    """Advance by one poll per fake sleep; trip if the deadline is removed."""
+    """Advance by each requested sleep; trip if the deadline is removed."""
 
     def __init__(self):
         self.sleeps = []
 
     def monotonic(self):
-        return len(self.sleeps) * 0.1
+        # fsum keeps 100 x 0.1 at exactly 10.0, so float drift adds no extra poll.
+        return math.fsum(self.sleeps)
 
     def sleep(self, seconds):
         self.sleeps.append(seconds)
@@ -976,7 +968,10 @@ def _grace_task(
     owner="CoderRaw",
     reason="awaiting_lead_completion",
     age: float = 0,
+    covers_age: float | None = None,
 ):
+    """A wait whose `since` is `age` old; `covers_since` defaults to the same value."""
+    covers_age = age if covers_age is None else covers_age
     return make_task(
         status=status,
         owner=owner,
@@ -984,16 +979,16 @@ def _grace_task(
             "reason": reason,
             "expected_resolver": "lead",
             "since": (_GRACE_NOW - timedelta(seconds=age)).isoformat(),
-            "covers_since": (_GRACE_NOW - timedelta(seconds=age)).isoformat(),
+            "covers_since": (_GRACE_NOW - timedelta(seconds=covers_age)).isoformat(),
         }},
     )
 
 
 def _call_grace(tasks, tmp_path, clock, now=_GRACE_NOW,
                 team="TeamRaw", teammate="CoderRaw"):
-    from teammate_idle import check_inbox_grace
+    from teammate_idle import wait_for_inbox_evidence
 
-    return check_inbox_grace(
+    return wait_for_inbox_evidence(
         tasks,
         teammate,
         team,
@@ -1015,34 +1010,31 @@ def _write_inbox(tmp_path, content, team="TeamRaw", teammate="CoderRaw"):
 
 
 class TestInboxGraceGate:
-    def test_already_queued_message_blocks_without_sleep_and_uses_raw_names(
+    def test_already_queued_message_returns_without_sleep_and_uses_raw_names(
         self, tmp_path
     ):
-        """An immediate positive costs no sleep; mixed-case names stay raw."""
+        """An immediate positive returns at once, with no sleep; mixed-case names stay raw."""
         secret = "message text must never enter the hook reason"
         _write_inbox(tmp_path, json.dumps([{
             "from": "team-lead", "text": secret, "timestamp": "ignored",
         }]))
         clock = _FakeGraceClock()
 
-        decision = _call_grace([_grace_task()], tmp_path, clock)
+        seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision == _BLOCK_DECISION
+        assert seen is True
         assert clock.sleeps == []
-        assert secret not in decision["reason"]
-        assert "fresh-read the current task JSON" in decision["reason"]
-        assert "not proof of acceptance" in decision["reason"]
 
-    def test_message_appearing_after_empty_reads_blocks_once(self, tmp_path):
+    def test_message_appearing_after_empty_reads_is_seen_once(self, tmp_path):
         clock = _FakeGraceClock()
         valid = json.dumps([{"from": "team-lead", "text": "wake"}])
         with patch(
             "teammate_idle.state_file.read_text",
             side_effect=["[]", "[]", valid],
         ) as read:
-            decision = _call_grace([_grace_task()], tmp_path, clock)
+            seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision == _BLOCK_DECISION
+        assert seen is True
         assert read.call_count == 3
         assert clock.sleeps == [0.1, 0.1]
 
@@ -1050,13 +1042,13 @@ class TestInboxGraceGate:
         """Counter-test: removing the deadline trips the fake clock bound."""
         clock = _FakeGraceClock()
         with patch("teammate_idle.state_file.read_text", return_value="[]") as read:
-            decision = _call_grace([_grace_task()], tmp_path, clock)
+            seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision is None
+        assert seen is False
         assert read.call_count == 100
         assert len(clock.sleeps) == 100
         assert clock.sleeps == pytest.approx([0.1] * 100)
-        assert clock.monotonic() == 10.0
+        assert clock.monotonic() == pytest.approx(10.0)
 
     def test_invalid_json_retries_within_the_remaining_grace(self, tmp_path):
         clock = _FakeGraceClock()
@@ -1064,37 +1056,46 @@ class TestInboxGraceGate:
         with patch(
             "teammate_idle.state_file.read_text", side_effect=["{", valid]
         ) as read:
-            decision = _call_grace([_grace_task()], tmp_path, clock)
+            seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision == _BLOCK_DECISION
+        assert seen is True
         assert read.call_count == 2
         assert clock.sleeps == [0.1]
 
     @pytest.mark.parametrize("content", [
         "{",
-        json.dumps([
-            None,
-            "message",
-            {},
-            {"from": "", "text": "wake"},
-            {"from": "team-lead", "text": ""},
-            {"from": 3, "text": "wake"},
-            {"from": "team-lead", "text": 3},
-        ]),
+        json.dumps([]),
+        json.dumps([None]),
+        json.dumps(["message"]),
+        json.dumps([{}]),
+        json.dumps([{"from": "", "text": "wake"}]),
+        json.dumps([{"from": "team-lead", "text": ""}]),
+        json.dumps([{"from": 3, "text": "wake"}]),
+        json.dumps([{"from": "team-lead", "text": 3}]),
+        json.dumps([{"text": "wake"}]),
+        json.dumps([{"from": "team-lead"}]),
+        json.dumps([{"from": "team-lead", "text": "wake", "read": True}]),
+        '[{"from":"team-lead","text":"\\ud800"}]',
+        '[{"from":"\\udfff","text":"wake"}]',
+    ], ids=[
+        "invalid-json", "empty-list", "null-entry", "string-entry", "empty-dict",
+        "empty-from", "empty-text", "non-string-from", "non-string-text",
+        "missing-from", "missing-text", "read-true", "surrogate-text",
+        "surrogate-from",
     ])
-    def test_retryable_content_without_a_valid_message_never_blocks(
+    def test_retryable_content_without_a_valid_message_is_never_evidence(
         self, content, tmp_path
     ):
         """Counter-test: dropping the valid-message predicate blocks here."""
         clock = _FakeGraceClock()
         with patch("teammate_idle.state_file.read_text", return_value=content) as read:
-            decision = _call_grace([_grace_task()], tmp_path, clock)
+            seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision is None
+        assert seen is False
         assert read.call_count == 100
         assert len(clock.sleeps) == 100
 
-    def test_valid_message_beside_malformed_entries_blocks(self, tmp_path):
+    def test_valid_message_beside_malformed_entries_is_evidence(self, tmp_path):
         clock = _FakeGraceClock()
         content = json.dumps([
             None,
@@ -1102,9 +1103,9 @@ class TestInboxGraceGate:
             {"from": "team-lead", "text": "wake"},
         ])
         with patch("teammate_idle.state_file.read_text", return_value=content):
-            decision = _call_grace([_grace_task()], tmp_path, clock)
+            seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision == _BLOCK_DECISION
+        assert seen is True
         assert clock.sleeps == []
 
     def test_non_list_oversized_and_unreadable_inputs_fail_open(self, tmp_path):
@@ -1115,14 +1116,14 @@ class TestInboxGraceGate:
             with patch(
                 "teammate_idle.state_file.read_text", side_effect=[outcome]
             ) as read:
-                decision = _call_grace([_grace_task()], tmp_path, clock)
+                seen = _call_grace([_grace_task()], tmp_path, clock)
 
-            assert decision is None
+            assert seen is False
             assert read.call_count == 1
             assert read.call_args.kwargs["max_bytes"] == 1024 * 1024
             assert clock.sleeps == []
 
-    def test_missing_then_created_inbox_blocks_within_grace(self, tmp_path):
+    def test_missing_then_created_inbox_is_seen_within_grace(self, tmp_path):
         valid = json.dumps([{"from": "team-lead", "text": "wake"}])
 
         class _CreatingClock(_FakeGraceClock):
@@ -1131,9 +1132,9 @@ class TestInboxGraceGate:
                 _write_inbox(tmp_path, valid)
 
         clock = _CreatingClock()
-        decision = _call_grace([_grace_task()], tmp_path, clock)
+        seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision == _BLOCK_DECISION
+        assert seen is True
         assert clock.sleeps == [0.1]
 
     def test_persistently_missing_inbox_uses_original_remaining_budget(self, tmp_path):
@@ -1142,9 +1143,9 @@ class TestInboxGraceGate:
             "teammate_idle.state_file.read_text",
             side_effect=FileNotFoundError("missing"),
         ) as read:
-            decision = _call_grace([_grace_task(age=5.216)], tmp_path, clock)
+            seen = _call_grace([_grace_task(age=5.216)], tmp_path, clock)
 
-        assert decision is None
+        assert seen is False
         assert read.call_count == 48
         assert clock.sleeps[:-1] == pytest.approx([0.1] * 47)
         assert clock.sleeps[-1] == pytest.approx(0.084)
@@ -1155,9 +1156,9 @@ class TestInboxGraceGate:
             "teammate_idle.state_file.read_text",
             side_effect=OSError("unreadable"),
         ) as read:
-            decision = _call_grace([_grace_task()], tmp_path, clock)
+            seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision is None
+        assert seen is False
         assert read.call_count == 1
         assert clock.sleeps == []
 
@@ -1165,9 +1166,9 @@ class TestInboxGraceGate:
         _write_inbox(tmp_path, b"\xff")
         clock = _FakeGraceClock()
 
-        decision = _call_grace([_grace_task()], tmp_path, clock)
+        seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision is None
+        assert seen is False
         assert clock.sleeps == []
 
     @pytest.mark.parametrize("payload", [
@@ -1175,45 +1176,86 @@ class TestInboxGraceGate:
         b'[{"from":"\xff","text":"wake"}]',
         b'[{"from":"team-lead","text":"wake","note":"\xff"}]',
     ], ids=["text", "from", "unrelated-field"])
-    def test_replacement_decoded_valid_json_never_blocks(self, payload, tmp_path):
+    def test_replacement_decoded_valid_json_is_never_evidence(self, payload, tmp_path):
         """Invalid bytes become valid JSON with non-empty fields after replacement."""
         _write_inbox(tmp_path, payload)
         clock = _FakeGraceClock()
 
-        decision = _call_grace([_grace_task()], tmp_path, clock)
+        seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision is None
+        assert seen is False
         assert clock.sleeps == []
 
     @pytest.mark.parametrize("payload", [
         '[{"from":"team-lead","text":"\\ufffd"}]',
         '[{"from":"\\ufffd","text":"wake"}]',
-        '[{"from":"team-lead","text":"wake","note":"\\ufffd"}]',
-        '[{"\\ufffd":"x","from":"team-lead","text":"wake"}]',
-        '[{"from":"team-lead","text":"wake","meta":{"nested":["ok","\\ufffd"]}}]',
-        '[{"from":"team-lead","text":"\\ud800"}]',
-        '[{"from":"\\udfff","text":"wake"}]',
         '[{"from":"team-lead","text":"wake","note":"\\ud800"}]',
         '[{"\\ud800":"x","from":"team-lead","text":"wake"}]',
         '[{"from":"team-lead","text":"wake","meta":{"\\udfff":"x"}}]',
     ], ids=[
-        "replacement-text", "replacement-from", "replacement-unrelated-value",
-        "replacement-key", "replacement-nested-value", "surrogate-text",
-        "surrogate-from", "surrogate-unrelated-value", "surrogate-key",
-        "surrogate-nested-key",
+        "replacement-text", "replacement-from", "surrogate-unrelated-value",
+        "surrogate-key", "surrogate-nested-key",
     ])
-    def test_escaped_replacement_and_lone_surrogates_never_block(
+    def test_escaped_replacement_and_surrogates_outside_from_and_text_still_count(
         self, payload, tmp_path
     ):
+        """An escaped U+FFFD is real content, and only `from` and `text` are checked."""
         _write_inbox(tmp_path, payload)
         clock = _FakeGraceClock()
 
-        decision = _call_grace([_grace_task()], tmp_path, clock)
+        seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision is None
+        assert seen is True
         assert clock.sleeps == []
 
-    def test_escaped_ordinary_text_and_valid_non_bmp_characters_still_block(
+    @pytest.mark.parametrize("bad", [
+        {"from": "team-lead", "text": "\ud800"},
+        {"from": "team-lead", "text": "old", "read": True},
+        {"from": "", "text": "wake"},
+    ], ids=["surrogate", "read", "empty-from"])
+    @pytest.mark.parametrize("bad_first", [True, False], ids=["bad-first", "bad-last"])
+    def test_a_bad_sibling_entry_does_not_veto_a_valid_entry(
+        self, bad, bad_first, tmp_path
+    ):
+        valid = {"from": "team-lead", "text": "wake", "read": False}
+        entries = [bad, valid] if bad_first else [valid, bad]
+        clock = _FakeGraceClock()
+        with patch(
+            "teammate_idle.state_file.read_text", return_value=json.dumps(entries)
+        ):
+            seen = _call_grace([_grace_task()], tmp_path, clock)
+
+        assert seen is True
+        assert clock.sleeps == []
+
+    def test_unread_flag_absent_still_is_evidence(self, tmp_path):
+        _write_inbox(tmp_path, json.dumps([{"from": "team-lead", "text": "wake"}]))
+        clock = _FakeGraceClock()
+
+        assert _call_grace([_grace_task()], tmp_path, clock) is True
+
+    def test_read_only_inbox_retries_to_the_deadline_without_evidence(self, tmp_path):
+        """Counter-test: dropping the read clause blocks here on a consumed message."""
+        _write_inbox(
+            tmp_path,
+            json.dumps([{"from": "team-lead", "text": "old", "read": True}]),
+        )
+        clock = _FakeGraceClock()
+
+        seen = _call_grace([_grace_task()], tmp_path, clock)
+
+        assert seen is False
+        assert len(clock.sleeps) == 100
+
+    def test_inbox_is_read_with_strict_decoding(self, tmp_path):
+        clock = _FakeGraceClock()
+        valid = json.dumps([{"from": "team-lead", "text": "wake"}])
+        with patch("teammate_idle.state_file.read_text", return_value=valid) as read:
+            _call_grace([_grace_task()], tmp_path, clock)
+
+        assert read.call_args.kwargs["strict"] is True
+
+    def test_escaped_ordinary_text_and_valid_non_bmp_characters_still_count(
         self, tmp_path
     ):
         _write_inbox(
@@ -1222,9 +1264,9 @@ class TestInboxGraceGate:
         )
         clock = _FakeGraceClock()
 
-        decision = _call_grace([_grace_task()], tmp_path, clock)
+        seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision == _BLOCK_DECISION
+        assert seen is True
         assert clock.sleeps == []
 
     @pytest.mark.parametrize("parent", ["team", "inboxes"])
@@ -1247,9 +1289,9 @@ class TestInboxGraceGate:
         link.symlink_to(outside, target_is_directory=True)
         clock = _FakeGraceClock()
 
-        decision = _call_grace([_grace_task()], tmp_path, clock)
+        seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision is None
+        assert seen is False
         assert clock.sleeps == []
 
     def test_symlinked_inbox_never_reads_its_external_target(self, tmp_path):
@@ -1263,9 +1305,9 @@ class TestInboxGraceGate:
         inbox.symlink_to(outside)
         clock = _FakeGraceClock()
 
-        decision = _call_grace([_grace_task()], tmp_path, clock)
+        seen = _call_grace([_grace_task()], tmp_path, clock)
 
-        assert decision is None
+        assert seen is False
         assert clock.sleeps == []
 
     @pytest.mark.parametrize("team,teammate", [
@@ -1278,11 +1320,11 @@ class TestInboxGraceGate:
     ):
         clock = _FakeGraceClock()
         with patch("teammate_idle.state_file.read_text") as read:
-            decision = _call_grace(
+            seen = _call_grace(
                 [_grace_task()], tmp_path, clock, team=team, teammate=teammate
             )
 
-        assert decision is None
+        assert seen is False
         read.assert_not_called()
         assert clock.sleeps == []
 
@@ -1311,13 +1353,13 @@ class TestInboxGraceGate:
         elif case == "future":
             task = _grace_task(age=-0.01)
         elif case == "expired":
-            task = _grace_task(age=10)
+            task = _grace_task(age=10.001)
         clock = _FakeGraceClock()
 
         with patch("teammate_idle.state_file.read_text") as read:
-            decision = _call_grace([task], tmp_path, clock)
+            seen = _call_grace([task], tmp_path, clock)
 
-        assert decision is None
+        assert seen is False
         read.assert_not_called()
         assert clock.sleeps == []
 
@@ -1334,9 +1376,9 @@ class TestInboxGraceGate:
         _write_inbox(tmp_path, json.dumps([{"from": "team-lead", "text": "wake"}]))
         clock = _FakeGraceClock()
 
-        decision = _call_grace(tasks, tmp_path, clock)
+        seen = _call_grace(tasks, tmp_path, clock)
 
-        assert decision == _BLOCK_DECISION
+        assert seen is True
         assert clock.sleeps == []
 
     def test_completed_eligible_wait_survives_another_active_task(self, tmp_path):
@@ -1346,9 +1388,9 @@ class TestInboxGraceGate:
         _write_inbox(tmp_path, json.dumps([{"from": "team-lead", "text": "wake"}]))
         clock = _FakeGraceClock()
 
-        decision = _call_grace([waiting, other], tmp_path, clock)
+        seen = _call_grace([waiting, other], tmp_path, clock)
 
-        assert decision == _BLOCK_DECISION
+        assert seen is True
         assert clock.sleeps == []
 
     def test_simultaneous_eligible_waits_use_earliest_since_then_numeric_task_id(self):
@@ -1372,7 +1414,7 @@ class TestInboxGraceGate:
             assert selected["id"] == "9"
             assert age == 5
 
-    def test_completed_wait_blocks_on_late_positive_evidence_within_grace(
+    def test_completed_wait_sees_late_positive_evidence_within_grace(
         self, tmp_path
     ):
         """TaskUpdate-first completion must not discard the remaining grace."""
@@ -1385,27 +1427,85 @@ class TestInboxGraceGate:
             "teammate_idle.state_file.read_text",
             side_effect=["[]"] * 32 + [valid],
         ) as read:
-            decision = _call_grace([task], tmp_path, clock)
+            seen = _call_grace([task], tmp_path, clock)
 
-        assert decision == _BLOCK_DECISION
+        assert seen is True
         assert read.call_count == 33
         assert clock.sleeps == pytest.approx([0.1] * 32)
         assert clock.monotonic() == pytest.approx(3.2)
-        assert secret not in decision["reason"]
-        assert "not proof of acceptance" in decision["reason"]
 
     def test_completed_wait_timeout_uses_original_remaining_budget(self, tmp_path):
         """Completed status neither restarts grace nor blocks without evidence."""
         task = _grace_task(status="completed", age=5.216)
         clock = _FakeGraceClock()
         with patch("teammate_idle.state_file.read_text", return_value="[]") as read:
-            decision = _call_grace([task], tmp_path, clock)
+            seen = _call_grace([task], tmp_path, clock)
 
-        assert decision is None
+        assert seen is False
         assert read.call_count == 48
         assert len(clock.sleeps) == 48
         assert clock.sleeps[:-1] == pytest.approx([0.1] * 47)
         assert clock.sleeps[-1] == pytest.approx(0.084)
+
+    def test_eligible_upper_edge_reads_once_and_sleeps_the_remainder(self, tmp_path):
+        """Counter-test: shrinking the eligibility window skips this read."""
+        clock = _FakeGraceClock()
+        with patch("teammate_idle.state_file.read_text", return_value="[]") as read:
+            seen = _call_grace([_grace_task(age=9.95)], tmp_path, clock)
+
+        assert seen is False
+        assert read.call_count == 1
+        assert clock.sleeps == pytest.approx([0.05])
+
+    def test_restamped_since_keeps_the_original_covers_since_deadline(self, tmp_path):
+        """A re-SET moves since but not covers_since, so grace does not restart."""
+        _write_inbox(tmp_path, json.dumps([{"from": "team-lead", "text": "wake"}]))
+        clock = _FakeGraceClock()
+        task = _grace_task(age=0, covers_age=10.5)
+
+        with patch("teammate_idle.state_file.read_text") as read:
+            seen = _call_grace([task], tmp_path, clock)
+
+        assert seen is False
+        read.assert_not_called()
+        assert clock.sleeps == []
+
+    def test_restamped_since_inside_the_original_window_uses_its_remainder(
+        self, tmp_path
+    ):
+        clock = _FakeGraceClock()
+        task = _grace_task(age=0, covers_age=6)
+        with patch("teammate_idle.state_file.read_text", return_value="[]") as read:
+            seen = _call_grace([task], tmp_path, clock)
+
+        assert seen is False
+        assert read.call_count == 40
+        assert clock.monotonic() == pytest.approx(4.0)
+
+    def test_new_wait_with_matching_covers_since_gets_a_fresh_budget(self, tmp_path):
+        _write_inbox(tmp_path, json.dumps([{"from": "team-lead", "text": "wake"}]))
+        clock = _FakeGraceClock()
+
+        seen = _call_grace([_grace_task(age=0.5, covers_age=0.5)], tmp_path, clock)
+
+        assert seen is True
+
+    @pytest.mark.parametrize("covers", [None, "garbage", "2026-01-01T00:00:00"],
+                             ids=["absent", "malformed", "naive"])
+    def test_unusable_covers_since_falls_back_to_since(self, covers, tmp_path):
+        task = _grace_task(age=9.95, covers_age=0)
+        wait = task["metadata"]["intentional_wait"]
+        if covers is None:
+            del wait["covers_since"]
+        else:
+            wait["covers_since"] = covers
+        clock = _FakeGraceClock()
+        with patch("teammate_idle.state_file.read_text", return_value="[]") as read:
+            seen = _call_grace([task], tmp_path, clock)
+
+        assert seen is False
+        assert read.call_count == 1
+        assert clock.sleeps == pytest.approx([0.05])
 
     def test_second_idle_with_expired_wait_starts_no_new_grace(self, tmp_path):
         clock = _FakeGraceClock()
@@ -1416,67 +1516,71 @@ class TestInboxGraceGate:
                 [task], tmp_path, clock, now=_GRACE_NOW + timedelta(seconds=10)
             )
 
-        assert first is None and second is None
+        assert first is False and second is False
         assert read.call_count == 100
         assert len(clock.sleeps) == 100
 
 
-class TestMainInboxGrace:
-    def _run(self, gate, capsys, task=None):
+class TestMainInboxHold:
+    def _run(self, capsys, in_process=True, gate=None, task=None):
         import io
+        from unittest.mock import Mock
         from teammate_idle import main
 
-        tasks = [task or _grace_task()]
+        gate = gate or Mock(return_value=True)
         with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
-             patch("teammate_idle.iter_team_task_jsons", return_value=tasks), \
-             patch("teammate_idle.check_inbox_grace", gate) as grace, \
+             patch("teammate_idle.iter_team_task_jsons", return_value=[task or _grace_task()]), \
+             patch("teammate_idle.teammate_is_in_process", return_value=in_process), \
+             patch("teammate_idle.wait_for_inbox_evidence", gate) as hold, \
              patch("teammate_idle.check_idle_cleanup", return_value=(None, False)) as cleanup, \
              patch("teammate_idle.check_unflagged_background", return_value=None):
             with pytest.raises(SystemExit) as exc:
                 main()
 
         assert exc.value.code == 0
-        return grace, cleanup, json.loads(capsys.readouterr().out)
+        return hold, cleanup, json.loads(capsys.readouterr().out)
 
-    def test_main_emits_the_block_decision(self, capsys):
-        """Counter-test: deleting main's block output changes this exact JSON."""
+    @pytest.mark.parametrize("seen", [True, False], ids=["evidence", "deadline"])
+    def test_in_process_hold_returns_ordinary_output_without_a_decision(
+        self, seen, capsys
+    ):
+        """Counter-test: restoring a block output changes this exact JSON."""
         from unittest.mock import Mock
 
-        grace, cleanup, output = self._run(Mock(return_value=_BLOCK_DECISION), capsys)
-
-        assert output == _BLOCK_DECISION
-        assert "systemMessage" not in output
-        grace.assert_called_once()
-        cleanup.assert_not_called()
-
-    def test_main_preserves_suppress_output_after_timeout(self, capsys):
-        from unittest.mock import Mock
-
-        grace, cleanup, output = self._run(Mock(return_value=None), capsys)
+        hold, cleanup, output = self._run(capsys, gate=Mock(return_value=seen))
 
         assert output == {"suppressOutput": True}
-        grace.assert_called_once()
+        hold.assert_called_once()
         cleanup.assert_called_once()
 
-    def test_main_completed_timeout_preserves_ordinary_cleanup(self, capsys):
-        from unittest.mock import Mock
-
-        grace, cleanup, output = self._run(
-            Mock(return_value=None), capsys, task=_grace_task(status="completed")
-        )
+    def test_pane_or_undeterminable_mode_does_not_hold(self, capsys):
+        hold, cleanup, output = self._run(capsys, in_process=False)
 
         assert output == {"suppressOutput": True}
-        grace.assert_called_once()
+        hold.assert_not_called()
         cleanup.assert_called_once()
 
-    def test_main_fails_open_when_the_gate_errors(self, capsys):
+    def test_completed_task_keeps_ordinary_cleanup_after_the_hold(self, capsys):
+        hold, cleanup, _output = self._run(capsys, task=_grace_task(status="completed"))
+
+        hold.assert_called_once()
+        cleanup.assert_called_once()
+
+    def test_main_fails_open_when_the_hold_errors(self, capsys):
         from unittest.mock import Mock
 
-        _grace, cleanup, output = self._run(
-            Mock(side_effect=RuntimeError("inbox infrastructure failed")), capsys
+        _hold, cleanup, output = self._run(
+            capsys, gate=Mock(side_effect=RuntimeError("inbox infrastructure failed"))
         )
 
         assert output == {"suppressOutput": True}
         cleanup.assert_called_once()
+
+    def test_no_code_path_emits_a_decision(self):
+        """The runtime never delivers a queued message into a blocked continuation."""
+        source = HOOK.read_text(encoding="utf-8")
+
+        assert '"decision"' not in source
+        assert "'decision'" not in source
 

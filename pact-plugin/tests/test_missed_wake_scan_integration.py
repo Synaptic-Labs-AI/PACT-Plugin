@@ -50,6 +50,7 @@ the broken wiring" -> caught by UN-MOCKING the seam, not by revert alone.
 ================================================================================
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -381,10 +382,12 @@ class TestTeammateIdleResolvesTeamTasks:
 
 # ===========================================================================
 # IT-7 — teammate_idle inbox grace through the REAL hook process.
-#   The unit tests drive check_inbox_grace with an injected root and names,
-#   and the main()-level tests mock it, so neither covers the path main()
-#   composes from the config dir to the inbox file. This runs the hook the way
-#   hooks.json does, with nothing stubbed.
+#   The unit tests drive wait_for_inbox_evidence with an injected root and
+#   names, and the main()-level tests mock it, so neither covers the path
+#   main() composes from the config dir to the inbox file. This runs the hook
+#   the way hooks.json does, with nothing stubbed. The hold never emits a
+#   decision, so each arm reads WHEN the hook returned: early on evidence, at
+#   the deadline without it, and at once for a pane teammate.
 # ===========================================================================
 GRACE_HOOK = Path(__file__).resolve().parents[1] / "hooks" / "teammate_idle.py"
 GRACE_TEAM = "pact-graceseam"
@@ -398,9 +401,12 @@ def _grace_write(path: Path, payload) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
-def _grace_root(tmp_path: Path, age_seconds: float) -> Path:
+def _grace_root(
+    tmp_path: Path, age_seconds: float, backend: str = "in-process"
+) -> tuple[Path, datetime]:
     """A real config root: team config, session context and one task owned by
-    the teammate whose awaiting_lead_completion wait is age_seconds old."""
+    the teammate whose awaiting_lead_completion wait is age_seconds old. Only a
+    member whose backendType is exactly "in-process" is held."""
     from shared.pact_context import project_slug
 
     config = tmp_path / ".claude"
@@ -409,13 +415,14 @@ def _grace_root(tmp_path: Path, age_seconds: float) -> Path:
         "members": [{"name": GRACE_MEMBER,
                      "agentId": f"{GRACE_MEMBER}@{GRACE_TEAM}",
                      "agentType": "pact-backend-coder",
-                     "backendType": "in-process"}],
+                     "backendType": backend}],
     })
     _grace_write(config / "pact-sessions" / project_slug(GRACE_PROJECT) / GRACE_SID
                  / "pact-session-context.json",
                  {"session_id": GRACE_SID, "project_dir": GRACE_PROJECT,
                   "team_name": GRACE_TEAM})
-    since = (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat()
+    since_at = datetime.now(timezone.utc) - timedelta(seconds=age_seconds)
+    since = since_at.isoformat()
     _grace_write(config / "tasks" / GRACE_TEAM / "7.json", {
         "id": "7", "owner": GRACE_MEMBER, "subject": "s", "status": "in_progress",
         "metadata": {"intentional_wait": {
@@ -423,15 +430,14 @@ def _grace_root(tmp_path: Path, age_seconds: float) -> Path:
             "since": since, "covers_since": since,
         }},
     })
-    return config
+    return config, since_at
 
 
 def _grace_inbox(config: Path) -> Path:
     return config / "teams" / GRACE_TEAM / "inboxes" / f"{GRACE_MEMBER}.json"
 
 
-def _run_idle_hook(config: Path) -> tuple[dict, float]:
-    """Fire the real TeammateIdle hook as a subprocess; return (stdout JSON, seconds)."""
+def _idle_frame_and_env(config: Path) -> tuple[dict, dict]:
     frame = {
         "hook_event_name": "TeammateIdle",
         "session_id": GRACE_SID,
@@ -445,43 +451,103 @@ def _run_idle_hook(config: Path) -> tuple[dict, float]:
         "CLAUDE_CONFIG_DIR": str(config),
         "CLAUDE_PROJECT_DIR": GRACE_PROJECT,
     }
-    started = time.monotonic()
-    result = subprocess.run(
-        [sys.executable, str(GRACE_HOOK)], input=json.dumps(frame),
-        capture_output=True, text=True, env=carry_clock_shift(env), timeout=30,
+    return frame, carry_clock_shift(env)
+
+
+def _start_idle_hook(config: Path) -> subprocess.Popen:
+    """Launch the real TeammateIdle hook as a subprocess and feed its frame."""
+    frame, env = _idle_frame_and_env(config)
+    hook = subprocess.Popen(
+        [sys.executable, str(GRACE_HOOK)], stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
     )
-    elapsed = time.monotonic() - started
-    assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout), elapsed
+    hook.stdin.write(json.dumps(frame))
+    hook.stdin.close()
+    return hook
+
+
+def _finish_idle_hook(hook: subprocess.Popen) -> dict:
+    stdout = hook.stdout.read()
+    stderr = hook.stderr.read()
+    assert hook.wait(timeout=30) == 0, stderr
+    return json.loads(stdout)
+
+
+def _run_idle_hook(config: Path) -> tuple[dict, float]:
+    """Run the real TeammateIdle hook to completion; return (stdout JSON, seconds)."""
+    started = time.monotonic()
+    output = _finish_idle_hook(_start_idle_hook(config))
+    return output, time.monotonic() - started
+
+
+def _deadline(since_at: datetime, early_by: float = 0.0) -> datetime:
+    return since_at + timedelta(seconds=teammate_idle.GRACE_SECONDS - early_by)
 
 
 class TestTeammateIdleGraceThroughRealHook:
-    def test_queued_message_blocks_through_the_real_config_dir(self, tmp_path):
-        """Arm A. The wait is 8 s old: a queued message is found on the first
-        read, so the margin costs no sleep and absorbs interpreter start-up."""
-        config = _grace_root(tmp_path, age_seconds=8)
-        _grace_write(_grace_inbox(config), [{
+    def test_message_landing_during_the_hold_ends_it_early(self, tmp_path):
+        """Arm A. The wait is 8 s old, so about 2 s of grace remain. The lead's
+        message lands half a second after launch, while the hook is holding.
+        The hook must return after it lands and at least a second before the
+        deadline. A hook that skipped the hold returns before the message
+        lands; one that cannot reach this inbox holds to the deadline."""
+        config, since_at = _grace_root(tmp_path, age_seconds=8)
+        inbox = _grace_inbox(config)
+        inbox.parent.mkdir(parents=True, exist_ok=True)
+        staged = inbox.with_name("staged.tmp")
+
+        hook = _start_idle_hook(config)
+        time.sleep(0.5)
+        staged.write_text(json.dumps([{
             "from": "team-lead", "text": "accepted", "read": False,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-        }])
+        }]), encoding="utf-8")
+        still_holding = hook.poll() is None
+        os.replace(staged, inbox)
+        output = _finish_idle_hook(hook)
+        returned_at = datetime.now(timezone.utc)
 
-        output, _elapsed = _run_idle_hook(config)
-
-        assert output == {
-            "decision": "block", "reason": teammate_idle.INBOX_BLOCK_REASON,
-        }, "the real hook must reach the teammate's inbox under the config dir"
+        assert output == {"suppressOutput": True}, "the hold never emits a decision"
+        assert still_holding, (
+            "the hook exited before the message landed, so it never held"
+        )
+        assert returned_at < _deadline(since_at, early_by=1), (
+            "the real hook did not see the message in the teammate's inbox "
+            "under the config dir, so it held to the grace deadline"
+        )
 
     @pytest.mark.parametrize("inbox", [None, []], ids=["absent", "empty"])
-    def test_no_queued_message_fails_open_within_the_remaining_grace(
+    def test_no_queued_message_holds_to_the_original_deadline(
         self, tmp_path, inbox
     ):
-        """Arm B. The wait is 9.5 s old, so the real hook may poll for at most
-        about half a second before the ordinary idle path runs."""
-        config = _grace_root(tmp_path, age_seconds=9.5)
+        """Arm B. The wait is 9.5 s old, so the real hook holds for at most
+        about half a second. An eligible wait cannot end before its deadline
+        less one poll interval; a hook that skipped the hold returns about
+        0.1 s after launch, well before it."""
+        config, since_at = _grace_root(tmp_path, age_seconds=9.5)
         if inbox is not None:
             _grace_write(_grace_inbox(config), inbox)
 
         output, elapsed = _run_idle_hook(config)
+        returned_at = datetime.now(timezone.utc)
 
         assert output == {"suppressOutput": True}
         assert elapsed < 2, f"no-message idle held for {elapsed:.2f}s"
+        assert returned_at >= _deadline(since_at, early_by=teammate_idle.POLL_SECONDS), (
+            "the hook returned before the grace deadline, so it never held "
+            "the eligible wait"
+        )
+
+    def test_pane_teammate_is_never_held(self, tmp_path):
+        """Arm C. A tmux member's idle notice is sent before this hook runs, so
+        the same eligible wait with nothing queued returns at once, at least a
+        second before the deadline it would otherwise hold to."""
+        config, since_at = _grace_root(tmp_path, age_seconds=8, backend="tmux")
+
+        output, _elapsed = _run_idle_hook(config)
+        returned_at = datetime.now(timezone.utc)
+
+        assert "decision" not in output, output
+        assert returned_at < _deadline(since_at, early_by=1), (
+            "a pane teammate's idle was held"
+        )

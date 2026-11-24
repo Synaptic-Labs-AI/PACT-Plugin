@@ -127,13 +127,11 @@ asynchronously on delivery; unblocked TeammateIdle notifications fire at turn-en
 landed in the recipient's inbox. Synchronous SEND-SIDE wake/send detection is therefore
 dead-by-construction and historically produced near-100% false positives.
 
-**Bounded RECEIVE-SIDE exception — TeammateIdle grace.** The `TeammateIdle` hook may hold a fresh
-`awaiting_lead_completion` idle only on positive valid queued-message evidence within the original ten-second budget.
-The gate never infers acceptance, sends no message, and writes no task or inbox state. It preserves that budget
-when the task becomes `completed`. A genuinely missing inbox retries within that budget; persistent absence fails open
-at timeout, while unsafe or unreadable input fails open to the existing fallback immediately.
+**Receive-side exception.** The non-goal covers the lead's send path only: a `TeammateIdle` hook may
+briefly delay a teammate's idle so a message arriving meanwhile is delivered without an idle notification.
+Crossings still occur, so apply the redundant-confirm procedure above unchanged.
 
-The receive-side gate supplements, and does not replace, the existing mitigation layer: redundant-by-design wake handling on both sides (this rule
+The receive-side hold supplements, and does not replace, the existing mitigation layer: redundant-by-design wake handling on both sides (this rule
 plus the teammate-side disk-first re-read in
 [pact-agent-teams §On Wake](../skills/pact-agent-teams/SKILL.md#on-wake-disk-first-re-read-seam-agnostic))
 plus the duration-keyed `missed_wake_scan` hook that re-surfaces stale

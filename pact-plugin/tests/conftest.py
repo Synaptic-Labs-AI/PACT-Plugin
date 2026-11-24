@@ -176,6 +176,27 @@ import track_files  # noqa: E402, F401
 import validate_handoff  # noqa: E402, F401
 
 
+@pytest.fixture(autouse=True)
+def _no_real_grace_sleep(monkeypatch):
+    """Fail any test that reaches the real grace sleep instead of waiting 10 seconds.
+
+    main() swallows gate errors, so the raise only ends the loop; the teardown
+    assertion is what reports the reach. Injected sleeps are unaffected, and a
+    hook run as a subprocess is out of reach by design.
+    """
+    slept = []
+
+    def _refuse(seconds):
+        slept.append(seconds)
+        raise AssertionError("real grace sleep reached")
+
+    monkeypatch.setitem(
+        teammate_idle.wait_for_inbox_evidence.__kwdefaults__, "sleep", _refuse
+    )
+    yield
+    assert not slept, f"a test reached the real grace sleep: {slept}"
+
+
 # Name of the environment variable that relocates the PACT memory store.
 #
 # DUPLICATED FROM `scripts.config.MEMORY_DIR_ENV` ON PURPOSE. Importing it here
