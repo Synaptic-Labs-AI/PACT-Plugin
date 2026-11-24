@@ -259,7 +259,10 @@ def arm_command(
 # renders a value containing a single quote. A ; | & < > ( ) $ or backtick
 # outside quotes cannot sit inside a word, so a command composed onto the
 # watcher (in any slot, spaced or not) does not match and still counts as
-# a job the ending frame must account for. Admitted around the invocation:
+# a job the ending frame must account for. Slots are separated by spaces or
+# tabs only: a newline ends a shell command, so a line break between slots
+# would start another job (leading and trailing whitespace of any kind runs
+# nothing and is admitted). Admitted around the invocation:
 # an optional `cd <dir> &&`, env assignments, a python3 interpreter bare
 # or by path, and a trailing `2>&1`. The script word, once the shell's
 # quote removal is applied, must name a file called exactly pact_wait.py.
@@ -268,13 +271,13 @@ _PIECE = rf"""(?:{_BARE}|'[^']*'|"[^"$`\\]*")"""
 _WORD = rf"{_PIECE}+"
 _PACT_WAIT_SHAPE = re.compile(
     r"\A\s*"
-    rf"(?:cd\s+{_WORD}\s*&&\s*)?"
-    rf"(?:[A-Za-z_][A-Za-z0-9_]*=(?:{_WORD})?\s+)*"
-    rf"(?:(?:{_BARE}*/)?python3(?:\.\d+)?\s+)?"
-    rf"(?P<script>{_WORD})\s+"
-    rf"--team\s+{_WORD}\s+--task\s+{_WORD}\s+"
-    rf"--predicate\s+{_WORD}\s+--deadline\s+{_WORD}"
-    r"(?:\s+2>&1)?\s*\Z",
+    rf"(?:cd[ \t]+{_WORD}[ \t]*&&[ \t]*)?"
+    rf"(?:[A-Za-z_][A-Za-z0-9_]*=(?:{_WORD})?[ \t]+)*"
+    rf"(?:(?:{_BARE}*/)?python3(?:\.\d+)?[ \t]+)?"
+    rf"(?P<script>{_WORD})[ \t]+"
+    rf"--team[ \t]+{_WORD}[ \t]+--task[ \t]+{_WORD}[ \t]+"
+    rf"--predicate[ \t]+{_WORD}[ \t]+--deadline[ \t]+{_WORD}"
+    r"(?:[ \t]+2>&1)?\s*\Z",
     re.ASCII,
 )
 

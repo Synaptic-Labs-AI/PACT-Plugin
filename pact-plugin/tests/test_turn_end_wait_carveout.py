@@ -289,6 +289,10 @@ def test_is_wait_watcher_command_shape_table():
         _arm_command().replace("python3 ", "/repo/.venv/bin/python3 "),
         _arm_command() + " 2>&1",
         _arm_command() + "  ",
+        # Leading and trailing whitespace of any kind runs nothing.
+        _arm_command() + "\n",
+        "\n" + _arm_command(),
+        _arm_command().replace(" ", "\t"),
         _arm_command("/opt/o'brien/hooks/pact_wait.py"),
         _arm_command('/opt/"q"/hooks/pact_wait.py'),
         # A quoted spaced task id is ONE shell word: the builder renders a
@@ -313,6 +317,14 @@ def test_is_wait_watcher_command_shape_table():
         "true; pact_wait.py --team t --task 1 --predicate h --deadline 5",
         "cat pact_wait.py --team t --task 1 --predicate h --deadline 5",
         "pact_wait.py --team t --task 1 --predicate h --deadline 1800 extra",
+        # A NEWLINE between slots ends the command: the next line runs as
+        # another job, so none of these is the bare wake.
+        _arm_command() + "\nmake",
+        _arm_command().replace(" --team", "\n--team"),
+        _arm_command().replace("python3 ", "python3\n"),
+        "FOO=1\n" + _arm_command(),
+        "cd /repo\n&& " + _arm_command(),
+        _arm_command() + "\n2>&1",
         # GLUED compositions: the shell splits && ; | & BEFORE argv, so
         # each arms a watcher plus a second command — not the bare wake.
         "pact_wait.py --team t --task 1 --predicate h --deadline 5&&rm-rf-x",
