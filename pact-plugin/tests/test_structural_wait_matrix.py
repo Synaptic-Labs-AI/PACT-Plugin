@@ -354,9 +354,8 @@ def test_skillmd_handoff_template_values_are_string_typed():
     """Docs-vs-code, imported arm: every canonical handoff field the schema
     ships is rendered in the SKILL.md example as a JSON STRING (the value
     opens with a quote). A template that taught a non-string `produced`
-    would be refused by validate_handoff_schema's produced type gate and
-    read as ABSENT by wait_target.handoff_present — the list-typed failures
-    this mechanism answers."""
+    would be refused by validate_handoff_schema's produced type gate — the
+    list-typed handoffs this template change answers."""
     block = _store_handoff_block()
     for field in HANDOFF_CANONICAL_FIELDS:
         assert f'"{field}": "' in block, (
@@ -381,10 +380,8 @@ def test_handoff_teaching_surfaces_render_no_array_canonical_fields():
     be dead on EVERY LLM-loaded surface that teaches handoff metadata —
     the protocols SSOT, its byte-compared task-hierarchy extract, and the
     secretary's memory-save example — not only the SKILL.md template. A
-    canonical field rendered with a bracket-opened value is the live
-    false-EXPIRED class: the watcher reads a list-typed `produced` as
-    ABSENT and burns to a loud EXPIRED (degraded-loud, per
-    wait_target.handoff_present)."""
+    canonical field rendered with a bracket-opened value teaches the
+    list-typed handoff that validate_handoff_schema flags."""
     surfaces = [
         PLUGIN / "protocols" / "pact-protocols.md",
         PLUGIN / "protocols" / "pact-task-hierarchy.md",
@@ -395,8 +392,7 @@ def test_handoff_teaching_surfaces_render_no_array_canonical_fields():
         for field in TEMPLATE_FIELDS:
             assert f'"{field}": [' not in text, (
                 f"{surface.name}: canonical field {field} is rendered as "
-                "a JSON array — the watcher reads it as ABSENT and burns "
-                "its deadline (the false-EXPIRED class)"
+                "a JSON array, the shape the handoff schema flags"
             )
 
 

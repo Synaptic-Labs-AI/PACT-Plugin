@@ -126,11 +126,10 @@ def validate_handoff_schema(handoff: object) -> str | None:
 
     ONE TYPE GATE, on `produced` only: a non-string OR
     empty/whitespace-only `produced` fails validation. The deliverable
-    watcher keys on this field and reads a list-typed, empty, or
-    whitespace-only `produced` as ABSENT — degraded-loud, per
-    wait_target.handoff_present — so a template-shaped handoff used to pass
-    every check and still burn the watcher's whole deadline to a false
-    EXPIRED. The remedy is the write-time advisory this validator drives:
+    watcher keys on this field: it reads an empty or whitespace-only
+    `produced` as ABSENT, and wakes on a list holding a non-empty string
+    (wait_target.handoff_present), so the wrong shape still reaches the
+    lead. The remedy is the write-time advisory this validator drives:
     the author is told to re-write the field when the handoff is written,
     before the lead reads it. The other
     required fields stay presence-only — the watcher does not read them,
@@ -161,10 +160,10 @@ def validate_handoff_schema(handoff: object) -> str | None:
         if not isinstance(produced, str):
             return (
                 "metadata.handoff `produced` must be a non-empty string, "
-                f"got {type(produced).__name__} — the deliverable watcher "
-                "reads a list-typed, empty, or whitespace-only `produced` "
-                "as ABSENT and would burn its deadline to a false EXPIRED "
-                "(join the items with '; ' into one string)"
+                f"got {type(produced).__name__} — join the items with '; ' "
+                "into one string; the deliverable watcher reads any value "
+                "other than a non-empty string, or a list holding one, as "
+                "ABSENT and would burn its deadline to a false EXPIRED"
             )
         return None
     reason = f"metadata.handoff missing required fields: {', '.join(missing)}"

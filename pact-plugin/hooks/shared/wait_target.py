@@ -28,7 +28,8 @@ Public surface:
     EVAL_TARGET_CORRUPT     task file read but not a JSON object
     EVAL_UNKNOWN_PREDICATE  predicate_name not in PREDICATES
 - handoff_present(task) — `handoff` predicate: metadata.handoff with a
-  non-empty `produced` STRING, not the one a handoff_rejection rejected.
+  non-empty `produced` string, or a list holding one, not the one a
+  handoff_rejection rejected.
 - teachback_submit_present(task) — `teachback_submit` predicate, not the
   one a teachback_rejection rejected.
 - PREDICATES — name -> predicate mapping (the registry).
@@ -98,8 +99,9 @@ def _awaiting_revision(metadata: dict[str, Any], rejection_key: str) -> bool:
 
 def handoff_present(task: dict[str, Any]) -> bool:
     """The `handoff` predicate: True iff the task carries a HANDOFF whose
-    `produced` field is a non-empty STRING and that HANDOFF is not the one
-    a `metadata.handoff_rejection` rejected (see _awaiting_revision).
+    `produced` field is a non-empty string, or a list holding at least one
+    non-empty string, and that HANDOFF is not the one a
+    `metadata.handoff_rejection` rejected (see _awaiting_revision).
 
     Keying per hooks/shared/handoff_schema.py: `produced` is a REQUIRED
     canonical field and the watch keys on the canonical key only. It does
@@ -108,12 +110,12 @@ def handoff_present(task: dict[str, Any]) -> bool:
     accept: a handoff whose `produced` sits under a legacy spelling passes
     lead-side reads yet reads as ABSENT here, so the watch burns its
     deadline to a loud EXPIRED instead of firing. That degraded-loud
-    asymmetry is accepted, not hidden. STRING is load-bearing, not pedantry: the
-    live failures this mechanism answers were handoffs whose fields were
-    JSON ARRAYS — a list-typed `produced` is not a delivered summary, so it
-    must read as absent. Membership-grade emptiness ("" only, since a
-    non-str already failed the type check) rather than truthiness; the
-    strip catches a whitespace-only placeholder.
+    asymmetry is accepted, not hidden. A list-typed `produced` is the
+    wrong shape (handoff_schema flags it as an advisory) but it is still a
+    delivered handoff, so waking on it lets the lead read the handoff and
+    correct the shape; reading it as absent would burn the deadline to a
+    false EXPIRED. An empty list, or one holding only empty or
+    whitespace-only strings, is a placeholder and reads as absent.
     """
     metadata = task.get("metadata")
     if not isinstance(metadata, dict):
@@ -124,7 +126,8 @@ def handoff_present(task: dict[str, Any]) -> bool:
     if not isinstance(handoff, dict):
         return False
     produced = handoff.get("produced")
-    return isinstance(produced, str) and produced.strip() != ""
+    items = produced if isinstance(produced, list) else [produced]
+    return any(isinstance(item, str) and item.strip() != "" for item in items)
 
 
 def teachback_submit_present(task: dict[str, Any]) -> bool:

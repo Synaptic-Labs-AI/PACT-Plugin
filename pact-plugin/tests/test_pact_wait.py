@@ -4,8 +4,8 @@ and hooks/shared/wait_target.py (deliverable predicate registry).
 
 Verification-level coverage binding the exit contract (the numbers are the
 contract — a crash must never masquerade as EXPIRED):
-- predicates: handoff (non-empty `produced` STRING; list-typed produced reads
-  absent — that shape is the live failure class this mechanism answers),
+- predicates: handoff (non-empty `produced` string, or a list holding one;
+  a list-typed produced wakes the lead, who corrects the flagged shape),
   teachback_submit (non-empty object); both read absent while a rejection
   record holds the unrevised original (revision_number comparison).
 - evaluate_target outcomes: present / not_present / target_invalid (unsafe
@@ -82,13 +82,14 @@ def test_registry_ships_exactly_the_two_predicates():
     assert all(callable(fn) for fn in wait_target.PREDICATES.values())
 
 
-def test_handoff_predicate_string_produced_is_present():
-    assert wait_target.handoff_present(_handoff_task("a summary"))
+@pytest.mark.parametrize("produced", ["a summary", ["a summary"], ["", "f.py"]])
+def test_handoff_predicate_string_or_non_empty_list_produced_is_present(produced):
+    assert wait_target.handoff_present(_handoff_task(produced))
 
 
 @pytest.mark.parametrize(
     "produced",
-    ["", "   ", None, ["a summary"], 0, False],
+    ["", "   ", None, [], [""], ["  ", None], [["nested"]], 0, False, {"a": "b"}],
 )
 def test_handoff_predicate_non_string_or_empty_produced_is_absent(produced):
     assert not wait_target.handoff_present(_handoff_task(produced))
