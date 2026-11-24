@@ -37,7 +37,7 @@ When an in-process teammate goes idle within a few seconds of setting an `awaiti
 - An eligible idle with nothing queued is delayed by up to its remaining budget. That covers most teachback and handoff waits, since a lead usually answers after the budget has passed.
 - If the held turn ended with plain final text rather than a message to the lead, the runtime still sends an idle-type notice after the hold.
 - Whether the runtime waits on `TeammateIdle` hooks in a way that could serialize other hooks during a hold cannot be determined from the code and is unmeasured.
-- No live session has exercised the hold. Live behaviour, timing and the remaining crossing race are unverified, so a wake can still cross an idle; the lead's redundant-confirm procedure still covers it.
+- One live in-process probe measured the hold. A lead message sent six seconds into the wait ended the hold early, and the lead got no "available" idle notice, only the plain-text-turn notice above. With nothing queued, the "available" notice came at the deadline. An unpatched baseline crossed: its notice arrived before the message was sent. That is a single run, not a rate. Pane teammates are never held by design, and a wake can still cross an idle outside the window; the lead's redundant-confirm procedure still covers it.
 
 ### Why
 
