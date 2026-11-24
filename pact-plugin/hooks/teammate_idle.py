@@ -208,10 +208,10 @@ def wait_for_inbox_evidence(
             inbox_json = state_file.read_text(
                 inbox_path, root=teams_root, max_bytes=INBOX_MAX_BYTES, strict=True
             )
-        except FileNotFoundError as error:
-            # read_text wraps containment refusals in FileNotFoundError; only absence retries.
-            if error.__cause__ is not None:
-                return False
+        except state_file.Refused:
+            return False
+        except FileNotFoundError:
+            # Only a genuinely missing inbox retries; a containment refusal ended above.
             inbox_json = "[]"
         except UnicodeDecodeError:
             # A half-written non-ASCII message fails strict decoding; retry it like

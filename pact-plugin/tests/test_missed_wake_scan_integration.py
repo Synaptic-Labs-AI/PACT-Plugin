@@ -487,11 +487,12 @@ def _deadline(since_at: datetime, early_by: float = 0.0) -> datetime:
 class TestTeammateIdleGraceThroughRealHook:
     def test_message_landing_during_the_hold_ends_it_early(self, tmp_path):
         """Arm A. The wait is 5 s old, so about 5 s of grace remain. The lead's
-        message lands half a second after launch, while the hook is holding.
-        The hook must end the hold early, at least a second before the
+        message lands half a second after launch, while the hook process is
+        still running. The hook must end early, at least a second before the
         deadline, which proves it reached this inbox through the real config
-        dir; one that cannot reach it holds to the deadline. Arm B is the
-        guard against a hold that never runs."""
+        dir; one that cannot reach it holds to the deadline. Still running at
+        0.5 s does not prove the hold had started, since the process may still
+        be starting up; arm B is the evidence that a hold runs."""
         config, since_at = _grace_root(tmp_path, age_seconds=5)
         inbox = _grace_inbox(config)
         inbox.parent.mkdir(parents=True, exist_ok=True)
@@ -510,7 +511,7 @@ class TestTeammateIdleGraceThroughRealHook:
 
         assert output == {"suppressOutput": True}, "the hold never emits a decision"
         assert still_holding, (
-            "the hook exited before the message landed, so it never held"
+            "the hook process exited before the message landed"
         )
         assert returned_at < _deadline(since_at, early_by=1), (
             "the real hook did not see the message in the teammate's inbox "

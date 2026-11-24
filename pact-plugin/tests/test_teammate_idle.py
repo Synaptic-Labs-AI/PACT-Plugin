@@ -1165,6 +1165,22 @@ class TestInboxGraceGate:
         assert clock.sleeps[:-1] == pytest.approx([0.1] * 47)
         assert clock.sleeps[-1] == pytest.approx(0.084)
 
+    def test_a_containment_refusal_ends_the_hold_at_once(self, tmp_path):
+        """RED WHEN the hold treats state_file.Refused as a missing inbox and retries."""
+        outside = tmp_path / "outside"
+        (outside / "inboxes").mkdir(parents=True)
+        (outside / "inboxes" / "CoderRaw.json").write_text(
+            json.dumps([{"from": "team-lead", "text": "ok"}]), encoding="utf-8"
+        )
+        (tmp_path / "teams").mkdir()
+        (tmp_path / "teams" / "TeamRaw").symlink_to(outside, target_is_directory=True)
+        clock = _FakeGraceClock()
+
+        seen = _call_grace([_grace_task()], tmp_path, clock)
+
+        assert seen is False, "a message behind an out-of-root team link must never count"
+        assert clock.sleeps == [], "a refusal must end the hold, not retry it"
+
     def test_non_missing_oserror_fails_open_without_retry(self, tmp_path):
         clock = _FakeGraceClock()
         with patch(
@@ -1723,11 +1739,46 @@ class TestMainInboxHold:
         hold.assert_not_called()
         cleanup.assert_called_once()
 
-    def test_completed_task_keeps_ordinary_cleanup_after_the_hold(self, capsys):
-        hold, cleanup, _output = self._run(capsys, task=_grace_task(status="completed"))
+    def test_completed_task_keeps_ordinary_cleanup_after_the_hold(
+        self, capsys, tmp_path, monkeypatch
+    ):
+        """A completed task's fresh wait runs the REAL hold, and ordinary cleanup
+        still follows on the post-hold re-read. Counter-test: making completed
+        tasks ineligible skips the hold, so there is no re-read."""
+        import io
+        import teammate_idle
+        from teammate_idle import main
 
-        hold.assert_called_once()
+        fixed_now = datetime.now(timezone.utc)
+        since = fixed_now.isoformat()
+        task = make_task(status="completed", owner="CoderRaw", metadata={"intentional_wait": {
+            "reason": "awaiting_lead_completion", "expected_resolver": "lead",
+            "since": since, "covers_since": since,
+        }})
+        inbox = tmp_path / "teams" / "pact-test" / "inboxes" / "CoderRaw.json"
+        inbox.parent.mkdir(parents=True)
+        inbox.write_text(json.dumps([{"from": "team-lead", "text": "wake"}]), encoding="utf-8")
+        clock = _FakeGraceClock()
+        for name, value in (("sleep", clock.sleep), ("monotonic", clock.monotonic),
+                            ("now", fixed_now)):
+            monkeypatch.setitem(
+                teammate_idle.wait_for_inbox_evidence.__kwdefaults__, name, value
+            )
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
+             patch("teammate_idle.get_claude_config_dir", return_value=tmp_path), \
+             patch("teammate_idle.iter_team_task_jsons", return_value=[task]) as reads, \
+             patch("teammate_idle.teammate_is_in_process", return_value=True), \
+             patch("teammate_idle.check_idle_cleanup", return_value=(None, False)) as cleanup, \
+             patch("teammate_idle.check_unflagged_background", return_value=None):
+            with pytest.raises(SystemExit) as exc:
+                main()
+
+        assert exc.value.code == 0
+        assert json.loads(capsys.readouterr().out) == {"suppressOutput": True}
+        assert reads.call_count == 2, "the real hold did not run for a completed task"
         cleanup.assert_called_once()
+        assert cleanup.call_args.args[0][0]["status"] == "completed"
 
     def test_main_fails_open_when_the_hold_errors(self, capsys):
         from unittest.mock import Mock

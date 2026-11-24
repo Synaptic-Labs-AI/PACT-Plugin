@@ -579,6 +579,42 @@ def test_a_component_swapped_for_a_file_is_refused(tmp_path, monkeypatch):
     assert isinstance(refused.value.__cause__, OSError)
 
 
+def _refusal_case(case: str, tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    """A read target under root that read_text must refuse, for each refusal shape."""
+    root, team, outside = _team_and_outside(tmp_path)
+    if case == "out-of-root":
+        team.rename(team.with_name(team.name + ".moved"))
+        team.symlink_to(outside, target_is_directory=True)
+    elif case == "swapped-to-symlink":
+        _swap_after_resolve(monkeypatch, team, outside)
+    elif case == "already-a-file":
+        team.rename(team.with_name(team.name + ".moved"))
+        team.write_text("not a directory", encoding="utf-8")
+    return root, team / "inboxes" / "w.json"
+
+
+@pytest.mark.parametrize("case", ["out-of-root", "swapped-to-symlink", "already-a-file"])
+def test_a_refused_read_raises_the_public_refused_type(case, tmp_path, monkeypatch):
+    """RED WHEN read_text raises a plain FileNotFoundError for a refusal: a caller
+    could then tell refusal from absence only by its cause."""
+    root, target = _refusal_case(case, tmp_path, monkeypatch)
+    with pytest.raises(state_file.Refused) as refused:
+        state_file.read_text(target, root)
+    assert isinstance(refused.value, FileNotFoundError), "callers treating it as absent keep working"
+    assert isinstance(refused.value.__cause__, OSError)
+
+
+def test_absence_is_not_a_refusal(tmp_path):
+    """Guard arm: a missing file and a missing directory raise a plain
+    FileNotFoundError, never Refused, so an absence-retrying caller retries."""
+    root = tmp_path / "teams"
+    (root / TEAM).mkdir(parents=True)
+    for target in (root / TEAM / "w.json", root / TEAM / "inboxes" / "w.json"):
+        with pytest.raises(FileNotFoundError) as absent:
+            state_file.read_text(target, root)
+        assert not isinstance(absent.value, state_file.Refused)
+
+
 def test_a_missing_directory_reads_as_plain_absence(tmp_path):
     """Guard arm: a directory that does not exist yet is absence, not refusal,
     so a caller that retries on absence still retries."""

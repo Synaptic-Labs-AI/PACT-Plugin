@@ -29,12 +29,14 @@ stay inside the resolved `root`, so a symlinked team directory pointing outside
 symlinked config root, or a team link to another folder inside `teams/`, still
 works. Every open then uses the resolved directory, so the check and the open
 name the same place. A refused write raises OSError; a refused read raises
-FileNotFoundError, which callers already treat as "no file".
+Refused, a FileNotFoundError that callers already treat as "no file" and a
+caller that must tell refusal from absence can catch by type.
 read_text and append_line then reach that directory from the root one
-component at a time with O_NOFOLLOW, so a component swapped for a symlink
-after the check is refused rather than followed. Any other error on the
-walk (permission denied, too many open files) is raised unchanged, as a plain
-path open would raise it.
+component at a time with O_NOFOLLOW. A component that is a symlink or not a
+directory, whether swapped after the check or already a regular file before
+it, is refused rather than followed. Any other error on the walk (permission
+denied, too many open files, a missing component) is raised unchanged, as a
+plain path open would raise it.
 Remaining, and adversarial-only: locked_update (and so write_text) still opens
 by the resolved path, so a process swapping a path component between the
 resolve and the open can redirect one write. That needs a deliberate race
@@ -73,6 +75,13 @@ _APPEND_LOCK_TIMEOUT_SECONDS = 2.0
 
 class _Refused(OSError):
     """A state file's directory left its root, at the check or during the walk."""
+
+
+class Refused(FileNotFoundError):
+    """read_text's refusal: the file's directory left its root, or a component on
+    the walk was a symlink or not a directory. A FileNotFoundError, so callers
+    that treat a refusal as "no file" keep working; catch it first to tell a
+    refusal from a file that is simply absent. Chained from the cause."""
 
 
 def _resolve(path: Path, root: Path) -> tuple[str, str]:
@@ -147,7 +156,8 @@ def read_text(
     """Return a state file's text, reading without a lock.
 
     `root` is the directory the file must stay under; a file whose directory
-    resolves outside it reads as absent (FileNotFoundError).
+    resolves outside it, or whose walk meets a symlink or a non-directory,
+    raises Refused (a FileNotFoundError).
 
     Opens with O_NOFOLLOW, so a symlink at the path raises OSError rather than
     reading its target. Undecodable bytes are replaced rather than raised, so
@@ -165,7 +175,7 @@ def read_text(
     try:
         dir_fd = _open_contained_directory(path, root)
     except _Refused as refused:
-        raise FileNotFoundError(str(refused)) from refused
+        raise Refused(str(refused)) from refused
     try:
         fd = os.open(path.name, _READ_FLAGS, dir_fd=dir_fd)
     finally:
