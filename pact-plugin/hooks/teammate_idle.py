@@ -16,12 +16,14 @@ Used by: hooks.json TeammateIdle hook
 # teammate is stopped (safety is protocol-level, not a structural cap).
 # For an in-process teammate, a fresh awaiting_lead_completion wait holds the
 # hook, polling at 0.1-second intervals, until a valid unread message is
-# visible or 10 seconds pass from its `covers_since` anchor (falling back to
-# `since`); a wait that carries `covers_since` cannot restart that budget,
-# and without one each re-stamp of `since` gets at most one bounded hold.
+# visible or 10 seconds pass from its `covers_since` anchor. The window falls
+# back to `since` only when `covers_since` is absent; an unreadable
+# `covers_since` means no hold. A wait that carries `covers_since` cannot
+# restart that budget; without one, each re-stamp of `since` gives one more
+# 10-second budget, and each idle inside it holds for the remaining time.
 # The hold never emits a decision, so the runtime delivers a message that
-# lands during it. Exits
-# deterministically on every code path. Does NOT consume intentional_wait.
+# lands during it. Exits deterministically on every code path. Does NOT
+# consume intentional_wait.
 
 Idle cleanup: Track consecutive idle events for completed agents. After 3,
 suggest shutdown. After 5, advise the team-lead to `TaskStop` the teammate.
@@ -45,7 +47,7 @@ _hooks_dir = Path(__file__).parent
 if str(_hooks_dir) not in sys.path:
     sys.path.insert(0, str(_hooks_dir))
 
-from shared.error_output import hook_error_json
+from shared.error_output import ERROR_MAX_CHARS, hook_error_json
 import shared.pact_context as pact_context
 from shared.background_work import (
     ANCHOR_CLASS_MALFORMED,
@@ -211,8 +213,12 @@ def wait_for_inbox_evidence(
             if error.__cause__ is not None:
                 return False
             inbox_json = "[]"
+        except UnicodeDecodeError:
+            # A half-written non-ASCII message fails strict decoding; retry it like
+            # unparseable JSON (the empty text parses as invalid and is never evidence).
+            inbox_json = ""
         except (OSError, ValueError):
-            # ValueError covers TooLarge and the strict decode's UnicodeDecodeError.
+            # ValueError here is TooLarge.
             return False
         try:
             messages = json.loads(inbox_json)
@@ -600,7 +606,8 @@ def main():
                     tasks = list(iter_team_task_jsons(team_name))
         except Exception as hold_error:
             # Fall through to the ordinary output; stderr only, so stdout and exit stay unchanged.
-            print(f"Hook warning (teammate_idle): {hold_error}", file=sys.stderr)
+            detail = " ".join(str(hold_error)[:ERROR_MAX_CHARS].splitlines())
+            print(f"Hook warning (teammate_idle): {detail}", file=sys.stderr)
 
         messages = []
         cleanup_msg, should_shutdown = None, False

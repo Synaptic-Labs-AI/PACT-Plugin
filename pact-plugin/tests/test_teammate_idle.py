@@ -1014,9 +1014,8 @@ class TestInboxGraceGate:
         self, tmp_path
     ):
         """An immediate positive returns at once, with no sleep; mixed-case names stay raw."""
-        secret = "message text must never enter the hook reason"
         _write_inbox(tmp_path, json.dumps([{
-            "from": "team-lead", "text": secret, "timestamp": "ignored",
+            "from": "team-lead", "text": "wake", "timestamp": "ignored",
         }]))
         clock = _FakeGraceClock()
 
@@ -1179,13 +1178,33 @@ class TestInboxGraceGate:
         assert clock.sleeps == []
 
     def test_undecodable_replacement_never_becomes_positive_evidence(self, tmp_path):
+        """Invalid UTF-8 is retried to the deadline and never counts."""
         _write_inbox(tmp_path, b"\xff")
         clock = _FakeGraceClock()
 
         seen = _call_grace([_grace_task()], tmp_path, clock)
 
         assert seen is False
-        assert clock.sleeps == []
+        assert len(clock.sleeps) == 100
+
+    def test_half_written_non_ascii_message_is_retried_until_complete(self, tmp_path):
+        """Counter-test: ending the hold on a decode error misses the finished message."""
+        complete = json.dumps(
+            [{"from": "team-lead", "text": "caf\u00e9"}], ensure_ascii=False
+        ).encode("utf-8")
+        half = complete[:complete.index(b"\xc3") + 1]
+        _write_inbox(tmp_path, half)
+
+        class _CompletingClock(_FakeGraceClock):
+            def sleep(self, seconds):
+                super().sleep(seconds)
+                _write_inbox(tmp_path, complete)
+
+        clock = _CompletingClock()
+        seen = _call_grace([_grace_task()], tmp_path, clock)
+
+        assert seen is True
+        assert clock.sleeps == [0.1]
 
     @pytest.mark.parametrize("payload", [
         b'[{"from":"team-lead","text":"\xff"}]',
@@ -1193,14 +1212,14 @@ class TestInboxGraceGate:
         b'[{"from":"team-lead","text":"wake","note":"\xff"}]',
     ], ids=["text", "from", "unrelated-field"])
     def test_replacement_decoded_valid_json_is_never_evidence(self, payload, tmp_path):
-        """Invalid bytes become valid JSON with non-empty fields after replacement."""
+        """Invalid bytes would become valid JSON after replacement; strict decoding retries instead."""
         _write_inbox(tmp_path, payload)
         clock = _FakeGraceClock()
 
         seen = _call_grace([_grace_task()], tmp_path, clock)
 
         assert seen is False
-        assert clock.sleeps == []
+        assert len(clock.sleeps) == 100
 
     @pytest.mark.parametrize("payload", [
         '[{"from":"team-lead","text":"\\ufffd"}]',
@@ -1436,8 +1455,7 @@ class TestInboxGraceGate:
     ):
         """TaskUpdate-first completion must not discard the remaining grace."""
         task = _grace_task(status="completed", age=5.216)
-        secret = "resolution payload is not acceptance evidence"
-        valid = json.dumps([{"from": "team-lead", "text": secret}])
+        valid = json.dumps([{"from": "team-lead", "text": "accepted"}])
         clock = _FakeGraceClock()
         # The measured 3.112-second message is first visible to the 3.2-second poll.
         with patch(
@@ -1643,6 +1661,31 @@ class TestMainInboxHold:
             "Hook warning (teammate_idle): inbox infrastructure failed"
         )
         cleanup.assert_called_once()
+
+    def test_hold_warning_is_one_bounded_line(self, capsys):
+        """Counter-test: an unbounded error spills lines or length into stderr."""
+        import io
+        from unittest.mock import Mock
+        from shared.error_output import ERROR_MAX_CHARS
+        from teammate_idle import main
+
+        long_error = "first line\nsecond line\r\n" + "x" * 5000
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
+             patch("teammate_idle.iter_team_task_jsons", return_value=[_grace_task()]), \
+             patch("teammate_idle.teammate_is_in_process", return_value=True), \
+             patch("teammate_idle.wait_for_inbox_evidence",
+                   Mock(side_effect=RuntimeError(long_error))), \
+             patch("teammate_idle.check_idle_cleanup", return_value=(None, False)), \
+             patch("teammate_idle.check_unflagged_background", return_value=None):
+            with pytest.raises(SystemExit):
+                main()
+
+        err = capsys.readouterr().err
+        prefix = "Hook warning (teammate_idle): "
+        assert err.count("\n") == 1 and err.endswith("\n")
+        assert err.startswith(prefix + "first line second line x")
+        assert len(err) <= len(prefix) + ERROR_MAX_CHARS + 1
 
     def test_pane_or_undeterminable_mode_does_not_hold(self, capsys):
         hold, cleanup, output = self._run(capsys, in_process=False)
