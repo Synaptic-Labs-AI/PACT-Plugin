@@ -14,13 +14,11 @@ constant: an assertion computed from the pinned constant is self-confirming
 assertion binds behavior to the declared constant, so the module cannot
 drift from its own headline value.
 
-Robustness: no wall-clock upper bound is asserted anywhere; the delayed
-delivery (threading.Timer at 1.0s) only has to land inside a 12s deadline,
-so CI load cannot flip these arms except by stalling a single test past
-12 seconds.
+Robustness: no wall-clock upper bound is asserted anywhere, and the
+delivery is written from the recorder itself on the first sleep request,
+between two polls, so machine load cannot change what any poll reads.
 """
 import json
-import threading
 import time
 from pathlib import Path
 
@@ -47,41 +45,44 @@ _REAL_SLEEP = time.sleep  # captured BEFORE any patching: the recorder
 
 
 class _SleepRecorder:
-    """Stands in for time.sleep: records each requested duration, then
-    sleeps a token 1ms for real so the poll loop does not spin hot."""
+    """Stands in for time.sleep: records each requested duration, runs an
+    optional step once on the first request (a file write between two
+    polls), then sleeps a token 1ms for real so the poll loop does not
+    spin hot."""
 
-    def __init__(self):
+    def __init__(self, on_first_sleep=None):
         self.requested = []
+        self._on_first_sleep = on_first_sleep
 
     def __call__(self, seconds: float) -> None:
         self.requested.append(seconds)
+        if self._on_first_sleep is not None:
+            step, self._on_first_sleep = self._on_first_sleep, None
+            step()
         _REAL_SLEEP(0.001)
 
 
 def test_poll_interval_is_the_documented_five_seconds(tmp_path, monkeypatch):
     """The poll loop's real cadence is the documented 5.0s: the first sleep
     request of a default-interval watch (deadline 12 > interval, delivery
-    at 1.0s) must be exactly 5.0 — hardcoded, because min(interval,
+    written during that first sleep) must be exactly 5.0 — hardcoded, because min(interval,
     remaining) equals whatever the constant is and would self-confirm —
     AND equal to the module's declared constant, so behavior and headline
     cannot drift apart."""
     assert pact_wait.POLL_INTERVAL_SECONDS == 5.0
     task_file = _write_task(tmp_path, "team-a", "7", {"metadata": {}})
-    recorder = _SleepRecorder()
-    monkeypatch.setattr(pact_wait.time, "sleep", recorder)
-    timer = threading.Timer(
-        1.0,
-        lambda: _atomic_write(task_file, json.dumps(_handoff_task("delivered late"))),
-    )
-    timer.start()
-    try:
-        rc = pact_wait.wait_for_deliverable(
-            "team-a", "7", "handoff", deadline=12,
-            tasks_base_dir=str(tmp_path),
+    recorder = _SleepRecorder(
+        on_first_sleep=lambda: _atomic_write(
+            task_file, json.dumps(_handoff_task("delivered late"))
         )
-    finally:
-        timer.join()
+    )
+    monkeypatch.setattr(pact_wait.time, "sleep", recorder)
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=12,
+        tasks_base_dir=str(tmp_path),
+    )
     assert rc == pact_wait.EXIT_FIRED
+    assert len(recorder.requested) == 1
     assert recorder.requested, "the watch never slept — poll loop broken"
     assert recorder.requested[0] == 5.0
     assert recorder.requested[0] == pact_wait.POLL_INTERVAL_SECONDS

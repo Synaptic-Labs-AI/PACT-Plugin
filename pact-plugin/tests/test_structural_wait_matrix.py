@@ -34,13 +34,12 @@ byte-identical after each) is recorded in the TEST-phase HANDOFF.
 import json
 import re
 import shlex
-import threading
 from pathlib import Path
 
 import pytest
 
 import pact_wait  # noqa: E402
-from test_pact_wait import _atomic_write  # noqa: E402
+from test_pact_wait import _step_file_between_polls  # noqa: E402
 import task_lifecycle_gate as tlg  # noqa: E402
 import wait_filler_gate  # noqa: E402
 from shared import wait_target  # noqa: E402
@@ -442,7 +441,7 @@ def test_no_team_context_skips_the_arm_advisory_silently(tmp_path, monkeypatch):
     ],
 )
 def test_watch_armed_after_a_rejection_fires_only_on_the_revision(
-    tmp_path, predicate, key, rejection_key, deliverable
+    tmp_path, monkeypatch, predicate, key, rejection_key, deliverable
 ):
     """A watch armed after the lead rejects a deliverable must not fire on
     the rejected original still on disk, and must fire once the teammate
@@ -460,20 +459,15 @@ def test_watch_armed_after_a_rejection_fires_only_on_the_revision(
         tasks_base_dir=str(tmp_path), poll_interval=0.05,
     ) == pact_wait.EXIT_EXPIRED
 
+    # Fired: the revision lands between the first and second poll.
     revised = {"metadata": {**rejected["metadata"], "revision_number": 2}}
-    timer = threading.Timer(
-        0.15,
-        lambda: _atomic_write(task_file, json.dumps(revised)),
+    sleeps = _step_file_between_polls(monkeypatch, task_file, [json.dumps(revised)])
+    rc = pact_wait.wait_for_deliverable(
+        "team-x", "12", predicate, deadline=30,
+        tasks_base_dir=str(tmp_path), poll_interval=0.05,
     )
-    timer.start()
-    try:
-        rc = pact_wait.wait_for_deliverable(
-            "team-x", "12", predicate, deadline=5,
-            tasks_base_dir=str(tmp_path), poll_interval=0.05,
-        )
-    finally:
-        timer.join()
     assert rc == pact_wait.EXIT_FIRED
+    assert len(sleeps) == 1
 
 
 # --- prose: each role's teammate-deliverable wait in the agent-teams skill ---

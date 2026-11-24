@@ -29,7 +29,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
 import time
 from pathlib import Path
 
@@ -330,23 +329,19 @@ def test_fast_exit_when_already_present(tmp_path, monkeypatch):
     assert sleeps == []
 
 
-def test_fires_after_delayed_appearance(tmp_path):
+def test_fires_after_delayed_appearance(tmp_path, monkeypatch):
+    """The deliverable lands after the first poll: the watch reads it on
+    the next one and fires."""
     task_file = _write_task(tmp_path, "team-a", "7", {"metadata": {}})
-    timer = threading.Timer(
-        0.15,
-        lambda: _atomic_write(
-            task_file, json.dumps(_handoff_task("late but delivered"))
-        ),
+    sleeps = _step_file_between_polls(
+        monkeypatch, task_file, [json.dumps(_handoff_task("late but delivered"))]
     )
-    timer.start()
-    try:
-        rc = pact_wait.wait_for_deliverable(
-            "team-a", "7", "handoff", deadline=5,
-            tasks_base_dir=str(tmp_path), poll_interval=0.05,
-        )
-    finally:
-        timer.join()
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=30,
+        tasks_base_dir=str(tmp_path), poll_interval=0.05,
+    )
     assert rc == pact_wait.EXIT_FIRED
+    assert len(sleeps) == 1
 
 
 def test_expires_loud_at_deadline(tmp_path, capsys):
@@ -760,24 +755,21 @@ def test_fixed_failures_are_terminal_on_the_first_read(monkeypatch, fixed):
     assert len(calls) == 1
 
 
-def test_file_absent_on_first_read_then_delivered_fires(tmp_path):
-    """Real-file form of the grace: the task file appears between the
-    first and second poll (a rewrite caught mid-flight)."""
+def test_file_absent_on_first_read_then_delivered_fires(tmp_path, monkeypatch):
+    """Real-file form of the grace: the task file is absent on the first
+    poll and present on the second (a rewrite caught mid-flight)."""
+    (tmp_path / "team-a").mkdir()
     task_file = tmp_path / "team-a" / "7.json"
-    timer = threading.Timer(
-        0.05,
-        lambda: _write_task(tmp_path, "team-a", "7", _handoff_task("landed")),
+    sleeps = _step_file_between_polls(
+        monkeypatch, task_file, [json.dumps(_handoff_task("landed"))]
     )
-    timer.start()
-    try:
-        rc = pact_wait.wait_for_deliverable(
-            "team-a", "7", "handoff", deadline=5,
-            tasks_base_dir=str(tmp_path), poll_interval=0.3,
-        )
-    finally:
-        timer.join()
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=30,
+        tasks_base_dir=str(tmp_path), poll_interval=0.3,
+    )
     assert task_file.exists()
     assert rc == pact_wait.EXIT_FIRED
+    assert len(sleeps) == 1
 
 
 def test_deeply_nested_json_is_corrupt_not_a_crash(tmp_path):
