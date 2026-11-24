@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -185,15 +186,25 @@ def _no_real_grace_sleep(monkeypatch):
     hook run as a subprocess is out of reach by design.
     """
     slept = []
+    real_sleep = time.sleep
 
     def _refuse(seconds):
         slept.append(seconds)
         raise AssertionError("real grace sleep reached")
 
+    def _guarded_sleep(seconds):
+        # A reload rebinds the hold's default to time.sleep, i.e. to this wrapper.
+        caller = sys._getframe(1).f_code
+        if (caller.co_name == "wait_for_inbox_evidence"
+                and caller.co_filename.endswith("teammate_idle.py")):
+            _refuse(seconds)
+        return real_sleep(seconds)
+
+    monkeypatch.setattr(time, "sleep", _guarded_sleep)
     monkeypatch.setitem(
         teammate_idle.wait_for_inbox_evidence.__kwdefaults__, "sleep", _refuse
     )
-    yield
+    yield slept
     assert not slept, f"a test reached the real grace sleep: {slept}"
 
 

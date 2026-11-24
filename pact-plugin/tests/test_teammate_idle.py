@@ -1669,7 +1669,7 @@ class TestMainInboxHold:
         from shared.error_output import ERROR_MAX_CHARS
         from teammate_idle import main
 
-        long_error = "first line\nsecond line\r\n" + "x" * 5000
+        long_error = "first line\nsecond\x1b[31m line\x07\r\n\t" + "x" * 5000
         with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
              patch("teammate_idle.iter_team_task_jsons", return_value=[_grace_task()]), \
@@ -1684,8 +1684,37 @@ class TestMainInboxHold:
         err = capsys.readouterr().err
         prefix = "Hook warning (teammate_idle): "
         assert err.count("\n") == 1 and err.endswith("\n")
-        assert err.startswith(prefix + "first line second line x")
-        assert len(err) <= len(prefix) + ERROR_MAX_CHARS + 1
+        assert err.startswith(prefix + "first line second [31m line x")
+        assert all(ch.isprintable() for ch in err[:-1]), repr(err[:80])
+        assert len(err) <= len(prefix) + 200 + 1
+        assert ERROR_MAX_CHARS == 200
+
+    def test_warning_cap_is_the_shared_200_character_cap(self):
+        """Counter-test: raising the public alias past 200 reds this pin."""
+        from shared import error_output
+
+        assert error_output.ERROR_MAX_CHARS == error_output._ERROR_MAX_CHARS == 200
+
+    def test_sleep_guard_survives_a_module_reload(self, tmp_path, _no_real_grace_sleep):
+        """Counter-test: a guard on one function's defaults is lost on reload and sleeps 10s."""
+        import importlib.util
+        import teammate_idle
+
+        # A fresh, private execution of the hook file, as a reload would do; the
+        # shared sys.modules entry is never touched, so no other test sees it.
+        spec = importlib.util.spec_from_file_location(
+            "_teammate_idle_reexecuted", teammate_idle.__file__
+        )
+        reloaded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(reloaded)
+        assert reloaded is not teammate_idle
+        with pytest.raises(AssertionError, match="real grace sleep reached"):
+            reloaded.wait_for_inbox_evidence(
+                [_grace_task()], "CoderRaw", "TeamRaw", tmp_path / "teams", now=_GRACE_NOW
+            )
+
+        assert _no_real_grace_sleep == [0.1]
+        _no_real_grace_sleep.clear()
 
     def test_pane_or_undeterminable_mode_does_not_hold(self, capsys):
         hold, cleanup, output = self._run(capsys, in_process=False)

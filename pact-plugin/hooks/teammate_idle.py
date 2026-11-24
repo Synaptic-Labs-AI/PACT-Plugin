@@ -606,7 +606,10 @@ def main():
                     tasks = list(iter_team_task_jsons(team_name))
         except Exception as hold_error:
             # Fall through to the ordinary output; stderr only, so stdout and exit stay unchanged.
-            detail = " ".join(str(hold_error)[:ERROR_MAX_CHARS].splitlines())
+            # Non-printables (ANSI ESC, BEL, line breaks) become spaces: one plain, bounded line.
+            detail = " ".join("".join(
+                ch if ch.isprintable() else " " for ch in str(hold_error)[:ERROR_MAX_CHARS]
+            ).split())
             print(f"Hook warning (teammate_idle): {detail}", file=sys.stderr)
 
         messages = []

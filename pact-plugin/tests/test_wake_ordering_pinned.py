@@ -378,18 +378,56 @@ GRACE_CONTRACT_PINS = [
     (PROTOCOLS_SSOT, "The non-goal covers the lead's send path only"),
     (PROTOCOLS_SSOT, "Crossings still occur, so apply the redundant-confirm procedure above unchanged"),
 ]
-# Each pin's meaning-inverting rewrite: the pin must red when its negation or
-# scope word is flipped, not only when the whole phrase is deleted.
+# Each pin's inversion, as a sentence-scoped pattern over normalized text, so
+# a synonym of the opposite rule ("allowed", "feasible", "both paths", "never
+# occur") reds as surely as the literal one. Each lists sample inversions that
+# its injection control appends beside the intact original.
 GRACE_CONTRACT_INVERSIONS = {
-    "synchronous SEND-SIDE wake-detection hook remains prohibited":
-        "synchronous SEND-SIDE wake-detection hook remains permitted",
-    "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction":
-        "Synchronous SEND-SIDE wake/send detection is therefore viable",
-    "The non-goal covers the lead's send path only":
-        "The non-goal covers the lead's send path and the receive path",
-    "Crossings still occur, so apply the redundant-confirm procedure above unchanged":
-        "Crossings no longer occur, so skip the redundant-confirm procedure above",
+    "synchronous SEND-SIDE wake-detection hook remains prohibited": (
+        r"SEND-SIDE wake[\w/-]*detection hook[^.;]{0,40}"
+        r"\b(?:permitted|allowed|acceptable|fine|ok)\b"
+        r"|SEND-SIDE wake[\w/-]*detection hook[^.;]{0,20}\bmay\b",
+        [
+            "A synchronous SEND-SIDE wake-detection hook remains permitted.",
+            "A synchronous SEND-SIDE wake-detection hook is allowed.",
+            "A synchronous SEND-SIDE wake-detection hook may be added.",
+        ],
+    ),
+    "Synchronous SEND-SIDE wake/send detection is therefore dead-by-construction": (
+        r"SEND-SIDE wake/send detection is therefore[^.;]{0,30}"
+        r"\b(?:viable|possible|feasible|workable|achievable|practical)\b",
+        [
+            "Synchronous SEND-SIDE wake/send detection is therefore viable.",
+            "Synchronous SEND-SIDE wake/send detection is therefore feasible.",
+            "Synchronous SEND-SIDE wake/send detection is therefore quite possible.",
+        ],
+    ),
+    "The non-goal covers the lead's send path only": (
+        r"non-goal covers[^.;]{0,60}"
+        r"\b(?:receive path|receive side|both paths|both sides|every path|all paths)\b",
+        [
+            "The non-goal covers the lead's send path and the receive path.",
+            "The non-goal covers both paths.",
+            "The non-goal covers the receive side too.",
+        ],
+    ),
+    "Crossings still occur, so apply the redundant-confirm procedure above unchanged": (
+        r"\bCrossings\b[^.;]{0,20}"
+        r"\b(?:no longer|never|cannot|can't|do not|don't|rarely)\b[^.;]{0,10}\boccur"
+        r"|\b(?:skip|omit|drop|ignore|bypass)\b[^.;]{0,20}\bredundant-confirm\b",
+        [
+            "Crossings no longer occur, so skip the redundant-confirm procedure above.",
+            "Crossings never occur.",
+            "Omit the redundant-confirm procedure above.",
+            "Crossings rarely occur.",
+        ],
+    ),
 }
+_INVERSION_CASES = [
+    (doc, phrase, sample)
+    for doc, phrase in GRACE_CONTRACT_PINS
+    for sample in GRACE_CONTRACT_INVERSIONS[phrase][1]
+]
 PHRASE_PINS.extend(GRACE_CONTRACT_PINS)
 
 
@@ -439,29 +477,30 @@ def test_grace_contract_pin_fails_when_phrase_is_removed(
     ids=[f"{p.name}::{ph[:40]}" for p, ph in GRACE_CONTRACT_PINS],
 )
 def test_grace_contract_inversion_absent(doc_path: Path, phrase: str):
-    """The opposite of each contract rule appears nowhere on its surface, so an
-    inverted rule added beside the intact original still reds."""
-    inverted = _phrase(GRACE_CONTRACT_INVERSIONS[phrase])
-    assert inverted not in _normalized(doc_path), (
-        f"{doc_path.name}: inverted contract wording {inverted!r} is present "
-        f"beside or instead of {phrase!r}."
+    """No wording of the opposite rule appears on the surface, so an inverted
+    rule (in any listed synonym) added beside the intact original still reds."""
+    match = re.search(
+        GRACE_CONTRACT_INVERSIONS[phrase][0], _normalized(doc_path), re.IGNORECASE
+    )
+    assert match is None, (
+        f"{doc_path.name}: inverted contract wording {match.group(0)!r} is "
+        f"present beside or instead of {phrase!r}."
     )
 
 
 @pytest.mark.parametrize(
-    "doc_path, phrase",
-    GRACE_CONTRACT_PINS,
-    ids=[f"{p.name}::{ph[:40]}" for p, ph in GRACE_CONTRACT_PINS],
+    "doc_path, phrase, sample",
+    _INVERSION_CASES,
+    ids=[f"{p.name}::{s[:40]}" for p, _ph, s in _INVERSION_CASES],
 )
 def test_grace_contract_inversion_fails_when_added_beside_original(
-    doc_path: Path, phrase: str, monkeypatch
+    doc_path: Path, phrase: str, sample: str, monkeypatch
 ):
-    """Appending the inverted wording while the original stays must red."""
+    """Appending each inverted wording while the original stays must red."""
     original = _normalized(doc_path)
-    inverted = _phrase(GRACE_CONTRACT_INVERSIONS[phrase])
     assert _phrase(phrase) in original
     monkeypatch.setitem(
-        globals(), "_normalized", lambda _path: original + " " + inverted
+        globals(), "_normalized", lambda _path: original + " " + _phrase(sample)
     )
     with pytest.raises(AssertionError, match="inverted contract wording"):
         test_grace_contract_inversion_absent(doc_path, phrase)
