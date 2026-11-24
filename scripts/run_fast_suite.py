@@ -5,9 +5,12 @@ TWO MODES
                    compares pytest's collected FILE SET to the pure
                    selector's expected set. It proves the --ignore arguments
                    actually excluded the excluded files; a matrix probe of
-                   the selector would prove the TEST, not the lane.
-  (default)        the real run. Streams output, parses the summary, writes
-                   the summary artifact, and exits with pytest's code.
+                   the selector would prove the TEST, not the lane. It stays
+                   serial as the independent collection oracle and captures
+                   every complete node ID for comparison with the real run.
+  (default)        the real run. Uses fixed four-worker loadfile execution,
+                   streams output, parses the summary, writes the summary
+                   artifact, and exits with pytest's code.
 
 WHY THIS EXISTS AT ALL
   A wrapper invocation contains `python` but not the token `pytest`, so a
@@ -25,9 +28,23 @@ ARTIFACTS
   workflow names both destinations on every runner step.
 
 INVARIANTS
-  No PYTEST_ADDOPTS, no env overrides, no shell: a direct subprocess.run.
-  Artifacts are written atomically and are written even when pytest fails --
-  a missing artifact must mean "never ran", never "failed".
+  No inherited PYTEST_* or recorder-owner variables, no env overrides, no
+  shell: a direct subprocess.run. Artifacts are written atomically and are
+  written even when pytest fails.
+
+  Artifact ABSENCE certifies nothing: pass/fail is decided by the verifier
+  from evidence, never from an artifact existing, and the gate treats a
+  missing run artifact as uncertifiable regardless of cause. The named
+  paths that leave no artifact: the run never started (contaminated
+  environment, rc 3); selection refused (bad manifest, rc 2; an argparse
+  usage error also exits before selection); the run started but produced
+  no collection evidence and refused at write time (NO-COLLECTED-HEADER,
+  rc 3 -- the verifier re-derives the collected count from the persisted
+  header, so an artifact without it is unverifiable by construction); or
+  the run was interrupted mid-stream (SIGINT/SIGTERM) or lost to a write
+  or crash failure before the artifact landed. A run that failed but
+  completed still writes its artifact with pytest's exit code and outcome
+  counts.
 """
 
 from __future__ import annotations
@@ -40,7 +57,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from collections import deque
+from collections import Counter, deque
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -53,9 +70,17 @@ from fast_suite_selection import (  # noqa: E402  (path must precede import)
     select_for_change,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _TAIL_LINES = 400
-_ITEMS_LINE_RE = re.compile(r"collected \d+ items?\b")
+_ITEMS_LINE_RE = re.compile(
+    r"collected (\d+) items?\b|\d+ workers \[(\d+) items?\]")
+_SKIPPED_FILE_RE = re.compile(r"^SKIPPED \[\d+\] (.+?\.py):\d+:")
+
+
+def _skipped_module_file(line: str) -> str | None:
+    """The file from a module-level collection skip, without inventing a node."""
+    match = _SKIPPED_FILE_RE.match(line.strip())
+    return match.group(1) if match else None
 
 
 def _node_id_file(line: str) -> str | None:
@@ -170,6 +195,8 @@ def _base_payload(selection, manifest_path: Path, base_sha: str | None,
         },
         "base_sha": base_sha,
         "head_sha": _git_head(repo_root),
+        "run_id": os.environ.get("GITHUB_RUN_ID"),
+        "run_attempt": os.environ.get("GITHUB_RUN_ATTEMPT"),
         "selection": _selection_block(selection, manifest_path),
     }
 
@@ -186,12 +213,20 @@ def _collect_only(args, selection, manifest_path: Path, plugin_root: Path,
               + ", ".join(missing_ignores), file=sys.stderr)
         return 1
 
+    node_ids: list[str] = []
     node_files: list[str] = []
 
     def note_node_id(line: str) -> None:
         file_part = _node_id_file(line)
         if file_part is not None:
+            node_ids.append(line.strip())
             node_files.append(file_part)
+            return
+        skipped_file = _skipped_module_file(line)
+        if skipped_file is not None:
+            # A module skipped during collection has no test node ID, but its
+            # file did participate in collection and must not read as missing.
+            node_files.append(skipped_file)
 
     rc, tail = _stream(argv, plugin_root, note_node_id)
     parsed = parse_pytest_summary("\n".join(tail))
@@ -216,6 +251,9 @@ def _collect_only(args, selection, manifest_path: Path, plugin_root: Path,
     expected = set(selection.included)
     missing = sorted(expected - collected)
     extra = sorted(collected - expected)
+    collected_node_ids = sorted(set(node_ids))
+    duplicate_node_ids = sorted(
+        node_id for node_id, count in Counter(node_ids).items() if count > 1)
 
     payload = _base_payload(selection, manifest_path, args.base_sha,
                             repo_root, "collect-only")
@@ -227,6 +265,7 @@ def _collect_only(args, selection, manifest_path: Path, plugin_root: Path,
         # The collected ITEM count. The run must collect exactly this many,
         # which catches a run-only narrowing that is not a deselection.
         "collected_items": int(parsed["collected"]) if parsed else None,
+        "collected_node_ids": collected_node_ids,
         "expected_files": sorted(expected),
         "collected_files": sorted(collected),
         "missing": missing,
@@ -240,6 +279,13 @@ def _collect_only(args, selection, manifest_path: Path, plugin_root: Path,
         failures.append(f"rc {rc} != 0")
     if parsed is None:
         failures.append("no parseable summary line (the suite may not have started)")
+    if duplicate_node_ids:
+        failures.append(
+            f"duplicate collected node IDs: {duplicate_node_ids}")
+    if parsed is not None and len(collected_node_ids) != int(parsed["collected"]):
+        failures.append(
+            f"unique collected node IDs ({len(collected_node_ids)}) != "
+            f"collected_items ({parsed['collected']})")
     # DESELECTION AND COLLECTION ERRORS, scanned separately from the file
     # sets. A PARTIAL deselection -- an inherited PYTEST_ADDOPTS=-k, say --
     # leaves the file collected, so the file-set comparison passes and only
@@ -270,19 +316,45 @@ def _collect_only(args, selection, manifest_path: Path, plugin_root: Path,
 
 def _run(args, selection, manifest_path: Path, plugin_root: Path,
          repo_root: Path) -> int:
-    argv = build_argv(selection, plugin_root, "run")
-    # The `collected N items` header sits at the TOP of a run log of tens of
-    # thousands of lines, so a tail-only parse never sees it and the collected
-    # count silently falls back to the outcome sum. Capture it as it streams.
+    argv = build_argv(selection, plugin_root, "run", workers=4)
+    # The `collected N items` / `N workers [M items]` header sits at the TOP
+    # of a run log of tens of thousands of lines, so a tail-only parse never
+    # sees it and the collected count silently falls back to the outcome sum.
+    # FIRST match wins: the header prints once, before any test output, and
+    # any later matching line belongs to a nested session, not this run (the
+    # same first-match rule parse_pytest_summary applies to its own items
+    # fallback).
     collected_header: list[str] = []
 
     def note_collected(line: str) -> None:
-        if _ITEMS_LINE_RE.search(line):
-            collected_header[:] = [line.strip()]
+        if not collected_header and _ITEMS_LINE_RE.search(line):
+            collected_header.append(line.strip())
 
     rc, tail = _stream(argv, plugin_root, note_collected)
+    if not collected_header:
+        # The verifier re-derives run.collected from this stored line, so an
+        # artifact without the header is unverifiable by construction, and a
+        # headerless run means the suite started but produced no collection
+        # evidence. Refuse rather than write one: the count would carry no
+        # printed provenance, and artifact absence certifies nothing -- the
+        # verifier decides pass/fail from evidence, never from an artifact
+        # existing.
+        print(
+            "FAST-SUITE REFUSAL: no collected-items header line was captured "
+            "(NO-COLLECTED-HEADER); the run produced no start-of-run "
+            "collection evidence",
+            file=sys.stderr,
+        )
+        return 3
     parsed = parse_pytest_summary(
         "\n".join([*collected_header, *tail]))
+    collected = parsed["collected"] if parsed else None
+    # xdist reports `N workers [M items]`, not pytest's serial
+    # `collected M items` header. The explicit item count is authoritative:
+    # outcome-sum inference counts a module-level collection skip as a node.
+    match = _ITEMS_LINE_RE.search(collected_header[0])
+    if match is not None:
+        collected = int(match.group(1) or match.group(2))
 
     payload = _base_payload(selection, manifest_path, args.base_sha,
                             repo_root, "run")
@@ -290,12 +362,22 @@ def _run(args, selection, manifest_path: Path, plugin_root: Path,
         "command": argv,
         "rc": rc,
         "summary_line": parsed["summary_line"] if parsed else None,
-        "collected": int(parsed["collected"]) if parsed else None,
+        # Always an int: the capture above matched this same regex on this
+        # same string, so the re-search cannot miss; when the summary line
+        # is unparseable the header-derived count is still recorded.
+        "collected": int(collected),
+        # The first-match header line itself. The verifier re-derives the
+        # collected count from this string with the same parse rule, so the
+        # count carries its printed provenance instead of resting on the
+        # cross-artifact equality checks alone.
+        "collected_header": collected_header[0],
         "passed": int(parsed["passed"]) if parsed else None,
         "failed": int(parsed["failed"]) if parsed else None,
         "errors": int(parsed["errors"]) if parsed else None,
         "skipped": int(parsed["skipped"]) if parsed else None,
         "deselected": int(parsed["deselected"]) if parsed else None,
+        "xfailed": int(parsed["xfailed"]) if parsed else None,
+        "xpassed": int(parsed["xpassed"]) if parsed else None,
     }
     _write_json(Path(args.summary), payload)
     return rc
@@ -320,15 +402,17 @@ def main(argv: list[str] | None = None) -> int:
                              "mode)")
     args = parser.parse_args(argv)
 
-    # Inherited pytest options can change what runs without appearing in the
-    # command, and the canary's collection checks cannot see a run-only
-    # option. Refuse rather than run under an unknown configuration.
-    if os.environ.get("PYTEST_ADDOPTS"):
+    # Any inherited pytest or xdist variable can reshape the run or make this
+    # controller look like a nested worker. The recorder-owner variable would
+    # suppress the controller's record entirely. Refuse before selection so no
+    # artifact can make a contaminated process look like a measured one.
+    contaminated = sorted(
+        name for name in os.environ
+        if name.startswith("PYTEST_") or name == "PACT_FULL_RUN_RECORD_OWNER")
+    if contaminated:
         print(
-            "FAST-SUITE REFUSAL: PYTEST_ADDOPTS is set in this process "
-            f"({os.environ['PYTEST_ADDOPTS']!r}). Inherited options can "
-            "narrow or reshape the run without appearing in the recorded "
-            "command, so the runner refuses to start.",
+            "FAST-SUITE REFUSAL: inherited pytest/recorder environment: "
+            + ", ".join(contaminated),
             file=sys.stderr,
         )
         return 3
@@ -340,7 +424,8 @@ def main(argv: list[str] | None = None) -> int:
                      else repo_root / "scripts" / "fast_suite_exclusions.json")
 
     try:
-        manifest = load_manifest(manifest_path, plugin_root=plugin_root)
+        manifest = load_manifest(
+            manifest_path, plugin_root=plugin_root, repo_root=repo_root)
     except ManifestError as exc:
         for error in exc.errors:
             print(error, file=sys.stderr)

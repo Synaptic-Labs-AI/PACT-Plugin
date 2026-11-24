@@ -112,7 +112,8 @@ def main(argv: list[str] | None = None) -> int:
         manifest_path = repo_root / manifest_path
 
     try:
-        manifest = load_manifest(manifest_path, plugin_root=plugin_root)
+        manifest = load_manifest(
+            manifest_path, plugin_root=plugin_root, repo_root=repo_root)
     except ManifestError as exc:
         for error in exc.errors:
             print(error, file=sys.stderr)

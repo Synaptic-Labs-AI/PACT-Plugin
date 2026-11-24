@@ -529,7 +529,8 @@ def _validate_exclusions(entries: object, plugin_root: Path,
     return tuple(validated)
 
 
-def load_manifest(path: Path, plugin_root: Path | None = None) -> Manifest:
+def load_manifest(path: Path, plugin_root: Path | None = None,
+                  repo_root: Path | None = None) -> Manifest:
     """Read and validate the exclusion manifest. Raises ManifestError.
 
     Every violation is reported, not just the first: an operator fixing a
@@ -570,7 +571,8 @@ def load_manifest(path: Path, plugin_root: Path | None = None) -> Manifest:
             f"{path_base!r}.{hint}"
         )
 
-    repo_root = _derive_repo_root(manifest_path)
+    repo_root = Path(repo_root) if repo_root is not None else _derive_repo_root(
+        manifest_path)
     plugin_root = Path(plugin_root) if plugin_root is not None else (
         repo_root / PLUGIN_DIRNAME
     )
