@@ -1324,7 +1324,7 @@ class TestInboxGraceGate:
                 [_grace_task()], tmp_path, clock, team=team, teammate=teammate
             )
 
-        assert seen is False
+        assert seen is None
         read.assert_not_called()
         assert clock.sleeps == []
 
@@ -1359,7 +1359,7 @@ class TestInboxGraceGate:
         with patch("teammate_idle.state_file.read_text") as read:
             seen = _call_grace([task], tmp_path, clock)
 
-        assert seen is False
+        assert seen is None
         read.assert_not_called()
         assert clock.sleeps == []
 
@@ -1466,7 +1466,7 @@ class TestInboxGraceGate:
         with patch("teammate_idle.state_file.read_text") as read:
             seen = _call_grace([task], tmp_path, clock)
 
-        assert seen is False
+        assert seen is None
         read.assert_not_called()
         assert clock.sleeps == []
 
@@ -1490,15 +1490,9 @@ class TestInboxGraceGate:
 
         assert seen is True
 
-    @pytest.mark.parametrize("covers", [None, "garbage", "2026-01-01T00:00:00"],
-                             ids=["absent", "malformed", "naive"])
-    def test_unusable_covers_since_falls_back_to_since(self, covers, tmp_path):
-        task = _grace_task(age=9.95, covers_age=0)
-        wait = task["metadata"]["intentional_wait"]
-        if covers is None:
-            del wait["covers_since"]
-        else:
-            wait["covers_since"] = covers
+    def test_absent_covers_since_falls_back_to_since(self, tmp_path):
+        task = _grace_task(age=9.95)
+        del task["metadata"]["intentional_wait"]["covers_since"]
         clock = _FakeGraceClock()
         with patch("teammate_idle.state_file.read_text", return_value="[]") as read:
             seen = _call_grace([task], tmp_path, clock)
@@ -1506,6 +1500,20 @@ class TestInboxGraceGate:
         assert seen is False
         assert read.call_count == 1
         assert clock.sleeps == pytest.approx([0.05])
+
+    @pytest.mark.parametrize("covers", ["garbage", "2026-01-01T00:00:00", 3],
+                             ids=["malformed", "naive", "non-string"])
+    def test_present_but_invalid_covers_since_does_not_hold(self, covers, tmp_path):
+        """Counter-test: falling back to a fresh since here would restart the hold."""
+        task = _grace_task(age=0)
+        task["metadata"]["intentional_wait"]["covers_since"] = covers
+        clock = _FakeGraceClock()
+        with patch("teammate_idle.state_file.read_text") as read:
+            seen = _call_grace([task], tmp_path, clock)
+
+        assert seen is None
+        read.assert_not_called()
+        assert clock.sleeps == []
 
     def test_second_idle_with_expired_wait_starts_no_new_grace(self, tmp_path):
         clock = _FakeGraceClock()
@@ -1516,7 +1524,7 @@ class TestInboxGraceGate:
                 [task], tmp_path, clock, now=_GRACE_NOW + timedelta(seconds=10)
             )
 
-        assert first is False and second is False
+        assert first is False and second is None
         assert read.call_count == 100
         assert len(clock.sleeps) == 100
 
@@ -1553,6 +1561,44 @@ class TestMainInboxHold:
         assert output == {"suppressOutput": True}
         hold.assert_called_once()
         cleanup.assert_called_once()
+
+    def _run_rereads(self, capsys, result, in_process=True):
+        import io
+        from unittest.mock import Mock
+        from teammate_idle import main
+
+        before = [_grace_task()]
+        after = [_grace_task(status="completed")]
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
+             patch("teammate_idle.iter_team_task_jsons", side_effect=[before, after]) as reads, \
+             patch("teammate_idle.teammate_is_in_process", return_value=in_process), \
+             patch("teammate_idle.wait_for_inbox_evidence", Mock(return_value=result)), \
+             patch("teammate_idle.check_idle_cleanup", return_value=(None, False)) as cleanup, \
+             patch("teammate_idle.check_unflagged_background", return_value=None) as advisory:
+            with pytest.raises(SystemExit):
+                main()
+        capsys.readouterr()
+        return reads, cleanup.call_args.args[0], advisory.call_args.args[0], after
+
+    @pytest.mark.parametrize("result", [True, False], ids=["evidence", "deadline"])
+    def test_a_hold_that_ran_rereads_tasks_for_cleanup_and_advisory(
+        self, result, capsys
+    ):
+        """Counter-test: dropping the re-read leaves cleanup on the pre-hold snapshot."""
+        reads, cleaned, advised, after = self._run_rereads(capsys, result)
+
+        assert reads.call_count == 2
+        assert cleaned == after and advised == after
+        assert cleaned[0]["status"] == "completed"
+
+    @pytest.mark.parametrize("result,in_process", [(None, True), (True, False)],
+                             ids=["no-eligible-wait", "not-in-process"])
+    def test_no_hold_keeps_the_single_task_read(self, result, in_process, capsys):
+        reads, cleaned, _advised, after = self._run_rereads(capsys, result, in_process)
+
+        assert reads.call_count == 1
+        assert cleaned != after
 
     def test_pane_or_undeterminable_mode_does_not_hold(self, capsys):
         hold, cleanup, output = self._run(capsys, in_process=False)

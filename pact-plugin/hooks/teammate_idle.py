@@ -46,6 +46,7 @@ if str(_hooks_dir) not in sys.path:
 from shared.error_output import hook_error_json
 import shared.pact_context as pact_context
 from shared.background_work import (
+    ANCHOR_CLASS_MALFORMED,
     frame_team_and_name,
     teammate_is_in_process,
     wait_scope_anchor,
@@ -138,7 +139,7 @@ def _has_valid_inbox_message(messages: list) -> bool:
 def _select_grace_task(
     tasks: list[dict], teammate_name: str, wall_now: datetime
 ) -> tuple[dict, float] | None:
-    """Select the earliest eligible wait, breaking ties by numeric task ID."""
+    """Select the oldest eligible wait (the shortest remaining hold), breaking ties by numeric task ID."""
     candidates = []
     for task in tasks:
         if (
@@ -155,8 +156,8 @@ def _select_grace_task(
         ):
             continue
         # covers_since survives a re-SET of a held wait, so a re-stamped since cannot restart grace.
-        since, _anchor_class = wait_scope_anchor(wait)
-        if since is None:
+        since, anchor_class = wait_scope_anchor(wait)
+        if since is None or anchor_class == ANCHOR_CLASS_MALFORMED:
             continue
         age = (wall_now - since).total_seconds()
         if not 0 <= age < GRACE_SECONDS:
@@ -181,21 +182,22 @@ def wait_for_inbox_evidence(
     now: datetime | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
-) -> bool:
-    """True once a valid queued message is visible within a fresh wait's grace."""
+) -> bool | None:
+    """None when no hold runs; else True once a valid queued message is visible, False at the deadline."""
     wall_now = now if now is not None else datetime.now(timezone.utc)
     selected = _select_grace_task(tasks, teammate_name, wall_now)
     if selected is None:
-        return False
+        return None
     _task, age = selected
     if not (
         is_safe_path_component(team_name)
         and is_safe_path_component(teammate_name)
     ):
-        return False
+        return None
 
     inbox_dir = teams_root / team_name / "inboxes"
     inbox_path = inbox_dir / f"{teammate_name}.json"
+    # canonical_since truncates fractional seconds, so the budget is conservatively up to 1s shorter.
     deadline = monotonic() + GRACE_SECONDS - age
     while monotonic() < deadline:
         try:
@@ -589,7 +591,11 @@ def main():
         # so only an in-process teammate's runtime can deliver a message that lands now.
         try:
             if teammate_is_in_process(team_name, teammate_name, str(teams_root)):
-                wait_for_inbox_evidence(tasks, teammate_name, team_name, teams_root)
+                if wait_for_inbox_evidence(
+                    tasks, teammate_name, team_name, teams_root
+                ) is not None:
+                    # The hold may have outlived task changes; cleanup must see current state.
+                    tasks = list(iter_team_task_jsons(team_name))
         except Exception:
             pass
 
