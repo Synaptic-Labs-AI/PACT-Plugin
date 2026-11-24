@@ -1241,9 +1241,9 @@ def test_tier3_outlet_branches_on_role(tmp_path, monkeypatch, capsys):
     assert "pact_wait.py" in lead_reason
     assert "--team tm-team" in lead_reason
     assert "re-invokes you" in lead_reason
-    # The lead text DOES name metadata.intentional_wait (the do-NOT-arm
-    # alternative, cold round 8) — the mate discriminator is the
-    # wake-model phrasing, not the metadata key.
+    # The lead text names no intentional_wait (its own write is done now);
+    # the mate discriminator is the wake-model phrasing.
+    assert "metadata.intentional_wait" not in lead_reason
     assert "will NOT wake you" not in lead_reason
 
 

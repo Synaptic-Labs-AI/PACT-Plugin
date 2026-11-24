@@ -78,9 +78,10 @@ LEAD_BLOCK_TEXT = (
     "next turn, but a notice can go undelivered. Before ending this turn, do "
     "one of these: wait for it to finish, schedule a wake with CronCreate, or "
     "stop it if it is no longer needed. If a job listed here belongs to a "
-    "teammate, end the turn again. A pact-wait watcher is never listed "
-    "unless something is chained onto its command, so account for a listed "
-    "one like any other job. Each job is reported once."
+    "teammate, end the turn again. A pact-wait watcher is listed only when "
+    "its command differs from the arm command's form (flags missing or "
+    "reordered, a ~ or unquoted path, or something chained onto it), so "
+    "account for a listed one like any other job. Each job is reported once."
 )
 TEAMMATE_BLOCK_TEXT = (
     "You are ending your turn while background work you started is still "

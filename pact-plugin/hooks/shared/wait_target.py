@@ -35,7 +35,7 @@ Public surface:
 - PREDICATES — name -> predicate mapping (the registry).
 - evaluate_target(team_name, task_id, predicate_name, tasks_base_dir=None)
   — ONE pass: resolve, read, parse, evaluate.
-- WATCHER_PATH, TEAM_PLACEHOLDER, TASK_ID_PLACEHOLDER, arm_command(...) —
+- WATCHER_PATH, TASK_ID_PLACEHOLDER, arm_command(...) —
   the ONE builder of the watcher arm command every emitter uses.
 - is_wait_watcher_command(command) — the ONE classifier of a running
   watcher's command text; it accepts every form arm_command emits.
@@ -265,9 +265,8 @@ WATCHER_PATH = os.path.join(
 
 # Emitted unquoted where the emitter does not know the value; the agent
 # substitutes the real value before running the command.
-TEAM_PLACEHOLDER = "<team-name>"
 TASK_ID_PLACEHOLDER = "<task-id>"
-_PLACEHOLDERS = (TEAM_PLACEHOLDER, TASK_ID_PLACEHOLDER)
+_PLACEHOLDERS = (TASK_ID_PLACEHOLDER,)
 
 
 def _arg(value: object) -> str:
