@@ -3563,6 +3563,12 @@ class PACTMemory:
                 _ensure_ready()
         else:
             _ensure_ready()
+            # THE SCHEMA IS CREATED HERE, not left to `_ensure_ready()`: only
+            # its embedding catch-up opens a connection that initializes, and
+            # a catch-up skipped for this session (its marker spent) would
+            # leave the read a store with no tables.
+            with db_connection() as connection:
+                ensure_initialized(connection)
 
     def _read_project_scopes(self, conn: Any = None) -> tuple:
         """The project ids a READ may bind: the canonical id plus its legacy bucket.
