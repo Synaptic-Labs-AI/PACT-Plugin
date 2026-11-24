@@ -428,8 +428,9 @@ the different wait it is on task-file inspection.
 One exception applies to a wait on another teammate's deliverable. A
 separate-process teammate (tmux teammateMode) arms the structural watcher
 only with the arm command a `wait_filler_gate` denial gives it: it runs that
-command verbatim with one `Bash` call (`run_in_background: true`) and ends
-the turn. Without that command, it SETs `intentional_wait` with
+command with the awaited task's id in place of its placeholder, and with
+`--predicate teachback_submit` when the awaited deliverable is a teachback,
+with one `Bash` call (`run_in_background: true`) and ends the turn. Without that command, it SETs `intentional_wait` with
 `expected_resolver` naming the lead and ends the turn. An
 in-process teammate does not arm a watcher: it SETs `intentional_wait`
 with `expected_resolver` naming the lead and ends the turn. An Agent-tool

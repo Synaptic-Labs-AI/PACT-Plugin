@@ -478,7 +478,9 @@ SELF_STARTED_HEADING = "### Wait Discipline for Self-Started Work"
 ROLE_WAIT_CLAUSES = [
     "A separate-process teammate (tmux teammateMode) arms the structural "
     "watcher only with the arm command a wait_filler_gate denial gives it: "
-    "it runs that command verbatim with one Bash call "
+    "it runs that command with the awaited task's id in place of its "
+    "placeholder, and with --predicate teachback_submit when the awaited "
+    "deliverable is a teachback, with one Bash call "
     "(run_in_background: true) and ends the turn.",
     "Without that command, it SETs intentional_wait with expected_resolver "
     "naming the lead and ends the turn.",
