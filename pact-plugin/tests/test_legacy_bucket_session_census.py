@@ -124,7 +124,7 @@ def test_a_verified_bucket_with_no_foreign_row_is_read(checkout, caplog):
     assert state["verified"] and not state["unproven"], state
     assert state["sessions"]["unattributed"] == 2, state
     assert len(notices) == 1, notices
-    assert "its file rows lie under this repository, but 2 of its memories" in notices[0], notices
+    assert "of its file rows lie under this repository and none in another checkout, but 2 of its memories" in notices[0], notices
 
 
 def test_a_vouched_bucket_with_no_unattributed_row_reads_quietly(checkout, caplog):

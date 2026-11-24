@@ -1526,6 +1526,33 @@ def _contained_by_root(
     return True
 
 
+def _inside_a_checkout(resolved: str, cache: Dict[str, bool]) -> bool:
+    """Whether a directory above `resolved` holds a `.git` (a checkout owns
+    the path). `cache` keeps each directory's answer for one gate call.
+    Never raises."""
+    directory = os.path.dirname(resolved)
+    seen = []
+    found = False
+    while True:
+        if directory in cache:
+            found = cache[directory]
+            break
+        seen.append(directory)
+        try:
+            if os.path.lexists(os.path.join(directory, ".git")):
+                found = True
+                break
+        except (OSError, ValueError):
+            break
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    for each in seen:
+        cache[each] = found
+    return found
+
+
 def legacy_candidate_plausibility(
     conn: sqlite3.Connection,
     candidate_id: str,
@@ -1556,7 +1583,8 @@ def legacy_candidate_plausibility(
     one-element sequence, so an existing single-root caller keeps working.
 
     Returns `(outcome, detail)` where outcome is one of:
-      - `verified`   — at least one absolute row lies under SOME root;
+      - `verified`   — at least one absolute row lies under SOME root, and
+                       no row is foreign (`foreign_rows` below);
       - `unverified` — no roots, or no absolute rows exist at all, so the
                        store cannot judge; the caller reads the bucket only
                        on session evidence (a recorded session from this
@@ -1564,6 +1592,14 @@ def legacy_candidate_plausibility(
                        `included_unverified`, and otherwise reports it
                        `unproven` and does not read it;
       - `excluded`   — absolute rows exist and none lies under ANY root.
+
+    A FOREIGN ROW IS POSITIVE EVIDENCE OF ANOTHER CHECKOUT: an absolute row
+    whose path exists, lies under no root, and lies inside some checkout (a
+    `.git` at one of its parent directories). A bucket holding rows under a
+    root AND foreign rows is shared with another checkout, so it is
+    `unverified`, not `verified`, and `detail["foreign_rows"]` counts the
+    foreign rows; the caller must not admit it whole. A row whose path no
+    longer exists is never foreign.
 
     A ROW UNDER A NESTED CHECKOUT IS NOT CONTAINED. A row counts for a root
     only when no directory strictly between the root and the row is a
@@ -1622,6 +1658,8 @@ def legacy_candidate_plausibility(
     file_rows = 0
     absolute_rows = 0
     contained_rows = 0
+    foreign_rows = 0
+    checkouts: Dict[str, bool] = {}
     for row in cursor.fetchall():
         file_rows += 1
         path = row["path"]
@@ -1641,11 +1679,14 @@ def legacy_candidate_plausibility(
             for root in root_paths
         ):
             contained_rows += 1
+        elif os.path.lexists(resolved) and _inside_a_checkout(resolved, checkouts):
+            foreign_rows += 1
 
     detail = {
         "file_rows": file_rows,
         "absolute_rows": absolute_rows,
         "contained_rows": contained_rows,
+        "foreign_rows": foreign_rows,
         "roots": len(root_paths),
     }
     if not root_paths or absolute_rows == 0:
@@ -1655,6 +1696,8 @@ def legacy_candidate_plausibility(
         # reported as verified OR excluded.
         return LEGACY_PLAUSIBLE_UNVERIFIED, detail
     if contained_rows > 0:
+        if foreign_rows > 0:
+            return LEGACY_PLAUSIBLE_UNVERIFIED, detail
         return LEGACY_PLAUSIBLE_VERIFIED, detail
     return LEGACY_PLAUSIBLE_EXCLUDED, detail
 

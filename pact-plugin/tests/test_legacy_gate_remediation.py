@@ -350,3 +350,110 @@ def test_a_journal_beside_the_store_blocks_the_immutable_open(
     memory_api._read_only_connection(str(store)).close()
     assert "immutable=1" not in opened[-1]
     assert memory_api._store_stamp(str(store)) != stamp_without
+
+
+# ---------------------------------------------------------------------------
+# CB-1: a bucket shared with another checkout is not admitted whole
+# ---------------------------------------------------------------------------
+
+ORIGIN = "https://github.com/Acme/Widget.git"
+CANONICAL = "github.com/acme/widget"
+
+
+@pytest.fixture
+def shared_bucket(tmp_path, monkeypatch, scopes_clean):
+    """The cold probe: `widget` has an origin, `other/widget` has none, and
+    the `widget` folder-name bucket holds one row from each."""
+    assert_outside_repository(tmp_path)
+    mine = make_repo(tmp_path / NAME, remote=ORIGIN)
+    theirs = make_repo(tmp_path / "other" / NAME)
+    for repo in (mine, theirs):
+        (repo / "src.py").write_text("x\n")
+    store = tmp_path / "store.db"
+    _seed(store, NAME, files=[theirs / "src.py", mine / "src.py"])
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    memory_api._UNPROVEN_WARNED.clear()
+    yield mine, theirs, store
+    memory_api._UNPROVEN_WARNED.clear()
+
+
+def test_a_bucket_with_a_foreign_row_is_not_read_whole(shared_bucket, monkeypatch, caplog):
+    mine, theirs, store = shared_bucket
+    monkeypatch.chdir(mine)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._project_id == CANONICAL
+    with caplog.at_level(logging.WARNING):
+        assert memory._read_project_scopes() == (CANONICAL,)
+    state = memory._legacy_scope_state
+    assert state["unproven"] and not state["verified"], state
+    assert state["unproven_reason"] == "foreign_rows"
+    assert state["detail"]["foreign_rows"] == 1
+    assert state["detail"]["contained_rows"] == 1
+    assert "1 of its file rows lie in another checkout" in caplog.text
+
+
+def test_a_defaulted_rekey_refuses_the_shared_bucket(shared_bucket, monkeypatch, capfd):
+    from scripts.cli import main
+
+    mine, theirs, store = shared_bucket
+    monkeypatch.chdir(mine)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "rekey", f"--from={NAME}", "--db-path", str(store)])
+    envelope = json.loads(capfd.readouterr().err)
+    assert exit_info.value.code == 1, envelope
+    assert envelope["error"] == "REKEY_REFUSED"
+    assert "1 of its file rows lie in another checkout" in envelope["message"]
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    with pytest.raises(SystemExit) as exit_info:
+        main([
+            "project-id", "rekey", f"--from={NAME}", f"--to={CANONICAL}",
+            "--db-path", str(store),
+        ])
+    assert exit_info.value.code == 0, capfd.readouterr()
+
+
+def test_the_other_checkout_still_reads_its_rows(shared_bucket, monkeypatch):
+    mine, theirs, store = shared_bucket
+    monkeypatch.chdir(theirs)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._project_id == NAME
+    assert memory._read_project_scopes() == (NAME,)
+    assert len(memory.list(limit=5)) == 1
+
+
+def test_a_foreign_row_whose_path_is_gone_is_no_evidence(shared_bucket, monkeypatch):
+    """Control: the vanished row leaves the bucket verified and read."""
+    mine, theirs, store = shared_bucket
+    (theirs / "src.py").unlink()
+    monkeypatch.chdir(mine)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._read_project_scopes() == (CANONICAL, NAME)
+    assert memory._legacy_scope_state["verified"] is True
+
+
+
+def test_the_gate_calls_a_shared_bucket_unverified(shared_bucket):
+    """The gate itself: a row here plus an existing row in another checkout is
+    not `verified`."""
+    from scripts.database import legacy_candidate_plausibility
+
+    mine, theirs, store = shared_bucket
+    with sqlite3.connect(str(store)) as conn:
+        conn.row_factory = sqlite3.Row
+        outcome, detail = legacy_candidate_plausibility(conn, NAME, [str(mine.resolve())])
+    assert outcome == "unverified", detail
+    assert detail["foreign_rows"] == 1 and detail["contained_rows"] == 1, detail
+
+
+def test_session_evidence_does_not_admit_a_shared_bucket(
+    shared_bucket, monkeypatch, tmp_path
+):
+    """Admission: a session recorded here would admit an unverified bucket,
+    but a foreign file row still keeps it out."""
+    mine, theirs, store = shared_bucket
+    seed_session_evidence(tmp_path / "home" / ".claude", mine, "s")
+    monkeypatch.chdir(mine)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._read_project_scopes() == (CANONICAL,)
+    assert memory._legacy_scope_state["sessions"]["here"] == 1
+    assert memory._legacy_scope_state["unproven_reason"] == "foreign_rows"

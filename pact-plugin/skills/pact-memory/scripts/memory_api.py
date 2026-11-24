@@ -686,6 +686,11 @@ def _printed_rekey_remedy(commands: list) -> str:
 # Why an unproven bucket was not read: the `unproven_reason` value and the
 # clause the warning prints for it.
 _UNPROVEN_CAUSES = {
+    "foreign_rows": (
+        "{foreign_rows} of its file rows lie in another checkout "
+        "({contained_rows} under this repository), so it is shared with "
+        "that checkout"
+    ),
     "recorded_elsewhere": (
         "{elsewhere} of its memories came from sessions recorded at "
         "another checkout ({here} from sessions recorded here)"
@@ -709,8 +714,12 @@ _UNPROVEN_CAUSES = {
 }
 
 
-def _unproven_reason(outcome: str, sessions: Dict[str, int]) -> str:
+def _unproven_reason(
+    outcome: str, sessions: Dict[str, int], detail: Optional[Dict[str, int]] = None
+) -> str:
     """The `_UNPROVEN_CAUSES` key for a bucket that is not read."""
+    if (detail or {}).get("foreign_rows"):
+        return "foreign_rows"
     if sessions["elsewhere"]:
         return "recorded_elsewhere"
     if outcome == "unverified" and sessions["subfolder"]:
@@ -718,6 +727,20 @@ def _unproven_reason(outcome: str, sessions: Dict[str, int]) -> str:
     if outcome == "unverified" and sessions["description_newer"]:
         return "description_newer"
     return "no_session"
+
+
+def _unproven_cause(
+    reason: str,
+    sessions: Optional[Dict[str, int]],
+    detail: Optional[Dict[str, int]] = None,
+) -> str:
+    """The `_UNPROVEN_CAUSES` clause for `reason`, filled from the session
+    census and the gate's row counts. The read warning and the rekey refusal
+    both print it, so they cannot disagree."""
+    return _UNPROVEN_CAUSES[reason].format(
+        **(sessions or dict.fromkeys(_SESSION_CENSUS_KEYS, 0)),
+        **{"contained_rows": 0, "foreign_rows": 0, **(detail or {})},
+    )
 
 
 def _warn_legacy_unproven(
@@ -728,6 +751,7 @@ def _warn_legacy_unproven(
     file_paths: int,
     reason: str = "no_session",
     sessions: Optional[Dict[str, int]] = None,
+    detail: Optional[Dict[str, int]] = None,
 ) -> None:
     """Disclose an UNPROVEN legacy bucket, once per process per bucket, with
     the reason it was not read (`_UNPROVEN_CAUSES`)."""
@@ -735,9 +759,7 @@ def _warn_legacy_unproven(
     if key in _UNPROVEN_WARNED:
         return
     _UNPROVEN_WARNED.add(key)
-    cause = _UNPROVEN_CAUSES[reason].format(
-        **(sessions or dict.fromkeys(_SESSION_CENSUS_KEYS, 0))
-    )
+    cause = _unproven_cause(reason, sessions, detail)
     logger.warning(
         "legacy project bucket %r holds %d memor%s and %d file path%s, but "
         "%s, so it is NOT in this read scope: its folder name alone cannot "
@@ -761,6 +783,7 @@ def _warn_legacy_unattributed(
     target: str,
     verified: bool,
     sessions: Dict[str, int],
+    detail: Optional[Dict[str, int]] = None,
 ) -> None:
     """Disclose an ADMITTED legacy bucket that holds rows no session record
     places, once per process per bucket. Such a row reads like this
@@ -777,7 +800,8 @@ def _warn_legacy_unattributed(
         "If every row belongs here, file the bucket under this repository's "
         "id with: %s",
         candidate,
-        "its file rows lie under this repository"
+        f"{(detail or {}).get('contained_rows', 0)} of its file rows lie under "
+        "this repository and none in another checkout"
         if verified
         else (
             f"{sessions['here']} of its memories came from sessions "
@@ -3892,13 +3916,18 @@ class PACTMemory:
                     if outcome == "unverified"
                     else None
                 )
-                foreign = bool(sessions and sessions["elsewhere"])
+                # FOREIGN EVIDENCE OF EITHER KIND KEEPS IT OUT: a row written
+                # by a session recorded at another checkout, or a file row
+                # whose existing path lies in another checkout.
+                foreign = bool(sessions and sessions["elsewhere"]) or bool(
+                    detail.get("foreign_rows")
+                )
                 included = (
                     outcome == "verified" or bool(session_evidence)
                 ) and not foreign
                 unproven = outcome != "excluded" and not included
                 unproven_reason = (
-                    _unproven_reason(outcome, sessions) if unproven else None
+                    _unproven_reason(outcome, sessions, detail) if unproven else None
                 )
                 memory_count = buckets.get(candidate, 0)
                 state = _legacy_scope_record(
@@ -3936,11 +3965,12 @@ class PACTMemory:
                 elif unproven:
                     _warn_legacy_unproven(
                         store, candidate, scope, memory_count, file_paths or 0,
-                        unproven_reason, sessions,
+                        unproven_reason, sessions, detail,
                     )
                 elif sessions and sessions["unattributed"]:
                     _warn_legacy_unattributed(
                         store, candidate, scope, outcome == "verified", sessions,
+                        detail,
                     )
                 result = (scope, candidate) if included else (scope,)
         self._legacy_scope_state = state

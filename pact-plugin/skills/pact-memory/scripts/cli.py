@@ -59,11 +59,11 @@ from scripts.database import (
     escape_for_envelope,
 )
 from scripts.memory_api import (
-    _UNPROVEN_CAUSES,
     PACTMemory,
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
     _invalidate_legacy_scope_cache,
+    _unproven_cause,
     detection_pass,
     main_repo_root,
     present_store_fault,
@@ -1245,7 +1245,9 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             # cause and the row counts are the read gate's own, so this text
             # and the read warning cannot disagree.
             sessions = state["sessions"]
-            cause = _UNPROVEN_CAUSES[state["unproven_reason"]].format(**sessions)
+            cause = _unproven_cause(
+                state["unproven_reason"], sessions, state.get("detail")
+            )
             _error(
                 "REKEY_REFUSED",
                 escape_for_envelope(
