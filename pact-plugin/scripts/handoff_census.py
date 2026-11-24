@@ -36,16 +36,14 @@ ONE ADAPTATION, STATED BECAUSE IT BOUNDS THE RESULT: a real journal event
 carries the FULL HANDOFF inline, so the journal arm validates it directly. A
 `handoff` that is the LIST OF KEY NAMES is the defensive/historical shape the
 validator must still accept -- not the shape real events carry. The arm keeps
-it countable by reconstructing {key: None}. COLD ROUND 12 / cycle 11: the
-validator now INSPECTS VALUES by design (the produced type gate -- a
-list-typed, empty, or whitespace-only `produced` is the false-EXPIRED class
-it exists to refuse), so the reconstruction is no longer validation-exact: a
-{key: None} row FIRES where the real inline handoff it stood in for may not.
-The journal arm's `fires` rate is therefore a keyed-PRESENCE rate for those
-historical rows, and the guard below is INVERTED to fail loudly if the
-validator ever drifts back to presence-only -- at which point the
-distinction this documentation rests on would silently vanish and the
-census would drift into a wrong answer with nothing signalling it.
+it countable by reconstructing every listed key with a non-empty string
+placeholder. The validator inspects values (it refuses a `produced` that is
+not a non-empty string), and the placeholder satisfies every value check, so
+for those rows the `refused` count measures exactly one property: a REQUIRED
+key absent from the list. For inline handoffs it also counts value refusals.
+assert_placeholder_measures_presence() below fails loudly if the validator
+ever refuses the placeholder or stops refusing a missing required key, since
+either would make the key-list rows measure something else.
 Nothing here makes journal content unrecoverable: a real event carries its
 handoff inline, so the content is one read away.
 """
@@ -67,28 +65,31 @@ from shared.handoff_schema import (  # noqa: E402
 )
 
 
-def assert_values_are_inspected() -> None:
-    """INVERTED GUARD (cold round 12; replaces assert_presence_only). The
-    validator now inspects values BY DESIGN -- the produced type gate
-    (cycle 11) refuses a list-typed, empty, or whitespace-only `produced`,
-    the false-EXPIRED class the write side exists to close. Consequence for
-    this census: the key-list reconstruction {key: None} FIRES under the
-    gate, so the journal arm's `fires` rate for historical rows is a
-    keyed-PRESENCE rate, not a validation verdict on the original handoff.
+# The value a key-list row's keys are reconstructed with: a non-empty string
+# satisfies every value check the validator makes.
+KEY_LIST_PLACEHOLDER = "<key-list row>"
 
-    The guard fails loudly if the validator ever drifts BACK to
-    presence-only -- at that point {key: None} and a fully-valued handoff
-    validate identically again, the reconstruction becomes exact once more,
-    and the fires-rate distinction documented above would silently vanish."""
-    keys = {f: None for f in HANDOFF_CANONICAL_FIELDS}
-    values = {f: "x" for f in HANDOFF_CANONICAL_FIELDS}
-    if validate_handoff_schema(keys) == validate_handoff_schema(values):
+
+def assert_placeholder_measures_presence() -> None:
+    """The key-list reconstruction measures REQUIRED-key presence only while
+    the validator accepts a fully reconstructed row and refuses one missing
+    any required key. Abort if either stops holding."""
+    full = {f: KEY_LIST_PLACEHOLDER for f in HANDOFF_CANONICAL_FIELDS}
+    if validate_handoff_schema(full) is not None:
         raise SystemExit(
-            "ABORT: validate_handoff_schema no longer inspects VALUES -- "
-            "the key-list reconstruction is validation-exact again and the "
-            "fires-rate distinction this census documents has collapsed. "
-            "Re-read the produced type gate before trusting any number below."
+            "ABORT: validate_handoff_schema refuses the key-list placeholder, "
+            "so key-list rows no longer measure key presence. Fix the "
+            "reconstruction before trusting any number below."
         )
+    for field in HANDOFF_REQUIRED_FIELDS:
+        partial = {k: v for k, v in full.items() if k != field}
+        if validate_handoff_schema(partial) is None:
+            raise SystemExit(
+                f"ABORT: validate_handoff_schema accepts a row missing the "
+                f"required field {field!r}, so the refused count no longer "
+                "measures key presence. Re-read the validator before trusting "
+                "any number below."
+            )
 
 
 def config_roots(home: Path) -> list[Path]:
@@ -96,8 +97,8 @@ def config_roots(home: Path) -> list[Path]:
 
 
 def journal_handoffs(root: Path):
-    """Yield each event's inline handoff; reconstruct {key: None} only for the
-    historical list-of-keys shape."""
+    """Yield each event's inline handoff; reconstruct the historical
+    list-of-keys shape with KEY_LIST_PLACEHOLDER values."""
     for journal in root.glob("pact-sessions/*/*/session-journal.jsonl"):
         try:
             lines = journal.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -114,7 +115,7 @@ def journal_handoffs(root: Path):
                 continue
             keys = event.get("handoff")
             if isinstance(keys, list):
-                yield {k: None for k in keys if isinstance(k, str)}
+                yield {k: KEY_LIST_PLACEHOLDER for k in keys if isinstance(k, str)}
             else:
                 yield keys  # not the expected shape -- count it, don't drop it
 
@@ -136,14 +137,14 @@ def task_handoffs(root: Path):
 def tally(handoffs) -> dict:
     """Counts only. The caller turns them into rates beside their population."""
     out = {
-        "n": 0, "fires": 0, "missing_canonical": 0, "no_reasoning_chain": 0,
+        "n": 0, "refused": 0, "missing_canonical": 0, "no_reasoning_chain": 0,
         "not_a_dict": 0, "legacy_any": 0,
         **{f"legacy_{alias}": 0 for alias in HANDOFF_LEGACY_ALIASES},
     }
     for handoff in handoffs:
         out["n"] += 1
         if validate_handoff_schema(handoff) is not None:
-            out["fires"] += 1
+            out["refused"] += 1
         if not isinstance(handoff, dict):
             out["not_a_dict"] += 1
             continue
@@ -171,11 +172,11 @@ def report(name: str, unit: str, per_root: dict[str, dict]) -> dict:
     print(f"  {'COMBINED':<28} n={combined['n']}")
     print(f"\n  {'measure':<44}{'count':>8}   rate")
     rows = [
-        (f"fires: missing >=1 of the {len(HANDOFF_REQUIRED_FIELDS)} REQUIRED "
-         f"(shipped validator)", "fires"),
+        ("refused by the shipped validator (key-list rows: a REQUIRED key "
+         "absent; inline: that or a bad produced)", "refused"),
         (f"missing >=1 of the {len(HANDOFF_CANONICAL_FIELDS)} canonical "
          f"(shape, not the validator)", "missing_canonical"),
-        ("reasoning_chain absent (recommended -- never fires)", "no_reasoning_chain"),
+        ("reasoning_chain absent (recommended -- never refused)", "no_reasoning_chain"),
         ("present but NOT A DICT", "not_a_dict"),
         ("carries >=1 legacy spelling", "legacy_any"),
         *((f"  legacy `{a}` -> `{c}`", f"legacy_{a}") for a, c in HANDOFF_LEGACY_ALIASES.items()),
@@ -191,7 +192,7 @@ def main() -> int:
                         help="directory to scan for .claude* roots (default: $HOME)")
     args = parser.parse_args()
 
-    assert_values_are_inspected()
+    assert_placeholder_measures_presence()
     roots = config_roots(args.home)
     if not roots:
         print(f"No .claude* roots under {args.home} -- nothing to census.")

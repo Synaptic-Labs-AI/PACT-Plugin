@@ -118,7 +118,9 @@ def test_the_handoff_census_skips_the_deep_line(tmp_path):
         _deep("agent_handoff") + "\n"
         + json.dumps({"type": "agent_handoff", "handoff": ["produced"]}) + "\n",
         encoding="utf-8")
-    assert list(hc.journal_handoffs(tmp_path / ".claude")) == [{"produced": None}]
+    assert list(hc.journal_handoffs(tmp_path / ".claude")) == [
+        {"produced": hc.KEY_LIST_PLACEHOLDER}
+    ]
 
 
 def test_the_telegram_inbox_skips_the_deep_line(tmp_path):

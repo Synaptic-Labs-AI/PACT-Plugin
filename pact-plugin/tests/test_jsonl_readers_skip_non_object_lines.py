@@ -24,7 +24,9 @@ def test_the_handoff_census_skips_a_non_object_line(tmp_path, line):
     (journal / "session-journal.jsonl").write_text(
         line + "\n" + json.dumps({"type": "agent_handoff", "handoff": ["produced"]}) + "\n",
         encoding="utf-8")
-    assert list(hc.journal_handoffs(tmp_path / ".claude")) == [{"produced": None}]
+    assert list(hc.journal_handoffs(tmp_path / ".claude")) == [
+        {"produced": hc.KEY_LIST_PLACEHOLDER}
+    ]
 
 
 @pytest.mark.parametrize("line", _NON_OBJECTS)
