@@ -828,8 +828,9 @@ def _unproven_cause(
 ) -> str:
     """The clause for a verdict's `reason`, filled from its counts
     (`decide_bucket`); `bucket` is the bucket's id, which the folder-kind
-    clause names. THE ONE TEXT HELPER: the read warnings, the folder-name
-    refusal and the rekey refusal all print it, so they cannot disagree. A
+    clause names. THE ONE TEXT HELPER: the legacy read warnings
+    (`_read_project_scopes`) and the rekey refusal (`cli._project_id_rekey`)
+    both print it, so they cannot disagree. A
     shared bucket (`foreign_rows` with rows here too) says so in
     parentheses, never with a "so" that the templates' own "so" would
     double."""
@@ -4481,7 +4482,16 @@ class PACTMemory:
         # both answers describe one start. A start that is not a repository
         # answers None, which is the designed basename arm.
         common_dir = main_repo_common_dir()
-        identity = detect_id_for_root(root, common_dir, asked_root=cwd_or_none())
+        asked = cwd_or_none()
+        # A CHECKOUT THAT IS HOME LANDS, as on every resolver rung
+        # (`_identity_at_root`): the resolver binds HOME's folder name and never
+        # a dotfiles repository's id, so the comparison uses the same name.
+        toplevel = _git_dir_and_toplevel(str(asked))[1] if asked is not None else None
+        landing = _home_checkout(root, asked, toplevel)
+        if landing is not None:
+            self._cwd_repo_id = landing.name
+            return self._cwd_repo_id
+        identity = detect_id_for_root(root, common_dir, asked_root=asked)
         # NO FOLDER PSEUDO-ID ON A DECLINE. `identity.project_id or root.name`
         # invented an id the resolver had just refused, and the warning then
         # advised a save that would itself be refused. None means "unknown

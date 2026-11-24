@@ -689,6 +689,11 @@ class TestLegacyScopeStatesAreDocumented:
                      "Clones of a local-only repository", "local-pin remedy"):
             assert gone not in body, gone
         assert (
+            "That includes a repository with an origin whose pre-upgrade "
+            "folder-name bucket has not yet been moved with project-id rekey: any "
+            "same-name folder-name session can still read and write that bucket."
+        ) in body
+        assert (
             "The session's own folder-name id is the one non-canonical target a "
             "rekey accepts, only as an explicit --to, and only for its own legacy "
             "candidate."

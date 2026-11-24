@@ -268,8 +268,11 @@ A session whose project id is a folder name (a repository with no portable
 origin, a non-git project folder, the home-directory landing, or the
 user-scope `project_id` setting) is not judged: it reads and saves its
 same-name bucket as before, so it shares that bucket with every folder of the
-same name. To give such a project its own id, add an `origin` remote, or ask
-the user to write a canonical id to `<git-common-dir>/pact-project-id`.
+same name. That includes a repository with an origin whose pre-upgrade
+folder-name bucket has not yet been moved with `project-id rekey`: any
+same-name folder-name session can still read and write that bucket. To give
+such a project its own id, add an `origin` remote, or ask the user to write a
+canonical id to `<git-common-dir>/pact-project-id`.
 
 A folder-name id whose pre-change name differs, such as a
 `--separate-git-dir` checkout without a portable origin (the old resolver named

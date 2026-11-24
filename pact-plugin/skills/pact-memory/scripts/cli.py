@@ -1253,9 +1253,11 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 escape_for_envelope(
                     "no canonical project id resolves here, so the rekey "
                     f"target is unknown. Pass --to=host/owner/repo{pin}. A "
-                    "folder-name target is refused: moving rows into a "
+                    "folder-name target is never defaulted: moving rows into a "
                     "basename bucket is the misfile this command exists to "
-                    "prevent. Nothing was moved."
+                    "prevent. The one folder-name target accepted is this "
+                    "session's own id, for its own legacy bucket, given "
+                    "explicitly with --to. Nothing was moved."
                 ),
             )
     # A DEFAULTED TARGET EQUAL TO --from MOVES NOTHING. It is the no-op the
@@ -1372,8 +1374,8 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             nullcontext() if args.apply and not noop else read_only_scope(),
             db_connection() as conn,
         ):
-            # A non-canonical target reaching here passed
-            # `_own_folder_name_target` above (explicit or defaulted).
+            # A non-canonical target reaching here is an explicit --to that
+            # passed `_own_folder_name_target` above; a defaulted one is refused.
             counters = rekey_project(
                 conn, from_id, to_id, dry_run=not args.apply,
                 own_folder_name_target=not is_canonical(to_id),

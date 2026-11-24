@@ -601,8 +601,9 @@ def _url_host(host: str) -> Optional[str]:
 
 def _reserved_host(host: str) -> bool:
     """Whether a lowercased host is in the `.invalid` namespace (RFC 2606):
-    no remote can be there, and the local pin (`local.invalid/...`) lives
-    there, so a remote naming one declines rather than derive a pin's id."""
+    no remote can be there, and a hand-written pin may use it for an id no
+    remote can derive (`local.invalid/...`), so a remote naming one declines
+    rather than derive such a pin's id."""
     return host == "invalid" or host.endswith(".invalid")
 
 
@@ -2048,8 +2049,8 @@ def _admin_dir_refusal(admin_dir: Path, asked_root: Path) -> Optional[str]:
         # UNPROVABLE, so FAIL CLOSED. This function is reached only for the
         # `<...>/.git/modules/<name>` shape (a submodule admin dir), and git
         # being unable to answer there says nothing about whether the pointer
-        # is genuine. A live submodule always records `core.worktree`, so
-        # nothing legitimate is refused here.
+        # is genuine, so refusing here is fail-closed by design: a legitimate
+        # checkout git cannot answer for is refused too, with the cause named.
         return CORE_WORKTREE_UNREAD_DETAIL
     if result.returncode not in (0, 1) or (result.returncode == 1 and result.stdout):
         # `git config --get` exits 1 with no output when the key is unset;
