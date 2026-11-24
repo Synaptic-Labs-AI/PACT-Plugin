@@ -5212,7 +5212,9 @@ def test_acceptance_arm_waits_for_an_open_predecessor(
     tmp_path, monkeypatch, pact_context
 ):
     """A predecessor work task still open keeps B gated after its teachback
-    is accepted: no arm at acceptance (the wiring shape supplied it)."""
+    is accepted, so accepting the teachback arms nothing: B is not ready
+    while any blocker is open, and the predecessor's completion is the write
+    that arms it."""
     arms = _accept_teachback(tmp_path, monkeypatch, pact_context, "A", [
         ("A", "backend-coder: TEACHBACK for hook core", "completed"),
         ("C", "implement schema", "in_progress"),
@@ -5499,9 +5501,9 @@ def test_arming_invariant_truth_table(
 
 def test_no_arm_supply_on_non_lead_frames(tmp_path, monkeypatch, pact_context):
     """The arm advisories are LEAD-shaped: a frame whose agent_type names a
-    non-lead actor (a teammate claim/reassignment write) is suppressed on
-    both wiring shapes, so a teammate never receives the lead's arm
-    instruction."""
+    non-lead actor (a teammate claim or reassignment write) evaluates
+    nothing, so neither a teachback-gate owner write nor a work-task owner
+    write by a teammate supplies the lead's arm instruction."""
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
     _seed_task_a(
