@@ -14,10 +14,14 @@ import pytest
 from fixtures.identity_git import (
     assert_outside_repository,
     make_repo,
+    make_worktree,
+    run_git,
+    seed_session_evidence,
 )
 from scripts.database import db_connection, ensure_initialized
 from scripts.memory_api import PACTMemory
 
+import session_end
 from scripts import memory_api
 
 NAME = "widget"
@@ -148,4 +152,58 @@ def test_folder_name_save_into_its_own_bucket_is_not_refused(basename_env):
     repo, other, store = basename_env
     _seed(store, NAME, files=[repo / "src.py"])
     assert _basename_memory(store)._project_id_for_write() == NAME
+
+
+# ---------------------------------------------------------------------------
+# C-3: a removed linked worktree of this repository is not "elsewhere"
+# ---------------------------------------------------------------------------
+
+
+def test_removed_worktree_session_is_unattributed_through_removal_and_reap(
+    tmp_path, monkeypatch
+):
+    """Present: the worktree's session counts here. Removed: it places the
+    rows nowhere (never elsewhere). Reaped: the reaper writes no ledger line
+    for a vanished directory, so it stays unattributed: no in/out/in."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / NAME)
+    worktree = make_worktree(repo, tmp_path / "wt")
+    config = tmp_path / "home" / ".claude"
+    context = seed_session_evidence(config, worktree, "wts")
+    store = tmp_path / "store.db"
+    _seed(store, NAME, session_id="wts")
+    roots = [str(repo.resolve()), str(worktree.resolve())]
+    common = (repo / ".git").resolve()
+
+    def census():
+        with sqlite3.connect(str(store)) as conn:
+            return memory_api._legacy_session_census(conn, NAME, roots, common)
+
+    assert census()["here"] == 1
+    run_git("worktree", "remove", "--force", str(worktree), cwd=repo)
+    removed = census()
+    assert removed["elsewhere"] == 0 and removed["unattributed"] == 1, removed
+    assert session_end._pruned_session_line(context.parent) is None
+    reaped_folder = context.parent
+    for child in reaped_folder.iterdir():
+        child.unlink()
+    reaped_folder.rmdir()
+    reaped = census()
+    assert reaped["elsewhere"] == 0 and reaped["unattributed"] == 1, reaped
+
+
+def test_an_existing_directory_outside_the_roots_is_still_elsewhere(tmp_path):
+    """Control: the vanished-directory rule does not blunt the foreign arm."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / NAME)
+    other = make_repo(tmp_path / "other" / NAME)
+    config = tmp_path / "home" / ".claude"
+    seed_session_evidence(config, other, "far")
+    store = tmp_path / "store.db"
+    _seed(store, NAME, session_id="far")
+    with sqlite3.connect(str(store)) as conn:
+        counts = memory_api._legacy_session_census(
+            conn, NAME, [str(repo.resolve())], (repo / ".git").resolve()
+        )
+    assert counts["elsewhere"] == 1, counts
 

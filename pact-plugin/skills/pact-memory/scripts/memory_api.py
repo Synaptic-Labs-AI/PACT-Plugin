@@ -484,7 +484,8 @@ def _legacy_session_evidence(
 # one), `subfolder` (recorded at a folder of a gate root's own checkout, below
 # the root), `description_newer` (recorded at a gate
 # root but started before `description` last changed), `unattributed`
-# (no session id, or no record found).
+# (no session id, no record found, or a record whose directory no longer
+# exists). Every place but `unattributed` is a directory that exists.
 _SESSION_CENSUS_KEYS = ("here", "elsewhere", "subfolder", "description_newer", "unattributed")
 
 
@@ -556,6 +557,13 @@ def _legacy_session_census(
         try:
             project_dir = os.path.realpath(record.get("project_dir"))
         except Exception:
+            return None
+        if not os.path.exists(project_dir):
+            # A DIRECTORY THAT IS GONE PLACES THE SESSION NOWHERE. A removed
+            # linked worktree of this repository is gone and so is a deleted
+            # checkout elsewhere, and nothing left on disk tells them apart.
+            # The reaper writes no ledger line for such a folder, so the live
+            # record and the reaped one both leave the row unattributed.
             return None
         if project_dir in roots:
             return (
