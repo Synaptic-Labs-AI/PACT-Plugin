@@ -686,12 +686,15 @@ _ARMING_ROLES = ("lead", "separate_process")
 
 
 def _check_r_arm(table):
-    """R-ARM: each arming role arms exactly on another agent's deliverable,
-    and no other branch of it names that wait."""
+    """R-ARM: each arming role arms exactly on another agent's deliverable:
+    that wait has one branch and it arms, and no branch for any other wait
+    arms."""
     for role in _ARMING_ROLES:
         deliverable = [b for b in table[role]["branches"]
                        if b[0] == "teammate_deliverable"]
         assert len(deliverable) == 1 and deliverable[0][1] == "arm", role
+        for kind, action, _then in table[role]["branches"]:
+            assert (action == "arm") == (kind == "teammate_deliverable"), (role, kind)
 
 
 def _check_r_then(table):
@@ -753,6 +756,14 @@ def test_outlet_checks_bite_on_bad_tables():
     bad_arm["lead"]["branches"][0] = ("teammate_deliverable", "intentional_wait", None)
     with pytest.raises(AssertionError):
         _check_r_arm(bad_arm)
+    # An arming role that also arms on a wait other than another agent's
+    # deliverable fails R-ARM, even with the same THEN text (which renders
+    # as one sentence and one command, so the render checks cannot see it).
+    extra_arm = copy.deepcopy(wait_filler_gate.OUTLET)
+    then = extra_arm["lead"]["branches"][0][2]
+    extra_arm["lead"]["branches"][1] = ("own_write", "arm", then)
+    with pytest.raises(AssertionError):
+        _check_r_arm(extra_arm)
     bad_then = copy.deepcopy(wait_filler_gate.OUTLET)
     bad_then["in_process"]["branches"][0] = ("teammate_deliverable", "intentional_wait", "exits")
     with pytest.raises(AssertionError):

@@ -5418,6 +5418,15 @@ _ARMING_TABLE = [
     ("E1 unchanged owner is not an evaluation write",
      {"B": dict(subject="implement api", status="pending", owner="backend-coder")},
      [(("wire_unchanged", "B"), [])]),
+    ("6c rejection of a completed task's handoff arms nothing",
+     {"B": dict(subject="implement api", status="completed", owner="backend-coder")},
+     [(("reject", "B", "handoff_rejection"), [])]),
+    ("6tc rejection of a completed teachback arms nothing",
+     {"A": dict(subject="backend-coder: " + _TB, status="completed", owner="backend-coder")},
+     [(("reject", "A", "teachback_rejection"), [])]),
+    ("13 owner write on a claimed teachback arms nothing",
+     {"A": dict(subject="backend-coder: " + _TB, status="in_progress", owner="backend-coder")},
+     [(_w("A"), [])]),
 ]
 
 
