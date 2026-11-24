@@ -438,19 +438,33 @@ def test_grace_contract_pin_fails_when_phrase_is_removed(
     GRACE_CONTRACT_PINS,
     ids=[f"{p.name}::{ph[:40]}" for p, ph in GRACE_CONTRACT_PINS],
 )
-def test_grace_contract_pin_fails_when_phrase_is_inverted(
+def test_grace_contract_inversion_absent(doc_path: Path, phrase: str):
+    """The opposite of each contract rule appears nowhere on its surface, so an
+    inverted rule added beside the intact original still reds."""
+    inverted = _phrase(GRACE_CONTRACT_INVERSIONS[phrase])
+    assert inverted not in _normalized(doc_path), (
+        f"{doc_path.name}: inverted contract wording {inverted!r} is present "
+        f"beside or instead of {phrase!r}."
+    )
+
+
+@pytest.mark.parametrize(
+    "doc_path, phrase",
+    GRACE_CONTRACT_PINS,
+    ids=[f"{p.name}::{ph[:40]}" for p, ph in GRACE_CONTRACT_PINS],
+)
+def test_grace_contract_inversion_fails_when_added_beside_original(
     doc_path: Path, phrase: str, monkeypatch
 ):
-    """Flipping each contract phrase's meaning must redden its pin."""
+    """Appending the inverted wording while the original stays must red."""
     original = _normalized(doc_path)
-    needle = _phrase(phrase)
     inverted = _phrase(GRACE_CONTRACT_INVERSIONS[phrase])
-    assert needle in original and inverted != needle
+    assert _phrase(phrase) in original
     monkeypatch.setitem(
-        globals(), "_normalized", lambda _path: original.replace(needle, inverted, 1)
+        globals(), "_normalized", lambda _path: original + " " + inverted
     )
-    with pytest.raises(AssertionError, match="rule phrase"):
-        test_rule_phrase_present(doc_path, phrase)
+    with pytest.raises(AssertionError, match="inverted contract wording"):
+        test_grace_contract_inversion_absent(doc_path, phrase)
 
 
 RETIRED_ABSOLUTE_WAKE_PINS = [
