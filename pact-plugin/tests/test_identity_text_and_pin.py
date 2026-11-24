@@ -62,3 +62,25 @@ class TestTheLocalPin:
         pin = memory_api.local_pin_id(tmp_path / "x")
         _host, digest, name = pin.split("/")
         assert pi.normalize_remote_url(f"git@local:{digest}/{name}") != pin
+
+
+class TestNoRemoteDerivesAnInvalidHost:
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "git@local.invalid:0123456789ab/x",
+            "https://local.invalid/0123456789ab/x",
+            "https://LOCAL.Invalid:8443/0123456789ab/x",
+            "ssh://git@invalid/o/r",
+        ],
+    )
+    def test_a_remote_in_the_invalid_namespace_declines(self, url):
+        assert pi.normalize_remote_url(url) is None
+        assert pi.classify_remote_origin(url)[0] == pi.OUTCOME_DECLINE
+
+    @pytest.mark.parametrize("url", ["https://invalidx.com/o/r", "https://h.invalidate/o/r"])
+    def test_control_a_host_merely_spelled_like_it_is_kept(self, url):
+        assert pi.normalize_remote_url(url) is not None
+
+    def test_control_a_local_pin_is_still_canonical(self, tmp_path):
+        assert pi.is_canonical(memory_api.local_pin_id(tmp_path / "x"))

@@ -104,9 +104,9 @@ class OverrideRead(NamedTuple):
     (None when it is absent). `reason` is a fixed token naming why a PRESENT
     file was unusable — "not_regular", "not_utf8", "empty", "control_chars",
     "too_long", "not_canonical" or "unreadable". Absence is `value=None,
-    path=None`, never a reason. "not_regular" covers a FIFO, a device node and a SYMLINK: none is
-    read, because a FIFO in this position would block every memory operation
-    that resolves an identity.
+    path=None`, never a reason. "not_regular" covers a FIFO, a device node
+    and a SYMLINK: none is read, because a FIFO in this position would block
+    every memory operation that resolves an identity.
     """
 
     value: Optional[str]
@@ -429,9 +429,10 @@ def decline_record(
 def _server_identity_impl() -> tuple:
     """The two grammar predicates owned by database.py (see module docstring).
 
-    Imported at call time because the memory scripts are loaded both as a
-    package (`scripts.memory_api`) and by direct `sys.path` insertion, and
-    because `database.py` must not import this module.
+    Imported at call time, so loading this module does not load
+    database.py. The import is package-relative: this module loads only as
+    `scripts.project_identity`, which is how every caller reaches it.
+    database.py must not import this module.
     """
     from .database import is_canonical_id, validate_identifier_for_write
 
@@ -538,9 +539,8 @@ def find_git_marker(start) -> Optional[Path]:
 def _max_id_length() -> int:
     """The identifier length cap, from database.py (ONE definition).
 
-    Imported at call time for the same reason `_server_identity_impl` is: the
-    memory scripts load both as a package and by direct `sys.path` insertion,
-    so a module-level relative import would break the second form.
+    Imported at call time and package-relative, as `_server_identity_impl`
+    is: loading this module does not load database.py.
     """
     from .database import CANONICAL_ID_MAX_LENGTH
 
@@ -569,6 +569,13 @@ def _valid_host(host: str) -> bool:
     if not host or not host[0].isalnum() or not host[-1].isalnum():
         return False
     return all(char in _HOST_CHARS for char in host)
+
+
+def _reserved_host(host: str) -> bool:
+    """Whether a lowercased host is in the `.invalid` namespace (RFC 2606):
+    no remote can be there, and the local pin (`local.invalid/...`) lives
+    there, so a remote naming one declines rather than derive a pin's id."""
+    return host == "invalid" or host.endswith(".invalid")
 
 
 def _valid_port(port: str) -> bool:
@@ -913,7 +920,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         else:
             host, port = authority, ""
         host = host.lower()
-        if not _valid_host(host):
+        if not _valid_host(host) or _reserved_host(host):
             return None
         # git percent-decodes an ssh url's WHOLE path before sending it
         # (measured: `ssh://h/srv/a%2Bb` sends `/srv/a+b`, `%2F` sends a
@@ -941,7 +948,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
             # local path, which is NO PORTABLE ORIGIN.
             return None
         host = scp_match.group("host").lower()
-        if not _valid_host(host):
+        if not _valid_host(host) or _reserved_host(host):
             return None
         # RELATIVE AND ABSOLUTE SCP PATHS ARE DELIBERATELY ONE ID.
         # `git@host:srv/repo`, `git@host:/srv/repo` and `ssh://git@host/srv/repo`
