@@ -5393,6 +5393,10 @@ _ARMING_TABLE = [
     ("12 TaskCreate with an owner",
      {"B": dict(subject="implement api", status="pending", owner="backend-coder")},
      [(("create", "B"), ["B:h"])]),
+    ("12b TaskCreate with an owner and addBlockedBy an open teachback",
+     {"A": dict(subject="backend-coder: " + _TB, status="pending", owner="backend-coder"),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder")},
+     [(("create", "B", {"addBlockedBy": ["A"]}), [])]),
     ("E3 re-completing a completed task is not an evaluation write",
      {"C": dict(subject="implement schema", status="completed", owner="database-engineer", blocks=["B"]),
       "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["C"])},
@@ -5446,7 +5450,8 @@ def _arming_payload(step, records, tmp_path):
     if kind == "create":
         return {
             "tool_name": "TaskCreate",
-            "tool_input": {"subject": records[tid]["subject"], "owner": records[tid]["owner"]},
+            "tool_input": {"subject": records[tid]["subject"], "owner": records[tid]["owner"],
+                           **(step[2] if len(step) > 2 else {})},
             "tool_response": {"task": {"id": tid, **records[tid]}},
         }
     opts = step[2]

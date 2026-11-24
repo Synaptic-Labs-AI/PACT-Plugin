@@ -1723,7 +1723,8 @@ def arm_candidates(
     response record, the disk record, and a store scan for blockedBy naming
     X), HANDOFF-READY with X counted as done. E4 a rejection in this write's
     metadata: the written task, live only, predicate by rejection kind.
-    Adding a blocker (addBlockedBy alone) can only make a task not ready.
+    Adding a blocker (addBlockedBy alone) can only make a task not ready;
+    an addBlockedBy carried by an E1 or E2 write counts as open for it.
     Duplicates are harmless: the watcher fast-exits when the deliverable is
     present and holds a rejected one until its revision. Both teams come
     from shared/wait_target.wait_identity: tasks are read from store_team,
@@ -1750,7 +1751,10 @@ def arm_candidates(
         if task_id and isinstance(owner, str) and owner.strip():
             if _teachback_ready(task_id, store_team):
                 add(task_id, "teachback_submit", "teachback gate dispatched")
-            elif _handoff_ready(task_id, store_team, member_team=member_team):
+            elif _handoff_ready(
+                task_id, store_team, added=tool_input.get("addBlockedBy"),
+                member_team=member_team,
+            ):
                 add(task_id, "handoff", "work task created")
         return out
 
