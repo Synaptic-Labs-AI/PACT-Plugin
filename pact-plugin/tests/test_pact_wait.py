@@ -833,7 +833,6 @@ def test_default_base_falls_back_to_home_claude(tmp_path):
     assert "pact-wait FIRED" in proc.stdout
 
 
-
 # --- never-raise census: every exception the resolve/read/parse path raises -
 
 def test_oversized_integer_literal_is_corrupt_not_a_crash(tmp_path):
@@ -914,7 +913,6 @@ def test_evaluate_target_never_raises_for_any_census_exception(
     ) == outcome
 
 
-
 # --- only regular files are read: a FIFO or a device cannot hold the watch --
 
 def _special_target(tmp_path, kind):
@@ -956,7 +954,6 @@ def test_non_regular_task_file_ends_the_watch_within_its_deadline(tmp_path, kind
     )
     assert proc.returncode == pact_wait.EXIT_TERMINAL, proc.stderr
     assert "target_unreadable" in proc.stderr
-
 
 
 # --- a symlink loop under the tasks base never escapes as a crash ----------

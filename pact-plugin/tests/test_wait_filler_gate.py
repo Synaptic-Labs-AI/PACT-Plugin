@@ -1863,7 +1863,6 @@ def test_previous_release_reads_this_release_state_as_valid(
     assert allowance_open is False
 
 
-
 @pytest.mark.parametrize("seeded", [2, 1, 0, "two", -1, True, None])
 def test_legacy_budget_is_always_written_as_zero(tmp_path, monkeypatch, capsys, seeded):
     """Whatever an older writer left under the legacy budget key, a section
@@ -1882,7 +1881,6 @@ def test_legacy_budget_is_always_written_as_zero(tmp_path, monkeypatch, capsys, 
     assert type(written["valve_budget"]) is int
 
 
-
 def test_every_intentional_wait_branch_names_a_concrete_resolver():
     """Each non-arm intentional_wait instruction gives the value to write:
     expected_resolver set to the lead, never an abstract 'the resolver'."""
@@ -1893,7 +1891,6 @@ def test_every_intentional_wait_branch_names_a_concrete_resolver():
         assert "metadata.intentional_wait" in text
         assert "`expected_resolver` set to `lead`" in text
         assert "naming the resolver" not in text
-
 
 
 def test_catch_all_names_no_ci_wait():

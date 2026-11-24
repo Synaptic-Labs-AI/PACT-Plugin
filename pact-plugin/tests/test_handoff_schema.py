@@ -268,7 +268,6 @@ class TestResolveHandoffField:
         assert resolve_handoff_field({}, "produced") is None
 
 
-
 def test_empty_produced_is_named_apart_from_a_wrong_type():
     """An empty or whitespace-only produced gets its own reason (write a
     summary); a non-string gets the type reason (join the items)."""

@@ -317,6 +317,7 @@ For memory-save tasks specifically:
      "open_questions": "Should older memories on {topic} be consolidated?"
    }})
    ```
+   Every value is one string: when a field holds several items (memory ids, decisions), join them with '; '.
 2. **Notify lead with summary** via `SendMessage`:
    ```
    SendMessage(to="team-lead",
