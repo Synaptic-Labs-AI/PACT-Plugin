@@ -547,7 +547,7 @@ Both calls are required, in this order. `TaskUpdate` must precede the wake-signa
 **Rejection — two-call atomic pair (BOTH required, `TaskUpdate` FIRST)**
 
 1. `TaskUpdate(taskId, metadata={"teachback_rejection": {...}})` OR `metadata={"handoff_rejection": {...}}` — payload `{reason, corrections, since, revision_number}`
-2. `SendMessage(to=<teammate>, "[team-lead→<teammate>] Rejected on Task #<id>. REJECTION-PAYLOAD-BEGIN reason: <one-line summary> corrections: [<correction 1>, ...] since: <canonical_since() output> revision_number: <N> REJECTION-PAYLOAD-END The payload is a verbatim copy of metadata.{teachback,handoff}_rejection. Revise.")`
+2. `SendMessage(to=<teammate>, "[team-lead→<teammate>] Rejected on Task #<id>. REJECTION-PAYLOAD-BEGIN reason: <one-line summary> corrections: [<correction 1>, ...] since: <canonical_since() output> revision_number: <the revision being rejected> REJECTION-PAYLOAD-END The payload is a verbatim copy of metadata.{teachback,handoff}_rejection. Revise.")`
 
 Both calls are required, in this order. `TaskUpdate` must precede the wake-signal `SendMessage` — the wake is the last call. If the `TaskUpdate` succeeds and the `SendMessage` errors, retry the send on the tool error. 3+ rejection cycles on the same task is an imPACT META-BLOCK signal.
 

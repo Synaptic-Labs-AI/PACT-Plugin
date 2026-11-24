@@ -282,7 +282,7 @@ If the team-lead rejects your teachback or HANDOFF, you wake on the inbound `Sen
    > ⚠️ To rewrite, RE-SEND THE FULL OBJECT in ONE `TaskUpdate` call, and include each field the corrections did not touch, unchanged. A write that carries part of a nested sub-object REPLACES that sub-object, and it erases each field you omit. Then read the task file back and enumerate the keys of the object you wrote. Mechanism: [pact-teachback §Action: store teachback now](../pact-teachback/SKILL.md#action-store-teachback-now).
 
 4. **Re-submit on the SAME task** (do NOT create a new task):
-   - Increment `metadata.revision_number`. The team-lead writes `revision_number=1` in the rejection record. On your first revision, increment to `2`. On each subsequent revision, increment again. This count is the rejection-cycle audit trail — it feeds the imPACT META-BLOCK 3-cycle signal, not harvest routing. It does NOT gate whether your revised content is preserved: the team-lead's acceptance (the single completion) emits whatever `metadata.handoff` holds at that moment, so the revised content reaches the journal regardless of the count.
+   - In the same `TaskUpdate` that writes the revised `metadata.teachback_submit` or `metadata.handoff`, raise `metadata.revision_number` by one: `2` on your first revision (absent counts as `1`), one more on each later revision. Never write a revised deliverable without raising it: the team-lead's watcher counts a deliverable as revised only once `metadata.revision_number` exceeds the rejection's `revision_number`, so an unraised revision never wakes the lead.
    - `SendMessage` the team-lead carrying the revised payload verbatim in the same form as the first submission: `"[{sender}→team-lead] Revised teachback/HANDOFF on Task #{id} (revision {N})."` followed by the payload block — `pact-teachback` Step 2 for a teachback, On Completion Step 2 for a HANDOFF. The team-lead accepts the revision on the message-carried payload; the disk read is their deferred audit.
    - Re-SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<fresh canonical_since() output>, covers_since=<the same value as since>}`.
    - End the turn (idle).
@@ -427,11 +427,11 @@ the HANDOFF/teachback acceptance wait, and a transferred watch must read as
 the different wait it is on task-file inspection.
 One exception applies to a wait on another teammate's deliverable. A
 separate-process teammate (tmux teammateMode) arms the structural watcher
-with one `Bash` call (`run_in_background: true`) and ends the turn; the
-watcher's completion starts its next turn. An in-process teammate does not
-arm a watcher: it SETs `intentional_wait` with `expected_resolver` naming
-the lead and ends the turn. An Agent-tool subagent does not arm a watcher;
-it puts what the lead needs in its final report.
+with one `Bash` call (`run_in_background: true`) and ends the turn. An
+in-process teammate does not arm a watcher: it SETs `intentional_wait`
+with `expected_resolver` naming the lead and ends the turn. An Agent-tool
+subagent does not arm a watcher; it puts what the lead needs in its final
+report.
 
 Silence is uninformative in both directions, and narrating a wait is noise in
 both. Do not emit "still running" or "waiting on the gate" turns while your own
