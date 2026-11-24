@@ -1617,6 +1617,33 @@ class TestMainInboxHold:
         assert reads.call_count == 1
         assert cleaned != after
 
+    def test_a_raising_hold_writes_a_stderr_diagnostic_and_keeps_the_output(
+        self, capsys
+    ):
+        """Counter-test: a silent except leaves stderr empty."""
+        import io
+        from unittest.mock import Mock
+        from teammate_idle import main
+
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
+             patch("teammate_idle.iter_team_task_jsons", return_value=[_grace_task()]), \
+             patch("teammate_idle.teammate_is_in_process", return_value=True), \
+             patch("teammate_idle.wait_for_inbox_evidence",
+                   Mock(side_effect=RuntimeError("inbox infrastructure failed"))), \
+             patch("teammate_idle.check_idle_cleanup", return_value=(None, False)) as cleanup, \
+             patch("teammate_idle.check_unflagged_background", return_value=None):
+            with pytest.raises(SystemExit) as exc:
+                main()
+
+        captured = capsys.readouterr()
+        assert exc.value.code == 0
+        assert json.loads(captured.out) == {"suppressOutput": True}
+        assert captured.err.strip() == (
+            "Hook warning (teammate_idle): inbox infrastructure failed"
+        )
+        cleanup.assert_called_once()
+
     def test_pane_or_undeterminable_mode_does_not_hold(self, capsys):
         hold, cleanup, output = self._run(capsys, in_process=False)
 
@@ -1649,8 +1676,10 @@ class TestMainInboxHold:
         import teammate_idle
         from teammate_idle import main
 
+        # One fixed wall clock for since and the hold, so setup time cannot age the wait.
+        fixed_now = datetime.now(timezone.utc)
         age = 9.95 if path == "deadline" else 0
-        since = (datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat()
+        since = (fixed_now - timedelta(seconds=age)).isoformat()
         task = make_task(owner="CoderRaw", metadata={"intentional_wait": {
             "reason": "awaiting_lead_completion", "expected_resolver": "lead",
             "since": since, "covers_since": since,
@@ -1666,6 +1695,9 @@ class TestMainInboxHold:
         monkeypatch.setitem(
             teammate_idle.wait_for_inbox_evidence.__kwdefaults__,
             "monotonic", clock.monotonic,
+        )
+        monkeypatch.setitem(
+            teammate_idle.wait_for_inbox_evidence.__kwdefaults__, "now", fixed_now
         )
         with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \

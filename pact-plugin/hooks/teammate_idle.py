@@ -17,8 +17,10 @@ Used by: hooks.json TeammateIdle hook
 # For an in-process teammate, a fresh awaiting_lead_completion wait holds the
 # hook, polling at 0.1-second intervals, until a valid unread message is
 # visible or 10 seconds pass from its `covers_since` anchor (falling back to
-# `since`); later idles cannot restart that budget. The hold never emits a
-# decision, so the runtime delivers a message that lands during it. Exits
+# `since`); a wait that carries `covers_since` cannot restart that budget,
+# and without one each re-stamp of `since` gets at most one bounded hold.
+# The hold never emits a decision, so the runtime delivers a message that
+# lands during it. Exits
 # deterministically on every code path. Does NOT consume intentional_wait.
 
 Idle cleanup: Track consecutive idle events for completed agents. After 3,
@@ -596,8 +598,9 @@ def main():
                 ) is not None:
                     # The hold may have outlived task changes; cleanup must see current state.
                     tasks = list(iter_team_task_jsons(team_name))
-        except Exception:
-            pass
+        except Exception as hold_error:
+            # Fall through to the ordinary output; stderr only, so stdout and exit stay unchanged.
+            print(f"Hook warning (teammate_idle): {hold_error}", file=sys.stderr)
 
         messages = []
         cleanup_msg, should_shutdown = None, False
