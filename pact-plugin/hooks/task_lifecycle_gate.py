@@ -1712,16 +1712,23 @@ def revision_advisories(input_data: dict, tool_input: dict, store_team: str) -> 
                 "until the number rises past the rejection's, so without it "
                 "the revision is never seen.",
             ))
-        if raises and deliverable not in metadata:
+        # Only the number that clears this rejection can be the raise; a
+        # post-write frame cannot tell it from a rewrite of that same number,
+        # so the text is conditional.
+        written = _current_revision({"revision_number": metadata.get("revision_number")})
+        if raises and deliverable not in metadata and written == rejected + 1:
             out.append((
                 "revision_raised_without_deliverable",
-                f"PACT task_lifecycle_gate: this write raises Task {task_id}'s "
-                f"metadata.revision_number but does not carry the revised "
-                f"metadata.{deliverable}. Re-send the full revised "
-                f"{deliverable} object and the raised revision_number in ONE "
-                "TaskUpdate: a watcher waiting on the revision fires as "
-                "soon as the number rises, and would read the rejected "
-                "original still on disk.",
+                f"PACT task_lifecycle_gate: this write sets Task {task_id}'s "
+                f"metadata.revision_number to {written}, one above the "
+                f"rejected revision {rejected}, but does not carry the revised "
+                f"metadata.{deliverable}. If this write is what raised it, "
+                f"re-send the full revised {deliverable} object and the "
+                "raised revision_number in ONE TaskUpdate: a watcher waiting "
+                "on the revision fires as soon as the number rises, and "
+                "would read the rejected original still on disk. If the "
+                f"revised {deliverable} was already written with this "
+                "number, nothing is needed.",
             ))
     return out
 

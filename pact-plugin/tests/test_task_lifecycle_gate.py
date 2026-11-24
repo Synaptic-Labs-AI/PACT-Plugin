@@ -6084,6 +6084,50 @@ def test_revision_raised_without_the_deliverable_is_flagged(
     assert "revision_raised_without_deliverable" not in lead_write
 
 
+def test_revision_advisory_ignores_a_rejection_the_write_cannot_clear(
+    tmp_path, monkeypatch, pact_context
+):
+    """Two rejections on one task: a write raising to 3 with the revised
+    handoff is the raise for the handoff rejection at 2, not for the older
+    teachback rejection at 1, so neither advisory fires."""
+    disk = {
+        "teachback_rejection": {"revision_number": 1},
+        "teachback_submit": {"u": 1},
+        "handoff_rejection": {"revision_number": 2},
+        "handoff": {"produced": "v3"},
+        "revision_number": 3,
+    }
+    rules = _rev_rules(tmp_path, monkeypatch, pact_context, disk,
+                       {"revision_number": 3, "handoff": {"produced": "v3"}},
+                       agent_type="pact-backend-coder")
+    assert "revision_raised_without_deliverable" not in rules
+    assert "revised_deliverable_without_raised_revision" not in rules
+
+
+def test_rewrite_of_a_cleared_revision_gets_only_the_conditional_text(
+    tmp_path, monkeypatch, pact_context
+):
+    """A teammate re-sending an unchanged revision_number beside a rejection
+    it already cleared leaves the same post-write state as a raise without
+    the deliverable, so the advisory fires, worded as a condition that
+    tells the cleared case nothing is needed."""
+    disk = {"handoff_rejection": {"revision_number": 1},
+            "handoff": {"produced": "v2"}, "revision_number": 2}
+    rules = _rev_rules(tmp_path, monkeypatch, pact_context, disk,
+                       {"revision_number": 2, "intentional_wait": {"reason": "x"}},
+                       agent_type="pact-backend-coder")
+    assert "revision_raised_without_deliverable" in rules
+    import task_lifecycle_gate as gate
+    _rule, text = next(
+        (r, m) for r, m in gate.revision_advisories(
+            {"agent_type": "pact-backend-coder"},
+            {"taskId": "9", "metadata": {"revision_number": 2}}, "test-team",
+        ) if r == "revision_raised_without_deliverable"
+    )
+    assert "If this write is what raised it" in text
+    assert "nothing is needed" in text
+
+
 # --- wait-path identity: store and membership come from wait_identity -------
 
 def _hook_world(tmp_path, *, ctx_team=None, session_id=None, tasks=(), configs=None,
