@@ -198,6 +198,12 @@ SECTION_PHRASE_PINS = [
     (WAIT_IN_SILENCE, "Legitimate wait-time activity terminates on the awaited event"),
     # --- §5: the watcher rule ---
     (WAIT_IN_SILENCE, "set up a watcher AT THAT MOMENT"),
+    # Teammate-deliverable waits are armed with the structural watcher before
+    # the turn ends. Pinned as the whole sentence so deleting it, or inverting
+    # "join"/"BEFORE", reddens; a token count of the launch flag cannot.
+    (WAIT_IN_SILENCE, "Teammate-deliverable waits join the watcher scope: arm the bounded background watcher with `Bash` `run_in_background: true` BEFORE ending the turn."),
+    # The in-process exception: its background completion does not wake it.
+    (WAIT_IN_SILENCE, "so an in-process teammate must not background a watch and end the turn"),
     (WAIT_IN_SILENCE, "the timeout is not optional"),
     # The watcher rule's reference to the §5-home discriminator.
     (WAIT_IN_SILENCE, "passes the termination test"),

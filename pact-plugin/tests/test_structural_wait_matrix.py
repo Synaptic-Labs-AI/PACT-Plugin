@@ -473,3 +473,45 @@ def test_watch_armed_after_a_rejection_fires_only_on_the_revision(
     finally:
         timer.join()
     assert rc == pact_wait.EXIT_FIRED
+
+
+# --- prose: each role's teammate-deliverable wait in the agent-teams skill ---
+
+SELF_STARTED_HEADING = "### Wait Discipline for Self-Started Work"
+
+# One whole clause per role, each carrying its polarity word ("arms" or
+# "does not arm"), so inverting any role's rule reddens its own row.
+ROLE_WAIT_CLAUSES = [
+    "A separate-process teammate (tmux teammateMode) arms the structural "
+    "watcher with one Bash call (run_in_background: true) and ends the turn",
+    "An in-process teammate does not arm a watcher: it SETs intentional_wait "
+    "with expected_resolver naming the lead and ends the turn.",
+    "An Agent-tool subagent does not arm a watcher; it puts what the lead "
+    "needs in its final report.",
+]
+
+
+def _normalized(text):
+    return " ".join(text.replace("`", "").split())
+
+
+def _self_started_section():
+    """The body under the self-started-work heading, up to the next
+    heading. The heading line itself is excluded, so a heading can never
+    satisfy a clause pin."""
+    lines = SKILL_MD.read_text(encoding="utf-8").splitlines()
+    start = lines.index(SELF_STARTED_HEADING)
+    body = []
+    for line in lines[start + 1:]:
+        if line.startswith("#"):
+            break
+        body.append(line)
+    return _normalized("\n".join(body))
+
+
+@pytest.mark.parametrize("clause", ROLE_WAIT_CLAUSES, ids=["separate", "in-process", "subagent"])
+def test_skill_states_each_roles_deliverable_wait(clause):
+    """Each role's wait on another teammate's deliverable matches what the
+    tier-3 outlet tells that role: the separate-process teammate arms, the
+    in-process teammate and the subagent do not."""
+    assert _normalized(clause) in _self_started_section(), clause
