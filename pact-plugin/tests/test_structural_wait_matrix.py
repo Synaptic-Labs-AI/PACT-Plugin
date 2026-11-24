@@ -29,7 +29,8 @@ Seams and prose bound here:
 
 Counter-test evidence for this module (source-only mutations, each
 predicted then observed to redden exactly its target arm, tree restored
-byte-identical after each) is recorded in the TEST-phase HANDOFF.
+byte-identical after each) is recorded in
+tests/runbooks/1729-structural-wait-teeth-pass.md.
 """
 import json
 import re

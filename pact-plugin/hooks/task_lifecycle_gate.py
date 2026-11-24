@@ -1665,6 +1665,8 @@ def revision_advisories(input_data: dict, tool_input: dict, store_team: str) -> 
             if not isinstance(rejection, dict):
                 continue
             written = rejection.get("revision_number")
+            if written is None and expected == 1:
+                continue  # the watcher reads an omitted number as 1
             if written != expected or isinstance(written, bool):
                 out.append((
                     "rejection_revision_mismatch",

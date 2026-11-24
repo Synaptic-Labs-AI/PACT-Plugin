@@ -6002,6 +6002,8 @@ def test_no_arm_supply_on_teachback_acceptance_without_blocks(
 
 # --- revision-number coherence advisories -----------------------------------
 
+_OMIT = object()  # a rejection written without revision_number
+
 def _rev_rules(tmp_path, monkeypatch, pact_context, disk_metadata, metadata, agent_type=None):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     pact_context(team_name="test-team", session_id="test-session")
@@ -6027,6 +6029,10 @@ def _rev_rules(tmp_path, monkeypatch, pact_context, disk_metadata, metadata, age
         (2, 3, True),       # next number: would hold the revision
         (None, True, True), # bool is not a revision number
         (None, "1", True),
+        (None, _OMIT, False),  # omitted at revision 1: the watcher reads it as 1
+        (1, _OMIT, False),
+        (None, None, False),
+        (2, _OMIT, True),      # omitted past revision 1 holds the revision
     ],
 )
 @pytest.mark.parametrize("rejection_key", ["handoff_rejection", "teachback_rejection"])
@@ -6034,10 +6040,10 @@ def test_rejection_must_carry_the_revision_being_rejected(
     tmp_path, monkeypatch, pact_context, disk_revision, written, fires, rejection_key
 ):
     disk = {} if disk_revision is None else {"revision_number": disk_revision}
-    rules = _rev_rules(tmp_path, monkeypatch, pact_context, disk, {
-        rejection_key: {"reason": "r", "corrections": ["c"],
-                        "since": "2026-11-24T00:00:00+00:00", "revision_number": written},
-    })
+    rejection = {"reason": "r", "corrections": ["c"], "since": "2026-11-24T00:00:00+00:00"}
+    if written is not _OMIT:
+        rejection["revision_number"] = written
+    rules = _rev_rules(tmp_path, monkeypatch, pact_context, disk, {rejection_key: rejection})
     assert ("rejection_revision_mismatch" in rules) is fires, rules
 
 

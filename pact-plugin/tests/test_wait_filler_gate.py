@@ -136,8 +136,7 @@ re-measuring — the dated rows above are as-executed history):
   - test_valve_instant_grammar_edges (cited above) was renamed to
     test_tier3_outlet_uniform_across_duration_spellings; the other
     cited names are unchanged. Eight further valve-era arms were
-    renamed in the same retirement (map in the TEST-phase HANDOFF);
-    none is cited in these tables.
+    renamed in the same retirement; none is cited in these tables.
 
 Counter-test record (measured at authoring time): this module was run
 against the repo BEFORE hooks/wait_filler_gate.py existed (TDD red-first):

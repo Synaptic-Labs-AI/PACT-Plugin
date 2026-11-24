@@ -80,7 +80,8 @@ LEAD_BLOCK_TEXT = (
     "stop it if it is no longer needed. If a job listed here belongs to a "
     "teammate, end the turn again. A pact-wait watcher is listed only when "
     "its command differs from the arm command's form (flags missing or "
-    "reordered, a ~ or unquoted path, or something chained onto it), so "
+    "reordered, a ~ path, an unquoted path holding a space or a shell "
+    "character, or something chained onto it), so "
     "account for a listed one like any other job. Each job is reported once."
 )
 TEAMMATE_BLOCK_TEXT = (
