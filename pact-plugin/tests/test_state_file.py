@@ -481,6 +481,104 @@ def test_a_swap_after_the_walk_still_appends_to_the_walked_directory(tmp_path, m
     assert list((outside / "inboxes").iterdir()) == [], "the append followed the swapped link"
 
 
+_NOT_ROOT = pytest.mark.skipif(
+    os.geteuid() == 0, reason="root bypasses directory permission checks"
+)
+
+
+@_NOT_ROOT
+def test_a_search_only_directory_on_the_walk_still_reads(tmp_path):
+    """RED WHEN the walk opens components O_RDONLY where O_PATH exists: a
+    plain path open needs only search permission, and so must the walk."""
+    if not hasattr(os, "O_PATH"):
+        pytest.skip("no O_PATH: the walk opens components O_RDONLY here")
+    root = tmp_path / "teams"
+    team = root / TEAM
+    (team / "inboxes").mkdir(parents=True)
+    (team / "inboxes" / "w.json").write_text("[]", encoding="utf-8")
+    team.chmod(0o111)
+    try:
+        assert state_file.read_text(team / "inboxes" / "w.json", root) == "[]"
+    finally:
+        team.chmod(0o755)
+
+
+@_NOT_ROOT
+def test_permission_denied_on_the_walk_raises_permission_error_unwrapped(tmp_path):
+    """RED WHEN the walk reports every OSError as a refusal: a directory the
+    reader may not search raises PermissionError, as a plain path open does."""
+    root = tmp_path / "teams"
+    team = root / TEAM
+    (team / "inboxes").mkdir(parents=True)
+    team.chmod(0o000)
+    try:
+        with pytest.raises(PermissionError) as denied:
+            state_file.read_text(team / "inboxes" / "w.json", root)
+        assert not isinstance(denied.value, FileNotFoundError)
+    finally:
+        team.chmod(0o755)
+
+
+@pytest.mark.parametrize("operation", ["read_text", "append_line"])
+def test_another_os_error_on_the_walk_is_raised_unchanged(operation, tmp_path, monkeypatch):
+    """RED WHEN the walk maps an error other than ELOOP/ENOTDIR to a refusal."""
+    root = tmp_path / "teams"
+    (root / TEAM / "inboxes").mkdir(parents=True)
+    real_open = os.open
+
+    def no_descriptors(path, flags, *args, **kwargs):
+        if kwargs.get("dir_fd") is not None and flags & os.O_DIRECTORY:
+            raise OSError(errno.EMFILE, "Too many open files")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(state_file.os, "open", no_descriptors)
+    before = _open_descriptors()
+    target = root / TEAM / "inboxes" / "w.json"
+    with pytest.raises(OSError) as raised:
+        if operation == "read_text":
+            state_file.read_text(target, root)
+        else:
+            state_file.append_line(target, b"x\n", root, max_file_bytes=100)
+    assert raised.value.errno == errno.EMFILE and raised.value.__cause__ is None
+    assert _open_descriptors() == before, "the failed walk leaked the root descriptor"
+
+
+@pytest.mark.parametrize("code", [errno.ELOOP, errno.ENOTDIR], ids=["ELOOP", "ENOTDIR"])
+def test_a_symlink_or_non_directory_errno_on_the_walk_is_a_refusal(code, tmp_path, monkeypatch):
+    """RED WHEN either errno leaves the refusal set. Linux reports a swapped
+    symlink as ENOTDIR; other kernels report ELOOP, so both are injected."""
+    root = tmp_path / "teams"
+    (root / TEAM / "inboxes").mkdir(parents=True)
+    real_open = os.open
+
+    def swapped(path, flags, *args, **kwargs):
+        if kwargs.get("dir_fd") is not None and flags & os.O_DIRECTORY:
+            raise OSError(code, os.strerror(code))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(state_file.os, "open", swapped)
+    with pytest.raises(FileNotFoundError) as refused:
+        state_file.read_text(root / TEAM / "inboxes" / "w.json", root)
+    assert isinstance(refused.value.__cause__, OSError)
+
+
+def test_a_component_swapped_for_a_file_is_refused(tmp_path, monkeypatch):
+    """RED WHEN ENOTDIR leaves the refusal set."""
+    root, team, _outside = _team_and_outside(tmp_path)
+    real_resolve = state_file._resolve
+
+    def resolve_then_replace(path, root_):
+        resolved = real_resolve(path, root_)
+        team.rename(team.with_name(team.name + ".moved"))
+        team.write_text("not a directory", encoding="utf-8")
+        return resolved
+
+    monkeypatch.setattr(state_file, "_resolve", resolve_then_replace)
+    with pytest.raises(FileNotFoundError) as refused:
+        state_file.read_text(team / "inboxes" / "w.json", root)
+    assert isinstance(refused.value.__cause__, OSError)
+
+
 def test_a_missing_directory_reads_as_plain_absence(tmp_path):
     """Guard arm: a directory that does not exist yet is absence, not refusal,
     so a caller that retries on absence still retries."""

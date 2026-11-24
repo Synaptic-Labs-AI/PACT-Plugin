@@ -32,7 +32,9 @@ name the same place. A refused write raises OSError; a refused read raises
 FileNotFoundError, which callers already treat as "no file".
 read_text and append_line then reach that directory from the root one
 component at a time with O_NOFOLLOW, so a component swapped for a symlink
-after the check is refused rather than followed.
+after the check is refused rather than followed. Any other error on the
+walk (permission denied, too many open files) is raised unchanged, as a plain
+path open would raise it.
 Remaining, and adversarial-only: locked_update (and so write_text) still opens
 by the resolved path, so a process swapping a path component between the
 resolve and the open can redirect one write. That needs a deliberate race
@@ -44,6 +46,7 @@ for this module and nothing else.
 
 from __future__ import annotations
 
+import errno
 import fcntl  # Unix-only; PACT supports macOS/Linux.
 import os
 import time
@@ -54,7 +57,10 @@ FILE_MODE = 0o600
 DIR_MODE = 0o700
 
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
-_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+# O_PATH needs only search permission, as a plain path open does; macOS falls back to O_RDONLY.
+_DIR_FLAGS = getattr(os, "O_PATH", os.O_RDONLY) | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+# What a symlink or non-directory component yields under O_DIRECTORY|O_NOFOLLOW.
+_SWAPPED_ERRNOS = frozenset({errno.ELOOP, errno.ENOTDIR})
 _LOCK_FLAGS = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
 _TEMP_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _APPEND_FLAGS = os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -89,8 +95,9 @@ def _open_contained_directory(path: Path, root: Path) -> int:
 
     Each component below the root is opened with O_NOFOLLOW relative to the one
     above it, so a component that became a symlink (or anything but a
-    directory) after _resolve is refused with _Refused instead of followed. A
-    missing component raises FileNotFoundError unwrapped, as a missing file does.
+    directory) after _resolve is refused with _Refused instead of followed.
+    Every other OSError, a missing component's FileNotFoundError included, is
+    raised unchanged, as the plain path open this replaces would raise it.
     """
     real_root, real_directory = _resolve(path, root)
     fd = os.open(real_root, _DIR_FLAGS & ~os.O_NOFOLLOW)  # the resolved root is trusted
@@ -100,9 +107,9 @@ def _open_contained_directory(path: Path, root: Path) -> int:
                 continue
             try:
                 next_fd = os.open(part, _DIR_FLAGS, dir_fd=fd)
-            except FileNotFoundError:
-                raise
             except OSError as swapped:
+                if swapped.errno not in _SWAPPED_ERRNOS:
+                    raise
                 raise _Refused(
                     f"state file {path}: {part} stopped being a directory under {root}"
                 ) from swapped
