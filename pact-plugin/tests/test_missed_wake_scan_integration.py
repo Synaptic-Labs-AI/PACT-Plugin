@@ -486,12 +486,12 @@ def _deadline(since_at: datetime, early_by: float = 0.0) -> datetime:
 
 class TestTeammateIdleGraceThroughRealHook:
     def test_message_landing_during_the_hold_ends_it_early(self, tmp_path):
-        """Arm A. The wait is 8 s old, so about 2 s of grace remain. The lead's
+        """Arm A. The wait is 5 s old, so about 5 s of grace remain. The lead's
         message lands half a second after launch, while the hook is holding.
         The hook must return after it lands and at least a second before the
         deadline. A hook that skipped the hold returns before the message
         lands; one that cannot reach this inbox holds to the deadline."""
-        config, since_at = _grace_root(tmp_path, age_seconds=8)
+        config, since_at = _grace_root(tmp_path, age_seconds=5)
         inbox = _grace_inbox(config)
         inbox.parent.mkdir(parents=True, exist_ok=True)
         staged = inbox.with_name("staged.tmp")
@@ -516,33 +516,35 @@ class TestTeammateIdleGraceThroughRealHook:
             "under the config dir, so it held to the grace deadline"
         )
 
-    @pytest.mark.parametrize("inbox", [None, []], ids=["absent", "empty"])
-    def test_no_queued_message_holds_to_the_original_deadline(
-        self, tmp_path, inbox
-    ):
-        """Arm B. The wait is 9.5 s old, so the real hook holds for at most
-        about half a second. An eligible wait cannot end before its deadline
-        less one poll interval; a hook that skipped the hold returns about
-        0.1 s after launch, well before it."""
-        config, since_at = _grace_root(tmp_path, age_seconds=9.5)
-        if inbox is not None:
-            _grace_write(_grace_inbox(config), inbox)
+    def test_no_queued_message_holds_to_the_original_deadline(self, tmp_path):
+        """Arm B. The wait is 7 s old and the inbox is absent, so the real hook
+        holds for about 3 s. It must still be running 1.5 s after launch, well
+        before the deadline, and must not return before the deadline less one
+        poll interval. A hook that skipped the hold has exited by the check.
+        Empty versus absent inboxes are covered by the unit tests."""
+        config, since_at = _grace_root(tmp_path, age_seconds=7)
 
-        output, elapsed = _run_idle_hook(config)
+        started = time.monotonic()
+        hook = _start_idle_hook(config)
+        time.sleep(1.5)
+        still_holding = hook.poll() is None
+        output = _finish_idle_hook(hook)
+        elapsed = time.monotonic() - started
         returned_at = datetime.now(timezone.utc)
 
         assert output == {"suppressOutput": True}
-        assert elapsed < 2, f"no-message idle held for {elapsed:.2f}s"
+        assert still_holding, "the hook exited 1.5 s into a 3 s hold"
         assert returned_at >= _deadline(since_at, early_by=teammate_idle.POLL_SECONDS), (
             "the hook returned before the grace deadline, so it never held "
             "the eligible wait"
         )
+        assert elapsed < 6, f"no-message idle held for {elapsed:.2f}s"
 
     def test_pane_teammate_is_never_held(self, tmp_path):
         """Arm C. A tmux member's idle notice is sent before this hook runs, so
         the same eligible wait with nothing queued returns at once, at least a
         second before the deadline it would otherwise hold to."""
-        config, since_at = _grace_root(tmp_path, age_seconds=8, backend="tmux")
+        config, since_at = _grace_root(tmp_path, age_seconds=5, backend="tmux")
 
         output, _elapsed = _run_idle_hook(config)
         returned_at = datetime.now(timezone.utc)
