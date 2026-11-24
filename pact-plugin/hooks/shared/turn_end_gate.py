@@ -79,9 +79,9 @@ LEAD_BLOCK_TEXT = (
     "one of these: wait for it to finish, schedule a wake with CronCreate, or "
     "stop it if it is no longer needed. If a job listed here belongs to a "
     "teammate, end the turn again. A pact-wait watcher is listed only when "
-    "its command differs from the arm command's form (flags missing or "
-    "reordered, a ~ path, an unquoted path holding a space or a shell "
-    "character, or something chained onto it), so "
+    "its command differs from the arm command's form (for example, flags "
+    "missing or reordered, a ~ path, an unquoted path holding a space or a "
+    "shell character, or something chained onto it), so "
     "account for a listed one like any other job. Each job is reported once."
 )
 TEAMMATE_BLOCK_TEXT = (
