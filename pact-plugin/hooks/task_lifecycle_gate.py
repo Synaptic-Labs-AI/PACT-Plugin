@@ -1551,19 +1551,26 @@ def _open_blockers(
 
 
 def _handoff_ready(
-    task_id: str, store_team: str, done: frozenset = frozenset(), added: object = None
+    task_id: str,
+    store_team: str,
+    done: frozenset = frozenset(),
+    added: object = None,
+    member_team: str = "",
 ) -> bool:
     """HANDOFF-READY: the task is live, is not a teachback gate, is owned by
-    a specialist who is not the lead, and has no open blocker."""
+    a specialist who is not the lead, and has no open blocker. Task records
+    come from the store team; the owner's role comes from the membership
+    team's config (they differ in a config-less substrate)."""
     record = read_task_json(task_id, store_team, base_fallback=False)
     owner = record.get("owner")
+    member_team = member_team or store_team
     return (
         _live(record)
         and not _is_teachback_subject(record.get("subject") or "")
         and isinstance(owner, str)
         and bool(owner.strip())
-        and is_pact_specialist_owner(owner, store_team)
-        and not _owner_resolves_to_lead(owner, store_team)
+        and is_pact_specialist_owner(owner, member_team)
+        and not _owner_resolves_to_lead(owner, member_team)
         and not _open_blockers(record, store_team, added, done)
     )
 
@@ -1683,6 +1690,7 @@ def arm_candidates(
     tool_input: dict,
     tool_response: object,
     store_team: str,
+    member_team: str = "",
 ) -> list:
     """The (task_id, predicate, shape) arms this lead write supplies under
     the arming invariant: every task the write could have made ready, whose
@@ -1697,8 +1705,11 @@ def arm_candidates(
     metadata: the written task, live only, predicate by rejection kind.
     Adding a blocker (addBlockedBy alone) can only make a task not ready.
     Duplicates are harmless: the watcher fast-exits when the deliverable is
-    present and holds a rejected one until its revision."""
+    present and holds a rejected one until its revision. Both teams come
+    from shared/wait_target.wait_identity: tasks are read from store_team,
+    owner roles from member_team."""
     out: list = []
+    member_team = member_team or store_team
 
     def add(task_id, predicate, shape):
         item = (task_id, predicate, shape)
@@ -1719,7 +1730,7 @@ def arm_candidates(
         if task_id and isinstance(owner, str) and owner.strip():
             if _teachback_ready(task_id, store_team):
                 add(task_id, "teachback_submit", "teachback gate dispatched")
-            elif _handoff_ready(task_id, store_team):
+            elif _handoff_ready(task_id, store_team, member_team=member_team):
                 add(task_id, "handoff", "work task created")
         return out
 
@@ -1733,7 +1744,10 @@ def arm_candidates(
     if isinstance(owner, str) and owner.strip() and _changed(tool_response, "owner"):
         if _teachback_ready(task_id, store_team):
             add(task_id, "teachback_submit", "teachback gate dispatched")
-        elif _handoff_ready(task_id, store_team, added=tool_input.get("addBlockedBy")):
+        elif _handoff_ready(
+            task_id, store_team, added=tool_input.get("addBlockedBy"),
+            member_team=member_team,
+        ):
             add(task_id, "handoff", "work task wired")
 
     if tool_input.get("status") == "completed" and _newly_completed(tool_response):
@@ -1744,7 +1758,9 @@ def arm_candidates(
             if isinstance(other, dict) and task_id in _norm_ids(other.get("blockedBy")):
                 dependents = _norm_ids(dependents, [other.get("id")])
         for dependent in dependents:
-            if dependent != task_id and _handoff_ready(dependent, store_team, done):
+            if dependent != task_id and _handoff_ready(
+                dependent, store_team, done, member_team=member_team
+            ):
                 add(dependent, "handoff", "blocker completed")
 
     metadata = tool_input.get("metadata")
@@ -2905,12 +2921,17 @@ def evaluate_lifecycle(
                 team_name, task_id, incoming_metadata, task=task_a
             )
 
+    # The wait mechanism's store and membership come from wait_identity,
+    # the one identity source both arm-command producers share; nothing on
+    # these paths resolves a team any other way.
+    identity = wait_identity(input_data)
+
     # Revision-number coherence: the watcher holds a rejected deliverable
     # until metadata.revision_number exceeds the rejection's, so both sides
     # of that comparison must be written as the protocol says.
-    if tool_name == "TaskUpdate" and team_name:
+    if tool_name == "TaskUpdate" and identity.store_team:
         advisories.extend(
-            revision_advisories(input_data, tool_input, team_name)
+            revision_advisories(input_data, tool_input, identity.store_team)
         )
 
     # Structural wait arming: one invariant, evaluated by arm_candidates at
@@ -2918,12 +2939,11 @@ def evaluate_lifecycle(
     # launches the watcher with its own Bash frame; this gate never spawns
     # a process. LEAD-SHAPED: a frame whose agent_type names a non-lead
     # actor evaluates nothing.
-    # The store comes from wait_identity, the one identity source both
-    # arm-command producers share.
     if not _is_non_lead_frame(input_data):
-        store_team = wait_identity(input_data).store_team
+        store_team = identity.store_team
         for arm_task_id, predicate, shape in arm_candidates(
-            tool_name, tool_input, tool_response, store_team
+            tool_name, tool_input, tool_response, store_team,
+            identity.member_team,
         ):
             advisories.append(
                 _wait_arm_advisory(shape, store_team, arm_task_id, predicate)

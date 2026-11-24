@@ -6042,3 +6042,115 @@ def test_revision_raised_without_the_deliverable_is_flagged(
     lead_write = _rev_rules(tmp_path, monkeypatch, pact_context, disk,
                             {"revision_number": 2})
     assert "revision_raised_without_deliverable" not in lead_write
+
+
+# --- wait-path identity: store and membership come from wait_identity -------
+
+def _hook_world(tmp_path, *, ctx_team=None, session_id=None, tasks=(), configs=None,
+                registry=None):
+    """A hermetic config root a live session leaves behind, for running the
+    REAL hook as a child process (fresh interpreter caches)."""
+    import os
+
+    plugin = Path(__file__).resolve().parents[1]
+    project = tmp_path / "proj"
+    project.mkdir()
+    config = tmp_path / "config"
+    if ctx_team is not None:
+        session_dir = config / "pact-sessions" / project.resolve().name / session_id
+        session_dir.mkdir(parents=True)
+        (session_dir / "pact-session-context.json").write_text(json.dumps({
+            "team_name": ctx_team, "session_id": session_id,
+            "project_dir": str(project), "plugin_root": str(plugin),
+            "started_at": "2026-11-24T00:00:00Z",
+        }))
+    for team in tasks:
+        (config / "tasks" / team).mkdir(parents=True, exist_ok=True)
+    for team, team_config in (configs or {}).items():
+        (config / "teams" / team).mkdir(parents=True, exist_ok=True)
+        (config / "teams" / team / "config.json").write_text(json.dumps(team_config))
+    if registry:
+        (config / "pact-sessions").mkdir(parents=True, exist_ok=True)
+        (config / "pact-sessions" / ".teammate-registry.jsonl").write_text(
+            json.dumps({"session_id": registry[0], "value": registry[1]}) + "\n"
+        )
+    env = {k: v for k, v in os.environ.items() if k != "PYTEST_CURRENT_TEST"}
+    env.update(CLAUDE_CONFIG_DIR=str(config), CLAUDE_PROJECT_DIR=str(project),
+               CLAUDE_PLUGIN_ROOT=str(plugin))
+    return env, config
+
+
+def _run_lifecycle_hook(env, frame):
+    import subprocess
+    import sys
+
+    hook = Path(__file__).resolve().parents[1] / "hooks" / "task_lifecycle_gate.py"
+    proc = subprocess.run(
+        [sys.executable, str(hook)], input=json.dumps(frame), capture_output=True,
+        text=True, env=env, cwd="/", timeout=60, check=False,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout) if proc.stdout.strip() else {}
+    return out.get("hookSpecificOutput", {}).get("additionalContext", "")
+
+
+_MEMBERS = [
+    {"name": "team-lead", "agentType": "pact-orchestrator"},
+    {"name": "backend-coder", "agentType": "pact-backend-coder"},
+]
+
+
+def test_config_under_session_id8_arms_against_the_uuid_store(tmp_path):
+    """The context and the team config are keyed session-<id8> while the
+    task store is the session-UUID directory. Task records come from the
+    store and the owner's role from the config, so the wiring advisory arms
+    and names the UUID store (reading roles under the store team found no
+    config and armed nothing)."""
+    sid = "aaaa1111-0000-4000-8000-000000000001"
+    env, config = _hook_world(
+        tmp_path, ctx_team="session-aaaa1111", session_id=sid, tasks=[sid],
+        configs={"session-aaaa1111": {"leadSessionId": sid, "members": _MEMBERS}},
+    )
+    (config / "tasks" / sid / "B.json").write_text(json.dumps({
+        "id": "B", "subject": "implement x", "status": "pending",
+        "owner": "backend-coder",
+    }))
+    context = _run_lifecycle_hook(env, {
+        "session_id": sid, "agent_type": "PACT:pact-orchestrator",
+        "hook_event_name": "PostToolUse", "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "B", "owner": "backend-coder"},
+        "tool_response": {"success": True, "taskId": "B", "updatedFields": ["owner"]},
+    })
+    commands = [ln for ln in context.splitlines() if ln.startswith("python3")]
+    assert len(commands) == 1, context
+    assert f"--team {sid} " in commands[0] and "--task B " in commands[0]
+
+
+def test_separate_process_teammate_gets_the_revision_advisory(tmp_path):
+    """A separate-process teammate's own process has no session context, so
+    a resolver keyed on the context saw no store and the revision advisory
+    never ran there. Through wait_identity the registry route names its
+    store, and raising revision_number without the revised handoff is
+    flagged in the teammate's own hook."""
+    sp_sid = "bbbb2222-0000-4000-8000-000000000002"
+    members = [dict(m, backendType="tmux") if m["name"] == "backend-coder" else m
+               for m in _MEMBERS]
+    env, config = _hook_world(
+        tmp_path, tasks=["s-team"], configs={"s-team": {"members": members}},
+        registry=(sp_sid, "backend-coder@s-team"),
+    )
+    (config / "tasks" / "s-team" / "B.json").write_text(json.dumps({
+        "id": "B", "subject": "implement x", "status": "in_progress",
+        "owner": "backend-coder",
+        "metadata": {"handoff_rejection": {"revision_number": 1},
+                     "handoff": {"produced": "v1"}},
+    }))
+    frame = {
+        "session_id": sp_sid, "agent_type": "pact-backend-coder",
+        "hook_event_name": "PostToolUse", "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": "B", "metadata": {"revision_number": 2}},
+        "tool_response": {"success": True, "taskId": "B", "updatedFields": ["metadata"]},
+    }
+    assert "does not carry the revised metadata.handoff" in _run_lifecycle_hook(env, frame)
+    frame["tool_input"]["metadata"]["handoff"] = {"produced": "v2"}
+    assert "does not carry the revised" not in _run_lifecycle_hook(env, frame)

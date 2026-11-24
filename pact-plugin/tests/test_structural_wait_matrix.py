@@ -544,6 +544,13 @@ _IDENTITY_CELLS = [
     # lifecycle gate has nothing to arm; the outlet names the store.
     ("lead, config-less", dict(ctx_team="session-aaaa1111", tasks=[_LEAD_SID]),
      _LEAD_FRAME, _LEAD_SID, "", [_LEAD_SID], []),
+    # The context and the team config are keyed session-<id8>, the store is
+    # the session-UUID directory: tasks come from the store, roles from the
+    # config, so the lifecycle gate arms too and both name the store.
+    ("lead, config under session-<id8>",
+     dict(ctx_team="session-aaaa1111", tasks=[_LEAD_SID],
+          configs={"session-aaaa1111": _LEAD_CONFIG}),
+     _LEAD_FRAME, _LEAD_SID, "", [_LEAD_SID], [_LEAD_SID]),
     ("lead, both names exist (fail closed)",
      dict(ctx_team="persisted-team", tasks=["persisted-team", "aligned-team"],
           configs={"aligned-team": _LEAD_CONFIG,
@@ -659,25 +666,57 @@ def test_wait_identity_cells_and_cross_producer_team(
     assert set(_teams_in(reason)) | set(_teams_in(advisory)) <= {store_team}
 
 
-def test_both_producers_take_the_store_from_wait_identity():
-    """Lead frames resolve the same store through either route today, so
-    the cells above cannot tell a producer that bypasses wait_identity from
-    one that calls it. This pin keeps a future change to the identity route
-    landing in both producers at once: each producer's arm path calls
-    wait_identity, and neither resolves the store any other way."""
+# The wait-mechanism functions in both gates: every place a store or
+# membership team is consumed on an arm or advisory path.
+_WAIT_PATH_FUNCTIONS = {
+    tlg: ("arm_candidates", "_handoff_ready", "_teachback_ready", "_open_blockers",
+          "revision_advisories", "_wait_arm_advisory"),
+    wait_filler_gate: ("_tier3_frame_identity", "_tier3_arm_command", "render_outlet"),
+}
+_TEAM_RESOLVERS = {"resolve_task_dir", "frame_team_and_name", "get_team_name",
+                   "resolve_team_dir", "task_dir_for"}
+
+
+def _called_names(func):
     import ast
     import inspect
 
-    lifecycle_src = inspect.getsource(tlg.evaluate_lifecycle)
-    assert "wait_identity(input_data).store_team" in lifecycle_src
-    filler_src = inspect.getsource(wait_filler_gate._tier3_frame_identity)
-    assert "wait_identity(input_data)" in filler_src
-    calls = {
+    tree = ast.parse(inspect.getsource(func).lstrip())
+    return {
         node.func.id if isinstance(node.func, ast.Name) else getattr(node.func, "attr", "")
-        for node in ast.walk(ast.parse(filler_src)) if isinstance(node, ast.Call)
+        for node in ast.walk(tree) if isinstance(node, ast.Call)
     }
-    assert "resolve_task_dir" not in calls
-    assert "frame_team_and_name" not in calls
+
+
+def test_identity_consumer_census():
+    """Census of every identity consumer on the wait paths: no wait-path
+    function in either gate resolves a team itself, the filler gate's
+    identity comes from wait_identity, and evaluate_lifecycle feeds BOTH
+    wait paths (arming and revision advisories) from one wait_identity
+    call: arming reads tasks under the store team and roles under the
+    membership team. Lead cells alone cannot tell a bypass from a call, so
+    this holds the route by enumeration."""
+    import ast
+    import inspect
+
+    for module, names in _WAIT_PATH_FUNCTIONS.items():
+        for name in names:
+            leaked = _called_names(getattr(module, name)) & _TEAM_RESOLVERS
+            assert not leaked, (module.__name__, name, leaked)
+    assert "wait_identity" in _called_names(wait_filler_gate._tier3_frame_identity)
+
+    tree = ast.parse(inspect.getsource(tlg.evaluate_lifecycle).lstrip())
+    calls = {
+        getattr(node.func, "id", getattr(node.func, "attr", "")): node
+        for node in ast.walk(tree) if isinstance(node, ast.Call)
+    }
+    assert "wait_identity" in calls
+    rendered = {name: ast.unparse(calls[name]) for name in
+                ("revision_advisories", "arm_candidates")}
+    assert "identity.store_team" in rendered["revision_advisories"], rendered
+    assert "identity.member_team" in rendered["arm_candidates"], rendered
+    source = inspect.getsource(tlg.evaluate_lifecycle)
+    assert "store_team = identity.store_team" in source
 
 
 # --- tier-3 outlet table: the five mechanical checks ------------------------
