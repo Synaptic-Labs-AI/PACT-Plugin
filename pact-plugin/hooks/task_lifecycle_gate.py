@@ -1694,6 +1694,34 @@ def evaluate_lifecycle(
         # A duplicate arm is safe by construction (the duplicate watcher
         # fast-exits 0 when the deliverable is already present), which is
         # why this needs no dedup marker.
+        # Structural wait arming at the REJECTION shape: a lead write that
+        # carries metadata.handoff_rejection or teachback_rejection sends
+        # the deliverable back for revision, so the lead's next stage is
+        # waiting on the revised one in the same task. Keyed on the
+        # rejection in THIS write's metadata (never a rejection already on
+        # disk, which every later write would otherwise re-trigger); the
+        # watcher's revision-number check keeps it from firing on the
+        # rejected original. LEAD-SHAPED, like the shapes below.
+        rejection_task_id = tool_input.get("taskId", "") or ""
+        if (
+            team_name
+            and isinstance(rejection_task_id, str)
+            and rejection_task_id.strip()
+            and isinstance(incoming_metadata, dict)
+            and not _is_non_lead_frame(input_data)
+        ):
+            for rejection_key, predicate in (
+                ("handoff_rejection", "handoff"),
+                ("teachback_rejection", "teachback_submit"),
+            ):
+                if isinstance(incoming_metadata.get(rejection_key), dict):
+                    advisories.append(_wait_arm_advisory(
+                        "deliverable rejected",
+                        team_name,
+                        rejection_task_id,
+                        predicate,
+                    ))
+
         if team_name and not _is_non_lead_frame(input_data):
             wiring_task_id = tool_input.get("taskId", "") or ""
             wiring_owner = tool_input.get("owner")

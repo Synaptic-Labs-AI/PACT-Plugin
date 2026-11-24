@@ -5254,6 +5254,77 @@ def test_acceptance_ignores_the_accepted_teachback_itself(
     assert len(arms) == 1
 
 
+def _rejection_frame(task_id, metadata, agent_type=None):
+    """The captured lead PostToolUse(TaskUpdate) frame, re-aimed at a
+    metadata write: the harness's real envelope (tool_response carries
+    success/taskId/updatedFields, no task key)."""
+    from fixtures.role_frames import captured_frame
+
+    frame = captured_frame("lead_posttooluse_taskupdate_completed")
+    frame["tool_input"] = {"taskId": task_id, "metadata": metadata}
+    frame["tool_response"] = {
+        "success": True, "taskId": task_id, "updatedFields": ["metadata"],
+    }
+    if agent_type is not None:
+        frame["agent_type"] = agent_type
+    return frame
+
+
+_REJECTION = {
+    "reason": "r", "corrections": ["c"], "since": "2026-11-24T00:00:00+00:00",
+    "revision_number": 1,
+}
+
+
+@pytest.mark.parametrize(
+    "rejection_key,predicate",
+    [("handoff_rejection", "handoff"), ("teachback_rejection", "teachback_submit")],
+)
+def test_lead_rejection_write_supplies_the_arm_for_the_revision(
+    tmp_path, monkeypatch, pact_context, rejection_key, predicate
+):
+    """Rejecting a deliverable sends it back for revision in the same task,
+    so the lead's next wait is the revision: the rejection write supplies
+    the arm command for that task and that deliverable's predicate."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(tmp_path, "test-team", "9", subject="implement hook core",
+                 status="in_progress", owner="backend-coder")
+    advisories = tlg.evaluate_lifecycle(
+        _rejection_frame("9", {rejection_key: dict(_REJECTION)})
+    )
+    arms = [msg for rule, msg in advisories if rule == "wait_arm_supply"]
+    assert len(arms) == 1, advisories
+    assert "deliverable rejected" in arms[0]
+    assert f"--predicate {predicate}" in arms[0] and "--task 9" in arms[0]
+    assert "--team test-team" in arms[0]
+
+
+def test_rejection_arm_is_lead_only_and_keyed_on_this_write(
+    tmp_path, monkeypatch, pact_context
+):
+    """A teammate frame writing a rejection-shaped key gets no arm, and a
+    later lead write to a task whose rejection is already on disk does not
+    re-supply it (the key must be in this write's metadata)."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    _seed_task_a(
+        tmp_path, "test-team", "9", subject="implement hook core",
+        status="in_progress", owner="backend-coder",
+        metadata={"handoff_rejection": dict(_REJECTION)},
+    )
+    teammate = tlg.evaluate_lifecycle(_rejection_frame(
+        "9", {"handoff_rejection": dict(_REJECTION)},
+        agent_type="pact-backend-coder",
+    ))
+    later = tlg.evaluate_lifecycle(_rejection_frame("9", {"note": "x"}))
+    for advisories in (teammate, later):
+        assert not any(
+            rule == "wait_arm_supply" and "deliverable rejected" in msg
+            for rule, msg in advisories
+        ), advisories
+
+
 def test_no_arm_supply_on_non_lead_frames(tmp_path, monkeypatch, pact_context):
     """The arm advisories are LEAD-shaped: a frame whose agent_type names a
     non-lead actor (a teammate claim/reassignment write) is suppressed on
