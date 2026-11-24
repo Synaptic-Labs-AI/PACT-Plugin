@@ -1455,8 +1455,8 @@ def test_tier3_outlet_write_preserves_unknown_keys(
     budget decrement no longer has its own rewrite shape). Seeded at
     count 2 so this instant form's third attempt is a tier-3 outlet
     deny; assert the deny fired with the outlet text, the unknown keys
-    survived (including the stale budget field, preserved untouched),
-    and pairs/total landed their new values in the same write."""
+    survived, the legacy budget field was written as its inert 0, and
+    pairs/total landed their new values in the same write."""
     import wait_filler_gate
 
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
@@ -1479,7 +1479,7 @@ def test_tier3_outlet_write_preserves_unknown_keys(
     assert "PACT-WAIT-OUTLET" in _deny_reason(payload)
     section = json.loads(state.read_text(encoding="utf-8"))[""]
     assert section["future_field"] == "keep-me"
-    assert section["valve_budget"] == 2
+    assert section["valve_budget"] == 0
     assert section["pairs"] == {true_key: 3}
     assert section["total"] == 3
 
@@ -1858,3 +1858,22 @@ def test_previous_release_reads_this_release_state_as_valid(
     tier, count, total, allowance_open, _budget = result
     assert (tier, count, total) == (3, 4, 4)
     assert allowance_open is False
+
+
+
+@pytest.mark.parametrize("seeded", [2, 1, 0, "two", -1, True, None])
+def test_legacy_budget_is_always_written_as_zero(tmp_path, monkeypatch, capsys, seeded):
+    """Whatever an older writer left under the legacy budget key, a section
+    this release writes carries 0: a positive value would keep the previous
+    release's retired allowance live after a downgrade."""
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    state = _state_path(tmp_path)
+    state.parent.mkdir(parents=True, exist_ok=True)
+    section = {"pairs": {}, "total": 0}
+    if seeded is not None:
+        section["valve_budget"] = seeded
+    state.write_text(json.dumps({"": section}), encoding="utf-8")
+    _invoke(_gradient_frame("true"), capsys)
+    written = json.loads(state.read_text(encoding="utf-8"))[""]
+    assert written["valve_budget"] == 0
+    assert type(written["valve_budget"]) is int

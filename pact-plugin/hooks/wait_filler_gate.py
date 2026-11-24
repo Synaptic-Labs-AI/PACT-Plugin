@@ -439,13 +439,11 @@ def _escalate(input_data, normalized):
             new_section = dict(section) if isinstance(section, dict) else {}
             new_section["pairs"] = pairs
             new_section["total"] = new_total
-            # Inert here. The previous release reads a section without a
-            # non-negative int under this key as corrupt and pins the
-            # session at tier 1 after a downgrade; 0 also keeps that
-            # release's retired allowance closed.
-            legacy = new_section.get(_LEGACY_BUDGET_FIELD)
-            if not isinstance(legacy, int) or isinstance(legacy, bool) or legacy < 0:
-                new_section[_LEGACY_BUDGET_FIELD] = 0
+            # Inert here, and always 0. The previous release reads a section
+            # without a non-negative int under this key as corrupt and pins
+            # the session at tier 1 after a downgrade; any value above 0
+            # would re-open that release's retired allowance.
+            new_section[_LEGACY_BUDGET_FIELD] = 0
             data[agent_key] = new_section
             return (json.dumps(data), True, (tier, new_count, new_total))
 
