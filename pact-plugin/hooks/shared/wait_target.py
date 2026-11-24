@@ -33,6 +33,8 @@ Public surface:
 - teachback_submit_present(task) — `teachback_submit` predicate, not the
   one a teachback_rejection rejected.
 - PREDICATES — name -> predicate mapping (the registry).
+- revision_number(value) — the ONE parser of a revision number; the
+  lifecycle gate's revision advisories read through it.
 - evaluate_target(team_name, task_id, predicate_name, tasks_base_dir=None)
   — ONE pass: resolve, read, parse, evaluate.
 - WATCHER_PATH, TASK_ID_PLACEHOLDER, arm_command(...) —
@@ -70,7 +72,7 @@ EVAL_TARGET_CORRUPT = "target_corrupt"
 EVAL_UNKNOWN_PREDICATE = "unknown_predicate"
 
 
-def _revision(value: Any) -> int:
+def revision_number(value: Any) -> int:
     """A revision number as the rejection protocol writes it: a positive int
     (bool excluded). Anything else counts as 1, the first submission."""
     if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
@@ -92,7 +94,7 @@ def _awaiting_revision(metadata: dict[str, Any], rejection_key: str) -> bool:
     rejection = metadata.get(rejection_key)
     if not isinstance(rejection, dict):
         return False
-    return _revision(metadata.get("revision_number")) <= _revision(
+    return revision_number(metadata.get("revision_number")) <= revision_number(
         rejection.get("revision_number")
     )
 

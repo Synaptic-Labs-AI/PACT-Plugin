@@ -339,7 +339,7 @@ try:
         validate_reasoning_reconstruction,
     )
     from shared.tool_response import extract_tool_response
-    from shared.wait_target import arm_command, wait_identity
+    from shared.wait_target import arm_command, revision_number, wait_identity
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -1638,12 +1638,12 @@ _REVISED_DELIVERABLE = {
 
 
 def _current_revision(metadata: object) -> int:
-    """The teammate's current revision as the protocol writes it: a
-    positive int (bool excluded); 1 when absent or malformed."""
-    value = metadata.get("revision_number") if isinstance(metadata, dict) else None
-    if isinstance(value, int) and not isinstance(value, bool) and value >= 1:
-        return value
-    return 1
+    """The teammate's current revision, read by the watcher's own parser
+    (shared/wait_target.revision_number) so the advisory and the watcher
+    cannot disagree."""
+    return revision_number(
+        metadata.get("revision_number") if isinstance(metadata, dict) else None
+    )
 
 
 def revision_advisories(input_data: dict, tool_input: dict, store_team: str) -> list:
@@ -1699,7 +1699,7 @@ def revision_advisories(input_data: dict, tool_input: dict, store_team: str) -> 
         rejection = on_disk.get(rejection_key)
         if not isinstance(rejection, dict):
             continue
-        rejected = _current_revision({"revision_number": rejection.get("revision_number")})
+        rejected = revision_number(rejection.get("revision_number"))
         if deliverable in metadata and _current_revision(on_disk) <= rejected:
             out.append((
                 "revised_deliverable_without_raised_revision",
@@ -1715,7 +1715,7 @@ def revision_advisories(input_data: dict, tool_input: dict, store_team: str) -> 
         # Only the number that clears this rejection can be the raise; a
         # post-write frame cannot tell it from a rewrite of that same number,
         # so the text is conditional.
-        written = _current_revision({"revision_number": metadata.get("revision_number")})
+        written = revision_number(metadata.get("revision_number"))
         if raises and deliverable not in metadata and written == rejected + 1:
             out.append((
                 "revision_raised_without_deliverable",

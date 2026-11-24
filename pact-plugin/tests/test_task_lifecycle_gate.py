@@ -6057,6 +6057,35 @@ def test_rejection_must_carry_the_revision_being_rejected(
 
 
 @pytest.mark.parametrize(
+    "disk_revision",
+    [_OMIT, None, 1, 2, 7, 0, -3, True, False, "2", 2.0, [2]],
+)
+def test_gate_and_watcher_read_a_revision_the_same_way(
+    tmp_path, monkeypatch, pact_context, disk_revision
+):
+    """The gate accepts a rejection carrying the revision it reads as
+    current, and the watcher must then hold the rejected deliverable; a
+    rejection one higher than that is flagged by the gate. Both sides read
+    the same parser, so this reddens if either restates it differently."""
+    from shared import wait_target
+
+    disk = {} if disk_revision is _OMIT else {"revision_number": disk_revision}
+    expected = wait_target.revision_number(disk.get("revision_number"))
+    assert tlg._current_revision(disk) == expected
+    rejection = {"reason": "r", "corrections": ["c"],
+                 "since": "2026-11-24T00:00:00+00:00", "revision_number": expected}
+    rules = _rev_rules(tmp_path, monkeypatch, pact_context, disk,
+                       {"handoff_rejection": rejection})
+    assert "rejection_revision_mismatch" not in rules
+    held = {"metadata": {**disk, "handoff": {"produced": "v"}, "handoff_rejection": rejection}}
+    assert not wait_target.handoff_present(held)
+    stale = dict(rejection, revision_number=expected + 1)
+    rules = _rev_rules(tmp_path, monkeypatch, pact_context, disk,
+                       {"handoff_rejection": stale})
+    assert "rejection_revision_mismatch" in rules
+
+
+@pytest.mark.parametrize(
     "rejection_key,deliverable",
     [("handoff_rejection", "handoff"), ("teachback_rejection", "teachback_submit")],
 )
