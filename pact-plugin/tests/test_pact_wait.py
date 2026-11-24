@@ -8,12 +8,13 @@ contract — a crash must never masquerade as EXPIRED):
   absent — that shape is the live failure class this mechanism answers),
   teachback_submit (non-empty object); both read absent while a rejection
   record holds the unrevised original (revision_number comparison).
-- evaluate_target outcomes: present / not_present / target_missing (incl.
-  unsafe team name) / target_unreadable / target_corrupt / unknown_predicate.
+- evaluate_target outcomes: present / not_present / target_invalid (unsafe
+  team name or task id) / target_missing / target_unreadable /
+  target_corrupt / unknown_predicate.
 - wait_for_deliverable: fast-exit on already-present, fires after delayed
-  appearance, expires loud at the deadline, terminal on missing target,
-  terminal on persistently corrupt file, tolerant of a mid-rewrite-style
-  transient parse failure, terminal on unknown predicate.
+  appearance, expires loud at the deadline, terminal on a target missing on
+  two consecutive reads, terminal on persistently corrupt file, tolerant of
+  one bad read, terminal on unknown predicate.
 - main(): usage errors exit 2 (argparse), happy path returns 0.
 - one subprocess smoke: the script runs standalone from an arbitrary cwd
   (its shared.* import resolves via the script directory).
@@ -375,11 +376,9 @@ def test_terminal_on_missing_target(tmp_path):
 
 
 def test_terminal_on_persistently_corrupt_file(tmp_path, capsys):
-    """TIMING-SENSITIVE FLAKE CANDIDATE (CI scheduler load): the two-poll
-    corrupt window here and its sibling transient arm below place their
-    heal/expire points 0.03-0.15s from the bracketing polls — on a loaded
-    CI runner a poll can overshoot the window. On flake, widen the margin
-    or add a witness between polls; do not delete the arm."""
+    """A real file that never stops being unparseable ends the watch
+    TERMINAL on its second read. Nothing writes the file during the watch,
+    so the outcome does not depend on timing."""
     team_dir = tmp_path / "team-a"
     team_dir.mkdir()
     (team_dir / "7.json").write_text("{still not json", encoding="utf-8")
@@ -397,31 +396,43 @@ def test_terminal_on_persistently_corrupt_file(tmp_path, capsys):
     assert "task 7" in captured.err and "team-a" in captured.err
 
 
-def test_tolerates_transient_corrupt_read(tmp_path):
-    """TIMING-SENSITIVE FLAKE CANDIDATE (CI scheduler load): this is the
-    second corrupt-boundary arm — the 0.03s heal timer lands 0.03-0.15s
-    from the bracketing polls, and a loaded runner can push a poll past
-    it. On flake, widen the margin or add a witness between polls; do not
-    delete the arm."""
-    # A rewrite landing between polls must not kill the watch: corrupt on
-    # the first poll, healed (deliverable written) well before the second.
+def _step_file_between_polls(monkeypatch, task_file, bodies):
+    """Replace the watcher's sleep with a step that writes the next body to
+    the real task file, so each poll reads exactly one scripted state.
+    Deterministic on any machine load: the file changes only between polls,
+    never during one. A None body leaves the file unchanged for that poll.
+    Returns the list of sleeps taken."""
+    queue = list(bodies)
+    sleeps = []
+
+    def _step(seconds):
+        sleeps.append(seconds)
+        if queue:
+            body = queue.pop(0)
+            if body is not None:
+                task_file.write_text(body, encoding="utf-8")
+
+    monkeypatch.setattr(pact_wait.time, "sleep", _step)
+    return sleeps
+
+
+def test_tolerates_transient_corrupt_read(tmp_path, monkeypatch):
+    """A rewrite caught mid-flight must not kill the watch: the real file
+    is corrupt on the first poll and holds the deliverable on the second,
+    so the watch fires after exactly one sleep."""
     team_dir = tmp_path / "team-a"
     team_dir.mkdir()
     task_file = team_dir / "7.json"
     task_file.write_text("{mid-rewrite", encoding="utf-8")
-    timer = threading.Timer(
-        0.03,
-        lambda: _atomic_write(task_file, json.dumps(_handoff_task("arrived"))),
+    sleeps = _step_file_between_polls(
+        monkeypatch, task_file, [json.dumps(_handoff_task("arrived"))]
     )
-    timer.start()
-    try:
-        rc = pact_wait.wait_for_deliverable(
-            "team-a", "7", "handoff", deadline=5,
-            tasks_base_dir=str(tmp_path), poll_interval=0.1,
-        )
-    finally:
-        timer.join()
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=30,
+        tasks_base_dir=str(tmp_path), poll_interval=0.1,
+    )
     assert rc == pact_wait.EXIT_FIRED
+    assert len(sleeps) == 1
 
 
 def test_terminal_on_unknown_predicate(tmp_path):
@@ -505,68 +516,55 @@ def test_duplicate_watcher_re_arm_fast_exits_fired(tmp_path, monkeypatch):
     assert sleeps == []
 
 
-def test_second_consecutive_corrupt_read_is_terminal(tmp_path):
-    """Corrupt-tolerance boundary: the window is ONE corrupt poll. A file
-    still unparseable on the SECOND consecutive read is corrupt, not
-    mid-rewrite — TERMINAL immediately, and a deliverable landing just
-    past that second read does not resurrect the watch. The heal lands
-    BETWEEN the second poll (t=0.1) and the third (t=0.2) deliberately: a
-    loosened tolerance (terminal only on a third consecutive read) would
-    flip this arm to FIRED instead of staying green."""
+def test_second_consecutive_corrupt_read_is_terminal(tmp_path, monkeypatch):
+    """Corrupt-tolerance boundary: the window is ONE corrupt poll. A real
+    file still unparseable on the SECOND consecutive read is corrupt, not
+    mid-rewrite: TERMINAL then, and the deliverable written right after
+    that read does not resurrect the watch. A loosened tolerance (terminal
+    only on a third consecutive read) would reach the deliverable and flip
+    this arm to FIRED."""
     team_dir = tmp_path / "team-a"
     team_dir.mkdir()
     task_file = team_dir / "7.json"
     task_file.write_text("{still corrupt", encoding="utf-8")
-    timer = threading.Timer(
-        0.15,
-        lambda: _atomic_write(task_file, json.dumps(_handoff_task("delivered"))),
+    sleeps = _step_file_between_polls(
+        monkeypatch, task_file, [None, json.dumps(_handoff_task("delivered"))]
     )
-    timer.start()
-    try:
-        rc = pact_wait.wait_for_deliverable(
-            "team-a", "7", "handoff", deadline=30,
-            tasks_base_dir=str(tmp_path), poll_interval=0.1,
-        )
-    finally:
-        timer.join()
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=30,
+        tasks_base_dir=str(tmp_path), poll_interval=0.1,
+    )
     assert rc == pact_wait.EXIT_TERMINAL
+    assert len(sleeps) == 1
 
 
-def test_alternating_corrupt_reads_expire_never_turn_terminal(tmp_path):
-    """The corrupt streak RESETS on every good read: corrupt, good, corrupt,
-    good stays a live watch and ends at the deadline (EXPIRED), never
-    TERMINAL — tolerance is per-CONSECUTIVE-run, not per-file history.
-    Timing: one poll_interval of poll clock (0.15s) against ~0.12s corrupt
-    windows, so each window covers at most one poll."""
+def test_alternating_corrupt_reads_never_turn_terminal(tmp_path, monkeypatch):
+    """The bad-read streak RESETS on every good read: a real file read as
+    good, corrupt, good, corrupt, good, then delivered stays a live watch
+    and fires, never TERMINAL. Tolerance is per CONSECUTIVE run, not per
+    file history: without the reset the second corrupt read would end the
+    watch."""
     team_dir = tmp_path / "team-a"
     team_dir.mkdir()
     task_file = team_dir / "7.json"
     task_file.write_text(json.dumps({"metadata": {}}), encoding="utf-8")
-    # The deliberate corrupt bodies are plain writes; the heals are atomic,
-    # so a heal can never add an unscheduled corrupt read next to one.
-    corrupt = lambda body: task_file.write_text(body, encoding="utf-8")  # noqa: E731
-    heal = lambda body: _atomic_write(task_file, body)  # noqa: E731
-    schedule = [
-        (0.20, "{corrupt", corrupt),
-        (0.32, json.dumps({"metadata": {}}), heal),
-        (0.50, "{corrupt again", corrupt),
-        (0.62, json.dumps({"metadata": {}}), heal),
-    ]
-    timers = [
-        threading.Timer(at, lambda body=body, write=write: write(body))
-        for at, body, write in schedule
-    ]
-    for timer in timers:
-        timer.start()
-    try:
-        rc = pact_wait.wait_for_deliverable(
-            "team-a", "7", "handoff", deadline=1.0,
-            tasks_base_dir=str(tmp_path), poll_interval=0.15,
-        )
-    finally:
-        for timer in timers:
-            timer.join()
-    assert rc == pact_wait.EXIT_EXPIRED
+    sleeps = _step_file_between_polls(
+        monkeypatch,
+        task_file,
+        [
+            "{corrupt",
+            json.dumps({"metadata": {}}),
+            "{corrupt again",
+            json.dumps({"metadata": {}}),
+            json.dumps(_handoff_task("delivered")),
+        ],
+    )
+    rc = pact_wait.wait_for_deliverable(
+        "team-a", "7", "handoff", deadline=30,
+        tasks_base_dir=str(tmp_path), poll_interval=0.15,
+    )
+    assert rc == pact_wait.EXIT_FIRED
+    assert len(sleeps) == 5
 
 
 def test_terminal_outcomes_surface_well_before_the_deadline(tmp_path):

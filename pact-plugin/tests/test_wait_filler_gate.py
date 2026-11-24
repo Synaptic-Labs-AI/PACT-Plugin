@@ -1113,14 +1113,13 @@ def test_tier3_agent_tool_subagent_gets_completion_report_text(
     assert "starts your next turn" not in reason
 
 
-def test_tier3_outlet_three_way_role_branch(tmp_path, monkeypatch, capsys):
-    """The outlet is THREE-way, resolved through the REAL member record: a
-    separate-process teammate (backendType tmux, resolved via the frame's
-    team_name/teammate_name) gets the arm command with the ACCURATE wake
-    statement — their completion notice starts their next turn, so the
-    in-process text's "will NOT wake you" would be false for them; an
-    in-process teammate keeps the intentional_wait guidance; a lead keeps
-    the lead text. Same gradient, same deny verdict, all three roles."""
+def test_tier3_outlet_separate_process_teammate_branch(tmp_path, monkeypatch, capsys):
+    """The separate-process branch of the role-branched outlet, resolved
+    through the REAL member record and session registry: a tmux teammate
+    gets the arm command naming its team with the ACCURATE wake statement
+    (its completion notice starts its next turn), never the in-process
+    text's "will NOT wake you". The lead and in-process branches are
+    driven by test_tier3_outlet_branches_on_role."""
     config = tmp_path / "teams" / "tm-team"
     config.mkdir(parents=True)
     (config / "config.json").write_text(json.dumps({

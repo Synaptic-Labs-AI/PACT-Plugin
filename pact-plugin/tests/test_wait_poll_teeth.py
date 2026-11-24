@@ -129,8 +129,8 @@ def test_non_finite_deadline_exits_2_before_any_watching(text):
     re-open the immortal watcher through exactly this input. Regression
     direction: with the rejection removed the arm reds, never hangs — the
     target below is a team dir that does not exist, so even an unfixed
-    parser returns TERMINAL (4) immediately and the SystemExit assertion
-    fails DID-NOT-RAISE."""
+    parser returns TERMINAL (4) after the one grace read (one poll
+    interval later) and the SystemExit assertion fails DID-NOT-RAISE."""
     with pytest.raises(SystemExit) as excinfo:
         pact_wait.main([
             "--team", "no-such-pollteeth-team", "--task", "7",
@@ -143,8 +143,8 @@ def test_non_finite_deadline_exits_2_before_any_watching(text):
 def test_finite_deadline_control_still_runs_the_watch_contract(tmp_path):
     """Finite control for the S1 rejection: a sane deadline parses, the
     watch RUNS, and the exit comes through the watch contract (TERMINAL on
-    the missing target) — the rejection must not over-block finite
-    values."""
+    the target missing on two consecutive reads) — the rejection must not
+    over-block finite values."""
     rc = pact_wait.main([
         "--team", "team-a", "--task", "7", "--predicate", "handoff",
         "--deadline", "1", "--tasks-base-dir", str(tmp_path),

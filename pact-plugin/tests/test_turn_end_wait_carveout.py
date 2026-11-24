@@ -237,8 +237,12 @@ def test_in_process_teammate_watcher_still_counts(tmp_path, monkeypatch):
     get the carve-out. Its completion notice will not wake them (their
     block text says so), so the watcher stays in the must-account-for list
     and the remedy stays the intentional_wait coverage path. Pinned at the
-    _candidates fork, because that is the line the role split lives on."""
+    _candidates fork, because that is the line the role split lives on.
+    The config root points at tmp_path, so the intentional_wait lookup
+    reads an empty task store instead of the real one."""
     from shared import turn_end_gate
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
 
     records = [
         {"agent_name": MATE, "harness_task_id": "iw1", "launched_at": "2026-11-21T00:00:00Z"}

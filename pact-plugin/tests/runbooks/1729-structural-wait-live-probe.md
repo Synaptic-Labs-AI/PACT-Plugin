@@ -164,24 +164,20 @@ Execution record (2026-11-21, team session-47d94d14, session 47d94d14-b906-4d03-
 - **Filler-state census source**: the session's own `pact-filler-state/47d94d14-….json` counters (count 6, total 10, budget 0 post-episode) corroborate the transcript census.
 - **Probe-worker compliance**: both episodes ran silent as instructed (no SendMessage; handoff writes landed unseen — 27: six string fields; 28: six string fields, 4211B; both audited on disk post-wake). CORRECTION (post-audit, test-engineer finding): the originally recorded task-27 figure "4806B" was a mid-trim instantaneous read — the probe-worker's disclosed size-trim passes raced the lead's acceptance audit; two later independent measurements agree on 4148B (handoff object; 4216B full metadata). The load-bearing claim (six strings, written unseen, present post-wake) verifies at every recorded moment; the task file keeps no history to arbitrate intermediate values.
 
-- **Timing-margin annotation (review cycle 1, 2026-11-21):** the two
-  corrupt-boundary arms in `test_pact_wait.py`
-  (`test_second_consecutive_corrupt_read_is_terminal`, heal timed 0.15s
-  between polls at 0.1s/0.2s; `test_tolerates_transient_corrupt_read`,
-  heal at 0.03s against the next poll at 0.1s) carry ONE-SIDED ~50-70ms
-  margins that are ASSERTED, not measured — no merge-queue history exists
-  for them yet, and this PR's queue run is the first real data point (lead
-  ruling). A flake reds BY DESIGN (poll slips past the heal); the remedy
-  then is widen the margin or move the witness between the polls. The
-  alternating arm (`test_alternating_corrupt_reads_expire_never_turn_terminal`)
-  is NOT structurally safe under load. On schedule its corrupt windows
-  (0.12s) are shorter than the poll spacing (0.15s), so two consecutive
-  polls cannot both land in one window. But a heal timer that fires late
-  lengthens its window, so under load two consecutive corrupt polls can
-  occur and the arm reds like the two above, with the same remedy. Every
-  heal and deliverable write that races a running watcher in these tests
-  is atomic (temp file + os.replace), so a write can no longer add a corrupt
-  read of its own: the remaining exposure is timer lateness only.
+- **Timing-margin annotation (review cycle 1, 2026-11-21; superseded):**
+  the three corrupt-boundary arms in `test_pact_wait.py`
+  (`test_tolerates_transient_corrupt_read`,
+  `test_second_consecutive_corrupt_read_is_terminal`,
+  `test_alternating_corrupt_reads_never_turn_terminal`) once timed their
+  file rewrites with threading.Timer against the poll clock, and the
+  alternating arm flaked under load. They now write each scripted file
+  state from the watcher's own sleep, between two polls, so every poll
+  reads exactly one state and the outcome does not depend on timing or
+  machine load. The scripted-outcome twins
+  (`test_one_bad_read_is_tolerated_then_fires`,
+  `test_two_consecutive_bad_reads_are_terminal`,
+  `test_a_good_read_resets_the_bad_read_streak`) cover the same properties
+  without a file.
 
 Run-dates tracking: `RUNBOOK_RUN_DATES.md` carries the execution ledger
 pointer for this file.
