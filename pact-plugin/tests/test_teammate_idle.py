@@ -1498,6 +1498,24 @@ class TestInboxGraceGate:
         assert clock.sleeps[:-1] == pytest.approx([0.1] * 47)
         assert clock.sleeps[-1] == pytest.approx(0.084)
 
+    def test_a_false_mode_gate_means_no_hold_after_eligibility(self, tmp_path):
+        """Counter-test: ignoring the gate holds a pane teammate."""
+        from teammate_idle import wait_for_inbox_evidence
+
+        calls = []
+        clock = _FakeGraceClock()
+        with patch("teammate_idle.state_file.read_text") as read:
+            seen = wait_for_inbox_evidence(
+                [_grace_task()], "CoderRaw", "TeamRaw", tmp_path / "teams",
+                now=_GRACE_NOW, monotonic=clock.monotonic, sleep=clock.sleep,
+                in_process=lambda: calls.append(1) or False,
+            )
+
+        assert seen is None
+        assert calls == [1]
+        read.assert_not_called()
+        assert clock.sleeps == []
+
     def test_eligible_upper_edge_reads_once_and_sleeps_the_remainder(self, tmp_path):
         """Counter-test: shrinking the eligibility window skips this read."""
         clock = _FakeGraceClock()
@@ -1580,13 +1598,21 @@ class TestInboxGraceGate:
         assert len(clock.sleeps) == 100
 
 
+def _honouring(result):
+    """A fake hold that, like the real one, holds only when its in_process gate allows."""
+    from unittest.mock import Mock
+
+    return Mock(side_effect=lambda *a, in_process=lambda: True, **k: (
+        result if in_process() else None
+    ))
+
+
 class TestMainInboxHold:
     def _run(self, capsys, in_process=True, gate=None, task=None):
         import io
-        from unittest.mock import Mock
         from teammate_idle import main
 
-        gate = gate or Mock(return_value=True)
+        gate = gate or _honouring(True)
         with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
              patch("teammate_idle.iter_team_task_jsons", return_value=[task or _grace_task()]), \
@@ -1615,7 +1641,6 @@ class TestMainInboxHold:
 
     def _run_rereads(self, capsys, result, in_process=True):
         import io
-        from unittest.mock import Mock
         from teammate_idle import main
 
         before = [_grace_task()]
@@ -1624,7 +1649,7 @@ class TestMainInboxHold:
              patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
              patch("teammate_idle.iter_team_task_jsons", side_effect=[before, after]) as reads, \
              patch("teammate_idle.teammate_is_in_process", return_value=in_process), \
-             patch("teammate_idle.wait_for_inbox_evidence", Mock(return_value=result)), \
+             patch("teammate_idle.wait_for_inbox_evidence", _honouring(result)), \
              patch("teammate_idle.check_idle_cleanup", return_value=(None, False)) as cleanup, \
              patch("teammate_idle.check_unflagged_background", return_value=None) as advisory:
             with pytest.raises(SystemExit):
@@ -1733,11 +1758,42 @@ class TestMainInboxHold:
         _no_real_grace_sleep.clear()
 
     def test_pane_or_undeterminable_mode_does_not_hold(self, capsys):
+        """main gates the hold on the mode check; a False gate means no hold and no re-read."""
         hold, cleanup, output = self._run(capsys, in_process=False)
 
         assert output == {"suppressOutput": True}
-        hold.assert_not_called()
+        hold.assert_called_once()
+        assert hold.call_args.kwargs["in_process"]() is False
         cleanup.assert_called_once()
+
+    @pytest.mark.parametrize("fresh", [False, True], ids=["no-fresh-wait", "fresh-wait"])
+    def test_team_config_is_read_only_for_an_eligible_wait(self, fresh, capsys):
+        """Counter-test: reading the mode before eligibility reads the config on every idle."""
+        import io
+        from unittest.mock import Mock
+        from teammate_idle import main
+
+        if fresh:
+            since = datetime.now(timezone.utc).isoformat()
+            task = make_task(owner="CoderRaw", metadata={"intentional_wait": {
+                "reason": "awaiting_lead_completion", "expected_resolver": "lead",
+                "since": since, "covers_since": since,
+            }})
+        else:
+            task = _grace_task()  # a wait from long ago: not eligible
+        mode = Mock(return_value=False)
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
+             patch("teammate_idle.iter_team_task_jsons", return_value=[task]) as reads, \
+             patch("teammate_idle.teammate_is_in_process", mode), \
+             patch("teammate_idle.check_idle_cleanup", return_value=(None, False)), \
+             patch("teammate_idle.check_unflagged_background", return_value=None):
+            with pytest.raises(SystemExit):
+                main()
+
+        assert json.loads(capsys.readouterr().out) == {"suppressOutput": True}
+        assert mode.call_count == (1 if fresh else 0)
+        assert reads.call_count == 1  # a False mode means no hold, so no re-read
 
     def test_completed_task_keeps_ordinary_cleanup_after_the_hold(
         self, capsys, tmp_path, monkeypatch

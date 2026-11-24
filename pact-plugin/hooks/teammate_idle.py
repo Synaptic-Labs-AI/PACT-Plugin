@@ -186,8 +186,13 @@ def wait_for_inbox_evidence(
     now: datetime | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    in_process: Callable[[], bool] = lambda: True,
 ) -> bool | None:
-    """None when no hold runs; else True once a valid queued message is visible, False at the deadline."""
+    """None when no hold runs; else True once a valid queued message is visible, False at the deadline.
+
+    `in_process` is consulted only once an eligible wait is found, so an idle
+    without one never pays for the team-config read behind it.
+    """
     wall_now = now if now is not None else datetime.now(timezone.utc)
     selected = _select_grace_task(tasks, teammate_name, wall_now)
     if selected is None:
@@ -197,6 +202,8 @@ def wait_for_inbox_evidence(
         is_safe_path_component(team_name)
         and is_safe_path_component(teammate_name)
     ):
+        return None
+    if not in_process():
         return None
 
     inbox_dir = teams_root / team_name / "inboxes"
@@ -213,7 +220,8 @@ def wait_for_inbox_evidence(
         except state_file.Refused:
             return False
         except FileNotFoundError:
-            # Only a genuinely missing inbox retries; a containment refusal ended above.
+            # A missing inbox file, inboxes directory or team directory retries;
+            # a containment refusal ended above.
             inbox_json = "[]"
         except UnicodeDecodeError:
             # A half-written non-ASCII message fails strict decoding; retry it like
@@ -600,12 +608,14 @@ def main():
         # A hold, never a block: a pane teammate's idle notice is already sent,
         # so only an in-process teammate's runtime can deliver a message that lands now.
         try:
-            if teammate_is_in_process(team_name, teammate_name, str(teams_root)):
-                if wait_for_inbox_evidence(
-                    tasks, teammate_name, team_name, teams_root
-                ) is not None:
-                    # The hold may have outlived task changes; cleanup must see current state.
-                    tasks = list(iter_team_task_jsons(team_name))
+            if wait_for_inbox_evidence(
+                tasks, teammate_name, team_name, teams_root,
+                in_process=lambda: teammate_is_in_process(
+                    team_name, teammate_name, str(teams_root)
+                ),
+            ) is not None:
+                # The hold may have outlived task changes; cleanup must see current state.
+                tasks = list(iter_team_task_jsons(team_name))
         except Exception as hold_error:
             # Fall through to the ordinary output; stderr only, so stdout and exit stay unchanged.
             # Non-printables (ANSI ESC, BEL, line breaks) become spaces: one plain, bounded line.
