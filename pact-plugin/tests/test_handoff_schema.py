@@ -165,16 +165,21 @@ class TestValidatorStaysSilent:
             assert "produced" in problem
 
     def test_non_string_produced_fires_naming_the_watcher_cost(self):
-        """TEETH for the produced type gate (cold round 10): a handoff whose
-        `produced` is a LIST — the template-shaped failure the array
-        examples taught — now FAILS validation with a reason naming the
-        watcher cost. Red on the pre-fix presence-only validator."""
-        handoff = dict(VALID_HANDOFF, produced=["src/auth.ts"])
-        problem = validate_handoff_schema(handoff)
+        """TEETH for the produced type gate: a non-string `produced` FAILS
+        validation and is told to join its items. Only a value the watcher
+        reads as absent is told it would burn the deadline; a list holding
+        a non-empty string wakes the watcher, so its reason makes no such
+        claim."""
+        problem = validate_handoff_schema(dict(VALID_HANDOFF, produced=["src/auth.ts"]))
         assert problem is not None
-        assert "produced" in problem
         assert "must be a non-empty string" in problem
-        assert "ABSENT" in problem
+        assert "join the items" in problem
+        assert "ABSENT" not in problem and "EXPIRED" not in problem
+        for absent in ([], [""], 7, {"a": "b"}):
+            problem = validate_handoff_schema(dict(VALID_HANDOFF, produced=absent))
+            assert problem is not None, absent
+            assert "must be a non-empty string" in problem, absent
+            assert "ABSENT" in problem, absent
 
     def test_silent_on_extra_keys(self):
         handoff = dict(VALID_HANDOFF, memory_saved=["m1"], findings=["f1"])

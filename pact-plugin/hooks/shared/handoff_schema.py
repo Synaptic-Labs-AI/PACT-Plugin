@@ -158,11 +158,18 @@ def validate_handoff_schema(handoff: object) -> str | None:
                 "and would burn its deadline to a false EXPIRED"
             )
         if not isinstance(produced, str):
-            return (
+            base = (
                 "metadata.handoff `produced` must be a non-empty string, "
                 f"got {type(produced).__name__} — join the items with '; ' "
-                "into one string; the deliverable watcher reads any value "
-                "other than a non-empty string, or a list holding one, as "
+                "into one string"
+            )
+            if isinstance(produced, list) and any(
+                isinstance(item, str) and item.strip() for item in produced
+            ):
+                # The watcher wakes on this shape; only the shape is wrong.
+                return base
+            return (
+                base + "; the deliverable watcher reads this value as "
                 "ABSENT and would burn its deadline to a false EXPIRED"
             )
         return None
