@@ -888,7 +888,17 @@ def test_evaluate_target_never_raises_for_any_census_exception(
 
     base = str(tmp_path)
     if stage == "exists":
-        monkeypatch.setattr(Path, "exists", boom)
+        # Raise for the watched file only: a class-wide patch outlives the test
+        # body, and a conftest teardown that calls Path.exists then errors.
+        target = tmp_path / "team-a" / "7.json"
+        real_exists = Path.exists
+
+        def exists(self, *a, **k):
+            if self == target:
+                raise exc
+            return real_exists(self, *a, **k)
+
+        monkeypatch.setattr(Path, "exists", exists)
     elif stage == "open":
         monkeypatch.setattr(wait_target.os, "open", boom)
     elif stage == "read":
