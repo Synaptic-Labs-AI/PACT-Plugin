@@ -650,8 +650,7 @@ class TestLegacyScopeStatesAreDocumented:
     def test_unproven_is_not_read_and_names_its_command(self):
         assert (
             "unproven: it is not read, and its rekey command is printed once "
-            "per process, with the cause (a folder-name scope has no canonical "
-            "target, so it prints the local-pin remedy instead)."
+            "per process, with the cause."
         ) in _body(SKILL)
 
     def test_an_unattributed_row_is_read_with_a_warning(self):
@@ -675,45 +674,24 @@ class TestLegacyScopeStatesAreDocumented:
             "checkout), does not block it"
         ) in _body(SKILL)
 
-    def test_a_folder_name_session_is_refused_only_on_another_owners_evidence(self):
+    def test_a_folder_name_id_is_not_judged(self):
+        """Folder-name ids keep the pre-change shared bucket; the removed
+        gate's refusal, pins and folder-name rekey target are gone."""
         body = _body(SKILL)
         assert (
-            "A session whose project id is a folder name reads and saves into "
-            "that bucket unless there is evidence another owner wrote it"
+            "A session whose project id is a folder name (a repository with no "
+            "portable origin, a non-git project folder, the home-directory "
+            "landing, or the user-scope project_id setting) is not judged: it "
+            "reads and saves its same-name bucket as before, so it shares that "
+            "bucket with every folder of the same name."
         ) in body
-        assert (
-            "Two folder-name ids are never judged and are shared as before: the "
-            "home-directory landing and the user-scope project_id setting."
-        ) in body
-        assert (
-            "another checkout or project folder with that name (a git checkout, "
-            "or a folder marked by .claude or a recorded session)"
-        ) in body
-        assert "A row in a checkout with another name is a cross-reference, not evidence." in body
-        assert (
-            "a save fails with FOLDER_NAME_BUCKET_REFUSED, exits 1 and writes "
-            "nothing."
-        ) in body
-        assert "the pin is the user's to write, so ask the user" in body
-        from scripts.memory_api import local_pin_id
-
-        assert "(local.invalid/<digest>/<folder>)" in body
-        assert local_pin_id("/tmp/some/widget").startswith("local.invalid/")
-        assert (
-            "A bucket with no evidence either way (only relative or vanished "
-            "file rows, an unmarked folder, no recorded session) stays shared "
-            "by every folder of that name."
-        ) in body
-        assert "when the gate excludes it (its file rows all lie in" not in body
-        assert (
-            "Clones of a local-only repository (its origin is a local path or a "
-            "file:// URL) are separate projects until they share a pin."
-        ) in body
-        assert "show the user the origin path and ask; never choose for them." in body
+        for gone in ("FOLDER_NAME_BUCKET_REFUSED", "local.invalid/<digest>",
+                     "Clones of a local-only repository", "local-pin remedy"):
+            assert gone not in body, gone
         assert (
             "The session's own folder-name id is the one non-canonical target a "
-            "rekey accepts, and only for its own legacy candidate when its bucket "
-            "allows a save."
+            "rekey accepts, only as an explicit --to, and only for its own legacy "
+            "candidate."
         ) in body
 
     def test_foreign_rows_is_a_documented_unproven_reason(self):
@@ -7221,14 +7199,8 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<name imported from a project module cli: PrefixTooShortError>"): (
             "database's error class, caught by a command"
         ),
-        ("call", "<name imported from a project module cli: FolderNameBucketRefusedError>"): (
-            "memory_api's error class, caught by a command"
-        ),
         ("call", "<name imported from a project module cli: LegacyBucketWriteRefusedError>"): (
             "memory_api's error class, caught by a command"
-        ),
-        ("call", "<class of its own module used as a value memory_api: FolderNameBucketRefusedError>"): (
-            "the save refusal's error class, caught by save to record the refused status before re-raising"
         ),
         ("call", "<name imported from a project module cli: ProjectIdentityUnresolvedError>"): (
             "memory_api's error class, caught by a command"
@@ -7357,12 +7329,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "<name imported from a project module memory_api: UNKNOWN_NAME>"): (
             "database's marker for a pre-change name that could not be read"
-        ),
-        ("call", "<name imported from a project module memory_api: project_identity.OUTCOME_NO_PORTABLE_ORIGIN>"): (
-            "the classifier's no-portable-origin outcome, compared in the shared-pin remedy of a refusal"
-        ),
-        ("call", "<call to no function memory_api: value.lower>"): (
-            "lowercases the origin value read for the shared-pin remedy, to spot a file:// URL"
         ),
         ('call', 'link_memory_to_paths'): (
             'links a saved memory to its file paths in the store' + _AFTER_DETECTION

@@ -5,10 +5,10 @@ Summary: each row of the ownership decision matrix builds real git checkouts
 in tmp, seeds one legacy bucket named like the project folder, and runs every
 consumer of the bucket's verdict: the read scope (`list`), `project-id show`,
 the defaulted `project-id rekey` and the save. A canonical scope (the
-repository has an origin, so the bucket is its legacy candidate) and a
-folder-name scope (no origin, so the bucket is the session's own id) are run
-for every row that has an expectation for them. Then the folder-name refusal
-remedies (R1-R4) and the structural arms (S1-S3).
+repository has an origin, so the bucket is its legacy candidate) is judged
+by the rule. A folder-name scope (no portable origin, so the bucket is the
+session's own id) is never judged: every row also checks that it reads and
+saves its own bucket, as before this change. Then the structural arms (S1-S3).
 Used by: the test suite; no production code imports it.
 """
 
@@ -18,9 +18,7 @@ import ast
 import json
 import logging
 import os
-import shlex
 import sqlite3
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -339,7 +337,41 @@ def row_22n(tmp_path, canonical):
     return Layout(root, tmp_path / "store.db", files=[make_repo(tmp_path / "rival" / "proj")])
 
 
-# (row, canonical expectation, folder-name expectation). An expectation is
+def _separate_git_dir_rival(tmp_path):
+    """A rival checkout named like the bucket whose git dir lives elsewhere
+    (`--separate-git-dir`): its pre-change name is the git dir's parent
+    ('store'), not B, but its folder-name id is B."""
+    rival = tmp_path / "rival" / B
+    (tmp_path / "store").mkdir()
+    run_git("init", "-q", f"--separate-git-dir={tmp_path / 'store' / 'dotgit'}", str(rival), cwd=tmp_path)
+    return _touch(rival / "src.py")
+
+
+def row_ns5(tmp_path, canonical):
+    """N-S5: the separate-git-dir rival beside a row under this root."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    return Layout(root, tmp_path / "store.db", files=[_touch(root / "src.py"), _separate_git_dir_rival(tmp_path)])
+
+
+def row_ns5b(tmp_path, canonical):
+    """N-S5's rival row alone."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    return Layout(root, tmp_path / "store.db", files=[_separate_git_dir_rival(tmp_path)])
+
+
+def row_dangling(tmp_path, canonical):
+    """A rival named like the bucket whose `.git` FILE names a git dir that no
+    longer exists: its pre-change name is not B, but its folder-name id is,
+    so it stays a rival."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    rival = tmp_path / "rival" / B
+    rival.mkdir(parents=True)
+    (rival / ".git").write_text(f"gitdir: {tmp_path / 'gone' / 'dotgit'}\n", encoding="utf-8")
+    return Layout(root, tmp_path / "store.db", files=[_touch(rival / "src.py")])
+
+
+# (row, canonical expectation, folder-name expectation). No folder-name id is
+# judged (user ruling): its column always reads and saves its own bucket. An expectation is
 # (read, state, reason, rekey_or_save) where rekey_or_save is "ok" or
 # "refused"; None means the row has no expectation for that scope.
 VERIFIED = (True, "verified", None, "ok")
@@ -348,8 +380,8 @@ FOLDER_OK = (True, None, None, "ok")
 ROWS = [
     (row_1, VERIFIED, FOLDER_OK),
     (row_2, VERIFIED, FOLDER_OK),
-    (row_3, (False, "excluded", "foreign_rows", "refused"), (False, "excluded", "foreign_rows", "refused")),
-    (row_4, (False, "unproven", "foreign_rows", "refused"), (False, "unproven", "foreign_rows", "refused")),
+    (row_3, (False, "excluded", "foreign_rows", "refused"), FOLDER_OK),
+    (row_4, (False, "unproven", "foreign_rows", "refused"), FOLDER_OK),
     (row_5, NO_SESSION, FOLDER_OK),
     # Read on session evidence alone: a defaulted --to cannot claim the whole
     # bucket, so the defaulted rekey is refused (an explicit --to still moves it).
@@ -360,17 +392,20 @@ ROWS = [
     (row_10, NO_SESSION, FOLDER_OK),
     (row_11, NO_SESSION, FOLDER_OK),
     (row_12, NO_SESSION, FOLDER_OK),
-    (row_13, (False, "excluded", "recorded_elsewhere", "refused"), (False, "excluded", "recorded_elsewhere", "refused")),
+    (row_13, (False, "excluded", "recorded_elsewhere", "refused"), FOLDER_OK),
     (row_14, NO_SESSION, FOLDER_OK),
-    (row_15, (False, "unproven", "recorded_elsewhere", "refused"), (False, "unproven", "recorded_elsewhere", "refused")),
+    (row_15, (False, "unproven", "recorded_elsewhere", "refused"), FOLDER_OK),
     (row_16, None, (False, None, None, "ok")),  # empty: nothing to read
-    (row_17, (False, "excluded", "foreign_rows", "refused"), (False, "excluded", "foreign_rows", "refused")),
-    (row_18, (False, "excluded", "foreign_rows", "refused"), (False, "excluded", "foreign_rows", "refused")),
+    (row_17, (False, "excluded", "foreign_rows", "refused"), FOLDER_OK),
+    (row_18, (False, "excluded", "foreign_rows", "refused"), FOLDER_OK),
     (row_19, VERIFIED, FOLDER_OK),
-    (row_21, (False, "unproven", "foreign_rows", "refused"), (False, "unproven", "foreign_rows", "refused")),
-    (row_22, (False, "excluded", "foreign_rows", "refused"), (False, "excluded", "foreign_rows", "refused")),
+    (row_21, (False, "unproven", "foreign_rows", "refused"), FOLDER_OK),
+    (row_22, (False, "excluded", "foreign_rows", "refused"), FOLDER_OK),
     (row_21n, VERIFIED, FOLDER_OK),
     (row_22n, NO_SESSION, FOLDER_OK),
+    (row_ns5, (False, "unproven", "foreign_rows", "refused"), FOLDER_OK),
+    (row_ns5b, (False, "excluded", "foreign_rows", "refused"), FOLDER_OK),
+    (row_dangling, (False, "excluded", "foreign_rows", "refused"), FOLDER_OK),
 ]
 
 
@@ -408,14 +443,10 @@ def test_every_consumer_follows_the_row(builder, canonical, expect, tmp_path, mo
             assert "project-id rekey" not in seen.warnings, seen.warnings
         assert seen.save_code == 0, seen.save_envelope  # a save binds the canonical id
     else:
-        if action == "ok":
-            assert seen.save_code == 0, seen.save_envelope
-        else:
-            assert seen.save_code == 1, seen.save_envelope
-            assert seen.save_envelope["error"] == "FOLDER_NAME_BUCKET_REFUSED", seen.save_envelope
-        if state is not None and seen.legacy_scope is not None:
-            assert _state(seen.legacy_scope) == state, seen.legacy_scope
-            assert seen.legacy_scope["unproven_reason"] == reason, seen.legacy_scope
+        # No folder-name id is judged: it reads and saves its own bucket, with
+        # no legacy_scope record, whatever the bucket's evidence says.
+        assert seen.save_code == 0, seen.save_envelope
+        assert seen.legacy_scope is None, seen.legacy_scope
     _assert_texts(seen, reason, FOLDER_KIND.get(builder, "checkout"), layout.bucket)
 
 
@@ -452,149 +483,6 @@ def test_row_16_an_empty_bucket_reads_empty_and_saves(tmp_path, monkeypatch, cap
     assert seen.read is False and seen.save_code == 0, seen.save_envelope
     with sqlite3.connect(str(layout.store)) as conn:
         assert conn.execute("SELECT project_id FROM memories").fetchall() == [(B,)]
-
-
-def test_row_20_each_copy_of_a_no_origin_project_is_refused_with_its_local_pin(
-    tmp_path, monkeypatch, capfd, caplog
-):
-    """Row 20: one no-origin project at two existing paths, each with recorded
-    sessions; each copy sees the other's sessions as elsewhere."""
-    assert_outside_repository(tmp_path)
-    copies = [make_repo(tmp_path / "c1" / B), make_repo(tmp_path / "c2" / B)]
-    for index, copy in enumerate(copies):
-        _session_at(tmp_path, copy, f"s{index}")
-    layout = Layout(copies[0], tmp_path / "store.db", memories=[("a" * 32, "s0"), ("b" * 32, "s1")])
-    _seed(layout)
-    for copy in copies:
-        seen = _run_consumers(Layout(copy, layout.store), monkeypatch, capfd, caplog, rekey=False)
-        assert seen.read is False, seen.warnings
-        assert seen.save_code == 1 and seen.save_envelope["error"] == "FOLDER_NAME_BUCKET_REFUSED", seen.save_envelope
-        assert memory_api.local_pin_id(copy) in seen.save_envelope["message"], seen.save_envelope
-        if seen.legacy_scope is not None:
-            assert _state(seen.legacy_scope) == "unproven", seen.legacy_scope
-            assert seen.legacy_scope["unproven_reason"] == "recorded_elsewhere", seen.legacy_scope
-
-
-def test_a_folder_name_save_refusal_reports_the_sync_status_refused(tmp_path, monkeypatch):
-    """The folder-name refusal is a refusal like its siblings
-    (ProjectIdentityUnresolvedError): `last_sync_status` reads REFUSED after
-    it, not the cleared None, so a caller reading only the status sees a
-    deliberate refusal."""
-    from scripts.working_memory import SyncResult
-
-    assert_outside_repository(tmp_path)
-    layout = row_3(tmp_path, False)
-    _seed(layout)
-    monkeypatch.chdir(layout.root)
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-    _fresh()
-    memory = memory_api.PACTMemory(session_id="s", db_path=layout.store)
-    with pytest.raises(memory_api.FolderNameBucketRefusedError):
-        memory.save({"context": "new"})
-    assert memory.last_sync_status == SyncResult.REFUSED, memory.last_sync_status
-
-
-# ---------------------------------------------------------------------------
-# R1-R4: the folder-name refusal remedy, by layout (row 3's bucket)
-# ---------------------------------------------------------------------------
-
-
-def _refusal(root: Path, tmp_path: Path, monkeypatch, capfd, errors=("FOLDER_NAME_BUCKET_REFUSED",)) -> dict:
-    store = tmp_path / "store.db"
-    _seed(Layout(root, store, files=[_other_checkout(tmp_path) / "src.py"]))
-    monkeypatch.chdir(root)
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-    code, envelope = _cli(["save", json.dumps({"context": "new"}), "--db-path", str(store)], capfd)
-    assert code == 1 and envelope["error"] in errors, envelope
-    return envelope
-
-
-def _printed_pin_command(message: str) -> str:
-    """The `printf ... > <file>` command the refusal prints."""
-    import re
-
-    match = re.search(r"printf '%s\\n' \S+ > \S+", message)
-    assert match is not None, message
-    return match.group(0).rstrip(".,;")
-
-
-def test_r1_an_own_git_directory_gets_a_runnable_pin_for_this_checkout_only(tmp_path, monkeypatch, capfd):
-    assert_outside_repository(tmp_path)
-    root = make_repo(tmp_path / "work" / B)
-    message = _refusal(root, tmp_path, monkeypatch, capfd)["message"]
-    command = _printed_pin_command(message)
-    subprocess.run(["sh", "-c", command], check=True, cwd=tmp_path)
-    pin = (root / ".git" / "pact-project-id").read_text(encoding="utf-8").strip()
-    assert pin == memory_api.local_pin_id(root)
-    other = tmp_path / "other" / B / ".git"
-    assert not (other / "pact-project-id").exists()
-
-
-def test_r2_a_linked_worktree_pins_the_main_checkouts_git_directory(tmp_path, monkeypatch, capfd):
-    assert_outside_repository(tmp_path)
-    main = make_repo(tmp_path / "main" / B)
-    worktree = make_worktree(main, tmp_path / "work" / "wt")
-    message = _refusal(worktree, tmp_path, monkeypatch, capfd)["message"]
-    command = _printed_pin_command(message)
-    target = str((main / ".git").resolve() / "pact-project-id")
-    assert command.endswith(shlex.quote(target)), command
-
-
-def _separate_git_dir(tmp_path):
-    root = tmp_path / "work" / B
-    run_git("init", "-q", f"--separate-git-dir={tmp_path / 'store-git'}", str(root), cwd=tmp_path)
-    return root
-
-
-def _forged_pointer(tmp_path):
-    victim = make_repo(tmp_path / "victim" / "proj")
-    root = tmp_path / "work" / B
-    root.mkdir(parents=True)
-    (root / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
-    return root
-
-
-def _symlinked_git(tmp_path):
-    victim = make_repo(tmp_path / "victim" / "proj")
-    root = tmp_path / "work" / B
-    root.mkdir(parents=True)
-    (root / ".git").symlink_to(victim / ".git", target_is_directory=True)
-    return root
-
-
-def _core_worktree(tmp_path):
-    store = make_repo(tmp_path / "admin" / "repo")
-    root = tmp_path / "work" / B
-    root.mkdir(parents=True)
-    run_git("config", "core.worktree", str(root), cwd=store)
-    (root / ".git").write_text(f"gitdir: {store / '.git'}\n", encoding="utf-8")
-    return root
-
-
-@pytest.mark.parametrize("layout", [_separate_git_dir, _forged_pointer, _symlinked_git, _core_worktree])
-def test_r3_an_external_git_directory_gets_no_command_and_no_path(layout, tmp_path, monkeypatch, capfd):
-    """A layout whose git directory lies outside the checkout. Where the
-    identity itself declines (a redirected marker), the refusal is the
-    unresolved-identity one; either way no pin command and no path into that
-    git directory is printed, and the text leaves the pin to the user."""
-    assert_outside_repository(tmp_path)
-    root = layout(tmp_path)
-    envelope = _refusal(
-        root, tmp_path, monkeypatch, capfd,
-        errors=("FOLDER_NAME_BUCKET_REFUSED", "PROJECT_IDENTITY_UNRESOLVED"),
-    )
-    message = envelope["message"]
-    assert "printf" not in message and "pact-project-id" not in message, message
-    assert "decision" in message, message
-
-
-def test_r4_a_non_git_folder_names_project_id_and_an_origin_remote(tmp_path, monkeypatch, capfd):
-    assert_outside_repository(tmp_path)
-    root = tmp_path / "work" / B
-    (root / ".claude").mkdir(parents=True)
-    message = _refusal(root, tmp_path, monkeypatch, capfd)["message"]
-    assert "rev-parse" not in message, message
-    assert "project_id" in message and "origin" in message, message
 
 
 # ---------------------------------------------------------------------------
@@ -651,7 +539,6 @@ def _reaches(function, target: str, defs: dict, depth: int = 4) -> bool:
 
 @pytest.mark.parametrize("module, qualified", [
     ("memory_api", "PACTMemory._read_project_scopes"),
-    ("memory_api", "PACTMemory._project_id_for_write"),
     ("cli", "_project_id_rekey"),
 ])
 def test_s1_every_consumer_takes_the_one_verdict(module, qualified):
@@ -675,7 +562,7 @@ def test_s2_the_census_runs_at_most_once_per_command(tmp_path, monkeypatch, capf
     from shared.pact_context import reconstruct_session_dir
 
     assert_outside_repository(tmp_path)
-    layout = row_6(tmp_path, False)
+    layout = row_6(tmp_path, True)
     _seed(layout)
     sessions_root = Path(reconstruct_session_dir(str(layout.root), "x")).parent.parent
     listings = []
@@ -746,48 +633,36 @@ def _sessions(**counts):
     return base
 
 
-# The 2.4 table: (scope, evidence, sessions or None when the census is skipped)
-# -> (read, save, rekey_default, state, reason). Save is None for a canonical
-# scope (n/a), rekey_default is None for a folder-name scope (n/a).
+# The canonical decision table: (evidence, sessions or None when the census
+# is skipped) -> (read, rekey_default, state, reason). A folder-name id is
+# never judged, so decide_bucket takes no scope kind.
 DECISIONS = [
-    ("canonical", _evidence(contained=1), _sessions(), (True, None, True, "verified", None)),
-    ("canonical", _evidence(neutral_outside=1), _sessions(here=1), (True, None, False, "included_unverified", None)),
-    ("canonical", _evidence(contained=1, foreign=1), None, (False, None, False, "unproven", "foreign_rows")),
-    ("canonical", _evidence(contained=1), _sessions(elsewhere=1), (False, None, False, "unproven", "recorded_elsewhere")),
-    ("canonical", _evidence(foreign=1), None, (False, None, False, "excluded", "foreign_rows")),
-    # Section 10.2: elsewhere-only evidence is excluded in every scope.
-    ("canonical", _evidence(relative=1), _sessions(elsewhere=1), (False, None, False, "excluded", "recorded_elsewhere")),
-    ("canonical", _evidence(neutral_outside=1), _sessions(), (False, None, False, "unproven", "no_session")),
-    ("canonical", _evidence(vanished=1), _sessions(subfolder=1), (False, None, False, "unproven", "subfolder_launch")),
-    ("canonical", _evidence(unresolvable=1), _sessions(description_newer=1), (False, None, False, "unproven", "description_newer")),
-    ("folder_name", _evidence(neutral_outside=1), _sessions(), (True, True, None, None, None)),
-    ("folder_name", _evidence(contained=1), _sessions(here=1), (True, True, None, None, None)),
-    ("folder_name", _evidence(), _sessions(), (True, True, None, None, None)),
-    ("folder_name", _evidence(contained=1, foreign=1), None, (False, False, None, "unproven", "foreign_rows")),
-    ("folder_name", _evidence(contained=1), _sessions(elsewhere=1), (False, False, None, "unproven", "recorded_elsewhere")),
-    ("folder_name", _evidence(foreign=1), None, (False, False, None, "excluded", "foreign_rows")),
-    ("folder_name", _evidence(relative=1), _sessions(elsewhere=1), (False, False, None, "excluded", "recorded_elsewhere")),
+    (_evidence(contained=1), _sessions(), (True, True, "verified", None)),
+    (_evidence(neutral_outside=1), _sessions(here=1), (True, False, "included_unverified", None)),
+    (_evidence(contained=1, foreign=1), None, (False, False, "unproven", "foreign_rows")),
+    (_evidence(contained=1), _sessions(elsewhere=1), (False, False, "unproven", "recorded_elsewhere")),
+    (_evidence(foreign=1), None, (False, False, "excluded", "foreign_rows")),
+    # Section 10.2: elsewhere-only evidence is excluded.
+    (_evidence(relative=1), _sessions(elsewhere=1), (False, False, "excluded", "recorded_elsewhere")),
+    (_evidence(neutral_outside=1), _sessions(), (False, False, "unproven", "no_session")),
+    (_evidence(vanished=1), _sessions(subfolder=1), (False, False, "unproven", "subfolder_launch")),
+    (_evidence(unresolvable=1), _sessions(description_newer=1), (False, False, "unproven", "description_newer")),
 ]
 
 
-@pytest.mark.parametrize("scope, evidence, sessions, expected", DECISIONS)
-def test_s3_decide_bucket_follows_the_table(scope, evidence, sessions, expected):
-    verdict = memory_api.decide_bucket(scope, evidence, sessions)
-    got = (verdict.read, verdict.save, verdict.rekey_default, verdict.state, verdict.reason)
-    want = list(expected)
-    if scope == "canonical":
-        got = (got[0], None, *got[2:])  # save is n/a for a canonical scope
-    else:
-        got = (*got[:2], None, *got[3:])
-    assert got == tuple(want), (scope, evidence, sessions, verdict)
+@pytest.mark.parametrize("evidence, sessions, expected", DECISIONS)
+def test_s3_decide_bucket_follows_the_table(evidence, sessions, expected):
+    verdict = memory_api.decide_bucket(evidence, sessions)
+    got = (verdict.read, verdict.rekey_default, verdict.state, verdict.reason)
+    assert got == expected, (evidence, sessions, verdict)
 
 
 def test_s3_decide_bucket_is_pure():
     """The same inputs give the same verdict and the inputs are not changed."""
     evidence, sessions = _evidence(contained=1, foreign=1), None
     before = json.dumps(evidence, sort_keys=True)
-    first = memory_api.decide_bucket("canonical", evidence, sessions)
-    assert memory_api.decide_bucket("canonical", evidence, sessions) == first
+    first = memory_api.decide_bucket(evidence, sessions)
+    assert memory_api.decide_bucket(evidence, sessions) == first
     assert json.dumps(evidence, sort_keys=True) == before
 
 
@@ -929,18 +804,18 @@ FOLDER_KIND.update({row_a23: "folder", row_a23b: "folder", row_t1_joined: "joine
 EXCLUDED_FOREIGN = (False, "excluded", "foreign_rows", "refused")
 AMENDED_ROWS = [
     (row_a21b, None, FOLDER_OK),
-    (row_a23, None, EXCLUDED_FOREIGN),
-    (row_a23b, None, EXCLUDED_FOREIGN),
-    (row_a23c, None, EXCLUDED_FOREIGN),
+    (row_a23, None, FOLDER_OK),
+    (row_a23b, None, FOLDER_OK),
+    (row_a23c, None, FOLDER_OK),
     (row_a24, VERIFIED, FOLDER_OK),
     (row_a25, VERIFIED, FOLDER_OK),
     (row_a25b, NO_SESSION, FOLDER_OK),
     (row_a26, NO_SESSION, FOLDER_OK),
-    (row_a27, VERIFIED, EXCLUDED_FOREIGN),
-    (row_a28, None, (False, "excluded", "recorded_elsewhere", "refused")),
+    (row_a27, VERIFIED, FOLDER_OK),
+    (row_a28, None, FOLDER_OK),
     # A29 (a dotfiles repository not named B enclosing the root) is row 7.
     (row_a30, VERIFIED, FOLDER_OK),
-    (row_t1_joined, EXCLUDED_FOREIGN, EXCLUDED_FOREIGN),
+    (row_t1_joined, EXCLUDED_FOREIGN, FOLDER_OK),
 ]
 
 
@@ -1040,10 +915,9 @@ def _g1_supplied(tmp_path, outside):
 
 @pytest.mark.parametrize("source", [_g1_home, _g1_setting, _g1_supplied], ids=["home-landing", "user-setting", "supplied"])
 def test_g1_an_ungated_source_is_never_refused(source, tmp_path, tmp_path_factory, monkeypatch, capfd):
-    """Each source the user chose keeps the pre-change behaviour even with
-    foreign evidence present: no legacy_scope record, and no
-    FOLDER_NAME_BUCKET_REFUSED. (A cwd-marker folder with the same evidence IS
-    refused: row A23.)"""
+    """Each folder-name source keeps the pre-change behaviour even with
+    foreign evidence present: no legacy_scope record, and the save succeeds.
+    (A cwd-marker folder behaves the same: the test after this one.)"""
     assert_outside_repository(tmp_path)
     # The rival lies outside the test root, which the cwd walk can land on.
     cwd, bucket, files, payload = source(tmp_path, tmp_path_factory.mktemp("outside"))
@@ -1060,9 +934,10 @@ def test_g1_an_ungated_source_is_never_refused(source, tmp_path, tmp_path_factor
     assert code == 0, saved
 
 
-def test_g1_control_the_same_evidence_refuses_a_gated_folder(tmp_path, tmp_path_factory, monkeypatch, capfd):
-    """Control for G1: with the user setting gone, the same folder and the same
-    rival are judged, and the save is refused."""
+def test_g1_a_cwd_marker_folder_with_foreign_evidence_still_saves(tmp_path, tmp_path_factory, monkeypatch, capfd):
+    """No folder-name id is judged (user ruling): a non-git cwd-marker folder
+    with a rival of the same name elsewhere still reads and saves its bucket,
+    as before this change, and shows no legacy_scope record."""
     assert_outside_repository(tmp_path)
     outside = tmp_path_factory.mktemp("outside")
     cwd = _marked(tmp_path / "work" / "notes")
@@ -1071,44 +946,20 @@ def test_g1_control_the_same_evidence_refuses_a_gated_folder(tmp_path, tmp_path_
     _seed(layout)
     monkeypatch.chdir(cwd)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-    code, saved = _cli(["save", json.dumps({"context": "new"}), "--db-path", str(layout.store)], capfd)
-    assert code == 1 and saved["error"] == "FOLDER_NAME_BUCKET_REFUSED", saved
-
-
-def test_c1_a_store_that_moves_during_the_read_is_decided_again(tmp_path, monkeypatch):
-    """Section 10.6: when the store's stamp moves during the guarded read, the
-    locked repeat decides again (a second census) and its answer stands.
-    Here the first census says this repository wrote the bucket and the
-    second says another folder did, so the write guard must refuse."""
-    assert_outside_repository(tmp_path)
-    layout = row_6(tmp_path, False)
-    _seed(layout)
-    monkeypatch.chdir(layout.root)
-    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-    calls = []
-    real = memory_api._legacy_session_census
-
-    def census(*args, **kwargs):
-        counts = real(*args, **kwargs)
-        calls.append(dict(counts))
-        if len(calls) > 1:
-            counts = {**counts, "here": 0, "elsewhere": counts["here"] + counts["elsewhere"]}
-        return counts
-
-    stamps = iter(range(10_000))
-    monkeypatch.setattr(memory_api, "_legacy_session_census", census)
-    monkeypatch.setattr(memory_api, "_store_stamp", lambda store: (next(stamps), 0, 0, False))
-    _fresh()
-    with memory_api.detection_pass():
-        memory = memory_api.PACTMemory(session_id="s", db_path=layout.store)
-        with pytest.raises(memory_api.FolderNameBucketRefusedError):
-            memory._project_id_for_write()
-    assert len(calls) == 2, calls
+    store = ["--db-path", str(layout.store)]
+    code, listed = _cli(["list", *store], capfd)
+    assert code == 0 and any(row["id"] == MEMORY_ID for row in listed["result"]), listed
+    code, shown = _cli(["project-id", "show", *store], capfd)
+    assert code == 0 and shown["result"].get("legacy_scope") is None, shown
+    code, saved = _cli(["save", json.dumps({"context": "new"}), *store], capfd)
+    assert code == 0, saved
 
 
 def test_c1_an_unmoved_store_runs_one_census_per_save(tmp_path, monkeypatch, capfd):
+    """A save with an unmoved store decides the canonical legacy candidate
+    once (the moved-store re-decision is pinned in test_legacy_gate_remediation)."""
     assert_outside_repository(tmp_path)
-    layout = row_6(tmp_path, False)
+    layout = row_6(tmp_path, True)
     _seed(layout)
     monkeypatch.chdir(layout.root)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)

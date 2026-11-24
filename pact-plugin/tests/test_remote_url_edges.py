@@ -1,9 +1,10 @@
 """
 Location: pact-plugin/tests/test_remote_url_edges.py
 Summary: Remote url spellings that must give the same id as their plain form:
-a percent-encoded `.git` suffix and an Azure DevOps collection name in any
-case; and a config text whose `[include]` line continues a value, which git
-reads as part of that value.
+a percent-encoded `.git` suffix, an Azure DevOps collection name in any case
+and an empty port; a host with an empty label, which declines; and a config
+text whose `[include]` line continues a value, which git reads as part of
+that value.
 Used by: the test suite; no production code imports it.
 """
 
@@ -171,3 +172,37 @@ def test_an_ipv4_mapped_literal_declines(url):
 def test_an_ipv4_mapped_id_is_not_canonical(value):
     """Neither spelling, including the compressed one `ipaddress` prints."""
     assert not pi.is_canonical(value)
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("ssh://git@example.com:/o/r.git", "example.com/o/r"),
+        ("https://example.com:/o/r", "example.com/o/r"),
+        ("ssh://git@[2001:db8::1]:/o/r", "[2001:db8::1]/o/r"),
+    ],
+)
+def test_an_empty_port_is_the_default_port(url, expected):
+    """git passes no port for `ssh://h:/o/r`, the same as `ssh://h/o/r`, so
+    an empty port names the same server and the same id."""
+    assert pi.normalize_remote_url(url) == expected
+    assert pi.classify_remote_origin(url)[0] == pi.OUTCOME_CANONICAL
+
+
+@pytest.mark.parametrize(
+    "url", ["https://a..b/o/r", "ssh://git@a..b/o/r", "git@a..b:o/r", "https://a.b..c:8443/o/r"]
+)
+def test_a_host_with_an_empty_label_declines(url):
+    """The host check refuses it on its own, before the id grammar does."""
+    assert pi._valid_host(url.split("//")[-1].split("@")[-1].split(":")[0].split("/")[0]) is False
+    assert pi.normalize_remote_url(url) is None
+    assert pi.classify_remote_origin(url)[0] == pi.OUTCOME_DECLINE
+
+
+@pytest.mark.parametrize("value", ["a..b/o/r", "a.b..c:8443/o/r", "a...b/o/r"])
+def test_an_id_with_an_empty_host_label_is_not_canonical(value):
+    assert not pi.is_canonical(value)
+
+
+@pytest.mark.parametrize("value", ["a.b/o/r", "a-.b/o/r", "a.b.c:8443/o/r", "a/o/r"])
+def test_control_a_host_with_no_empty_label_is_canonical(value):
+    assert pi.is_canonical(value)

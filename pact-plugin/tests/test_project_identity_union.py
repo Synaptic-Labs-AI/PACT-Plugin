@@ -1359,7 +1359,7 @@ class TestReviewDbGateWorktreeRoots:
 
         evidence = bucket_evidence(conn, bucket, roots)
         sessions = None if evidence["foreign_rows"] else {}
-        return memory_api.decide_bucket("canonical", evidence, sessions).state, evidence
+        return memory_api.decide_bucket(evidence, sessions).state, evidence
 
     def test_an_unreadable_path_is_neutral_and_never_raises(self, union_env):
         """A `files.path` with an embedded NUL makes `os.path.realpath` raise

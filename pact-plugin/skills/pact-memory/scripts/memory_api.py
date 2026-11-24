@@ -21,11 +21,9 @@ from __future__ import annotations
 
 import contextvars
 import functools
-import hashlib
 import json
 import logging
 import os
-import re
 import shlex
 import stat
 import struct
@@ -857,7 +855,6 @@ class BucketVerdict(NamedTuple):
     """`decide_bucket`'s answer; every consumer reads only this."""
 
     read: bool
-    save: bool
     rekey_default: bool
     state: Optional[str]
     reason: Optional[str]
@@ -866,30 +863,29 @@ class BucketVerdict(NamedTuple):
 
 
 def decide_bucket(
-    scope_kind: str, evidence: Dict[str, int], sessions: Optional[Dict[str, int]]
+    evidence: Dict[str, int], sessions: Optional[Dict[str, int]]
 ) -> BucketVerdict:
-    """THE ONE OWNERSHIP RULE: what every consumer does with a bucket.
+    """THE ONE OWNERSHIP RULE: what every consumer does with a legacy bucket.
 
-    `scope_kind` is `"canonical"` (the bucket is a canonical id's legacy
-    candidate) or `"folder_name"` (the bucket is the session's own id, no
-    canonical id having resolved). `evidence` is `bucket_evidence`'s counts;
-    `sessions` the session census, or None when it was skipped because file
-    rows already showed another owner.
+    The bucket is a LEGACY CANDIDATE: the pre-change name of a session whose
+    own id differs (a canonical id, or a folder-name id whose old resolver
+    named it otherwise). A folder-name id's OWN bucket is never judged: it is
+    read and saved into as before this change. `evidence` is
+    `bucket_evidence`'s counts; `sessions` the session census, or None when
+    it was skipped because file rows already showed another owner.
 
     FOREIGN = `foreign_rows` or `elsewhere`; OWN = `contained_rows` or
-    `here`. A canonical scope reads the bucket only with OWN and no FOREIGN;
-    a folder-name scope reads (and saves into) its own bucket unless FOREIGN.
-    A bucket that is not read is `excluded` when the foreign evidence stands
+    `here`. The bucket is read only with OWN and no FOREIGN. A bucket that
+    is not read is `excluded` when the foreign evidence stands
     alone and `unproven` when this repository's evidence is there too; with
     foreign file rows the census is skipped and `contained_rows` alone
     decides that label. `excluded` always has foreign evidence: neutral
     rows (vanished, unresolvable, relative, outside any rival) never exclude.
 
-    Returns a `BucketVerdict` (read, save, rekey_default, state, reason,
-    counts, sessions_counted): `state` is
-    `verified`, `included_unverified`, `unproven`, `excluded`, or None for
-    a folder-name bucket that is read; `reason` keys `_UNPROVEN_CAUSES`.
-    Pure: no I/O.
+    Returns a `BucketVerdict` (read, rekey_default, state, reason, counts,
+    sessions_counted): `state` is `verified`, `included_unverified`,
+    `unproven` or `excluded`; `reason` keys `_UNPROVEN_CAUSES`. Pure: no
+    I/O.
     """
     counts: Dict[str, Any] = {
         **dict.fromkeys(_SESSION_CENSUS_KEYS, 0),
@@ -903,8 +899,6 @@ def decide_bucket(
         own = contained or counts["here"]
         state = "unproven" if own else "excluded"
         reason = "recorded_elsewhere"
-    elif scope_kind == "folder_name":
-        state, reason = None, None
     elif contained:
         state, reason = "verified", None
     elif counts["here"]:
@@ -916,17 +910,16 @@ def decide_bucket(
             else "description_newer" if counts["description_newer"]
             else "no_session"
         )
-    read = state in (None, "verified", "included_unverified")
+    read = state in ("verified", "included_unverified")
     # A DEFAULTED REKEY MOVES THE WHOLE BUCKET, so it needs file rows that
     # place it here (`verified`). A bucket read on session evidence alone
     # (`included_unverified`) can carry many rows no session places, so it
     # moves only with an explicit --to the user has read.
-    rekey_default = read and scope_kind == "canonical" and state == "verified"
-    # Positional, in field order: read, save, rekey_default, state, reason,
-    # counts, sessions_counted.
+    rekey_default = state == "verified"
+    # Positional, in field order: read, rekey_default, state, reason, counts,
+    # sessions_counted.
     return BucketVerdict(
         read,
-        read if scope_kind == "folder_name" else True,
         rekey_default,
         state,
         reason,
@@ -1762,7 +1755,10 @@ def _stable_read_only(store: str, read: Callable[[], Any]) -> Any:
                 return answer
         # THE REPEAT RE-DECIDES: a verdict cached from the moved read is
         # dropped, so the locked repeat counts the bucket again.
-        for key in [key for key in _LEGACY_SCOPE_CACHE if key[:2] == ("verdict", store)]:
+        for key in [
+            key for key in _LEGACY_SCOPE_CACHE
+            if key[:2] == ("verdict", store) or key[:1] == (store,)
+        ]:
             _LEGACY_SCOPE_CACHE.pop(key, None)
         locked = _LOCKED_READS_ONLY.set(True)
         try:
@@ -2737,31 +2733,6 @@ class LegacyBucketWriteRefusedError(ValueError):
     (`PACTMemory._refuse_legacy_write`). Caller input the session may not
     write, so a ValueError, but not a field-validation error: the CLI reports
     it as `LEGACY_BUCKET_WRITE_REFUSED`, exit 2, with no field list."""
-
-
-class FolderNameBucketRefusedError(ProjectScopeDisagreementError):
-    """A SAVE was refused because the folder-name project id names a bucket
-    whose file rows place it in another checkout
-    (`PACTMemory._folder_name_bucket_verdict`). A refusal, not bad input: the
-    CLI reports it as `FOLDER_NAME_BUCKET_REFUSED` with exit 1."""
-
-
-def local_pin_id(repo_root: Any) -> str:
-    """A canonical id for a repository with no usable remote:
-    `local.invalid/<digest>/<folder>`. The host is under the `.invalid`
-    top-level domain (RFC 2606), which no reachable remote can use, so the
-    pin never names a bucket a real remote also derives.
-
-    The digest is the first 12 hex digits of the SHA-256 of the resolved root
-    path, so two folders of the same name get different ids; the folder name
-    keeps it readable, with every character the id grammar does not allow
-    turned into `-`. The user writes it to the pin file; nothing writes it
-    for them.
-    """
-    root = os.path.realpath(str(repo_root)) if repo_root is not None else ""
-    name = re.sub(r"[^A-Za-z0-9._~-]+", "-", os.path.basename(root)).strip("-.")[:100]
-    digest = hashlib.sha256(os.fsencode(root)).hexdigest()[:12]
-    return f"local.invalid/{digest}/{name or 'repo'}"
 
 
 class ProjectIdentityUnresolvedError(ProjectScopeDisagreementError):
@@ -3811,7 +3782,7 @@ class PACTMemory:
                 ensure_initialized(connection)
 
     def _bucket_verdict(
-        self, connection: Any, store: str, bucket: str, scope_kind: str
+        self, connection: Any, store: str, bucket: str
     ) -> BucketVerdict:
         """`decide_bucket`'s verdict for `bucket`, from this repository's gate
         roots, computed ONCE PER COMMAND.
@@ -3832,7 +3803,7 @@ class PACTMemory:
         # which moves the stat with no row changed, and would run the census
         # twice. In-process writes clear this cache; a change another process
         # makes mid-command is seen by the next command.
-        key = ("verdict", store, str(repo_root), scope_kind, bucket)
+        key = ("verdict", store, str(repo_root), bucket)
         in_pass = project_identity.DETECTION_ANSWERS.get() is not None
         cached = _LEGACY_SCOPE_CACHE.get(key) if in_pass else None
         if cached is not None:
@@ -3847,64 +3818,23 @@ class PACTMemory:
             if evidence["foreign_rows"]
             else _legacy_session_census(connection, bucket, roots, common)
         )
-        verdict = decide_bucket(scope_kind, evidence, sessions)
+        verdict = decide_bucket(evidence, sessions)
         if in_pass:
             _LEGACY_SCOPE_CACHE[key] = verdict
         return verdict
 
     def _folder_name_gated(self) -> bool:
-        """Whether this folder-name id is judged by the ownership rule.
-
-        Every folder-name id is, a non-git cwd-marker folder included (its
-        name is whoever made the folder's choice), EXCEPT the sources the user
-        chose and no repository controls: a supplied id, the user-scope
-        `project_id` setting, and a HOME landing. Those keep sharing their
-        bucket as before the change.
+        """Whether this folder-name id's LEGACY CANDIDATE (a pre-change name
+        that differs from it, as for a `--separate-git-dir` checkout) is
+        judged and may be moved into it. Not for the sources the user chose and
+        no repository controls: a supplied id, the user-scope `project_id`
+        setting, and a HOME landing. A folder-name id's own bucket is never
+        judged.
         """
         return (
             self._project_id_source not in ("supplied", "user setting")
             and not getattr(self, "_project_home_landing", False)
         )
-
-    def _folder_name_bucket_verdict(
-        self, scope: str, conn: Any = None, disclose: bool = True
-    ) -> Optional[BucketVerdict]:
-        """The verdict for a DETECTED folder-name id's own bucket, or None when
-        it is not judged: an ungated source (`_folder_name_gated`), no
-        identity root, an absent store or a store with no schema. With `disclose`, a verdict that does not read
-        is disclosed in `_legacy_scope_state` and by one warning; the save
-        guard passes False because its refusal says the same."""
-        repo_root = self._project_identity_root
-        if repo_root is None or not self._folder_name_gated():
-            return None
-        store = str(self._db_path or resolve_db_path())
-        if _store_stat_key(store) is None:
-            return None
-        from .database import count_project_memories
-
-        with _legacy_probe_context(store, conn) as (connection, _degraded):
-            if connection is None:
-                return None
-            verdict = self._bucket_verdict(connection, store, scope, "folder_name")
-            if verdict.read or not disclose:
-                return verdict
-            memory_count = count_project_memories(connection, scope)
-            file_paths = count_project_file_paths(connection, scope)
-        self._legacy_scope_state = _legacy_scope_record(
-            candidate=scope,
-            memory_count=memory_count,
-            file_paths=file_paths,
-            excluded=verdict.state == "excluded",
-            unproven=verdict.state == "unproven",
-            unproven_reason=verdict.reason,
-            sessions=_census_part(verdict),
-            detail=_evidence_part(verdict),
-        )
-        key = (store, scope, "folder_name")
-        if key not in _EXCLUSION_WARNED:
-            _EXCLUSION_WARNED.add(key)
-            logger.warning("%s", self._folder_name_refusal(verdict, refused="read"))
-        return verdict
 
     def _legacy_gate_roots(self, repo_root: Any) -> tuple:
         """`(gate roots, gate common dir)` for the plausibility gate and the
@@ -3972,8 +3902,8 @@ class PACTMemory:
         None, because None is the library's whole-store value and a read with
         no identity must not reach a query as an unscoped filter. A
         NON-canonical id (a supplied value, or a folder name) is a
-        one-element scope, or none when its own bucket's verdict refuses it
-        (`_folder_name_bucket_verdict`), EXCEPT a gated folder-name id whose
+        one-element scope, never judged: a folder-name id reads its own bucket
+        as before this change, EXCEPT that a folder-name id whose
         pre-change name differs (a `--separate-git-dir` checkout): its legacy
         candidate is judged and disclosed exactly as a canonical id's is.
 
@@ -4036,13 +3966,12 @@ class PACTMemory:
         if scope is None:
             return ()
         if not is_canonical(scope):
-            verdict = self._folder_name_bucket_verdict(scope, conn)
-            if verdict is not None and not verdict.read:
-                return ()
+            # A FOLDER-NAME ID'S OWN BUCKET IS NOT JUDGED: it is read and saved
+            # into as before this change, shared with any same-name folder.
             legacy = self._legacy_project_basename
             if not legacy or legacy == scope or not self._folder_name_gated():
                 return (scope,)
-            # A GATED FOLDER-NAME ID WITH A DIFFERENT PRE-CHANGE NAME (a
+            # A FOLDER-NAME ID WITH A DIFFERENT PRE-CHANGE NAME (a
             # `--separate-git-dir` checkout: the old resolver named it after
             # the external git dir's parent) has a legacy candidate like a
             # canonical id does. It falls through to the same candidate
@@ -4189,7 +4118,7 @@ class PACTMemory:
                 # it appends the cwd repository's checkouts to the declared
                 # one's gate, and it refuses with a write-oriented error that
                 # must never escape a read.
-                verdict = self._bucket_verdict(connection, store, candidate, "canonical")
+                verdict = self._bucket_verdict(connection, store, candidate)
                 self._legacy_verdict = verdict
                 included = verdict.read
                 state_name = verdict.state
@@ -4279,9 +4208,7 @@ class PACTMemory:
         )
 
     def _project_id_for_write(self) -> Optional[str]:
-        """The project id a WRITE may bind; ValueError for an unusable one,
-        FolderNameBucketRefusedError for a folder-name id whose bucket's
-        verdict refuses the save (`_folder_name_bucket_verdict`).
+        """The project id a WRITE may bind; ValueError for an unusable one.
 
         This is the write ingress's remedy channel: a detected value that no
         utf-8 TEXT column can hold refuses HERE, naming the detection source
@@ -4297,171 +4224,7 @@ class PACTMemory:
                 "explicitly, or fix the project directory name or session "
                 "record it was derived from. Nothing was written."
             )
-        if self._project_id is not None and not is_canonical(self._project_id):
-            verdict = _stable_read_only(
-                str(self._db_path or resolve_db_path()),
-                lambda: self._folder_name_bucket_verdict(self._project_id, disclose=False),
-            )
-            if verdict is not None and not verdict.save:
-                raise FolderNameBucketRefusedError(self._folder_name_refusal(verdict))
         return self._project_id
-
-    def _folder_name_refusal(self, verdict: BucketVerdict, refused: str = "save") -> str:
-        """The folder-name refusal's text: what the evidence shows, then the
-        remedy for this checkout's layout (`_local_pin_remedy`). `refused` is
-        `"save"` for the save refusal and `"read"` for the read warning."""
-        name = self._project_id
-        # A gated non-git folder is a folder, not a repository: the same test
-        # `_local_pin_remedy` uses to say "This folder is not a git repository".
-        owner = (
-            "this repository"
-            if os.path.lexists(os.path.join(str(self._project_identity_root), ".git"))
-            else "this folder"
-        )
-        consequence = (
-            f"so a save here would file {owner}'s memory with rows {owner} "
-            "does not own. Nothing was written."
-            if refused == "save"
-            else "so that bucket is NOT read here."
-        )
-        return (
-            f"{owner}'s project id is its folder name {name!r}, and "
-            f"{_unproven_cause(verdict.reason, verdict.counts, name)}, "
-            f"{consequence} {self._local_pin_remedy()}"
-        )
-
-    def _local_pin_remedy(self) -> str:
-        """The remedy for a refused folder-name id, by checkout layout.
-
-        A RUNNABLE PIN COMMAND ONLY INTO THIS CHECKOUT'S OWN GIT DIR: the
-        identity root's `.git` is a directory on lstat (a `.git` symlink does
-        not qualify) and git's common dir is that directory. A linked
-        worktree's identity root is its main checkout, so it qualifies the same
-        way. A `.git` that is a file or a symlink, or a common dir anywhere
-        else, gets no command and no path: writing there is the user's
-        decision. A folder that is no git repository gets neither pin nor git
-        advice.
-
-        A CLONE OF A LOCAL-ONLY REPOSITORY is also offered the SHARED pin
-        (`_shared_pin`), after the isolation pin and as text only: every clone
-        of that origin is offered the same id, and writing it is the user's
-        choice.
-        """
-        root = self._project_identity_root
-        pin = local_pin_id(root)
-        git_path = os.path.join(str(root), ".git")
-        try:
-            own_dir = stat.S_ISDIR(os.lstat(git_path).st_mode)
-        except OSError:
-            return (
-                "This folder is not a git repository: pass project_id, or make "
-                "it a repository with an origin remote."
-            )
-        common = getattr(self, "_project_common_dir", None)
-        try:
-            same = common is not None and os.path.realpath(str(common)) == os.path.realpath(git_path)
-        except (OSError, ValueError):
-            same = False
-        shared = self._shared_pin()
-        if shared is not None and shared[1] == pin:
-            shared = None
-        pin_path = os.path.join(os.path.realpath(git_path), "pact-project-id")
-        # A COMMAND HOLDING A CONTROL OR FORMAT CHARACTER IS NOT PRINTED, as in
-        # `_printed_rekey_remedy`: in a log line or a terminal it would forge
-        # a line or reorder the text around it.
-        printable = not any(
-            unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp")
-            for char in pin + pin_path
-        )
-        if own_dir and same and not printable:
-            isolation = (
-                ("To keep this checkout separate: this" if shared is not None else "This")
-                + " checkout's path holds a control or format character, so no "
-                "command is printed; the local pin id for this checkout is "
-                f"{pin}, for the pact-project-id file in its git directory."
-            )
-            tail = "Or add an origin remote, or pass project_id."
-        elif own_dir and same:
-            command = f"printf '%s\\n' {shlex.quote(pin)} > {shlex.quote(pin_path)}"
-            isolation = (
-                f"To keep this checkout separate, write its local pin: {command} ."
-                if shared is not None
-                else f"Give this repository its own id with a local pin: {command} ."
-            )
-            tail = (
-                "Or add an origin remote, or pass project_id. Earlier memories "
-                "in that bucket stay there; `project-id show` lists them."
-            )
-        else:
-            isolation = (
-                ("To keep this checkout separate: this" if shared is not None else "This")
-                + " checkout's git directory is outside it, so writing a pin "
-                "there is your decision after confirming that directory is yours; "
-                f"the local pin id for this checkout is {pin}."
-            )
-            tail = "Or add an origin remote, or pass project_id."
-        if shared is None:
-            return f"{isolation} {tail}"
-        origin_path, shared_id = shared
-        if any(
-            unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp") for char in origin_path
-        ):
-            named = "the repository this checkout's origin names"
-        else:
-            named = f"the repository at {shlex.quote(origin_path)} (this checkout's origin)"
-        return f"{isolation} To share memory with {named}, write {shared_id} instead. {tail}"
-
-    def _shared_pin(self) -> Optional[Tuple[str, str]]:
-        """`(origin path, shared pin)` for a clone of a LOCAL-ONLY repository,
-        or None.
-
-        The origin is read with `read_origin` (the repository's own config,
-        includes skipped), never `git remote get-url`, whose `insteadOf`
-        rewrites are machine-local. It must classify as no portable origin and
-        be a local path or a `file://` URL with no host; a relative path
-        resolves against the identity root, as git resolves it. The path must
-        be a git repository by file checks alone (`.git` present, or a
-        regular `HEAD` beside an `objects` directory); no git runs inside
-        it, and its own origin is never followed (one hop). The pin is
-        `local_pin_id` of that path. Never raises.
-        """
-        common = getattr(self, "_project_common_dir", None)
-        root = self._project_identity_root
-        if common is None or root is None:
-            return None
-        try:
-            origin = project_identity.read_origin(Path(common))
-            if origin.state != "present" or not origin.value or not origin.value.strip():
-                return None
-            value = origin.value
-            outcome, _ = project_identity.classify_remote_origin(value)
-            if outcome != project_identity.OUTCOME_NO_PORTABLE_ORIGIN:
-                return None
-            if value.lower().startswith("file://"):
-                from urllib.parse import unquote, urlsplit
-
-                parts = urlsplit(value)
-                if parts.netloc not in ("", "localhost"):
-                    return None
-                path = unquote(parts.path)
-            else:
-                # `classify_remote_origin` already sent every network-shaped
-                # value, scp-like `host:path` included, elsewhere.
-                path = value
-            if not os.path.isabs(path):
-                path = os.path.join(str(root), path)
-            origin_path = os.path.realpath(path)
-            head = os.path.join(origin_path, "HEAD")
-            is_repository = os.path.lexists(os.path.join(origin_path, ".git")) or (
-                os.path.lexists(head)
-                and stat.S_ISREG(os.lstat(head).st_mode)
-                and os.path.isdir(os.path.join(origin_path, "objects"))
-            )
-            if not is_repository:
-                return None
-            return origin_path, local_pin_id(origin_path)
-        except (OSError, ValueError, AttributeError):
-            return None
 
     def _session_id_for_envelope(self) -> Optional[str]:
         """The session id a status ENVELOPE reports; the FINAL value.
@@ -5059,12 +4822,7 @@ class PACTMemory:
             # rather than letting the value die at the TEXT bind. A supplied
             # payload project is a warrant, was validated above, and never
             # consults the adopted value.
-            try:
-                project_for_write = self._project_id_for_write()
-            except FolderNameBucketRefusedError:
-                # A refusal like its siblings below: the status says so.
-                self._last_sync_status = SyncResult.REFUSED
-                raise
+            project_for_write = self._project_id_for_write()
             if project_for_write is None:
                 self._last_sync_status = SyncResult.REFUSED
                 raise ProjectIdentityUnresolvedError(

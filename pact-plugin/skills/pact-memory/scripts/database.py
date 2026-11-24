@@ -1183,7 +1183,8 @@ def _unusable_identifier(value: object) -> bool:
 
 CANONICAL_ID_MAX_LENGTH = 255
 
-# Host: lowercase, alnum at BOTH ends, dots and hyphens only inside. The
+# Host: lowercase, alnum at BOTH ends, dots and hyphens only inside, and no
+# two dots together (an empty label names no host). The
 # optional port sits in the HOST position and nowhere else; a colon anywhere
 # else is refused by the segment class. `[1-9]` rejects a leading zero (and
 # zero itself); the 65535 ceiling is checked numerically because a regex
@@ -1199,7 +1200,7 @@ CANONICAL_ID_MAX_LENGTH = 255
 # A host is a DNS name, or an IPv6 literal in brackets in its one compressed
 # spelling (`is_canonical_id` checks the spelling).
 CANONICAL_ID_RE = re.compile(
-    r"(?:[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?|\[(?P<ipv6>[0-9a-f:.]+)\])"
+    r"(?:[a-z0-9](?:(?:[a-z0-9-]|\.(?!\.))*[a-z0-9])?|\[(?P<ipv6>[0-9a-f:.]+)\])"
     r"(?::(?P<port>[1-9][0-9]{0,4}))?"
     r"(?:/(?:[A-Za-z0-9._~!$&'()*+,;=-]|%[0-9A-F]{2})+)+"
 )
@@ -1680,8 +1681,9 @@ def _foreign_kind(
     evidence of another owner, else None.
 
     (a) Its nearest checkout is not nested inside a gate root, and that
-    checkout's pre-change name is the bucket's or cannot be read: a rival
-    checkout. Under folder-name keying a checkout with another name could
+    checkout's pre-change name or its folder-name id (its own folder's name,
+    which differs for a `--separate-git-dir` checkout) is the bucket's, or
+    its name cannot be read: a rival checkout. Under folder-name keying a checkout with another name could
     only have written another bucket, so a row in it is a cross-reference,
     whether the checkout lies elsewhere or around a root (a `$HOME` dotfiles
     repository). One nested inside a root is not a rival.
@@ -1695,7 +1697,7 @@ def _foreign_kind(
     nearest = _nearest_checkout(resolved, walk.checkouts)
     if nearest is not None and not any(_within(nearest, root) for root in roots):
         name = pre_change_name(nearest, walk.names)
-        if name is UNKNOWN_NAME or name == bucket:
+        if name is UNKNOWN_NAME or bucket in (name, os.path.basename(nearest)):
             return "checkout"
     directory = os.path.dirname(resolved)
     while True:

@@ -59,7 +59,6 @@ from scripts.database import (
     escape_for_envelope,
 )
 from scripts.memory_api import (
-    FolderNameBucketRefusedError,
     LegacyBucketWriteRefusedError,
     PACTMemory,
     ProjectIdentityUnresolvedError,
@@ -605,9 +604,6 @@ def cmd_save(args, db_path=None):
         # THE SAME RENDERER as the disagreement arm below: one escaping
         # discipline for every rendered refusal message.
         _error("PROJECT_IDENTITY_UNRESOLVED", _scope_disagreement_message(exc))
-    except FolderNameBucketRefusedError as exc:
-        # A refusal, exit 1: the caller's input was fine.
-        _error("FOLDER_NAME_BUCKET_REFUSED", _scope_disagreement_message(exc))
     except LegacyBucketWriteRefusedError as exc:
         # The payload names a folder-name bucket this session may not write:
         # caller input, exit 2, but no field list and no field-validation note.
@@ -1123,10 +1119,9 @@ def _own_folder_name_target(memory, from_id: str, to_id: str) -> bool:
 
     A gated folder-name id whose pre-change name differs (a
     `--separate-git-dir` checkout without a portable origin) has no canonical
-    id to move its old bucket into, so its own id is the target, provided its
-    bucket's verdict allows a save there (`_project_id_for_write` raises
-    otherwise). Any other folder-name target is the misfile this command
-    exists to prevent.
+    id to move its old bucket into, so its own id is the target, provided it
+    is a usable id (`_project_id_for_write` raises otherwise). Any other
+    folder-name target is the misfile this command exists to prevent.
     """
     if (
         to_id != memory.project_id
@@ -1241,9 +1236,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             else "unverified"
         )
     if target_defaulted:
-        if not to_id or not (
-            is_canonical(to_id) or _own_folder_name_target(memory, from_id, to_id)
-        ):
+        if not to_id or not is_canonical(to_id):
             # No canonical identity resolves, so there is no defensible target:
             # a detected BASENAME is exactly the bucket the move must leave.
             # A PIN IS OFFERED ONLY WHERE ONE CAN WORK: an override file the

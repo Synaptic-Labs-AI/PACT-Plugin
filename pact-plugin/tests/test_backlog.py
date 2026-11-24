@@ -6601,7 +6601,7 @@ def test_an_unset_or_non_directory_project_dir_still_refuses(tmp_path, monkeypat
             return None
 
         @staticmethod
-        def main_repo_root(start=None, common=None):
+        def main_repo_root(start=None, common=None, toplevel=None, listing=None):
             return None
 
         # The session-record channel, inert: under pytest the real discovery
@@ -6695,7 +6695,7 @@ def test_a_directory_inside_a_repository_git_cannot_read_still_refuses(tmp_path,
             return None
 
         @staticmethod
-        def main_repo_root(start=None, common=None):
+        def main_repo_root(start=None, common=None, toplevel=None, listing=None):
             return None
 
         # The session-record channel, inert: under pytest the real discovery

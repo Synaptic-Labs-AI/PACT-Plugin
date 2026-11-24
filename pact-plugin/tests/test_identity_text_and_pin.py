@@ -50,20 +50,6 @@ class TestOneGitSuffixPerRemote:
         assert pi.normalize_remote_url(url) == "github.com/o/foo"
 
 
-class TestTheLocalPin:
-    def test_the_pin_host_is_reserved(self, tmp_path):
-        pin = memory_api.local_pin_id(tmp_path / "my repo")
-        host, digest, name = pin.split("/")
-        assert host == "local.invalid"
-        assert memory_api.is_canonical(pin), pin
-        assert name == "my-repo"
-
-    def test_no_scp_remote_spelling_the_pin_names_it(self, tmp_path):
-        pin = memory_api.local_pin_id(tmp_path / "x")
-        _host, digest, name = pin.split("/")
-        assert pi.normalize_remote_url(f"git@local:{digest}/{name}") != pin
-
-
 class TestNoRemoteDerivesAnInvalidHost:
     @pytest.mark.parametrize(
         "url",
@@ -82,5 +68,6 @@ class TestNoRemoteDerivesAnInvalidHost:
     def test_control_a_host_merely_spelled_like_it_is_kept(self, url):
         assert pi.normalize_remote_url(url) is not None
 
-    def test_control_a_local_pin_is_still_canonical(self, tmp_path):
-        assert pi.is_canonical(memory_api.local_pin_id(tmp_path / "x"))
+    def test_control_a_local_pin_is_still_canonical(self):
+        # A user-written pin in the reserved namespace stays a valid id.
+        assert pi.is_canonical("local.invalid/0123456789ab/x")

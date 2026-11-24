@@ -183,7 +183,8 @@ class RootIdentity(NamedTuple):
 
 # The `detail` for a `.git` marker refused by its target's shape
 # (`_redirect_target_refusal`): a directory named `.git`, or a submodule's
-# git dir whose `core.worktree` is not the marker's directory or is unset.
+# git dir whose `core.worktree` is not the marker's directory, or is unset
+# while git, asked there, does not name the marker's directory its top level.
 FOREIGN_GIT_DIR_DETAIL = (
     "its `.git` names another directory called `.git`, or a submodule's git "
     "directory that does not record it as that submodule's working tree"
@@ -557,11 +558,11 @@ def is_canonical(value: object) -> bool:
 def _valid_host(host: str) -> bool:
     """Whether a lowercased host is well formed.
 
-    Alphanumeric at both ends, and only `[a-z0-9.-]` between: a trailing dot,
-    a leading hyphen and an underscore all name something git would not
-    contact the same way.
+    Alphanumeric at both ends, and only `[a-z0-9.-]` between, with no empty
+    label (`a..b`): a trailing dot, a leading hyphen and an underscore all
+    name something git would not contact the same way.
     """
-    if not host or not host[0].isalnum() or not host[-1].isalnum():
+    if not host or not host[0].isalnum() or not host[-1].isalnum() or ".." in host:
         return False
     return all(char in _HOST_CHARS for char in host)
 
@@ -948,11 +949,13 @@ def normalize_remote_url(url: object) -> Optional[str]:
             if rest and not rest.startswith(":"):
                 return None
             port = rest[1:]
-            if rest and not _valid_port(port):
+            if port and not _valid_port(port):
                 return None
         elif ":" in authority:
+            # An EMPTY port (`host:`) is git's default port: git passes no
+            # `-p` for `ssh://h:/o/r`, so it is the same server as `h/o/r`.
             host, _, port = authority.rpartition(":")
-            if not _valid_port(port):
+            if port and not _valid_port(port):
                 return None
         else:
             host, port = authority, ""
@@ -1113,10 +1116,10 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
       whitespace-only value does reach it, as an ordinary first url.)
     - decline: a NETWORK remote that was present but cannot be a canonical id:
       an unsupported scheme; a bad, zero, out-of-range or leading-zero port;
-      a backslash or more than one `@`; a host outside `[a-z0-9.-]` or with a
-      leading or trailing `.`/`-`; an empty path or an empty, `.` or `..`
-      segment (including `%2E%2E`); whitespace, `@`, `?`, `#` or a control
-      character in a path segment; a `%` not followed by two hex digits; an
+      a backslash or more than one `@`; a host outside `[a-z0-9.-]`, with a
+      leading or trailing `.`/`-` or with an empty label (`a..b`); an empty
+      path or an empty, `.` or `..` segment (including `%2E%2E`); whitespace,
+      `@`, `?`, `#` or a control character in a path segment; a `%` not followed by two hex digits; an
       undecodable byte; a leading BOM; or an id over the length cap. A
       non-ASCII character or a sub-delimiter does NOT decline: it is kept in
       percent-encoded form (`_normalize_segment`). No id is produced and no
@@ -2018,10 +2021,11 @@ def _admin_dir_refusal(admin_dir: Path, asked_root: Path) -> Optional[str]:
 
     MEASURED: a genuine submodule's `core.worktree` is `../../../submod`,
     resolving to the submodule checkout the caller is standing in; a forged
-    pointer's resolves to somebody else's checkout. A BARE OR UNSET
-    `core.worktree` is UNPROVABLE and is refused: `git submodule
-    deinit` leaves exactly that state while the submodule's origin survives,
-    so treating it as innocent bound another repository's id.
+    pointer's resolves to somebody else's checkout. AN UNSET `core.worktree`
+    (`git submodule deinit` and `git config --unset` leave it) is accepted
+    only when git, asked at the marker's directory, names that directory as
+    its top level; otherwise it is refused, since the submodule's origin
+    survives the deinit and accepting it would bind another repository's id.
     """
     try:
         from shared.git_helpers import answered_once

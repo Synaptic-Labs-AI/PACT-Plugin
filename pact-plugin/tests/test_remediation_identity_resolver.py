@@ -2028,7 +2028,7 @@ class TestAnAncestorRootDoesNotClaimANestedCheckout:
         with db_connection(store) as conn:
             evidence = bucket_evidence(conn, bucket, roots, **kwargs)
         sessions = None if evidence["foreign_rows"] else {}
-        return memory_api.decide_bucket("canonical", evidence, sessions).state, evidence
+        return memory_api.decide_bucket(evidence, sessions).state, evidence
 
     def test_a_registered_submodules_rows_stay_the_superprojects(self, identity_env):
         """A superproject session that saved a memory naming a file inside its

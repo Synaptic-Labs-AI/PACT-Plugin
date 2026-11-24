@@ -175,7 +175,7 @@ def _gate(store, bucket, roots, **kwargs):
     with db_connection(store) as conn:
         evidence = bucket_evidence(conn, bucket, roots, **kwargs)
     sessions = None if evidence["foreign_rows"] else {}
-    return memory_api.decide_bucket("canonical", evidence, sessions).state, evidence
+    return memory_api.decide_bucket(evidence, sessions).state, evidence
 
 
 def _git(*args, cwd):
