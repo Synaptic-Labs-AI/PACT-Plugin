@@ -2116,9 +2116,10 @@ def _gitfile_redirect_detail(root: Path) -> Optional[str]:
     would file into a project nobody named.
 
     Read straight from the marker rather than through git: a comparison of
-    git answers cannot see this (every answer agrees), and the check must
-    run BEFORE the override and origin reads, because both would otherwise
-    be taken from the foreign repository.
+    git answers cannot see this (every answer agrees). `detect_id_for_root`
+    runs the check AFTER the override read and BEFORE the origin read: the
+    origin would otherwise be taken from the foreign repository, and a usable
+    override is answered first on purpose (see the measured exception below).
 
     A SYMLINKED PARENT DIRECTORY IS NOT A REDIRECT: the marker is then the
     real checkout's own `.git` directory (the walk resolves the start), so

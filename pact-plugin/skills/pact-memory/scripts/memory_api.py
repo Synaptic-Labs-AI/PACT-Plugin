@@ -1726,7 +1726,7 @@ def read_project_bucket_census(store: str) -> Dict[str, int]:
     SCHEMA-LESS store answers `{}`: a report must not create a store or its
     schema. A store that is PRESENT but cannot be opened, or is not a
     readable SQLite database, RAISES with the remedy named
-    (`present_store_fault`), which the CLI reports as exit 2: "no buckets"
+    (`present_store_fault`), which the CLI reports as exit 3: "no buckets"
     for an unreadable store would hide its rows.
     """
     if not Path(store).exists():
@@ -2214,14 +2214,14 @@ def _start_and_toplevel(
         return start, None
     toplevel = _git_rev_parse(start, "--show-toplevel")
     if toplevel is None:
-        checkout = _git_dir_start(Path(start) if start is not None else _cwd_or_none())
+        checkout = _git_dir_start(Path(start) if start is not None else cwd_or_none())
         if checkout is not None:
             start = str(checkout)
             toplevel = _git_rev_parse(start, "--show-toplevel")
     return start, toplevel
 
 
-def _cwd_or_none() -> Optional[Path]:
+def cwd_or_none() -> Optional[Path]:
     """`Path.cwd()`, or None when the process cwd no longer exists.
 
     `Path.cwd()` RAISES FileNotFoundError once the directory is deleted, so it
@@ -2472,7 +2472,7 @@ def main_repo_root(
         # linked worktree is listed. The caller reports the refusal: every
         # resolver rung names it as `gitfile_redirect` through its own guard,
         # so a warning here would log the one cause twice.
-        asked = Path(start) if start is not None else _cwd_or_none()
+        asked = Path(start) if start is not None else cwd_or_none()
         if asked is None:
             return None
         if _worktree_redirect(asked, common_path, git_dir=git_dir, toplevel=root, listing=listing):
@@ -2571,37 +2571,6 @@ class PACTMemory:
                         directory the marker walk reaches is not asked, so
                         it counts as none), then the working directory's
                         folder name (home scope warns).
-                        Measured git subprocesses per detection, by layout
-                        and rung, as the fewest to the most over that rung's
-                        routes (each takes about 1 ms):
-                          checkout: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
-                          linked worktree: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
-                          submodule: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
-                          separate-git-dir checkout: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
-                          linked worktree of a submodule: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
-                          submodule of a superproject worktree: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6.
-                        The cwd marker is reached through a
-                        GIT_CEILING_DIRECTORIES entry above the cwd. The first
-                        legacy-scope read adds up to 1 more (the worktree
-                        list, asked of the common dir the identity was read
-                        from; none when the detection pass already listed
-                        that common dir). No call is repeated with the same
-                        argument. A git older than 2.36 rejects the worktree
-                        listing's `-z`, and the listing is then asked once
-                        more without it. These counts assume no override
-                        pin. With a canonical override pin, which answers
-                        before the
-                        origin is read, the counts are:
-                          checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
-                          linked worktree: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
-                          submodule: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
-                          separate-git-dir checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
-                          linked worktree of a submodule: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
-                          submodule of a superproject worktree: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
-                          dot-git store checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4.
-                        A dot-git store checkout, made with `git init
-                        --separate-git-dir=<dir>/.git`, declines without a
-                        pin and binds only through one.
             session_id: Session identifier. Auto-detected from context file if not provided.
             db_path: Custom database path. Uses default if not provided.
 
@@ -2761,7 +2730,7 @@ class PACTMemory:
         # derived again (`_refresh_cwd_cache`), so a save from another
         # repository still warns. While the directory is unchanged the seed
         # and the cached answers stand, and no git call repeats.
-        self._cwd_cache_dir: Optional[Path] = _cwd_or_none()
+        self._cwd_cache_dir: Optional[Path] = cwd_or_none()
         self._cwd_repo_root: Any = (
             self._git_rung_root if self._git_rung_root is not None else False
         )
@@ -3226,7 +3195,7 @@ class PACTMemory:
         # repository, a separate-git-dir store) asks from where it is. A
         # submodule's git dir gets its top level from git and is asked as is.
         start_arg: Optional[str] = None
-        asked_start = _cwd_or_none()
+        asked_start = cwd_or_none()
         cwd_common_dir = main_repo_common_dir()
         if cwd_common_dir is not None:
             # The pre-change resolver named every repository it reached here,
@@ -3278,7 +3247,7 @@ class PACTMemory:
         # different bucket. git absent from PATH, a corrupted or partial
         # `.git`, or a timeout all take this arm; a genuinely non-git umbrella
         # has no marker and keeps its designed basename fallback.
-        broken_start = _cwd_or_none()
+        broken_start = cwd_or_none()
         broken_marker = _unanswerable_repository(broken_start)
         if broken_marker is not None:
             # With no declaration the pre-change resolver fell through to the
@@ -3325,7 +3294,7 @@ class PACTMemory:
             override_ignored=None, identity_root=None,
         )
         try:
-            cwd_start = _cwd_or_none()
+            cwd_start = cwd_or_none()
             cwd_root = None
             cwd_common_dir = None
             marker_toplevel = None
@@ -4264,7 +4233,7 @@ class PACTMemory:
         One `getcwd` per call and no git call: the cached answers are reused
         only while the working directory is the one they were derived for.
         """
-        current = _cwd_or_none()
+        current = cwd_or_none()
         if current != self._cwd_cache_dir:
             self._cwd_cache_dir = current
             self._cwd_repo_root = False
@@ -4305,7 +4274,7 @@ class PACTMemory:
         # both answers describe one start. A start that is not a repository
         # answers None, which is the designed basename arm.
         common_dir = main_repo_common_dir()
-        identity = detect_id_for_root(root, common_dir, asked_root=_cwd_or_none())
+        identity = detect_id_for_root(root, common_dir, asked_root=cwd_or_none())
         # NO FOLDER PSEUDO-ID ON A DECLINE. `identity.project_id or root.name`
         # invented an id the resolver had just refused, and the warning then
         # advised a save that would itself be refused. None means "unknown

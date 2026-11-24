@@ -405,7 +405,7 @@ def _root_and_common_dir(
         # gives no root for (a bare one, say): the root check judges it as it
         # judges a declared directory, so the refusal names that check's
         # cause and remedy rather than advising CLAUDE_PROJECT_DIR.
-        cwd = memory_api._cwd_or_none()
+        cwd = memory_api.cwd_or_none()
         if cwd is not None:
             project_dir, source = str(cwd), "the working directory"
     if project_dir and Path(project_dir).is_dir():
@@ -2230,6 +2230,7 @@ class _HeldWarnings(logging.Filter):
         super().__init__()
         memory_api = _memory_api()
         self.records: List[logging.LogRecord] = []
+        self.replayed = False
         self.logger = memory_api.logger
         self.is_decline = memory_api.is_decline_record
 
@@ -2247,7 +2248,11 @@ class _HeldWarnings(logging.Filter):
         self.logger.removeFilter(self)
 
     def replay(self) -> None:
-        """Print the held warnings as the memory skill would have, once."""
+        """Print the held warnings as the memory skill would have. Acts once
+        per command: a later call does nothing."""
+        if self.replayed:
+            return
+        self.replayed = True
         self.__exit__()
         records, self.records = self.records, []
         for record in records:
@@ -2261,6 +2266,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # the roots, a refusal's root check and a memory store the command opens
     # read the same git answers, each asked once, so a refusal names the
     # cause the guard decided on.
+    # A REFUSAL REPLAYS AT ITS OWN PRINT (`_main`, `_handle_write_or_show`),
+    # so the decline precedes the refusal text. Here a raised command, or a
+    # failing one that did not replay, replays; `replay` acts once.
     with _HeldWarnings() as held, _memory_api().detection_pass():
         try:
             code = _main(args, backlog_dir, held)

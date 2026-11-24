@@ -1901,16 +1901,6 @@ _KEPT_TEXT_PINS = {
         "`sys.modules[__name__]` ties that listing to the row in the same test that shows the table "
         "does not read the form"
     ),
-    "_documented_floor": (
-        "PACTMemory.__init__'s git-call table is the subject: its rows are parsed here and compared with "
-        "the measured counts, and its sentence 'No call is repeated with the same argument.' is the claim "
-        "`test_no_route_repeats_a_git_call` measures"
-    ),
-    "_documented_pinned_floor": (
-        "the pinned git-call table is parsed and compared with the counts measured with a pin; the "
-        "sentence 'These counts assume no override pin.' is what the main table's measurement, made "
-        "with no pin, holds the docstring to"
-    ),
     "_CONVERSION_MISSING": (
         "Python 3.12's ast records no field types, so the grammar's identifier fields are read from the "
         "compiler's own conversion errors; changed wording empties the result, which fails "
@@ -2310,12 +2300,50 @@ def _rung_family(route: str) -> str:
     return route.split(" (", 1)[0]
 
 
+# The git subprocesses one detection runs, by layout and rung, measured by
+# the floor arms below. Kept here rather than in a docstring: the arms
+# measure them, and a count in prose would rot.
+_GIT_CALL_TABLE = """
+Measured git subprocesses per detection, by layout
+and rung, as the fewest to the most over that rung's
+routes (each takes about 1 ms):
+  checkout: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
+  linked worktree: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
+  submodule: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
+  separate-git-dir checkout: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
+  linked worktree of a submodule: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6;
+  submodule of a superproject worktree: git root 5, CLAUDE_PROJECT_DIR 5, cwd marker 6.
+The cwd marker is reached through a
+GIT_CEILING_DIRECTORIES entry above the cwd. The first
+legacy-scope read adds up to 1 more (the worktree
+list, asked of the common dir the identity was read
+from; none when the detection pass already listed
+that common dir). No call is repeated with the same
+argument. A git older than 2.36 rejects the worktree
+listing's `-z`, and the listing is then asked once
+more without it. These counts assume no override
+pin. With a canonical override pin, which answers
+before the
+origin is read, the counts are:
+  checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
+  linked worktree: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
+  submodule: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
+  separate-git-dir checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
+  linked worktree of a submodule: git root 4, CLAUDE_PROJECT_DIR 4, cwd marker 5;
+  submodule of a superproject worktree: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4;
+  dot-git store checkout: git root 3, CLAUDE_PROJECT_DIR 3, cwd marker 4.
+A dot-git store checkout, made with `git init
+--separate-git-dir=<dir>/.git`, declines without a
+pin and binds only through one.
+"""
+
+
 def _documented_floor() -> tuple:
     """({layout: {rung: (fewest, most)}}, first-read maximum) from the
     docstring, where a rung's count is `N` or `N-M`."""
     import re
 
-    doc = " ".join(PACTMemory.__init__.__doc__.split())
+    doc = " ".join(_GIT_CALL_TABLE.split())
     table = {}
     for layout in FLOOR_LAYOUTS:
         line = re.search(
@@ -2901,7 +2929,7 @@ def _documented_pinned_floor() -> dict:
     after checking it states that the main table assumes no pin."""
     import re
 
-    doc = " ".join(PACTMemory.__init__.__doc__.split())
+    doc = " ".join(_GIT_CALL_TABLE.split())
     assert "These counts assume no override pin." in doc
     rows = re.search(
         r"With a canonical override pin, which answers before the origin is "

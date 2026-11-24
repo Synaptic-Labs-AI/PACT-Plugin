@@ -8162,3 +8162,24 @@ def test_every_layout_git_lists_reads_whole(tmp_path, monkeypatch, nul):
         assert isinstance(ours, list), (where, ours)
         read = [Path(record[0][len("worktree "):]).resolve() for record in ours]
         assert sorted(read) == sorted(path.resolve() for path in paths), (where, read)
+
+
+def test_a_failing_command_replays_the_held_declines_once(monkeypatch):
+    """A refusal replays at its own print, and `main`'s replay of a failing
+    command is then a no-op: each failing command prints its held declines
+    once, never again for a record held after the first replay."""
+    handled = []
+    holder = {}
+
+    def refused(args, backlog_dir, held):
+        holder["held"] = held
+        monkeypatch.setattr(held.logger, "handle", handled.append)
+        held.records.append("first")
+        held.replay()
+        held.records.append("late")
+        return backlog._EXIT_REFUSED
+
+    monkeypatch.setattr(backlog, "_main", refused)
+    assert backlog.main(["show"]) == backlog._EXIT_REFUSED
+    assert handled == ["first"]
+    assert holder["held"].records == ["late"]
