@@ -490,6 +490,11 @@ def _deadline(since_at: datetime, early_by: float = 0.0) -> datetime:
 # correctly; a runner too slow to leave that room fails loudly before any launch.
 GRACE_AGE = 1.5
 CHECK_AFTER = 3.0
+# Arm A: the hook must return this soon after the message lands. Its wait is
+# younger, and its room check adds this bound plus a second, so the deadline a
+# hook that never reads the inbox holds to always falls well after the bound.
+RETURN_BOUND = 2.0
+GRACE_AGE_A = 0.5
 
 
 def _startup_seconds(tmp_path: Path) -> float:
@@ -499,10 +504,14 @@ def _startup_seconds(tmp_path: Path) -> float:
     return elapsed
 
 
-def _require_room(startup: float, since_at: datetime) -> None:
-    """Fail loudly, before any launch, when start-up leaves no room to observe the hold."""
+def _require_room(startup: float, since_at: datetime, extra: float = 0.0) -> None:
+    """Fail loudly, before any launch, when start-up leaves no room to observe the hold.
+
+    `extra` is the time an arm still needs after its check point (arm A: the
+    return bound), so a deadline inside that span can never pass for the hold.
+    """
     remaining = (_deadline(since_at) - datetime.now(timezone.utc)).total_seconds()
-    assert startup + CHECK_AFTER + 1.0 < remaining, (
+    assert startup + CHECK_AFTER + extra + 1.0 < remaining, (
         f"runner too slow to observe the hold: hook start-up took {startup:.2f}s "
         f"with {remaining:.2f}s of the window left"
     )
@@ -534,11 +543,11 @@ class TestTeammateIdleGraceThroughRealHook:
         to the deadline. Arm B is the deadline-based check that a hold runs at
         all."""
         startup = _startup_seconds(tmp_path)
-        config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE)
+        config, since_at = _grace_root(tmp_path, age_seconds=GRACE_AGE_A)
         inbox = _grace_inbox(config)
         inbox.parent.mkdir(parents=True, exist_ok=True)
         staged = inbox.with_name("staged.tmp")
-        _require_room(startup, since_at)
+        _require_room(startup, since_at, extra=RETURN_BOUND)
 
         with _Launched(config) as run:
             time.sleep(startup + CHECK_AFTER)
@@ -557,7 +566,7 @@ class TestTeammateIdleGraceThroughRealHook:
             f"the hook exited within {CHECK_AFTER:.1f}s of its {startup:.2f}s "
             "measured start-up, before the message landed"
         )
-        assert (returned_at - landed_at).total_seconds() < 2.0, (
+        assert (returned_at - landed_at).total_seconds() < RETURN_BOUND, (
             "the real hook did not see the message in the teammate's inbox "
             "under the config dir, so it kept holding after the message landed"
         )
