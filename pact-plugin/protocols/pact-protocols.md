@@ -2263,7 +2263,7 @@ landed in the recipient's inbox. Synchronous SEND-SIDE wake/send detection is th
 dead-by-construction and historically produced near-100% false positives.
 
 **Receive-side exception.** The non-goal covers the lead's send path only: a `TeammateIdle` hook may
-briefly delay an in-process teammate's idle so a message arriving meanwhile is delivered without an idle notification.
+briefly delay an in-process teammate's idle so a message arriving meanwhile can be delivered before the idle is announced.
 Crossings still occur, so apply the redundant-confirm procedure above unchanged.
 
 The receive-side hold supplements, and does not replace, the existing mitigation layer: redundant-by-design wake handling on both sides (this rule

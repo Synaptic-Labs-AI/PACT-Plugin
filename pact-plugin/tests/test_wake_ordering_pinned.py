@@ -381,6 +381,9 @@ GRACE_CONTRACT_PINS = [
     (COMPLETION_AUTHORITY, "may briefly delay an in-process teammate's idle"),
     (PROTOCOLS_SSOT, "may briefly delay an in-process teammate's idle"),
     (SKILL, "receive-side TeammateIdle hold is permitted for in-process teammates"),
+    # The hold delays only the hook's return, so delivery is possible, not promised.
+    (COMPLETION_AUTHORITY, "can be delivered before the idle is announced"),
+    (PROTOCOLS_SSOT, "can be delivered before the idle is announced"),
 ]
 # Each pin's inversion, as a sentence-scoped pattern over normalized text, so
 # a synonym of the opposite rule ("allowed", "feasible", "both paths", "never
@@ -441,6 +444,16 @@ GRACE_CONTRACT_INVERSIONS = {
             "A receive-side TeammateIdle hold is permitted.",
             "A receive-side TeammateIdle hold is permitted for all teammates.",
             "A receive-side TeammateIdle hold is permitted for pane teammates.",
+        ],
+    ),
+    "can be delivered before the idle is announced": (
+        r"\b(?:is|are|will be|is always|always) delivered "
+        r"(?:without (?:an|any) idle (?:notification|notice)|before the idle is announced)"
+        r"|\bguarantee[sd]?\b[^.;]{0,40}\bdeliver",
+        [
+            "A message arriving meanwhile is delivered without an idle notification.",
+            "A message arriving meanwhile will be delivered before the idle is announced.",
+            "The hold guarantees the message is delivered first.",
         ],
     ),
 }
