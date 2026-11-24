@@ -27,13 +27,14 @@ from pathlib import Path
 import pytest
 
 import pact_wait
+from test_pact_wait import _atomic_write
 
 
 def _write_task(tasks_base: Path, team: str, task_id: str, payload: dict) -> Path:
     team_dir = tasks_base / team
     team_dir.mkdir(parents=True, exist_ok=True)
     task_file = team_dir / f"{task_id}.json"
-    task_file.write_text(json.dumps(payload), encoding="utf-8")
+    _atomic_write(task_file, json.dumps(payload))
     return task_file
 
 
@@ -70,9 +71,7 @@ def test_poll_interval_is_the_documented_five_seconds(tmp_path, monkeypatch):
     monkeypatch.setattr(pact_wait.time, "sleep", recorder)
     timer = threading.Timer(
         1.0,
-        lambda: task_file.write_text(
-            json.dumps(_handoff_task("delivered late")), encoding="utf-8"
-        ),
+        lambda: _atomic_write(task_file, json.dumps(_handoff_task("delivered late"))),
     )
     timer.start()
     try:

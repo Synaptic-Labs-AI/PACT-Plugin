@@ -46,8 +46,18 @@ def _write_task(tasks_base: Path, team: str, task_id: str, payload: dict) -> Pat
     team_dir = tasks_base / team
     team_dir.mkdir(parents=True, exist_ok=True)
     task_file = team_dir / f"{task_id}.json"
-    task_file.write_text(json.dumps(payload), encoding="utf-8")
+    _atomic_write(task_file, json.dumps(payload))
     return task_file
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write a task file the way a racing watcher must see it: whole or not
+    at all. Path.write_text truncates before it writes, so a watcher polling
+    inside that window reads an empty file as CORRUPT; a temp file renamed
+    over the target never exposes a partial body."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def _handoff_task(produced) -> dict:
@@ -298,24 +308,33 @@ def test_evaluate_unknown_predicate(tmp_path):
 
 # --- wait_for_deliverable --------------------------------------------------
 
-def test_fast_exit_when_already_present(tmp_path):
+def _record_sleeps(monkeypatch) -> list:
+    """Replace the watcher's sleep with a recorder: a fast exit is one that
+    never sleeps, which holds on any machine load (a wall-clock bound does
+    not)."""
+    calls: list = []
+    monkeypatch.setattr(pact_wait.time, "sleep", calls.append)
+    return calls
+
+
+def test_fast_exit_when_already_present(tmp_path, monkeypatch):
     _write_task(tmp_path, "team-a", "7", _handoff_task("done"))
-    start = time.monotonic()
+    sleeps = _record_sleeps(monkeypatch)
     rc = pact_wait.wait_for_deliverable(
         "team-a", "7", "handoff", deadline=30,
         tasks_base_dir=str(tmp_path), poll_interval=0.2,
     )
-    # FIRED before the first sleep: strictly faster than one poll interval.
+    # FIRED before the first sleep.
     assert rc == pact_wait.EXIT_FIRED
-    assert time.monotonic() - start < 0.2
+    assert sleeps == []
 
 
 def test_fires_after_delayed_appearance(tmp_path):
     task_file = _write_task(tmp_path, "team-a", "7", {"metadata": {}})
     timer = threading.Timer(
         0.15,
-        lambda: task_file.write_text(
-            json.dumps(_handoff_task("late but delivered")), encoding="utf-8"
+        lambda: _atomic_write(
+            task_file, json.dumps(_handoff_task("late but delivered"))
         ),
     )
     timer.start()
@@ -392,9 +411,7 @@ def test_tolerates_transient_corrupt_read(tmp_path):
     task_file.write_text("{mid-rewrite", encoding="utf-8")
     timer = threading.Timer(
         0.03,
-        lambda: task_file.write_text(
-            json.dumps(_handoff_task("arrived")), encoding="utf-8"
-        ),
+        lambda: _atomic_write(task_file, json.dumps(_handoff_task("arrived"))),
     )
     timer.start()
     try:
@@ -472,20 +489,20 @@ def test_subprocess_standalone_smoke(tmp_path):
 # suite left open. No dated ablation tables live in this file (census at
 # TEST intake), so extending it trips no re-measure obligation.
 
-def test_duplicate_watcher_re_arm_fast_exits_fired(tmp_path):
+def test_duplicate_watcher_re_arm_fast_exits_fired(tmp_path, monkeypatch):
     """NAMED SCENARIO — duplicate-watcher re-arm: the tier-3 outlet and a
     lead who missed the first arm can arm a SECOND watcher whose
     deliverable already landed. The duplicate resolves on its FIRST
     evaluation, before any sleep, and must not burn its deadline (this is
     why re-arming needs no dedup marker)."""
     _write_task(tmp_path, "team-a", "7", _handoff_task("delivered earlier"))
-    start = time.monotonic()
+    sleeps = _record_sleeps(monkeypatch)
     rc = pact_wait.wait_for_deliverable(
         "team-a", "7", "handoff", deadline=60,
         tasks_base_dir=str(tmp_path), poll_interval=0.2,
     )
     assert rc == pact_wait.EXIT_FIRED
-    assert time.monotonic() - start < 0.2
+    assert sleeps == []
 
 
 def test_second_consecutive_corrupt_read_is_terminal(tmp_path):
@@ -502,9 +519,7 @@ def test_second_consecutive_corrupt_read_is_terminal(tmp_path):
     task_file.write_text("{still corrupt", encoding="utf-8")
     timer = threading.Timer(
         0.15,
-        lambda: task_file.write_text(
-            json.dumps(_handoff_task("delivered")), encoding="utf-8"
-        ),
+        lambda: _atomic_write(task_file, json.dumps(_handoff_task("delivered"))),
     )
     timer.start()
     try:
@@ -527,15 +542,19 @@ def test_alternating_corrupt_reads_expire_never_turn_terminal(tmp_path):
     team_dir.mkdir()
     task_file = team_dir / "7.json"
     task_file.write_text(json.dumps({"metadata": {}}), encoding="utf-8")
+    # The deliberate corrupt bodies are plain writes; the heals are atomic,
+    # so a heal can never add an unscheduled corrupt read next to one.
+    corrupt = lambda body: task_file.write_text(body, encoding="utf-8")  # noqa: E731
+    heal = lambda body: _atomic_write(task_file, body)  # noqa: E731
     schedule = [
-        (0.20, "{corrupt"),
-        (0.32, json.dumps({"metadata": {}})),
-        (0.50, "{corrupt again"),
-        (0.62, json.dumps({"metadata": {}})),
+        (0.20, "{corrupt", corrupt),
+        (0.32, json.dumps({"metadata": {}}), heal),
+        (0.50, "{corrupt again", corrupt),
+        (0.62, json.dumps({"metadata": {}}), heal),
     ]
     timers = [
-        threading.Timer(at, lambda body=body: task_file.write_text(body, encoding="utf-8"))
-        for at, body in schedule
+        threading.Timer(at, lambda body=body, write=write: write(body))
+        for at, body, write in schedule
     ]
     for timer in timers:
         timer.start()

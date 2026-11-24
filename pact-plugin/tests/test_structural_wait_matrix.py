@@ -40,6 +40,7 @@ from pathlib import Path
 import pytest
 
 import pact_wait  # noqa: E402
+from test_pact_wait import _atomic_write  # noqa: E402
 import task_lifecycle_gate as tlg  # noqa: E402
 import wait_filler_gate  # noqa: E402
 from shared import wait_target  # noqa: E402
@@ -462,7 +463,7 @@ def test_watch_armed_after_a_rejection_fires_only_on_the_revision(
     revised = {"metadata": {**rejected["metadata"], "revision_number": 2}}
     timer = threading.Timer(
         0.15,
-        lambda: task_file.write_text(json.dumps(revised), encoding="utf-8"),
+        lambda: _atomic_write(task_file, json.dumps(revised)),
     )
     timer.start()
     try:
