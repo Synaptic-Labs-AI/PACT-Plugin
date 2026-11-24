@@ -2065,8 +2065,6 @@ def _in_child(code: str, *args: str) -> str:
     return result.stdout.strip()
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
-
 def _wait_until_waiting_in_open(proc):
     """Return once `proc` waits in a FIFO open for a reader. Linux names that
     wait `wait_for_partner` in /proc; where /proc is absent, wait a second."""
@@ -2084,6 +2082,8 @@ def _wait_until_waiting_in_open(proc):
         assert time.monotonic() < deadline, "the writer never waited in its open"
         time.sleep(0.01)
 
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs os.mkfifo")
 class TestAGitFileThatIsNotARegularFileNamesNothing:
     """A `.git` or an admin `gitdir` that is a FIFO, a link to one, or a
     directory is read as naming nothing, as git reads only a regular file
