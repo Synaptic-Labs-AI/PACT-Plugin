@@ -214,7 +214,7 @@ def wait_for_inbox_evidence(
             return False
         try:
             messages = json.loads(inbox_json)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, RecursionError):
             pass
         else:
             if not isinstance(messages, list):

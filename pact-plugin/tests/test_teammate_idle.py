@@ -1050,6 +1050,22 @@ class TestInboxGraceGate:
         assert clock.sleeps == pytest.approx([0.1] * 100)
         assert clock.monotonic() == pytest.approx(10.0)
 
+    def test_deeply_nested_inbox_is_retried_like_invalid_json(self, tmp_path):
+        """Counter-test: an uncaught RecursionError escapes the hold and skips the re-read."""
+        deep = "[" * 200_000 + "]" * 200_000
+        with pytest.raises(RecursionError):
+            json.loads(deep)
+        valid = json.dumps([{"from": "team-lead", "text": "wake"}])
+        clock = _FakeGraceClock()
+        with patch(
+            "teammate_idle.state_file.read_text", side_effect=[deep, valid]
+        ) as read:
+            seen = _call_grace([_grace_task()], tmp_path, clock)
+
+        assert seen is True
+        assert read.call_count == 2
+        assert clock.sleeps == [0.1]
+
     def test_invalid_json_retries_within_the_remaining_grace(self, tmp_path):
         clock = _FakeGraceClock()
         valid = json.dumps([{"from": "team-lead", "text": "wake"}])
@@ -1320,8 +1336,9 @@ class TestInboxGraceGate:
     ):
         clock = _FakeGraceClock()
         with patch("teammate_idle.state_file.read_text") as read:
+            # The owner is the unsafe name, so selection passes and the safe-name check decides.
             seen = _call_grace(
-                [_grace_task()], tmp_path, clock, team=team, teammate=teammate
+                [_grace_task(owner=teammate)], tmp_path, clock, team=team, teammate=teammate
             )
 
         assert seen is None
@@ -1623,10 +1640,47 @@ class TestMainInboxHold:
         assert output == {"suppressOutput": True}
         cleanup.assert_called_once()
 
-    def test_no_code_path_emits_a_decision(self):
-        """The runtime never delivers a queued message into a blocked continuation."""
-        source = HOOK.read_text(encoding="utf-8")
+    @pytest.mark.parametrize("path", ["no-hold", "message", "deadline"])
+    def test_no_path_emits_a_decision(self, path, capsys, tmp_path, monkeypatch):
+        """The runtime never delivers a queued message into a blocked continuation,
+        so main()'s real output carries no decision whether the real hold is
+        skipped, ends on a message, or runs to its deadline."""
+        import io
+        import teammate_idle
+        from teammate_idle import main
 
-        assert '"decision"' not in source
-        assert "'decision'" not in source
+        age = 9.95 if path == "deadline" else 0
+        since = (datetime.now(timezone.utc) - timedelta(seconds=age)).isoformat()
+        task = make_task(owner="CoderRaw", metadata={"intentional_wait": {
+            "reason": "awaiting_lead_completion", "expected_resolver": "lead",
+            "since": since, "covers_since": since,
+        }})
+        inbox = tmp_path / "teams" / "pact-test" / "inboxes" / "CoderRaw.json"
+        inbox.parent.mkdir(parents=True)
+        queued = [{"from": "team-lead", "text": "wake"}] if path == "message" else []
+        inbox.write_text(json.dumps(queued), encoding="utf-8")
+        clock = _FakeGraceClock()
+        monkeypatch.setitem(
+            teammate_idle.wait_for_inbox_evidence.__kwdefaults__, "sleep", clock.sleep
+        )
+        monkeypatch.setitem(
+            teammate_idle.wait_for_inbox_evidence.__kwdefaults__,
+            "monotonic", clock.monotonic,
+        )
+        with patch("teammate_idle.frame_team_and_name", return_value=("pact-test", "")), \
+             patch("sys.stdin", io.StringIO(json.dumps({"teammate_name": "CoderRaw"}))), \
+             patch("teammate_idle.get_claude_config_dir", return_value=tmp_path), \
+             patch("teammate_idle.iter_team_task_jsons", return_value=[task]), \
+             patch("teammate_idle.teammate_is_in_process", return_value=path != "no-hold"), \
+             patch("teammate_idle.check_idle_cleanup", return_value=(None, False)), \
+             patch("teammate_idle.check_unflagged_background", return_value=None):
+            with pytest.raises(SystemExit) as exc:
+                main()
+
+        output = json.loads(capsys.readouterr().out)
+        assert exc.value.code == 0
+        assert "decision" not in output, output
+        assert output == {"suppressOutput": True}
+        # The deadline case must have really held, or it would prove nothing.
+        assert (len(clock.sleeps) > 0) is (path == "deadline"), clock.sleeps
 

@@ -488,9 +488,10 @@ class TestTeammateIdleGraceThroughRealHook:
     def test_message_landing_during_the_hold_ends_it_early(self, tmp_path):
         """Arm A. The wait is 5 s old, so about 5 s of grace remain. The lead's
         message lands half a second after launch, while the hook is holding.
-        The hook must return after it lands and at least a second before the
-        deadline. A hook that skipped the hold returns before the message
-        lands; one that cannot reach this inbox holds to the deadline."""
+        The hook must end the hold early, at least a second before the
+        deadline, which proves it reached this inbox through the real config
+        dir; one that cannot reach it holds to the deadline. Arm B is the
+        guard against a hold that never runs."""
         config, since_at = _grace_root(tmp_path, age_seconds=5)
         inbox = _grace_inbox(config)
         inbox.parent.mkdir(parents=True, exist_ok=True)
