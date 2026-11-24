@@ -1591,9 +1591,16 @@ def _secretary_owned(owner: str, member_team: str) -> bool:
     return owner.strip() in _SECRETARY_NAMES or is_teachback_exempt(owner, member_team)
 
 
-def _teachback_ready(task_id: str, store_team: str, member_team: str = "") -> bool:
+def _teachback_ready(
+    task_id: str,
+    store_team: str,
+    member_team: str = "",
+    done: frozenset = frozenset(),
+    added: object = None,
+) -> bool:
     """TEACHBACK-READY: a teachback gate handed to its teammate (pending,
-    with an owner who is not the secretary) and not yet accepted."""
+    with an owner who is not the secretary), not yet accepted, and with no
+    open blocker."""
     record = read_task_json(task_id, store_team, base_fallback=False)
     owner = record.get("owner")
     return (
@@ -1602,6 +1609,7 @@ def _teachback_ready(task_id: str, store_team: str, member_team: str = "") -> bo
         and isinstance(owner, str)
         and bool(owner.strip())
         and not _secretary_owned(owner, member_team or store_team)
+        and not _open_blockers(record, store_team, added, done)
     )
 
 
@@ -1738,7 +1746,7 @@ def arm_candidates(
     with an owner: the task itself, TEACHBACK-READY for a teachback gate,
     else HANDOFF-READY. E3 a completion of X: every task X blocks (from the
     response record, the disk record, and a store scan for blockedBy naming
-    X), HANDOFF-READY with X counted as done. E4 a rejection in this write's
+    X), TEACHBACK-READY or else HANDOFF-READY with X counted as done. E4 a rejection in this write's
     metadata: the written task, live only, predicate by rejection kind.
     Adding a blocker (addBlockedBy alone) can only make a task not ready;
     an addBlockedBy carried by an E1 or E2 write counts as open for it.
@@ -1766,7 +1774,9 @@ def arm_candidates(
         record = read_task_json(task_id, store_team, base_fallback=False) if task_id else {}
         owner = response_task.get("owner") or record.get("owner") or tool_input.get("owner")
         if task_id and isinstance(owner, str) and owner.strip():
-            if _teachback_ready(task_id, store_team, member_team):
+            if _teachback_ready(
+                task_id, store_team, member_team, added=tool_input.get("addBlockedBy")
+            ):
                 add(task_id, "teachback_submit", "teachback gate dispatched")
             elif _handoff_ready(
                 task_id, store_team, added=tool_input.get("addBlockedBy"),
@@ -1783,7 +1793,9 @@ def arm_candidates(
 
     owner = tool_input.get("owner")
     if isinstance(owner, str) and owner.strip() and _changed(tool_response, "owner"):
-        if _teachback_ready(task_id, store_team, member_team):
+        if _teachback_ready(
+            task_id, store_team, member_team, added=tool_input.get("addBlockedBy")
+        ):
             add(task_id, "teachback_submit", "teachback gate dispatched")
         elif _handoff_ready(
             task_id, store_team, added=tool_input.get("addBlockedBy"),
@@ -1799,7 +1811,11 @@ def arm_candidates(
             if isinstance(other, dict) and task_id in _norm_ids(other.get("blockedBy")):
                 dependents = _norm_ids(dependents, [other.get("id")])
         for dependent in dependents:
-            if dependent != task_id and _handoff_ready(
+            if dependent == task_id:
+                continue
+            if _teachback_ready(dependent, store_team, member_team, done):
+                add(dependent, "teachback_submit", "blocker completed")
+            elif _handoff_ready(
                 dependent, store_team, done, member_team=member_team
             ):
                 add(dependent, "handoff", "blocker completed")
