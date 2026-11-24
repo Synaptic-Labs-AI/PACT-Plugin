@@ -893,7 +893,9 @@ def test_valve_mechanism_absent_from_module():
     constant, the budget constant and the instant-form predicate are
     gone from the module, and neither the payload head, the budget
     render string, nor the mechanism's name appears anywhere in the
-    source — the mechanism left no live trace."""
+    source — the mechanism left no live trace. The one exception is the
+    legacy state key, written as an inert 0 so the previous release still
+    reads the section as valid after a downgrade."""
     import wait_filler_gate
 
     assert not hasattr(wait_filler_gate, "_VALVE_PAYLOAD")
@@ -902,7 +904,8 @@ def test_valve_mechanism_absent_from_module():
     source = HOOK_PATH.read_text(encoding="utf-8")
     assert "CIRCUIT-BREAKER" not in source
     assert "remaining:" not in source
-    assert "valve" not in source.lower()
+    assert "valve" not in source.lower().replace('"valve_budget"', "")
+    assert source.count('"valve_budget"') == 1
 
 
 def test_outlet_reason_pinned_verbatim():
@@ -1252,13 +1255,14 @@ def test_counts_climb_through_denials_and_budget_field_gone(
     tmp_path, monkeypatch, capsys
 ):
     """The budget bookkeeping is retired: counts climb through DENIALS
-    (no call ever exits 0), the persisted section carries NO budget
-    field at all, and the re-fire lands at tier 3 with the count
-    rendered — the gradient never regresses, and nothing is allowed."""
+    (no call ever exits 0), the persisted section's legacy budget key is
+    an inert 0 (written only for the previous release's reader), and the
+    re-fire lands at tier 3 with the count rendered — the gradient never
+    regresses, and nothing is allowed."""
     results = _drive(["true"] * 5, tmp_path, monkeypatch, capsys)
     assert [c for c, _p, _e in results] == [2, 2, 2, 2, 2]
     state = json.loads(_state_path(tmp_path).read_text(encoding="utf-8"))
-    assert "valve_budget" not in state[""]
+    assert state[""]["valve_budget"] == 0
     _code, payload, _err = _invoke(_gradient_frame("true"), capsys)
     reason = _deny_reason(payload)
     assert "FILLER-LOCK" in reason
@@ -1335,9 +1339,10 @@ def test_stale_budget_value_is_ignored_not_degrading(
     tmp_path, monkeypatch, capsys
 ):
     """A stale non-int budget field (written by an older hook version)
-    is an IGNORED unknown field now, not a degrade trigger: the gradient
-    escalates normally off pairs/total, and the field survives the
-    writes untouched (version-skew preserve)."""
+    is not a degrade trigger: the gradient escalates normally off
+    pairs/total. The field is repaired to the inert 0 on write, the one
+    value the previous release reads as valid, so a downgrade after this
+    write does not pin the session at tier 1."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
     state = _state_path(tmp_path)
     state.parent.mkdir(parents=True, exist_ok=True)
@@ -1356,7 +1361,7 @@ def test_stale_budget_value_is_ignored_not_degrading(
     assert "FILLER-LOCK" in _deny_reason(payload)
     assert (
         json.loads(state.read_text(encoding="utf-8"))[""]["valve_budget"]
-        == "two"
+        == 0
     )
 
 
@@ -1798,3 +1803,58 @@ def test_cross_process_reaper_sees_probe_state(tmp_path, monkeypatch):
     reaped, _skipped = session_end.cleanup_old_filler_state()
     assert reaped == 1
     assert not state.exists()
+
+
+# The previous release's (4.8.36) section reader, copied verbatim from its
+# wait_filler_gate._compute_gradient (docstring dropped). A downgrade runs
+# THIS code against state the current release wrote, so the section must
+# read as valid to it, not as corrupt (which pins the session at tier 1).
+_PREVIOUS_RELEASE_READER = '''
+_MAX_TIER = 3
+_SATURATION_TOTAL = 6
+_INITIAL_VALVE_BUDGET = 2
+
+
+def _compute_gradient(section, key: str, instant: bool):
+    if section is None:
+        pairs, total, budget = {}, 0, _INITIAL_VALVE_BUDGET
+    elif not isinstance(section, dict):
+        return None
+    else:
+        pairs = section.get("pairs")
+        pairs = pairs if isinstance(pairs, dict) else {}
+        total = section.get("total")
+        total = total if isinstance(total, int) and total >= 0 else 0
+        budget = section.get("valve_budget")
+        if not isinstance(budget, int) or budget < 0:
+            return None
+    count = pairs.get(key)
+    count = count if isinstance(count, int) and count >= 0 else 0
+    new_count = count + 1
+    new_total = total + 1
+    tier = min(
+        _MAX_TIER, new_count + (1 if new_total > _SATURATION_TOTAL else 0)
+    )
+    valve_open = tier == _MAX_TIER and instant and budget > 0
+    return tier, new_count, new_total, valve_open, budget
+'''
+
+
+def test_previous_release_reads_this_release_state_as_valid(
+    tmp_path, monkeypatch, capsys
+):
+    """Downgrade compatibility: a state section this release wrote reads as
+    VALID to the previous release's reader (a tier tuple, not the None that
+    means corrupt), keeps that reader's counts, and leaves its retired
+    allowance closed at tier 3."""
+    _drive(["true"] * 3, tmp_path, monkeypatch, capsys)
+    state = json.loads(_state_path(tmp_path).read_text(encoding="utf-8"))
+    section = state[""]
+    namespace: dict = {}
+    exec(_PREVIOUS_RELEASE_READER, namespace)  # frozen literal above, not input
+    key = next(iter(section["pairs"]))
+    result = namespace["_compute_gradient"](section, key, True)
+    assert result is not None, section
+    tier, count, total, allowance_open, _budget = result
+    assert (tier, count, total) == (3, 4, 4)
+    assert allowance_open is False
