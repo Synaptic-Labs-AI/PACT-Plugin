@@ -4957,6 +4957,7 @@ def test_arm_supply_on_teachback_gate_dispatch(tmp_path, monkeypatch, pact_conte
         "A",
         subject="preparer: TEACHBACK for foo",
         status="pending",
+        owner="pact-preparer",  # PostToolUse: the owner write is on disk
     )
     payload = {
         "tool_name": "TaskUpdate",
@@ -5009,6 +5010,7 @@ def test_arm_supply_on_work_task_wiring(tmp_path, monkeypatch, pact_context):
         "B",
         subject="implement hook core",
         status="pending",
+        owner="backend-coder",  # PostToolUse: the owner write is on disk
     )
     payload = {
         "tool_name": "TaskUpdate",
@@ -5150,23 +5152,6 @@ def test_wiring_arm_when_every_blocker_is_closed_or_unreadable(
     """A completed blocker no longer gates the task, and a blocker with no
     readable record can never complete: the wiring arm is supplied."""
     arms = _wire_work_task(tmp_path, monkeypatch, pact_context, [("A", status)])
-    assert len(arms) == 1
-    assert "--predicate handoff" in arms[0] and "--task B" in arms[0]
-
-
-def test_wiring_arm_despite_an_open_non_teachback_blocker(
-    tmp_path, monkeypatch, pact_context
-):
-    """A sequential pipeline: B waits on predecessor work task C. Only a
-    teachback acceptance re-arms later, so a non-teachback blocker must
-    not suppress the wiring arm, or B never gets one."""
-    monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    pact_context(team_name="test-team", session_id="test-session")
-    _seed_task_a(
-        tmp_path, "test-team", "C",
-        subject="implement schema", status="in_progress", owner="database-engineer",
-    )
-    arms = _wire_work_task(tmp_path, monkeypatch, pact_context, [("C", None)])
     assert len(arms) == 1
     assert "--predicate handoff" in arms[0] and "--task B" in arms[0]
 
@@ -5323,6 +5308,192 @@ def test_rejection_arm_is_lead_only_and_keyed_on_this_write(
             rule == "wait_arm_supply" and "deliverable rejected" in msg
             for rule, msg in advisories
         ), advisories
+
+
+# --- the arming invariant: the design's truth table -----------------------
+
+_TB = "TEACHBACK for hook core"
+_REJ = {"reason": "r", "corrections": ["c"], "since": "2026-11-24T00:00:00+00:00",
+        "revision_number": 1}
+
+
+def _w(tid):
+    return ("wire", tid)
+
+
+def _done(tid, **kw):
+    return ("complete", tid, kw)
+
+
+_ARMING_TABLE = [
+    # (case, records {id: fields}, steps [(write, expected arms)])
+    ("1 no blockers",
+     {"B": dict(subject="implement api", status="pending", owner="backend-coder")},
+     [(_w("B"), ["B:h"])]),
+    ("2 teachback only",
+     {"A": dict(subject="backend-coder: " + _TB, status="pending", owner="backend-coder", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["A"])},
+     [(_w("A"), ["A:t"]), (_w("B"), []), (_done("A"), ["B:h"])]),
+    ("3 predecessor only, blocks present",
+     {"C": dict(subject="implement schema", status="in_progress", owner="database-engineer", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["C"])},
+     [(_w("B"), []), (_done("C"), ["B:h"])]),
+    ("3 predecessor only, blocks absent (store scan)",
+     {"C": dict(subject="implement schema", status="in_progress", owner="database-engineer"),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["C"])},
+     [(_w("B"), []), (_done("C", response_task=False), ["B:h"])]),
+    ("4a teachback then predecessor",
+     {"A": dict(subject="backend-coder: " + _TB, status="pending", owner="backend-coder", blocks=["B"]),
+      "C": dict(subject="implement schema", status="in_progress", owner="database-engineer", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["A", "C"])},
+     [(_w("B"), []), (_done("A"), []), (_done("C"), ["B:h"])]),
+    ("4b predecessor then teachback",
+     {"A": dict(subject="backend-coder: " + _TB, status="pending", owner="backend-coder", blocks=["B"]),
+      "C": dict(subject="implement schema", status="in_progress", owner="database-engineer", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["A", "C"])},
+     [(_w("B"), []), (_done("C"), []), (_done("A"), ["B:h"])]),
+    ("5 two teachbacks",
+     {"A1": dict(subject="backend-coder: " + _TB, status="pending", owner="backend-coder", blocks=["B"]),
+      "A2": dict(subject="security-engineer: " + _TB, status="pending", owner="security-engineer", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["A1", "A2"])},
+     [(_done("A1"), []), (_done("A2"), ["B:h"])]),
+    ("6 rejection of the handoff",
+     {"B": dict(subject="implement api", status="in_progress", owner="backend-coder")},
+     [(("reject", "B", "handoff_rejection"), ["B:h"])]),
+    ("6t rejection of the teachback",
+     {"A": dict(subject="backend-coder: " + _TB, status="in_progress", owner="backend-coder")},
+     [(("reject", "A", "teachback_rejection"), ["A:t"])]),
+    ("7a int blocker id, X.id int",
+     {"5": dict(subject="implement schema", status="pending", owner="database-engineer", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=[5])},
+     [(_w("B"), []), (_done("5", id_value=5), ["B:h"])]),
+    ("7a int blocker id, X.id str",
+     {"5": dict(subject="implement schema", status="pending", owner="database-engineer"),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=[5])},
+     [(_w("B"), []), (_done("5", id_value="5", response_task=False), ["B:h"])]),
+    ("7b no nameable blocker",
+     {"B": dict(subject="implement api", status="pending", owner="backend-coder",
+                blockedBy=[{"x": 1}, None, "", True, 1.5])},
+     [(_w("B"), ["B:h"])]),
+    ("7c unreadable blocker",
+     {"B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["ghost"])},
+     [(_w("B"), ["B:h"])]),
+    ("8 accepted teachback still in_progress on disk",
+     {"A": dict(subject="backend-coder: " + _TB, status="in_progress", owner="backend-coder", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["A"])},
+     [(_done("A", disk_status="in_progress"), ["B:h"])]),
+    ("9 lead-owned parent in blocks",
+     {"X": dict(subject="implement schema", status="in_progress", owner="database-engineer", blocks=["P", "B"]),
+      "P": dict(subject="feature parent", status="pending", owner="team-lead", blockedBy=["X"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["X"])},
+     [(_done("X"), ["B:h"])]),
+    ("10 non-lead frame",
+     {"B": dict(subject="implement api", status="pending", owner="backend-coder")},
+     [(("wire_as_teammate", "B"), [])]),
+    ("11 work task already completed",
+     {"B": dict(subject="implement api", status="completed", owner="backend-coder")},
+     [(_w("B"), [])]),
+    ("11 work task unreadable",
+     {},
+     [(_w("B"), [])]),
+    ("12 TaskCreate with an owner",
+     {"B": dict(subject="implement api", status="pending", owner="backend-coder")},
+     [(("create", "B"), ["B:h"])]),
+    ("E3 re-completing a completed task is not an evaluation write",
+     {"C": dict(subject="implement schema", status="completed", owner="database-engineer", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["C"])},
+     [(_done("C", status_change={"from": "completed", "to": "completed"}), [])]),
+    ("3 predecessor only, live response shape (statusChange, no task key)",
+     {"C": dict(subject="implement schema", status="in_progress", owner="database-engineer", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["C"])},
+     [(_done("C", response_task=False, status_change={"from": "in_progress", "to": "completed"}), ["B:h"])]),
+    ("E3 malformed statusChange still evaluates (not a dict)",
+     {"C": dict(subject="implement schema", status="in_progress", owner="database-engineer", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["C"])},
+     [(_done("C", status_change="completed"), ["B:h"])]),
+    ("E3 malformed statusChange still evaluates (no 'to')",
+     {"C": dict(subject="implement schema", status="in_progress", owner="database-engineer", blocks=["B"]),
+      "B": dict(subject="implement api", status="pending", owner="backend-coder", blockedBy=["C"])},
+     [(_done("C", status_change={"from": "in_progress"}), ["B:h"])]),
+    ("E1 unchanged owner is not an evaluation write",
+     {"B": dict(subject="implement api", status="pending", owner="backend-coder")},
+     [(("wire_unchanged", "B"), [])]),
+]
+
+
+def _arming_payload(step, records, tmp_path):
+    kind = step[0]
+    tid = step[1]
+    if kind in ("wire", "wire_as_teammate", "wire_unchanged"):
+        payload = {
+            "tool_name": "TaskUpdate",
+            "tool_input": {"taskId": tid, "owner": records.get(tid, {}).get("owner", "backend-coder")},
+            "tool_response": {"success": True, "taskId": tid,
+                              "updatedFields": [] if kind == "wire_unchanged" else ["owner"]},
+        }
+        if kind == "wire_as_teammate":
+            payload["agent_type"] = "pact-backend-coder"
+        return payload
+    if kind == "reject":
+        return {
+            "tool_name": "TaskUpdate",
+            "tool_input": {"taskId": tid, "metadata": {step[2]: dict(_REJ)}},
+            "tool_response": {"success": True, "taskId": tid, "updatedFields": ["metadata"]},
+        }
+    if kind == "create":
+        return {
+            "tool_name": "TaskCreate",
+            "tool_input": {"subject": records[tid]["subject"], "owner": records[tid]["owner"]},
+            "tool_response": {"task": {"id": tid, **records[tid]}},
+        }
+    opts = step[2]
+    records[tid]["status"] = opts.get("disk_status", "completed")
+    _seed_task_a(tmp_path, "test-team", tid, **records[tid])
+    response = {"success": True, "taskId": tid, "updatedFields": ["status"]}
+    if "status_change" in opts:
+        response["statusChange"] = opts["status_change"]
+    if opts.get("response_task", True):
+        response["task"] = {"id": opts.get("id_value", tid), **{
+            k: v for k, v in records[tid].items() if k != "status"}, "status": "completed"}
+    return {
+        "tool_name": "TaskUpdate",
+        "tool_input": {"taskId": tid, "status": "completed"},
+        "tool_response": response,
+    }
+
+
+@pytest.mark.parametrize(
+    "case,records,steps", _ARMING_TABLE, ids=[row[0] for row in _ARMING_TABLE]
+)
+def test_arming_invariant_truth_table(
+    tmp_path, monkeypatch, pact_context, case, records, steps
+):
+    """Each row replays a sequence of lead writes and asserts the exact arms
+    supplied at each write: one advisory per task the write made ready,
+    HANDOFF-READY with the handoff predicate, TEACHBACK-READY with
+    teachback_submit, nothing anywhere else."""
+    import copy
+
+    records = copy.deepcopy(records)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    pact_context(team_name="test-team", session_id="test-session")
+    monkeypatch.setattr(
+        tlg, "is_pact_specialist_owner",
+        lambda owner, *_a, **_k: owner in ("backend-coder", "database-engineer",
+                                           "security-engineer"),
+    )
+    for tid, fields in records.items():
+        _seed_task_a(tmp_path, "test-team", tid, **fields)
+    for step, expected in steps:
+        advisories = tlg.evaluate_lifecycle(_arming_payload(step, records, tmp_path))
+        arms = []
+        for rule, msg in advisories:
+            if rule != "wait_arm_supply":
+                continue
+            task = msg.split("--task ")[1].split(" ")[0].strip("'")
+            predicate = msg.split("--predicate ")[1].split(" ")[0]
+            arms.append(f"{task}:{'t' if predicate == 'teachback_submit' else 'h'}")
+        assert sorted(arms) == sorted(expected), (case, step, advisories)
 
 
 def test_no_arm_supply_on_non_lead_frames(tmp_path, monkeypatch, pact_context):

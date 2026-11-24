@@ -321,7 +321,11 @@ try:
         emit_task_metadata_snapshot,
     )
     from shared.task_utils import is_teachback_subject as _is_teachback_subject
-    from shared.task_utils import read_task_json, resolve_task_dir
+    from shared.task_utils import (
+        iter_team_task_jsons,
+        read_task_json,
+        resolve_task_dir,
+    )
     from shared.teachback_schema import (
         DISPATCH_VARIETY_KEYS,
         TEACHBACK_OBJECT_FIELDS,
@@ -1500,25 +1504,187 @@ def _owner_resolves_to_lead(owner: str, team_name: str) -> bool:
         return False
 
 
-def _open_blockers(task: dict, team_name: str, added: object = None) -> list:
-    """The blocker records still gating `task`: each blocker named in its
-    on-disk `blockedBy` (or in this write's `addBlockedBy`) whose readable
-    record's status is not completed, with its id. A blocker with no
-    readable record does not gate (nothing can complete it), and the
-    platform may drop completed blockers from `blockedBy` or keep them;
-    both read as open only while the blocker record says so."""
+def _norm_id(value: object) -> str:
+    """A task id as the store compares it: an int (not bool) or a non-empty
+    string becomes its stripped string form; anything else names no task
+    and becomes "". The store mixes id types, so ids are compared only in
+    this form."""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _norm_ids(*sources: object) -> list:
+    """The normalised, de-duplicated ids named by each list in sources, in
+    order. Non-list sources and entries that name no task are dropped
+    before de-duplication."""
     ids: list = []
-    for source in (task.get("blockedBy"), added):
+    for source in sources:
         if isinstance(source, list):
-            ids.extend(source)
-    open_records = []
-    for blocker_id in dict.fromkeys(ids):
-        if not isinstance(blocker_id, str) or not blocker_id.strip():
+            ids.extend(i for i in (_norm_id(v) for v in source) if i)
+    return list(dict.fromkeys(ids))
+
+
+def _live(record: dict) -> bool:
+    return record.get("status") in ("pending", "in_progress")
+
+
+def _open_blockers(
+    task: dict, store_team: str, added: object = None, done: frozenset = frozenset()
+) -> list:
+    """Normalised ids of the blockers still gating `task`: its on-disk
+    `blockedBy` plus this write's `addBlockedBy`, minus `done` (tasks
+    this very write completes, which the disk may not show yet), minus
+    unreadable records (nothing can complete them), minus completed ones."""
+    open_ids = []
+    for blocker_id in _norm_ids(task.get("blockedBy"), added):
+        if blocker_id in done:
             continue
-        blocker = read_task_json(blocker_id, team_name, base_fallback=False)
+        blocker = read_task_json(blocker_id, store_team, base_fallback=False)
         if blocker and blocker.get("status") != "completed":
-            open_records.append((blocker_id, blocker))
-    return open_records
+            open_ids.append(blocker_id)
+    return open_ids
+
+
+def _handoff_ready(
+    task_id: str, store_team: str, done: frozenset = frozenset(), added: object = None
+) -> bool:
+    """HANDOFF-READY: the task is live, is not a teachback gate, is owned by
+    a specialist who is not the lead, and has no open blocker."""
+    record = read_task_json(task_id, store_team, base_fallback=False)
+    owner = record.get("owner")
+    return (
+        _live(record)
+        and not _is_teachback_subject(record.get("subject") or "")
+        and isinstance(owner, str)
+        and bool(owner.strip())
+        and is_pact_specialist_owner(owner, store_team)
+        and not _owner_resolves_to_lead(owner, store_team)
+        and not _open_blockers(record, store_team, added, done)
+    )
+
+
+def _teachback_ready(task_id: str, store_team: str) -> bool:
+    """TEACHBACK-READY: a teachback gate handed to its teammate (pending,
+    with an owner) and not yet accepted."""
+    record = read_task_json(task_id, store_team, base_fallback=False)
+    owner = record.get("owner")
+    return (
+        record.get("status") == "pending"
+        and _is_teachback_subject(record.get("subject") or "")
+        and isinstance(owner, str)
+        and bool(owner.strip())
+    )
+
+
+def _changed(tool_response: object, field: str) -> bool:
+    """False only when the harness reports the fields this write changed
+    and `field` is not among them; a write that changed nothing the
+    arming predicates read is not an evaluation write. Without that report
+    the write counts as a change."""
+    if isinstance(tool_response, dict):
+        updated = tool_response.get("updatedFields")
+        if isinstance(updated, list):
+            return field in updated
+    return True
+
+
+def _newly_completed(tool_response: object) -> bool:
+    """False only when the harness's statusChange shows this completion
+    did not move the task into completed (it was already completed). A
+    missing or malformed statusChange (not a dict, or no "to") counts as a
+    completion, so a malformed response never suppresses an arm."""
+    if isinstance(tool_response, dict):
+        change = tool_response.get("statusChange")
+        if isinstance(change, dict) and "to" in change:
+            return change.get("to") == "completed" and change.get("from") != "completed"
+    return True
+
+
+def arm_candidates(
+    tool_name: str,
+    tool_input: dict,
+    tool_response: object,
+    store_team: str,
+) -> list:
+    """The (task_id, predicate, shape) arms this lead write supplies under
+    the arming invariant: every task the write could have made ready, whose
+    predicate now holds. Evaluated only at the writes that can flip a
+    predicate; the caller gates on a lead frame and a resolved store team.
+
+    E1 owner wiring (a TaskUpdate that changes the owner) and E2 a TaskCreate
+    with an owner: the task itself, TEACHBACK-READY for a teachback gate,
+    else HANDOFF-READY. E3 a completion of X: every task X blocks (from the
+    response record, the disk record, and a store scan for blockedBy naming
+    X), HANDOFF-READY with X counted as done. E4 a rejection in this write's
+    metadata: the written task, live only, predicate by rejection kind.
+    Adding a blocker (addBlockedBy alone) can only make a task not ready.
+    Duplicates are harmless: the watcher fast-exits when the deliverable is
+    present and holds a rejected one until its revision."""
+    out: list = []
+
+    def add(task_id, predicate, shape):
+        item = (task_id, predicate, shape)
+        if task_id and all(o[:2] != item[:2] for o in out):
+            out.append(item)
+
+    if not isinstance(tool_input, dict) or not store_team:
+        return out
+    response_task = (
+        tool_response.get("task") if isinstance(tool_response, dict) else None
+    )
+    response_task = response_task if isinstance(response_task, dict) else {}
+
+    if tool_name == "TaskCreate":
+        task_id = _norm_id(_created_task_id(tool_response, tool_input))
+        record = read_task_json(task_id, store_team, base_fallback=False) if task_id else {}
+        owner = response_task.get("owner") or record.get("owner") or tool_input.get("owner")
+        if task_id and isinstance(owner, str) and owner.strip():
+            if _teachback_ready(task_id, store_team):
+                add(task_id, "teachback_submit", "teachback gate dispatched")
+            elif _handoff_ready(task_id, store_team):
+                add(task_id, "handoff", "work task created")
+        return out
+
+    if tool_name != "TaskUpdate":
+        return out
+    task_id = _norm_id(tool_input.get("taskId"))
+    if not task_id:
+        return out
+
+    owner = tool_input.get("owner")
+    if isinstance(owner, str) and owner.strip() and _changed(tool_response, "owner"):
+        if _teachback_ready(task_id, store_team):
+            add(task_id, "teachback_submit", "teachback gate dispatched")
+        elif _handoff_ready(task_id, store_team, added=tool_input.get("addBlockedBy")):
+            add(task_id, "handoff", "work task wired")
+
+    if tool_input.get("status") == "completed" and _newly_completed(tool_response):
+        record = read_task_json(task_id, store_team, base_fallback=False)
+        done = frozenset({task_id})
+        dependents = _norm_ids(response_task.get("blocks"), record.get("blocks"))
+        for other in iter_team_task_jsons(store_team, tasks_base_dir=None):
+            if isinstance(other, dict) and task_id in _norm_ids(other.get("blockedBy")):
+                dependents = _norm_ids(dependents, [other.get("id")])
+        for dependent in dependents:
+            if dependent != task_id and _handoff_ready(dependent, store_team, done):
+                add(dependent, "handoff", "blocker completed")
+
+    metadata = tool_input.get("metadata")
+    if isinstance(metadata, dict):
+        for rejection_key, predicate in (
+            ("handoff_rejection", "handoff"),
+            ("teachback_rejection", "teachback_submit"),
+        ):
+            if isinstance(metadata.get(rejection_key), dict) and _live(
+                read_task_json(task_id, store_team, base_fallback=False)
+            ):
+                add(task_id, predicate, "deliverable rejected")
+    return out
 
 
 def evaluate_lifecycle(
@@ -1694,83 +1860,6 @@ def evaluate_lifecycle(
         # A duplicate arm is safe by construction (the duplicate watcher
         # fast-exits 0 when the deliverable is already present), which is
         # why this needs no dedup marker.
-        # Structural wait arming at the REJECTION shape: a lead write that
-        # carries metadata.handoff_rejection or teachback_rejection sends
-        # the deliverable back for revision, so the lead's next stage is
-        # waiting on the revised one in the same task. Keyed on the
-        # rejection in THIS write's metadata (never a rejection already on
-        # disk, which every later write would otherwise re-trigger); the
-        # watcher's revision-number check keeps it from firing on the
-        # rejected original. LEAD-SHAPED, like the shapes below.
-        rejection_task_id = tool_input.get("taskId", "") or ""
-        if (
-            team_name
-            and isinstance(rejection_task_id, str)
-            and rejection_task_id.strip()
-            and isinstance(incoming_metadata, dict)
-            and not _is_non_lead_frame(input_data)
-        ):
-            for rejection_key, predicate in (
-                ("handoff_rejection", "handoff"),
-                ("teachback_rejection", "teachback_submit"),
-            ):
-                if isinstance(incoming_metadata.get(rejection_key), dict):
-                    advisories.append(_wait_arm_advisory(
-                        "deliverable rejected",
-                        team_name,
-                        rejection_task_id,
-                        predicate,
-                    ))
-
-        if team_name and not _is_non_lead_frame(input_data):
-            wiring_task_id = tool_input.get("taskId", "") or ""
-            wiring_owner = tool_input.get("owner")
-            if (
-                isinstance(wiring_task_id, str)
-                and wiring_task_id.strip()
-                and isinstance(wiring_owner, str)
-                and wiring_owner.strip()
-            ):
-                wired = read_task_json(
-                    wiring_task_id, team_name, base_fallback=False
-                )
-                wired_subject = wired.get("subject") or ""
-                if _is_teachback_subject(wired_subject):
-                    if wired.get("status") == "pending":
-                        advisories.append(_wait_arm_advisory(
-                            "teachback gate dispatched",
-                            team_name,
-                            wiring_task_id,
-                            "teachback_submit",
-                        ))
-                elif (
-                    wired.get("status") in ("pending", "in_progress")
-                    and is_pact_specialist_owner(wiring_owner, team_name)
-                    and not _owner_resolves_to_lead(wiring_owner, team_name)
-                    and not any(
-                        _is_teachback_subject(blocker.get("subject") or "")
-                        for _id, blocker in _open_blockers(
-                            wired, team_name, tool_input.get("addBlockedBy")
-                        )
-                    )
-                ):
-                    # The live-status whitelist is load-bearing twice over:
-                    # it rejects a COMPLETED task (a late owner fix on a
-                    # closed one cannot produce a handoff) AND an empty
-                    # record — the named-store read with base_fallback=False
-                    # returns {} for a task that is not this store's, and
-                    # {}'s status (None) would pass a not-completed test.
-                    # The lead-rejection conjunct is load-bearing too: the
-                    # registry glob admits the orchestrator, so the
-                    # specialist leg ALONE returns True for the bare lead
-                    # name and a lead-owned pending task would qualify.
-                    advisories.append(_wait_arm_advisory(
-                        "work task wired",
-                        team_name,
-                        wiring_task_id,
-                        "handoff",
-                    ))
-
     # ② TaskCreate rules — teachback addBlocks + work-task addBlockedBy
     if tool_name == "TaskCreate":
         subject = (tool_input.get("subject") or "")
@@ -2010,56 +2099,6 @@ def evaluate_lifecycle(
             owner = ""
         raw_metadata = task.get("metadata")
         metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
-
-        # Structural wait arming at the TEACHBACK-ACCEPTANCE shape: the
-        # lead accepting the teachback is about to idle on the gated work
-        # task's HANDOFF, so the advisory supplies the arm command for
-        # that task (predicate handoff). Duplicates the wiring-shape arm
-        # by design — the wiring write may predate the acceptance by
-        # hours, and a duplicate watcher fast-exits 0 (deliverable
-        # already present). Per QUALIFYING blocked entry, NOT blocks[0]:
-        # the pair-with-parent shape blocks the parent aggregation task
-        # FIRST (live shape: blocks ['30','36'], '30' the lead's own
-        # parent), and a parent is lead-owned — watching it burns the
-        # deadline toward a misleading EXPIRED, or false-fires if the
-        # parent ever gains an unrelated handoff. An entry qualifies when
-        # its on-disk record is still live (pending, or in_progress when
-        # the teammate claimed it first) and carries a specialist
-        # owner that is NOT the lead (the registry glob admits the
-        # orchestrator, so the specialist leg alone would admit lead-owned
-        # parents), and that no OTHER non-completed blocker still gates (a
-        # second teachback, or a predecessor task: the work cannot start
-        # until it closes); one advisory per qualifying entry (duplicate
-        # arms are safe). LEAD-SHAPED: suppressed on non-lead frames.
-        if is_teachback and team_name and not _is_non_lead_frame(input_data):
-            accepted_id = task.get("id") or tool_input.get("taskId")
-            blocks = task.get("blocks")
-            if isinstance(blocks, list):
-                for work_id in blocks:
-                    if not isinstance(work_id, str) or not work_id.strip():
-                        continue
-                    blocked = read_task_json(
-                        work_id, team_name, base_fallback=False
-                    )
-                    blocked_owner = blocked.get("owner")
-                    if (
-                        blocked.get("status") in ("pending", "in_progress")
-                        and isinstance(blocked_owner, str)
-                        and blocked_owner.strip()
-                        and is_pact_specialist_owner(blocked_owner, team_name)
-                        and not _owner_resolves_to_lead(
-                            blocked_owner, team_name
-                        )
-                        and not any(
-                            blocker_id != accepted_id
-                            for blocker_id, _rec in _open_blockers(
-                                blocked, team_name
-                            )
-                        )
-                    ):
-                        advisories.append(_wait_arm_advisory(
-                            "teachback accepted", team_name, work_id, "handoff"
-                        ))
 
         # RETIRED: the work-task handoff-presence/schema branch (gated on
         # `is_work_task = not is_teachback and owner.startswith("pact-")`,
@@ -2791,6 +2830,19 @@ def evaluate_lifecycle(
         ):
             _emit_per_write_snapshot(
                 team_name, task_id, incoming_metadata, task=task_a
+            )
+
+    # Structural wait arming: one invariant, evaluated by arm_candidates at
+    # the writes that can make a task ready. ADVISORY ONLY — the lead
+    # launches the watcher with its own Bash frame; this gate never spawns
+    # a process. LEAD-SHAPED: a frame whose agent_type names a non-lead
+    # actor evaluates nothing.
+    if team_name and not _is_non_lead_frame(input_data):
+        for arm_task_id, predicate, shape in arm_candidates(
+            tool_name, tool_input, tool_response, team_name
+        ):
+            advisories.append(
+                _wait_arm_advisory(shape, team_name, arm_task_id, predicate)
             )
 
     return advisories
