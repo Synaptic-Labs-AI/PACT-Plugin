@@ -345,8 +345,10 @@ Addressing mode, not the verb name, decides scope: `list`, `search` and `search_
 | `status` | System status | `{"memory_count": N, "db_path": "...", ...}` |
 | `setup` | Initialize system | `{"status": "ready", "message": "..."}` |
 | `project-file` | Print this session's project memory file path, or `unavailable: <reason>` | one line on stdout |
-| `project-id show` | Report the detected project id, its `id_shape`, its `source`, the resolved read scope, and every populated bucket in `candidates`. Each candidate row is `{id, memory_count, relation, rekey}`, with `relation` one of `current`, `legacy_candidate`, `case_variant` or `other`; only a `legacy_candidate` row that is not excluded and a `case_variant` row carry a `rekey` command, and every other row's `rekey` is `null`. `repo_root` is the IDENTITY root this verb resolved and the legacy gate compared rows against; `process_repo_root` is the repository the process itself sits in — they differ in a declared-repo session, and `repo_root` is the one that explains the id. `decline_reason` is `{source, reason, override_path}` whenever resolution declined for a named cause, and `null` otherwise: `source` is the rung that declined, `reason` is one of `origin_unreadable`, `origin_unrepresentable`, `gitfile_redirect`, `broken_git_marker`, `no_working_tree`, `submodule_checkout` or `declaration_unresolved`, and `override_path` is the `<git-common-dir>/pact-project-id` file that remedies it, or `null` in two cases. First, when no override file can remedy the decline: that is the case for `gitfile_redirect`, `no_working_tree`, `broken_git_marker` and `declaration_unresolved`. Second, for any other cause when the checkout's `.git` points at a git directory outside it that is neither a linked worktree's nor a submodule's admin directory: a pin there may remedy the decline, but the path is withheld because a forged pointer looks the same, so pinning that git directory is the user's decision, as for `gitfile_redirect` below. For `gitfile_redirect`: Check that git can answer for this checkout (`git rev-parse --git-dir`, `git worktree list`), or run from the repository the `.git` points at. A `git init --separate-git-dir` layout of your own is a user decision: see the pact-memory skill. In this skill, that is the next sentence. Such a layout is recovered by a pin at `<dir>/.git/pact-project-id`, in the git directory its `.git` file names, but only the user writes it, after confirming that directory is theirs. An agent never writes this pin and asks the user instead: a forged `.git` file naming another repository's git directory has the same shape, and the pin would re-pin that repository. When the detail says git lists the worktree entry the `.git` names at another path, which git marks prunable, and not at this checkout, the remedy adds: A linked worktree you moved is re-registered by running `git worktree repair` in it; the user runs that, not an agent. `case_variant` lists a case-differing bucket the case gate did NOT include (present-but-not-included, with its rekey command), distinct from `excluded`, which means the plausibility gate disproved it. Reads an existing store and creates none | `{"project_id": "...", "id_shape": "canonical", "source": "...", "decline_reason": null, "repo_root": "...", "process_repo_root": "...", "read_scope": [...], "legacy_scope": {"candidate": "...", "case_variant": [], "case_variant_rekey": [], ...}, "candidates": [{"id": "...", "memory_count": N, "relation": "legacy_candidate", "rekey": "..."}]}` |
+| `project-id show` | Report the detected project id, its `id_shape`, its `source`, the resolved read scope, and every populated bucket in `candidates`. Each candidate row is `{id, memory_count, relation, rekey}`, with `relation` one of `current`, `legacy_candidate`, `case_variant` or `other`; only a `legacy_candidate` row that is not excluded and a `case_variant` row carry a `rekey` command, and every other row's `rekey` is `null`. `repo_root` is the identity root that explains the id; `process_repo_root` is the repository the process sits in. `decline_reason` is `{source, reason, override_path}` whenever resolution declined for a named cause, and `null` otherwise: `source` is the rung that declined, `reason` is one of `origin_unreadable`, `origin_unrepresentable`, `gitfile_redirect`, `broken_git_marker`, `no_working_tree`, `submodule_checkout` or `declaration_unresolved`, and `override_path` is the `<git-common-dir>/pact-project-id` file that remedies it, or `null` in two cases. First, when no override file can remedy the decline: that is the case for `gitfile_redirect`, `no_working_tree`, `broken_git_marker` and `declaration_unresolved`. Second, for any other cause when the checkout's `.git` points at a git directory outside it that is neither a linked worktree's nor a submodule's admin directory. `case_variant` lists a case-differing bucket the case gate did not include, with its rekey command; it is not `excluded`. Reads an existing store and creates none. The decline remedies follow the table | `{"project_id": "...", "id_shape": "canonical", "source": "...", "decline_reason": null, "repo_root": "...", "process_repo_root": "...", "read_scope": [...], "legacy_scope": {"candidate": "...", "case_variant": [], "case_variant_rekey": [], ...}, "candidates": [{"id": "...", "memory_count": N, "relation": "legacy_candidate", "rekey": "..."}]}` |
 | `project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply]`, or `project-id rekey --candidates` alone | Move an ENTIRE project bucket to a canonical id in one transaction (a folder-name id's own legacy candidate may instead move into that folder-name id, with an explicit `--to`; see above): memories, file rows, graph links and vector partitions. `--dry-run` is the default posture. `--candidates` lists the buckets as `show` does and takes no other option. An omitted `--to` is accepted only when `--from` is this checkout's own legacy candidate and the bucket is verified (a file row places it here). A bucket read on session evidence alone (`included_unverified`) moves only with an explicit `--to`, and so does one that is excluded or unproven; otherwise the move is refused with `REKEY_REFUSED`. Exit codes: 0 clean plan or applied move, 1 refused (`REKEY_REFUSED`; `PROJECT_IDENTITY_UNRESOLVED` when no canonical identity resolves; `DB_PATH_NOT_FOUND` when `--db-path` names a store that is not present, and nothing is created), 2 bad input, 3 operational failure (nothing moved). When the default store does not exist yet, the command answers `store_absent: true` and creates nothing; a `--from` bucket with no rows answers `from_bucket_empty: true`. The envelope also carries `target_defaulted` and `legacy_verdict`. A merged memory link keeps the TARGET's relationship; `links_repointed` counts the links on file rows merged into an existing target row, and `links_conflicted` counts relationship types dropped | `{"from": "...", "to": "...", "dry_run": true, "memories": N, "links_repointed": N, "links_conflicted": N, "vectors_moved": N, "from_bucket_empty": false, "target_defaulted": true, "legacy_verdict": "verified", ...}` |
+
+Decline remedies. For `gitfile_redirect`: Check that git can answer for this checkout (`git rev-parse --git-dir`, `git worktree list`), or run from the repository the `.git` points at. A `git init --separate-git-dir` layout of your own is a user decision: see the pact-memory skill. In this skill, that is the next sentence. Such a layout is recovered by a pin at `<dir>/.git/pact-project-id`, in the git directory its `.git` file names, but only the user writes it, after confirming that directory is theirs. An agent never writes this pin and asks the user instead: a forged `.git` file naming another repository's git directory has the same shape, and the pin would re-pin that repository. When the remedy names `git worktree repair`, the user runs it, not an agent.
 
 WHEN A PROJECT RETURNS NO MEMORIES, run `project-id show` before concluding
 anything. It reports the identity this session resolved, how it was decided,
@@ -394,7 +396,7 @@ one of `included`, `excluded` and `unproven` is true:
   at an existing directory outside this repository and its linked worktrees:
   it is then `unproven`. A row with no recorded session, or whose session's
   recorded directory no longer exists (a removed worktree or a deleted
-  checkout), does not block it, because nothing tells such rows apart: an included bucket that holds such rows is read with a warning,
+  checkout), does not block it; an included bucket that holds such rows is read with a warning,
   once per process, that gives their count (`sessions.unattributed`) and the
   rekey command.
 - `excluded`: evidence places it elsewhere and nothing places it here, so it
@@ -407,10 +409,14 @@ one of `included`, `excluded` and `unproven` is true:
   that are gone, unreadable, relative, in an unmarked folder, in a checkout
   with another name, or outside any other checkout are no evidence either way. Another
   clone of this same repository is not a rival: its rows and sessions are no
-  evidence either way when its own config's first origin url is this
-  repository's, written the same way, or its pin is this repository's id. A
-  clone whose url is spelled differently (ssh against https) still counts as
-  a rival.
+  evidence either way when its `.git` is a directory and either its usable
+  pin (read by the same rule as this repository's own) is this repository's
+  id or, when it has no usable pin, its own config's first origin url is this
+  repository's, written the same way (a url is compared only when this
+  repository's id came from a url). A clone with a different pin, a
+  differently spelled url (ssh against https), or a `.git` that is a file or
+  link (a linked worktree or separate-git-dir checkout of another clone)
+  still counts as a rival.
 - `unproven`: it is not read, and its `rekey` command is printed once per
   process, with the cause. `unproven_reason` names the cause:
   `recorded_elsewhere` (some of its rows were written by sessions recorded at
@@ -433,7 +439,7 @@ one of `included`, `excluded` and `unproven` is true:
   `relative` and `roots`. A repository that was moved, copied,
   restored or cloned again, and a folder that is not a repository, read as
   `unproven` too. A
-  session folder that an earlier version of the plugin removed left no line,
+  session folder removed before the session ledger existed left no line,
   so a project whose writing sessions were all removed that way reads as
   `unproven` until its rows are moved with that rekey command and `--apply`,
   which needs the user's explicit approval.
@@ -458,8 +464,7 @@ Two operator surfaces answer, and they are deliberately ordered:
   as `override_ignored` with reason `not_canonical`, and resolution continues
   without it. To move a copied store's folder-name bucket, use
   `project-id rekey --from=<old> --to=<canonical>`. An ssh host alias from
-  the user's ssh config stays in the id, because git cannot tell an alias
-  from a host: `git@github-work:Acme/Widget` gives `github-work/Acme/Widget`,
+  the user's ssh config stays in the id: `git@github-work:Acme/Widget` gives `github-work/Acme/Widget`,
   while an https clone of the same repository gives `github.com/acme/widget`.
   The pin is the remedy: a pin holding `github.com/acme/widget` in the alias
   clone gives it the https clone's bucket.

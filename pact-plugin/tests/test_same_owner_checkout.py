@@ -79,3 +79,48 @@ def test_a_session_with_no_url_matches_no_unpinned_clone(tmp_path):
     assert_outside_repository(tmp_path)
     clone = make_repo(tmp_path / "b" / "proj", remote=URL)
     assert checkout_is_same_owner(str(clone), ID, None) is False
+
+
+@pytest.mark.parametrize("pin", [
+    ID + "\r\n",
+    "# pinned by hand\n" + ID + "\n",
+    "  " + ID + "  \n",
+    "\ufeff" + ID + "\n",
+    "\n\n" + ID,
+])
+def test_a_pin_is_read_as_the_resolver_reads_it(tmp_path, pin):
+    """The pin's text rule is the resolver's (`pin_file_value`): CRLF, a
+    comment line first, surrounding spaces and a BOM all still name the id."""
+    assert_outside_repository(tmp_path)
+    clone = make_repo(tmp_path / "b" / "proj", remote="https://github.com/acme/other.git")
+    (clone / ".git" / "pact-project-id").write_bytes(pin.encode("utf-8"))
+    assert checkout_is_same_owner(str(clone), ID, URL) is True
+
+
+def test_a_rejected_pin_falls_back_to_the_url_as_the_resolver_does(tmp_path):
+    assert_outside_repository(tmp_path)
+    clone = make_repo(tmp_path / "b" / "proj", remote=URL)
+    (clone / ".git" / "pact-project-id").write_text("not-canonical\n", encoding="utf-8")
+    assert checkout_is_same_owner(str(clone), ID, URL) is True
+
+
+def test_a_rejected_own_pin_keeps_url_matching(tmp_path, monkeypatch):
+    """This repository's pin file is present but rejected, so its id comes
+    from its origin: siblings are still matched by url."""
+    from scripts.memory_api import PACTMemory
+
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    repo = make_repo(tmp_path / "a" / "proj", remote=URL)
+    (repo / ".git" / "pact-project-id").write_text("not-canonical\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    memory = PACTMemory(session_id="s", db_path=tmp_path / "m.db")
+    assert memory.project_id == ID, "precondition: the rejected pin is ignored"
+    assert memory._own_identity(repo / ".git") == (ID, URL)
+
+
+def test_the_pin_size_cap_is_the_resolvers(tmp_path):
+    from scripts import database
+    from scripts import project_identity
+
+    assert database.PIN_FILE_MAX_BYTES == project_identity._MAX_OVERRIDE_BYTES

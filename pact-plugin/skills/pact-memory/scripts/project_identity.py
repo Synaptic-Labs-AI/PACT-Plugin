@@ -789,6 +789,9 @@ def _azure_devops_services_id(host: str, port: str, segments: list) -> Optional[
 # repository has one id whatever case a remote spells it in: the path is
 # lower-cased. Every other host keeps its path's case.
 _CASE_INSENSITIVE_PATH_HOSTS = frozenset({"github.com"})
+# GitHub's own SSH-over-443 host (`ssh://git@ssh.github.com:443/O/N`): the
+# same service as github.com, so it takes github.com's id.
+_GITHUB_SSH_443_HOST = "ssh.github.com"
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-f]{2}")
 
 
@@ -797,6 +800,9 @@ def _identifier(host: str, port: str, segments: list, git_dropped: bool = False)
     and the lower-cased path of a `_CASE_INSENSITIVE_PATH_HOSTS` host.
     `git_dropped` says the case-sensitive strip already removed a `.git`,
     so no second one is removed: one `.git` per remote on every host."""
+    if host == _GITHUB_SSH_443_HOST and port in ("", "443"):
+        # GitHub's SSH-over-443 endpoint is github.com itself.
+        host, port = "github.com", ""
     azure = _azure_devops_services_id(host, port, segments)
     if azure is not None:
         host, segments = "dev.azure.com", azure
@@ -1333,30 +1339,10 @@ def read_override(common_dir: Path) -> OverrideRead:
         return OverrideRead(None, None, None)
     except OSError:
         return OverrideRead(None, path, "unreadable")
-    if len(raw) > _MAX_OVERRIDE_BYTES:
-        return OverrideRead(None, path, "too_long")
-    try:
-        # `utf-8-sig` drops an encoding BOM. `validate_identifier_for_write`
-        # does not reject U+FEFF (it is not a control character), so a decoded
-        # BOM would otherwise become an invisible first character of the id.
-        text = raw.decode("utf-8-sig")
-    except UnicodeDecodeError:
-        return OverrideRead(None, path, "not_utf8")
-    _, validate_identifier_for_write = _server_identity_impl()
-    for line in text.splitlines():
-        candidate = line.strip()
-        if not candidate or candidate.startswith("#"):
-            continue
-        if len(candidate) > _max_id_length():
-            return OverrideRead(None, path, "too_long")
-        try:
-            validate_identifier_for_write(candidate)
-        except ValueError:
-            return OverrideRead(None, path, "control_chars")
-        if not is_canonical(candidate):
-            return OverrideRead(None, path, "not_canonical")
-        return OverrideRead(candidate, path, None)
-    return OverrideRead(None, path, "empty")
+    from .database import pin_file_value
+
+    value, reason = pin_file_value(raw)
+    return OverrideRead(value, path, reason)
 
 
 def read_user_setting(config_path: Path) -> Optional[str]:

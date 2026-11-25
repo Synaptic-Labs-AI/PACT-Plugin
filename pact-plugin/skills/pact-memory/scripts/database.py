@@ -1726,18 +1726,59 @@ def origin_url_in_config(config_path: Any) -> Optional[str]:
     return None
 
 
+# The most bytes a `pact-project-id` pin file may hold (`pin_file_value`).
+PIN_FILE_MAX_BYTES = 4096
+
+
+def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
+    """`(value, reason)` for the bytes of a `pact-project-id` pin file: THE
+    ONE COPY of the pin's text rule, used by `project_identity.read_override`
+    and by `checkout_is_same_owner`.
+
+    The first line that is neither blank nor a `#` comment, stripped, after
+    an encoding BOM is dropped, is the candidate; it must be a canonical id.
+    `reason` is None for a usable value, else "too_long" (over
+    `PIN_FILE_MAX_BYTES` bytes, or a candidate over the id length cap),
+    "not_utf8", "control_chars", "not_canonical" or "empty". Never raises.
+    """
+    if len(raw) > PIN_FILE_MAX_BYTES:
+        return None, "too_long"
+    try:
+        # `utf-8-sig` drops an encoding BOM. `validate_identifier_for_write`
+        # does not reject U+FEFF (it is not a control character), so a decoded
+        # BOM would otherwise become an invisible first character of the id.
+        text = raw.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return None, "not_utf8"
+    for line in text.splitlines():
+        candidate = line.strip()
+        if not candidate or candidate.startswith("#"):
+            continue
+        if len(candidate) > CANONICAL_ID_MAX_LENGTH:
+            return None, "too_long"
+        try:
+            validate_identifier_for_write(candidate)
+        except ValueError:
+            return None, "control_chars"
+        if not is_canonical_id(candidate):
+            return None, "not_canonical"
+        return candidate, None
+    return None, "empty"
+
+
 def checkout_is_same_owner(checkout: str, own_id: str, own_url: Optional[str]) -> bool:
     """Whether `checkout`, a directory a store row names, is a plain clone of
-    this session's repository: its pin file's first line is `own_id`, or,
-    with no pin file, the first origin url of its own config
-    (`origin_url_in_config`) is `own_url`, the url this session's id comes
-    from (None when its id comes from a pin).
+    this session's repository: its usable pin (`pin_file_value`, the rule
+    the resolver reads a pin by) is `own_id`, or, with no usable pin, the
+    first origin url of its own config (`origin_url_in_config`) is
+    `own_url`, the url this session's id comes from (None when its id comes
+    from a pin). A pin the resolver would ignore is ignored here too.
 
     FILES ONLY, NO GIT: no git command runs on a path a store row names. So
     only a checkout whose `.git` is a directory is judged, read straight from
     it. A `.git` file or symlink (a linked worktree, a separate git dir, or a
-    pointer at another repository), a pin file that is not exactly
-    `own_id`, and a url spelled differently from this session's (ssh against
+    pointer at another repository), a usable pin that is not `own_id`, and a
+    url spelled differently from this session's (ssh against
     https) are not the same owner, so such a checkout stays a rival (fail
     closed). Never raises."""
     from shared.git_helpers import read_git_file
@@ -1747,9 +1788,11 @@ def checkout_is_same_owner(checkout: str, own_id: str, own_url: Optional[str]) -
         if not stat.S_ISDIR(os.lstat(git_dir).st_mode):
             return False
         pin = os.path.join(git_dir, "pact-project-id")
-        if os.path.lexists(pin):
-            text = read_git_file(pin) if not os.path.islink(pin) else None
-            return text is not None and text.split("\n", 1)[0] == own_id
+        if os.path.lexists(pin) and not os.path.islink(pin):
+            text = read_git_file(pin)
+            value = pin_file_value(os.fsencode(text))[0] if text is not None else None
+            if value is not None:
+                return value == own_id
         url = origin_url_in_config(os.path.join(git_dir, "config"))
         return own_url is not None and url == own_url
     except (OSError, ValueError):

@@ -484,9 +484,12 @@ class TestOverridePathIsNullWhenNoPinCanRemedy:
     """The `override_path` clause and the redirect remedy beside it."""
 
     def _clause(self) -> str:
+        """The override_path clause of the show row plus the decline-remedy
+        paragraph that follows the table."""
         row = _table_row(SKILL, "project-id show")
-        start = row.index("override_path is the")
-        return row[start:start + 1400]
+        body = _body(SKILL)
+        remedies = body[body.index("Decline remedies."):body.index("WHEN A PROJECT RETURNS NO MEMORIES")]
+        return row[row.index("override_path is the"):] + " " + remedies
 
     def test_null_means_no_override_file_can_remedy(self):
         assert (
@@ -496,6 +499,12 @@ class TestOverridePathIsNullWhenNoPinCanRemedy:
 
     def test_the_retired_condition_is_gone(self):
         assert "null when no repository was found" not in _body(SKILL).lower()
+
+    def test_the_show_row_is_bare_and_the_remedies_follow_the_table(self):
+        row = _table_row(SKILL, "project-id show")
+        assert "because" not in row and "For gitfile_redirect:" not in row
+        assert "The decline remedies follow the table" in row
+        assert "Decline remedies. For gitfile_redirect: " in _body(SKILL)
 
     def test_the_redirect_remedy_is_the_code_remedy(self):
         from scripts.memory_api import _REDIRECT_REMEDY
@@ -594,8 +603,8 @@ class TestLegacyScopeStatesAreDocumented:
 
     def test_sessions_removed_before_the_ledger_read_as_unproven(self):
         assert (
-            "A session folder that an earlier version of the plugin removed "
-            "left no line, so a project whose writing sessions were all "
+            "A session folder removed before the session ledger existed left "
+            "no line, so a project whose writing sessions were all "
             "removed that way reads as unproven until its rows are moved with "
             "that rekey command and --apply, which needs the user's explicit "
             "approval."
@@ -677,9 +686,11 @@ class TestLegacyScopeStatesAreDocumented:
     def test_a_sibling_clone_is_not_a_rival(self):
         assert (
             "Another clone of this same repository is not a rival: its rows and "
-            "sessions are no evidence either way when its own config's first "
-            "origin url is this repository's, written the same way, or its pin "
-            "is this repository's id."
+            "sessions are no evidence either way when its .git is a directory and "
+            "either its usable pin (read by the same rule as this repository's "
+            "own) is this repository's id or, when it has no usable pin, its own "
+            "config's first origin url is this repository's, written the same way "
+            "(a url is compared only when this repository's id came from a url)."
         ) in _body(SKILL)
 
     def test_the_rekey_dry_run_states_what_it_leaves(self):
@@ -1436,8 +1447,7 @@ class TestNullOverridePathIsMeasured:
 
     def _clause(self) -> str:
         row = _table_row(SKILL, "project-id show")
-        start = row.index("override_path is the")
-        return row[start:row.index("For gitfile_redirect:", start)]
+        return row[row.index("override_path is the"):]
 
     def _documented_causes(self) -> set:
         clause = self._clause()
@@ -1525,11 +1535,13 @@ class TestNullOverridePathIsMeasured:
             assert self.OUTSIDE_PHRASE not in self._clause(), "documented but measures no null"
 
     def test_the_withheld_path_is_the_users_decision(self):
+        """The row states the null case bare; the agent rule lives in the
+        decline remedies, and the old rationale is gone."""
+        body = _body(SKILL)
+        assert "because a forged pointer looks the same" not in body
         assert (
-            "a pin there may remedy the decline, but the path is withheld "
-            "because a forged pointer looks the same, so pinning that git "
-            "directory is the user's decision"
-        ) in self._clause()
+            "An agent never writes this pin and asks the user instead"
+        ) in body
 
     DOC_LEAD = "It is None for "
 
@@ -7068,6 +7080,10 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "is_canonical_id"): "validates an id value",
         ("call", "validate_identifier_for_write"): "validates an id value",
+        ("call", "pin_file_value"): (
+            "classifies the bytes read_override already read from the pin file (database's one "
+            "copy of the pin's text rule); it validates an id value and asks git nothing"
+        ),
         ("call", "answered_once"): (
             "runs the reader's own git command once per detection pass and hands later "
             "askers of the same question its result; the command is the reader's input, "

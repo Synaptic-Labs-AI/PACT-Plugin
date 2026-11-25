@@ -396,7 +396,11 @@ def _pruned_session_records(ledger: Path) -> List[dict]:
     try:
         if not stat.S_ISREG(os.lstat(ledger).st_mode):
             return []
-        fd = os.open(ledger, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(
+            ledger,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
     except Exception:
         return []
     try:
@@ -436,7 +440,7 @@ def _pruned_session_records(ledger: Path) -> List[dict]:
         os.close(fd)
 
 
-# One parsed ledger per (path, size, mtime) for the life of the process. A
+# One parsed ledger per (path, size, mtime, ctime, inode) for the life of the process. A
 # bucket that stays unproven re-runs the evidence check whenever the store
 # changes, and without this each run re-reads and re-parses the same ledger.
 _PRUNED_SESSION_INDEX: Dict[str, tuple] = {}
@@ -447,12 +451,14 @@ def _pruned_session_index(ledger: Path) -> Dict[str, List[dict]]:
 
     Built once per ledger state and then reused, so the evidence check costs
     one dictionary lookup per writing session instead of a scan of every
-    line. The cache key carries the file's size and mtime, so an appended
-    line or a cut-back (the reaper's two writes) is seen on the next read.
+    line. The cache key carries the file's size, mtime, change time and inode,
+    so an appended line or a cut-back (the reaper's two writes) is seen on the
+    next read, as is a compaction's new file renamed over the ledger at the
+    same size within one mtime tick.
     """
     try:
         status = os.lstat(ledger)
-        stamp = (status.st_size, status.st_mtime_ns)
+        stamp = (status.st_size, status.st_mtime_ns, status.st_ctime_ns, status.st_ino)
     except OSError:
         return {}
     cached = _PRUNED_SESSION_INDEX.get(str(ledger))
@@ -3852,7 +3858,7 @@ class PACTMemory:
         own_id = self._project_id
         if not own_id or not is_canonical(own_id) or common is None:
             return None
-        if project_identity.read_override(Path(common)).path is not None:
+        if project_identity.read_override(Path(common)).value is not None:
             return own_id, None
         return own_id, origin_url_in_config(Path(common) / "config")
 

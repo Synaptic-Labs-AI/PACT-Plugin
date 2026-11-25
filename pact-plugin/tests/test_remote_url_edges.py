@@ -206,3 +206,22 @@ def test_an_id_with_an_empty_host_label_is_not_canonical(value):
 @pytest.mark.parametrize("value", ["a.b/o/r", "a-.b/o/r", "a.b.c:8443/o/r", "a/o/r"])
 def test_control_a_host_with_no_empty_label_is_canonical(value):
     assert pi.is_canonical(value)
+
+
+@pytest.mark.parametrize("url", [
+    "ssh://git@ssh.github.com:443/Acme/Widget.git",
+    "ssh://git@ssh.github.com/Acme/Widget.git",
+    "git@ssh.github.com:Acme/Widget.git",
+])
+def test_githubs_ssh_over_443_host_is_github(url):
+    """GitHub's SSH-over-443 endpoint is github.com, as the backlog's remote
+    parser already reads it: both name the same repository."""
+    from shared import backlog
+
+    assert pi.normalize_remote_url(url) == "github.com/acme/widget"
+    owner, name = backlog._slug_from_remote_url(url)
+    assert f"github.com/{owner}/{name}".lower() == pi.normalize_remote_url(url)
+
+
+def test_control_another_port_on_that_host_keeps_its_own_id():
+    assert pi.normalize_remote_url("ssh://git@ssh.github.com:2222/Acme/Widget") == "ssh.github.com:2222/Acme/Widget"
