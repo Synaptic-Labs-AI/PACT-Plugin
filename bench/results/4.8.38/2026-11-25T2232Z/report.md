@@ -85,6 +85,14 @@ lead persisted task state. The relay path worked, but it adds overhead and a
 durability dependency. This is an environmental/tool-surface issue, not a plugin
 crash.
 
+Env check: CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 and
+CLAUDE_CODE_ENABLE_TODO_TOOLS=1 are both present in the live settings and in the
+scratch config used by the smoke, and both are in the prepare manifest env_keys.
+Agent Teams was active (teammates spawned). ToolSearch for TaskCreate,
+TaskUpdate, TaskList, and TaskGet returned "No matching deferred tools found",
+and no TodoWrite/TodoRead calls were observed. The missing task tools are a
+teammate tool-surface issue, not an unset-env issue.
+
 ## Token snapshot
 
 Two subagent first-request samples: 52,112 and 86,606 tokens; median 69,359.

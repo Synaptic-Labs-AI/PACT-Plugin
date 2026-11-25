@@ -186,7 +186,13 @@
       "handoffs": 3,
       "handoffs_valid": 3,
       "note": "Teammates reported TaskCreate/TaskUpdate/TaskList/TaskGet absent after ToolSearch and relayed handoffs by SendMessage; the lead persisted task state. This is an environmental/tool-surface finding, not a plugin crash.",
-      "handoffs_all_valid": true
+      "handoffs_all_valid": true,
+      "env": {
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1",
+        "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1",
+        "source": "live settings and scratch config; both included in the prepare manifest env_keys"
+      },
+      "task_tool_evidence": "ToolSearch for TaskCreate,TaskUpdate,TaskList,TaskGet returned No matching deferred tools found; no TodoWrite/TodoRead calls were observed in the subagent transcripts. Agent Teams was active (teammates spawned), so the missing task tools are not caused by an unset agent-teams env var."
     }
   },
   "track_b": {
