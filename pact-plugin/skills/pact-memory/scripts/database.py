@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple, Union
+from urllib.parse import unquote
 
 # Try to import pysqlite3 which has extension loading enabled.
 # Standard library sqlite3 has enable_load_extension disabled for security.
@@ -1751,13 +1752,34 @@ def github_folded_segment(segment: str) -> str:
     return _GITHUB_ESCAPE_RE.sub(lambda m: m.group(0).upper(), segment.lower())
 
 
+# A GitHub owner or repository name: only the characters GitHub allows, `\Z`
+# anchored (`$` would also match before a trailing newline), and never dots
+# alone (`.`, `..` are path traversal in a REST url). THE ONE COPY, for a
+# remote's id, a pin, and the backlog's `_valid_slug`.
+GITHUB_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
+
+
+def is_github_name(name: object) -> bool:
+    """Whether `name` is a valid GitHub owner or repository name."""
+    return isinstance(name, str) and bool(GITHUB_NAME_RE.match(name)) and set(name) != {"."}
+
+
+def is_github_repo_path(path: str) -> bool:
+    """Whether a port-less github.com id's path is exactly owner/repo, each
+    name, decoded as GitHub reads it, a GitHub name."""
+    parts = path.split("/")
+    return len(parts) == 2 and all(
+        is_github_name(unquote(part, errors="surrogateescape")) for part in parts
+    )
+
+
 def _github_folded_pin(candidate: str) -> Optional[str]:
     """A canonical pin with GitHub's spelling rules applied as a remote's id
     takes them (`project_identity._identifier`), or None when it names no
     GitHub repository. A port-less `www.github.com` becomes github.com; a
     `github.com` path, on any port, is lower-cased outside its escapes; and a
-    port-less github.com path of fewer than two segments (owner/repo) is None,
-    as such a remote declines. Every other host keeps its spelling, a ported
+    port-less github.com path that is not exactly owner/repo of GitHub names
+    (`is_github_repo_path`) is None, as such a remote declines. Every other host keeps its spelling, a ported
     `www.github.com` included, exactly as a remote naming it does."""
     hostport, _, path = candidate.partition("/")
     host, colon, port = hostport.partition(":")
@@ -1765,7 +1787,7 @@ def _github_folded_pin(candidate: str) -> Optional[str]:
     if host != "github.com":
         return candidate
     segments = path.split("/")
-    if not port and len(segments) < 2:
+    if not port and not is_github_repo_path(path):
         return None
     return host + colon + port + "/" + "/".join(
         github_folded_segment(segment) for segment in segments

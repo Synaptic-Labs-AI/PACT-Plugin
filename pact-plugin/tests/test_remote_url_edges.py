@@ -88,8 +88,8 @@ def test_an_escape_a_segment_needs_survives_the_decode(url, expected):
 @pytest.mark.parametrize(
     ("url", "expected"),
     [
-        ("https://github.com/O/Caf%C3%A9", "github.com/o/caf%C3%A9"),
-        ("https://github.com/o/café", "github.com/o/caf%C3%A9"),
+        ("https://github.com/O/R%2Dx", "github.com/o/r-x"),
+        ("https://h.example/O/Caf%c3%a9", "h.example/O/Caf%C3%A9"),
         ("https://github.com/O/R.GIT", "github.com/o/r"),
         ("git@github.com:O/R.Git", "github.com/o/r"),
         ("https://h.example/o/r.GIT", "h.example/o/r.GIT"),
@@ -97,11 +97,12 @@ def test_an_escape_a_segment_needs_survives_the_decode(url, expected):
     ],
 )
 def test_github_case_folding_keeps_escapes_and_only_dot_git_is_a_suffix(url, expected):
-    """GitHub's path is lower-cased outside its percent escapes, which stay
-    upper-case as the id grammar requires; elsewhere only a lower-case
+    """GitHub's path is lower-cased (an escaped name character is decoded
+    first, and a name needing any other escape declines); elsewhere escapes
+    stay upper-case as the id grammar requires, and only a lower-case
     `.git` is dropped, because git looks up exactly `<path>.git`. RED WHEN
-    an escape is lower-cased (a non-ASCII GitHub path declines) or `.GIT`
-    is dropped on a case-sensitive server."""
+    an escape is lower-cased or `.GIT` is dropped on a case-sensitive
+    server."""
     assert pi.normalize_remote_url(url) == expected
 
 
@@ -464,9 +465,16 @@ def test_the_backlog_strips_a_git_suffix_as_the_id_does(url):
     "https://github.com/O/R/.GIT",
     "https://github.com/O/R/%2EGIT",
     "https://github.com/%7E/o/r",
-    # A github.com id is exactly owner/repo.
+    # A github.com id is exactly owner/repo, and each name a GitHub name.
     "https://github.com/o/r/extra",
     "git@github.com:o/r/x/y",
+    "https://github.com/O/R%2Fx",
+    "https://github.com/o~x/r",
+    "https://github.com/o/r~",
+    "git@github.com:o/r+x",
+    "https://github.com/o/r%C3%A9",
+    "https://github.com/O/Caf%C3%A9",
+    "https://github.com/o/café",
 ])
 def test_a_github_path_github_does_not_serve_declines(url):
     """github.com serves no home-relative path and no `o/r/.git` (measured:

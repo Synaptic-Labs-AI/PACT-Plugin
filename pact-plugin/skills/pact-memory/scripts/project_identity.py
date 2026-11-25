@@ -1069,8 +1069,14 @@ def normalize_remote_url(url: object) -> Optional[str]:
     # names no repository there, and neither does a home-relative `~/o/r` or a
     # `o/r/.git` path (`_github_does_not_serve`). Each declines rather than
     # bind an id the remote does not reach.
+    from .database import is_github_repo_path
+
     if identifier.startswith("github.com/") and (
-        identifier.count("/") != 2 or github_unserved
+        github_unserved
+        # Exactly owner/repo, each name decoded as GitHub reads it: an escaped
+        # `/` (`o/r%2Fx`), a `~` or any other character names nothing
+        # GitHub serves.
+        or not is_github_repo_path(identifier[len("github.com/"):])
     ):
         return None
 
@@ -1080,6 +1086,14 @@ def normalize_remote_url(url: object) -> Optional[str]:
     if not is_canonical(identifier):
         return None
     return identifier
+
+
+def is_github_name(name: object) -> bool:
+    """`database.is_github_name`, the one GitHub name rule, for callers that
+    load this module (the backlog's `_valid_slug`)."""
+    from .database import is_github_name as rule
+
+    return rule(name)
 
 
 def _github_does_not_serve(path: str) -> bool:

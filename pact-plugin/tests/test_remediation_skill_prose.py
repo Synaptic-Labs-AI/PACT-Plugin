@@ -694,7 +694,8 @@ class TestLegacyScopeStatesAreDocumented:
         assert (
             "A github.com or www.github.com pin with no port is read as a "
             "github.com remote is: lower-cased outside its %XX escapes, with "
-            "www.github.com read as github.com, and it must name owner/repo. A "
+            "www.github.com read as github.com, and it must name exactly owner/repo, "
+            "each a valid GitHub name. A "
             "github.com pin on another port is lower-cased the same way."
         ) in body
         assert "earlier mixed-case spelling" not in body
@@ -7150,6 +7151,10 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "github_folded_segment"): (
             "database's one copy of GitHub's case fold for a path segment the remote grammar "
             "already parsed; pure, it asks git nothing"
+        ),
+        ("call", "is_github_repo_path"): (
+            "database's one copy of GitHub's owner/repo name rule, applied to an id path the "
+            "remote grammar already built; pure, it asks git nothing"
         ),
         ("call", "pin_file_value"): (
             "classifies the bytes read_override already read from the pin file (database's one "

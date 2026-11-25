@@ -81,6 +81,8 @@ CORPUS = [
     # Spellings the id declines or names no github.com repository with.
     ("https://github.com/o", None),
     ("https://github.com/o/r/extra", None),
+    ("https://github.com/O/R%2Fx", None),
+    ("https://github.com/o~x/r", None),
     ("https://github.com/o/r/.git", None),
     ("git@github.com:~/o/r", None),
     ("ssh://git@github.com/~/o/r", None),

@@ -133,12 +133,6 @@ _STALE_AFTER = timedelta(days=14)
 # its last rung, `gh repo view`, can cost a budget of its own.
 _TRACKER_TIMEOUT_SECONDS = 5
 
-# Characters a repository owner or name may hold. Everything else is refused
-# rather than interpolated into a query.
-# `\Z` rather than `$`, matching the sibling anchor in backlog_store.py: Python's
-# `$` also matches before a trailing newline, so `$` would accept "owner\n".
-_SLUG_CHARS = re.compile(r"^[A-Za-z0-9._-]+\Z")
-
 # The only host the slug chain and the ref classifier accept. GitHub Enterprise
 # and every other host fall through rather than being read as this tracker.
 _GITHUB_HOST = "github.com"
@@ -1601,18 +1595,17 @@ def _project_identity():
 
 
 def _valid_slug(owner: Any, name: Any) -> bool:
-    """Both parts hold only slug characters, and neither is dots alone.
+    """Both parts are GitHub names (`project_identity.is_github_name`: the
+    characters a repository slug may contain, anchored at the true end of
+    the string, never dots alone).
 
     The slug is interpolated into a GraphQL string literal AND into a REST URL
-    path, so it is confirmed to hold nothing but the characters a repository
-    slug may contain. `.` and `..` pass `_SLUG_CHARS` but are path traversal
-    in a URL, so a name made only of dots is refused too.
+    path, so it is confirmed to hold nothing else; `.` and `..` would be
+    path traversal in a URL. The memory id applies the same rule, so a
+    github.com id and its slug agree.
     """
-    return all(
-        isinstance(part, str) and bool(_SLUG_CHARS.match(part))
-        and set(part) != {"."}
-        for part in (owner, name)
-    )
+    is_github_name = _project_identity().is_github_name
+    return is_github_name(owner) and is_github_name(name)
 
 
 def _gh_repo_view_slug(project_path: Optional[str] = None) -> Optional[Tuple[str, str]]:

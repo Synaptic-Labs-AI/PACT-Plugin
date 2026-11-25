@@ -421,7 +421,7 @@ afternoon.
   the duplicates note stops naming      test_the_duplicates_message_reports_what_it_saw_and_claims_no_cause
   the top-level type check removed      test_a_top_level_non_object_reaches_the_named_path_machinery
   the title TYPE check removed          test_a_non_string_title_is_reported_and_the_block_still_renders
-  `_SLUG_CHARS` anchored on `$`         test_a_repo_slug_with_a_trailing_newline_is_refused
+  `GITHUB_NAME_RE` anchored on `$`         test_a_repo_slug_with_a_trailing_newline_is_refused
 
 The REST-fallback rows (#1667 and its review cycles) are recorded in
 tests/test_backlog_rest_fallback.py, next to the arms they name.
@@ -2022,7 +2022,8 @@ def test_a_non_string_title_is_reported_and_the_block_still_renders(tmp_path):
 
 
 def test_a_repo_slug_with_a_trailing_newline_is_refused():
-    """`_SLUG_CHARS` anchors on `\\Z`, so a trailing newline is refused.
+    """`GITHUB_NAME_RE` (the GitHub name rule the slug uses) anchors on `\\Z`,
+    so a trailing newline is refused.
 
     A DIFFERENT regex from the item-id anchor in backlog_store.py, despite the
     shared rationale — the sibling arm covers that one and leaves this one
@@ -2035,9 +2036,12 @@ def test_a_repo_slug_with_a_trailing_newline_is_refused():
 
     RED WHEN the anchor becomes `$`, which matches before a trailing newline.
     """
-    assert backlog._SLUG_CHARS.match("owner-name_1.0")
-    assert not backlog._SLUG_CHARS.match("owner\n"), "a trailing newline was accepted"
-    assert not backlog._SLUG_CHARS.match("owner\nname")
+    backlog._project_identity()  # puts the pact-memory `scripts` package on sys.path
+    from scripts.database import GITHUB_NAME_RE as names
+
+    assert names.match("owner-name_1.0")
+    assert not names.match("owner\n"), "a trailing newline was accepted"
+    assert not names.match("owner\nname")
 
 
 def test_an_ancestor_checkout_does_not_claim_an_unrelated_project(tmp_path):

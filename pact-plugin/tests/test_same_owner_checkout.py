@@ -180,7 +180,7 @@ def test_the_file_reader_never_answers_where_read_origin_declines(tmp_path, arra
 @pytest.mark.parametrize("pin, expected", [
     ("github.com/Acme/Widget", "github.com/acme/widget"),
     ("www.github.com/Acme/Widget", "github.com/acme/widget"),
-    ("github.com/Acme/Caf%C3%A9", "github.com/acme/caf%C3%A9"),
+    ("github.com:443/Acme/Caf%C3%A9", "github.com:443/acme/caf%C3%A9"),
     ("github.com:443/Acme/Widget", "github.com:443/acme/widget"),
     ("ssh.github.com:443/Acme/Widget", "ssh.github.com:443/Acme/Widget"),
     ("www.github.com:8443/Acme/Widget", "www.github.com:8443/Acme/Widget"),
@@ -199,11 +199,27 @@ def test_a_pin_takes_githubs_spelling_rules(pin, expected):
         assert pi.normalize_remote_url("https://" + pin) == expected
 
 
-@pytest.mark.parametrize("pin", ["github.com/acme", "www.github.com/acme"])
-def test_a_one_segment_github_pin_is_refused(pin):
+@pytest.mark.parametrize("pin", [
+    "github.com/acme",
+    "www.github.com/acme",
+    "github.com/a/b/c",
+    "www.github.com/a/b/c",
+    "github.com/o~x/r",
+    "github.com/o/r~",
+    "github.com/o/r+x",
+    "github.com/o/r%2Fx",
+    "github.com/acme/caf%C3%A9",
+    "www.github.com/acme/caf%C3%A9",
+])
+def test_a_github_pin_that_is_not_owner_repo_of_github_names_is_refused(pin):
+    """A port-less github.com pin is refused exactly where a remote naming it
+    declines: not exactly owner/repo, or a decoded name GitHub does not allow.
+    RED WHEN a pin binds an id no remote derives."""
+    from scripts import project_identity as pi
     from scripts.database import pin_file_value
 
     assert pin_file_value((pin + "\n").encode()) == (None, "not_canonical")
+    assert pi.normalize_remote_url("https://" + pin) is None
 
 
 def test_a_mixed_case_pin_and_its_lower_case_origin_are_one_owner(tmp_path):
