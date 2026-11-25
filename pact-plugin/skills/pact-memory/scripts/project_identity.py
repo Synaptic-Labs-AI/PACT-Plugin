@@ -96,6 +96,10 @@ _MAX_OVERRIDE_BYTES = 4096
 
 _OVERRIDE_FILENAME = "pact-project-id"
 
+# A hard cap on the user-scope `config.json` read for its `project_id`
+# (`read_user_setting`): it holds a few settings, so a larger file is refused.
+_MAX_USER_SETTING_BYTES = 1 << 20
+
 
 class OverrideRead(NamedTuple):
     """One read of `<common_dir>/pact-project-id`.
@@ -1365,9 +1369,28 @@ def read_user_setting(config_path: Path) -> Optional[str]:
     `.git` that git looks past does not make its folder a checkout), no
     override is read, and the
     cwd-marker route applies this setting there. Never raises.
+
+    READ LIKE THE OVERRIDE FILE (`read_override`): only a regular file, never
+    through a symlink or a FIFO, and at most `_MAX_USER_SETTING_BYTES`; a
+    FIFO in this position would otherwise hang every resolution that reaches
+    the setting.
     """
+    path = Path(config_path)
     try:
-        payload = json.loads(Path(config_path).read_text(encoding="utf-8"))
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+        with open(fd, "rb") as handle:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            data = handle.read(_MAX_USER_SETTING_BYTES + 1)
+        if len(data) > _MAX_USER_SETTING_BYTES:
+            return None
+        payload = json.loads(data.decode("utf-8"))
     except (OSError, ValueError):
         return None
     if not isinstance(payload, dict):

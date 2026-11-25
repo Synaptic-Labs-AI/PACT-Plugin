@@ -405,7 +405,12 @@ one of `included`, `excluded` and `unproven` is true:
   this bucket's name (a git checkout, or a folder marked by `.claude` or a
   recorded session), or a session recorded at another existing folder. Rows
   that are gone, unreadable, relative, in an unmarked folder, in a checkout
-  with another name, or outside any other checkout are no evidence either way.
+  with another name, or outside any other checkout are no evidence either way. Another
+  clone of this same repository is not a rival: its rows and sessions are no
+  evidence either way when its own config's first origin url is this
+  repository's, written the same way, or its pin is this repository's id. A
+  clone whose url is spelled differently (ssh against https) still counts as
+  a rival.
 - `unproven`: it is not read, and its `rekey` command is printed once per
   process, with the cause. `unproven_reason` names the cause:
   `recorded_elsewhere` (some of its rows were written by sessions recorded at

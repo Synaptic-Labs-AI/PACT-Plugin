@@ -773,10 +773,11 @@ def _worktree_paths_from_admin_gitdirs(checkout: Path) -> Optional[list[str]]:
 
     THE FALLBACK FOR A GIT WITHOUT `-z` (pre-2.36). git records each linked
     worktree's own `.git` path in its admin dir, and that file is not
-    line-quoted, so dropping exactly one trailing newline recovers a path
-    containing a newline. The recorded value is `<worktree>/.git`, so the
-    worktree root is its parent -- the record terminator follows `/.git`, not
-    the path, which is why an internal newline survives.
+    line-quoted, so trimming its trailing whitespace as git does
+    (`worktree_admin_gitdir`) recovers a path containing a newline. The
+    recorded value is `<worktree>/.git`, so the worktree root is its parent --
+    the trimmed whitespace follows `/.git`, not the path, which is why an
+    internal newline survives.
 
     Returns None when git cannot answer at all, and the listing then has no
     answer. An empty repository returns its own root.

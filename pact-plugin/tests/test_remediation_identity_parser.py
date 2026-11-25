@@ -2498,6 +2498,10 @@ class TestEveryReaderOpensWithoutAnOptionalFlag:
         read = pi.read_override(tmp_path)
         assert (read.value, read.reason) == ("github.com/me/p", None)
 
+    def test_the_user_setting_reader(self, tmp_path, without_optional_open_flags):
+        (tmp_path / "config.json").write_text('{"project_id": "github.com/me/p"}')
+        assert pi.read_user_setting(tmp_path / "config.json") == "github.com/me/p"
+
     def test_the_prune_ledger_reader(self, tmp_path, without_optional_open_flags):
         from scripts import memory_api
 
@@ -2641,6 +2645,8 @@ def _platform_claim_modules() -> dict:
 _RUN_WITHOUT_OPTIONAL_FLAGS = {
     ("scripts.project_identity", "read_override"):
         TestEveryReaderOpensWithoutAnOptionalFlag.test_the_override_reader,
+    ("scripts.project_identity", "read_user_setting"):
+        TestEveryReaderOpensWithoutAnOptionalFlag.test_the_user_setting_reader,
     ("shared.git_helpers", "read_git_file"):
         TestEveryReaderOpensWithoutAnOptionalFlag.test_the_git_file_reader,
     ("scripts.memory_api", "_pruned_session_records"):

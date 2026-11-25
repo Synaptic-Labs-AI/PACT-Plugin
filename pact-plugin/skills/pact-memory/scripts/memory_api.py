@@ -64,6 +64,9 @@ from .database import (
     SQLITE_EXTENSIONS_ENABLED,
     BUCKET_EVIDENCE_KEYS,
     UNKNOWN_NAME,
+    checkout_is_same_owner,
+    common_dir_parent_name,
+    origin_url_in_config,
     pre_change_name,
     pre_change_name_of_common,
     validate_identifier_for_write,
@@ -504,9 +507,10 @@ _SESSION_CENSUS_KEYS = ("here", "elsewhere", "subfolder", "description_newer", "
 
 
 # Directory listings the session census and the recorded-dir loader reuse
-# across commands in one process: {path: ((st_mtime_ns, st_ino), names)}. A
-# folder is listed again only when its stat moves (an entry added, removed or
-# renamed), so an unchanged sessions root costs one stat per folder, not one
+# across commands in one process: {path: ((st_mtime_ns, st_ctime_ns, st_size,
+# st_ino), names)}. A folder is listed again only when its stat moves (an
+# entry added, removed or renamed); the change time and size join the mtime so
+# a filesystem with a coarse mtime still sees a change inside one tick, so an unchanged sessions root costs one stat per folder, not one
 # listing per verdict. Writes to the store do not clear it: they change no
 # session folder.
 _DIR_LISTINGS: Dict[str, tuple] = {}
@@ -517,7 +521,7 @@ def _listing(directory: Path) -> set:
     unchanged. Raises what `os.stat` and `os.listdir` raise."""
     key = str(directory)
     status = os.stat(key)
-    stamp = (status.st_mtime_ns, status.st_ino)
+    stamp = (status.st_mtime_ns, status.st_ctime_ns, status.st_size, status.st_ino)
     cached = _DIR_LISTINGS.get(key)
     if cached is not None and cached[0] == stamp:
         return cached[1]
@@ -527,7 +531,11 @@ def _listing(directory: Path) -> set:
 
 
 def _legacy_session_census(
-    conn: Any, candidate: str, gate_roots: list, common_dir: Optional[Path]
+    conn: Any,
+    candidate: str,
+    gate_roots: list,
+    common_dir: Optional[Path],
+    own: Optional[Tuple[str, Optional[str]]] = None,
 ) -> Dict[str, int]:
     """`candidate`'s memories counted by where their writing session is
     recorded (`_SESSION_CENSUS_KEYS`).
@@ -545,6 +553,12 @@ def _legacy_session_census(
     be listed is not taken as empty: each session is then looked up in it by
     path. Never raises: a store or filesystem failure leaves the affected
     rows `unattributed`.
+
+    A SESSION RECORDED IN A SAME-OWNER CHECKOUT (`checkout_is_same_owner`
+    with `own`, this session's canonical id and origin url: a sibling clone
+    of the same origin or pin) is not elsewhere: it
+    places the session nowhere, as `bucket_evidence` treats that checkout's
+    rows as no rival's.
     """
     from shared.pact_context import (
         PRUNE_LEDGER_NAME,
@@ -637,6 +651,12 @@ def _legacy_session_census(
             # or cannot be read.
             name = pre_change_name(project_dir, names)
             return "elsewhere" if name is UNKNOWN_NAME or name == candidate else None
+        if own is not None:
+            marker = find_git_marker(project_dir)
+            if marker is not None and checkout_is_same_owner(
+                os.path.realpath(marker.parent), *own
+            ):
+                return None
         return "elsewhere"
 
     for session_id, count in named:
@@ -1500,11 +1520,7 @@ def _legacy_suppression(
         common_dir = main_repo_common_dir(str(identity_root))
     if common_dir is None or not _submodule_admin_dir(common_dir):
         return None, None
-    try:
-        derived = common_dir.resolve().parent.name
-    except (OSError, RuntimeError, ValueError):
-        derived = common_dir.parent.name
-    return _suppression_record(), derived
+    return _suppression_record(), common_dir_parent_name(common_dir)
 
 
 def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
@@ -3423,7 +3439,7 @@ class PACTMemory:
         if cwd_common_dir is not None:
             # The pre-change resolver named every repository it reached here,
             # bare and redirected included, by its common dir's parent.
-            git_pre_change = cwd_common_dir.parent.name or None
+            git_pre_change = common_dir_parent_name(cwd_common_dir) or None
             start_arg, cwd_toplevel = _start_and_toplevel(None, cwd_common_dir)
             if start_arg is not None:
                 asked_start = Path(start_arg)
@@ -3807,19 +3823,38 @@ class PACTMemory:
         if cached is not None:
             return cached
         roots, common = self._legacy_gate_roots(repo_root)
+        own = self._own_identity(common)
         evidence = bucket_evidence(
             connection, bucket, roots or None, root_common=common,
             recorded_dirs=_recorded_project_dirs,
+            same_owner=(
+                functools.partial(checkout_is_same_owner, own_id=own[0], own_url=own[1])
+                if own else None
+            ),
         )
         sessions = (
             None
             if evidence["foreign_rows"]
-            else _legacy_session_census(connection, bucket, roots, common)
+            else _legacy_session_census(connection, bucket, roots, common, own)
         )
         verdict = decide_bucket(evidence, sessions)
         if in_pass:
             _LEGACY_SCOPE_CACHE[key] = verdict
         return verdict
+
+    def _own_identity(self, common: Any) -> Optional[Tuple[str, Optional[str]]]:
+        """(canonical id, origin url) for a canonical session, else None: what
+        a sibling clone must carry to be the same owner
+        (`checkout_is_same_owner`). The url is the first origin url of this
+        repository's own config (`origin_url_in_config`, read from the
+        common dir git reported), the url the id came from; a session whose
+        id comes from its pin has none and matches siblings by pin alone."""
+        own_id = self._project_id
+        if not own_id or not is_canonical(own_id) or common is None:
+            return None
+        if project_identity.read_override(Path(common)).path is not None:
+            return own_id, None
+        return own_id, origin_url_in_config(Path(common) / "config")
 
     def _folder_name_gated(self) -> bool:
         """Whether this folder-name id's LEGACY CANDIDATE (a pre-change name

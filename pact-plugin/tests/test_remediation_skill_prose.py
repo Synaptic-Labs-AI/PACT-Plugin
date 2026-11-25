@@ -674,6 +674,14 @@ class TestLegacyScopeStatesAreDocumented:
             "checkout), does not block it"
         ) in _body(SKILL)
 
+    def test_a_sibling_clone_is_not_a_rival(self):
+        assert (
+            "Another clone of this same repository is not a rival: its rows and "
+            "sessions are no evidence either way when its own config's first "
+            "origin url is this repository's, written the same way, or its pin "
+            "is this repository's id."
+        ) in _body(SKILL)
+
     def test_the_rekey_dry_run_states_what_it_leaves(self):
         body = _body(SKILL)
         assert (
@@ -7169,6 +7177,23 @@ class TestEveryRouteEntryConditionIsARoute:
             "database's one copy of the submodule admin dir path rule, which "
             "project_identity._submodule_admin_dir delegates to; it tests a path's shape and asks "
             "git nothing"
+        ),
+        ("call", "checkout_is_same_owner"): (
+            "reads, from files and with no git, whether a checkout a store row or session record "
+            "names is a plain clone carrying this session's id or origin url" + _AFTER_DETECTION
+        ),
+        ("call", "origin_url_in_config"): (
+            "reads this repository's first origin url from the config file in the common dir git "
+            "already reported, with no git, to compare sibling clones" + _AFTER_DETECTION
+        ),
+        ("call", "common_dir_parent_name"): (
+            "database's one copy of the unsuppressed pre-change name of a common dir git already "
+            "reported, for a suppressed candidate's disclosure and a decline's record; it asks git "
+            "nothing"
+        ),
+        ("call", "<call to no function project_identity: data.decode>"): (
+            "decodes the bytes read_user_setting read from the user-scope config file, a regular "
+            "file it opened itself; it asks git nothing"
         ),
         ("call", "pre_change_name_of_common"): (
             "database's one copy of the pre-change name rule for a common dir git already "

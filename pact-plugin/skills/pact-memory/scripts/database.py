@@ -1657,6 +1657,15 @@ def pre_change_name_of_common(common: Any) -> Optional[str]:
     `PACTMemory._legacy_project_name` (from git's answer) both end here."""
     if submodule_admin_path(common):
         return None
+    return common_dir_parent_name(common)
+
+
+def common_dir_parent_name(common: Any) -> str:
+    """The parent folder name of the resolved common dir `common`, with NO
+    submodule check: the name the pre-change resolver gave any repository.
+    `pre_change_name_of_common` adds the submodule suppression; the callers
+    that want the name a suppression hides, or a decline's name, call this.
+    Never raises."""
     try:
         return Path(common).resolve().parent.name
     except (OSError, RuntimeError, ValueError):
@@ -1672,14 +1681,109 @@ def pre_change_name(directory: str, cache: Optional[Dict[str, Any]] = None) -> A
     return cache[directory]
 
 
+def origin_url_in_config(config_path: Any) -> Optional[str]:
+    """The first `remote.origin.url` in the git config FILE at `config_path`,
+    read with no git, or None when the file holds none or uses any form this
+    strict reader does not take.
+
+    It agrees with `project_identity.read_origin`'s rule (the first value in
+    the repository's own file) on the plain form a clone writes,
+    `[remote "origin"]` then `url = <value>`, and refuses everything else
+    rather than guess: a file that is not a regular file of at most
+    `GIT_FILE_LIMIT` bytes, an include section, a header or key line it
+    cannot read, and a url value holding a quote, a backslash, `#` or `;`.
+    Never raises.
+    """
+    from shared.git_helpers import read_git_file
+
+    try:
+        text = read_git_file(config_path)
+    except (OSError, ValueError):
+        return None
+    if text is None:
+        return None
+    section: Optional[Tuple[str, Optional[str]]] = None
+    for raw in text.split("\n"):
+        line = raw.strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.startswith("["):
+            header = re.fullmatch(r'\[([A-Za-z0-9.-]+)(?:\s+"([^"\\]*)")?\]', line)
+            if header is None or header.group(1).lower() in ("include", "includeif"):
+                return None
+            section = (header.group(1).lower(), header.group(2))
+            continue
+        if section != ("remote", "origin"):
+            continue
+        entry = re.fullmatch(r"([A-Za-z][A-Za-z0-9-]*)\s*(?:=\s*(.*))?", line)
+        if entry is None:
+            return None
+        if entry.group(1).lower() == "url":
+            value = (entry.group(2) or "").strip()
+            if not value or any(char in value for char in "\"\\#;"):
+                return None
+            return value
+    return None
+
+
+def checkout_is_same_owner(checkout: str, own_id: str, own_url: Optional[str]) -> bool:
+    """Whether `checkout`, a directory a store row names, is a plain clone of
+    this session's repository: its pin file's first line is `own_id`, or,
+    with no pin file, the first origin url of its own config
+    (`origin_url_in_config`) is `own_url`, the url this session's id comes
+    from (None when its id comes from a pin).
+
+    FILES ONLY, NO GIT: no git command runs on a path a store row names. So
+    only a checkout whose `.git` is a directory is judged, read straight from
+    it. A `.git` file or symlink (a linked worktree, a separate git dir, or a
+    pointer at another repository), a pin file that is not exactly
+    `own_id`, and a url spelled differently from this session's (ssh against
+    https) are not the same owner, so such a checkout stays a rival (fail
+    closed). Never raises."""
+    from shared.git_helpers import read_git_file
+
+    try:
+        git_dir = os.path.join(checkout, ".git")
+        if not stat.S_ISDIR(os.lstat(git_dir).st_mode):
+            return False
+        pin = os.path.join(git_dir, "pact-project-id")
+        if os.path.lexists(pin):
+            text = read_git_file(pin) if not os.path.islink(pin) else None
+            return text is not None and text.split("\n", 1)[0] == own_id
+        url = origin_url_in_config(os.path.join(git_dir, "config"))
+        return own_url is not None and url == own_url
+    except (OSError, ValueError):
+        return False
+
+
 class _EvidenceWalk:
     """The per-call caches one `bucket_evidence` call shares across rows."""
 
-    def __init__(self, recorded_dirs: Optional[Callable[[], Any]]):
+    def __init__(
+        self,
+        recorded_dirs: Optional[Callable[[], Any]],
+        same_owner: Optional[Callable[[str], bool]] = None,
+    ):
         self.checkouts: Dict[str, Optional[str]] = {}
         self.names: Dict[str, Any] = {}
         self._recorded_dirs = recorded_dirs
         self._recorded: Optional[Any] = None
+        self._same_owner = same_owner
+        self._same: Dict[str, bool] = {}
+
+    def same_owner(self, checkout: str) -> bool:
+        """Whether `checkout` resolves to this session's own canonical id (a
+        sibling clone of the same repository), per the caller's predicate,
+        cached per checkout. False with no predicate or when it raises: an
+        unreadable identity stays a rival."""
+        if self._same_owner is None:
+            return False
+        if checkout not in self._same:
+            try:
+                self._same[checkout] = bool(self._same_owner(checkout))
+            except Exception:
+                self._same[checkout] = False
+        return self._same[checkout]
 
     def recorded(self, directory: str) -> bool:
         """Whether a session record names `directory` as its project_dir,
@@ -1705,6 +1809,9 @@ def _foreign_kind(
     only have written another bucket, so a row in it is a cross-reference,
     whether the checkout lies elsewhere or around a root (a `$HOME` dotfiles
     repository). One nested inside a root is not a rival.
+    A SAME-OWNER CHECKOUT IS NO RIVAL under either rule: one whose canonical
+    identity is this session's (`walk.same_owner`, a sibling clone of the
+    same origin or pin) wrote the bucket as this repository did.
     (b) THE NAMED-DIRECTORY RULE: a STRICT ancestor directory (the row itself
     never counts) whose pre-change name is the bucket's, which is neither a
     gate root nor inside one, and which carries a project marker: a `.git`
@@ -1715,7 +1822,9 @@ def _foreign_kind(
     nearest = _nearest_checkout(resolved, walk.checkouts)
     if nearest is not None and not any(_within(nearest, root) for root in roots):
         name = pre_change_name(nearest, walk.names)
-        if name is UNKNOWN_NAME or bucket in (name, os.path.basename(nearest)):
+        if (
+            name is UNKNOWN_NAME or bucket in (name, os.path.basename(nearest))
+        ) and not walk.same_owner(nearest):
             return "checkout"
     directory = os.path.dirname(resolved)
     while True:
@@ -1725,8 +1834,11 @@ def _foreign_kind(
                 name = pre_change_name(directory, walk.names)
                 if name is not UNKNOWN_NAME and name == bucket:
                     if has_git:
-                        return "checkout"
-                    if os.path.lexists(os.path.join(directory, ".claude")) or walk.recorded(directory):
+                        # A same-owner clone is skipped whole: its `.claude` or
+                        # a session record naming it makes it no rival folder.
+                        if not walk.same_owner(directory):
+                            return "checkout"
+                    elif os.path.lexists(os.path.join(directory, ".claude")) or walk.recorded(directory):
                         return "folder"
         parent = os.path.dirname(directory)
         if parent == directory:
@@ -1749,6 +1861,7 @@ def bucket_evidence(
     *,
     root_common: Optional[Union[Path, str]] = None,
     recorded_dirs: Optional[Callable[[], Any]] = None,
+    same_owner: Optional[Callable[[str], bool]] = None,
 ) -> Dict[str, int]:
     """Count a bucket's file rows by what they show about its owner.
 
@@ -1782,6 +1895,10 @@ def bucket_evidence(
     and compares literally, with no case folding. `recorded_dirs` returns the
     resolved `project_dir` of every recorded session; it is called at most
     once, and only when a folder named like the bucket has no other marker.
+    `same_owner(checkout)` answers whether a checkout outside the roots
+    resolves to the session's own canonical id; the caller computes it (this
+    module asks no git), and a checkout it answers True for is no rival.
+    None treats every such checkout as a possible rival.
 
     PRECONDITION: the store's schema is present (a read-only identity
     primitive: it never runs `ensure_initialized`; on a store without the
@@ -1793,7 +1910,7 @@ def bucket_evidence(
     )
     root_paths = _gate_root_paths(roots)
     nested: Dict[tuple, bool] = {}
-    walk = _EvidenceWalk(recorded_dirs)
+    walk = _EvidenceWalk(recorded_dirs, same_owner)
     verified_common: Optional[str] = None
     if root_common:
         try:

@@ -1357,10 +1357,15 @@ class TestLegacyScopeHasOneKeySet:
         states["unproven"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "unp.db"))
 
         checkout("exc")
-        rival = make_repo(identity_env / "rival")
+        # A checkout named like the bucket with no origin: not this
+        # repository, so a rival (a same-origin clone would be the same owner).
+        rival = make_repo(identity_env / "rival" / "exc")
         (rival / "x.py").write_text("x\n")
         # An EXISTING row in another checkout: the only thing that excludes.
-        _seed(identity_env / "exc.db", "exc", path=str(rival / "x.py"))
+        _seed(
+            identity_env / "exc.db", "exc", path=str(rival / "x.py"),
+            session_id="unrecorded-session",
+        )
         states["excluded"] = self._state(PACTMemory(session_id="s", db_path=identity_env / "exc.db"))
 
         checkout("case")

@@ -370,6 +370,63 @@ def row_dangling(tmp_path, canonical):
     return Layout(root, tmp_path / "store.db", files=[_touch(rival / "src.py")])
 
 
+def _clone(tmp_path, remote):
+    """Another clone named like the bucket, at another path, with `remote`."""
+    clone = make_repo(tmp_path / "clone" / B, remote=remote)
+    return _touch(clone / "src.py")
+
+
+def row_sib(tmp_path, canonical):
+    """A same-origin sibling clone's row beside a row under this root: the
+    sibling resolves to this session's canonical id, so it is the same owner
+    and no rival; the root's row verifies."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    return Layout(root, tmp_path / "store.db", files=[_touch(root / "src.py"), _clone(tmp_path, REMOTE)])
+
+
+def row_sibclaude(tmp_path, canonical):
+    """The same-origin sibling carries a `.claude` folder, as a PACT project
+    does: it is still the same owner, not a rival project folder."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    row = _clone(tmp_path, REMOTE)
+    (row.parent / ".claude").mkdir()
+    return Layout(root, tmp_path / "store.db", files=[_touch(root / "src.py"), row])
+
+
+def row_sibalone(tmp_path, canonical):
+    """The same-origin sibling's row alone: not foreign, so no evidence either way."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    return Layout(root, tmp_path / "store.db", files=[_clone(tmp_path, REMOTE)])
+
+
+def row_sibsession(tmp_path, canonical):
+    """A memory whose session is recorded at the same-origin sibling: that
+    session is not elsewhere, so the bucket is not excluded."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    sibling = make_repo(tmp_path / "clone" / B, remote=REMOTE)
+    _session_at(tmp_path, sibling, "s-sibling")
+    return Layout(root, tmp_path / "store.db", sessions={"s-sibling": sibling})
+
+
+def row_sibother(tmp_path, canonical):
+    """CB-1: a clone named like the bucket with a DIFFERENT origin stays a rival."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    return Layout(
+        root, tmp_path / "store.db",
+        files=[_touch(root / "src.py"), _clone(tmp_path, f"https://github.com/x/{B}.git")],
+    )
+
+
+def row_sibunread(tmp_path, canonical):
+    """A clone named like the bucket whose identity cannot be resolved (an
+    origin no id can represent) stays a rival: fail closed."""
+    root = _repo(tmp_path / "work" / B, canonical)
+    return Layout(
+        root, tmp_path / "store.db",
+        files=[_touch(root / "src.py"), _clone(tmp_path, "https://host.example/own%ZZr/repo")],
+    )
+
+
 # (row, canonical expectation, folder-name expectation). No folder-name id is
 # judged (user ruling): its column always reads and saves its own bucket. An expectation is
 # (read, state, reason, rekey_or_save) where rekey_or_save is "ok" or
@@ -406,6 +463,12 @@ ROWS = [
     (row_ns5, (False, "unproven", "foreign_rows", "refused"), FOLDER_OK),
     (row_ns5b, (False, "excluded", "foreign_rows", "refused"), FOLDER_OK),
     (row_dangling, (False, "excluded", "foreign_rows", "refused"), FOLDER_OK),
+    (row_sib, VERIFIED, FOLDER_OK),
+    (row_sibclaude, VERIFIED, FOLDER_OK),
+    (row_sibalone, NO_SESSION, FOLDER_OK),
+    (row_sibsession, NO_SESSION, FOLDER_OK),
+    (row_sibother, (False, "unproven", "foreign_rows", "refused"), FOLDER_OK),
+    (row_sibunread, (False, "unproven", "foreign_rows", "refused"), FOLDER_OK),
 ]
 
 
