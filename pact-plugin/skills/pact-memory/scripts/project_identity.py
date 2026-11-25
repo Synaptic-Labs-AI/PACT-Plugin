@@ -559,16 +559,20 @@ def is_canonical(value: object) -> bool:
     return is_canonical_id(value)
 
 
-def _valid_host(host: str) -> bool:
+def _valid_host(host: str, ssh: bool = False) -> bool:
     """Whether a lowercased host is well formed.
 
     Alphanumeric at both ends, and only `[a-z0-9.-]` between, with no empty
-    label (`a..b`): a trailing dot, a leading hyphen and an underscore all
-    name something git would not contact the same way.
+    label (`a..b`): a trailing dot and a leading hyphen name something git
+    would not contact the same way. An `_` inside the host is accepted for
+    an ssh or scp remote (`ssh`), where it names an ssh_config alias
+    (`Host gh_work`) that ssh resolves, as it resolves a hyphenated one;
+    no other transport takes it.
     """
     if not host or not host[0].isalnum() or not host[-1].isalnum() or ".." in host:
         return False
-    return all(char in _HOST_CHARS for char in host)
+    allowed = _HOST_CHARS | {"_"} if ssh else _HOST_CHARS
+    return all(char in allowed for char in host)
 
 
 def _ipv6_host(host: str) -> Optional[str]:
@@ -591,14 +595,14 @@ def _ipv6_host(host: str) -> Optional[str]:
     return "[" + address.compressed + "]"
 
 
-def _url_host(host: str) -> Optional[str]:
+def _url_host(host: str, ssh: bool = False) -> Optional[str]:
     """The host as it goes into an id: a bracketed IPv6 literal compressed,
     a name lower-cased and checked; None for anything else (including a host
     in the reserved `.invalid` namespace)."""
     if host.startswith("["):
         return _ipv6_host(host)
     host = host.lower()
-    if not _valid_host(host) or _reserved_host(host):
+    if not _valid_host(host, ssh) or _reserved_host(host):
         return None
     return host
 
@@ -707,7 +711,8 @@ def _strip_path_suffixes(path: str) -> Tuple[str, bool]:
     another directory. A `_CASE_INSENSITIVE_PATH_HOSTS` host drops any case
     (`_identifier`).
 
-    The second slash strip exists only for the `owner/.git` form: once `.git`
+    The second slash strip exists only for the `repo/.git` form (a
+    non-bare repository's git dir, which a plain sshd serves): once `.git`
     is removed the path ends in the separator that used to precede it, and
     leaving it would create an empty final segment. It does NOT rescue
     `owner/repo//`: that form has no `.git`, so the single strip runs out and
@@ -792,17 +797,26 @@ _CASE_INSENSITIVE_PATH_HOSTS = frozenset({"github.com"})
 # GitHub's own SSH-over-443 host (`ssh://git@ssh.github.com:443/O/N`): the
 # same service as github.com, so it takes github.com's id.
 _GITHUB_SSH_443_HOST = "ssh.github.com"
+# GitHub's www host, which redirects to github.com.
+_GITHUB_WWW_HOST = "www.github.com"
 _PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-f]{2}")
 
 
-def _identifier(host: str, port: str, segments: list, git_dropped: bool = False) -> str:
+def _identifier(
+    host: str, port: str, segments: list, git_dropped: bool = False, ssh: bool = False
+) -> str:
     """`host[:port]/<segments>`, after the bounded Azure DevOps Services rule
     and the lower-cased path of a `_CASE_INSENSITIVE_PATH_HOSTS` host.
     `git_dropped` says the case-sensitive strip already removed a `.git`,
-    so no second one is removed: one `.git` per remote on every host."""
-    if host == _GITHUB_SSH_443_HOST and port in ("", "443"):
-        # GitHub's SSH-over-443 endpoint is github.com itself.
+    so no second one is removed: one `.git` per remote on every host.
+    `ssh` says the remote is an ssh or scp one, the only transport
+    `ssh.github.com` folds for."""
+    if ssh and host == _GITHUB_SSH_443_HOST and port in ("", "443"):
+        # GitHub's SSH-over-443 endpoint is github.com itself, for ssh only.
         host, port = "github.com", ""
+    if host == _GITHUB_WWW_HOST and not port:
+        # GitHub redirects www.github.com to github.com: one repository.
+        host = "github.com"
     azure = _azure_devops_services_id(host, port, segments)
     if azure is not None:
         host, segments = "dev.azure.com", azure
@@ -972,7 +986,8 @@ def normalize_remote_url(url: object) -> Optional[str]:
             host, port = authority, ""
         if port and _DEFAULT_PORTS.get(scheme) == int(port):
             port = ""
-        host = _url_host(host)
+        ssh = scheme in _HOME_RELATIVE_SCHEMES
+        host = _url_host(host, ssh)
         if host is None:
             return None
         # git percent-decodes an ssh url's WHOLE path before sending it
@@ -993,14 +1008,14 @@ def normalize_remote_url(url: object) -> Optional[str]:
             return None
         if scheme in _HOME_RELATIVE_SCHEMES:
             segments = _drop_home_prefix(segments)
-        identifier = _identifier(host, port, segments, git_dropped)
+        identifier = _identifier(host, port, segments, git_dropped, ssh)
     else:
         scp_match = _scp_match(value)
         if scp_match is None:
             # Neither a URL nor scp syntax: indistinguishable from a relative
             # local path, which is NO PORTABLE ORIGIN.
             return None
-        host = _url_host(scp_match.group("host"))
+        host = _url_host(scp_match.group("host"), True)
         if host is None:
             return None
         # RELATIVE AND ABSOLUTE SCP PATHS ARE DELIBERATELY ONE ID.
@@ -1049,9 +1064,14 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # the same endpoint, and the grammar allows a single segment;
         # declining the scp spelling while accepting the URL spelling would
         # split one repository into two ids.
-        identifier = _identifier(host, "", segments, git_dropped)
+        identifier = _identifier(host, "", segments, git_dropped, True)
 
     if len(identifier) > _max_id_length():
+        return None
+    # A GITHUB ID IS ALWAYS owner/repo: `https://github.com/owner/.git` (or
+    # any one-segment path) names no repository there, so it declines rather
+    # than bind the one-segment id `github.com/owner`.
+    if identifier.startswith("github.com/") and identifier.count("/") < 2:
         return None
 
     # The grammar's single authority. If `database.is_canonical_id` is ever
@@ -1113,6 +1133,38 @@ def _is_network_shaped(url: object) -> bool:
     return "@" in prefix and ":" in prefix
 
 
+# REMOTE-HELPER TRANSPORTS. git hands `<helper>::<address>` to
+# git-remote-<helper>, and these schemes to their own helpers too. None of them
+# has a portable id, so such an origin is NO PORTABLE ORIGIN: the folder name,
+# disclosed (`REMOTE_HELPER_DETAIL`). Every other unknown scheme still
+# declines. The helper name holds no `/`, `@`, `[` or `:`, so an IPv6
+# literal's `::` never reads as one.
+_REMOTE_HELPER_FORM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
+_REMOTE_HELPER_SCHEMES = frozenset({"codecommit", "persistent-https", "sso", "keybase"})
+
+# The `detail` for a folder-name id bound because the origin is a
+# remote-helper transport (`_is_remote_helper`).
+REMOTE_HELPER_DETAIL = (
+    "its origin is a remote-helper transport, which has no portable id, so it "
+    "uses its folder name: a bucket shared with any folder of that name. A "
+    "canonical id written to <git-common-dir>/pact-project-id gives it its own"
+)
+
+
+def _is_remote_helper(url: str) -> bool:
+    """Whether an origin value names a remote-helper transport: the
+    `<helper>::<address>` form, or a scheme in `_REMOTE_HELPER_SCHEMES`. A
+    value with a control character, a leading BOM or leading whitespace is
+    not one (it declines as before)."""
+    value = _strip_one_terminator(url)
+    if _has_control_character(value) or value[:1] in ("\ufeff", " ", "\t"):
+        return False
+    if _REMOTE_HELPER_FORM_RE.match(value):
+        return True
+    scheme = _SCHEME_PREFIX_RE.match(value)
+    return scheme is not None and scheme.group("scheme").lower() in _REMOTE_HELPER_SCHEMES
+
+
 def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
     """Classify an origin value into one of the three ruled outcomes.
 
@@ -1121,7 +1173,8 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
 
     - canonical: a network remote that parses under the canonical grammar.
     - no_portable_origin: no origin, an empty or whitespace-only string, a
-      local path or `file://`. The caller falls through to the basename.
+      local path or `file://`, or a remote-helper transport
+      (`_is_remote_helper`). The caller falls through to the basename.
       (An empty value inside the url list never reaches this function:
       `read_origin` reports it as `empty_entry`, which declines. A
       whitespace-only value does reach it, as an ordinary first url.)
@@ -1145,6 +1198,8 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
     identifier = normalize_remote_url(url)
     if identifier is not None:
         return OUTCOME_CANONICAL, identifier
+    if _is_remote_helper(url):
+        return OUTCOME_NO_PORTABLE_ORIGIN, None
     if _is_network_shaped(url):
         return OUTCOME_DECLINE, None
     return OUTCOME_NO_PORTABLE_ORIGIN, None
@@ -2414,4 +2469,8 @@ def detect_id_for_root(
         )
     if submodule_controlled:
         return _refuse_submodule_basename(root, common_dir, override_ignored)
+    if _is_remote_helper(origin.value):
+        return RootIdentity(
+            name, "basename", "basename", override_ignored, None, REMOTE_HELPER_DETAIL
+        )
     return RootIdentity(name, "basename", "basename", override_ignored)

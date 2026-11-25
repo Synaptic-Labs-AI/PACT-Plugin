@@ -74,7 +74,7 @@ from scripts.memory_api import (
     read_project_bucket_census,
     render_rekey_command,
 )
-from scripts.project_identity import is_canonical
+from scripts.project_identity import REMOTE_HELPER_DETAIL, is_canonical
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
 # The stream the ERROR ENVELOPE is written to. None means "use sys.stderr",
@@ -1081,6 +1081,13 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
                 "id_shape": memory._project_id_shape,
                 "source": memory._project_id_source,
                 "override_ignored": memory._override_ignored,
+                # A remote-helper origin's folder-name id says what it shares
+                # and how to isolate it, as the warning does.
+                "identity_detail": (
+                    REMOTE_HELPER_DETAIL
+                    if memory._project_id_source == "remote helper"
+                    else None
+                ),
                 # STRUCTURED DECLINE REASON, not just the warning. A repository
                 # chose the name a basename id would have used, so the refusal
                 # names the cause and the override file that is its remedy; a

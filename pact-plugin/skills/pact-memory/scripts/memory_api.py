@@ -226,6 +226,8 @@ _LEGACY_SCOPE_CACHE: Dict[tuple, tuple] = {}
 # Exclusion notices already emitted, keyed by (store, candidate). A warning
 # repeated on every read is a warning readers learn to ignore.
 _EXCLUSION_WARNED: set = set()
+# Roots whose remote-helper folder-name id was disclosed, once per process.
+_REMOTE_HELPER_WARNED: set = set()
 
 # Case-variant notices already emitted, keyed by (store, variants). The fold
 # suppression is silent loss unless it is reported; reported once per process
@@ -1537,7 +1539,12 @@ def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
     `CLAUDE_PROJECT_DIR` believes the environment chose the id, and the
     whole point of the pin is that a human chose it.
     """
-    return "override file" if identity.source == "override file" else rung_label
+    if identity.source == "override file":
+        return "override file"
+    if identity.detail == project_identity.REMOTE_HELPER_DETAIL:
+        # The folder-name id of a remote-helper origin: disclosed as such.
+        return "remote helper"
+    return rung_label
 
 
 def runnable_rekey_command(
@@ -3348,6 +3355,18 @@ class PACTMemory:
             lambda: detect_id_for_root(root, common_dir, asked_root=asked_root),
         )
         PACTMemory._warn_override_ignored(identity)
+        if (
+            identity.project_id is not None
+            and identity.detail == project_identity.REMOTE_HELPER_DETAIL
+            and str(root) not in _REMOTE_HELPER_WARNED
+        ):
+            # ONCE PER ROOT, AND NEVER THE URL: a helper address can carry an
+            # account id or a token.
+            _REMOTE_HELPER_WARNED.add(str(root))
+            logger.warning(
+                "project_id for %r is its folder name %r: %s.",
+                str(root), identity.project_id, identity.detail,
+            )
         if identity.project_id is not None:
             logger.debug(
                 "project_id detected from %s: %s", source, identity.project_id

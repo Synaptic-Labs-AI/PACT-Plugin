@@ -4591,6 +4591,12 @@ def _union_admits_str(annotation) -> bool:
 _OBSERVED = "reports what was observed"
 _DETAIL = "part of a rung detail: the rung and the path it read"
 _DESCRIBED_PRINTED_CLAUSES = {
+    # The remote-helper disclosure (REMOTE_HELPER_DETAIL): no change to a `.git`.
+    "A canonical id written to <git-common-dir>/pact-project-id gives it its own":
+        "names the pin as the remedy, written by the user",
+    "a bucket shared with any folder of that name": "says what the folder-name id shares",
+    "it uses its folder name": "says which id it binds",
+    "its origin is a remote-helper transport, which has no portable id": _OBSERVED,
     "A `git init --separate-git-dir` layout of your own is a user decision":
         "names the user's own layout as theirs to decide",
     "A full 32-character id still resolves": "says which lookups still work",

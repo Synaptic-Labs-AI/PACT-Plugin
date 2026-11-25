@@ -694,8 +694,9 @@ class TestLegacyScopeStatesAreDocumented:
         ) in _body(SKILL)
         assert (
             "A clone with a different pin, a differently spelled url (ssh against "
-            "https, or with or without .git), a config holding an include or an "
-            "empty origin url anywhere, or a .git that is a file or link"
+            "https, or with or without .git), a config holding an include, a "
+            "dotted section header such as [remote.origin], or an empty origin "
+            "url anywhere, or a .git that is a file or link"
         ) in _body(SKILL)
 
     def test_the_rekey_dry_run_states_what_it_leaves(self):
@@ -713,7 +714,9 @@ class TestLegacyScopeStatesAreDocumented:
         body = _body(SKILL)
         assert (
             "A session whose project id is a folder name (a repository with no "
-            "portable origin, a non-git project folder, the home-directory "
+            "portable origin or with a remote-helper transport origin "
+            "(<helper>::<address>, codecommit://, persistent-https://, sso:// or "
+            "keybase://), a non-git project folder, the home-directory "
             "landing, or the user-scope project_id setting) is not judged: it "
             "reads and saves its same-name bucket as before, so it shares that "
             "bucket with every folder of the same name."
@@ -1550,6 +1553,13 @@ class TestNullOverridePathIsMeasured:
             "outside git directory, a pin in that git directory may remedy the "
             "decline; only the user writes it, as above."
         ) in remedies
+
+    def test_the_show_row_names_the_remote_helper_source(self):
+        assert (
+            "source is remote helper when the id is the folder name of a "
+            "repository whose origin is a remote-helper transport; identity_detail "
+            "then holds the sentence that names the pin remedy, and is null otherwise."
+        ) in _table_row(SKILL, "project-id show")
 
     def test_the_show_row_names_what_repo_root_is(self):
         assert (
@@ -7122,6 +7132,14 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "<call to no function memory_api: project_identity.DETECTION_LISTINGS.set>"): (
             "detection_pass starts the per-pass worktree-listing memo empty in an outermost pass"
+        ),
+        ("call", "<name imported from a project module cli: REMOTE_HELPER_DETAIL>"): (
+            "the identity layer's fixed remote-helper sentence, which project-id show reports for a "
+            "'remote helper' source"
+        ),
+        ("call", "<name imported from a project module memory_api: project_identity.REMOTE_HELPER_DETAIL>"): (
+            "the identity layer's fixed remote-helper sentence, compared to a detected detail to "
+            "disclose the source and warn once"
         ),
         ("call", "<name imported from a project module memory_api: project_identity.DETECTION_ANSWERS>"): (
             "detection_pass names the identity layer's per-pass answer memo, to start it and to hand it back on a join"

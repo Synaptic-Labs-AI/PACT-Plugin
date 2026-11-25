@@ -143,8 +143,9 @@ _SLUG_CHARS = re.compile(r"^[A-Za-z0-9._-]+\Z")
 # and every other host fall through rather than being read as this tracker.
 _GITHUB_HOST = "github.com"
 # Hosts a REMOTE may name for github.com: `ssh.github.com` is GitHub's own
-# SSH-over-443 endpoint (`ssh://git@ssh.github.com:443/O/N`), the same service.
-_GITHUB_REMOTE_HOSTS = {_GITHUB_HOST, f"ssh.{_GITHUB_HOST}"}
+# SSH-over-443 endpoint (`ssh://git@ssh.github.com:443/O/N`), the same service,
+# and `www.github.com` redirects to github.com.
+_GITHUB_REMOTE_HOSTS = {_GITHUB_HOST, f"ssh.{_GITHUB_HOST}", f"www.{_GITHUB_HOST}"}
 # Appended to every `gh api` call. `gh api` takes its host from GH_HOST, not
 # from the slug, so without this an environment with GH_HOST set would send
 # github.com refs to another host and let its answers decide the verdicts.

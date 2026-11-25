@@ -223,5 +223,159 @@ def test_githubs_ssh_over_443_host_is_github(url):
     assert f"github.com/{owner}/{name}".lower() == pi.normalize_remote_url(url)
 
 
+def test_the_ssh_443_fold_is_for_ssh_only():
+    """GitHub's ssh.github.com serves ssh; an https remote there is another
+    endpoint and keeps its own id."""
+    assert pi.normalize_remote_url("https://ssh.github.com/Acme/Widget") == "ssh.github.com/Acme/Widget"
+
+
+@pytest.mark.parametrize("url", ["https://www.github.com/Acme/Widget.git", "http://www.github.com/acme/widget"])
+def test_githubs_www_host_is_github(url):
+    """GitHub redirects www.github.com to github.com: one repository, one id,
+    as the backlog's remote parser reads it."""
+    from shared import backlog
+
+    assert pi.normalize_remote_url(url) == "github.com/acme/widget"
+    owner, name = backlog._slug_from_remote_url(url)
+    assert f"github.com/{owner}/{name}".lower() == pi.normalize_remote_url(url)
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/owner/.git",
+    "https://github.com/owner",
+    "git@github.com:owner.git",
+    "https://www.github.com/owner",
+])
+def test_a_one_segment_github_path_declines(url):
+    """A github.com id is always owner/repo; a one-segment path names none."""
+    assert pi.normalize_remote_url(url) is None
+    assert pi.classify_remote_origin(url)[0] == pi.OUTCOME_DECLINE
+
+
+def test_control_a_non_bare_repository_git_dir_on_another_host_keeps_its_id():
+    assert pi.normalize_remote_url("git@host:srv/repo/.git") == "host/srv/repo"
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("git@gh_work:o/r.git", "gh_work/o/r"),
+    ("ssh://git@gh_work/o/r", "gh_work/o/r"),
+    ("gh_work:o/r", "gh_work/o/r"),
+])
+def test_an_ssh_alias_with_an_underscore_is_a_host(url, expected):
+    """ssh resolves an ssh_config alias such as `gh_work`, as it resolves a
+    hyphenated one, so an ssh or scp remote naming it has an id."""
+    assert pi.normalize_remote_url(url) == expected
+    assert pi.classify_remote_origin(url)[0] == pi.OUTCOME_CANONICAL
+    assert pi.is_canonical(expected)
+
+
+@pytest.mark.parametrize("url", ["https://gh_work/o/r", "git@_gh:o/r", "git@gh_:o/r"])
+def test_an_underscore_host_declines_outside_ssh_or_at_an_end(url):
+    assert pi.normalize_remote_url(url) is None
+
+
 def test_control_another_port_on_that_host_keeps_its_own_id():
     assert pi.normalize_remote_url("ssh://git@ssh.github.com:2222/Acme/Widget") == "ssh.github.com:2222/Acme/Widget"
+
+
+HELPERS = [
+    "codecommit::us-east-1://my-repo",
+    "codecommit://my-repo",
+    "persistent-https://source.example/o/r",
+    "sso://source.example/o/r",
+    "keybase://private/team/repo",
+]
+
+
+@pytest.mark.parametrize("url", HELPERS)
+def test_a_remote_helper_transport_has_no_portable_origin(url):
+    """A remote-helper transport has no portable id: it takes the folder
+    name, as a repository with no remote does, rather than declining."""
+    assert pi.normalize_remote_url(url) is None
+    assert pi.classify_remote_origin(url) == (pi.OUTCOME_NO_PORTABLE_ORIGIN, None)
+
+
+@pytest.mark.parametrize("url, outcome", [
+    ("ftp://host.example/o/r", "decline"),
+    ("rsync://host.example/o/r", "decline"),
+    ("git@[::1]:o/r", "canonical"),
+    ("ssh://git@[2001:db8::1]/o/r", "canonical"),
+    ("https://[::1]/o/r", "canonical"),
+    ("codecommit::\x01x", "decline"),
+])
+def test_control_other_schemes_and_ipv6_classify_as_before(url, outcome):
+    assert pi.classify_remote_origin(url)[0] == outcome
+
+
+def test_a_remote_helper_origin_binds_and_discloses_its_folder_name(tmp_path, monkeypatch, caplog):
+    """The repository binds its folder name, `project-id show` discloses the
+    source as a remote helper, and one warning names the remedy without the
+    url (a helper address can carry an account id or a token)."""
+    import logging
+
+    from fixtures.identity_git import assert_outside_repository, make_repo
+    from scripts import memory_api
+    from scripts.memory_api import PACTMemory
+
+    assert_outside_repository(tmp_path)
+    secret = "codecommit::us-east-1://SECRETTOKEN@my-repo"
+    repo = make_repo(tmp_path / "work" / "proj", remote=secret)
+    identity = pi.detect_id_for_root(repo, repo / ".git", asked_root=repo)
+    assert (identity.project_id, identity.id_shape, identity.detail) == ("proj", "basename", pi.REMOTE_HELPER_DETAIL)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(memory_api, "_REMOTE_HELPER_WARNED", set())
+    with caplog.at_level(logging.WARNING):
+        memory = PACTMemory(session_id="s", db_path=tmp_path / "m.db")
+        PACTMemory(session_id="s", db_path=tmp_path / "m.db")
+    assert (memory.project_id, memory._project_id_source) == ("proj", "remote helper")
+    warned = [r.getMessage() for r in caplog.records if "remote-helper transport" in r.getMessage()]
+    assert len(warned) == 1, warned
+    assert "pact-project-id" in warned[0] and "SECRETTOKEN" not in caplog.text
+
+
+def _present_store(path):
+    from scripts.database import db_connection, ensure_initialized
+
+    with db_connection(path) as conn:
+        ensure_initialized(conn)
+
+
+def test_project_id_show_discloses_a_remote_helper_origin(tmp_path, monkeypatch, capfd):
+    """`project-id show` names the remote-helper source and says the bucket is
+    shared by folder name and that a pin isolates it; never the url."""
+    import json
+
+    from fixtures.identity_git import assert_outside_repository, make_repo
+    from scripts.cli import main
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "work" / "proj", remote="codecommit::us-east-1://SECRETTOKEN@my-repo")
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(repo)
+    _present_store(tmp_path / "m.db")
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "show", "--db-path", str(tmp_path / "m.db")])
+    captured = capfd.readouterr()
+    assert exit_info.value.code == 0, captured.err
+    shown = json.loads(captured.out)["result"]
+    assert (shown["project_id"], shown["id_shape"], shown["source"]) == ("proj", "basename", "remote helper")
+    assert shown["identity_detail"] == pi.REMOTE_HELPER_DETAIL
+    assert "shared" in shown["identity_detail"] and "pact-project-id" in shown["identity_detail"]
+    assert "SECRETTOKEN" not in captured.out + captured.err
+
+
+def test_control_show_has_no_identity_detail_for_a_canonical_origin(tmp_path, monkeypatch, capfd):
+    import json
+
+    from fixtures.identity_git import assert_outside_repository, make_repo
+    from scripts.cli import main
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "work" / "proj", remote="https://github.com/acme/proj.git")
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(repo)
+    _present_store(tmp_path / "m.db")
+    with pytest.raises(SystemExit):
+        main(["project-id", "show", "--db-path", str(tmp_path / "m.db")])
+    assert json.loads(capfd.readouterr().out)["result"]["identity_detail"] is None
