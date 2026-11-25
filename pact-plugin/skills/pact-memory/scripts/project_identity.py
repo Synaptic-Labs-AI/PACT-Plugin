@@ -483,14 +483,20 @@ def _git_ceiling_directories() -> set:
 def _is_git_directory(path: Path) -> bool:
     """Whether git would accept `path` as a git directory (git's own
     `is_git_directory`): a `HEAD` entry, and `objects/` and `refs/` in
-    it, or in the directory its `commondir` file names. Never raises."""
+    it, or in the directory its `commondir` file names. A `commondir`
+    that is not a regular file of at most GIT_FILE_LIMIT bytes (a FIFO, a
+    huge file) refuses, read by the bounded `read_git_file` so it never
+    blocks. Never raises."""
     try:
         if not os.path.lexists(path / "HEAD"):
             return False
         common = path
         commondir = path / "commondir"
-        if commondir.is_file():
-            named = commondir.read_text(encoding="utf-8", errors="surrogateescape").strip()
+        if os.path.lexists(commondir):
+            text = read_git_file(commondir)
+            if text is None:
+                return False
+            named = text.strip()
             common = Path(named) if os.path.isabs(named) else path / named
         return (common / "objects").is_dir() and (common / "refs").is_dir()
     except (OSError, ValueError):

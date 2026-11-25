@@ -1981,6 +1981,7 @@ NAMED_LAYOUT_FORMS = {
     ('_submodule_checkout', 'binds', 'a call to _resolved_git_dir'): (1, 'assigns a call to `_resolved_git_dir` (not a predicate) to a local in `_submodule_checkout` (predicate)'),
     ('find_git_marker', 'binds', 'a call to _git_ceiling_directories'): (1, 'assigns a call to `_git_ceiling_directories` (not a predicate) to a local in `find_git_marker` (not a predicate)'),
     ('find_git_marker', 'binds', 'a call to _git_env_bool'): (1, 'assigns a call to `_git_env_bool` (predicate) to a local in `find_git_marker` (not a predicate)'),
+    ('_is_git_directory', 'binds', 'a call to read_git_file'): (1, 'assigns a call to `read_git_file` (not a predicate) to a local in `_is_git_directory` (predicate)'),
     ('find_git_marker', 'uses', 'an `if` or `elif` test: a call to _is_git_directory'): (1, 'uses a call to `_is_git_directory` (predicate) in an `if` or `elif` test in `find_git_marker` (not a predicate)'),
     ('git_dir_answer', 'calls', 'DETECTION_GIT_DIRS.get'): (1, 'calls a method on `DETECTION_GIT_DIRS`, a module-level assignment of a `contextvars.ContextVar(...)` call, in `git_dir_answer` (not a predicate)'),
     ('_redirect_target_refusal', 'uses', 'an `if` or `elif` test: a call to _submodule_admin_dir'): (1, 'uses a call to `_submodule_admin_dir` (predicate) in an `if` or `elif` test in `_redirect_target_refusal` (refusal)'),

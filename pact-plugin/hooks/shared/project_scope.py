@@ -49,8 +49,11 @@ from .paths import get_claude_config_dir
 # Git LOCATES the repository from these instead of discovering it from `-C` or
 # the working directory. Inherited -- a git hook runs with GIT_DIR exported for
 # its own repository -- they make every directory report that one repository,
-# so an unrelated directory compares equal to it.
-_GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+# so an unrelated directory compares equal to it. GIT_OBJECT_DIRECTORY too:
+# git's `is_git_directory` takes `objects/` from it, so with it set a `.git`
+# folder holding no `objects/` would answer for git while the marker walk
+# (`project_identity._is_git_directory`) walks past it.
+_GIT_LOCATION_VARIABLES = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY")
 
 # Written by session_init into a session's own folder when the session starts
 # inside a linked worktree; read back by the working-memory write guard.

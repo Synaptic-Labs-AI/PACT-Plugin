@@ -890,6 +890,53 @@ class TestGitDiscoveryHonoursACeilingAsGitDoes:
             (tmp_path / "top" / ".git").resolve()
         )
 
+    def test_a_fifo_commondir_refuses_without_blocking(self, tmp_path):
+        """A `commondir` that is a FIFO is read by the bounded reader, which
+        never opens it: the folder is not a git directory. RED WHEN a
+        non-regular commondir is skipped (the folder then passes on its own
+        objects/ and refs/) or read without the bound."""
+        git_dir = tmp_path / ".git"
+        _git_directory(git_dir)
+        os.mkfifo(git_dir / "commondir")
+        assert pi._is_git_directory(git_dir) is False
+
+    def test_an_oversized_commondir_refuses(self, tmp_path):
+        """A commondir past GIT_FILE_LIMIT is refused, not read whole."""
+        from shared.git_helpers import GIT_FILE_LIMIT
+
+        git_dir = tmp_path / ".git"
+        _git_directory(git_dir)
+        (git_dir / "commondir").write_bytes(b"." + b"/" * GIT_FILE_LIMIT)
+        assert pi._is_git_directory(git_dir) is False
+
+    def test_git_object_directory_does_not_make_git_and_the_walk_disagree(
+        self, tmp_path, monkeypatch
+    ):
+        """A `.git` folder with HEAD and refs/ but no objects/, under an
+        inherited GIT_OBJECT_DIRECTORY naming real objects: the walk skips the
+        folder, and git run with the location-free environment refuses it
+        too. RED WHEN GIT_OBJECT_DIRECTORY survives into that environment, so
+        git accepts a folder the walk passed."""
+        import subprocess
+
+        from shared.project_scope import git_env_without_location
+
+        real = tmp_path / "real"
+        subprocess.run(["git", "init", "-q", str(real)], check=True)
+        probe = tmp_path / "probe"
+        (probe / ".git" / "refs").mkdir(parents=True)
+        (probe / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_OBJECT_DIRECTORY", str(real / ".git" / "objects"))
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+        assert pi._is_git_directory(probe / ".git") is False
+        env = git_env_without_location()
+        assert "GIT_OBJECT_DIRECTORY" not in env
+        answer = subprocess.run(
+            ["git", "-C", str(probe), "rev-parse", "--git-dir"],
+            capture_output=True, text=True, env=env,
+        )
+        assert answer.returncode != 0, answer.stdout
+
     def test_a_dangling_marker_symlink_still_counts(self, tmp_path):
         (tmp_path / "top").mkdir()
         (tmp_path / "top" / ".git").symlink_to(tmp_path / "missing")
