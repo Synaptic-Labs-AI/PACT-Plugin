@@ -683,6 +683,12 @@ class TestLegacyScopeStatesAreDocumented:
             "checkout), does not block it"
         ) in _body(SKILL)
 
+    def test_a_folder_name_legacy_candidate_moves_only_with_apply(self):
+        assert (
+            "Its rows move with project-id rekey --from=<old> --to=<this "
+            "folder-name id> and --apply, with the user's approval."
+        ) in _body(SKILL)
+
     def test_an_alias_id_is_shared_only_by_clones_using_that_alias(self):
         assert (
             "Only clones whose origin uses that same alias share an alias id."
@@ -913,13 +919,15 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
         printed = str(refusal.value).replace("`", "")
         remedy = "project-id rekey --from=FOLDER_NAME --to=host/owner/repo"
         assert (
-            "To move rows, run " + remedy + ", with the folder-name bucket and "
-            "the canonical id filled in; to write a folder-name bucket, save "
-            "from a folder whose project id is that name (project-id show "
-            "reports it)."
+            "To move rows, preview the move with " + remedy + ", with the "
+            "folder-name bucket and the canonical id filled in, and add --apply, "
+            "with the user's approval, to perform it; to write a folder-name "
+            "bucket, save from a folder whose project id is that name "
+            "(project-id show reports it)."
         ) in _body(SKILL)
         assert "save from that non-repository folder" not in _body(SKILL)
-        assert remedy in printed, printed
+        assert "To move rows, run " not in _body(SKILL)
+        assert "preview the move with " + remedy + " and add --apply, with the user's approval, to perform it" in printed, printed
         assert "--to=<canonical id>" not in printed
 
 

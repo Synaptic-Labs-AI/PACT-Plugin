@@ -1295,7 +1295,10 @@ class TestAPrintedRekeyCommandRunsAsPrinted:
     def _printed_command(caplog, marker):
         messages = [r.getMessage() for r in caplog.records if marker in r.getMessage()]
         assert len(messages) == 1, messages
-        return messages[0].split("explicitly with: ", 1)[1]
+        command = messages[0].split("preview the move with: ", 1)[1]
+        clause = " (add --apply, with the user's approval, to perform it)"
+        assert command.endswith(clause), command  # the printed command is a dry run
+        return command[: -len(clause)]
 
     @staticmethod
     def _run_printed(text, capfd):
@@ -2203,3 +2206,19 @@ class TestEachCliCommandAsksGitEachQuestionOnce:
         assert repeated == {name: [] for name, _, _ in _EVERY_CLI_COMMAND}, (asked, repeated)
         # Control: no command wrote a CLAUDE.md under the test's tree.
         assert {p: p.read_bytes() for p in identity_env.rglob("CLAUDE.md")} == documents
+
+
+def test_the_legacy_write_refusal_says_the_printed_rekey_is_a_preview(identity_env, monkeypatch):
+    """The refusal names `project-id rekey` as a preview, with --apply as the
+    user-approved step that performs the move: run as printed, the command
+    is a dry run."""
+    from scripts.memory_api import LegacyBucketWriteRefusedError, PACTMemory
+
+    repo = make_repo(identity_env / "proj", remote="https://github.com/acme/proj.git")
+    monkeypatch.chdir(repo)
+    memory = PACTMemory(session_id="s", db_path=identity_env / "m.db")
+    with pytest.raises(LegacyBucketWriteRefusedError) as refusal:
+        memory._refuse_legacy_write("save")
+    text = " ".join(str(refusal.value).replace("`", "").split())
+    assert "preview the move with project-id rekey --from=FOLDER_NAME --to=host/owner/repo" in text, text
+    assert "add --apply, with the user's approval, to perform it" in text, text

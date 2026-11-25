@@ -800,9 +800,14 @@ def _printed_rekey_remedy(commands: list) -> str:
         return (
             "the command printed by the `project-id show` verb (its bucket id "
             "or store path holds a control character, so it is not printed "
-            "in this log line)"
+            "in this log line)" + _APPLY_CLAUSE
         )
-    return " ; ".join(commands)
+    return " ; ".join(commands) + _APPLY_CLAUSE
+
+
+# A printed rekey command is a DRY RUN (`render_rekey_command` never adds
+# --apply): it previews the move, and only --apply performs it.
+_APPLY_CLAUSE = " (add --apply, with the user's approval, to perform it)"
 
 
 # Why a bucket was not read: the verdict's `reason` and the clause every
@@ -987,8 +992,8 @@ def _warn_legacy_unproven(
     logger.warning(
         "legacy project bucket %r holds %d memor%s and %d file path%s, but "
         "%s, so it is NOT in this read scope: its folder name alone does not "
-        "show that the rows are this repository's. If they are, move them "
-        "explicitly with: %s",
+        "show that the rows are this repository's. If they are, preview the "
+        "move with: %s",
         candidate,
         memories,
         "y" if memories == 1 else "ies",
@@ -1015,8 +1020,8 @@ def _warn_legacy_unattributed(
     logger.warning(
         "legacy project bucket %r is in this read scope because %s, but %d "
         "of its memories came from no recorded session, so nothing shows "
-        "they are this repository's. If every row belongs here, file the "
-        "bucket under this repository's id with: %s",
+        "they are this repository's. If every row belongs here, preview the "
+        "move to this repository's id with: %s",
         candidate,
         f"{counts['contained_rows']} of its file rows lie under this "
         "repository and no file row places it elsewhere"
@@ -1052,7 +1057,7 @@ def _warn_case_variant(
         "case, and this filesystem distinguishes case, so none is in this "
         "read scope: on a case-sensitive filesystem those are different "
         "projects, not one project spelled differently. If a bucket belongs "
-        "to this project, move its rows explicitly with: %s",
+        "to this project, preview the move with: %s",
         legacy,
         ", ".join(repr(variant) for variant in variants),
         commands,
@@ -1587,6 +1592,10 @@ def render_rekey_command(
     `db_path` IS CARRIED WHEN KNOWN. Without it the printed remedy runs
     against the DEFAULT store, so a bucket reported from `--db-path X` is
     "moved" in some other file and reports success.
+
+    NO `--apply`: the printed command is a DRY RUN that previews the move,
+    and every message printing it says so (`_APPLY_CLAUSE`), leaving the
+    apply to the user.
     """
     argv = [
         "python3",
@@ -4260,7 +4269,9 @@ class PACTMemory:
             f"{what}: this session's project id is {self._project_id!r} (a "
             "repository identity), and a repository session does not write "
             "into a folder-name bucket. Nothing was written. To move rows, "
-            "run `project-id rekey --from=FOLDER_NAME --to=host/owner/repo`; "
+            "preview the move with `project-id rekey --from=FOLDER_NAME "
+            "--to=host/owner/repo` and add --apply, with the user's approval, "
+            "to perform it; "
             "to write a folder-name bucket, save from a folder whose project "
             "id is that name (`project-id show` reports it)."
         )

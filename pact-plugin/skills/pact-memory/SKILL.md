@@ -259,8 +259,8 @@ A session whose detected project id is a repository identity never writes into
 a folder-name bucket: `save` and `update` refuse a payload `project_id` that is
 not a canonical `host/owner/repo` id, and `update` refuses a `session_id`
 change on a row stored under a folder-name bucket. Both fail with
-`LEGACY_BUCKET_WRITE_REFUSED`, exit 2 and write nothing. To move rows, run `project-id rekey --from=FOLDER_NAME --to=host/owner/repo`,
-with the folder-name bucket and the canonical id filled in; to write a
+`LEGACY_BUCKET_WRITE_REFUSED`, exit 2 and write nothing. To move rows, preview the move with `project-id rekey --from=FOLDER_NAME --to=host/owner/repo`,
+with the folder-name bucket and the canonical id filled in, and add `--apply`, with the user's approval, to perform it; to write a
 folder-name bucket, save from a folder whose project id is that name
 (`project-id show` reports it).
 
@@ -279,7 +279,7 @@ A folder-name id whose pre-change name differs, such as a
 `--separate-git-dir` checkout without a portable origin (the old resolver named
 it after the external git dir's parent), has a legacy candidate like a
 canonical id: it is judged by the same rule and disclosed in `legacy_scope`.
-Its rows move with `project-id rekey --from=<old> --to=<this folder-name id>`.
+Its rows move with `project-id rekey --from=<old> --to=<this folder-name id>` and `--apply`, with the user's approval.
 The session's own folder-name id is the one non-canonical target a rekey
 accepts, only as an explicit `--to`, and only for its own legacy candidate.
 

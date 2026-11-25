@@ -1570,11 +1570,17 @@ class TestReviewQuoting:
         with caplog.at_level(logging.WARNING):
             memory._read_project_scopes()
 
-        match = re.search(r"move them explicitly with: (.+)", caplog.text)
+        match = re.search(
+            r"preview the move with: (.+) \(add --apply, with the user's approval, to perform it\)",
+            caplog.text,
+        )
         assert match is not None, (
             f"the unproven notice did not render a rekey command: {caplog.text!r}"
         )
         argv = shlex.split(match.group(1))
+        # THE PRINTED COMMAND IS A DRY RUN: the text says --apply performs the
+        # move, and the command itself never carries it.
+        assert "--apply" not in argv, argv
         assert f"--from={hostile}" in argv, (
             f"the bucket id did not round-trip as ONE --from argument: {argv!r}"
         )
