@@ -53,7 +53,7 @@
   },
   "track_a": {
     "native_eval": {
-      "status": "blocked_shell_sandbox_no_valid_case",
+      "status": "blocked_sandbox_confinement_no_valid_case",
       "valid_baseline_cases": 0,
       "probe": {
         "command": "claude plugin eval ... --ablation with-without --runs 1 --scaffold --allow-tools Bash Write Edit",
@@ -104,7 +104,15 @@
         "cost_usd": 1.231479,
         "verdict": "output-only; regex was prompt-satisfied; blocked pending a working sandbox and a positive delta"
       },
-      "review_requirement": "Native checks must be reported as blocked/deferred until a case shows a positive with/without delta under a working eval sandbox."
+      "review_requirement": "Native checks must be reported as blocked/deferred until a case shows a positive with/without delta under a working eval sandbox.",
+      "sandbox_diagnosis": {
+        "root_cause": "eval-child TMPDIR made the sandbox bridge AF_UNIX socket path exceed socat's 108-character limit; this is a host path-length bug, not a PACT bug",
+        "boundary": "parent TMPDIR <= 51 chars; 50/51 pass, 52 fails (socket 107/108 pass, 109 fails)",
+        "fix": "native_eval.py now creates a short TMPDIR/HOME outside /tmp (default under HOME), asserts TMPDIR <= 51 chars, and records temp_root; minimal sandboxed-Bash marker case scores 1.0",
+        "remaining": "the eval sandbox still denies reading/executing the plugin-under-test scripts and denies writes to config/out, so bootstrap and memory-save cannot be valid PACT cases; native eval remains blocked for baseline purposes",
+        "step3_evidence": "bench/.runs/step3/sandbox.md (gitignored)"
+      },
+      "active_cases": "none; shell-dependent PACT cases are deferred, and no-shell cases showed zero delta"
     },
     "plugin_eval": {
       "status": "complete",
@@ -192,7 +200,10 @@
         "CLAUDE_CODE_ENABLE_TODO_TOOLS": "1",
         "source": "live settings and scratch config; both included in the prepare manifest env_keys"
       },
-      "task_tool_evidence": "ToolSearch for TaskCreate,TaskUpdate,TaskList,TaskGet returned No matching deferred tools found; no TodoWrite/TodoRead calls were observed in the subagent transcripts. Agent Teams was active (teammates spawned), so the missing task tools are not caused by an unset agent-teams env var."
+      "task_tool_evidence": "ToolSearch for TaskCreate,TaskUpdate,TaskList,TaskGet returned No matching deferred tools found; no TodoWrite/TodoRead calls were observed in the subagent transcripts. Agent Teams was active (teammates spawned), so the missing task tools are not caused by an unset agent-teams env var.",
+      "root_cause": "Claude Code 2.1.332 does not initialize the session team under claude -p; named spawns become ordinary background subagents, and TaskCreate/TaskUpdate/TaskList/TaskGet are reserved for true teammates. Agent Teams is enabled, but -p is not a valid teammate-creation environment (PACT README recovery branch C/D documents this).",
+      "workaround": "run_in_background:false foreground spawns receive the four Task tools; PACT documents this only as a legacy non-TTY compatibility note. Interactive PTY is the correct path for true Agent Teams.",
+      "todo_tools": "TodoWrite/TodoRead do not exist in Claude Code 2.1.332, so CLAUDE_CODE_ENABLE_TODO_TOOLS does not explain the missing Task tools."
     }
   },
   "track_b": {
@@ -239,14 +250,15 @@
     "next": "Run pilot, then the full PACT-vs-solo matrix and scorecard; no outcome claim is made yet."
   },
   "recommendations": [
-    "Fix or bypass the native eval shell-sandbox initialization before relying on native eval cases that need Bash; use the direct headless smoke harness for shell-requiring PACT behavior in the meantime.",
-    "Investigate why teammates lose TaskCreate/TaskUpdate/TaskList/TaskGet after ToolSearch in headless orchestration; the relay path works but adds overhead and memory-durability risk.",
-    "Prioritize pact-agent-teams and pact-handoff-harvest triggering/orchestration quality; pact-memory is the strongest selected skill but still has output-quality gaps.",
+    "Do not run Track B PACT-vs-solo in claude -p as if it were true PACT team mode: -p cannot form real teammates. Use an interactive pseudo-TTY for the PACT arm, or explicitly label a foreground/relay compatibility mode and do not claim Agent Teams parity.",
+    "For the native eval harness, keep the short-TMPDIR fix; do not use shell-dependent bootstrap/memory-save cases as baseline evidence until the eval sandbox permits reading/executing the plugin scripts and effect-based graders show a positive delta.",
+    "Prioritize pact-agent-teams and pact-handoff-harvest prompting/orchestration quality; pact-memory is the strongest selected skill but still has output-quality gaps.",
     "Audit first-request spawn context: observed 52K-87K tokens per subagent (median 69K); reduce fixed teammate payload before adding more agents.",
-    "Run the Track B pilot and full matrix before making any coding-outcome claim; the suite is validated but not executed."
+    "Run the Track B pilot/full matrix only after the team-mode decision; the six tasks are validated and ready."
   ],
   "limitations": [
-    "Native eval is blocked by the host shell sandbox; no valid native eval baseline was produced.",
+    "Native eval bridge bug is fixed at the harness level, but native eval remains blocked for shell-dependent PACT cases by sandbox confinement.",
+    "PACT headless -p cannot form true teammates; Track B team-mode results require an interactive PTY or a labelled compatibility mode.",
     "PluginEval judge scores are experimental and Anthropic-labeled; do not report USD as DeepSeek billing.",
     "Eval-bench and evolve were deferred; no judged scores are claimed for them.",
     "Token snapshot has n=2 subagent samples plus one provider aggregate.",

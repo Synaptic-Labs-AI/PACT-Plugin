@@ -41,6 +41,20 @@ The eval Bash sandbox failed to initialize in the child sessions:
     Sandbox is required but failed to initialize:
     Failed to create bridge sockets after 5 attempts.
 
+Root cause: the eval child TMPDIR made the sandbox bridge AF_UNIX socket path
+exceed socat's 108-character limit. The prepared parent TMPDIR was 107 chars;
+the child TMPDIR was 130 and the socket 164. The measured boundary is parent
+TMPDIR <= 51 chars (50/51 pass, 52 fails). This is a host path-length bug, not
+a PACT bug.
+
+The harness now creates a short TMPDIR/HOME outside /tmp (default under HOME),
+asserts TMPDIR <= 51 chars and records temp_root. A minimal sandboxed-Bash
+marker case now scores 1.0. Native eval is still not valid PACT baseline
+evidence: the eval sandbox denies reading/executing the plugin-under-test
+scripts and denies writes to config/out, so bootstrap and memory-save remain
+deferred. Attempt-based Bash graders can also pass on a failed sandbox call;
+effect-based graders are required.
+
 Cases that need shell steps could not run their required PACT commands. The
 probe also exposed invalid case signals:
 
@@ -90,8 +104,16 @@ CLAUDE_CODE_ENABLE_TODO_TOOLS=1 are both present in the live settings and in the
 scratch config used by the smoke, and both are in the prepare manifest env_keys.
 Agent Teams was active (teammates spawned). ToolSearch for TaskCreate,
 TaskUpdate, TaskList, and TaskGet returned "No matching deferred tools found",
-and no TodoWrite/TodoRead calls were observed. The missing task tools are a
-teammate tool-surface issue, not an unset-env issue.
+and no TodoWrite/TodoRead calls were observed. TodoWrite/TodoRead do not exist
+in Claude Code 2.1.332.
+
+Root cause: under claude -p, 2.1.332 does not initialize the session team;
+named spawns fall back to ordinary background subagents, and the four Task
+tools are reserved for true teammates. PACT's README already documents that a
+named -p agent is an ordinary subagent, not team formation. A foreground spawn
+with run_in_background:false does receive the four Task tools, and PACT
+documents that only as a legacy non-TTY compatibility workaround. Interactive
+PTY is the correct path for true Agent Teams.
 
 ## Token snapshot
 
@@ -118,11 +140,13 @@ full PACT-vs-solo matrix with the scorecard; no coding-outcome claim is made.
 
 ## Recommendations
 
-1. Fix or bypass the native eval shell-sandbox initialization. Until then, use
-   the direct headless smoke runner for PACT behavior that needs Bash, and do not
-   report native eval scores.
-2. Investigate the missing teammate Task tools. The relay path is functional but
-   costs tokens and leaves task durability to the lead.
+1. Keep the short-TMPDIR native-eval fix, but do not use shell-dependent
+   bootstrap/memory-save cases as baseline evidence until the eval sandbox can
+   read/execute the plugin scripts and effect-based graders show a positive
+   delta. Do not report native eval scores.
+2. Do not run Track B PACT-vs-solo in claude -p as if it were true PACT team
+   mode. Use an interactive pseudo-TTY for the PACT arm, or explicitly label a
+   foreground/relay compatibility mode and do not claim Agent Teams parity.
 3. Prioritize prompting/orchestration quality for pact-agent-teams and
    pact-handoff-harvest; keep pact-memory's output-quality gap on the list.
 4. Audit the fixed teammate spawn payload; 52K-87K first-request tokens per

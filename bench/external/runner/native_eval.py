@@ -13,6 +13,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +34,21 @@ def run(args: argparse.Namespace) -> int:
     token_file = Path(manifest["provider"]["token_file"])
     base_url = str(manifest["provider"]["base_url"])
     env = prepare.build_child_env(settings_env, scratch, token_file, base_url)
+    temp_parent = Path(args.temp_root).expanduser()
+    temp_parent.mkdir(parents=True, exist_ok=True)
+    short_root = Path(tempfile.mkdtemp(prefix="pact-native-", dir=str(temp_parent)))
+    for name in ("tmp", "home"):
+        (short_root / name).mkdir(parents=True, exist_ok=True)
+    short_tmp = short_root / "tmp"
+    if len(str(short_tmp)) > 51:
+        raise SystemExit(
+            "native eval TMPDIR is too long for the sandbox bridge: "
+            f"{len(str(short_tmp))} chars (max 51); choose a shorter --temp-root outside /tmp"
+        )
+    env["TMPDIR"] = str(short_tmp)
+    env["HOME"] = str(short_root / "home")
+    env.pop("TMP", None)
+    env.pop("TEMP", None)
 
     cases_dir = Path(args.cases_dir).expanduser().resolve() if args.cases_dir else _default_cases()
     if not cases_dir.is_dir():
@@ -110,6 +126,7 @@ def run(args: argparse.Namespace) -> int:
         "schema": "pact-bench/native-eval/1",
         "command": cmd,
         "cases_dir": str(cases_dir),
+        "temp_root": str(short_root),
         "exit_code": code,
         "timed_out": timed_out,
         "report_json": str(out / "report.json") if (out / "report.json").is_file() else None,
@@ -124,6 +141,11 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser = parser or argparse.ArgumentParser(description="Run native claude plugin evals.")
     parser.add_argument("--manifest", required=True, help="prepare manifest.json")
     parser.add_argument("--cases-dir", default=None, help="native eval cases directory")
+    parser.add_argument(
+        "--temp-root",
+        default=str(Path.home()),
+        help="short writable parent for TMPDIR/HOME, outside /tmp; keeps sandbox bridge sockets under the Unix socket path limit",
+    )
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--concurrency", type=int, default=1)
     parser.add_argument("--model", default=None)
