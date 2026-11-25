@@ -715,7 +715,9 @@ def _compact_ledger(ledger: Path, fd: int, size: int) -> None:
         if not chunk:
             break
         tail += chunk
-    tail = tail[tail.find(b"\n") + 1:]
+    # No newline in the window: it holds one partial line only, so keep none.
+    newline = tail.find(b"\n")
+    tail = tail[newline + 1:] if newline >= 0 else b""
     _remove_cut_back_leftovers(ledger)
     new_fd, new_path = _create_cut_back_file(ledger)
     try:

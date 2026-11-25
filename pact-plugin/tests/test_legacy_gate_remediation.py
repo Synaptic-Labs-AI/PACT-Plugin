@@ -283,6 +283,23 @@ def test_ledger_compaction_keeps_a_whole_first_line_on_a_boundary(
     assert ledger.read_bytes() == data[2 * line:]
 
 
+def test_ledger_compaction_keeps_no_partial_line_when_the_window_has_no_newline(
+    tmp_path, monkeypatch
+):
+    """The window lies inside one line (no newline in it): it keeps nothing.
+    RED WHEN a find() of -1 keeps the whole window, a partial line."""
+    data = _lines(2) + b"y" * 50
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_bytes(data)
+    monkeypatch.setattr(session_end, "_PRUNE_LEDGER_KEEP_BYTES", 20)
+    fd = os.open(ledger, os.O_RDWR)
+    try:
+        session_end._compact_ledger(ledger, fd, len(data))
+    finally:
+        os.close(fd)
+    assert ledger.read_bytes() == b""
+
+
 # ---------------------------------------------------------------------------
 # BR-6: a held ledger lock costs the line, never a hung hook
 # ---------------------------------------------------------------------------

@@ -2098,15 +2098,16 @@ def bucket_evidence(
         checkout (`_contained_by_root`; the root's own submodules stay
         contained), and a memory linked to it was saved after this
         repository's `description` last changed (`_linked_after_description`,
-        "dated"), or its file still exists AND no other contained row of the
-        bucket is both missing and undated. A file that exists counts only for
-        a bucket whose every contained path is still here: an unrelated clone
-        in a deleted project's folder shares a README, never the whole tree.
+        "dated"), or its file still exists. A file that exists counts even
+        beside missing, undated rows (a re-clone where one file was renamed
+        upstream); an unrelated clone in a deleted project's folder that
+        shares a file such as a README therefore places the bucket too, as
+        every same-named folder did before this change.
         With `dated_only` only dated rows count (an earlier canonical id,
         `memory_api.PACTMemory._earlier_canonical_buckets`);
       - `vanished`: the path no longer exists, and it is not contained, or
         it is contained but does not count by the rule above (a deleted file
-        of an earlier project, or an existing file beside one);
+        of an earlier project);
       - `foreign_rows`: exists, not contained, and evidence of another owner
         (`_foreign_kind`), split into `foreign_checkout_rows` (the rival is
         a git checkout) and `foreign_folder_rows` (a marked non-git folder);
@@ -2191,11 +2192,8 @@ def bucket_evidence(
             else:
                 counts["foreign_rows"] += 1
                 counts[f"foreign_{kind}_rows"] += 1
-    existence_counts = not dated_only and all(
-        exists or dated for exists, dated in contained
-    )
     for exists, dated in contained:
-        if dated or (exists and existence_counts):
+        if dated or (exists and not dated_only):
             counts["contained_rows"] += 1
         else:
             counts["vanished"] += 1

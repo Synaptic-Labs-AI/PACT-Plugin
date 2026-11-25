@@ -4108,6 +4108,11 @@ class PACTMemory:
                             and not evidence["foreign_rows"]
                             and not evidence["neutral_outside"]
                         ):
+                            memories = count_project_memories(connection, bucket)
+                            if not memories:
+                                # Its rows are linked by another bucket's
+                                # memories: nothing of its own would move.
+                                continue
                             found[bucket] = runnable_rekey_command(bucket, scope, db_path=store)
                             linked = connection.execute(
                                 "SELECT COUNT(DISTINCT mf.memory_id) FROM memory_files mf "
@@ -4115,7 +4120,7 @@ class PACTMemory:
                                 f"WHERE f.project_id = ? AND ({' OR '.join(clauses)})",
                                 [bucket, *params[1:]],
                             ).fetchone()[0]
-                            counts[bucket] = (count_project_memories(connection, bucket), linked)
+                            counts[bucket] = (memories, linked)
         except (sqlite3.Error, OSError, StoreFaultError):
             return {}
         # One entry per store, root and scope: a newer store stamp replaces it.

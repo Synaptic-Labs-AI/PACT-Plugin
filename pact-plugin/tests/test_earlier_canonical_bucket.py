@@ -221,6 +221,33 @@ def test_a_checkout_with_no_description_names_no_earlier_id(tmp_path, monkeypatc
     assert asked == [], "the pre-git filter let an undated bucket ask git"
 
 
+def test_a_bucket_with_no_memories_is_not_an_earlier_id(tmp_path, monkeypatch):
+    """A canonical bucket whose only content is a file row here, linked by a
+    memory of ANOTHER bucket saved after the clone, has nothing of its own
+    to move. RED WHEN it enters the earlier-id map (and project-id show's
+    earlier_id row) with a rekey command."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/o/proj.git")
+    (repo / "a.py").write_text("a\n", encoding="utf-8")
+    store = tmp_path / "store.db"
+    stamp = _later()
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        conn.execute(
+            "INSERT INTO memories (id, context, project_id, created_at, updated_at) "
+            "VALUES ('m1', 'c', 'github.com/o/proj', ?, ?)",
+            (stamp, stamp),
+        )
+        conn.execute("INSERT INTO files (id, path, project_id) VALUES ('f1', ?, ?)",
+                     (str(repo / "a.py"), OLD))
+        conn.execute("INSERT INTO memory_files (memory_id, file_id) VALUES ('m1', 'f1')")
+        conn.commit()
+    _fresh(monkeypatch, repo)
+    memory = PACTMemory(session_id="s", db_path=store)
+    memory._read_project_scopes()
+    assert memory._earlier_canonical == {}
+
+
 def test_a_new_store_stamp_replaces_the_cached_answer(renamed):
     """RED WHEN each store stamp adds a cache entry that is never trimmed."""
     _repo, store = renamed

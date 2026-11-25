@@ -395,9 +395,9 @@ one of `included`, `excluded` and `unproven` is true:
 - `included`: the whole bucket is read. `verified` means an absolute file row
   places it in this repository and no evidence places it elsewhere. A file row
   places it when a memory linked to it was saved after
-  `<git-common-dir>/description` last changed, or when its file still exists and
-  no other file row of the bucket under this repository is both missing and
-  older than that. With no `description` file, every row counts. `included_unverified` means no file row places
+  `<git-common-dir>/description` last changed, or when its file still exists,
+  even beside missing rows, so a file another repository shares with it (a
+  README) places it too. With no `description` file, every row counts. `included_unverified` means no file row places
   it but a recorded session from this repository wrote into it
   (`session_evidence` is `true`). A recorded session counts only when it was
   launched at the root of this repository or of one of its linked worktrees (a
@@ -528,7 +528,9 @@ never counts), every existing absolute file row of the bucket lies in this
 checkout, and the bucket holds memories, `project-id show` lists it as `earlier_id` with a rekey command into this
 checkout's id, and a read prints one notice per process naming it; otherwise
 `project-id show` lists it as an ordinary bucket with no command, as it does
-for every bucket when the repository has no `description` file. Join them with
+for every bucket when the repository has no `description` file, and for a
+bucket with an existing file in a linked worktree outside the repository
+folder. Join them with
 `project-id rekey --from=<id> --to=<id>`, and run it with `--apply` only with
 the user's explicit approval.
 

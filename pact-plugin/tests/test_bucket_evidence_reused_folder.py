@@ -2,11 +2,13 @@
 Location: pact-plugin/tests/test_bucket_evidence_reused_folder.py
 Summary: A contained file row places a legacy bucket in this checkout only if
 a memory linked to it was saved after the repository's `description` last
-changed (dated), or its file still exists there and no other contained row
-of the bucket is both missing and undated. An unrelated repository cloned into
-a deleted project's folder therefore does not read (or default-rekey) that
-project's bucket, even when the two share a file such as a README. Also pins that bucket_evidence works on a plain connection
-with no sqlite3.Row factory.
+changed (dated), or its file still exists there. An unrelated repository
+cloned into a deleted project's folder therefore does not read (or
+default-rekey) that project's bucket by its missing files, and a re-clone
+whose one file was renamed upstream stays verified. Pins the accepted
+residual: a file both trees share (a README) still places the bucket. Also
+pins that bucket_evidence works on a plain connection with no sqlite3.Row
+factory.
 Used by: pytest; exercises scripts.database.bucket_evidence on real files.
 """
 
@@ -95,18 +97,38 @@ def test_a_deleted_file_saved_after_the_clone_still_places_the_bucket(tmp_path):
     assert (counts["contained_rows"], counts["vanished"]) == (1, 0), counts
 
 
-def test_a_shared_file_does_not_place_an_unrelated_clone_whose_other_rows_vanished(tmp_path):
-    """An old project's rows at foo/README and foo/src/a.py, and an unrelated
-    repository cloned at foo later that also has a README: the old project's
-    other file is missing and undated, so existence proves nothing and neither
-    row is contained. RED WHEN an existing file counts while another contained
-    row of the bucket is missing and undated."""
+def test_accepted_residual_a_shared_file_places_an_unrelated_clone(tmp_path):
+    """ACCEPTED RESIDUAL, pinned so the decision is explicit: an old
+    project's rows at foo/README and foo/src/a.py, and an unrelated
+    repository cloned at foo later that also has a README. The shared README
+    is contained, the missing file vanished, so the bucket is placed here,
+    as every same-named folder shared it before this change. A rule that
+    vetoed existence beside a missing row dropped re-clones whose one file
+    was renamed upstream (next test)."""
     assert_outside_repository(tmp_path)
     repo = make_repo(tmp_path / "foo", remote="https://github.com/other/foo.git")
     (repo / "README").write_text("r\n", encoding="utf-8")
     _seed_rows(tmp_path / "m.db", [repo / "README", repo / "src" / "a.py"], OLD)
     counts = _evidence(tmp_path / "m.db", repo)
-    assert (counts["contained_rows"], counts["vanished"]) == (0, 2), counts
+    assert (counts["contained_rows"], counts["vanished"]) == (1, 1), counts
+
+
+def test_a_re_clone_with_one_file_renamed_upstream_stays_verified(tmp_path):
+    """Eleven rows, all memories older than the clone; ten files are back and
+    one was renamed upstream. RED WHEN one missing, undated row vetoes the
+    existing ones (the bucket would read unproven and a defaulted rekey be
+    refused)."""
+    from scripts.memory_api import decide_bucket
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "foo", remote="https://github.com/acme/foo.git")
+    paths = [repo / f"f{index}.py" for index in range(11)]
+    for path in paths[:10]:
+        path.write_text("x\n", encoding="utf-8")
+    _seed_rows(tmp_path / "m.db", paths, OLD)
+    counts = _evidence(tmp_path / "m.db", repo)
+    assert (counts["contained_rows"], counts["vanished"]) == (10, 1), counts
+    assert decide_bucket(counts, None).state == "verified"
 
 
 def test_a_re_clone_with_every_file_back_is_placed_by_existence(tmp_path):
