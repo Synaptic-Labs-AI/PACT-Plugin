@@ -1688,11 +1688,13 @@ def origin_url_in_config(config_path: Any) -> Optional[str]:
 
     It agrees with `project_identity.read_origin`'s rule (the first value in
     the repository's own file) on the plain form a clone writes,
-    `[remote "origin"]` then `url = <value>`, and refuses everything else
-    rather than guess: a file that is not a regular file of at most
-    `GIT_FILE_LIMIT` bytes, an include section, a header or key line it
-    cannot read, and a url value holding a quote, a backslash, `#` or `;`.
-    Never raises.
+    `[remote "origin"]` then `url = <value>`, and refuses wherever that rule
+    declines or this reader cannot follow git: EVERY line of the file is read
+    before the answer, so it refuses a file that is not a regular file of at
+    most `GIT_FILE_LIMIT` bytes, an include section anywhere in it, a header
+    or key line it cannot read, and any origin url (not only the first) that
+    is empty, valueless, or holds a quote, a backslash, `#` or `;`. An
+    empty one is what `read_origin` declines as `empty_entry`. Never raises.
     """
     from shared.git_helpers import read_git_file
 
@@ -1703,6 +1705,7 @@ def origin_url_in_config(config_path: Any) -> Optional[str]:
     if text is None:
         return None
     section: Optional[Tuple[str, Optional[str]]] = None
+    urls: List[str] = []
     for raw in text.split("\n"):
         line = raw.strip()
         if not line or line[0] in "#;":
@@ -1722,8 +1725,8 @@ def origin_url_in_config(config_path: Any) -> Optional[str]:
             value = (entry.group(2) or "").strip()
             if not value or any(char in value for char in "\"\\#;"):
                 return None
-            return value
-    return None
+            urls.append(value)
+    return urls[0] if urls else None
 
 
 # The most bytes a `pact-project-id` pin file may hold (`pin_file_value`).
@@ -1768,19 +1771,21 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
 
 def checkout_is_same_owner(checkout: str, own_id: str, own_url: Optional[str]) -> bool:
     """Whether `checkout`, a directory a store row names, is a plain clone of
-    this session's repository: its usable pin (`pin_file_value`, the rule
-    the resolver reads a pin by) is `own_id`, or, with no usable pin, the
-    first origin url of its own config (`origin_url_in_config`) is
-    `own_url`, the url this session's id comes from (None when its id comes
-    from a pin). A pin the resolver would ignore is ignored here too.
+    this session's repository, judged from its files: its usable pin
+    (`pin_file_value`, the rule the resolver reads a pin by) is `own_id`,
+    or, with no usable pin, the first origin url of its own config
+    (`origin_url_in_config`) is EXACTLY `own_url`, the url this session's id
+    comes from (None when its id comes from a pin), compared as written, not
+    normalized. A pin the resolver would ignore is ignored here too.
 
     FILES ONLY, NO GIT: no git command runs on a path a store row names. So
     only a checkout whose `.git` is a directory is judged, read straight from
     it. A `.git` file or symlink (a linked worktree, a separate git dir, or a
-    pointer at another repository), a usable pin that is not `own_id`, and a
-    url spelled differently from this session's (ssh against
-    https) are not the same owner, so such a checkout stays a rival (fail
-    closed). Never raises."""
+    pointer at another repository), a usable pin that is not `own_id`, a url
+    `origin_url_in_config` refuses, and a url spelled differently from
+    `own_url` (ssh against https, with or without `.git`, even for one
+    repository) are not the same owner, so such a checkout stays a rival
+    (fail closed). Never raises."""
     from shared.git_helpers import read_git_file
 
     try:
@@ -1815,9 +1820,9 @@ class _EvidenceWalk:
         self._same: Dict[str, bool] = {}
 
     def same_owner(self, checkout: str) -> bool:
-        """Whether `checkout` resolves to this session's own canonical id (a
-        sibling clone of the same repository), per the caller's predicate,
-        cached per checkout. False with no predicate or when it raises: an
+        """Whether `checkout` is a plain clone of this session's repository
+        by its pin or its origin url as written (`checkout_is_same_owner`),
+        per the caller's predicate, cached per checkout. False with no predicate or when it raises: an
         unreadable identity stays a rival."""
         if self._same_owner is None:
             return False
@@ -1852,9 +1857,11 @@ def _foreign_kind(
     only have written another bucket, so a row in it is a cross-reference,
     whether the checkout lies elsewhere or around a root (a `$HOME` dotfiles
     repository). One nested inside a root is not a rival.
-    A SAME-OWNER CHECKOUT IS NO RIVAL under either rule: one whose canonical
-    identity is this session's (`walk.same_owner`, a sibling clone of the
-    same origin or pin) wrote the bucket as this repository did.
+    A SAME-OWNER CHECKOUT IS NO RIVAL under either rule: a plain clone whose
+    usable pin is this session's id, or whose first origin url is this
+    repository's own url as written (`walk.same_owner`,
+    `checkout_is_same_owner`; read from files, no git), wrote the bucket as
+    this repository did.
     (b) THE NAMED-DIRECTORY RULE: a STRICT ancestor directory (the row itself
     never counts) whose pre-change name is the bucket's, which is neither a
     gate root nor inside one, and which carries a project marker: a `.git`
@@ -1938,9 +1945,10 @@ def bucket_evidence(
     and compares literally, with no case folding. `recorded_dirs` returns the
     resolved `project_dir` of every recorded session; it is called at most
     once, and only when a folder named like the bucket has no other marker.
-    `same_owner(checkout)` answers whether a checkout outside the roots
-    resolves to the session's own canonical id; the caller computes it (this
-    module asks no git), and a checkout it answers True for is no rival.
+    `same_owner(checkout)` answers whether a checkout outside the roots is
+    a plain clone of the session's repository by its usable pin or its origin
+    url as written, read from files with no git (`checkout_is_same_owner`),
+    and a checkout it answers True for is no rival.
     None treats every such checkout as a possible rival.
 
     PRECONDITION: the store's schema is present (a read-only identity

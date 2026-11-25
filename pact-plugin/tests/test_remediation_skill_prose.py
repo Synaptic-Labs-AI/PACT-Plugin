@@ -692,6 +692,11 @@ class TestLegacyScopeStatesAreDocumented:
             "config's first origin url is this repository's, written the same way "
             "(a url is compared only when this repository's id came from a url)."
         ) in _body(SKILL)
+        assert (
+            "A clone with a different pin, a differently spelled url (ssh against "
+            "https, or with or without .git), a config holding an include or an "
+            "empty origin url anywhere, or a .git that is a file or link"
+        ) in _body(SKILL)
 
     def test_the_rekey_dry_run_states_what_it_leaves(self):
         body = _body(SKILL)
@@ -1535,13 +1540,22 @@ class TestNullOverridePathIsMeasured:
             assert self.OUTSIDE_PHRASE not in self._clause(), "documented but measures no null"
 
     def test_the_withheld_path_is_the_users_decision(self):
-        """The row states the null case bare; the agent rule lives in the
-        decline remedies, and the old rationale is gone."""
+        """The row states the null case bare; the decline remedies say who
+        writes a pin for the withheld path, and the old rationale is gone."""
         body = _body(SKILL)
         assert "because a forged pointer looks the same" not in body
+        remedies = body[body.index("Decline remedies."):body.index("WHEN A PROJECT RETURNS NO MEMORIES")]
         assert (
-            "An agent never writes this pin and asks the user instead"
-        ) in body
+            "When override_path is null because the checkout's .git points at an "
+            "outside git directory, a pin in that git directory may remedy the "
+            "decline; only the user writes it, as above."
+        ) in remedies
+
+    def test_the_show_row_names_what_repo_root_is(self):
+        assert (
+            "repo_root is the identity root that explains the id and that the "
+            "legacy gate compared rows against;"
+        ) in _table_row(SKILL, "project-id show")
 
     DOC_LEAD = "It is None for "
 

@@ -29,6 +29,12 @@ ID = "github.com/acme/proj"
     ('[remote "origin"]\n\turl = https://h/o/r # note\n', None),
     ('[remote "origin"]\n\turl = https://h/o/r\\\n', None),
     ("", None),
+    # Every origin url is read: an empty or unreadable later one refuses the
+    # file, as read_origin declines an empty entry anywhere in the list.
+    ('[remote "origin"]\n\turl = https://h/o/r\n\turl =\n', None),
+    ('[remote "origin"]\n\turl = https://h/o/r\n\turl\n', None),
+    ('[remote "origin"]\n\turl = https://h/o/r\n[remote "origin"]\n\turl = "q"\n', None),
+    ('[remote "origin"]\n\turl = https://h/o/r\n[include]\n\tpath = x\n', None),
 ])
 def test_the_strict_origin_reader(tmp_path, text, expected):
     config = tmp_path / "config"
@@ -124,3 +130,40 @@ def test_the_pin_size_cap_is_the_resolvers(tmp_path):
     from scripts import project_identity
 
     assert database.PIN_FILE_MAX_BYTES == project_identity._MAX_OVERRIDE_BYTES
+
+def _git(repo, *args):
+    import subprocess
+
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+@pytest.mark.parametrize("arrange", ["one", "two", "empty_later", "valueless_later", "include", "none"])
+def test_the_file_reader_never_answers_where_read_origin_declines(tmp_path, arrange):
+    """Parity with the resolver's own read (git config --get-all): whenever
+    the file reader gives a url, read_origin gives the same first url; where
+    read_origin declines (an empty entry, a valueless one, no origin) the file
+    reader gives none, and it also gives none for any include, which it
+    cannot follow (the safe direction)."""
+    from scripts import project_identity as pi
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "r" / "proj", remote=None if arrange == "none" else URL)
+    config = repo / ".git" / "config"
+    if arrange == "two":
+        _git(repo, "config", "--add", "remote.origin.url", "https://github.com/acme/proj")
+    elif arrange == "empty_later":
+        _git(repo, "config", "--add", "remote.origin.url", "")
+    elif arrange == "valueless_later":
+        with open(config, "a", encoding="utf-8") as handle:
+            handle.write('[remote "origin"]\n\turl\n')
+    elif arrange == "include":
+        (tmp_path / "extra.config").write_text('[remote "origin"]\n\turl = https://h/x/y\n', encoding="utf-8")
+        _git(repo, "config", "include.path", str(tmp_path / "extra.config"))
+    origin = pi.read_origin(repo / ".git")
+    found = origin_url_in_config(config)
+    if found is not None:
+        assert origin.value == found, (arrange, origin, found)
+    if arrange in ("one", "two"):
+        assert found == URL
+    else:
+        assert found is None, (arrange, origin)
