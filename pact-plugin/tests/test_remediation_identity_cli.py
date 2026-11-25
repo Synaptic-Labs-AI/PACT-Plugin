@@ -586,11 +586,19 @@ class TestTheHelpNeverSaysFollowTheCandidate:
         for path, text in rendered.items():
             assert "follow the candidate" not in text.lower(), path
 
-    @pytest.mark.parametrize("path", ["sync", "project-id rekey"])
-    def test_the_rekey_help_requires_approval_and_names_the_limits(self, path):
-        text = _rendered_help()[path]
+    def test_the_rekey_help_requires_approval_and_names_the_limits(self):
+        text = _rendered_help()["project-id rekey"]
         assert "--apply only with the user's explicit approval" in text, text
         assert "never for an excluded bucket or another repository's id" in text, text
+
+    def test_the_sync_help_says_the_printed_command_previews_the_move(self):
+        """The template the sync help prints is a dry run: it previews the
+        move, and --apply, with the user's approval, performs it."""
+        text = " ".join(_rendered_help()["sync"].split())
+        assert "previews moving that bucket into the canonical id" in text, text
+        assert "--apply, only with the user's explicit approval, performs it" in text, text
+        assert "Never apply it for an excluded bucket or another repository's id" in text, text
+        assert "and moves that bucket" not in text, text
 
     def test_the_target_defaults_only_for_this_checkouts_own_bucket(self):
         text = _rendered_help()["project-id rekey"]

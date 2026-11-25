@@ -1779,9 +1779,10 @@ def build_parser():
             "checkout's own bucket that is not excluded carries a rekey "
             "command; "
             + render_rekey_command("<id>", "<canonical>")
-            + " names both ends and moves that bucket into the canonical id. "
-            "Run it with --apply only with the user's explicit approval, and "
-            "never for an excluded bucket or another repository's id."
+            + " names both ends and previews moving that bucket into the "
+            "canonical id; --apply, only with the user's explicit approval, "
+            "performs it. Never apply it for an excluded bucket or another "
+            "repository's id."
         ),
         parents=[parent],
         formatter_class=fmt,
