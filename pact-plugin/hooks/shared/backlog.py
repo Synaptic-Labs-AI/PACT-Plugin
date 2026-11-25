@@ -154,6 +154,8 @@ _GH_API_HOST_ARGS = ("--hostname", _GITHUB_HOST)
 # `user@host:path`, which needs a non-empty user and the `@` so arbitrary text
 # (a sentence, a JSON body) never parses as a remote.
 _REMOTE_SCHEMES = {"https", "http", "ssh", "git", "git+ssh", "ssh+git"}
+# The ssh transports among them: the only ones `ssh.github.com` is read for.
+_SSH_REMOTE_SCHEMES = {"ssh", "git+ssh", "ssh+git"}
 _SCP_REMOTE = re.compile(r"^[^@\s/:\\]+@([^:/\s]+):(.+)\Z")
 # A ref that names an issue or pull request of a github.com repository, as a
 # link. Owner and name are compared to this repository's slug by the callers.
@@ -1578,8 +1580,9 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
 
     Accepted: `https://` and `http://` (with or without `user[:token]@`),
     `ssh://` and `git+ssh://` (`[user@]host[:port]`), `git://`, and the scp
-    form `user@host:O/N` with any non-empty user. The host is `github.com` or
-    GitHub's SSH-over-443 host `ssh.github.com`. One trailing `/` and one
+    form `user@host:O/N` with any non-empty user. The host is `github.com`,
+    `www.github.com`, or, for an ssh or scp remote only, GitHub's SSH-over-443
+    host `ssh.github.com`. One trailing `/` and one
     `.git` are stripped, and exactly two path segments must remain. Any other
     host — GitHub Enterprise, a loopback proxy, another forge — returns None
     and the chain falls through to `gh repo view`.
@@ -1595,7 +1598,8 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
     if "\\" in url or url.count("@") > 1:
         return None
     scp = _SCP_REMOTE.match(url)
-    if scp is not None and "://" not in url:
+    ssh = scp is not None and "://" not in url
+    if ssh:
         host, path = scp.group(1), scp.group(2)
     else:
         try:
@@ -1605,8 +1609,13 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
             return None
         if parts.scheme.lower() not in _REMOTE_SCHEMES:
             return None
+        ssh = parts.scheme.lower() in _SSH_REMOTE_SCHEMES
         path = parts.path
     if host.lower() not in _GITHUB_REMOTE_HOSTS:
+        return None
+    if host.lower() == f"ssh.{_GITHUB_HOST}" and not ssh:
+        # GitHub's ssh.github.com serves ssh only; the identity resolver keeps
+        # an https remote there as its own id, and so does this parser.
         return None
     path = path[1:] if path.startswith("/") else path
     path = path[:-1] if path.endswith("/") else path
