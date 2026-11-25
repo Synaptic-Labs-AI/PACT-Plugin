@@ -1176,10 +1176,11 @@ REMOTE_HELPER_DETAIL = (
 # The `detail` for a port-less github.com pin whose repository ends in
 # `.git` (`pin_remote_spelling`): the pin is its own id, not its remote's.
 PIN_DOT_GIT_DETAIL = (
-    "a github.com pin whose repository name ends in .git is its own id: an "
-    "origin naming that repository gives the id without the .git suffix, so "
-    "memories saved through the remote are not this pin's. Write the pin "
-    "without the trailing .git to share them"
+    "a github.com pin whose repository name ends in .git names the id a "
+    "remote spelled with .GIT or .git.git gives, not the id a remote spelled "
+    "with no suffix or one .git gives. If this repository's remote is "
+    "spelled the second way, write the pin without the trailing .git to "
+    "share its memories"
 )
 
 

@@ -1602,8 +1602,7 @@ class TestNullOverridePathIsMeasured:
             "source is remote helper when the id is the folder name of a "
             "repository whose origin is a remote-helper transport. identity_detail "
             "holds a sentence naming the remedy in that case and when a github.com "
-            "pin names a repository ending in .git, which its remote drops; it is "
-            "null otherwise."
+            "pin names a repository ending in .git; it is null otherwise."
         ) in _table_row(SKILL, "project-id show")
 
     def test_the_show_row_names_what_repo_root_is(self):
@@ -7176,6 +7175,16 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "pin_file_value"): (
             "classifies the bytes read_override already read from the pin file (database's one "
             "copy of the pin's text rule); it validates an id value and asks git nothing"
+        ),
+        ("call", "<call to no function database: candidate.startswith>"): (
+            "pin_file_value reads the text of a pin file read_override already read; a string "
+            "test on that text, it asks git nothing"
+        ),
+        ("call", "<call to no function database: candidate.partition>"): (
+            "pin_file_value splits the pin's text at its host; a string split, it asks git nothing"
+        ),
+        ("call", "<call to no function database: hostport.lower>"): (
+            "pin_file_value lower-cases the pin's host, as a remote's id does; it asks git nothing"
         ),
         ("call", "answered_once"): (
             "runs the reader's own git command once per detection pass and hands later "

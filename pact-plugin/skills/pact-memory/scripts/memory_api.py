@@ -3457,8 +3457,8 @@ class PACTMemory:
             # the remote spelling it differs from.
             _PIN_DOT_GIT_WARNED.add(str(root))
             logger.warning(
-                "project_id for %r is its pin %r, not %r, the id its github.com "
-                "remote gives: %s.",
+                "project_id for %r is its pin %r, not %r, the id a github.com "
+                "remote spelled with no suffix or one .git gives: %s.",
                 str(root), identity.project_id,
                 project_identity.pin_remote_spelling(identity.project_id),
                 identity.detail,

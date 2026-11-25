@@ -1768,6 +1768,17 @@ def canonical_escape(hex_pair: str) -> str:
     return decoded if decoded in UNRESERVED_CHARS else "%" + hex_pair.upper()
 
 
+def _unreserved_escapes_decoded(path: str) -> str:
+    """`path` with each escaped unreserved character decoded, in any hex
+    case (`%6a` is `j`); every other escape stays exactly as written."""
+
+    def decoded(match: "re.Match[str]") -> str:
+        char = chr(int(match.group(1), 16))
+        return char if char in UNRESERVED_CHARS else match.group(0)
+
+    return _ANY_ESCAPE_RE.sub(decoded, path)
+
+
 def _pin_path_escapes(candidate: str) -> str:
     """A canonical pin with every path escape in its id spelling
     (`canonical_escape`), as a remote naming the same path gets."""
@@ -1861,9 +1872,12 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
             validate_identifier_for_write(candidate)
         except ValueError:
             return None, "control_chars"
-        # A host is case-insensitive, and a remote's id lower-cases it.
+        # A host is case-insensitive, and a remote's id lower-cases it. An
+        # escaped unreserved character is decoded in any hex case, as a
+        # remote's is; any other escape keeps its spelling, so a lower-case
+        # one (`%c3`) is still refused by the canonical check.
         hostport, slash, path = candidate.partition("/")
-        candidate = hostport.lower() + slash + path
+        candidate = hostport.lower() + slash + _unreserved_escapes_decoded(path)
         if not is_canonical_id(candidate):
             return None, "not_canonical"
         folded = _github_folded_pin(_pin_path_escapes(candidate))

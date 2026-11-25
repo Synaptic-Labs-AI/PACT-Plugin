@@ -257,6 +257,11 @@ def test_an_escaped_github_pin_is_the_id_its_remote_gives(pin):
     "www.github.com:8443/O/%41b",
     "h.example/o/%41b",
     "h.example:8443/%7Euser/r",
+    # Lower-case hex of an unreserved character, decoded as a remote's is.
+    "h.example/o/r%6a",
+    "h.example/o/r%2e",
+    "github.com:8443/O/R%2dx",
+    "github.com/O/R%2dx",
 ])
 def test_an_escaped_ported_or_other_host_pin_is_the_id_its_remote_gives(pin):
     """Every pin's path escapes take the remote's own spelling
@@ -311,6 +316,34 @@ def test_the_remote_spelling_a_dot_git_pin_differs_from(pin, expected):
     assert pi.pin_remote_spelling(pin) == expected
 
 
+@pytest.mark.parametrize("pin", ["h.example/o/r%c3", "h.example/o/r%2f", "h.example/o/%2e%2e"])
+def test_a_pin_keeps_refusing_a_lower_case_escape_of_any_other_byte(pin):
+    """Only an escaped unreserved character is decoded before the canonical
+    check; a lower-case escape of any other byte stays as written and is
+    refused, as ruled, and a decoded '..' is still traversal."""
+    from scripts.database import pin_file_value
+
+    assert pin_file_value((pin + "\n").encode()) == (None, "not_canonical")
+
+
+def test_the_dot_git_pin_hint_is_true_for_both_remote_spellings():
+    """The pin github.com/acme/widget.git is the id of a remote spelled
+    widget.GIT or widget.git.git, and not of one spelled widget or
+    widget.git. The detail names both, so it does not tell the owner of a
+    widget.GIT remote to drop a .git their remote needs. RED WHEN the detail
+    says only that a remote gives the id without the .git suffix."""
+    from scripts import project_identity as pi
+
+    pin = "github.com/acme/widget.git"
+    for spelling in ("widget.GIT", "widget.git.git"):
+        assert pi.normalize_remote_url(f"https://github.com/acme/{spelling}") == pin
+    for spelling in ("widget", "widget.git"):
+        assert pi.normalize_remote_url(f"https://github.com/acme/{spelling}") == pi.pin_remote_spelling(pin)
+    detail = " ".join(pi.PIN_DOT_GIT_DETAIL.split())
+    assert "a remote spelled with .GIT or .git.git gives" in detail, detail
+    assert "If this repository's remote is spelled the second way" in detail, detail
+
+
 @pytest.mark.parametrize("pin, expected_detail", [
     ("github.com/Acme/Widget.git", True),
     ("github.com/acme/widget", False),
@@ -344,7 +377,7 @@ def test_a_github_pin_ending_in_dot_git_is_disclosed(tmp_path, monkeypatch, caps
     assert exit_info.value.code == 0
     shown = json.loads(capsys.readouterr().out)["result"]
     assert shown["source"] == "override file", shown
-    notes = [r.getMessage() for r in caplog.records if "the id its github.com remote gives" in r.getMessage()]
+    notes = [r.getMessage() for r in caplog.records if "remote spelled with no suffix or one .git gives" in r.getMessage()]
     if expected_detail:
         assert shown["project_id"] == "github.com/acme/widget.git", shown
         assert shown["identity_detail"] == PIN_DOT_GIT_DETAIL, shown

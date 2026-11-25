@@ -4593,12 +4593,12 @@ _DETAIL = "part of a rung detail: the rung and the path it read"
 _DESCRIBED_PRINTED_CLAUSES = {
     # The .git pin disclosure (PIN_DOT_GIT_DETAIL): it names the pin file's
     # value, never a change to a `.git` directory or file.
-    "a github.com pin whose repository name ends in .git is its own id": _OBSERVED,
-    "an origin naming that repository gives the id without the .git suffix":
-        "says which id the remote gives",
-    "memories saved through the remote are not this pin's": "says what the split costs",
-    "Write the pin without the trailing .git to share them":
-        "names the pin's own text as the remedy, written by the user",
+    "a github.com pin whose repository name ends in .git names the id a remote spelled "
+    "with .GIT or .git.git gives, not the id a remote spelled with no suffix or one .git "
+    "gives": _OBSERVED,
+    "If this repository's remote is spelled the second way, write the pin without the "
+    "trailing .git to share its memories":
+        "names the pin's own text as the remedy, only for the remote spelling it fits",
     # The remote-helper disclosure (REMOTE_HELPER_DETAIL): no change to a `.git`.
     "A canonical id written to <git-common-dir>/pact-project-id gives it its own":
         "names the pin as the remedy, written by the user",
