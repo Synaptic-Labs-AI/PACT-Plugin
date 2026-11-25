@@ -493,8 +493,11 @@ ROLE_WAIT_CLAUSES = [
     "watcher only with the arm command a wait_filler_gate denial gives it: "
     "it runs that command with the awaited task's id in place of its "
     "placeholder, and with --predicate teachback_submit when the awaited "
-    "deliverable is a teachback, with one Bash call "
-    "(run_in_background: true) and ends the turn.",
+    "deliverable is a teachback, as one background task the harness "
+    "tracks: one Bash call with run_in_background: true, or, where Bash is "
+    "reached only through a REPL that refuses that flag, the same command "
+    "awaited with a short timeout (for example 3000 ms) so it moves to the "
+    "background. Then it ends the turn.",
     "Without that command, it SETs intentional_wait with expected_resolver "
     "naming the lead and ends the turn.",
     "An in-process teammate does not arm a watcher: it SETs intentional_wait "

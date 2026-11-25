@@ -201,7 +201,7 @@ SECTION_PHRASE_PINS = [
     # Teammate-deliverable waits are armed with the structural watcher before
     # the turn ends. Pinned as the whole sentence so deleting it, or inverting
     # "join"/"BEFORE", reddens; a token count of the launch flag cannot.
-    (WAIT_IN_SILENCE, "Teammate-deliverable waits join the watcher scope: arm the bounded background watcher with `Bash` `run_in_background: true` BEFORE ending the turn."),
+    (WAIT_IN_SILENCE, "Teammate-deliverable waits join the watcher scope: arm the bounded background watcher BEFORE ending the turn, as one background task the harness tracks: one `Bash` call with `run_in_background: true`, or, where `Bash` is reached only through a REPL that refuses that flag, the same command awaited with a short timeout (for example 3000 ms) so it moves to the background."),
     # The in-process exception: its background completion does not wake it.
     (WAIT_IN_SILENCE, "so an in-process teammate must not background a watch and end the turn"),
     (WAIT_IN_SILENCE, "the timeout is not optional"),
@@ -232,7 +232,7 @@ SECTION_PHRASE_PINS = [
     (WAIT_IN_SILENCE, "That terminating condition must BE the awaited event, never a correlate of it."),
     (WAIT_IN_SILENCE, "If the awaited event cannot be tested directly, poll until it can be"),
     # --- §5: what makes a watcher's exit re-invoke the lead ---
-    (WAIT_IN_SILENCE, "Launch it with `run_in_background: true` — that flag is what makes its exit re-invoke you."),
+    (WAIT_IN_SILENCE, "Launch it as one background task the harness tracks: one `Bash` call with `run_in_background: true`, or, where `Bash` is reached only through a REPL that refuses that flag, the same command awaited with a short timeout (for example 3000 ms) so it moves to the background — that tracked task's exit is what re-invokes you."),
     (WAIT_IN_SILENCE, "Never background it with a shell `&` inside a foreground call instead"),
     # --- §5: a watcher that fires is spent; retiring one ---
     (WAIT_IN_SILENCE, "A watcher that FIRES is spent, and firing does not re-arm it."),
