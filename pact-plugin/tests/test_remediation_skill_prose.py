@@ -7562,6 +7562,9 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', 'bucket_evidence'): (
             "counts from the store's rows what a legacy bucket's file rows show about its owner, for the read scope; it asks git nothing" + _AFTER_DETECTION
         ),
+        ('call', '_linked_after_description'): (
+            "reads from the store whether a memory linked to a file row was saved after the repository's description changed, for the earlier-id notice; it asks git nothing" + _AFTER_DETECTION
+        ),
         ("call", "<name imported from a project module memory_api: BUCKET_EVIDENCE_KEYS>"): (
             "database's tuple of the evidence count names a verdict carries"
         ),

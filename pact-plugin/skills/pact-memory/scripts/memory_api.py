@@ -4007,7 +4007,11 @@ class PACTMemory:
         id. It is not read; one notice per process names it with the command
         that moves it into `scope`. Every other bucket stays silent. Never raises: a store that
         cannot be read answers {}."""
-        from .database import bucket_evidence, count_project_memories
+        from .database import (
+            _linked_after_description,
+            bucket_evidence,
+            count_project_memories,
+        )
 
         store = str(self._db_path or resolve_db_path())
         root = self._project_identity_root
@@ -4058,6 +4062,23 @@ class PACTMemory:
                             )
                         )
                     ]
+                    # NO ROW HERE LINKED AFTER THE CLONE: it can never be
+                    # named (`dated_only` below), so it is ruled out before
+                    # git too. Without a recorded common dir the date is
+                    # left to the evidence walk.
+                    recorded_common = getattr(self, "_project_common_dir", None)
+                    if recorded_common is not None:
+                        with_files = [
+                            bucket for bucket in with_files
+                            if any(
+                                _linked_after_description(connection, file_id, recorded_common)
+                                for (file_id,) in connection.execute(
+                                    "SELECT id FROM files WHERE project_id = ? "
+                                    f"AND ({' OR '.join(clauses)})",
+                                    [bucket, *params[1:]],
+                                )
+                            )
+                        ]
                     roots, common, own = None, None, None
                     if with_files:
                         roots, common = self._legacy_gate_roots(root)

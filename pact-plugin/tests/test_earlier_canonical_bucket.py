@@ -165,6 +165,30 @@ def test_buckets_with_no_row_under_this_checkout_cost_no_git_call(tmp_path, monk
     assert asked == [], asked
 
 
+def test_an_old_shared_file_alone_costs_no_git_call(tmp_path, monkeypatch):
+    """A bucket whose only row here is a README this checkout shares, linked
+    by a memory older than the clone, can never be named: a read asks for the
+    gate roots (a `git worktree list`) not once. RED WHEN the pre-git filter
+    keeps a bucket with no row linked after the clone."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/o/proj.git")
+    (repo / "README").write_text("r\n", encoding="utf-8")
+    store = tmp_path / "store.db"
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        _memory(conn, "m1", SHARED, OLD_STAMP, repo / "README")
+        conn.commit()
+    _fresh(monkeypatch, repo)
+    asked = []
+    real = PACTMemory._legacy_gate_roots
+    monkeypatch.setattr(PACTMemory, "_legacy_gate_roots",
+                        lambda self, root: asked.append(root) or real(self, root))
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._read_project_scopes() == ("github.com/o/proj",)
+    assert memory._earlier_canonical == {}
+    assert asked == [], asked
+
+
 def test_a_new_store_stamp_replaces_the_cached_answer(renamed):
     """RED WHEN each store stamp adds a cache entry that is never trimmed."""
     _repo, store = renamed
