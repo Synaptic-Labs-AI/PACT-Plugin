@@ -667,7 +667,8 @@ class TestLegacyScopeStatesAreDocumented:
             "an included_unverified bucket that holds such rows is read with a "
             "warning, once per process, that gives their count "
             "(sessions.unattributed) and the rekey command, and a verified bucket "
-            "is read without one."
+            "is read with one informational line, once per process, that gives "
+            "their count and says its file rows place it here."
         ) in _body(SKILL)
 
     def test_a_foreign_row_keeps_either_kind_out(self):
@@ -712,7 +713,8 @@ class TestLegacyScopeStatesAreDocumented:
             "each a valid GitHub name. A "
             "github.com pin on another port is lower-cased outside its %XX escapes. "
             "In any pin, an escaped unreserved character such as %41 is decoded, as "
-            "in a remote."
+            "in a remote. Write the pin as the id project-id show reports for the "
+            "remote (github.com/owner/repo, with no .git)."
         ) in body
         assert "earlier mixed-case spelling" not in body
 

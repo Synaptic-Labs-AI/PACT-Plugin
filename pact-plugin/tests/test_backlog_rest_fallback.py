@@ -108,6 +108,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -351,6 +352,45 @@ def test_the_origin_slug_reads_the_first_url_as_the_id_does(tmp_path, hermetic_g
     (repo / "sub").mkdir()
     assert backlog._origin_repo_slug(str(repo)) == ("o", "first")
     assert backlog._origin_repo_slug(str(repo / "sub")) == ("o", "first")
+
+
+def test_the_origin_slug_works_on_a_git_without_path_format(tmp_path, monkeypatch, hermetic_git):
+    """A git before 2.31 does not know `rev-parse --path-format` and echoes it
+    before a relative common dir. A fake `git` first on PATH does exactly
+    that, so the slug must come from a read that never passes the flag, as
+    the memory id's does. RED WHEN the origin read uses `--path-format`."""
+    repo = _init_repo_with_origin(tmp_path / "proj", "https://github.com/o/r.git")
+    real = shutil.which("git")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "git"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "args = sys.argv[1:]\n"
+        "for arg in args:\n"
+        "    if arg.startswith('--path-format'):\n"
+        "        print(arg, flush=True)\n"
+        f"os.execv({real!r}, [{real!r}] + [a for a in args if not a.startswith('--path-format')])\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    echoed = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True, text=True,
+    ).stdout
+    assert echoed == "--path-format=absolute\n.git\n", f"control: the old-git shape is live: {echoed!r}"
+    assert backlog._origin_repo_slug(str(repo)) == ("o", "r")
+
+
+def test_the_origin_slug_reads_a_repository_whose_path_is_not_utf8(tmp_path, hermetic_git):
+    """A Linux path can hold bytes that are not UTF-8. The common dir is
+    decoded as the memory id decodes it (`os.fsdecode`), not with
+    replacement characters, so the origin is still read. RED WHEN the
+    common dir is decoded with errors='replace'."""
+    repo = _init_repo_with_origin(tmp_path / os.fsdecode(b"proj\xff"), "https://github.com/o/r.git")
+    assert os.fsencode(str(repo)).endswith(b"proj\xff"), "control: the path holds a non-UTF-8 byte"
+    assert backlog._origin_repo_slug(str(repo)) == ("o", "r")
 
 
 def test_a_non_utf8_origin_url_yields_no_slug_and_no_crash(tmp_path, hermetic_git):

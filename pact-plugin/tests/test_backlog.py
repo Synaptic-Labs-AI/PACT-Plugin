@@ -4664,14 +4664,15 @@ def test_a_malformed_repo_slug_payload_yields_no_tracker(monkeypatch):
 
     RED WHEN either type check is removed.
 
-    Reaches the `gh repo view` rung ALONE: GH_REPO is unset, and the stub
-    answers the origin read (`git config --get remote.origin.url`) with no
-    output, so the origin rung yields nothing and this payload is seen only by
-    the last rung. Without that split the origin rung would receive the same
+    Reaches the `gh repo view` rung ALONE: GH_REPO is unset, and the origin
+    rung (`_origin_repo_slug`) is stubbed to answer nothing, so this payload
+    is seen only by the last rung. Without that split the origin rung would receive the same
     payload and refuse it as a remote, and the arm would pass through the
     wrong rung.
     """
     monkeypatch.delenv("GH_REPO", raising=False)
+
+    monkeypatch.setattr(backlog, "_origin_repo_slug", lambda *_: None)
 
     def _slug(stdout):
         monkeypatch.setattr(

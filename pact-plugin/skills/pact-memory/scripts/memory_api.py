@@ -1013,8 +1013,8 @@ def _warn_legacy_unattributed(
     (`included_unverified`) that holds rows no session record places, once
     per process per bucket. Such a row reads like this repository's own,
     though nothing shows it is (`_legacy_session_evidence`'s limit). A
-    `verified` bucket is not disclosed: its file rows place the whole bucket
-    here, as its defaulted rekey does."""
+    `verified` bucket's rows are placed by its file rows instead, so it gets
+    the informational line (`_note_verified_unattributed`)."""
     key = (store, candidate, "unattributed")
     if key in _UNPROVEN_WARNED:
         return
@@ -1031,6 +1031,26 @@ def _warn_legacy_unattributed(
         _printed_rekey_remedy(
             [runnable_rekey_command(candidate, target, db_path=store)]
         ),
+    )
+
+
+def _note_verified_unattributed(store: str, candidate: str, counts: Dict[str, Any]) -> None:
+    """Say, once per process per bucket, how many memories of a `verified`
+    legacy bucket came from no recorded session. The bucket's file rows place
+    the whole bucket here (`decide_bucket`), so they are read and a defaulted
+    rekey moves them; the line states that, and asks nothing."""
+    key = (store, candidate, "unattributed")
+    if key in _UNPROVEN_WARNED:
+        return
+    _UNPROVEN_WARNED.add(key)
+    logger.warning(
+        "legacy project bucket %r is in this read scope because its file rows "
+        "place it here (%d under this repository, none elsewhere); %d of its "
+        "memories came from no recorded session and are read, and moved by "
+        "its rekey, with it",
+        candidate,
+        counts["contained_rows"],
+        counts["unattributed"],
     )
 
 
@@ -4251,6 +4271,8 @@ class PACTMemory:
                     )
                 elif state_name == "included_unverified" and verdict.counts["unattributed"]:
                     _warn_legacy_unattributed(store, candidate, scope, verdict.counts)
+                elif state_name == "verified" and verdict.counts["unattributed"]:
+                    _note_verified_unattributed(store, candidate, verdict.counts)
                 result = (scope, candidate) if included else (scope,)
         self._legacy_scope_state = state
         # PRUNE superseded stamps for this same store/scope/legacy pair: the

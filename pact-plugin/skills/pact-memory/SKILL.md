@@ -405,7 +405,8 @@ one of `included`, `excluded` and `unproven` is true:
   recorded directory no longer exists (a removed worktree or a deleted
   checkout), does not block it; an `included_unverified` bucket that holds such rows is read with a warning,
   once per process, that gives their count (`sessions.unattributed`) and the
-  rekey command, and a `verified` bucket is read without one.
+  rekey command, and a `verified` bucket is read with one informational line,
+  once per process, that gives their count and says its file rows place it here.
 - `excluded`: evidence places it elsewhere and nothing places it here, so it
   is not read and no rekey command is printed anywhere. `unproven_reason` names
   the evidence (`foreign_rows` or `recorded_elsewhere`; a bucket written only by
@@ -476,7 +477,8 @@ Two operator surfaces answer, and they are deliberately ordered:
   `www.github.com` read as `github.com`, and it must name exactly owner/repo,
   each a valid GitHub name. A `github.com` pin on another port is lower-cased
   outside its `%XX` escapes. In any pin, an escaped unreserved character such as
-  `%41` is decoded, as in a remote.
+  `%41` is decoded, as in a remote. Write the pin as the id `project-id show`
+  reports for the remote (`github.com/owner/repo`, with no `.git`).
   To move a copied store's folder-name bucket, use
   `project-id rekey --from=<old> --to=<canonical>`. An ssh host alias from
   the user's ssh config stays in the id: `git@github-work:Acme/Widget` gives `github-work/Acme/Widget`,

@@ -1519,13 +1519,20 @@ def _origin_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
     anchor = _git_anchor(project_path)
     if anchor is None:
         return None
-    common = _run_capture(
-        ["git", *anchor, "rev-parse", "--path-format=absolute", "--git-common-dir"]
-    )
-    if not common or not common.strip():
+    from shared.project_scope import _rev_parse_path
+
+    try:
+        start = Path(project_path) if anchor else Path.cwd()
+    except OSError:
+        return None
+    # The common-dir reader the identity roots use: no `--path-format` (git
+    # 2.31+), a relative answer resolved against `start`, bytes decoded with
+    # `os.fsdecode`.
+    common = _rev_parse_path(start, "--git-common-dir")
+    if common is None:
         return None
     identity = _project_identity()
-    origin = identity.read_origin(Path(common.rstrip("\n")))
+    origin = identity.read_origin(common)
     if origin.state != identity.ORIGIN_PRESENT:
         return None
     return _slug_from_remote_url(origin.value)

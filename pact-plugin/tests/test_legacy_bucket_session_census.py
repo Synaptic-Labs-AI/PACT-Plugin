@@ -115,10 +115,12 @@ def test_a_row_recorded_at_another_checkout_keeps_a_verified_bucket_out(checkout
 
 def test_a_verified_bucket_with_no_foreign_row_is_read(checkout, caplog):
     """The control for the arm above: the same verified bucket without the
-    foreign session's record is read, quietly. Its file row places the whole
-    bucket here (a defaulted rekey moves it), so its rows with no recorded
-    session get no "nothing shows they are this repository's" notice. RED
-    WHEN a verified bucket's unattributed rows are disclosed as unplaced."""
+    foreign session's record is read. Its file row places the whole bucket
+    here (a defaulted rekey moves it), so its rows with no recorded session
+    get one informational line with their count and the reason the bucket is
+    read, never the "nothing shows they are this repository's" warning or a
+    confirm-first remedy. RED WHEN the line is missing, or a verified
+    bucket's unattributed rows are disclosed as unplaced."""
     repo, store, _config = checkout
     _rows(store, [("m1", None), ("m2", "other-1")],
           file_path=str(repo.resolve() / "src" / "a.py"))
@@ -127,7 +129,15 @@ def test_a_verified_bucket_with_no_foreign_row_is_read(checkout, caplog):
     assert state["verified"] and not state["unproven"], state
     assert state["sessions"]["unattributed"] == 2, state
     assert state["rekey"], state
-    assert notices == [], notices
+    assert len(notices) == 1, notices
+    assert (
+        "is in this read scope because its file rows place it here (1 under "
+        "this repository, none elsewhere); 2 of its memories came from no "
+        "recorded session"
+    ) in notices[0], notices
+    assert "nothing shows" not in notices[0] and "If every row" not in notices[0], notices
+    _read(store, caplog)
+    assert len([r for r in caplog.records if "no recorded session" in r.getMessage()]) == 1
 
 
 def test_a_vouched_bucket_with_no_unattributed_row_reads_quietly(checkout, caplog):
