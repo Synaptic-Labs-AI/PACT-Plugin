@@ -408,7 +408,9 @@ def _team_dir_under(base: Path, name: object) -> Path | None:
         team_dir = base / stripped
         team_dir.resolve().relative_to(base_resolved)
         return team_dir
-    except (OSError, ValueError, TypeError):
+    except (OSError, ValueError, TypeError, RuntimeError):
+        # RuntimeError: Path.resolve raises it on a symlink loop (Python
+        # 3.12), which is an unusable name like any other.
         return None
 
 
@@ -429,7 +431,9 @@ def task_dir_for(team_name: object, tasks_base_dir: str | Path | None = None) ->
             else (get_claude_config_dir() / "tasks")
         )
         return _team_dir_under(base, team_name)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RuntimeError):
+        # RuntimeError: Path.home() with no home directory, or a resolve
+        # symlink loop.
         return None
 
 
@@ -619,6 +623,19 @@ def fold_team_name(team_name: object) -> str:
     return team_name.strip().lower() if isinstance(team_name, str) else ""
 
 
+def sanitize_task_id(task_id: str) -> str:
+    """Strip path machinery from a task id BEFORE any join: removes ``/``
+    and ``\\`` separators and any ``..`` segments, leaving a
+    single-component name ("" when the id was only machinery).
+
+    The ONE sanitizer for task-id joins — ``read_task_json`` and the
+    watcher's ``shared.wait_target`` both delegate here; a byte-identical
+    inline copy previously lived in each. The strengthened traversal pin
+    (seeded files planted exactly where an escaped join would land)
+    proves the delegation equivalent."""
+    return re.sub(r'[/\\]|\.\.', '', task_id)
+
+
 def read_task_json(
     task_id: str,
     team_name: str | None,
@@ -643,13 +660,14 @@ def read_task_json(
 
     Returns:
         Full task dict from the JSON file, or empty dict on any failure
-        (missing file, malformed JSON, IO error). Fail-open by design —
-        callers treat "no task data" as a signal to bypass, not crash.
+        (missing file, malformed JSON, IO error, or a JSON value that is not
+        an object). Fail-open by design — callers treat "no task data" as a
+        signal to bypass, not crash.
     """
     if not task_id:
         return {}
 
-    task_id = re.sub(r'[/\\]|\.\.', '', task_id)
+    task_id = sanitize_task_id(task_id)
     if not task_id:
         return {}
 
@@ -706,7 +724,9 @@ def read_task_json(
         # the turn (advisory-suppression DoS).
         try:
             if task_file.exists():
-                return json.loads(task_file.read_text(encoding="utf-8"))
+                task = json.loads(task_file.read_text(encoding="utf-8"))
+                # A list or scalar file is no task: callers .get() the result.
+                return task if isinstance(task, dict) else {}
         except (json.JSONDecodeError, IOError, ValueError):
             return {}
 

@@ -8,8 +8,9 @@ expected counts are known by construction, and assert the instrument reports
 what was planted.
 
 The arms that touch the shipped code rather than the fixture guard what the
-journal arm's confidence rests on: the presence-only reconstruction, and the
-inline handoff passing through unchanged.
+journal arm's confidence rests on: the key-list placeholder measuring
+required-key presence under the value-inspecting validator, and the inline
+handoff passing through unchanged.
 """
 
 from __future__ import annotations
@@ -17,14 +18,19 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 import handoff_census as hc  # noqa: E402
 
+# produced is STRING-TYPED: the validator refuses a list-typed produced, and
+# the census's planted corpus must produce handoffs that PASS it so the
+# tallies keep their by-construction meanings.
 CANONICAL = {
-    "produced": ["a"], "decisions": ["b"], "reasoning_chain": "c",
+    "produced": "a", "decisions": "b", "reasoning_chain": "c",
     "uncertainty": [], "integration": [], "open_questions": [],
 }
 NO_REASONING = {k: v for k, v in CANONICAL.items() if k != "reasoning_chain"}
-LEGACY = {**NO_REASONING, "key_decisions": ["x"]}
+LEGACY = {**NO_REASONING, "key_decisions": "x"}
 del LEGACY["decisions"]
 
 
@@ -62,12 +68,36 @@ def _corpus(home: Path) -> None:
     (tasks / "5.json").write_text("{ broken", encoding="utf-8")
 
 
-def test_key_set_reconstruction_is_faithful():
-    """The historical list-of-keys shape is reconstructed as {key: None}. That
-    is exact only while the validator is presence-only, and this is the guard
-    that fails loudly rather than letting the census drift into a wrong
-    answer."""
-    hc.assert_presence_only()  # raises SystemExit if the validator inspects values
+def test_placeholder_guard_holds_on_the_shipped_validator():
+    """The shipped validator accepts a fully reconstructed key-list row and
+    refuses one missing any required key, so the guard passes."""
+    hc.assert_placeholder_measures_presence()
+
+
+def test_placeholder_guard_aborts_when_the_placeholder_is_refused(monkeypatch):
+    """A validator that refused the placeholder would make every key-list
+    row read as refused (the property the old None reconstruction measured
+    by accident): the guard must abort the run."""
+    monkeypatch.setattr(hc, "validate_handoff_schema", lambda _h: "refused")
+    with pytest.raises(SystemExit):
+        hc.assert_placeholder_measures_presence()
+
+
+def test_placeholder_guard_aborts_when_presence_stops_mattering(monkeypatch):
+    monkeypatch.setattr(hc, "validate_handoff_schema", lambda _h: None)
+    with pytest.raises(SystemExit):
+        hc.assert_placeholder_measures_presence()
+
+
+def test_key_list_rows_are_refused_only_for_a_missing_required_key(tmp_path):
+    """Key-list journal rows are reconstructed with a string placeholder, so
+    the refused count for them is exactly the rows missing a required key:
+    CANONICAL and NO_REASONING carry every required key, LEGACY lacks
+    `decisions`. A None reconstruction would refuse all three."""
+    _corpus(tmp_path)
+    counts = hc.tally(hc.journal_handoffs(tmp_path / ".claude"))
+    assert counts["n"] == 3
+    assert counts["refused"] == 1
 
 
 def test_journal_reader_passes_an_inline_handoff_through_unchanged(tmp_path):
@@ -86,7 +116,7 @@ def test_tally_counts_the_planted_shapes():
     counts = hc.tally([CANONICAL, NO_REASONING, LEGACY, "not a dict", 7])
     assert counts["n"] == 5
     # LEGACY is missing `decisions`; the two non-dicts are malformed.
-    assert counts["fires"] == 3
+    assert counts["refused"] == 3
     assert counts["not_a_dict"] == 2
     assert counts["no_reasoning_chain"] == 2      # NO_REASONING + LEGACY
     assert counts["missing_canonical"] == 2

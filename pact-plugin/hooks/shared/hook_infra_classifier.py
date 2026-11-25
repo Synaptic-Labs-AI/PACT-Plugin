@@ -344,6 +344,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "background_launch", "background_work", "state_file",
         "actor_identity", "subagent_meta",
         "cloud_roster",  # actor_identity's roster read (#1670)
+        "wait_target",  # the arm-command builder
     }),  # actor_identity reached via the self-completion rule's actor
          # resolution (#1666 item 4); subagent_meta is its module-level
          # edge (the registry-free frame and meta.json readers). Its own
@@ -423,6 +424,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_registry", "session_state", "state_file", "task_utils",
         "turn_end_gate", "turn_end_jobs",
         "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
+        "wait_target",  # turn_end_gate's watcher-shape import
     }),  # regenerated from the live derivation: the SubagentStop background
          # check imports turn_end_gate, which reaches background_work and
          # state_file and their helpers.
@@ -433,6 +435,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "session_state", "state_file", "task_utils", "turn_end_gate",
         "turn_end_jobs",
         "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
+        "wait_target",  # turn_end_gate's watcher-shape import
     }),  # regenerated from the live derivation.
     "merge_guard_pre": frozenset({
         "constants", "merge_guard_common", "pact_context", "paths",
@@ -453,6 +456,7 @@ _SEAM_HOOK_HELPER_CLOSURE: dict[str, frozenset[str]] = {
         "pact_context", "paths", "session_journal", "session_registry",
         "session_state", "state_file", "task_utils",
         "actor_identity", "cloud_roster",  # cloud roster (#1670): intentional_wait's owner fallback
+        "wait_target",  # the tier-3 arm-command builder (lazy import)
     }),
     "pin_caps_gate": frozenset({
         "subagent_meta",  # background_work's module-level edge

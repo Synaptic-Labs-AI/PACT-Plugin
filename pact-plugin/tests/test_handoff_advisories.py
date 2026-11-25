@@ -20,6 +20,8 @@ from pathlib import Path
 import pytest
 
 import task_lifecycle_gate as tlg  # noqa: E402
+# The shared fixture validates as-is: its `produced` is a non-empty string,
+# the type validate_handoff_schema requires.
 from fixtures.emitter import VALID_HANDOFF  # noqa: E402
 
 TEAM = "pact-test"
