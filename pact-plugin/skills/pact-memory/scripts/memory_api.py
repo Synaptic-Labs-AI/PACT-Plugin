@@ -228,6 +228,28 @@ _LEGACY_SCOPE_CACHE: Dict[tuple, tuple] = {}
 _EXCLUSION_WARNED: set = set()
 # Roots whose remote-helper folder-name id was disclosed, once per process.
 _REMOTE_HELPER_WARNED: set = set()
+# Roots whose github.com pin ending in .git was disclosed, once per process.
+_PIN_DOT_GIT_WARNED: set = set()
+
+# Set while a command reads the scope only to act on the bucket it names
+# (`legacy_notices_quiet`): the legacy notices advise a move, and printing
+# that advice beside the move's own result contradicts it. A quiet read
+# marks nothing as disclosed, so a later read still discloses.
+_LEGACY_NOTICES_QUIET: contextvars.ContextVar = contextvars.ContextVar(
+    "pact_legacy_notices_quiet", default=False
+)
+
+
+@contextmanager
+def legacy_notices_quiet():
+    """Suppress the legacy-bucket read notices for the reads inside, as
+    `project-id rekey --apply` does for the scope read before its move."""
+    token = _LEGACY_NOTICES_QUIET.set(True)
+    try:
+        yield
+    finally:
+        _LEGACY_NOTICES_QUIET.reset(token)
+
 
 # Case-variant notices already emitted, keyed by (store, variants). The fold
 # suppression is silent loss unless it is reported; reported once per process
@@ -759,6 +781,8 @@ def _warn_legacy_excluded(
     move into this id would file that owner's rows here. `cause` is
     `_unproven_cause`'s clause for the verdict's reason.
     """
+    if _LEGACY_NOTICES_QUIET.get():
+        return
     key = (store, candidate)
     if key in _EXCLUSION_WARNED:
         return
@@ -985,6 +1009,8 @@ def _warn_legacy_unproven(
 ) -> None:
     """Disclose an UNPROVEN legacy bucket, once per process per bucket, with
     the reason it was not read (`_unproven_cause`)."""
+    if _LEGACY_NOTICES_QUIET.get():
+        return
     key = (store, candidate)
     if key in _UNPROVEN_WARNED:
         return
@@ -1015,6 +1041,8 @@ def _warn_legacy_unattributed(
     though nothing shows it is (`_legacy_session_evidence`'s limit). A
     `verified` bucket's rows are placed by its file rows instead, so it gets
     the informational line (`_note_verified_unattributed`)."""
+    if _LEGACY_NOTICES_QUIET.get():
+        return
     key = (store, candidate, "unattributed")
     if key in _UNPROVEN_WARNED:
         return
@@ -1043,6 +1071,8 @@ def _note_verified_unattributed(store: str, candidate: str, counts: Dict[str, An
     handler, and `logging.lastResort` prints WARNING and above. Its key is
     its own, so a bucket that turns from `included_unverified` to
     `verified` in one process still gets this line after the warning."""
+    if _LEGACY_NOTICES_QUIET.get():
+        return
     key = (store, candidate, "verified_unattributed")
     if key in _UNPROVEN_WARNED:
         return
@@ -1069,6 +1099,8 @@ def _warn_case_variant(
     literal rekey command is the difference between a deliberate non-binding
     and a lost bucket. The bucket is NEVER read here.
     """
+    if _LEGACY_NOTICES_QUIET.get():
+        return
     key = (store, tuple(variants))
     if key in _CASE_VARIANT_WARNED:
         return
@@ -3415,6 +3447,21 @@ class PACTMemory:
             logger.warning(
                 "project_id for %r is its folder name %r: %s.",
                 str(root), identity.project_id, identity.detail,
+                extra=_IDENTITY_RECORD,
+            )
+        if (
+            identity.detail == project_identity.PIN_DOT_GIT_DETAIL
+            and str(root) not in _PIN_DOT_GIT_WARNED
+        ):
+            # ONCE PER ROOT: the pin is honoured as written, and this names
+            # the remote spelling it differs from.
+            _PIN_DOT_GIT_WARNED.add(str(root))
+            logger.warning(
+                "project_id for %r is its pin %r, not %r, the id its github.com "
+                "remote gives: %s.",
+                str(root), identity.project_id,
+                project_identity.pin_remote_spelling(identity.project_id),
+                identity.detail,
                 extra=_IDENTITY_RECORD,
             )
         if identity.project_id is not None:

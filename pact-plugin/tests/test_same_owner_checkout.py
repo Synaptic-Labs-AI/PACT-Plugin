@@ -290,6 +290,49 @@ def test_a_mixed_case_pin_and_its_lower_case_origin_are_one_owner(tmp_path):
     assert checkout_is_same_owner(str(b), "github.com/acme/widget", "https://github.com/acme/widget.git") is True
 
 
+@pytest.mark.parametrize("pin, expected_detail", [
+    ("github.com/Acme/Widget.git", True),
+    ("github.com/acme/widget", False),
+    ("github.com:8443/acme/widget.git", False),
+])
+def test_a_github_pin_ending_in_dot_git_is_disclosed(tmp_path, monkeypatch, capsys, caplog, pin, expected_detail):
+    """A port-less github.com pin ending in .git keeps its own id (a remote
+    ending r.git.git derives it), but it is not the id its remote gives, so
+    `project-id show` names that in identity_detail and the resolver warns
+    once, naming the remote's spelling. A pin without .git, and a ported
+    pin, get neither. RED WHEN the .git pin binds silently."""
+    import json
+    import logging
+
+    from scripts import memory_api
+    from scripts.cli import main
+    from scripts.project_identity import PIN_DOT_GIT_DETAIL
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "widget", remote="https://github.com/acme/widget.git")
+    (repo / ".git" / "pact-project-id").write_text(pin + "\n", encoding="utf-8")
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.setattr(memory_api, "_PIN_DOT_GIT_WARNED", set())
+    from scripts.database import db_connection, ensure_initialized
+
+    with db_connection(tmp_path / "store.db") as conn:
+        ensure_initialized(conn)
+    with caplog.at_level(logging.WARNING), pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "show", "--db-path", str(tmp_path / "store.db")])
+    assert exit_info.value.code == 0
+    shown = json.loads(capsys.readouterr().out)["result"]
+    assert shown["source"] == "override file", shown
+    notes = [r.getMessage() for r in caplog.records if "the id its github.com remote gives" in r.getMessage()]
+    if expected_detail:
+        assert shown["project_id"] == "github.com/acme/widget.git", shown
+        assert shown["identity_detail"] == PIN_DOT_GIT_DETAIL, shown
+        assert len(notes) == 1 and "'github.com/acme/widget'" in notes[0], notes
+    else:
+        assert shown["identity_detail"] is None, shown
+        assert notes == [], notes
+
+
 @pytest.mark.parametrize("url, pin", [
     ("https://github.com:8443/O/N", "github.com:8443/O/N"),
     ("ssh://git@github.com:443/O/N", "github.com:443/O/N"),

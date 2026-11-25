@@ -1599,8 +1599,10 @@ class TestNullOverridePathIsMeasured:
     def test_the_show_row_names_the_remote_helper_source(self):
         assert (
             "source is remote helper when the id is the folder name of a "
-            "repository whose origin is a remote-helper transport; identity_detail "
-            "then holds the sentence that names the pin remedy, and is null otherwise."
+            "repository whose origin is a remote-helper transport. identity_detail "
+            "holds a sentence naming the remedy in that case and when a github.com "
+            "pin names a repository ending in .git, which its remote drops; it is "
+            "null otherwise."
         ) in _table_row(SKILL, "project-id show")
 
     def test_the_show_row_names_what_repo_root_is(self):
@@ -7206,6 +7208,23 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<name imported from a project module memory_api: project_identity.REMOTE_HELPER_DETAIL>"): (
             "the identity layer's fixed remote-helper sentence, compared to a detected detail to "
             "disclose the source and warn once"
+        ),
+        ("call", "<name imported from a project module cli: PIN_DOT_GIT_DETAIL>"): (
+            "the identity layer's fixed .git-pin sentence, which project-id show reports for an "
+            "'override file' source whose github.com pin ends in .git"
+        ),
+        ("call", "<name imported from a project module memory_api: project_identity.PIN_DOT_GIT_DETAIL>"): (
+            "the identity layer's fixed .git-pin sentence, compared to a detected detail to warn once"
+        ),
+        ("call", "<call to no function memory_api: _LEGACY_NOTICES_QUIET.get>"): (
+            "the legacy read notices check whether a rekey --apply read asked for quiet; it "
+            "changes no answer, only whether a notice prints"
+        ),
+        ("call", "<call to no function memory_api: _LEGACY_NOTICES_QUIET.set>"): (
+            "legacy_notices_quiet turns the legacy read notices off for the reads inside it"
+        ),
+        ("call", "<call to no function memory_api: _LEGACY_NOTICES_QUIET.reset>"): (
+            "legacy_notices_quiet restores the legacy read notices when its block ends"
         ),
         ("call", "<name imported from a project module memory_api: project_identity.DETECTION_ANSWERS>"): (
             "detection_pass names the identity layer's per-pass answer memo, to start it and to hand it back on a join"

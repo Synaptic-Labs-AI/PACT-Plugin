@@ -4591,6 +4591,14 @@ def _union_admits_str(annotation) -> bool:
 _OBSERVED = "reports what was observed"
 _DETAIL = "part of a rung detail: the rung and the path it read"
 _DESCRIBED_PRINTED_CLAUSES = {
+    # The .git pin disclosure (PIN_DOT_GIT_DETAIL): it names the pin file's
+    # value, never a change to a `.git` directory or file.
+    "a github.com pin whose repository name ends in .git is its own id": _OBSERVED,
+    "an origin naming that repository gives the id without the .git suffix":
+        "says which id the remote gives",
+    "memories saved through the remote are not this pin's": "says what the split costs",
+    "Write the pin without the trailing .git to share them":
+        "names the pin's own text as the remedy, written by the user",
     # The remote-helper disclosure (REMOTE_HELPER_DETAIL): no change to a `.git`.
     "A canonical id written to <git-common-dir>/pact-project-id gives it its own":
         "names the pin as the remedy, written by the user",

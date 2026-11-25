@@ -40,7 +40,7 @@ import json
 import os
 import sys
 import tempfile
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import NoReturn
 
@@ -68,13 +68,19 @@ from scripts.memory_api import (
     _stable_read_only,
     _unproven_cause,
     detection_pass,
+    legacy_notices_quiet,
     main_repo_root,
     present_store_fault,
     project_candidate_rows,
     read_project_bucket_census,
     render_rekey_command,
 )
-from scripts.project_identity import REMOTE_HELPER_DETAIL, is_canonical
+from scripts.project_identity import (
+    PIN_DOT_GIT_DETAIL,
+    REMOTE_HELPER_DETAIL,
+    is_canonical,
+    pin_remote_spelling,
+)
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
 # The stream the ERROR ENVELOPE is written to. None means "use sys.stderr",
@@ -1086,6 +1092,9 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
                 "identity_detail": (
                     REMOTE_HELPER_DETAIL
                     if memory._project_id_source == "remote helper"
+                    else PIN_DOT_GIT_DETAIL
+                    if memory._project_id_source == "override file"
+                    and pin_remote_spelling(memory.project_id)
                     else None
                 ),
                 # STRUCTURED DECLINE REASON, not just the warning. A repository
@@ -1266,7 +1275,11 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     # `noop: True`, whichever route answers it.
     noop = from_id == to_id
     try:
-        memory._read_project_scopes()
+        # AN APPLIED MOVE READS THE SCOPE QUIETLY: the legacy notices advise
+        # the very move this run performs, so printing them beside its result
+        # contradicts it. A dry run keeps them.
+        with legacy_notices_quiet() if args.apply else nullcontext():
+            memory._read_project_scopes()
     except db_sqlite3.DatabaseError as exc:
         _exit_store_fault(exc, store, "REKEY_FAILED")
     state = memory._legacy_scope_state or {}

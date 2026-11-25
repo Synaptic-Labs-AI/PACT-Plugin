@@ -1180,6 +1180,27 @@ REMOTE_HELPER_DETAIL = (
 )
 
 
+# The `detail` for a port-less github.com pin whose repository ends in
+# `.git` (`pin_remote_spelling`): the pin is its own id, not its remote's.
+PIN_DOT_GIT_DETAIL = (
+    "a github.com pin whose repository name ends in .git is its own id: an "
+    "origin naming that repository gives the id without the .git suffix, so "
+    "memories saved through the remote are not this pin's. Write the pin "
+    "without the trailing .git to share them"
+)
+
+
+def pin_remote_spelling(pin: object) -> Optional[str]:
+    """The id a github.com remote gives for the repository a port-less
+    github.com pin ending in `.git` names (`github.com/acme/widget.git` ->
+    `github.com/acme/widget`), or None for every other pin. The pin keeps
+    its spelling (`r.git` is a valid repository id: a remote ending
+    `r.git.git` gives it); this only names the spelling it differs from."""
+    if not isinstance(pin, str) or not pin.startswith("github.com/") or not pin.endswith(".git"):
+        return None
+    return pin[: -len(".git")]
+
+
 def _is_remote_helper(url: str) -> bool:
     """Whether an origin value names a remote-helper transport: the
     `<helper>::<address>` form, or a scheme in `_REMOTE_HELPER_SCHEMES`. A
@@ -2397,7 +2418,10 @@ def detect_id_for_root(
     override_ignored = None
     if override.value is not None:
         # `read_override` returns only a canonical value.
-        return RootIdentity(override.value, "canonical", "override file", None)
+        return RootIdentity(
+            override.value, "canonical", "override file", None, None,
+            PIN_DOT_GIT_DETAIL if pin_remote_spelling(override.value) else None,
+        )
     if override.reason is not None and override.path is not None:
         override_ignored = {"path": str(override.path), "reason": override.reason}
 

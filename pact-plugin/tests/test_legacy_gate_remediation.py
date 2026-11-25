@@ -775,6 +775,35 @@ def test_a_verified_bucket_still_takes_a_defaulted_target(canonical_session, cap
 
 
 
+def test_an_applied_rekey_prints_no_advice_to_make_the_move_it_makes(canonical_session, capfd, caplog):
+    """An unproven bucket's read notice says "NOT in this read scope ...
+    preview the move with". A dry run keeps it; an applied move reads the
+    scope quietly, so the advice never prints beside the move's own result.
+    RED WHEN --apply reads the scope with its notices on."""
+    from scripts.cli import main
+
+    repo, store = canonical_session
+    _seed(store, NAME)
+    argv = ["project-id", "rekey", f"--from={NAME}", f"--to={CANONICAL}", "--db-path", str(store)]
+    with caplog.at_level(logging.WARNING), pytest.raises(SystemExit) as exit_info:
+        main(argv)
+    assert exit_info.value.code == 0, capfd.readouterr().err
+    assert any("NOT in this read scope" in r.getMessage() for r in caplog.records), (
+        "control: a dry run discloses the unproven bucket"
+    )
+    memory_api._UNPROVEN_WARNED.clear()
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    caplog.clear()
+    capfd.readouterr()
+    with caplog.at_level(logging.WARNING), pytest.raises(SystemExit) as exit_info:
+        main([*argv, "--apply"])
+    assert exit_info.value.code == 0, capfd.readouterr().err
+    assert json.loads(capfd.readouterr().out)["result"]["memories"] == 1
+    assert not any("legacy project bucket" in r.getMessage() for r in caplog.records), [
+        r.getMessage() for r in caplog.records
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Cycle 8: a row in a checkout with another name is a cross-reference
 # ---------------------------------------------------------------------------
