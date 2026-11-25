@@ -358,7 +358,7 @@ store the CLI resolved, not one you selected: keep it, and run the command
 exactly as printed. Run that command with
 `--apply` ONLY with the user's explicit approval, and NEVER for an excluded
 bucket or for another repository's canonical id: a rekey merges rows into the
-target and cannot be undone. The dry run, the default, changes nothing. A bucket can hold
+target and cannot be undone. The dry run, the default, does not write the store: it computes on an in-memory copy, leaves the store file unchanged and creates no journal files beside it (journal files another process already holds stay). A bucket can hold
 thousands of records that this session's read scope does not include — an
 identity it cannot derive, or a legacy bucket left `excluded` or `unproven` —
 and an empty result never means those records do not exist. A full id still

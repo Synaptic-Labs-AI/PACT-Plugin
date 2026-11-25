@@ -125,9 +125,8 @@ You are **exempted from the standard teachback** at spawn — your bootstrap tas
 
    Run it with Python's `sqlite3` module and bind a mapping, not a tuple:
    `{"name": "orchestration_calibration", "scope": json.dumps(read_scope)}`,
-   where `read_scope` is the array from that `project-id show` output. If the
-   command fails, or its `read_scope` is empty, do not run the count and
-   report the gate state `not determined`. Keep the three guards. `COALESCE` gives an empty array for a null column. The object
+   where `read_scope` is the array from that `project-id show` output. Keep the
+   three guards. `COALESCE` gives an empty array for a null column. The object
    arm keeps `json_extract` off a bare string, which gives an error. The text
    arm finds a record that holds the name in a bare string.
 

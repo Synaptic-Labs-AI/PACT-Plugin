@@ -65,6 +65,7 @@ from .database import (
     BUCKET_EVIDENCE_KEYS,
     UNKNOWN_NAME,
     pre_change_name,
+    pre_change_name_of_common,
     validate_identifier_for_write,
 )
 from .embeddings import (
@@ -3084,14 +3085,10 @@ class PACTMemory:
         scope when the bucket holds rows (`_suppressed_bucket_rows`).
         """
         if common_dir is not None:
-            if _submodule_admin_dir(common_dir):
-                # Disclosed by the read scope, and only when the bucket holds
-                # rows: see `_suppressed_bucket_rows`.
-                return None
-            try:
-                return common_dir.resolve().parent.name
-            except (OSError, RuntimeError, ValueError):
-                return common_dir.parent.name
+            # A submodule admin dir gives None, disclosed by the read scope
+            # only when the bucket holds rows (`_suppressed_bucket_rows`). One
+            # rule with the file-reading twin (`pre_change_name_of_common`).
+            return pre_change_name_of_common(common_dir)
         if root is not None:
             return Path(root).name
         return None

@@ -64,6 +64,7 @@ pact-memory now files a project's memories under the repository they belong to, 
 - The first memory read on a new derived store now answers empty and leaves the store with its schema, even when the embedding catch-up is skipped for the session.
 - Read-only memory reads no longer open a store immutably while a rollback journal (`-journal`) from a crashed writer is present.
 - A memory linking a file in another git checkout no longer hides or blocks the bucket: only a checkout named like the bucket counts as its rival owner.
+- A `project-id rekey` dry run no longer opens the store for writing: it plans on an in-memory copy, so the store file and its journal files are left exactly as they were.
 - A legacy folder-name bucket holding rows from this repository and from another checkout of that name is no longer read whole or moved by a defaulted `project-id rekey` for a repository-identity session; it is reported unproven (`foreign_rows`) with the number of foreign file rows. A bucket written only by sessions recorded at another existing folder is now excluded with no rekey command, and the warning names whether its foreign rows lie in another checkout or in another project folder of the same name.
 - The legacy-bucket session check no longer slows every memory command on a large sessions folder: at 3,665 session folders it took about 0.5 s per command and now takes under 0.1 s.
 - Text search on a memory store that has no tables yet now returns no results instead of failing with an SQL syntax error.
@@ -72,7 +73,7 @@ pact-memory now files a project's memories under the repository they belong to, 
 
 ### Hooks and agents
 
-- `hooks/session_end.py` appends one line per session folder it deletes to `pruned-sessions.jsonl`, so the evidence for an old bucket outlives the folder. The ledger is trimmed to its last 1 MiB past 2 MiB, by writing a new file and renaming it over the old one, without dropping a complete line. A writer skips its line after about one second rather than waiting on the lock indefinitely, and session records are read only as bounded regular files.
+- `hooks/session_end.py` appends one line per session folder it deletes to `pruned-sessions.jsonl`, so the evidence for an old bucket outlives the folder. The ledger is trimmed to its last 1 MiB past 2 MiB, by writing a new file and renaming it over the old one, without dropping a complete line. A writer skips its line when another session end holds the lock for about one second; if a trim replaces the ledger while it waits, it reopens and waits again, at most eight times (about eight seconds in the worst case), rather than waiting indefinitely, and session records are read only as bounded regular files.
 - `project-id rekey` no longer accepts an omitted `--to` for a legacy bucket read on session evidence alone, so one recorded session cannot move rows no session places; pass `--to` explicitly.
 - A repository session's refused write into a folder-name bucket now reports `LEGACY_BUCKET_WRITE_REFUSED` (exit 2) without the unrelated field-validation note.
 - A `--separate-git-dir` checkout without a portable origin no longer silently drops its pre-upgrade bucket: the old bucket is disclosed as its legacy candidate, and `project-id rekey` can move it into the checkout's own folder-name id.

@@ -1582,12 +1582,18 @@ def _within(path: str, root: str) -> bool:
 UNKNOWN_NAME = object()
 
 
-def _submodule_admin_path(path: str) -> bool:
+def submodule_admin_path(path: Any) -> bool:
     """Whether `path` is a submodule admin dir: a `.git` component followed
-    by `modules`, directly or after `worktrees/<name>`. The twin of
-    `project_identity._submodule_admin_dir`, kept here because this module
-    must not import `project_identity`."""
-    parts = Path(path).parts
+    by `modules`, directly or after `worktrees/<name>`, in its resolved
+    form. THE ONE COPY of the rule: `project_identity._submodule_admin_dir`
+    delegates here, because this module must not import `project_identity`.
+    False for None. Never raises."""
+    if path is None:
+        return False
+    try:
+        parts = Path(path).resolve().parts
+    except (OSError, RuntimeError, ValueError):
+        parts = Path(path).parts
     for index, component in enumerate(parts):
         if component != ".git":
             continue
@@ -1640,9 +1646,21 @@ def _read_pre_change_name(directory: str) -> Any:
                 common = target
     except (OSError, ValueError):
         return UNKNOWN_NAME
-    if _submodule_admin_path(common):
+    return pre_change_name_of_common(common)
+
+
+def pre_change_name_of_common(common: Any) -> Optional[str]:
+    """The pre-change resolver's name for a repository whose common dir is
+    `common`: the parent folder name of the resolved common dir, or None
+    for a submodule admin dir (a name the superproject chose). THE ONE COPY:
+    `_read_pre_change_name` (from files) and
+    `PACTMemory._legacy_project_name` (from git's answer) both end here."""
+    if submodule_admin_path(common):
         return None
-    return os.path.basename(os.path.dirname(common))
+    try:
+        return Path(common).resolve().parent.name
+    except (OSError, RuntimeError, ValueError):
+        return Path(common).parent.name
 
 
 def pre_change_name(directory: str, cache: Optional[Dict[str, Any]] = None) -> Any:

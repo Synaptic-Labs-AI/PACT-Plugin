@@ -1402,21 +1402,9 @@ def _submodule_admin_dir(path: Optional[Path]) -> bool:
     directory reads as a submodule admin dir; declining there is the safe
     direction, and such a layout has never been observed.
     """
-    if path is None:
-        return False
-    try:
-        parts = Path(path).resolve().parts
-    except (OSError, RuntimeError, ValueError):
-        parts = Path(path).parts
-    for index, component in enumerate(parts):
-        if component != ".git":
-            continue
-        following = parts[index + 1:]
-        if following[:1] == ("modules",):
-            return True
-        if following[:1] == ("worktrees",) and following[2:3] == ("modules",):
-            return True
-    return False
+    from .database import submodule_admin_path
+
+    return submodule_admin_path(path)
 
 
 # ONE DETECTION PASS'S `git rev-parse --git-dir` answers, keyed by the

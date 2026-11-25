@@ -674,6 +674,15 @@ class TestLegacyScopeStatesAreDocumented:
             "checkout), does not block it"
         ) in _body(SKILL)
 
+    def test_the_rekey_dry_run_states_what_it_leaves(self):
+        body = _body(SKILL)
+        assert (
+            "The dry run, the default, does not write the store: it computes on "
+            "an in-memory copy, leaves the store file unchanged and creates no "
+            "journal files beside it"
+        ) in body
+        assert "The dry run, the default, changes nothing." not in body
+
     def test_a_folder_name_id_is_not_judged(self):
         """Folder-name ids keep the pre-change shared bucket; the removed
         gate's refusal, pins and folder-name rekey target are gone."""
@@ -1017,10 +1026,14 @@ class TestCalibrationCountReadsTheWholeScope:
         assert show < check
 
     def test_no_scope_means_not_determined(self):
-        assert (
-            "If the command fails, or its read_scope is empty, "
-            "do not run the count and report the gate state not determined."
-        ) in _body(SECRETARY)
+        body = _body(SECRETARY)
+        clause = (
+            "If it fails, or its read_scope is empty, do not inspect the store "
+            "and report the gate state not determined."
+        )
+        assert clause in body
+        # Said once: the step used to repeat it after the SQL block.
+        assert body.count("read_scope is empty") == 1
 
     def test_the_sync_row_documents_read_scope(self):
         row = _table_row(SKILL, "sync")
@@ -7141,6 +7154,25 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function cli: store.exists>"): (
             "a method of the store path rekey resolves (resolve_db_path), checked before the store "
             "is opened"
+        ),
+        ("call", "<call to no function cli: db_sqlite3.connect>"): (
+            "opens the in-memory copy a rekey dry run computes on; it asks git nothing"
+        ),
+        ("call", "<call to no function cli: a method of what db_sqlite3.connect returns>"): (
+            "copies the store into that in-memory connection, sets its row factory and pragma, "
+            "and closes it"
+        ),
+        ("call", "<call to no function cli: a method of what _stable_read_only or rekey_project returns>"): (
+            "reads a counter of the rekey plan the store's rows produced"
+        ),
+        ("call", "submodule_admin_path"): (
+            "database's one copy of the submodule admin dir path rule, which "
+            "project_identity._submodule_admin_dir delegates to; it tests a path's shape and asks "
+            "git nothing"
+        ),
+        ("call", "pre_change_name_of_common"): (
+            "database's one copy of the pre-change name rule for a common dir git already "
+            "reported; it asks git nothing"
         ),
         ("call", "<call to no function config: _READ_ONLY_SCOPE.set>"): (
             "read_only_scope declares the block read-only"

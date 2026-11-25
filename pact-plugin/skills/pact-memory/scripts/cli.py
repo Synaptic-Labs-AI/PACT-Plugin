@@ -40,7 +40,7 @@ import json
 import os
 import sys
 import tempfile
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from typing import NoReturn
 
@@ -50,7 +50,7 @@ _SKILL_ROOT = str(Path(__file__).resolve().parent.parent)
 if _SKILL_ROOT not in sys.path:
     sys.path.insert(0, _SKILL_ROOT)
 
-from scripts.config import read_only_scope, resolve_db_path, store_scope
+from scripts.config import resolve_db_path, store_scope
 from scripts.database import (
     CALLER_FACING_CREATE_FIELDS,
     CALLER_FACING_UPDATE_FIELDS,
@@ -64,6 +64,8 @@ from scripts.memory_api import (
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
     _invalidate_legacy_scope_cache,
+    _read_only_connection,
+    _stable_read_only,
     _unproven_cause,
     detection_pass,
     main_repo_root,
@@ -1113,6 +1115,40 @@ _REKEY_ZERO_COUNTERS = (
 )
 
 
+def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: bool) -> dict:
+    """`rekey_project`'s counters, computed on an IN-MEMORY COPY of `store`.
+
+    A rolled-back SAVEPOINT on the store itself still commits an empty
+    transaction, which rewrites the store's header and, on a WAL store,
+    creates `-wal` and `-shm` for the length of the run. The copy is read
+    through the read-only open (`_read_only_connection`), which on a settled
+    store takes no lock and creates no sidecar, so the store file is not
+    touched. Its caller wraps it in `_stable_read_only`, which repeats the
+    read with locking when the store moved under it.
+
+    shortcut: the copy holds the whole store in memory; fine for a memory
+    store's size, revisit if stores grow past what a dry run may hold in RAM.
+    """
+    from scripts.database import rekey_project
+    from scripts.database import sqlite3 as db_sqlite3
+
+    source = _read_only_connection(str(store))
+    try:
+        copy = db_sqlite3.connect(":memory:")
+        try:
+            source.backup(copy)
+            copy.row_factory = db_sqlite3.Row
+            copy.execute("PRAGMA foreign_keys=ON")
+            return rekey_project(
+                copy, from_id, to_id, dry_run=dry_run,
+                own_folder_name_target=own_target,
+            )
+        finally:
+            copy.close()
+    finally:
+        source.close()
+
+
 def _own_folder_name_target(memory, from_id: str, to_id: str) -> bool:
     """Whether `to_id` is this session's OWN folder-name id and `from_id` its
     legacy candidate, the one folder-name target a rekey may take.
@@ -1364,21 +1400,27 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         })
 
     # ON A PRESENT STORE `--from` EQUAL TO `--to` IS ANSWERED BY THE LIBRARY
-    # TOO, so the no-op envelope carries every counter a plan carries. The
-    # library only reads on that path. A DRY RUN opens in the read scope too:
-    # its writes sit inside a SAVEPOINT that is rolled back, so the only change
-    # it could leave is the journal-mode switch on open, which the scope
-    # prevents. Only an apply may convert a DELETE-mode store to WAL.
+    # TOO, so the no-op envelope carries every counter a plan carries.
+    # A DRY RUN AND A NO-OP NEVER OPEN THE STORE FOR WRITING: they run on an
+    # in-memory copy read through the read-only open (`_rekey_on_copy`).
+    # Only an apply writes, and only an apply may convert a DELETE-mode store
+    # to WAL.
+    # A non-canonical target reaching here is an explicit --to that passed
+    # `_own_folder_name_target` above; a defaulted one is refused.
+    own_target = not is_canonical(to_id)
     try:
-        with (
-            nullcontext() if args.apply and not noop else read_only_scope(),
-            db_connection() as conn,
-        ):
-            # A non-canonical target reaching here is an explicit --to that
-            # passed `_own_folder_name_target` above; a defaulted one is refused.
-            counters = rekey_project(
-                conn, from_id, to_id, dry_run=not args.apply,
-                own_folder_name_target=not is_canonical(to_id),
+        if args.apply and not noop:
+            with db_connection() as conn:
+                counters = rekey_project(
+                    conn, from_id, to_id, dry_run=False,
+                    own_folder_name_target=own_target,
+                )
+        else:
+            counters = _stable_read_only(
+                str(store),
+                lambda: _rekey_on_copy(
+                    store, from_id, to_id, not args.apply, own_target
+                ),
             )
     except ValueError as exc:
         # The module's bad-input channel: an id that cannot be bound is
