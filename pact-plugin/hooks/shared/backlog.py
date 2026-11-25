@@ -1599,6 +1599,7 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
         return None
     scp = _SCP_REMOTE.match(url)
     ssh = scp is not None and "://" not in url
+    port = None
     if ssh:
         host, path = scp.group(1), scp.group(2)
     else:
@@ -1610,12 +1611,17 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
         if parts.scheme.lower() not in _REMOTE_SCHEMES:
             return None
         ssh = parts.scheme.lower() in _SSH_REMOTE_SCHEMES
+        try:
+            port = parts.port
+        except ValueError:
+            return None
         path = parts.path
     if host.lower() not in _GITHUB_REMOTE_HOSTS:
         return None
-    if host.lower() == f"ssh.{_GITHUB_HOST}" and not ssh:
-        # GitHub's ssh.github.com serves ssh only; the identity resolver keeps
-        # an https remote there as its own id, and so does this parser.
+    if host.lower() == f"ssh.{_GITHUB_HOST}" and (not ssh or port not in (None, 22, 443)):
+        # GitHub's ssh.github.com serves ssh only, on 443 (and 22); the
+        # identity resolver keeps an https remote or another port there as
+        # its own id, and so does this parser.
         return None
     path = path[1:] if path.startswith("/") else path
     path = path[:-1] if path.endswith("/") else path

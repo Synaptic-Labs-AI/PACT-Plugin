@@ -279,6 +279,27 @@ def test_an_underscore_host_declines_outside_ssh_or_at_an_end(url):
     assert pi.normalize_remote_url(url) is None
 
 
+@pytest.mark.parametrize("url", [
+    "ssh://git@ssh.github.com:2222/Acme/Widget",
+    "git+ssh://git@ssh.github.com:2222/Acme/Widget",
+])
+def test_another_port_on_ssh_github_is_no_github_slug_either(url):
+    """The id keeps ssh.github.com:2222/...; the backlog's remote parser reads
+    no github.com slug from it, so the two agree."""
+    from shared import backlog
+
+    assert pi.normalize_remote_url(url) == "ssh.github.com:2222/Acme/Widget"
+    assert backlog._slug_from_remote_url(url) is None
+
+
+@pytest.mark.parametrize("url", ["ssh://git@ssh.github.com:22/Acme/Widget", "ssh://git@ssh.github.com:443/Acme/Widget"])
+def test_control_the_served_ports_keep_the_github_slug(url):
+    from shared import backlog
+
+    assert pi.normalize_remote_url(url) == "github.com/acme/widget"
+    assert backlog._slug_from_remote_url(url) == ("Acme", "Widget")
+
+
 def test_control_another_port_on_that_host_keeps_its_own_id():
     assert pi.normalize_remote_url("ssh://git@ssh.github.com:2222/Acme/Widget") == "ssh.github.com:2222/Acme/Widget"
 
