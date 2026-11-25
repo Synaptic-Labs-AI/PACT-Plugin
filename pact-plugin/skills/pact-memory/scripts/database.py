@@ -2080,6 +2080,7 @@ def bucket_evidence(
     root_common: Optional[Union[Path, str]] = None,
     recorded_dirs: Optional[Callable[[], Any]] = None,
     same_owner: Optional[Callable[[str], bool]] = None,
+    dated_only: bool = False,
 ) -> Dict[str, int]:
     """Count a bucket's file rows by what they show about its owner.
 
@@ -2092,12 +2093,17 @@ def bucket_evidence(
       - `contained_rows`: its resolved path lies under a gate root, and no
         directory strictly between the root and the row is a separate
         checkout (`_contained_by_root`; the root's own submodules stay
-        contained), and either its file still exists or a memory linked to
-        it was saved after this repository's `description` last changed
-        (`_linked_after_description`): a deleted file of an earlier project
-        that lived in this folder places nothing;
+        contained), and a memory linked to it was saved after this
+        repository's `description` last changed (`_linked_after_description`,
+        "dated"), or its file still exists AND no other contained row of the
+        bucket is both missing and undated. A file that exists counts only for
+        a bucket whose every contained path is still here: an unrelated clone
+        in a deleted project's folder shares a README, never the whole tree.
+        With `dated_only` only dated rows count (an earlier canonical id,
+        `memory_api.PACTMemory._earlier_canonical_buckets`);
       - `vanished`: the path no longer exists, and it is not contained, or
-        it is contained but fails the date test above;
+        it is contained but does not count by the rule above (a deleted file
+        of an earlier project, or an existing file beside one);
       - `foreign_rows`: exists, not contained, and evidence of another owner
         (`_foreign_kind`), split into `foreign_checkout_rows` (the rival is
         a git checkout) and `foreign_folder_rows` (a marked non-git folder);
@@ -2142,6 +2148,9 @@ def bucket_evidence(
             verified_common = None
     counts = dict.fromkeys(BUCKET_EVIDENCE_KEYS, 0)
     counts["roots"] = len(root_paths)
+    # (exists, dated) for each contained row, judged after the walk: whether a
+    # file that exists may count depends on every other contained row.
+    contained: List[Tuple[bool, bool]] = []
     for row in cursor.fetchall():
         counts["file_rows"] += 1
         file_id, path = row[0], row[1]
@@ -2164,12 +2173,10 @@ def bucket_evidence(
             # belong to an earlier project that once lived in this folder (an
             # unrelated repository cloned into a deleted project's path), so
             # it counts as vanished.
-            if os.path.lexists(resolved) or _linked_after_description(
-                conn, file_id, verified_common
-            ):
-                counts["contained_rows"] += 1
-            else:
-                counts["vanished"] += 1
+            contained.append((
+                os.path.lexists(resolved),
+                _linked_after_description(conn, file_id, verified_common),
+            ))
         elif not os.path.lexists(resolved):
             counts["vanished"] += 1
         else:
@@ -2179,6 +2186,14 @@ def bucket_evidence(
             else:
                 counts["foreign_rows"] += 1
                 counts[f"foreign_{kind}_rows"] += 1
+    existence_counts = not dated_only and all(
+        exists or dated for exists, dated in contained
+    )
+    for exists, dated in contained:
+        if dated or (exists and existence_counts):
+            counts["contained_rows"] += 1
+        else:
+            counts["vanished"] += 1
     return counts
 
 

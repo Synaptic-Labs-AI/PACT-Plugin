@@ -427,8 +427,11 @@ class TestCanonicaliserSpellings:
         assert (
             "Two spellings of one repository can resolve to two ids, as can an origin "
             "that was renamed or transferred. The bucket under the earlier id is not "
-            "read. When its file rows place it in this checkout, by the rule legacy "
-            "buckets use, project-id show lists it as earlier_id with a rekey command "
+            "read. When a file row in this checkout is linked by a memory saved after "
+            "<git-common-dir>/description last changed (a file that merely exists here "
+            "never counts), every existing absolute file row of the bucket lies in this "
+            "checkout, and the bucket holds memories, project-id show lists it as "
+            "earlier_id with a rekey command "
             "into this checkout's id, and a read prints one notice per process naming "
             "it; otherwise project-id show lists it as an ordinary bucket with no "
             "command. Join them with project-id rekey --from=<id> --to=<id>, and "
@@ -936,10 +939,11 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
 
     def test_a_file_row_places_a_bucket_only_while_dated_or_present(self):
         assert (
-            "A file row places it only when its file still exists, or a memory "
-            "linked to it was saved after <git-common-dir>/description last changed, "
-            "or the repository has no description file; a deleted file whose "
-            "memories are older than that does not."
+            "A file row places it when a memory linked to it was saved after "
+            "<git-common-dir>/description last changed, or when its file still "
+            "exists and no other file row of the bucket under this repository is "
+            "both missing and older than that. With no description file, every "
+            "row counts."
         ) in _body(SKILL)
 
     def test_a_rekey_into_another_repository_needs_the_flag(self):

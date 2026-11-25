@@ -394,9 +394,10 @@ one of `included`, `excluded` and `unproven` is true:
 
 - `included`: the whole bucket is read. `verified` means an absolute file row
   places it in this repository and no evidence places it elsewhere. A file row
-  places it only when its file still exists, or a memory linked to it was saved
-  after `<git-common-dir>/description` last changed, or the repository has no
-  `description` file; a deleted file whose memories are older than that does not. `included_unverified` means no file row places
+  places it when a memory linked to it was saved after
+  `<git-common-dir>/description` last changed, or when its file still exists and
+  no other file row of the bucket under this repository is both missing and
+  older than that. With no `description` file, every row counts. `included_unverified` means no file row places
   it but a recorded session from this repository wrote into it
   (`session_evidence` is `true`). A recorded session counts only when it was
   launched at the root of this repository or of one of its linked worktrees (a
@@ -521,8 +522,10 @@ Two operator surfaces answer, and they are deliberately ordered:
 
 Two spellings of one repository can resolve to two ids, as can an origin that
 was renamed or transferred. The bucket under the earlier id is not read. When
-its file rows place it in this checkout, by the rule legacy buckets use,
-`project-id show` lists it as `earlier_id` with a rekey command into this
+a file row in this checkout is linked by a memory saved after
+`<git-common-dir>/description` last changed (a file that merely exists here
+never counts), every existing absolute file row of the bucket lies in this
+checkout, and the bucket holds memories, `project-id show` lists it as `earlier_id` with a rekey command into this
 checkout's id, and a read prints one notice per process naming it; otherwise
 `project-id show` lists it as an ordinary bucket with no command. Join them with
 `project-id rekey --from=<id> --to=<id>`, and run it with `--apply` only with

@@ -1077,25 +1077,31 @@ def _note_verified_unattributed(store: str, candidate: str, counts: Dict[str, An
 
 
 def _note_earlier_canonical(
-    store: str, bucket: str, scope: str, memories: int, command: Optional[str]
+    store: str, bucket: str, scope: str, memories: int, linked: int,
+    command: Optional[str],
 ) -> None:
-    """Name, once per process, a canonical bucket of this repository under an
-    earlier id (`PACTMemory._earlier_canonical_buckets`), with the command
-    that moves it into this checkout's id."""
-    if _LEGACY_NOTICES_QUIET.get():
+    """Name, once per process, a canonical bucket that may be this repository
+    under an earlier id (`PACTMemory._earlier_canonical_buckets`), with the
+    command that moves it into this checkout's id. `memories` is the
+    bucket's memory count, `linked` those linked to a file in this checkout.
+    A bucket with no memories is not named."""
+    if _LEGACY_NOTICES_QUIET.get() or not memories:
         return
     key = (store, bucket, scope)
     if key in _EARLIER_CANONICAL_WARNED:
         return
     _EARLIER_CANONICAL_WARNED.add(key)
     logger.warning(
-        "project bucket %r holds %d memor%s whose file rows lie in this "
-        "checkout, but it is not this checkout's id %r (the origin was "
-        "renamed, transferred or spelled another way), so it is NOT in this "
-        "read scope. If its rows are this repository's, preview the move with: %s",
+        "project bucket %r holds %d memor%s, %d linked to files in this "
+        "checkout (at least one saved after this checkout was cloned) and "
+        "none to an existing file elsewhere. It may be this repository under "
+        "an earlier id, but it is not this checkout's id %r, so it is NOT in "
+        "this read scope. If its rows are this repository's, preview the move "
+        "with: %s",
         bucket,
         memories,
         "y" if memories == 1 else "ies",
+        linked,
         scope,
         _printed_rekey_remedy([command]),
     )
@@ -3994,12 +4000,12 @@ class PACTMemory:
 
     def _earlier_canonical_buckets(self, scope: str, conn: Any = None) -> Dict[str, Optional[str]]:
         """{bucket: rekey command} for each CANONICAL bucket other than
-        `scope` whose file rows place it in this checkout by the legacy
-        placement rule (`bucket_evidence`: contained rows, none foreign).
-        Such a bucket is this repository's under an earlier id (an origin
-        renamed, transferred or respelled). It is not read; one notice per
-        process names it with the command that moves it into `scope`.
-        Buckets with no placing row stay silent. Never raises: a store that
+        `scope` that has a file row in this checkout linked by a memory saved
+        after its clone (`bucket_evidence` with `dated_only`), and whose
+        every existing absolute file row lies in this checkout (none foreign
+        or outside). Such a bucket may be this repository's under an earlier
+        id. It is not read; one notice per process names it with the command
+        that moves it into `scope`. Every other bucket stays silent. Never raises: a store that
         cannot be read answers {}."""
         from .database import bucket_evidence, count_project_memories
 
@@ -4012,20 +4018,45 @@ class PACTMemory:
         if key in _EARLIER_CANONICAL:
             return _EARLIER_CANONICAL[key]
         found: Dict[str, Optional[str]] = {}
-        counts: Dict[str, int] = {}
+        counts: Dict[str, Tuple[int, int]] = {}
         try:
             with _legacy_probe_context(store, conn) as (connection, _reason):
                 if connection is not None:
-                    # ONLY A BUCKET WITH FILE ROWS CAN BE PLACED, so the gate
-                    # roots (a `git worktree list`) are asked for only when a
-                    # canonical one exists: an ordinary read adds no git call.
+                    # ONLY A BUCKET WITH A FILE ROW UNDER THE IDENTITY ROOT CAN
+                    # BE PLACED, so the SQL keeps those alone and the gate roots
+                    # (a `git worktree list`) are asked for only when one is
+                    # canonical: a shared store whose other buckets live
+                    # elsewhere adds no git call and no evidence walk.
+                    prefixes = sorted({str(root), os.path.realpath(str(root))})
+                    clauses, params = [], [scope]
+                    for prefix in prefixes:
+                        under = prefix.rstrip(os.sep) + os.sep
+                        clauses.append("path = ? OR substr(path, 1, ?) = ?")
+                        params += [prefix, len(under), under]
                     with_files = [
                         row[0] for row in connection.execute(
                             "SELECT DISTINCT project_id FROM files "
-                            "WHERE project_id IS NOT NULL AND project_id != ?",
-                            (scope,),
+                            "WHERE project_id IS NOT NULL AND project_id != ? "
+                            f"AND ({' OR '.join(clauses)})",
+                            params,
                         ).fetchall()
                         if is_canonical(row[0])
+                    ]
+                    # A bucket with an EXISTING file outside the identity root
+                    # is another live repository's (or spans one): it is ruled
+                    # out here, before any git call. shortcut: a row in a
+                    # linked worktree outside the root also rules it out, so
+                    # such an earlier id stays silent rather than misnamed.
+                    with_files = [
+                        bucket for bucket in with_files
+                        if not any(
+                            os.path.isabs(path) and os.path.lexists(path)
+                            for (path,) in connection.execute(
+                                "SELECT path FROM files WHERE project_id = ? "
+                                f"AND NOT ({' OR '.join(clauses)})",
+                                [bucket, *params[1:]],
+                            )
+                        )
                     ]
                     roots, common, own = None, None, None
                     if with_files:
@@ -4041,15 +4072,36 @@ class PACTMemory:
                                 )
                                 if own else None
                             ),
+                            # ONLY A ROW LINKED AFTER THIS CLONE places an
+                            # earlier id: a file that merely exists here (a
+                            # README) is shared by unrelated repositories.
+                            dated_only=True,
                         )
-                        if evidence["contained_rows"] and not evidence["foreign_rows"]:
+                        # A LIVE OTHER REPOSITORY that cross-links one file here
+                        # also has rows in its own checkout (outside): those
+                        # rule it out, so every existing row must lie here.
+                        if (
+                            evidence["contained_rows"]
+                            and not evidence["foreign_rows"]
+                            and not evidence["neutral_outside"]
+                        ):
                             found[bucket] = runnable_rekey_command(bucket, scope, db_path=store)
-                            counts[bucket] = count_project_memories(connection, bucket)
+                            linked = connection.execute(
+                                "SELECT COUNT(DISTINCT mf.memory_id) FROM memory_files mf "
+                                "JOIN files f ON f.id = mf.file_id "
+                                f"WHERE f.project_id = ? AND ({' OR '.join(clauses)})",
+                                [bucket, *params[1:]],
+                            ).fetchone()[0]
+                            counts[bucket] = (count_project_memories(connection, bucket), linked)
         except (sqlite3.Error, OSError, StoreFaultError):
             return {}
+        # One entry per store, root and scope: a newer store stamp replaces it.
+        for stale in [k for k in _EARLIER_CANONICAL if k[1] == store and k[3:] == key[3:]]:
+            del _EARLIER_CANONICAL[stale]
         _EARLIER_CANONICAL[key] = found
         for bucket, command in found.items():
-            _note_earlier_canonical(store, bucket, scope, counts.get(bucket, 0), command)
+            memories, linked = counts.get(bucket, (0, 0))
+            _note_earlier_canonical(store, bucket, scope, memories, linked, command)
         return found
 
     def _own_identity(self, common: Any) -> Optional[Tuple[str, Optional[str]]]:
