@@ -683,6 +683,11 @@ class TestLegacyScopeStatesAreDocumented:
             "checkout), does not block it"
         ) in _body(SKILL)
 
+    def test_an_alias_id_is_shared_only_by_clones_using_that_alias(self):
+        assert (
+            "Only clones whose origin uses that same alias share an alias id."
+        ) in _body(SKILL)
+
     def test_a_sibling_clone_is_not_a_rival(self):
         assert (
             "Another clone of this same repository is not a rival: its rows and "

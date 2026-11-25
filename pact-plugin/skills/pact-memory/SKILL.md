@@ -469,6 +469,7 @@ Two operator surfaces answer, and they are deliberately ordered:
   `project-id rekey --from=<old> --to=<canonical>`. An ssh host alias from
   the user's ssh config stays in the id: `git@github-work:Acme/Widget` gives `github-work/Acme/Widget`,
   while an https clone of the same repository gives `github.com/acme/widget`.
+  Only clones whose origin uses that same alias share an alias id.
   The pin is the remedy: a pin holding `github.com/acme/widget` in the alias
   clone gives it the https clone's bucket.
   It must be a regular file: a FIFO or a symlink in that position is refused, and an
