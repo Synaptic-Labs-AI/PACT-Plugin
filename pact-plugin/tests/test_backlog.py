@@ -2957,15 +2957,19 @@ def test_every_other_listing_read_that_raises_gives_what_no_listing_gives(tmp_pa
 
 
 @pytest.mark.parametrize("outcome", ["success", "refusal", "raise"])
-def test_every_memory_warning_is_held_and_only_a_success_drops_them(monkeypatch, caplog, outcome):
-    """While one command runs, every warning the memory skill logs is held:
-    the decline, and any other identity warning (an ignored override, a HOME
-    landing). A success drops them all, since the backlog keys on the folder
-    name; a refusal or a raise prints them in the order they were logged.
-    The holder leaves the memory skill's logger as it found it.
+def test_identity_warnings_are_held_and_store_warnings_pass(monkeypatch, caplog, outcome):
+    """While one command runs, the memory skill's IDENTITY-RESOLUTION
+    warnings are held (a decline, a HOME landing): a success drops them,
+    since the backlog keys on the folder name, and a refusal or a raise
+    prints them in the order they were logged. A STORE warning (one a show
+    that checks memory ids can log) is not identity: it prints at once, on
+    every outcome. The holder leaves the memory skill's logger as it found
+    it.
 
-    The command is the stand-in; the decline is the memory skill's own."""
+    The command is the stand-in; the identity warnings are the memory
+    skill's own."""
     import logging
+    from pathlib import Path
 
     memory_api = backlog._memory_api()
     filters = list(memory_api.logger.filters)
@@ -2973,7 +2977,8 @@ def test_every_memory_warning_is_held_and_only_a_success_drops_them(monkeypatch,
 
     def command(_args, _backlog_dir, _held):
         memory_api._warn_declined({"reason": "no_working_tree"})
-        memory_api.logger.warning("another warning")
+        memory_api.logger.warning("the legacy project bucket could not be checked")
+        memory_api._warn_home_landing(Path("/home/someone"))
         if outcome == "raise":
             raise raised
         return backlog._EXIT_OK if outcome == "success" else backlog._EXIT_REFUSED
@@ -2984,13 +2989,21 @@ def test_every_memory_warning_is_held_and_only_a_success_drops_them(monkeypatch,
             result = backlog.main(["show"])
         except RuntimeError as error:
             result = error
-    printed = ["decline" if "so no project id was derived" in r.getMessage() else r.getMessage()
-               for r in caplog.records if r.name == memory_api.logger.name]
 
+    def label(record):
+        text = record.getMessage()
+        if "so no project id was derived" in text:
+            return "decline"
+        if "resolved to the HOME directory" in text:
+            return "home"
+        return text
+
+    printed = [label(r) for r in caplog.records if r.name == memory_api.logger.name]
+    store = "the legacy project bucket could not be checked"
     expected = {
-        "success": (backlog._EXIT_OK, []),
-        "refusal": (backlog._EXIT_REFUSED, ["decline", "another warning"]),
-        "raise": (raised, ["decline", "another warning"]),
+        "success": (backlog._EXIT_OK, [store]),
+        "refusal": (backlog._EXIT_REFUSED, [store, "decline", "home"]),
+        "raise": (raised, [store, "decline", "home"]),
     }[outcome]
     assert (result, printed, memory_api.logger.filters) == (*expected, filters)
 
@@ -6717,6 +6730,7 @@ def test_a_directory_inside_a_repository_git_cannot_read_still_refuses(tmp_path,
         # and runs the command in one detection pass.
         logger = real.logger
         is_decline_record = staticmethod(real.is_decline_record)
+        is_identity_record = staticmethod(real.is_identity_record)
         detection_pass = staticmethod(real.detection_pass)
 
     monkeypatch.setattr(backlog, "_memory_api", lambda: _NoGit)

@@ -2201,16 +2201,17 @@ def _add_item_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 class _HeldWarnings(logging.Filter):
-    """Holds every record logged on the memory skill's resolver logger
-    (`scripts.memory_api`'s `logger`, the one the identity warnings use)
-    while one command runs: a decline of the canonical id, an ignored
-    override, a HOME landing. Records on the memory skill's other module
-    loggers are not held. The backlog uses the memory skill only to find the
-    project, and its key is the pre-change folder name, so none of the held
-    warnings says anything about a write that succeeds: a success drops them
-    all. A command that does not succeed prints them in the order they were
-    logged (`replay`), so a refusal still shows what the memory skill
-    observed."""
+    """Holds the IDENTITY-RESOLUTION warnings logged on the memory skill's
+    resolver logger (`scripts.memory_api`'s `logger`) while one command runs:
+    a decline of the canonical id, an ignored override, a HOME landing, a
+    remote-helper folder name (`memory_api.is_identity_record`). The backlog
+    keys on the pre-change folder name, so none of them says anything about a
+    write that succeeds: a success drops them all. A command that does not
+    succeed prints them in the order they were logged (`replay`), so a
+    refusal still shows what the memory skill observed. Every OTHER record on
+    that logger passes at once: a warning from the memory store a command
+    opens (a show that checks memory ids reads it) is about that store, not
+    the identity, so it is never held or dropped."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -2218,8 +2219,11 @@ class _HeldWarnings(logging.Filter):
         self.records: List[logging.LogRecord] = []
         self.replayed = False
         self.logger = memory_api.logger
+        self.is_identity = memory_api.is_identity_record
 
     def filter(self, record: logging.LogRecord) -> bool:
+        if not self.is_identity(record):
+            return True
         self.records.append(record)
         return False
 

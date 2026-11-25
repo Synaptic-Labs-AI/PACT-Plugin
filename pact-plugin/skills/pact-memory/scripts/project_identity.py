@@ -993,11 +993,11 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # segment rule: `ssh://h/a%2Bb` and `h:a+b` share one id, `%20` stays
         # `%20`, and a decoded `%` becomes `%25`. Other schemes keep their
         # escapes.
-        path, git_dropped = _strip_path_suffixes(
-            _ssh_path_as_git_sends_it(path)
-            if scheme in _HOME_RELATIVE_SCHEMES
-            else path
+        sent_path = (
+            _ssh_path_as_git_sends_it(path) if scheme in _HOME_RELATIVE_SCHEMES else path
         )
+        github_unserved = _github_does_not_serve(sent_path)
+        path, git_dropped = _strip_path_suffixes(sent_path)
         segments = _split_path(path)
         if not segments:
             return None
@@ -1049,6 +1049,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
             # exception: its server decodes the scp path, so its `%20` names
             # the same project as the https spelling's `%20`.
             scp_path = scp_path.replace("%", "%25")
+        github_unserved = _github_does_not_serve(scp_path)
         path, git_dropped = _strip_path_suffixes(scp_path)
         segments = _split_path(path)
         if not segments:
@@ -1063,10 +1064,14 @@ def normalize_remote_url(url: object) -> Optional[str]:
 
     if len(identifier) > _max_id_length():
         return None
-    # A GITHUB ID IS ALWAYS owner/repo: `https://github.com/owner/.git` (or
-    # any one-segment path) names no repository there, so it declines rather
-    # than bind the one-segment id `github.com/owner`.
-    if identifier.startswith("github.com/") and identifier.count("/") < 2:
+    # A GITHUB ID IS ALWAYS owner/repo, AND ONLY A PATH GITHUB SERVES NAMES
+    # ONE: `https://github.com/owner/.git` (or any one-segment path) names no
+    # repository there, and neither does a home-relative `~/o/r` or a
+    # `o/r/.git` path (`_github_does_not_serve`). Each declines rather than
+    # bind an id the remote does not reach.
+    if identifier.startswith("github.com/") and (
+        identifier.count("/") < 2 or github_unserved
+    ):
         return None
 
     # The grammar's single authority. If `database.is_canonical_id` is ever
@@ -1075,6 +1080,17 @@ def normalize_remote_url(url: object) -> Optional[str]:
     if not is_canonical(identifier):
         return None
     return identifier
+
+
+def _github_does_not_serve(path: str) -> bool:
+    """Whether a remote path, as git sends it, is a form github.com does not
+    serve: home-relative (`~/o/r`, `~user/...`, which git sends as written)
+    or a non-bare repository's `o/r/.git`. Measured: GitHub answers 'not
+    found' for `https://github.com/O/R/.git` and refuses a `~` path over
+    https, while `O/R` and `O/R.git/` are served. A plain sshd serves both
+    forms, so only a github.com id declines them."""
+    trimmed = path.lstrip("/")
+    return trimmed.startswith("~") or trimmed.rstrip("/").endswith("/.git")
 
 
 def _is_network_shaped(url: object) -> bool:

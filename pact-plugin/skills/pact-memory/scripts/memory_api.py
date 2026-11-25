@@ -1195,8 +1195,21 @@ def _warn_declined(
         "to inspect the detected identity.",
         cause,
         f" {remedy}" if remedy else "",
-        extra={"pact_identity_decline": True},
+        extra={"pact_identity_decline": True, **_IDENTITY_RECORD},
     )
+
+
+# Marks a warning the identity RESOLUTION logs (a decline, a HOME landing, an
+# ignored override, a remote-helper folder name, an unresolved declaration),
+# as against one a store read logs: `is_identity_record` tells them apart.
+_IDENTITY_RECORD = {"pact_identity": True}
+
+
+def is_identity_record(record: logging.LogRecord) -> bool:
+    """Whether `record` is an identity-resolution warning (`_IDENTITY_RECORD`).
+    A caller that does not use the canonical id can hold those apart from the
+    store's own warnings, which it should still show."""
+    return getattr(record, "pact_identity", False) is True
 
 
 def is_decline_record(record: logging.LogRecord) -> bool:
@@ -1473,6 +1486,7 @@ def _warn_home_landing(root: Path) -> None:
         "the project directory or set CLAUDE_PROJECT_DIR.",
         root,
         root.name,
+        extra=_IDENTITY_RECORD,
     )
 
 
@@ -3147,6 +3161,7 @@ class PACTMemory:
                 "continues without it. Pinning that directory is a user "
                 "decision: see the pact-memory skill.",
                 ignored.get("reason"),
+                extra=_IDENTITY_RECORD,
             )
             return
         logger.warning(
@@ -3154,6 +3169,7 @@ class PACTMemory:
             "without it.",
             ignored.get("path"),
             ignored.get("reason"),
+            extra=_IDENTITY_RECORD,
         )
 
     @staticmethod
@@ -3375,6 +3391,7 @@ class PACTMemory:
             logger.warning(
                 "project_id for %r is its folder name %r: %s.",
                 str(root), identity.project_id, identity.detail,
+                extra=_IDENTITY_RECORD,
             )
         if identity.project_id is not None:
             logger.debug(
@@ -3549,7 +3566,8 @@ class PACTMemory:
         if declined_declaration:
             logger.warning(
                 "project_id unresolved: the git root did not answer either, "
-                "so Strategy 3 is skipped and no project scope was derived."
+                "so Strategy 3 is skipped and no project scope was derived.",
+                extra=_IDENTITY_RECORD,
             )
             return _DetectedIdentity(
                 project_id=None,

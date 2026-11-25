@@ -438,14 +438,43 @@ def test_control_show_has_no_identity_detail_for_a_canonical_origin(tmp_path, mo
 
 @pytest.mark.parametrize("url", [
     "https://github.com/O/R.GIT",
-    "https://github.com/O/R/.git",
     "git@github.com:O/R.Git",
     "https://github.com/O/R.git/",
 ])
 def test_the_backlog_strips_a_git_suffix_as_the_id_does(url):
-    """A github.com path drops one `.git` in any case, and a `repo/.git`
-    spelling its exposed `/`, in the id and in the backlog's slug alike."""
+    """A github.com path drops one `.git` in any case, in the id and in the
+    backlog's slug alike."""
     from shared import backlog
 
     owner, name = backlog._slug_from_remote_url(url)
     assert f"github.com/{owner}/{name}".lower() == pi.normalize_remote_url(url) == "github.com/o/r"
+
+
+@pytest.mark.parametrize("url", [
+    "git@github.com:~/o/r",
+    "ssh://git@github.com/~/o/r",
+    "ssh://git@github.com/%7E/o/r",
+    "git@github.com:~user/o/r",
+    "https://github.com/~/o/r",
+    "https://github.com/o/r/.git",
+    "git@github.com:o/r/.git",
+    "ssh://git@github.com/o/r/.git/",
+])
+def test_a_github_path_github_does_not_serve_declines(url):
+    """github.com serves no home-relative path and no `o/r/.git` (measured:
+    https://github.com/O/R/.git is 'not found'); git sends `~/o/r` as
+    written. Each declines, and the backlog reads no slug from it."""
+    from shared import backlog
+
+    assert pi.normalize_remote_url(url) is None
+    assert pi.classify_remote_origin(url)[0] == pi.OUTCOME_DECLINE
+    assert backlog._slug_from_remote_url(url) is None
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("git@host:~/srv/repo", "host/srv/repo"),
+    ("git@host:srv/repo/.git", "host/srv/repo"),
+    ("https://github.com/o/r.git/", "github.com/o/r"),
+])
+def test_control_a_plain_sshd_keeps_home_and_dot_git_paths(url, expected):
+    assert pi.normalize_remote_url(url) == expected
