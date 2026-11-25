@@ -1783,10 +1783,11 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
 
     The first line that is neither blank nor a `#` comment, stripped, after
     an encoding BOM is dropped, is the candidate; it must be a canonical id.
-    A valid candidate then takes GitHub's spelling rules (`_github_folded_pin`),
-    the ones a remote's id takes, and the folded value is checked again: a
-    mixed-case or www github.com pin names the same id its remote would, and
-    a one-segment github.com pin is "not_canonical".
+    A valid candidate then takes GitHub's spelling rules (`_github_folded_pin`):
+    the case and www folds a remote's id takes, checked again after the fold,
+    and a port-less one-segment github.com pin is "not_canonical". Nothing
+    else is rewritten: a trailing `.git` is kept, because `github.com/o/r.git`
+    is itself an id a remote derives (`https://github.com/o/r.git.git`).
     `reason` is None for a usable value, else "too_long" (over
     `PIN_FILE_MAX_BYTES` bytes, or a candidate over the id length cap),
     "not_utf8", "control_chars", "not_canonical" or "empty". Never raises.
