@@ -124,6 +124,19 @@ def validate_handoff_schema(handoff: object) -> str | None:
         open_questions / uncertainty fields are the norm in real handoffs.
       - A missing reasoning_chain is never a defect. It is recommended.
 
+    ONE TYPE GATE, on `produced` only: a non-string OR
+    empty/whitespace-only `produced` fails validation. The deliverable
+    watcher keys on this field: it reads an empty or whitespace-only
+    `produced` as ABSENT, and wakes on a list holding a non-empty string
+    (wait_target.handoff_present), so the wrong shape still reaches the
+    lead. The remedy is the write-time advisory this validator drives:
+    the author is told to re-write the field when the handoff is written,
+    before the lead reads it. The other
+    required fields stay presence-only — the watcher does not read them,
+    and the emptiness silence above keeps empty uncertainty/open_questions
+    legitimate. FOR `produced` the emptiness silence does NOT apply: an
+    empty produced IS the failure this gate exists to catch.
+
     When a missing required key has a legacy spelling present in the same
     handoff, the reason names the alias, because that is the correction the
     author can actually act on.
@@ -136,6 +149,29 @@ def validate_handoff_schema(handoff: object) -> str | None:
         return f"metadata.handoff must be object, got {type(handoff).__name__}"
     missing = [f for f in HANDOFF_REQUIRED_FIELDS if f not in handoff]
     if not missing:
+        produced = handoff.get("produced")
+        if isinstance(produced, str) and not produced.strip():
+            return (
+                "metadata.handoff `produced` is empty or whitespace-only — "
+                "write a one-paragraph summary of what was produced; the "
+                "deliverable watcher reads an empty `produced` as ABSENT "
+                "and would burn its deadline to a false EXPIRED"
+            )
+        if not isinstance(produced, str):
+            base = (
+                "metadata.handoff `produced` must be a non-empty string, "
+                f"got {type(produced).__name__} — join the items with '; ' "
+                "into one string"
+            )
+            if isinstance(produced, list) and any(
+                isinstance(item, str) and item.strip() for item in produced
+            ):
+                # The watcher wakes on this shape; only the shape is wrong.
+                return base
+            return (
+                base + "; the deliverable watcher reads this value as "
+                "ABSENT and would burn its deadline to a false EXPIRED"
+            )
         return None
     reason = f"metadata.handoff missing required fields: {', '.join(missing)}"
     hints = [

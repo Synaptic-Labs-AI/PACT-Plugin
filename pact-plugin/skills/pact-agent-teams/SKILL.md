@@ -218,12 +218,12 @@ If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "
 1. **Store HANDOFF in task metadata**:
    ```
    TaskUpdate(taskId, metadata={"handoff": {
-     "produced": [...],
-     "decisions": [...],
-     "reasoning_chain": "...",  // recommended — include unless task is trivial
-     "uncertainty": [...],
-     "integration": [...],
-     "open_questions": [...]
+     "produced": "What the task delivered — files changed, artifacts written, measurements taken — in 1-3 sentences.",
+     "decisions": "Each key decision and its rationale, '; '-joined when there are several.",
+     "reasoning_chain": "How the decisions connect — 'X because Y, which required Z.'",  // recommended — include unless task is trivial
+     "uncertainty": "What could be wrong, prioritized, '; '-joined; write 'No areas of uncertainty flagged.' when none.",
+     "integration": "What downstream agents need to build on this work.",
+     "open_questions": "What is still unresolved, '; '-joined; write 'None.' when none."
    }})
    ```
    If the metadata write fails, still send the payload-carrying notify and state the write failure in it; the lead treats the missing disk copy as an integrity finding, never as a reason to skip your submission.
@@ -231,7 +231,7 @@ If ANY precondition is unmet, KEEP WORKING. Do not write `metadata.handoff` to "
 2. **Notify the team-lead**:
    ```
    SendMessage(to="team-lead",
-     message="[{sender}→team-lead] Task complete. HANDOFF-PAYLOAD-BEGIN produced: [<files/deliverables>] decisions: [<key decisions>] reasoning_chain: <chain, when written> uncertainty: [<prioritized items>] integration: [<integration notes>] open_questions: [<questions>] HANDOFF-PAYLOAD-END The payload above is a verbatim copy of metadata.handoff. boundary-drain: [inbox empty | reconciled <n> directive(s) — <one-line summary>]",
+     message="[{sender}→team-lead] Task complete. HANDOFF-PAYLOAD-BEGIN produced: <what the task delivered> decisions: <each key decision and its rationale> reasoning_chain: <how the decisions connect, when written> uncertainty: <what could be wrong, prioritized> integration: <what downstream agents need> open_questions: <what is still unresolved> HANDOFF-PAYLOAD-END The payload above is a verbatim copy of metadata.handoff. boundary-drain: [inbox empty | reconciled <n> directive(s) — <one-line summary>]",
      summary="Task complete: [brief]")
    ```
 
@@ -282,7 +282,7 @@ If the team-lead rejects your teachback or HANDOFF, you wake on the inbound `Sen
    > ⚠️ To rewrite, RE-SEND THE FULL OBJECT in ONE `TaskUpdate` call, and include each field the corrections did not touch, unchanged. A write that carries part of a nested sub-object REPLACES that sub-object, and it erases each field you omit. Then read the task file back and enumerate the keys of the object you wrote. Mechanism: [pact-teachback §Action: store teachback now](../pact-teachback/SKILL.md#action-store-teachback-now).
 
 4. **Re-submit on the SAME task** (do NOT create a new task):
-   - Increment `metadata.revision_number`. The team-lead writes `revision_number=1` in the rejection record. On your first revision, increment to `2`. On each subsequent revision, increment again. This count is the rejection-cycle audit trail — it feeds the imPACT META-BLOCK 3-cycle signal, not harvest routing. It does NOT gate whether your revised content is preserved: the team-lead's acceptance (the single completion) emits whatever `metadata.handoff` holds at that moment, so the revised content reaches the journal regardless of the count.
+   - In the same `TaskUpdate` that writes the revised `metadata.teachback_submit` or `metadata.handoff`, raise `metadata.revision_number` by one: `2` on your first revision (absent counts as `1`), one more on each later revision. Never write a revised deliverable without raising it: the team-lead's watcher counts a deliverable as revised only once `metadata.revision_number` exceeds the rejection's `revision_number`, so an unraised revision never wakes the lead.
    - `SendMessage` the team-lead carrying the revised payload verbatim in the same form as the first submission: `"[{sender}→team-lead] Revised teachback/HANDOFF on Task #{id} (revision {N})."` followed by the payload block — `pact-teachback` Step 2 for a teachback, On Completion Step 2 for a HANDOFF. The team-lead accepts the revision on the message-carried payload; the disk read is their deferred audit.
    - Re-SET `intentional_wait{reason=awaiting_lead_completion, expected_resolver=lead, since=<fresh canonical_since() output>, covers_since=<the same value as since>}`.
    - End the turn (idle).
@@ -425,6 +425,21 @@ Set a free-form `reason` that names the transferred watch (e.g.
 `awaiting_lead_takeover`), not `awaiting_lead_completion` — that reason names
 the HANDOFF/teachback acceptance wait, and a transferred watch must read as
 the different wait it is on task-file inspection.
+One exception applies to a wait on another teammate's deliverable. A
+separate-process teammate (tmux teammateMode) arms the structural watcher
+only with the arm command a `wait_filler_gate` denial gives it: it runs that
+command with the awaited task's id in place of its placeholder, and with
+`--predicate teachback_submit` when the awaited deliverable is a teachback,
+as one background task the harness tracks: one `Bash` call with
+`run_in_background: true`, or, where `Bash` is reached only through a REPL
+that refuses that flag, the same command awaited with a short timeout (for
+example 3000 ms) so it moves to the background. Then it ends the turn.
+Without that command, it SETs `intentional_wait` with
+`expected_resolver` naming the lead and ends the turn. An
+in-process teammate does not arm a watcher: it SETs `intentional_wait`
+with `expected_resolver` naming the lead and ends the turn. An Agent-tool
+subagent does not arm a watcher; it puts what the lead needs in its final
+report.
 
 Silence is uninformative in both directions, and narrating a wait is noise in
 both. Do not emit "still running" or "waiting on the gate" turns while your own

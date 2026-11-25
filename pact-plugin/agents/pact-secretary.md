@@ -309,14 +309,15 @@ For memory-save tasks specifically:
 1. **Store HANDOFF in task metadata** via `TaskUpdate`, adapting the standard fields for memory operations:
    ```
    TaskUpdate(taskId, metadata={"handoff": {
-     "produced": ["memory_id: {id} — {topic}", ...],
-     "decisions": ["Consolidated 3 overlapping auth memories into 1", ...],
+     "produced": "memory_id: {id} — {topic}",
+     "decisions": "Consolidated 3 overlapping auth memories into 1",
      "reasoning_chain": "Prioritized saving architectural decisions because multiple agents touched the same subsystem",
-     "uncertainty": ["[LOW] Memory coverage gap in {area}"],
-     "integration": ["Updated Working Memory in CLAUDE.md"],
-     "open_questions": ["Should older memories on {topic} be consolidated?"]
+     "uncertainty": "[LOW] Memory coverage gap in {area}",
+     "integration": "Updated Working Memory in CLAUDE.md",
+     "open_questions": "Should older memories on {topic} be consolidated?"
    }})
    ```
+   Every value is one string: when a field holds several items (memory ids, decisions), join them with '; '.
 2. **Notify lead with summary** via `SendMessage`:
    ```
    SendMessage(to="team-lead",

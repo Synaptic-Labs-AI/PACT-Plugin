@@ -14,6 +14,20 @@ job's one-time report.
 Identification is positive-only. A plain session, an Agent-tool subagent and
 any frame this module does not recognise resolve to no role, and the stop is
 allowed.
+
+CARVE-OUT: a running pact-wait watcher (the structural wait mechanism's
+watcher armed before ending a turn) is EXEMPT from the shell-job block for
+exactly the roles whose own completion notice starts their next turn: the
+LEAD and a SEPARATE-PROCESS teammate. Its process completion IS their
+scheduled wake, so blocking the turn end over it would re-create the very
+wait-loop it replaces. An IN-PROCESS teammate is deliberately NOT exempt:
+its block text is the one that says the completion notice will NOT wake
+them, so its watcher stays accountable and the remedy stays the
+intentional_wait coverage path. Classified by an anchored command shape
+(`is_wait_watcher_command`, defined beside the arm-command builder in
+shared/wait_target.py): a lookalike that merely mentions the watcher name,
+a partial invocation missing the arm flags, or a command composed onto the
+watcher still counts as a job to account for.
 """
 
 from __future__ import annotations
@@ -32,6 +46,9 @@ from .subagent_meta import META_MAX_BYTES, subagent_metadata  # noqa: F401  # re
 from .paths import get_claude_config_dir
 from .session_journal import append_event_checked, make_event
 from .task_utils import iter_team_task_jsons
+# Re-exported: the watcher command shape lives beside the arm-command
+# builder, so the producer and this consumer cannot drift apart.
+from .wait_target import is_wait_watcher_command  # noqa: F401
 
 TURN_END_EVENTS = ("Stop", "SubagentStop")
 TRACE_EVENT = "background_stop_gate"
@@ -61,7 +78,11 @@ LEAD_BLOCK_TEXT = (
     "next turn, but a notice can go undelivered. Before ending this turn, do "
     "one of these: wait for it to finish, schedule a wake with CronCreate, or "
     "stop it if it is no longer needed. If a job listed here belongs to a "
-    "teammate, end the turn again. Each job is reported once."
+    "teammate, end the turn again. A pact-wait watcher is listed only when "
+    "its command differs from the arm command's form (for example, flags "
+    "missing or reordered, a ~ path, an unquoted path holding a space or a "
+    "shell character, or something chained onto it), so "
+    "account for a listed one like any other job. Each job is reported once."
 )
 TEAMMATE_BLOCK_TEXT = (
     "You are ending your turn while background work you started is still "
@@ -320,7 +341,14 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
         # candidates, so a reused id can only UNDER-block: it acquits the lead of
         # that job.
         teammate_jobs = {r["harness_task_id"] for r in records if r.get("harness_task_id")}
-        return [e for e in running if e["id"] not in teammate_jobs]
+        # The carve-out: a running pact-wait watcher is the lead's own
+        # scheduled wake, not unowned work (see the module docstring's
+        # CARVE-OUT). It never enters the lead's must-account-for list.
+        return [
+            e for e in running
+            if e["id"] not in teammate_jobs
+            and not is_wait_watcher_command(e.get("command"))
+        ]
     if input_data.get("hook_event_name") == "SubagentStop":
         # The lead process's whole list: only this teammate's recorded jobs count.
         #
@@ -351,6 +379,12 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
         # teammate is refused its turn end over work it did not launch — an
         # OVER-block.
         running = [e for e in running if e["id"] in by_job]
+        # NO watcher carve-out here, deliberately: an in-process teammate's
+        # completion notice will NOT wake them (their block text says so),
+        # so their watcher is not a scheduled wake — it stays in the
+        # must-account-for list and the intentional_wait coverage below
+        # remains the remedy.
+        watcher_is_wake = False
     else:
         # JOB-ID REUSE HERE ALSO OVER-BLOCKS, BY A DIFFERENT MECHANISM. This
         # process lists only its own jobs, so no other agent's job can enter its
@@ -360,8 +394,17 @@ def _candidates(input_data: dict, role: str, name: str, team: str, running: list
         # row any valid wait covers it. A reused id can only raise that bar,
         # never lower it.
         by_job = {r["harness_task_id"]: r for r in records if r.get("harness_task_id")}
+        # Separate-process teammate (the only role that reaches this branch):
+        # their own completion notice starts their next turn, so a running
+        # watcher IS their scheduled wake — the same carve-out the lead gets
+        # (see the module docstring's CARVE-OUT).
+        watcher_is_wake = True
     waiting = _tasks_with_valid_wait(team, name)
-    return [e for e in running if not _covered(waiting, by_job.get(e["id"]))]
+    return [
+        e for e in running
+        if not (watcher_is_wake and is_wait_watcher_command(e.get("command")))
+        and not _covered(waiting, by_job.get(e["id"]))
+    ]
 
 
 def _tasks_with_valid_wait(team: str, name: str) -> list:

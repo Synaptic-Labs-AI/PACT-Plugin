@@ -66,7 +66,7 @@ Check these sources in order to find the dev server start command:
 4. **`Makefile` targets** — check for `run`, `dev`, or `serve` targets
 5. **If none found** — report a blocker. You cannot proceed without knowing how to start the app.
 
-Start the server in the background using Bash with `run_in_background=true`. Wait a few seconds for startup, then begin exploration.
+Start the server as one background task the harness tracks: one `Bash` call with `run_in_background: true`, or, where `Bash` is reached only through a REPL that refuses that flag, the same command awaited with a short timeout (for example 3000 ms) so it moves to the background. Wait a few seconds for startup, then begin exploration.
 
 ## EXPLORATION STRATEGY
 

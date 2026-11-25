@@ -21,7 +21,7 @@ import pytest
 from shared.agent_handoff_marker import handoff_content_key
 
 VALID_HANDOFF = {
-    "produced": ["src/auth.ts"],
+    "produced": "src/auth.ts",
     "decisions": ["Used JWT"],
     "uncertainty": [],
     "integration": ["UserService"],

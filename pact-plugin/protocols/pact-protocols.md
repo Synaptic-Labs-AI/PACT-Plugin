@@ -1328,8 +1328,8 @@ Agent tasks include metadata for context:
   "domain": "backend",
   "feature": "user-auth",
   "handoff": {
-    "produced": ["src/auth.ts"],
-    "uncertainty": ["token refresh edge cases"]
+    "produced": "src/auth.ts",
+    "uncertainty": "token refresh edge cases"
   }
 }
 ```
@@ -2167,7 +2167,7 @@ Both calls are **required**, `TaskUpdate` FIRST — the wake-signal `SendMessage
 ### Rejection — two-call atomic pair (BOTH required, `TaskUpdate` FIRST)
 
 1. `TaskUpdate(taskId, metadata={"teachback_rejection": {...}})` (Task A) OR `TaskUpdate(taskId, metadata={"handoff_rejection": {...}})` (Task B) — payload `{reason, corrections, since, revision_number}`
-2. `SendMessage(to="<teammate>", "[team-lead→<teammate>] Rejected on Task #<id>. REJECTION-PAYLOAD-BEGIN reason: <one-line summary> corrections: [<correction 1>, <correction 2>, ...] since: <canonical_since() output> revision_number: <N> REJECTION-PAYLOAD-END The payload is a verbatim copy of metadata.{teachback,handoff}_rejection. Revise.", summary="Rejected; revise")` — wakes the teammate; the corrections they act on ride the message
+2. `SendMessage(to="<teammate>", "[team-lead→<teammate>] Rejected on Task #<id>. REJECTION-PAYLOAD-BEGIN reason: <one-line summary> corrections: [<correction 1>, <correction 2>, ...] since: <canonical_since() output> revision_number: <the revision being rejected> REJECTION-PAYLOAD-END The payload is a verbatim copy of metadata.{teachback,handoff}_rejection. Revise.", summary="Rejected; revise")` — wakes the teammate; the corrections they act on ride the message
 
 Both calls are **required**, and the ordering matches Acceptance for the same reason: the wake-signal `SendMessage` is what un-idles the teammate, who cannot self-observe the rejection metadata on a pull-only wait. If the `TaskUpdate` succeeds and the `SendMessage` errors, retry the send on the tool error. Skipping the `SendMessage` leaves the teammate idle on stale `awaiting_lead_completion`, never seeing the corrections — symmetric failure to skipping wake on acceptance. The teammate's `intentional_wait` does not auto-clear when you write rejection metadata; only the wake-signal triggers their CLEAR-and-revise flow. **3+ rejection cycles** on the same task is an imPACT META-BLOCK signal.
 
@@ -2390,7 +2390,7 @@ TaskUpdate(A_id, metadata={"teachback_rejection": {
     "reason": "<one-line summary>",
     "corrections": ["<correction 1>", "<correction 2>", ...],
     "since": "<canonical_since() output>",
-    "revision_number": 1
+    "revision_number": <the revision being rejected: the teammate's current metadata.revision_number, 1 when absent>
 }})
 SendMessage(
     to="<teammate>",
@@ -2400,7 +2400,7 @@ SendMessage(
         "reason: <one-line summary> "
         "corrections: [<correction 1>, <correction 2>, ...] "
         "since: <canonical_since() output> "
-        "revision_number: 1 "
+        "revision_number: <the revision being rejected> "
         "REJECTION-PAYLOAD-END "
         "The payload is a verbatim copy of metadata.teachback_rejection. Revise and re-submit. "
         "Task A remains in_progress."
@@ -2416,7 +2416,7 @@ TaskUpdate(B_id, metadata={"handoff_rejection": {
     "reason": "...",
     "corrections": [...],
     "since": "<canonical_since() output>",
-    "revision_number": 1
+    "revision_number": <the revision being rejected: the teammate's current metadata.revision_number, 1 when absent>
 }})
 SendMessage(
     to="<teammate>",
@@ -2426,7 +2426,7 @@ SendMessage(
         "reason: <one-line summary> "
         "corrections: [<correction 1>, <correction 2>, ...] "
         "since: <canonical_since() output> "
-        "revision_number: 1 "
+        "revision_number: <the revision being rejected> "
         "REJECTION-PAYLOAD-END "
         "The payload is a verbatim copy of metadata.handoff_rejection. Revise."
     ),
@@ -2441,8 +2441,8 @@ SendMessage(
 1. Lead writes rejection metadata + sends wake-signal.
 2. Teammate wakes on the message, CLEARs `intentional_wait`, reads the rejection payload the message carries (the disk copy is confirmation).
 3. Teammate revises (`metadata.teachback_submit` for A, or revises deliverable + `metadata.handoff` for B).
-4. Teammate increments `metadata.revision_number`, sends the notify `SendMessage` carrying the revised payload verbatim, re-SETs `intentional_wait` with a fresh `since` and a `covers_since` equal to it.
-5. Lead reviews; either accepts (per [Completion Authority](#completion-authority)) or rejects again (revision_number = N+1).
+4. Teammate raises `metadata.revision_number` by one in the same `TaskUpdate` that writes the revised deliverable, sends the notify `SendMessage` carrying the revised payload verbatim, re-SETs `intentional_wait` with a fresh `since` and a `covers_since` equal to it.
+5. Lead reviews; either accepts (per [Completion Authority](#completion-authority)) or rejects again, setting `revision_number` to the revision being rejected: the teammate's current `metadata.revision_number`, 1 when absent.
 
 > **Cycle limit**: 3+ rejection cycles on the same task is an imPACT META-BLOCK signal. See [imPACT.md](../commands/imPACT.md).
 

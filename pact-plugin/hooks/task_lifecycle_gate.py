@@ -321,7 +321,11 @@ try:
         emit_task_metadata_snapshot,
     )
     from shared.task_utils import is_teachback_subject as _is_teachback_subject
-    from shared.task_utils import read_task_json, resolve_task_dir
+    from shared.task_utils import (
+        iter_team_task_jsons,
+        read_task_json,
+        resolve_task_dir,
+    )
     from shared.teachback_schema import (
         DISPATCH_VARIETY_KEYS,
         TEACHBACK_OBJECT_FIELDS,
@@ -335,6 +339,7 @@ try:
         validate_reasoning_reconstruction,
     )
     from shared.tool_response import extract_tool_response
+    from shared.wait_target import arm_command, revision_number, wait_identity
 except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catch-all
     _emit_load_failure_advisory("module imports", _module_load_error)
 
@@ -353,6 +358,10 @@ except BaseException as _module_load_error:  # noqa: BLE001 — fail-closed catc
 # rationale (the SSOT for self-completion exemption is agentType, but
 # the name perimeter blocks teammates from spawning under reserved
 # names that could shadow legitimate secretary spawn).
+
+# The secretary's canonical task-owner names; a secretary spawned under
+# another name is recognised by its team-config agentType instead.
+_SECRETARY_NAMES = frozenset({"secretary", "pact-secretary"})
 
 # Teachback-exempt dispatch carve-out resolution is delegated entirely to
 # is_teachback_exempt(owner, team_name) in shared.intentional_wait.
@@ -1416,6 +1425,430 @@ def _resolve_required_band_via_blocks(
         # that also fails to resolve returns None → "unresolvable".
         return _inherit_band_from_parent(task_b, team_name) or "unresolvable"
     return _band_from_total(total)
+
+
+def _wait_arm_advisory(
+    shape: str, team_name: str, task_id: str, predicate: str
+) -> tuple[str, str]:
+    """The (rule, message) advisory supplying the ready-to-run arm command
+    for one teammate-deliverable wait, built by shared/wait_target.py's
+    arm_command (the one builder every emitter uses). The deadline is a
+    sane default the lead edits when the expected wait differs. ADVISORY
+    ONLY: this gate never spawns the watcher; the lead launches it as a
+    background task the harness tracks, because a hook-spawned process is
+    not harness-tracked and its completion would reach nothing idle."""
+    command = arm_command(team_name, task_id, predicate, 1800)
+    message = (
+        f"PACT task_lifecycle_gate: {shape} — you are about to wait on a "
+        "teammate deliverable. Arm the structural wait watcher BEFORE you "
+        "end this turn, as one background task the harness tracks: one "
+        "`Bash` call with `run_in_background: true`, or, where `Bash` is "
+        "reached only through a REPL that refuses that flag, the same "
+        "command awaited with a short timeout (for example 3000 ms) so it "
+        "moves to the background:\n"
+        f"{command}\n"
+        "Its completion notification re-invokes you: exit 0 deliverable "
+        "landed, 3 deadline expired with it absent, 4 could not watch at "
+        "all. A duplicate arm whose deliverable is already present exits "
+        "0 immediately — re-arming is safe. When the user may be away, also "
+        "schedule a recurring `CronCreate` check keyed on the deliverable, "
+        "not on whether a message arrived, and delete it when the wait "
+        "resolves."
+    )
+    return "wait_arm_supply", message
+
+
+def _is_non_lead_frame(input_data: dict) -> bool:
+    """True iff this frame's agent_type positively names a NON-lead actor —
+    a teammate (in-process or separate-process) or an Agent-tool subagent.
+    The wait-arm advisories are lead-shaped, so such frames are suppressed.
+
+    The INVERSE of a lead test on purpose: ``pact_context.is_lead`` returns
+    False for a lead launched with no --agent flag, and gating the supply on
+    it would re-darken the advisory for exactly the plain-lead launch class.
+    Suppression instead keys on the only field that positively identifies a
+    non-lead actor: an agent_type that is present and is not a lead
+    spelling (the same shape wait_filler_gate.is_teammate_frame tests).
+    Pure; never raises on a dict."""
+    agent_type = (
+        input_data.get("agent_type") if isinstance(input_data, dict) else None
+    )
+    return (
+        isinstance(agent_type, str)
+        and bool(agent_type)
+        and agent_type not in pact_context.LEAD_AGENT_TYPES
+    )
+
+
+def _owner_resolves_to_lead(owner: str, team_name: str) -> bool:
+    """True iff this owner resolves through team config to a LEAD agentType
+    (``shared.pact_context.LEAD_AGENT_TYPES`` is the SSOT), so a lead-owned
+    task never qualifies as a watch target at either arm-supply shape.
+
+    Why this exists beside ``is_pact_specialist_owner``: the registry check
+    that predicate composes admits ANY ``agents/pact-*.md`` definition —
+    including the orchestrator a lead member resolves to — so it returns
+    True for the bare lead name, and a lead-owned pending parent would
+    pass qualification at both shapes (measured live). The
+    specialist leg answers "is this owner a pact-* agent"; this one answers
+    "is this owner THE lead", and a watch target needs the first WITHOUT the
+    second. Fail-closed to False on every unresolvable path (empty inputs,
+    missing/malformed config, member-not-found, non-string agentType, any
+    unexpected exception): an owner that does not positively resolve to a
+    lead agentType is not a lead, and the specialist leg beside this one
+    fail-closes the same way."""
+    if not isinstance(owner, str) or not owner:
+        return False
+    if not isinstance(team_name, str) or not team_name:
+        return False
+    try:
+        for member in pact_context.iter_team_members(team_name):
+            if member.get("name") == owner:
+                agent_type = member.get("agentType")
+                return (
+                    isinstance(agent_type, str)
+                    and agent_type in pact_context.LEAD_AGENT_TYPES
+                )
+        return False
+    except Exception:
+        return False
+
+
+def _norm_id(value: object) -> str:
+    """A task id as the store compares it: an int (not bool) or a non-empty
+    string becomes its stripped string form; anything else names no task
+    and becomes "". The store mixes id types, so ids are compared only in
+    this form."""
+    if isinstance(value, bool):
+        return ""
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _norm_ids(*sources: object) -> list:
+    """The normalised, de-duplicated ids named by each list in sources, in
+    order. Non-list sources and entries that name no task are dropped
+    before de-duplication."""
+    ids: list = []
+    for source in sources:
+        if isinstance(source, list):
+            ids.extend(i for i in (_norm_id(v) for v in source) if i)
+    return list(dict.fromkeys(ids))
+
+
+def _live(record: dict) -> bool:
+    return record.get("status") in ("pending", "in_progress")
+
+
+def _open_blockers(
+    task: dict, store_team: str, added: object = None, done: frozenset = frozenset()
+) -> list:
+    """Normalised ids of the blockers still gating `task`: its on-disk
+    `blockedBy` plus this write's `addBlockedBy`, minus `done` (tasks
+    this very write completes, which the disk may not show yet), minus
+    unreadable records (nothing can complete them), minus completed ones."""
+    open_ids = []
+    for blocker_id in _norm_ids(task.get("blockedBy"), added):
+        if blocker_id in done:
+            continue
+        blocker = read_task_json(blocker_id, store_team, base_fallback=False)
+        if blocker and blocker.get("status") != "completed":
+            open_ids.append(blocker_id)
+    return open_ids
+
+
+def _handoff_ready(
+    task_id: str,
+    store_team: str,
+    done: frozenset = frozenset(),
+    added: object = None,
+    member_team: str = "",
+) -> bool:
+    """HANDOFF-READY: the task is live, is not a teachback gate, is owned by
+    a specialist who is not the lead or the secretary, and has no open
+    blocker. Task records come from the store team; the owner's role comes
+    from the membership team's config (they differ in a config-less
+    substrate)."""
+    record = read_task_json(task_id, store_team, base_fallback=False)
+    owner = record.get("owner")
+    member_team = member_team or store_team
+    return (
+        _live(record)
+        and not _is_teachback_subject(record.get("subject") or "")
+        and isinstance(owner, str)
+        and bool(owner.strip())
+        and is_pact_specialist_owner(owner, member_team)
+        and not _owner_resolves_to_lead(owner, member_team)
+        and not _secretary_owned(owner, member_team)
+        and not _open_blockers(record, store_team, added, done)
+    )
+
+
+def _secretary_owned(owner: str, member_team: str) -> bool:
+    """True for a task the secretary owns: its canonical name, or a member
+    whose team-config agentType is teachback-exempt (the secretary). The
+    lead does not wait on the secretary's bookkeeping, so no arm."""
+    return owner.strip() in _SECRETARY_NAMES or is_teachback_exempt(owner, member_team)
+
+
+def _teachback_ready(
+    task_id: str,
+    store_team: str,
+    member_team: str = "",
+    done: frozenset = frozenset(),
+    added: object = None,
+    claimed: bool = False,
+) -> bool:
+    """TEACHBACK-READY: a teachback gate handed to its teammate (pending,
+    with an owner who is not the secretary), not yet accepted, and with no
+    open blocker. With `claimed` (a blocker's completion), a gate the
+    teammate already claimed counts too while it carries no
+    teachback_submit: the teammate could not start it until now."""
+    record = read_task_json(task_id, store_team, base_fallback=False)
+    owner = record.get("owner")
+    status = record.get("status")
+    metadata = record.get("metadata")
+    submitted = isinstance(metadata, dict) and bool(metadata.get("teachback_submit"))
+    return (
+        (status == "pending" or (claimed and status == "in_progress" and not submitted))
+        and _is_teachback_subject(record.get("subject") or "")
+        and isinstance(owner, str)
+        and bool(owner.strip())
+        and not _secretary_owned(owner, member_team or store_team)
+        and not _open_blockers(record, store_team, added, done)
+    )
+
+
+def _changed(tool_response: object, field: str) -> bool:
+    """False only when the harness reports the fields this write changed
+    and `field` is not among them; a write that changed nothing the
+    arming predicates read is not an evaluation write. Without that report
+    the write counts as a change."""
+    if isinstance(tool_response, dict):
+        updated = tool_response.get("updatedFields")
+        if isinstance(updated, list):
+            return field in updated
+    return True
+
+
+_REVISED_DELIVERABLE = {
+    "handoff_rejection": "handoff",
+    "teachback_rejection": "teachback_submit",
+}
+
+
+def _current_revision(metadata: object) -> int:
+    """The teammate's current revision, read by the watcher's own parser
+    (shared/wait_target.revision_number) so the advisory and the watcher
+    cannot disagree."""
+    return revision_number(
+        metadata.get("revision_number") if isinstance(metadata, dict) else None
+    )
+
+
+def revision_advisories(input_data: dict, tool_input: dict, store_team: str) -> list:
+    """Advisories that keep the watcher's revision check honest.
+
+    A lead write recording a rejection must carry the revision being
+    rejected, the teammate's current metadata.revision_number (1 when
+    absent); any other number either holds the revised deliverable past its
+    arrival or fires the watcher on the rejected original. A teammate write
+    that raises metadata.revision_number must carry the revised deliverable
+    in the same write; raised alone, a watcher already waiting fires on the
+    rejected original still on disk. A teammate write that re-submits the
+    deliverable must leave metadata.revision_number above the rejection's;
+    otherwise the watcher keeps holding and never sees the revision."""
+    out: list = []
+    task_id = _norm_id(tool_input.get("taskId"))
+    metadata = tool_input.get("metadata")
+    if not task_id or not isinstance(metadata, dict):
+        return out
+    if not _is_non_lead_frame(input_data):
+        record = read_task_json(task_id, store_team, base_fallback=False)
+        expected = _current_revision(record.get("metadata"))
+        for rejection_key in _REVISED_DELIVERABLE:
+            rejection = metadata.get(rejection_key)
+            if not isinstance(rejection, dict):
+                continue
+            written = rejection.get("revision_number")
+            if written is None and expected == 1:
+                continue  # the watcher reads an omitted number as 1
+            if written != expected or isinstance(written, bool):
+                out.append((
+                    "rejection_revision_mismatch",
+                    f"PACT task_lifecycle_gate: Task {task_id}'s "
+                    f"{rejection_key} carries revision_number={written!r}, "
+                    f"but the revision being rejected is {expected} (the "
+                    "teammate's current metadata.revision_number, 1 when "
+                    "absent). Rewrite the rejection with "
+                    f"revision_number={expected}: the deliverable watcher "
+                    "holds the rejected deliverable until the teammate's "
+                    "revision number exceeds the rejection's, so a wrong "
+                    "number fires it early or holds the revision past its "
+                    "arrival.",
+                ))
+        return out
+    raises = "revision_number" in metadata
+    delivers = any(d in metadata for d in _REVISED_DELIVERABLE.values())
+    if not raises and not delivers:
+        return out
+    record = read_task_json(task_id, store_team, base_fallback=False)
+    on_disk = record.get("metadata") if isinstance(record, dict) else None
+    on_disk = on_disk if isinstance(on_disk, dict) else {}
+    for rejection_key, deliverable in _REVISED_DELIVERABLE.items():
+        rejection = on_disk.get(rejection_key)
+        if not isinstance(rejection, dict):
+            continue
+        rejected = revision_number(rejection.get("revision_number"))
+        if deliverable in metadata and _current_revision(on_disk) <= rejected:
+            out.append((
+                "revised_deliverable_without_raised_revision",
+                f"PACT task_lifecycle_gate: this write re-submits Task {task_id}'s "
+                f"metadata.{deliverable} but metadata.revision_number is "
+                f"{_current_revision(on_disk)}, not above the rejected "
+                f"revision {rejected}. Raise metadata.revision_number to "
+                f"{rejected + 1} in the same TaskUpdate as the revised "
+                f"{deliverable}: a watcher waiting on the revision holds "
+                "until the number rises past the rejection's, so without it "
+                "the revision is never seen.",
+            ))
+        # Only the number that clears this rejection can be the raise; a
+        # post-write frame cannot tell it from a rewrite of that same number,
+        # so the text is conditional.
+        written = revision_number(metadata.get("revision_number"))
+        if raises and deliverable not in metadata and written == rejected + 1:
+            out.append((
+                "revision_raised_without_deliverable",
+                f"PACT task_lifecycle_gate: this write sets Task {task_id}'s "
+                f"metadata.revision_number to {written}, one above the "
+                f"rejected revision {rejected}, but does not carry the revised "
+                f"metadata.{deliverable}. If this write is what raised it, "
+                f"re-send the full revised {deliverable} object and the "
+                "raised revision_number in ONE TaskUpdate: a watcher waiting "
+                "on the revision fires as soon as the number rises, and "
+                "would read the rejected original still on disk. If the "
+                f"revised {deliverable} was already written with this "
+                "number, nothing is needed.",
+            ))
+    return out
+
+
+def _newly_completed(tool_response: object) -> bool:
+    """False only when the harness's statusChange shows this completion
+    did not move the task into completed (it was already completed). A
+    missing or malformed statusChange (not a dict, or no "to") counts as a
+    completion, so a malformed response never suppresses an arm."""
+    if isinstance(tool_response, dict):
+        change = tool_response.get("statusChange")
+        if isinstance(change, dict) and "to" in change:
+            return change.get("to") == "completed" and change.get("from") != "completed"
+    return True
+
+
+def arm_candidates(
+    tool_name: str,
+    tool_input: dict,
+    tool_response: object,
+    store_team: str,
+    member_team: str = "",
+) -> list:
+    """The (task_id, predicate, shape) arms this lead write supplies under
+    the arming invariant: every task the write could have made ready, whose
+    predicate now holds. Evaluated only at the writes that can flip a
+    predicate; the caller gates on a lead frame and a resolved store team.
+
+    E1 owner wiring (a TaskUpdate that changes the owner) and E2 a TaskCreate
+    with an owner: the task itself, TEACHBACK-READY for a teachback gate,
+    else HANDOFF-READY. E3 a completion of X: every task X blocks (from the
+    response record, the disk record, and a store scan for blockedBy naming
+    X), TEACHBACK-READY or else HANDOFF-READY with X counted as done. E4 a rejection in this write's
+    metadata: the written task, live only, predicate by rejection kind.
+    Adding a blocker (addBlockedBy alone) can only make a task not ready;
+    an addBlockedBy carried by an E1 or E2 write counts as open for it.
+    Duplicates are harmless: the watcher fast-exits when the deliverable is
+    present and holds a rejected one until its revision. Both teams come
+    from shared/wait_target.wait_identity: tasks are read from store_team,
+    owner roles from member_team."""
+    out: list = []
+    member_team = member_team or store_team
+
+    def add(task_id, predicate, shape):
+        item = (task_id, predicate, shape)
+        if task_id and all(o[:2] != item[:2] for o in out):
+            out.append(item)
+
+    if not isinstance(tool_input, dict) or not store_team:
+        return out
+    response_task = (
+        tool_response.get("task") if isinstance(tool_response, dict) else None
+    )
+    response_task = response_task if isinstance(response_task, dict) else {}
+
+    if tool_name == "TaskCreate":
+        task_id = _norm_id(_created_task_id(tool_response, tool_input))
+        record = read_task_json(task_id, store_team, base_fallback=False) if task_id else {}
+        owner = response_task.get("owner") or record.get("owner") or tool_input.get("owner")
+        if task_id and isinstance(owner, str) and owner.strip():
+            if _teachback_ready(
+                task_id, store_team, member_team, added=tool_input.get("addBlockedBy")
+            ):
+                add(task_id, "teachback_submit", "teachback gate dispatched")
+            elif _handoff_ready(
+                task_id, store_team, added=tool_input.get("addBlockedBy"),
+                member_team=member_team,
+            ):
+                add(task_id, "handoff", "work task created")
+        return out
+
+    if tool_name != "TaskUpdate":
+        return out
+    task_id = _norm_id(tool_input.get("taskId"))
+    if not task_id:
+        return out
+
+    owner = tool_input.get("owner")
+    if isinstance(owner, str) and owner.strip() and _changed(tool_response, "owner"):
+        if _teachback_ready(
+            task_id, store_team, member_team, added=tool_input.get("addBlockedBy")
+        ):
+            add(task_id, "teachback_submit", "teachback gate dispatched")
+        elif _handoff_ready(
+            task_id, store_team, added=tool_input.get("addBlockedBy"),
+            member_team=member_team,
+        ):
+            add(task_id, "handoff", "work task wired")
+
+    if tool_input.get("status") == "completed" and _newly_completed(tool_response):
+        record = read_task_json(task_id, store_team, base_fallback=False)
+        done = frozenset({task_id})
+        dependents = _norm_ids(response_task.get("blocks"), record.get("blocks"))
+        for other in iter_team_task_jsons(store_team, tasks_base_dir=None):
+            if isinstance(other, dict) and task_id in _norm_ids(other.get("blockedBy")):
+                dependents = _norm_ids(dependents, [other.get("id")])
+        for dependent in dependents:
+            if dependent == task_id:
+                continue
+            if _teachback_ready(dependent, store_team, member_team, done, claimed=True):
+                add(dependent, "teachback_submit", "blocker completed")
+            elif _handoff_ready(
+                dependent, store_team, done, member_team=member_team
+            ):
+                add(dependent, "handoff", "blocker completed")
+
+    metadata = tool_input.get("metadata")
+    if isinstance(metadata, dict):
+        for rejection_key, predicate in (
+            ("handoff_rejection", "handoff"),
+            ("teachback_rejection", "teachback_submit"),
+        ):
+            if isinstance(metadata.get(rejection_key), dict) and _live(
+                read_task_json(task_id, store_team, base_fallback=False)
+            ):
+                add(task_id, predicate, "deliverable rejected")
+    return out
 
 
 def evaluate_lifecycle(
@@ -2514,6 +2947,34 @@ def evaluate_lifecycle(
         ):
             _emit_per_write_snapshot(
                 team_name, task_id, incoming_metadata, task=task_a
+            )
+
+    # The wait mechanism's store and membership come from wait_identity,
+    # the one identity source both arm-command producers share; nothing on
+    # these paths resolves a team any other way.
+    identity = wait_identity(input_data)
+
+    # Revision-number coherence: the watcher holds a rejected deliverable
+    # until metadata.revision_number exceeds the rejection's, so both sides
+    # of that comparison must be written as the protocol says.
+    if tool_name == "TaskUpdate" and identity.store_team:
+        advisories.extend(
+            revision_advisories(input_data, tool_input, identity.store_team)
+        )
+
+    # Structural wait arming: one invariant, evaluated by arm_candidates at
+    # the writes that can make a task ready. ADVISORY ONLY — the lead
+    # launches the watcher with its own Bash frame; this gate never spawns
+    # a process. LEAD-SHAPED: a frame whose agent_type names a non-lead
+    # actor evaluates nothing.
+    if not _is_non_lead_frame(input_data):
+        store_team = identity.store_team
+        for arm_task_id, predicate, shape in arm_candidates(
+            tool_name, tool_input, tool_response, store_team,
+            identity.member_team,
+        ):
+            advisories.append(
+                _wait_arm_advisory(shape, store_team, arm_task_id, predicate)
             )
 
     return advisories
