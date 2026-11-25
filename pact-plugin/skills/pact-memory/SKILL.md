@@ -527,7 +527,8 @@ a file row in this checkout is linked by a memory saved after
 never counts), every existing absolute file row of the bucket lies in this
 checkout, and the bucket holds memories, `project-id show` lists it as `earlier_id` with a rekey command into this
 checkout's id, and a read prints one notice per process naming it; otherwise
-`project-id show` lists it as an ordinary bucket with no command. Join them with
+`project-id show` lists it as an ordinary bucket with no command, as it does
+for every bucket when the repository has no `description` file. Join them with
 `project-id rekey --from=<id> --to=<id>`, and run it with `--apply` only with
 the user's explicit approval.
 

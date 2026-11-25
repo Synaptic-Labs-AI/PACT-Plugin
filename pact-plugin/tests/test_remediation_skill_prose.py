@@ -434,7 +434,8 @@ class TestCanonicaliserSpellings:
             "earlier_id with a rekey command "
             "into this checkout's id, and a read prints one notice per process naming "
             "it; otherwise project-id show lists it as an ordinary bucket with no "
-            "command. Join them with project-id rekey --from=<id> --to=<id>, and "
+            "command, as it does for every bucket when the repository has no "
+            "description file. Join them with project-id rekey --from=<id> --to=<id>, and "
             "run it with --apply only with the user's explicit approval."
         ) in _body(SKILL)
 

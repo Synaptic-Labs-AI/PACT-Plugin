@@ -13,6 +13,7 @@ Used by: pytest; exercises scripts.database.bucket_evidence on real files.
 from __future__ import annotations
 
 import sqlite3
+import os
 from datetime import datetime, timedelta, timezone
 
 from fixtures.identity_git import assert_outside_repository, make_repo
@@ -119,3 +120,21 @@ def test_a_re_clone_with_every_file_back_is_placed_by_existence(tmp_path):
     _seed_rows(tmp_path / "m.db", [repo / "README", repo / "src" / "a.py"], OLD)
     counts = _evidence(tmp_path / "m.db", repo)
     assert (counts["contained_rows"], counts["vanished"]) == (2, 0), counts
+
+
+def test_no_description_counts_for_a_legacy_bucket_but_not_for_an_earlier_id(tmp_path):
+    """No `.git/description`: a deleted file's row is still contained for a
+    legacy bucket (documented), but `dated_only` (an earlier canonical id)
+    counts it vanished. RED WHEN a missing description dates a row on the
+    earlier-id path."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "foo", remote="https://github.com/acme/foo.git")
+    os.remove(repo / ".git" / "description")
+    _seed(tmp_path / "m.db", repo / "src" / "gone.py", OLD)
+    assert _evidence(tmp_path / "m.db", repo)["contained_rows"] == 1
+    conn = sqlite3.connect(str(tmp_path / "m.db"))
+    try:
+        counts = bucket_evidence(conn, "foo", [repo], root_common=repo / ".git", dated_only=True)
+    finally:
+        conn.close()
+    assert (counts["contained_rows"], counts["vanished"]) == (0, 1), counts

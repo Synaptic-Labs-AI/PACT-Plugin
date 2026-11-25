@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -187,6 +188,37 @@ def test_an_old_shared_file_alone_costs_no_git_call(tmp_path, monkeypatch):
     assert memory._read_project_scopes() == ("github.com/o/proj",)
     assert memory._earlier_canonical == {}
     assert asked == [], asked
+
+
+def test_a_checkout_with_no_description_names_no_earlier_id(tmp_path, monkeypatch, caplog):
+    """No `.git/description` dates the clone, so no row is dated and no
+    earlier id is named: neither an old bucket on a shared README nor one
+    linked today. RED WHEN a missing description counts as dated on the
+    earlier-id path, in the evidence walk (see the bucket_evidence test) or
+    the pre-git filter (a gate-roots call). The rename test above is the
+    control with a description."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/o/proj.git")
+    (repo / "README").write_text("r\n", encoding="utf-8")
+    (repo / "a.py").write_text("a\n", encoding="utf-8")
+    os.remove(repo / ".git" / "description")
+    store = tmp_path / "store.db"
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        _memory(conn, "m1", SHARED, OLD_STAMP, repo / "README")
+        _memory(conn, "m2", OLD, _later(), repo / "a.py")
+        conn.commit()
+    _fresh(monkeypatch, repo)
+    asked = []
+    real = PACTMemory._legacy_gate_roots
+    monkeypatch.setattr(PACTMemory, "_legacy_gate_roots",
+                        lambda self, root: asked.append(root) or real(self, root))
+    memory = PACTMemory(session_id="s", db_path=store)
+    with caplog.at_level(logging.WARNING):
+        memory._read_project_scopes()
+    assert memory._earlier_canonical == {}
+    assert "is not this checkout's id" not in caplog.text
+    assert asked == [], "the pre-git filter let an undated bucket ask git"
 
 
 def test_a_new_store_stamp_replaces_the_cached_answer(renamed):

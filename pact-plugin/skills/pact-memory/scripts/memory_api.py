@@ -4071,7 +4071,9 @@ class PACTMemory:
                         with_files = [
                             bucket for bucket in with_files
                             if any(
-                                _linked_after_description(connection, file_id, recorded_common)
+                                _linked_after_description(
+                                    connection, file_id, recorded_common, missing_counts=False
+                                )
                                 for (file_id,) in connection.execute(
                                     "SELECT id FROM files WHERE project_id = ? "
                                     f"AND ({' OR '.join(clauses)})",

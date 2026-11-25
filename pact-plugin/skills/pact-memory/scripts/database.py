@@ -2036,12 +2036,15 @@ BUCKET_EVIDENCE_KEYS = (
 
 
 def _linked_after_description(
-    conn: sqlite3.Connection, file_id: Any, common_dir: Optional[str]
+    conn: sqlite3.Connection, file_id: Any, common_dir: Optional[str],
+    missing_counts: bool = True,
 ) -> bool:
     """Whether a memory linked to file row `file_id` was saved after
     `<common_dir>/description` last changed (its ctime), the date a clone or
     `git init` gives this repository. No description file: no ordering
-    check, so True (as a session record's `_description_predates` rule).
+    check, so `missing_counts` (True, as a session record's
+    `_description_predates` rule; False for an earlier id, which no
+    undated row may place).
     No common dir, a description that is not a regular file, or a creation
     time without a zone: False. Never raises."""
     if not common_dir:
@@ -2049,7 +2052,7 @@ def _linked_after_description(
     try:
         described = os.lstat(os.path.join(common_dir, "description"))
     except FileNotFoundError:
-        return True
+        return missing_counts
     except (OSError, ValueError):
         return False
     if not stat.S_ISREG(described.st_mode):
@@ -2175,7 +2178,9 @@ def bucket_evidence(
             # it counts as vanished.
             contained.append((
                 os.path.lexists(resolved),
-                _linked_after_description(conn, file_id, verified_common),
+                _linked_after_description(
+                    conn, file_id, verified_common, missing_counts=not dated_only
+                ),
             ))
         elif not os.path.lexists(resolved):
             counts["vanished"] += 1
