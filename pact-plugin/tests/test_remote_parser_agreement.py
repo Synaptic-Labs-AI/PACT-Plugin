@@ -1,116 +1,116 @@
 """
-Cross-parser agreement: two remote-URL parsers, one security rule.
+The backlog's github.com slug, end to end, against fixed expected values.
 
-`project_identity.normalize_remote_url` (the memory canonicaliser) and
-`shared.backlog._slug_from_remote_url` (the tracker-ref resolver) parse the
-same inputs for different purposes. They deliberately diverge on the HOST
-filter — the backlog one is github.com-only — but they must never diverge on
-the two REFUSALS that exist for a security reason:
+`shared.backlog._slug_from_remote_url` (the tracker-ref resolver) reads a
+remote through ONE parser, the memory canonicaliser
+`project_identity.normalize_remote_url`, and takes `(owner, repo)` from a
+`github.com/<owner>/<repo>` id whose names are safe slug characters
+(`_valid_slug`). There is no second parser to agree with, so these tests pin
+the composite's output for a representative corpus, including the inputs
+that must be refused for a security reason:
 
 - any backslash, and
 - more than one `@`.
 
 `urlsplit` and git disagree about where the host ends in
 `https://evil.com\\@github.com/o/n`: it is github.com to one reading and not
-the other. A parser that accepts it can be made to name a repository it is not
-talking to. Two parsers in one repo with different rules on that input is the
-defect; this module is what keeps them aligned.
+the other. Accepting it could make the slug name a repository the remote
+does not talk to.
 
-RED WHEN: either parser loses a refusal, or the backlog's slug and the
-memory id disagree on any spelling of a generated corpus: the slug is
-`(owner, repo)` exactly when the id is `github.com/<owner>/<repo>` with slug
-characters, and None otherwise (the host filter is that rule).
+RED WHEN a spelling's slug changes: a refusal is lost, a served spelling
+stops resolving, or the slug check (`_valid_slug`) or the id stops refusing
+a form it refuses.
 """
 
-from scripts.project_identity import normalize_remote_url
+import pytest
+
 from shared.backlog import _slug_from_remote_url
 
-# Inputs that BOTH parsers must refuse. Each names the rule it exercises.
+# The inputs refused for a security reason, by the slug here and by the
+# memory id (`test_remediation_identity_parser` checks the id on them too).
 SHARED_REFUSALS = (
     ("https://evil.com\\@github.com/o/n", "backslash + @ ambiguity (the measured case)"),
     ("git@host:owner\\repo", "a backslash in the path"),
     ("https://a@b@host/owner/repo", "more than one @"),
     ("git@a@b:owner/repo", "more than one @ in scp form"),
-    # THE TWO ROWS THE BACKLOG PARSER'S `@` RULE ALONE REFUSES. The two rows
-    # above name a non-github host, so the backlog parser's host filter would
-    # refuse them even without the `@` rule. These name github.com.
     ("https://a@b@github.com/o/n", "more than one @, github.com host"),
     ("git@a@b@github.com:o/n", "more than one @ in scp form, github.com host"),
 )
 
 
-def test_both_parsers_refuse_the_shared_corpus():
-    """Every shared-refusal input is refused by BOTH parsers."""
+def test_every_security_refusal_gives_no_slug():
     for url, rule in SHARED_REFUSALS:
-        assert normalize_remote_url(url) is None, (
-            f"the memory canonicaliser accepted {url!r} ({rule})"
-        )
-        assert _slug_from_remote_url(url) is None, (
-            f"the backlog parser accepted {url!r} ({rule})"
-        )
+        assert _slug_from_remote_url(url) is None, (url, rule)
 
 
-def test_the_parsers_are_live_on_a_shared_positive_control():
-    """A github.com remote both parsers can read, so a null refusal is meaningful.
+# (url, the slug the backlog must read, or None), fixed by hand.
+CORPUS = [
+    # Served github.com spellings: one repository, one lower-cased slug.
+    ("https://github.com/Owner/Repo.git", ("owner", "repo")),
+    ("https://github.com/o/r", ("o", "r")),
+    ("https://github.com/o/r/", ("o", "r")),
+    ("https://github.com/o/r.git/", ("o", "r")),
+    ("https://github.com/O/R.GIT", ("o", "r")),
+    ("https://user:tok@GitHub.com/o/r.git", ("o", "r")),
+    ("http://github.com/o/r", ("o", "r")),
+    ("https://github.com:443/o/r", ("o", "r")),
+    ("https://www.github.com/O/R", ("o", "r")),
+    ("ssh://git@github.com/o/r.git", ("o", "r")),
+    ("ssh://git@github.com:22/o/r", ("o", "r")),
+    ("ssh://git@ssh.github.com:443/o/r.git", ("o", "r")),
+    ("git+ssh://git@github.com/o/r", ("o", "r")),
+    ("ssh+git://git@github.com/o/r.git", ("o", "r")),
+    ("git://github.com/o/r", ("o", "r")),
+    ("git@github.com:o/r.git", ("o", "r")),
+    ("me@github.com:o/r", ("o", "r")),
+    ("github.com:o/r", ("o", "r")),
+    ("git@ssh.github.com:o/r", ("o", "r")),
+    ("https://github.com/o/r\n", ("o", "r")),
+    ("https://github.com/a.b/c_d-e", ("a.b", "c_d-e")),
+    # Refused for a security reason: backslash, more than one `@`.
+    ("https://evil.com\\@github.com/o/n", None),
+    ("git@github.com:owner\\repo", None),
+    ("https://a@b@github.com/o/n", None),
+    ("git@a@b@github.com:o/n", None),
+    # Names that are not slugs: all-dots, a quote, a space, a home path.
+    ("https://github.com/o/...", None),
+    ("https://github.com/o/..", None),
+    ("https://github.com/./r", None),
+    ('https://github.com/o/r"x', None),
+    ("https://github.com/o/r x", None),
+    # Spellings the id declines or names no github.com repository with.
+    ("https://github.com/o", None),
+    ("https://github.com/o/r/extra", None),
+    ("https://github.com/o/r/.git", None),
+    ("git@github.com:~/o/r", None),
+    ("ssh://git@github.com/~/o/r", None),
+    ("https://github.com/o/r?x", None),
+    ("https://github.com/o/r#x", None),
+    ("https://github.com:8443/o/r", None),
+    ("ssh://git@github.com:022/o/r", None),
+    ("https://github.com:00443/o/r", None),
+    ("https://ssh.github.com/o/r", None),
+    ("ssh://git@ssh.github.com:2222/o/r", None),
+    ("https://www.github.com:8443/o/r", None),
+    ("  https://github.com/o/r\n", None),
+    ("https://gitlab.com/o/r", None),
+    ("https://github.example.com/o/r", None),
+    ("ftp://github.com/o/r", None),
+    ("codecommit::us-east-1://r", None),
+    (None, None),
+    ("", None),
+    ("not a url", None),
+]
 
-    Without this arm both refusals could pass because a parser had stopped
-    working altogether.
-    """
-    url = "https://github.com/Owner/Repo.git"
-    assert normalize_remote_url(url) == "github.com/owner/repo"
-    assert _slug_from_remote_url(url) == ("owner", "repo")
+
+@pytest.mark.parametrize("url, expected", CORPUS)
+def test_the_backlog_slug_of_each_spelling(url, expected):
+    assert _slug_from_remote_url(url) == expected
 
 
-def _github_remote_corpus():
-    """Spellings of github.com remotes and their near misses: every scheme
-    and the scp form, with and without a user, each GitHub host, default,
-    other and leading-zero ports, mixed case, `.git` forms, `~/`, percent
-    escapes, one and three segments, and query or fragment tails."""
-    hosts = ["github.com", "GitHub.com", "www.github.com", "ssh.github.com", "gitlab.com"]
-    ports = ["", ":22", ":443", ":80", ":9418", ":8443", ":022", ":00443", ":"]
-    paths = [
-        "Acme/Widget", "acme/widget.git", "Acme/Widget.GIT", "Acme/Widget/", "Acme/Widget/.git",
-        "acme/widget.git.git", "~/acme/widget", "acme/wid%67et", "acme", "acme/widget/x",
-        "acme/widget?x", "acme/widget#x", "a.b/c_d-e",
-    ]
-    for scheme in ["https", "http", "ssh", "git", "git+ssh", "ssh+git"]:
-        for user in ["", "git@"]:
-            for host in hosts:
-                for port in ports:
-                    for path in paths:
-                        yield f"{scheme}://{user}{host}{port}/{path}"
-    for user in ["", "git@", "me@"]:
-        for host in hosts:
-            for path in paths:
-                yield f"{user}{host}:{path}"
-
-
-def _slug_the_id_names(url):
-    identifier = normalize_remote_url(url)
-    if identifier is None:
-        return None
-    host, _, path = identifier.partition("/")
-    owner, _, name = path.partition("/")
-    if host != "github.com" or not name or "/" in name:
-        return None
-    import re
-
-    allowed = re.compile(r"^[A-Za-z0-9._-]+\Z")
-    if not (allowed.match(owner) and allowed.match(name)) or {".", ".."} & {owner, name}:
-        return None
-    return owner, name
-
-
-def test_the_backlog_slug_and_the_id_agree_on_every_accepted_form():
-    """Accepted-form parity over the generated corpus, not only the shared
-    refusals: the backlog names a github.com repository exactly when the
-    memory id does, and the same one."""
-    corpus = list(_github_remote_corpus())
-    accepted = [url for url in corpus if _slug_the_id_names(url) is not None]
-    assert len(corpus) > 3000 and len(accepted) > 100, (len(corpus), len(accepted))  # control: the corpus is live
-    disagree = [
-        (url, _slug_from_remote_url(url), _slug_the_id_names(url))
-        for url in corpus
-        if _slug_from_remote_url(url) != _slug_the_id_names(url)
-    ]
-    assert disagree == [], (len(disagree), disagree[:10])
+def test_the_corpus_holds_both_outcomes():
+    """Control: the corpus pins served spellings and refusals alike, so a
+    parser that answered None (or a slug) for everything would red it."""
+    served = [url for url, expected in CORPUS if expected is not None]
+    refused = [url for url, expected in CORPUS if expected is None]
+    assert len(served) >= 20 and len(refused) >= 25, (len(served), len(refused))
