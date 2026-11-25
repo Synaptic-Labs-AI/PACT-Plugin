@@ -2218,7 +2218,7 @@ class TestTheWorkingMemoryCommentNamesWhenTheFolderNameKeys:
         "the repository's override file or its origin remote",
         "`project-id show` command reports the key in use",
         "which can be a folder name, and how it was chosen",
-        "When the identity declines, nothing is written.",
+        "When the identity declines, no memory entry is written.",
     )
 
     @staticmethod
