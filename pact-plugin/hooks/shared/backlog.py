@@ -156,6 +156,9 @@ _GH_API_HOST_ARGS = ("--hostname", _GITHUB_HOST)
 _REMOTE_SCHEMES = {"https", "http", "ssh", "git", "git+ssh", "ssh+git"}
 # The ssh transports among them: the only ones `ssh.github.com` is read for.
 _SSH_REMOTE_SCHEMES = {"ssh", "git+ssh", "ssh+git"}
+# Each scheme's default port, which the memory id drops (`_DEFAULT_PORTS` in
+# the pact-memory identity module): only that port, or none, is github.com.
+_REMOTE_DEFAULT_PORTS = {"https": 443, "http": 80, "ssh": 22, "git": 9418, "git+ssh": 22, "ssh+git": 22}
 _SCP_REMOTE = re.compile(r"^[^@\s/:\\]+@([^:/\s]+):(.+)\Z")
 # A ref that names an issue or pull request of a github.com repository, as a
 # link. Owner and name are compared to this repository's slug by the callers.
@@ -1599,7 +1602,7 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
         return None
     scp = _SCP_REMOTE.match(url)
     ssh = scp is not None and "://" not in url
-    port = None
+    port = default_port = None
     if ssh:
         host, path = scp.group(1), scp.group(2)
     else:
@@ -1615,13 +1618,19 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
             port = parts.port
         except ValueError:
             return None
+        default_port = _REMOTE_DEFAULT_PORTS.get(parts.scheme.lower())
         path = parts.path
     if host.lower() not in _GITHUB_REMOTE_HOSTS:
         return None
-    if host.lower() == f"ssh.{_GITHUB_HOST}" and (not ssh or port not in (None, 22, 443)):
-        # GitHub's ssh.github.com serves ssh only, on 443 (and 22); the
-        # identity resolver keeps an https remote or another port there as
-        # its own id, and so does this parser.
+    # ONLY THE PORTS THE MEMORY ID FOLDS TO github.com: none or the scheme's
+    # default, and for ssh.github.com, which serves ssh only, also 443. The
+    # identity resolver keeps any other port (or an https remote on
+    # ssh.github.com) as its own id, so this parser reads no slug there.
+    served = port is None or port == default_port
+    if host.lower() == f"ssh.{_GITHUB_HOST}":
+        if not ssh or not (served or port == 443):
+            return None
+    elif not served:
         return None
     path = path[1:] if path.startswith("/") else path
     path = path[:-1] if path.endswith("/") else path

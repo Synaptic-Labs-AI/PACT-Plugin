@@ -300,6 +300,35 @@ def test_control_the_served_ports_keep_the_github_slug(url):
     assert backlog._slug_from_remote_url(url) == ("Acme", "Widget")
 
 
+@pytest.mark.parametrize("url", [
+    "https://github.com:8443/O/N",
+    "ssh://git@github.com:2222/O/N",
+    "https://www.github.com:8443/O/N",
+    "git://github.com:9419/O/N",
+])
+def test_a_ported_github_remote_is_no_github_slug(url):
+    """The id keeps a non-default port as its own server; the backlog reads
+    no github.com slug from it either, so the two parsers agree."""
+    from shared import backlog
+
+    assert ":" in pi.normalize_remote_url(url).split("/", 1)[0]
+    assert backlog._slug_from_remote_url(url) is None
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com:443/O/N",
+    "ssh://git@github.com:22/O/N",
+    "http://github.com:80/O/N",
+    "git://github.com:9418/O/N",
+    "https://www.github.com:443/O/N",
+])
+def test_control_a_default_port_keeps_the_github_slug(url):
+    from shared import backlog
+
+    assert pi.normalize_remote_url(url) == "github.com/o/n"
+    assert backlog._slug_from_remote_url(url) == ("O", "N")
+
+
 def test_control_another_port_on_that_host_keeps_its_own_id():
     assert pi.normalize_remote_url("ssh://git@ssh.github.com:2222/Acme/Widget") == "ssh.github.com:2222/Acme/Widget"
 
