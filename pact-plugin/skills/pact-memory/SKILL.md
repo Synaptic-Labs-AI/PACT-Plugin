@@ -465,7 +465,10 @@ Two operator surfaces answer, and they are deliberately ordered:
   working directory. Its first non-blank, non-`#` line is the id, and only a
   canonical `host/owner/repo` id is accepted: a folder-name value is reported
   as `override_ignored` with reason `not_canonical`, and resolution continues
-  without it. To move a copied store's folder-name bucket, use
+  without it. A `github.com` or `www.github.com` pin with no port is read as a
+  github.com remote is: lower-cased outside its `%XX` escapes, with
+  `www.github.com` read as `github.com`, and it must name owner/repo.
+  To move a copied store's folder-name bucket, use
   `project-id rekey --from=<old> --to=<canonical>`. An ssh host alias from
   the user's ssh config stays in the id: `git@github-work:Acme/Widget` gives `github-work/Acme/Widget`,
   while an https clone of the same repository gives `github.com/acme/widget`.

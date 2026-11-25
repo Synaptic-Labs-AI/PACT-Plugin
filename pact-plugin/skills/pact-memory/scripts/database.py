@@ -1734,6 +1734,42 @@ def origin_url_in_config(config_path: Any) -> Optional[str]:
     return urls[0] if urls else None
 
 
+# GitHub's own spelling rules, THE ONE COPY for a remote's id
+# (`project_identity._identifier`) and a pin's (`pin_file_value`): GitHub
+# resolves owner/repo case-insensitively and redirects www.github.com.
+_GITHUB_ESCAPE_RE = re.compile(r"%[0-9a-f]{2}")
+
+
+def github_folded_host(host: str, port: str) -> str:
+    """`github.com` for a port-less `www.github.com`, else `host`."""
+    return "github.com" if host == "www.github.com" and not port else host
+
+
+def github_folded_segment(segment: str) -> str:
+    """A github.com path segment lower-cased OUTSIDE its percent escapes,
+    which stay upper-case as the id grammar requires (`%C3%A9`)."""
+    return _GITHUB_ESCAPE_RE.sub(lambda m: m.group(0).upper(), segment.lower())
+
+
+def _github_folded_pin(candidate: str) -> Optional[str]:
+    """A canonical pin with GitHub's spelling rules applied, or None when it
+    names no GitHub repository. Only the exact port-less hosts `github.com`
+    and `www.github.com` are folded: `www.github.com` becomes github.com,
+    the path is lower-cased outside its escapes, and a path of fewer than
+    two segments (owner/repo) is None, as a one-segment github.com remote
+    declines. Every other host and every ported spelling is unchanged: each
+    is an id a remote can derive."""
+    host, _, path = candidate.partition("/")
+    if host not in ("github.com", "www.github.com"):
+        return candidate
+    segments = path.split("/")
+    if len(segments) < 2:
+        return None
+    return github_folded_host(host, "") + "/" + "/".join(
+        github_folded_segment(segment) for segment in segments
+    )
+
+
 # The most bytes a `pact-project-id` pin file may hold (`pin_file_value`).
 PIN_FILE_MAX_BYTES = 4096
 
@@ -1745,6 +1781,10 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
 
     The first line that is neither blank nor a `#` comment, stripped, after
     an encoding BOM is dropped, is the candidate; it must be a canonical id.
+    A valid candidate then takes GitHub's spelling rules (`_github_folded_pin`),
+    the ones a remote's id takes, and the folded value is checked again: a
+    mixed-case or www github.com pin names the same id its remote would, and
+    a one-segment github.com pin is "not_canonical".
     `reason` is None for a usable value, else "too_long" (over
     `PIN_FILE_MAX_BYTES` bytes, or a candidate over the id length cap),
     "not_utf8", "control_chars", "not_canonical" or "empty". Never raises.
@@ -1770,7 +1810,10 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
             return None, "control_chars"
         if not is_canonical_id(candidate):
             return None, "not_canonical"
-        return candidate, None
+        folded = _github_folded_pin(candidate)
+        if folded is None or not is_canonical_id(folded):
+            return None, "not_canonical"
+        return folded, None
     return None, "empty"
 
 

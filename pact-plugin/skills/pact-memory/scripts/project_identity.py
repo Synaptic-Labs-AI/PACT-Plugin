@@ -797,9 +797,6 @@ _CASE_INSENSITIVE_PATH_HOSTS = frozenset({"github.com"})
 # GitHub's own SSH-over-443 host (`ssh://git@ssh.github.com:443/O/N`): the
 # same service as github.com, so it takes github.com's id.
 _GITHUB_SSH_443_HOST = "ssh.github.com"
-# GitHub's www host, which redirects to github.com.
-_GITHUB_WWW_HOST = "www.github.com"
-_PERCENT_ESCAPE_RE = re.compile(r"%[0-9a-f]{2}")
 
 
 def _identifier(
@@ -814,19 +811,17 @@ def _identifier(
     if ssh and host == _GITHUB_SSH_443_HOST and port in ("", "443"):
         # GitHub's SSH-over-443 endpoint is github.com itself, for ssh only.
         host, port = "github.com", ""
-    if host == _GITHUB_WWW_HOST and not port:
-        # GitHub redirects www.github.com to github.com: one repository.
-        host = "github.com"
+    from .database import github_folded_host, github_folded_segment
+
+    # GitHub redirects www.github.com to github.com: one repository. The
+    # rule is database's one copy, which a pin takes too.
+    host = github_folded_host(host, port)
     azure = _azure_devops_services_id(host, port, segments)
     if azure is not None:
         host, segments = "dev.azure.com", azure
     if host in _CASE_INSENSITIVE_PATH_HOSTS:
-        # Lower-cased OUTSIDE its percent escapes, which stay upper-case as
-        # the id grammar requires (`%C3%A9`, not `%c3%a9`).
-        segments = [
-            _PERCENT_ESCAPE_RE.sub(lambda m: m.group(0).upper(), segment.lower())
-            for segment in segments
-        ]
+        # Lower-cased OUTSIDE its percent escapes (`github_folded_segment`).
+        segments = [github_folded_segment(segment) for segment in segments]
         if (
             not git_dropped
             and segments

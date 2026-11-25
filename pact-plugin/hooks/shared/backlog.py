@@ -1633,8 +1633,13 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
     elif not served:
         return None
     path = path[1:] if path.startswith("/") else path
+    # AS THE MEMORY ID STRIPS A github.com PATH: one trailing `/`, then one
+    # `.git` in any case (GitHub's names are case-insensitive), then the `/`
+    # a `repo/.git` spelling leaves exposed.
     path = path[:-1] if path.endswith("/") else path
-    path = path[: -len(".git")] if path.endswith(".git") else path
+    if path.lower().endswith(".git"):
+        path = path[: -len(".git")]
+        path = path[:-1] if path.endswith("/") else path
     segments = path.split("/")
     if len(segments) != 2:
         return None

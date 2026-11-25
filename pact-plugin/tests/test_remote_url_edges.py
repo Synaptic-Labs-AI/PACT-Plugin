@@ -434,3 +434,18 @@ def test_control_show_has_no_identity_detail_for_a_canonical_origin(tmp_path, mo
     with pytest.raises(SystemExit):
         main(["project-id", "show", "--db-path", str(tmp_path / "m.db")])
     assert json.loads(capfd.readouterr().out)["result"]["identity_detail"] is None
+
+
+@pytest.mark.parametrize("url", [
+    "https://github.com/O/R.GIT",
+    "https://github.com/O/R/.git",
+    "git@github.com:O/R.Git",
+    "https://github.com/O/R.git/",
+])
+def test_the_backlog_strips_a_git_suffix_as_the_id_does(url):
+    """A github.com path drops one `.git` in any case, and a `repo/.git`
+    spelling its exposed `/`, in the id and in the backlog's slug alike."""
+    from shared import backlog
+
+    owner, name = backlog._slug_from_remote_url(url)
+    assert f"github.com/{owner}/{name}".lower() == pi.normalize_remote_url(url) == "github.com/o/r"

@@ -175,3 +175,46 @@ def test_the_file_reader_never_answers_where_read_origin_declines(tmp_path, arra
         assert found == URL
     else:
         assert found is None, (arrange, origin)
+
+
+@pytest.mark.parametrize("pin, expected", [
+    ("github.com/Acme/Widget", "github.com/acme/widget"),
+    ("www.github.com/Acme/Widget", "github.com/acme/widget"),
+    ("github.com/Acme/Caf%C3%A9", "github.com/acme/caf%C3%A9"),
+    ("github.com:443/Acme/Widget", "github.com:443/Acme/Widget"),
+    ("ssh.github.com:443/Acme/Widget", "ssh.github.com:443/Acme/Widget"),
+    ("www.github.com:8443/Acme/Widget", "www.github.com:8443/Acme/Widget"),
+    ("gitlab.com/Acme/Widget", "gitlab.com/Acme/Widget"),
+])
+def test_a_pin_takes_githubs_spelling_rules(pin, expected):
+    """A port-less github.com or www.github.com pin is folded as its remote
+    would be; every ported or other-host pin, which a remote can derive, is
+    kept as written. The resolver and the sibling check share this rule."""
+    from scripts import project_identity as pi
+    from scripts.database import pin_file_value
+
+    assert pin_file_value((pin + "\n").encode()) == (expected, None)
+    if expected.startswith("github.com/"):
+        assert pi.normalize_remote_url("https://" + pin) == expected
+
+
+@pytest.mark.parametrize("pin", ["github.com/acme", "www.github.com/acme"])
+def test_a_one_segment_github_pin_is_refused(pin):
+    from scripts.database import pin_file_value
+
+    assert pin_file_value((pin + "\n").encode()) == (None, "not_canonical")
+
+
+def test_a_mixed_case_pin_and_its_lower_case_origin_are_one_owner(tmp_path):
+    """The cold review's layout: clone B pinned to github.com/Acme/Widget and
+    clone A on origin github.com/acme/widget have one id, so each is the
+    other's same owner."""
+    from scripts import project_identity as pi
+
+    assert_outside_repository(tmp_path)
+    a = make_repo(tmp_path / "a" / "widget", remote="https://github.com/acme/widget.git")
+    b = make_repo(tmp_path / "b" / "widget", remote="https://github.com/acme/widget.git")
+    (b / ".git" / "pact-project-id").write_text("github.com/Acme/Widget\n", encoding="utf-8")
+    assert pi.read_override(b / ".git").value == "github.com/acme/widget"
+    assert pi.detect_id_for_root(a, a / ".git", asked_root=a).project_id == "github.com/acme/widget"
+    assert checkout_is_same_owner(str(b), "github.com/acme/widget", "https://github.com/acme/widget.git") is True

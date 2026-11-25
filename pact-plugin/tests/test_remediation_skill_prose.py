@@ -689,6 +689,15 @@ class TestLegacyScopeStatesAreDocumented:
             "folder-name id> and --apply, with the user's approval."
         ) in _body(SKILL)
 
+    def test_a_github_pin_is_read_with_githubs_spelling(self):
+        body = _body(SKILL)
+        assert (
+            "A github.com or www.github.com pin with no port is read as a "
+            "github.com remote is: lower-cased outside its %XX escapes, with "
+            "www.github.com read as github.com, and it must name owner/repo."
+        ) in body
+        assert "earlier mixed-case spelling" not in body
+
     def test_an_alias_id_is_shared_only_by_clones_using_that_alias(self):
         assert (
             "Only clones whose origin uses that same alias share an alias id."
@@ -7117,6 +7126,14 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "is_canonical_id"): "validates an id value",
         ("call", "validate_identifier_for_write"): "validates an id value",
+        ("call", "github_folded_host"): (
+            "database's one copy of GitHub's www-host fold, applied to a host the remote "
+            "grammar already parsed; pure, it asks git nothing"
+        ),
+        ("call", "github_folded_segment"): (
+            "database's one copy of GitHub's case fold for a path segment the remote grammar "
+            "already parsed; pure, it asks git nothing"
+        ),
         ("call", "pin_file_value"): (
             "classifies the bytes read_override already read from the pin file (database's one "
             "copy of the pin's text rule); it validates an id value and asks git nothing"
