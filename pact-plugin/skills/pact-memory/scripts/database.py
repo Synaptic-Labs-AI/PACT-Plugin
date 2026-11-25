@@ -1752,20 +1752,22 @@ def github_folded_segment(segment: str) -> str:
 
 
 def _github_folded_pin(candidate: str) -> Optional[str]:
-    """A canonical pin with GitHub's spelling rules applied, or None when it
-    names no GitHub repository. Only the exact port-less hosts `github.com`
-    and `www.github.com` are folded: `www.github.com` becomes github.com,
-    the path is lower-cased outside its escapes, and a path of fewer than
-    two segments (owner/repo) is None, as a one-segment github.com remote
-    declines. Every other host and every ported spelling is unchanged: each
-    is an id a remote can derive."""
-    host, _, path = candidate.partition("/")
-    if host not in ("github.com", "www.github.com"):
+    """A canonical pin with GitHub's spelling rules applied as a remote's id
+    takes them (`project_identity._identifier`), or None when it names no
+    GitHub repository. A port-less `www.github.com` becomes github.com; a
+    `github.com` path, on any port, is lower-cased outside its escapes; and a
+    port-less github.com path of fewer than two segments (owner/repo) is None,
+    as such a remote declines. Every other host keeps its spelling, a ported
+    `www.github.com` included, exactly as a remote naming it does."""
+    hostport, _, path = candidate.partition("/")
+    host, colon, port = hostport.partition(":")
+    host = github_folded_host(host, port)
+    if host != "github.com":
         return candidate
     segments = path.split("/")
-    if len(segments) < 2:
+    if not port and len(segments) < 2:
         return None
-    return github_folded_host(host, "") + "/" + "/".join(
+    return host + colon + port + "/" + "/".join(
         github_folded_segment(segment) for segment in segments
     )
 

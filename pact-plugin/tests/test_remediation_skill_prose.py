@@ -694,7 +694,8 @@ class TestLegacyScopeStatesAreDocumented:
         assert (
             "A github.com or www.github.com pin with no port is read as a "
             "github.com remote is: lower-cased outside its %XX escapes, with "
-            "www.github.com read as github.com, and it must name owner/repo."
+            "www.github.com read as github.com, and it must name owner/repo. A "
+            "github.com pin on another port is lower-cased the same way."
         ) in body
         assert "earlier mixed-case spelling" not in body
 

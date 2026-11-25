@@ -467,7 +467,8 @@ Two operator surfaces answer, and they are deliberately ordered:
   as `override_ignored` with reason `not_canonical`, and resolution continues
   without it. A `github.com` or `www.github.com` pin with no port is read as a
   github.com remote is: lower-cased outside its `%XX` escapes, with
-  `www.github.com` read as `github.com`, and it must name owner/repo.
+  `www.github.com` read as `github.com`, and it must name owner/repo. A
+  `github.com` pin on another port is lower-cased the same way.
   To move a copied store's folder-name bucket, use
   `project-id rekey --from=<old> --to=<canonical>`. An ssh host alias from
   the user's ssh config stays in the id: `git@github-work:Acme/Widget` gives `github-work/Acme/Widget`,

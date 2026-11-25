@@ -106,11 +106,11 @@ def test_github_case_folding_keeps_escapes_and_only_dot_git_is_a_suffix(url, exp
 
 
 def test_the_backlog_parser_reads_an_ssh_plus_git_remote():
-    """The two parsers share one scheme set."""
+    """The backlog reads the slug from the id, so every scheme the id takes
+    is the backlog's too."""
     from shared import backlog
 
     assert backlog._slug_from_remote_url("ssh+git://git@github.com/o/r.git") == ("o", "r")
-    assert backlog._REMOTE_SCHEMES >= {"ssh", "git+ssh", "ssh+git"}
 
 
 @pytest.mark.parametrize(
@@ -297,7 +297,7 @@ def test_control_the_served_ports_keep_the_github_slug(url):
     from shared import backlog
 
     assert pi.normalize_remote_url(url) == "github.com/acme/widget"
-    assert backlog._slug_from_remote_url(url) == ("Acme", "Widget")
+    assert backlog._slug_from_remote_url(url) == ("acme", "widget")
 
 
 @pytest.mark.parametrize("url", [
@@ -326,7 +326,7 @@ def test_control_a_default_port_keeps_the_github_slug(url):
     from shared import backlog
 
     assert pi.normalize_remote_url(url) == "github.com/o/n"
-    assert backlog._slug_from_remote_url(url) == ("O", "N")
+    assert backlog._slug_from_remote_url(url) == ("o", "n")
 
 
 def test_control_another_port_on_that_host_keeps_its_own_id():

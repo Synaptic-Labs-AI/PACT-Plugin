@@ -142,24 +142,10 @@ _SLUG_CHARS = re.compile(r"^[A-Za-z0-9._-]+\Z")
 # The only host the slug chain and the ref classifier accept. GitHub Enterprise
 # and every other host fall through rather than being read as this tracker.
 _GITHUB_HOST = "github.com"
-# Hosts a REMOTE may name for github.com: `ssh.github.com` is GitHub's own
-# SSH-over-443 endpoint (`ssh://git@ssh.github.com:443/O/N`), the same service,
-# and `www.github.com` redirects to github.com.
-_GITHUB_REMOTE_HOSTS = {_GITHUB_HOST, f"ssh.{_GITHUB_HOST}", f"www.{_GITHUB_HOST}"}
 # Appended to every `gh api` call. `gh api` takes its host from GH_HOST, not
 # from the slug, so without this an environment with GH_HOST set would send
 # github.com refs to another host and let its answers decide the verdicts.
 _GH_API_HOST_ARGS = ("--hostname", _GITHUB_HOST)
-# Remote-URL schemes `_slug_from_remote_url` parses, plus the scp-like form
-# `user@host:path`, which needs a non-empty user and the `@` so arbitrary text
-# (a sentence, a JSON body) never parses as a remote.
-_REMOTE_SCHEMES = {"https", "http", "ssh", "git", "git+ssh", "ssh+git"}
-# The ssh transports among them: the only ones `ssh.github.com` is read for.
-_SSH_REMOTE_SCHEMES = {"ssh", "git+ssh", "ssh+git"}
-# Each scheme's default port, which the memory id drops (`_DEFAULT_PORTS` in
-# the pact-memory identity module): only that port, or none, is github.com.
-_REMOTE_DEFAULT_PORTS = {"https": 443, "http": 80, "ssh": 22, "git": 9418, "git+ssh": 22, "ssh+git": 22}
-_SCP_REMOTE = re.compile(r"^[^@\s/:\\]+@([^:/\s]+):(.+)\Z")
 # A ref that names an issue or pull request of a github.com repository, as a
 # link. Owner and name are compared to this repository's slug by the callers.
 # Accepted around the number: `www.`, which GitHub redirects; a pull request's
@@ -1579,72 +1565,39 @@ def _slug_from_gh_repo(value: Any) -> Optional[Tuple[str, str]]:
 
 
 def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
-    """`(owner, name)` from a github.com remote URL, or None. Pure.
+    """`(owner, name)` from a github.com remote URL, or None. Pure, no git.
 
-    Accepted: `https://` and `http://` (with or without `user[:token]@`),
-    `ssh://` and `git+ssh://` (`[user@]host[:port]`), `git://`, and the scp
-    form `user@host:O/N` with any non-empty user. The host is `github.com`,
-    `www.github.com`, or, for an ssh or scp remote only, GitHub's SSH-over-443
-    host `ssh.github.com`. One trailing `/` and one
-    `.git` are stripped, and exactly two path segments must remain. Any other
-    host — GitHub Enterprise, a loopback proxy, another forge — returns None
-    and the chain falls through to `gh repo view`.
-
-    Refused outright: a URL with a backslash or more than one `@`. Python's
-    `urlsplit` and git disagree on where such a host ends
-    (`https://evil.com\\@github.com/o/n` is github.com to one, not the other),
-    so neither reading is trusted.
+    DERIVED FROM THE MEMORY ID, so the two cannot disagree: the remote is
+    read by `project_identity.normalize_remote_url`, and only an id that is
+    `github.com/<owner>/<repo>` gives a slug. Every spelling, port, `.git`
+    form, host fold (www.github.com, ssh.github.com over ssh) and refusal
+    (a backslash, more than one `@`, a leading-zero port) is the id's.
+    Names come back lower-cased, as the id holds them; GitHub resolves them
+    case-insensitively. Any other id (GitHub Enterprise, another forge, a
+    decline) returns None and the chain falls through to `gh repo view`.
+    The slug must also pass `_valid_slug`, because it becomes a REST path.
     """
     if not isinstance(url, str):
         return None
-    url = url.strip()
-    if "\\" in url or url.count("@") > 1:
+    identifier = _project_identity().normalize_remote_url(url)
+    if identifier is None:
         return None
-    scp = _SCP_REMOTE.match(url)
-    ssh = scp is not None and "://" not in url
-    port = default_port = None
-    if ssh:
-        host, path = scp.group(1), scp.group(2)
-    else:
-        try:
-            parts = urlsplit(url)
-            host = parts.hostname or ""
-        except ValueError:
-            return None
-        if parts.scheme.lower() not in _REMOTE_SCHEMES:
-            return None
-        ssh = parts.scheme.lower() in _SSH_REMOTE_SCHEMES
-        try:
-            port = parts.port
-        except ValueError:
-            return None
-        default_port = _REMOTE_DEFAULT_PORTS.get(parts.scheme.lower())
-        path = parts.path
-    if host.lower() not in _GITHUB_REMOTE_HOSTS:
+    host, _, path = identifier.partition("/")
+    owner, _, name = path.partition("/")
+    if host != _GITHUB_HOST or not name or "/" in name:
         return None
-    # ONLY THE PORTS THE MEMORY ID FOLDS TO github.com: none or the scheme's
-    # default, and for ssh.github.com, which serves ssh only, also 443. The
-    # identity resolver keeps any other port (or an https remote on
-    # ssh.github.com) as its own id, so this parser reads no slug there.
-    served = port is None or port == default_port
-    if host.lower() == f"ssh.{_GITHUB_HOST}":
-        if not ssh or not (served or port == 443):
-            return None
-    elif not served:
-        return None
-    path = path[1:] if path.startswith("/") else path
-    # AS THE MEMORY ID STRIPS A github.com PATH: one trailing `/`, then one
-    # `.git` in any case (GitHub's names are case-insensitive), then the `/`
-    # a `repo/.git` spelling leaves exposed.
-    path = path[:-1] if path.endswith("/") else path
-    if path.lower().endswith(".git"):
-        path = path[: -len(".git")]
-        path = path[:-1] if path.endswith("/") else path
-    segments = path.split("/")
-    if len(segments) != 2:
-        return None
-    owner, name = segments
     return (owner, name) if _valid_slug(owner, name) else None
+
+
+def _project_identity():
+    """The pact-memory identity module, imported lazily as `_memory_api` is.
+    It loads no store and runs no git at import."""
+    scripts_parent = Path(__file__).resolve().parents[2] / "skills" / "pact-memory"
+    if str(scripts_parent) not in sys.path:
+        sys.path.insert(0, str(scripts_parent))
+    from scripts import project_identity
+
+    return project_identity
 
 
 def _valid_slug(owner: Any, name: Any) -> bool:

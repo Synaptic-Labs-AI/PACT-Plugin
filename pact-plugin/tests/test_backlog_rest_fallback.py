@@ -235,7 +235,7 @@ def test_slug_from_remote_url_accepts_github_forms_and_refuses_the_rest():
         "ssh://git@github.com:22/o/r",
         "git@github.com:o/r.git",
         "git://github.com/o/r",
-        "  https://github.com/o/r\n",
+        "https://github.com/o/r\n",  # git's one terminator
         "me@github.com:o/r",  # B-F14: any non-empty scp user
     ]
     for url in accepted:
@@ -248,6 +248,8 @@ def test_slug_from_remote_url_accepts_github_forms_and_refuses_the_rest():
         "https://github.com/o", "https://github.com/o/r/extra",
         "https://github.com/o/..", "https://github.com/./r",
         'https://github.com/o/r"x', "https://github.com/o/r x",
+        # The id declines leading whitespace, and the slug comes from the id.
+        "  https://github.com/o/r\n",
     ]
     for url in refused:
         assert backlog._slug_from_remote_url(url) is None, url
@@ -305,13 +307,13 @@ def test_local_repo_slug_reads_origin_of_project_path_with_real_git(
     repo = _init_repo_with_origin(
         tmp_path / "proj", "https://user:secret-token@github.com/Real-Owner/real-repo.git")
 
-    assert backlog._local_repo_slug(str(repo)) == ("Real-Owner", "real-repo")
+    assert backlog._local_repo_slug(str(repo)) == ("real-owner", "real-repo")
     monkeypatch.chdir(tmp_path)
     assert (tmp_path / "proj").resolve() == repo.resolve()  # 'proj' resolves here
     assert backlog._local_repo_slug("proj") is None, "a relative project_path reached git"
     # No project_path: git runs in the process CWD, as `gh repo view` did.
     monkeypatch.chdir(repo)
-    assert backlog._local_repo_slug(None) == ("Real-Owner", "real-repo")
+    assert backlog._local_repo_slug(None) == ("real-owner", "real-repo")
 
 
 def test_r1_origin_is_read_raw_not_through_insteadof(tmp_path, hermetic_git):

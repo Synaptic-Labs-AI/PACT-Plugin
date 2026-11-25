@@ -181,15 +181,16 @@ def test_the_file_reader_never_answers_where_read_origin_declines(tmp_path, arra
     ("github.com/Acme/Widget", "github.com/acme/widget"),
     ("www.github.com/Acme/Widget", "github.com/acme/widget"),
     ("github.com/Acme/Caf%C3%A9", "github.com/acme/caf%C3%A9"),
-    ("github.com:443/Acme/Widget", "github.com:443/Acme/Widget"),
+    ("github.com:443/Acme/Widget", "github.com:443/acme/widget"),
     ("ssh.github.com:443/Acme/Widget", "ssh.github.com:443/Acme/Widget"),
     ("www.github.com:8443/Acme/Widget", "www.github.com:8443/Acme/Widget"),
     ("gitlab.com/Acme/Widget", "gitlab.com/Acme/Widget"),
 ])
 def test_a_pin_takes_githubs_spelling_rules(pin, expected):
-    """A port-less github.com or www.github.com pin is folded as its remote
-    would be; every ported or other-host pin, which a remote can derive, is
-    kept as written. The resolver and the sibling check share this rule."""
+    """A github.com or port-less www.github.com pin is folded as its remote
+    would be (a ported github.com path is lower-cased too); a ported www or
+    another host is kept as written. The resolver and the sibling check share
+    this rule."""
     from scripts import project_identity as pi
     from scripts.database import pin_file_value
 
@@ -218,3 +219,20 @@ def test_a_mixed_case_pin_and_its_lower_case_origin_are_one_owner(tmp_path):
     assert pi.read_override(b / ".git").value == "github.com/acme/widget"
     assert pi.detect_id_for_root(a, a / ".git", asked_root=a).project_id == "github.com/acme/widget"
     assert checkout_is_same_owner(str(b), "github.com/acme/widget", "https://github.com/acme/widget.git") is True
+
+
+@pytest.mark.parametrize("url, pin", [
+    ("https://github.com:8443/O/N", "github.com:8443/O/N"),
+    ("ssh://git@github.com:443/O/N", "github.com:443/O/N"),
+    ("https://github.com:8443/O", "github.com:8443/O"),
+    ("https://www.github.com:8443/O/N", "www.github.com:8443/O/N"),
+    ("http://ssh.github.com:443/O/N", "ssh.github.com:443/O/N"),
+    ("ssh://git@ssh.github.com:2222/O/N", "ssh.github.com:2222/O/N"),
+])
+def test_a_ported_pin_copied_from_its_url_names_the_remotes_id(url, pin):
+    """A pin written as the url's host, port and path names the id that url's
+    remote gets: one GitHub rule for pins and remotes."""
+    from scripts import project_identity as pi
+    from scripts.database import pin_file_value
+
+    assert pin_file_value((pin + "\n").encode()) == (pi.normalize_remote_url(url), None)
