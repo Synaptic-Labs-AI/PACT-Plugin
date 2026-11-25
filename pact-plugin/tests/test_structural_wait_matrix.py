@@ -294,6 +294,13 @@ def test_advisory_and_arming_texts_share_the_launch_phrase():
         assert LAUNCH_FORMS in getattr(wait_filler_gate, name), name
 
 
+def test_qa_engineer_dev_server_start_names_both_launch_forms():
+    """The QA engineer's dev-server start carries the same two-form launch
+    phrase as every arm instruction, bound to that sentence."""
+    text = (PLUGIN / "agents" / "pact-qa-engineer.md").read_text(encoding="utf-8")
+    assert "Start the server " + LAUNCH_FORMS in text
+
+
 def test_advisory_message_pinned_verbatim():
     """The advisory message carries termination-adjacent claims (the
     0/3/4 exit contract, the duplicate fast-exit reassurance), so its
