@@ -655,6 +655,8 @@ def _normalize_segment(raw: str) -> Optional[str]:
     The finished segment must be non-empty and not `.` or `..`, so `%2E%2E`
     is still refused as traversal. Ids therefore stay printable ASCII.
     """
+    from .database import canonical_escape
+
     out = []
     index = 0
     while index < len(raw):
@@ -663,10 +665,7 @@ def _normalize_segment(raw: str) -> Optional[str]:
             hex_pair = raw[index + 1:index + 3]
             if len(hex_pair) != 2 or not all(h in _HEX_DIGITS for h in hex_pair):
                 return None
-            decoded = chr(int(hex_pair, 16))
-            out.append(
-                decoded if decoded in _UNRESERVED_CHARS else "%" + hex_pair.upper()
-            )
+            out.append(canonical_escape(hex_pair))
             index += 3
             continue
         if char in _SEGMENT_RAW_CHARS:
@@ -1069,16 +1068,16 @@ def normalize_remote_url(url: object) -> Optional[str]:
     # names no repository there, and neither does a home-relative `~/o/r` or a
     # `o/r/.git` path (`_github_does_not_serve`). Each declines rather than
     # bind an id the remote does not reach.
-    from .database import is_github_repo_path
+    from .database import github_repo_path
 
-    if identifier.startswith("github.com/") and (
-        github_unserved
+    if identifier.startswith("github.com/"):
         # Exactly owner/repo, each name decoded as GitHub reads it: an escaped
         # `/` (`o/r%2Fx`), a `~` or any other character names nothing
-        # GitHub serves.
-        or not is_github_repo_path(identifier[len("github.com/"):])
-    ):
-        return None
+        # GitHub serves. A pin takes the same step.
+        repo_path = None if github_unserved else github_repo_path(identifier[len("github.com/"):])
+        if repo_path is None:
+            return None
+        identifier = "github.com/" + repo_path
 
     # The grammar's single authority. If `database.is_canonical_id` is ever
     # stricter than the construction above, the answer is a DECLINE, never a
@@ -1102,11 +1101,14 @@ def _github_does_not_serve(path: str) -> bool:
     or a non-bare repository's `o/r/.git`. Measured: GitHub answers 'not
     found' for `https://github.com/O/R/.git` and refuses a `~` path over
     https, while `O/R` and `O/R.git/` are served. A plain sshd serves both
-    forms, so only a github.com id declines them."""
+    forms, so only a github.com id declines them. GitHub drops only a
+    literal `.git` suffix: `https://github.com/git/git%2Egit` is not
+    `git/git` (measured: not found), so an escaped suffix declines too."""
     # Read as the server reads it: escapes decoded (`%2Egit`, `%7E`) and
     # `.git` in any case.
-    trimmed = unquote(path, errors="surrogateescape").lstrip("/")
-    return trimmed.startswith("~") or trimmed.rstrip("/").lower().endswith("/.git")
+    trimmed = unquote(path, errors="surrogateescape").lstrip("/").rstrip("/").lower()
+    escaped_suffix = trimmed.endswith(".git") and not path.rstrip("/").lower().endswith(".git")
+    return trimmed.startswith("~") or trimmed.endswith("/.git") or escaped_suffix
 
 
 def _is_network_shaped(url: object) -> bool:

@@ -1501,10 +1501,14 @@ def _local_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
 def _origin_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
     """The slug of the `origin` remote of `project_path`, or None. No network.
 
-    Read RAW with `git config --get remote.origin.url`: `git remote get-url`
-    applies `url.<base>.insteadOf`, so a rewrite rule in the repository's
-    config could point the slug at another repository. With no `project_path`
-    (None) git runs in the process CWD — the anchor `gh repo view` always had.
+    Read by the memory id's own reader (`project_identity.read_origin`) on
+    the repository's common dir: the FIRST `remote.origin.url` of its own
+    config file, raw (`git remote get-url` applies `url.<base>.insteadOf`,
+    so a rewrite rule could point the slug at another repository), so the
+    slug and the id always read the same url. Any other answer (no origin,
+    an included or empty url, git unavailable) gives no slug. With no
+    `project_path` (None) git runs in the process CWD — the anchor
+    `gh repo view` always had.
 
     The write path (`_normalise_ref`) uses THIS rung alone, never `GH_REPO`:
     a stored ref outlives the environment variable, so collapsing a link
@@ -1515,8 +1519,16 @@ def _origin_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
     anchor = _git_anchor(project_path)
     if anchor is None:
         return None
-    url = _run_capture(["git", *anchor, "config", "--get", "remote.origin.url"])
-    return _slug_from_remote_url(url)
+    common = _run_capture(
+        ["git", *anchor, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+    )
+    if not common or not common.strip():
+        return None
+    identity = _project_identity()
+    origin = identity.read_origin(Path(common.rstrip("\n")))
+    if origin.state != identity.ORIGIN_PRESENT:
+        return None
+    return _slug_from_remote_url(origin.value)
 
 
 def _git_anchor(project_path: Any) -> Optional[List[str]]:

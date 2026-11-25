@@ -664,9 +664,10 @@ class TestLegacyScopeStatesAreDocumented:
 
     def test_an_unattributed_row_is_read_with_a_warning(self):
         assert (
-            "an included bucket that holds such rows is read with a warning, "
-            "once per process, that gives their count (sessions.unattributed) "
-            "and the rekey command."
+            "an included_unverified bucket that holds such rows is read with a "
+            "warning, once per process, that gives their count "
+            "(sessions.unattributed) and the rekey command, and a verified bucket "
+            "is read without one."
         ) in _body(SKILL)
 
     def test_a_foreign_row_keeps_either_kind_out(self):
@@ -689,14 +690,29 @@ class TestLegacyScopeStatesAreDocumented:
             "folder-name id> and --apply, with the user's approval."
         ) in _body(SKILL)
 
+    def test_legacy_scope_null_and_null_candidate_are_distinguished(self):
+        body = _body(SKILL)
+        assert (
+            "It is null when no identity resolves, when the store does not exist "
+            "yet, when the id is supplied, or when this checkout has no "
+            "pre-change name that differs from its id"
+        ) in body
+        assert (
+            "Otherwise it is an object, and its candidate is null when no bucket "
+            "in the store matches that pre-change name"
+        ) in body
+        assert "when this checkout has no legacy candidate to report" not in body
+
     def test_a_github_pin_is_read_with_githubs_spelling(self):
         body = _body(SKILL)
         assert (
             "A github.com or www.github.com pin with no port is read as a "
-            "github.com remote is: lower-cased outside its %XX escapes, with "
+            "github.com remote is: each name is decoded and lower-cased, with "
             "www.github.com read as github.com, and it must name exactly owner/repo, "
             "each a valid GitHub name. A "
-            "github.com pin on another port is lower-cased the same way."
+            "github.com pin on another port is lower-cased outside its %XX escapes. "
+            "In any pin, an escaped unreserved character such as %41 is decoded, as "
+            "in a remote."
         ) in body
         assert "earlier mixed-case spelling" not in body
 
@@ -7105,15 +7121,7 @@ class TestEveryRouteEntryConditionIsARoute:
             "a method on a local the census cannot type; every project object built on "
             "the path is a named build"
         ),
-        ("call", "<call to no function project_identity: trimmed.rstrip>"): (
-            "a method on a local the census cannot type; every project object built on "
-            "the path is a named build"
-        ),
-        ("call", "<call to no function project_identity: trimmed.rstrip(...).lower>"): (
-            "a method on a local the census cannot type; every project object built on "
-            "the path is a named build"
-        ),
-        ("call", "<call to no function project_identity: trimmed.rstrip(...).lower().endswith>"): (
+        ("call", "<call to no function project_identity: trimmed.endswith>"): (
             "a method on a local the census cannot type; every project object built on "
             "the path is a named build"
         ),
@@ -7152,9 +7160,13 @@ class TestEveryRouteEntryConditionIsARoute:
             "database's one copy of GitHub's case fold for a path segment the remote grammar "
             "already parsed; pure, it asks git nothing"
         ),
-        ("call", "is_github_repo_path"): (
-            "database's one copy of GitHub's owner/repo name rule, applied to an id path the "
-            "remote grammar already built; pure, it asks git nothing"
+        ("call", "canonical_escape"): (
+            "database's one copy of the id spelling of a %XX escape in a segment the remote "
+            "grammar already split; pure, it asks git nothing"
+        ),
+        ("call", "github_repo_path"): (
+            "database's one copy of GitHub's owner/repo name rule and fold, applied to an id "
+            "path the remote grammar already built; pure, it asks git nothing"
         ),
         ("call", "pin_file_value"): (
             "classifies the bytes read_override already read from the pin file (database's one "

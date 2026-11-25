@@ -16,8 +16,11 @@ from scripts import project_identity as pi
 @pytest.mark.parametrize(
     "url, expected",
     [
-        ("https://github.com/o/r%2Egit", "github.com/o/r"),
-        ("https://github.com/o/r%2egit/", "github.com/o/r"),
+        # GitHub drops only a literal `.git` (measured: https://github.com/git/git%2Egit
+        # is 'not found' while https://github.com/git/gi%74 is git/git), so an
+        # escaped suffix there declines.
+        ("https://github.com/o/r%2Egit", None),
+        ("https://github.com/o/r%2egit/", None),
         ("https://h.example/o/R%2E%67%69%74", "h.example/o/R"),
         ("https://h.example/o/%2Egit", "h.example/o"),
         # scp syntax sends `%2E` to the server as written, so it names a
@@ -475,11 +478,14 @@ def test_the_backlog_strips_a_git_suffix_as_the_id_does(url):
     "https://github.com/o/r%C3%A9",
     "https://github.com/O/Caf%C3%A9",
     "https://github.com/o/café",
+    "https://github.com/git/git%2Egit",
+    "https://github.com/git/git%2egit/",
 ])
 def test_a_github_path_github_does_not_serve_declines(url):
     """github.com serves no home-relative path and no `o/r/.git` (measured:
     https://github.com/O/R/.git is 'not found'); git sends `~/o/r` as
-    written. Each declines, and the backlog reads no slug from it."""
+    written. GitHub drops only a literal `.git` (measured:
+    https://github.com/git/git%2Egit is 'not found', not git/git). Each declines, and the backlog reads no slug from it."""
     from shared import backlog
 
     assert pi.normalize_remote_url(url) is None

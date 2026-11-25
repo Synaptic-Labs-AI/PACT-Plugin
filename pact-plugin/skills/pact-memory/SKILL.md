@@ -380,8 +380,14 @@ that every row belongs here.
 `session_evidence`, `sessions`, `ambiguous`, `canonical_count`, `detail`,
 `case_variant`, `case_variant_rekey`, `suppressed`, `suppressed_candidate` and
 `degraded`. It is `null` when no identity resolves, when the store does not
-exist yet, when this checkout has no legacy candidate to report, or when the id
-is supplied or is a folder name with no legacy candidate. When `candidate` is set, exactly
+exist yet, when the id is supplied, or when this checkout has no pre-change
+name that differs from its id (a folder-name id with no other pre-change name
+included). Otherwise it is an object, and its `candidate` is `null` when no
+bucket in the store matches that pre-change name (`case_variant` then lists a
+case-differing one), when the store has no schema yet or could not be opened
+(`degraded`), or when the candidate is withheld (`suppressed`). A `save` whose
+payload names another project's id carries an object with only
+`canonical_count`, that bucket's prior row count, set. When `candidate` is set, exactly
 one of `included`, `excluded` and `unproven` is true:
 
 - `included`: the whole bucket is read. `verified` means an absolute file row
@@ -397,9 +403,9 @@ one of `included`, `excluded` and `unproven` is true:
   at an existing directory outside this repository and its linked worktrees:
   it is then `unproven`. A row with no recorded session, or whose session's
   recorded directory no longer exists (a removed worktree or a deleted
-  checkout), does not block it; an included bucket that holds such rows is read with a warning,
+  checkout), does not block it; an `included_unverified` bucket that holds such rows is read with a warning,
   once per process, that gives their count (`sessions.unattributed`) and the
-  rekey command.
+  rekey command, and a `verified` bucket is read without one.
 - `excluded`: evidence places it elsewhere and nothing places it here, so it
   is not read and no rekey command is printed anywhere. `unproven_reason` names
   the evidence (`foreign_rows` or `recorded_elsewhere`; a bucket written only by
@@ -466,10 +472,11 @@ Two operator surfaces answer, and they are deliberately ordered:
   canonical `host/owner/repo` id is accepted: a folder-name value is reported
   as `override_ignored` with reason `not_canonical`, and resolution continues
   without it. A `github.com` or `www.github.com` pin with no port is read as a
-  github.com remote is: lower-cased outside its `%XX` escapes, with
+  github.com remote is: each name is decoded and lower-cased, with
   `www.github.com` read as `github.com`, and it must name exactly owner/repo,
-  each a valid GitHub name. A
-  `github.com` pin on another port is lower-cased the same way.
+  each a valid GitHub name. A `github.com` pin on another port is lower-cased
+  outside its `%XX` escapes. In any pin, an escaped unreserved character such as
+  `%41` is decoded, as in a remote.
   To move a copied store's folder-name bucket, use
   `project-id rekey --from=<old> --to=<canonical>`. An ssh host alias from
   the user's ssh config stays in the id: `git@github-work:Acme/Widget` gives `github-work/Acme/Widget`,

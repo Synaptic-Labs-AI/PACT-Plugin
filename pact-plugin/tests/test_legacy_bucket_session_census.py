@@ -115,7 +115,10 @@ def test_a_row_recorded_at_another_checkout_keeps_a_verified_bucket_out(checkout
 
 def test_a_verified_bucket_with_no_foreign_row_is_read(checkout, caplog):
     """The control for the arm above: the same verified bucket without the
-    foreign session's record is read."""
+    foreign session's record is read, quietly. Its file row places the whole
+    bucket here (a defaulted rekey moves it), so its rows with no recorded
+    session get no "nothing shows they are this repository's" notice. RED
+    WHEN a verified bucket's unattributed rows are disclosed as unplaced."""
     repo, store, _config = checkout
     _rows(store, [("m1", None), ("m2", "other-1")],
           file_path=str(repo.resolve() / "src" / "a.py"))
@@ -123,8 +126,8 @@ def test_a_verified_bucket_with_no_foreign_row_is_read(checkout, caplog):
     assert scopes == (CANONICAL, "proj"), state
     assert state["verified"] and not state["unproven"], state
     assert state["sessions"]["unattributed"] == 2, state
-    assert len(notices) == 1, notices
-    assert "of its file rows lie under this repository and no file row places it elsewhere, but 2 of its memories" in notices[0], notices
+    assert state["rekey"], state
+    assert notices == [], notices
 
 
 def test_a_vouched_bucket_with_no_unattributed_row_reads_quietly(checkout, caplog):

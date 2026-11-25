@@ -334,6 +334,25 @@ def test_r1_origin_is_read_raw_not_through_insteadof(tmp_path, hermetic_git):
     assert backlog._origin_repo_slug(str(repo)) == ("real", "repo")
 
 
+def test_the_origin_slug_reads_the_first_url_as_the_id_does(tmp_path, hermetic_git):
+    """Two `remote.origin.url` values: git's `config --get` answers the LAST,
+    while the memory id reads the FIRST of the repository's own config
+    (`project_identity.read_origin`). The slug reads the id's url, from the
+    repository root and from a subfolder alike.
+
+    RED WHEN the slug goes back to `git config --get` (the last url).
+    """
+    repo = _init_repo_with_origin(tmp_path / "proj", "https://github.com/o/first.git")
+    subprocess.run(["git", "-C", str(repo), "config", "--add", "remote.origin.url",
+                    "https://github.com/o/second.git"], check=True)
+    last = subprocess.run(["git", "-C", str(repo), "config", "--get", "remote.origin.url"],
+                          capture_output=True, text=True).stdout.strip()
+    assert last == "https://github.com/o/second.git", "control: git's answer is the last url"
+    (repo / "sub").mkdir()
+    assert backlog._origin_repo_slug(str(repo)) == ("o", "first")
+    assert backlog._origin_repo_slug(str(repo / "sub")) == ("o", "first")
+
+
 def test_a_non_utf8_origin_url_yields_no_slug_and_no_crash(tmp_path, hermetic_git):
     """A hand-edited `.git/config` can hold bytes that are not UTF-8. The
     origin read decodes with replacement, and the replacement character is

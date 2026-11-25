@@ -222,6 +222,59 @@ def test_a_github_pin_that_is_not_owner_repo_of_github_names_is_refused(pin):
     assert pi.normalize_remote_url("https://" + pin) is None
 
 
+@pytest.mark.parametrize("pin", [
+    "github.com/o/%41b",
+    "github.com/O/%41B",
+    "github.com/o/a%62",
+    "github.com/%6F/r",
+    "github.com/O/R%2Dx",
+    "github.com/o/r%5Fx",
+    "github.com/o/r%2Ex",
+    "www.github.com/O/%41b",
+])
+def test_an_escaped_github_pin_is_the_id_its_remote_gives(pin):
+    """A port-less github.com pin is decoded and folded by the remote's own
+    step (`database.github_repo_path`), so every escaped spelling of a
+    repository is the one id a remote naming it gives. RED WHEN a pin keeps
+    an escape its remote decodes, binding an id no remote derives."""
+    from scripts import project_identity as pi
+    from scripts.database import pin_file_value
+
+    remote = pi.normalize_remote_url("https://" + pin)
+    assert remote is not None and "%" not in remote, remote
+    assert pin_file_value((pin + "\n").encode()) == (remote, None)
+
+
+@pytest.mark.parametrize("pin", [
+    "github.com:8443/O/%41b",
+    "github.com:8443/O/R%2Dx",
+    "github.com:8443/o/Caf%C3%A9",
+    "www.github.com:8443/O/%41b",
+    "h.example/o/%41b",
+    "h.example:8443/%7Euser/r",
+])
+def test_an_escaped_ported_or_other_host_pin_is_the_id_its_remote_gives(pin):
+    """Every pin's path escapes take the remote's own spelling
+    (`database.canonical_escape`): an escaped unreserved character is
+    decoded, any other escape is upper-cased. RED WHEN a ported github.com or
+    another host's pin keeps an escape its remote decodes."""
+    from scripts import project_identity as pi
+    from scripts.database import pin_file_value
+
+    remote = pi.normalize_remote_url("https://" + pin)
+    assert remote is not None, pin
+    assert pin_file_value((pin + "\n").encode()) == (remote, None)
+
+
+def test_the_remote_and_the_pin_share_one_unreserved_set():
+    """The remote grammar keeps its own raw-character set for parsing; the
+    escape rule both read is database's. RED WHEN the two sets drift."""
+    from scripts import project_identity as pi
+    from scripts.database import UNRESERVED_CHARS
+
+    assert pi._UNRESERVED_CHARS == UNRESERVED_CHARS
+
+
 def test_a_mixed_case_pin_and_its_lower_case_origin_are_one_owner(tmp_path):
     """The cold review's layout: clone B pinned to github.com/Acme/Widget and
     clone A on origin github.com/acme/widget have one id, so each is the

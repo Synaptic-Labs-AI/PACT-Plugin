@@ -1752,6 +1752,29 @@ def github_folded_segment(segment: str) -> str:
     return _GITHUB_ESCAPE_RE.sub(lambda m: m.group(0).upper(), segment.lower())
 
 
+# RFC 3986 unreserved characters: a `%XX` naming one of these is decoded.
+UNRESERVED_CHARS = frozenset(
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+)
+_ANY_ESCAPE_RE = re.compile(r"%([0-9A-Fa-f]{2})")
+
+
+def canonical_escape(hex_pair: str) -> str:
+    """A `%XX` escape as an id holds it: the character itself when it is
+    unreserved (`%41` is `A`), else `%XX` upper-cased (`%2F` stays).
+    THE ONE COPY, for a remote's path (`project_identity._normalize_segment`)
+    and a pin's (`pin_file_value`), so both spell one repository alike."""
+    decoded = chr(int(hex_pair, 16))
+    return decoded if decoded in UNRESERVED_CHARS else "%" + hex_pair.upper()
+
+
+def _pin_path_escapes(candidate: str) -> str:
+    """A canonical pin with every path escape in its id spelling
+    (`canonical_escape`), as a remote naming the same path gets."""
+    hostport, _, path = candidate.partition("/")
+    return hostport + "/" + _ANY_ESCAPE_RE.sub(lambda m: canonical_escape(m.group(1)), path)
+
+
 # A GitHub owner or repository name: only the characters GitHub allows, `\Z`
 # anchored (`$` would also match before a trailing newline), and never dots
 # alone (`.`, `..` are path traversal in a REST url). THE ONE COPY, for a
@@ -1764,13 +1787,15 @@ def is_github_name(name: object) -> bool:
     return isinstance(name, str) and bool(GITHUB_NAME_RE.match(name)) and set(name) != {"."}
 
 
-def is_github_repo_path(path: str) -> bool:
-    """Whether a port-less github.com id's path is exactly owner/repo, each
-    name, decoded as GitHub reads it, a GitHub name."""
-    parts = path.split("/")
-    return len(parts) == 2 and all(
-        is_github_name(unquote(part, errors="surrogateescape")) for part in parts
-    )
+def github_repo_path(path: str) -> Optional[str]:
+    """The `owner/repo` a port-less github.com path names, as GitHub reads
+    it: each part decoded and lower-cased, or None when the path is not
+    exactly two GitHub names. THE ONE STEP for a remote's id and a pin, so
+    every escaped spelling of one repository gives one id."""
+    parts = [unquote(part, errors="surrogateescape") for part in path.split("/")]
+    if len(parts) != 2 or not all(is_github_name(part) for part in parts):
+        return None
+    return "/".join(part.lower() for part in parts)
 
 
 def _github_folded_pin(candidate: str) -> Optional[str]:
@@ -1778,17 +1803,19 @@ def _github_folded_pin(candidate: str) -> Optional[str]:
     takes them (`project_identity._identifier`), or None when it names no
     GitHub repository. A port-less `www.github.com` becomes github.com; a
     `github.com` path, on any port, is lower-cased outside its escapes; and a
-    port-less github.com path that is not exactly owner/repo of GitHub names
-    (`is_github_repo_path`) is None, as such a remote declines. Every other host keeps its spelling, a ported
+    port-less github.com path is read as a remote's is (`github_repo_path`):
+    decoded and lower-cased, or None when it is not exactly owner/repo of
+    GitHub names. Every other host keeps its spelling, a ported
     `www.github.com` included, exactly as a remote naming it does."""
     hostport, _, path = candidate.partition("/")
     host, colon, port = hostport.partition(":")
     host = github_folded_host(host, port)
     if host != "github.com":
         return candidate
+    if not port:
+        repo_path = github_repo_path(path)
+        return None if repo_path is None else host + "/" + repo_path
     segments = path.split("/")
-    if not port and not is_github_repo_path(path):
-        return None
     return host + colon + port + "/" + "/".join(
         github_folded_segment(segment) for segment in segments
     )
@@ -1835,7 +1862,7 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
             return None, "control_chars"
         if not is_canonical_id(candidate):
             return None, "not_canonical"
-        folded = _github_folded_pin(candidate)
+        folded = _github_folded_pin(_pin_path_escapes(candidate))
         if folded is None or not is_canonical_id(folded):
             return None, "not_canonical"
         return folded, None

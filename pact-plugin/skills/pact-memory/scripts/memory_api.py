@@ -1009,24 +1009,24 @@ def _warn_legacy_unproven(
 def _warn_legacy_unattributed(
     store: str, candidate: str, target: str, counts: Dict[str, Any]
 ) -> None:
-    """Disclose an ADMITTED legacy bucket that holds rows no session record
-    places, once per process per bucket. Such a row reads like this
-    repository's own, though nothing shows it is (`_legacy_session_evidence`'s
-    limit)."""
+    """Disclose a legacy bucket read on session evidence alone
+    (`included_unverified`) that holds rows no session record places, once
+    per process per bucket. Such a row reads like this repository's own,
+    though nothing shows it is (`_legacy_session_evidence`'s limit). A
+    `verified` bucket is not disclosed: its file rows place the whole bucket
+    here, as its defaulted rekey does."""
     key = (store, candidate, "unattributed")
     if key in _UNPROVEN_WARNED:
         return
     _UNPROVEN_WARNED.add(key)
     logger.warning(
-        "legacy project bucket %r is in this read scope because %s, but %d "
-        "of its memories came from no recorded session, so nothing shows "
-        "they are this repository's. If every row belongs here, preview the "
-        "move to this repository's id with: %s",
+        "legacy project bucket %r is in this read scope because %d of its "
+        "memories came from sessions recorded here, but %d of its memories "
+        "came from no recorded session, so nothing shows they are this "
+        "repository's. If every row belongs here, preview the move to this "
+        "repository's id with: %s",
         candidate,
-        f"{counts['contained_rows']} of its file rows lie under this "
-        "repository and no file row places it elsewhere"
-        if counts["contained_rows"]
-        else f"{counts['here']} of its memories came from sessions recorded here",
+        counts["here"],
         counts["unattributed"],
         _printed_rekey_remedy(
             [runnable_rekey_command(candidate, target, db_path=store)]
@@ -4249,7 +4249,7 @@ class PACTMemory:
                         store, candidate, scope, memory_count, file_paths or 0,
                         _unproven_cause(verdict.reason, verdict.counts, candidate),
                     )
-                elif verdict.counts["unattributed"]:
+                elif state_name == "included_unverified" and verdict.counts["unattributed"]:
                     _warn_legacy_unattributed(store, candidate, scope, verdict.counts)
                 result = (scope, candidate) if included else (scope,)
         self._legacy_scope_state = state
