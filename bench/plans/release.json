@@ -1,0 +1,9 @@
+{
+  "schema": "pact-bench/plan/1",
+  "id": "release",
+  "description": "Compare the current release with the previous release.",
+  "plugin_ref": "current",
+  "baseline_ref": "previous",
+  "external": ["native-eval", "plugin-eval", "eval-bench"],
+  "repeats": 3
+}

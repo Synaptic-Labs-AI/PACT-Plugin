@@ -1,0 +1,139 @@
+# PACT 4.8.38 Track A baseline
+
+Run: 2026-11-25T2232Z
+Plugin SHA: 1befafb314dd8124ad9225b87d0d5b064f0a6af6
+Plugin tree: e668fbf505d74f4eb7b35a543cfa26e70e8b0f1b
+Status: provisional on native behavior. P1 is green, the harness and smoke pass,
+PluginEval completed, native eval is blocked by the host shell sandbox, and the
+coverage map (1.0.1) has an independent review with 13/13 agreement on direction.
+
+## What ran
+
+| Area | Result |
+|---|---|
+| P1 internal suite at evaluated SHA | green: full-suite and release checks succeeded on the GitHub commit checks |
+| A1 isolated prepare + provider check | pass: plugin copy, scratch config, DeepSeek model resolved (deepseek-flash[1m]) |
+| A2 native eval | blocked: eval Bash sandbox failed to initialize; probe produced no valid baseline case |
+| A3 PluginEval | complete: 3 selected skills scored; whole-plugin result exploratory only |
+| A4 eval-bench | deferred: 4 prompt/rubric entries committed, no judged run claimed |
+| A5 evolve | skipped: conditional tool; no candidate change package above threshold |
+| A6 token snapshot | 2 spawn samples: 52,112 and 86,606 first-request tokens; median 69,359 |
+| A1 orchestration smoke | pass: exit 0, feature branch commit, 9 tasks, 3 valid HANDOFFs |
+| P2 coverage map | version 1.0.0 written; independent review in progress at cut time |
+| Track B | 6 tasks authored and validated; no outcome runs executed yet |
+
+## Independent coverage review
+
+Reviewer coverage-reviewer agreed with all 13 keep/narrow/drop decisions and
+recommended no flips. Required fixes were applied: native checks are marked
+blocked/deferred, the bootstrap/impact-triage/memory-save graders were hardened,
+the eval-bench review prompt now uses a diff with a seeded defect plus a
+distractor, map metadata/citations were corrected, and the token measurement
+sources were recorded. The full review note is gitignored at
+bench/.runs/p2/review.md. Because native eval is blocked, the review does not
+certify a native score.
+
+## Native eval probe: blocked, not passed
+
+The native eval command itself exited 0, but the probe is not a baseline pass.
+The eval Bash sandbox failed to initialize in the child sessions:
+
+    Sandbox is required but failed to initialize:
+    Failed to create bridge sockets after 5 attempts.
+
+Cases that need shell steps could not run their required PACT commands. The
+probe also exposed invalid case signals:
+
+| Probe case | With | Without | Finding |
+|---|---:|---:|---|
+| bootstrap | 0.50 | 0.50 | TaskCreate 0x; the without arm matched the prompt text; Bash blocked |
+| handoff-schema | 0.00 | 0.00 | max turns 8 in both arms |
+| impact-edit | 1.00 | 1.00 | no plugin delta; the command is triage, not edit-impact |
+| memory-save | 1.00 | 1.00 | saved regex passes without the plugin; Bash blocked the memory CLI |
+
+A reframed no-shell impact-triage probe also measured zero delta (1.0 with and
+1.0 without; the with arm hit max turns 20), so it is not valid baseline
+evidence either. No native eval result is used as baseline evidence. The native
+cases remain useful as a follow-up once the shell sandbox works or the
+shell-dependent assertions move to the direct headless runner.
+
+## PluginEval selected skills
+
+| Skill | Composite | Badge | Main signal |
+|---|---:|---|---|
+| pact-agent-teams | 49.65 | none | triggering D+, orchestration F, output F |
+| pact-handoff-harvest | 54.44 | none | triggering C-, orchestration F, output D- |
+| pact-memory | 74.50 | silver | orchestration C, output D-; strongest selected skill |
+
+The whole-plugin static score (51.17, no badge) is exploratory and was dropped
+from Track A because internal structural oracles and CI lint are stricter.
+PluginEval's model labels and USD are Anthropic-oriented; token counts are real,
+USD is not DeepSeek billing. Judge scores are experimental.
+
+## Orchestration smoke
+
+The direct headless smoke passed:
+
+- exit code 0, feature branch feature/hello-docstring, commit 4fcef53
+- PREPARE skipped, ARCHITECT skipped, CODE started and completed, TEST skipped
+- 9 tasks created; 3 HANDOFFs emitted; all 3 passed validate_handoff_schema
+- no push, PR, or merge
+
+Finding: both teammates reported that TaskCreate/TaskUpdate/TaskList/TaskGet
+were absent after ToolSearch and relayed their handoffs through SendMessage; the
+lead persisted task state. The relay path worked, but it adds overhead and a
+durability dependency. This is an environmental/tool-surface issue, not a plugin
+crash.
+
+## Token snapshot
+
+Two subagent first-request samples: 52,112 and 86,606 tokens; median 69,359.
+A trivial provider probe used 19,235 input and 60 output tokens. The sample is
+small and reports tokens, not USD. The fixed teammate payload is a material
+share of spawn cost and should be audited before adding more agents.
+
+## Track B suite
+
+Six tasks are authored and independently validated by bench/tasks/validate.py:
+
+| Task | Class | Variety | Validation |
+|---|---|---:|---|
+| notes-api-crud | low | 5 | seed pass, hidden fail on seed, gold pass, seed after pass |
+| invoice-rounding-bug | low | 5 | same |
+| jwt-auth | medium | 9 | same |
+| discount-strategy-refactor | medium | 10 | same |
+| oauth-pkce-flow | high | 13 | same |
+| job-queue-retries | high | 14 | same |
+
+No Track B model runs have been executed. The next step is a pilot and then the
+full PACT-vs-solo matrix with the scorecard; no coding-outcome claim is made.
+
+## Recommendations
+
+1. Fix or bypass the native eval shell-sandbox initialization. Until then, use
+   the direct headless smoke runner for PACT behavior that needs Bash, and do not
+   report native eval scores.
+2. Investigate the missing teammate Task tools. The relay path is functional but
+   costs tokens and leaves task durability to the lead.
+3. Prioritize prompting/orchestration quality for pact-agent-teams and
+   pact-handoff-harvest; keep pact-memory's output-quality gap on the list.
+4. Audit the fixed teammate spawn payload; 52K-87K first-request tokens per
+   subagent is high for small tasks.
+5. Run the Track B pilot and full matrix before making any outcome claim.
+
+## Reproduce
+
+    bench/bootstrap.sh
+    bench/pact-bench prepare --out bench/.runs/external/probe --verify
+    bench/pact-bench native-eval --manifest bench/.runs/external/probe/manifest.json --runs 3
+    bench/pact-bench plugin-eval --manifest bench/.runs/external/probe/manifest.json --plugin-eval-dir <pinned-plugin-eval>
+    bench/pact-bench tasks validate --all
+
+## Caveats
+
+- Native eval is blocked on this host; no native score is claimed.
+- Eval-bench and evolve were deferred; no judged scores are claimed.
+- Token sample n=2.
+- The coverage map 1.0.1 is independently reviewed (13/13 agree, no flips), but
+  native checks remain blocked/deferred and are not a native score.
+- Track B is validated but not executed.

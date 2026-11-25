@@ -1,0 +1,257 @@
+{
+  "schema": "pact-bench/result/1",
+  "run_id": "2026-11-25T2232Z",
+  "created_at": "2026-11-25T22:32:00Z",
+  "plugin": {
+    "name": "PACT",
+    "version": "4.8.38",
+    "sha": "1befafb314dd8124ad9225b87d0d5b064f0a6af6",
+    "tree_sha": "e668fbf505d74f4eb7b35a543cfa26e70e8b0f1b",
+    "dirty_paths": [],
+    "source": "current-worktree"
+  },
+  "p1": {
+    "status": "green",
+    "source": "gh api repos/Synaptic-Labs-AI/PACT-Plugin/commits/1befafb3/check-runs",
+    "checks": [
+      {
+        "name": "full-suite",
+        "conclusion": "success",
+        "completed_at": "2026-11-25T12:45:46Z"
+      },
+      {
+        "name": "full-suite",
+        "conclusion": "success",
+        "completed_at": "2026-11-25T12:26:49Z"
+      },
+      {
+        "name": "release",
+        "conclusion": "success",
+        "completed_at": "2026-11-25T12:27:42Z"
+      }
+    ]
+  },
+  "environment": {
+    "model": "deepseek-flash[1m]",
+    "judge_model": "deepseek-flash[1m]",
+    "provider_base_url": "https://api.deepseek.com/anthropic",
+    "claude_version": "2.1.332",
+    "python": "3.12.3",
+    "pytest": "9.2.0",
+    "teammate_mode": "in-process",
+    "plugin_eval_pin": "c96b5f6552dba32e4492307493ee613581430715",
+    "plugin_eval_path": "/tmp/pact-eval-probe/plugineval/agents/plugins/plugin-eval",
+    "live_settings_sha256": "06486553851e56d7728f5f9bd91f770e09d5fced328f0add1418958c5ed79713",
+    "scratch_env_keys": 17
+  },
+  "coverage_map": {
+    "version": "1.0.1",
+    "path": "bench/external/README.md",
+    "reviewer": "coverage-reviewer (task-8), 13/13 agree on direction, no flips; required fixes applied",
+    "review_note": "bench/.runs/p2/review.md (gitignored)",
+    "native_status": "blocked/deferred; no native case produced a positive with/without delta"
+  },
+  "track_a": {
+    "native_eval": {
+      "status": "blocked_shell_sandbox_no_valid_case",
+      "valid_baseline_cases": 0,
+      "probe": {
+        "command": "claude plugin eval ... --ablation with-without --runs 1 --scaffold --allow-tools Bash Write Edit",
+        "claude_version": "2.1.332",
+        "duration_seconds": 376,
+        "cost_usd": 3.503587,
+        "cases_total": 4,
+        "cases_passed": 4,
+        "overall_score": 0.625,
+        "overall_pass_rate": 0.5,
+        "mean_delta": 0,
+        "cases": [
+          {
+            "name": "bootstrap",
+            "with": 0.5,
+            "without": 0.5,
+            "issue": "TaskCreate 0x; Bash sandbox failed; without arm also matched prompt text"
+          },
+          {
+            "name": "handoff-schema",
+            "with": 0,
+            "without": 0,
+            "issue": "max turns 8 in both arms"
+          },
+          {
+            "name": "impact-edit",
+            "with": 1,
+            "without": 1,
+            "issue": "no plugin delta; reframed to impact-triage"
+          },
+          {
+            "name": "memory-save",
+            "with": 1,
+            "without": 1,
+            "issue": "saved regex passes without plugin; Bash sandbox failed for memory CLI"
+          }
+        ]
+      },
+      "blocker": "Native eval Bash sandbox failed to initialize: 'Sandbox is required but failed to initialize: Failed to create bridge sockets after 5 attempts'. Cases requiring shell (bootstrap, memory-save) cannot be valid baseline evidence on this host.",
+      "impact_triage_probe": {
+        "case": "impact-triage",
+        "with_score": 1.0,
+        "without_score": 1.0,
+        "mean_delta": 0.0,
+        "with_error": "max turns 20",
+        "without_error": null,
+        "duration_seconds": 156,
+        "cost_usd": 1.231479,
+        "verdict": "output-only; regex was prompt-satisfied; blocked pending a working sandbox and a positive delta"
+      },
+      "review_requirement": "Native checks must be reported as blocked/deferred until a case shows a positive with/without delta under a working eval sandbox."
+    },
+    "plugin_eval": {
+      "status": "complete",
+      "tool": "PluginEval",
+      "pin": "c96b5f6552dba32e4492307493ee613581430715",
+      "selection": [
+        "pact-agent-teams",
+        "pact-handoff-harvest",
+        "pact-memory"
+      ],
+      "selected": [
+        {
+          "skill": "pact-agent-teams",
+          "composite": 49.64867460393205,
+          "badge": "no_badge",
+          "notes": "triggering D+, orchestration F, output F"
+        },
+        {
+          "skill": "pact-handoff-harvest",
+          "composite": 54.437907361455736,
+          "badge": "no_badge",
+          "notes": "triggering C-, orchestration F, output D-"
+        },
+        {
+          "skill": "pact-memory",
+          "composite": 74.50114736734454,
+          "badge": "silver",
+          "notes": "orchestration C, output D-; strongest selected skill"
+        }
+      ],
+      "whole_plugin_exploratory": {
+        "composite": 51.16936898256462,
+        "badge": "no_badge",
+        "note": "dropped from Track A; internal oracles and CI lint are stricter"
+      },
+      "caveat": "PluginEval model labels and USD are Anthropic-oriented; token counts are real, USD is not DeepSeek billing. Judge scores are experimental."
+    },
+    "eval_bench": {
+      "status": "deferred",
+      "prompts_ready": 4,
+      "reason": "First baseline did not install/adopt eval-bench; prompt inventory is committed and ready for a follow-up. No judged scores are claimed.",
+      "prompts": [
+        "orchestration-plan",
+        "variety-assessment",
+        "handoff-contract",
+        "review-findings"
+      ]
+    },
+    "evolve": {
+      "status": "skipped",
+      "reason": "Conditional tool; no candidate change package above the adoption threshold in this baseline. DeepSeek provider support unverified."
+    },
+    "token_snapshot": {
+      "samples": 2,
+      "median_spawn_total": 69359,
+      "min": 52112,
+      "max": 86606,
+      "source": "PACT smoke subagent first assistant requests",
+      "provider_probe_input_tokens": 19235,
+      "caveat": "Small n; reports tokens, not USD.",
+      "measurement_sources": [
+        "per-subagent first assistant usage from agent-*.jsonl transcripts",
+        "claude -p modelUsage aggregate from the provider probe"
+      ]
+    },
+    "orchestration_smoke": {
+      "status": "pass",
+      "exit_code": 0,
+      "branch": "feature/hello-docstring",
+      "commit": "4fcef53628b4f73f719854fd02874e511136bce7",
+      "phases": [
+        "PREPARE skipped",
+        "ARCHITECT skipped",
+        "CODE started",
+        "CODE completed",
+        "TEST skipped"
+      ],
+      "tasks_created": 9,
+      "handoffs": 3,
+      "handoffs_valid": 3,
+      "note": "Teammates reported TaskCreate/TaskUpdate/TaskList/TaskGet absent after ToolSearch and relayed handoffs by SendMessage; the lead persisted task state. This is an environmental/tool-surface finding, not a plugin crash.",
+      "handoffs_all_valid": true
+    }
+  },
+  "track_b": {
+    "status": "suite_ready_not_run",
+    "tasks": [
+      {
+        "id": "notes-api-crud",
+        "class": "low",
+        "variety": 5,
+        "validation": "pass"
+      },
+      {
+        "id": "invoice-rounding-bug",
+        "class": "low",
+        "variety": 5,
+        "validation": "pass"
+      },
+      {
+        "id": "jwt-auth",
+        "class": "medium",
+        "variety": 9,
+        "validation": "pass"
+      },
+      {
+        "id": "discount-strategy-refactor",
+        "class": "medium",
+        "variety": 10,
+        "validation": "pass"
+      },
+      {
+        "id": "oauth-pkce-flow",
+        "class": "high",
+        "variety": 13,
+        "validation": "pass"
+      },
+      {
+        "id": "job-queue-retries",
+        "class": "high",
+        "variety": 14,
+        "validation": "pass"
+      }
+    ],
+    "validation_method": "fixture seed pass, hidden tests fail on seed, gold patch applies, hidden tests pass, seed tests pass after patch",
+    "next": "Run pilot, then the full PACT-vs-solo matrix and scorecard; no outcome claim is made yet."
+  },
+  "recommendations": [
+    "Fix or bypass the native eval shell-sandbox initialization before relying on native eval cases that need Bash; use the direct headless smoke harness for shell-requiring PACT behavior in the meantime.",
+    "Investigate why teammates lose TaskCreate/TaskUpdate/TaskList/TaskGet after ToolSearch in headless orchestration; the relay path works but adds overhead and memory-durability risk.",
+    "Prioritize pact-agent-teams and pact-handoff-harvest triggering/orchestration quality; pact-memory is the strongest selected skill but still has output-quality gaps.",
+    "Audit first-request spawn context: observed 52K-87K tokens per subagent (median 69K); reduce fixed teammate payload before adding more agents.",
+    "Run the Track B pilot and full matrix before making any coding-outcome claim; the suite is validated but not executed."
+  ],
+  "limitations": [
+    "Native eval is blocked by the host shell sandbox; no valid native eval baseline was produced.",
+    "PluginEval judge scores are experimental and Anthropic-labeled; do not report USD as DeepSeek billing.",
+    "Eval-bench and evolve were deferred; no judged scores are claimed for them.",
+    "Token snapshot has n=2 subagent samples plus one provider aggregate.",
+    "Coverage map 1.0.1 is independently reviewed; native checks remain blocked/deferred.",
+    "Track B fixtures are validated but no model runs have been executed."
+  ],
+  "review": {
+    "status": "complete",
+    "reviewer": "coverage-reviewer",
+    "agreement": "13/13 keep/narrow/drop decisions agreed; no flips",
+    "required_fixes": "hardened native graders; rewrote evalbench review prompt with diff+distractor; fixed map metadata/citations; recorded token measurement sources; marked native checks blocked",
+    "caveat": "review note is gitignored; the map records the verdict and remains explicit that native eval is blocked"
+  }
+}

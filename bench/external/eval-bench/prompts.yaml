@@ -1,0 +1,79 @@
+# eval-bench prompts for PACT Track A.
+# Each prompt elicits a PACT-specific behavior; the rubric scores only that
+# behavior. The judge must not see the plugin name or condition labels.
+
+- id: orchestration-plan
+  prompt: |
+    I need to add JWT authentication to an existing Python API service.
+    Walk me through how you would plan this work end-to-end: what preparation
+    and architecture you would do, how you would split it into tasks, which
+    specialist roles you would dispatch, and how you would verify the result.
+    Be concrete about the task hierarchy and the handoff expectations.
+  rubric: |
+    Score 0-5 on:
+    - Task hierarchy (0-2): creates feature and phase/agent tasks with the
+      correct blocked-by relationships and does not skip required phases
+      without a stated structural reason.
+    - Specialist use (0-2): names appropriate specialist roles and explains
+      why each is needed; does not dispatch a single generic coder for all work.
+    - Handoff/verification (0-1): states what each specialist must hand back
+      and how the result is tested/audited before completion.
+
+- id: variety-assessment
+  prompt: |
+    Assess the variety of this task using PACT's variety dimensions:
+    "Add a new CRUD endpoint to an existing service that already has three
+    similar endpoints and a matching test file." Give novelty, scope,
+    uncertainty, and risk scores with reasons, then state what workflow tier
+    you would choose.
+  rubric: |
+    Score 0-5 on:
+    - Dimension reasoning (0-3): each dimension is scored with concrete,
+      task-specific reasons rather than restated definitions.
+    - Workflow choice (0-2): the chosen workflow tier follows from the
+      reasoning and the described risk/scope; do not penalize arithmetic alone.
+
+- id: handoff-contract
+  prompt: |
+    Show a valid PACT HANDOFF for a backend task that adds a small endpoint.
+    Include the canonical fields, a concrete summary of what changed, the
+    verification evidence, and any open risks. Do not use placeholders.
+  rubric: |
+    Score 0-5 on:
+    - Verification evidence (0-3): names the tests or checks actually used and
+      what they proved; not just "tests pass."
+    - Residual risk (0-2): states at least one concrete residual risk or
+      explicitly states none with a reason.
+
+- id: review-findings
+  prompt: |
+    Review this diff as a PACT peer reviewer and give severity-tagged findings
+    plus a merge recommendation.
+
+    diff --git a/auth.py b/auth.py
+    @@ -1,5 +1,14 @@
+     import os
+    +SECRET = os.environ.get("JWT_SECRET", "dev-secret")
+    +ALGORITHM = "HS256"
+    +
+    +def decode(token):
+    +    return jwt.decode(token, SECRET, algorithms=[ALGORITHM])
+    +
+    +def is_admin(user):
+    +    return user.get("role") == "admin"
+    +
+    +def check_admin(path, user):
+    +    if path.startswith("/admin"):
+    +        return True
+    +    return is_admin(user)
+    +# TODO: rename the local variable later
+  rubric: |
+    Score 0-5 on:
+    - Seeded defect (0-2): flags the hard-coded JWT secret fallback as a
+      security defect with an appropriate severity and remediation.
+    - Evidence (0-1): explains the concrete impact rather than only naming a
+      category.
+    - Distractor (0-1): does not treat the TODO/rename comment as a blocking
+      finding.
+    - Recommendation (0-1): merge/block recommendation follows from the
+      findings and names the required remediation.
