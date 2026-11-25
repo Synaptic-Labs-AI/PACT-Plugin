@@ -248,6 +248,31 @@ def test_a_bucket_with_no_memories_is_not_an_earlier_id(tmp_path, monkeypatch):
     assert memory._earlier_canonical == {}
 
 
+def test_a_submodule_is_not_an_earlier_id_of_its_superproject(tmp_path, monkeypatch, caplog):
+    """A real submodule with its own origin: its session's dated memory on a
+    file in it is the submodule's bucket, not the superproject's under an
+    earlier id. RED WHEN the earlier-id path counts submodule rows as the
+    superproject's (the submodule exemption)."""
+    assert_outside_repository(tmp_path)
+    upstream = make_repo(tmp_path / "libup", remote="https://github.com/acme/lib.git")
+    sup = make_repo(tmp_path / "super", remote="https://github.com/acme/super.git")
+    run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
+            str(upstream), "lib", cwd=sup)
+    lib = sup / "lib"
+    assert (lib / ".git").is_file()
+    store = tmp_path / "store.db"
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        _memory(conn, "m1", "github.com/acme/lib", _later(), lib / "README")
+        conn.commit()
+    _fresh(monkeypatch, sup)
+    memory = PACTMemory(session_id="s", db_path=store)
+    with caplog.at_level(logging.WARNING):
+        assert memory._read_project_scopes() == ("github.com/acme/super",)
+    assert memory._earlier_canonical == {}
+    assert "github.com/acme/lib" not in caplog.text
+
+
 def test_a_new_store_stamp_replaces_the_cached_answer(renamed):
     """RED WHEN each store stamp adds a cache entry that is never trimmed."""
     _repo, store = renamed

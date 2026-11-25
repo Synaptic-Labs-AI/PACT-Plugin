@@ -525,7 +525,7 @@ was renamed or transferred. The bucket under the earlier id is not read. When
 a file row in this checkout is linked by a memory saved after
 `<git-common-dir>/description` last changed (a file that merely exists here
 never counts), every existing absolute file row of the bucket lies in this
-checkout, and the bucket holds memories, `project-id show` lists it as `earlier_id` with a rekey command into this
+checkout and outside its submodules, and the bucket holds memories, `project-id show` lists it as `earlier_id` with a rekey command into this
 checkout's id, and a read prints one notice per process naming it; otherwise
 `project-id show` lists it as an ordinary bucket with no command, as it does
 for every bucket when the repository has no `description` file, and for a

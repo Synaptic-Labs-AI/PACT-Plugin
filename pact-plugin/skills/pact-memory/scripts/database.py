@@ -2103,7 +2103,8 @@ def bucket_evidence(
         upstream); an unrelated clone in a deleted project's folder that
         shares a file such as a README therefore places the bucket too, as
         every same-named folder did before this change.
-        With `dated_only` only dated rows count (an earlier canonical id,
+        With `dated_only` only dated rows count, and a row in one of the
+        root's submodules is not contained (an earlier canonical id,
         `memory_api.PACTMemory._earlier_canonical_buckets`);
       - `vanished`: the path no longer exists, and it is not contained, or
         it is contained but does not count by the rule above (a deleted file
@@ -2167,8 +2168,12 @@ def bucket_evidence(
         except (OSError, ValueError):
             counts["unresolvable"] += 1
             continue
+        # AN EARLIER ID (`dated_only`) TAKES NO SUBMODULE: a submodule has its
+        # own origin and id, so its rows are not the superproject's earlier ones.
         if any(
-            _contained_by_root(resolved, root, nested, verified_common)
+            _contained_by_root(
+                resolved, root, nested, None if dated_only else verified_common
+            )
             for root in root_paths
         ):
             # A CONTAINED ROW PLACES THE BUCKET HERE ONLY IF ITS FILE IS STILL
