@@ -459,6 +459,14 @@ def test_the_backlog_strips_a_git_suffix_as_the_id_does(url):
     "https://github.com/o/r/.git",
     "git@github.com:o/r/.git",
     "ssh://git@github.com/o/r/.git/",
+    # Read as the server reads it: an escape decoded, .git in any case.
+    "https://github.com/O/R/%2Egit",
+    "https://github.com/O/R/.GIT",
+    "https://github.com/O/R/%2EGIT",
+    "https://github.com/%7E/o/r",
+    # A github.com id is exactly owner/repo.
+    "https://github.com/o/r/extra",
+    "git@github.com:o/r/x/y",
 ])
 def test_a_github_path_github_does_not_serve_declines(url):
     """github.com serves no home-relative path and no `o/r/.git` (measured:

@@ -1064,13 +1064,13 @@ def normalize_remote_url(url: object) -> Optional[str]:
 
     if len(identifier) > _max_id_length():
         return None
-    # A GITHUB ID IS ALWAYS owner/repo, AND ONLY A PATH GITHUB SERVES NAMES
-    # ONE: `https://github.com/owner/.git` (or any one-segment path) names no
-    # repository there, and neither does a home-relative `~/o/r` or a
+    # A GITHUB ID IS EXACTLY owner/repo, AND ONLY A PATH GITHUB SERVES NAMES
+    # ONE: `https://github.com/owner/.git` (or any path of another depth)
+    # names no repository there, and neither does a home-relative `~/o/r` or a
     # `o/r/.git` path (`_github_does_not_serve`). Each declines rather than
     # bind an id the remote does not reach.
     if identifier.startswith("github.com/") and (
-        identifier.count("/") < 2 or github_unserved
+        identifier.count("/") != 2 or github_unserved
     ):
         return None
 
@@ -1089,8 +1089,10 @@ def _github_does_not_serve(path: str) -> bool:
     found' for `https://github.com/O/R/.git` and refuses a `~` path over
     https, while `O/R` and `O/R.git/` are served. A plain sshd serves both
     forms, so only a github.com id declines them."""
-    trimmed = path.lstrip("/")
-    return trimmed.startswith("~") or trimmed.rstrip("/").endswith("/.git")
+    # Read as the server reads it: escapes decoded (`%2Egit`, `%7E`) and
+    # `.git` in any case.
+    trimmed = unquote(path, errors="surrogateescape").lstrip("/")
+    return trimmed.startswith("~") or trimmed.rstrip("/").lower().endswith("/.git")
 
 
 def _is_network_shaped(url: object) -> bool:

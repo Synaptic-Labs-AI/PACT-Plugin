@@ -7108,7 +7108,11 @@ class TestEveryRouteEntryConditionIsARoute:
             "a method on a local the census cannot type; every project object built on "
             "the path is a named build"
         ),
-        ("call", "<call to no function project_identity: trimmed.rstrip(...).endswith>"): (
+        ("call", "<call to no function project_identity: trimmed.rstrip(...).lower>"): (
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
+        ),
+        ("call", "<call to no function project_identity: trimmed.rstrip(...).lower().endswith>"): (
             "a method on a local the census cannot type; every project object built on "
             "the path is a named build"
         ),
