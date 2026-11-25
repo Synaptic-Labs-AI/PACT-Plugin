@@ -1038,8 +1038,12 @@ def _note_verified_unattributed(store: str, candidate: str, counts: Dict[str, An
     """Say, once per process per bucket, how many memories of a `verified`
     legacy bucket came from no recorded session. The bucket's file rows place
     the whole bucket here (`decide_bucket`), so they are read and a defaulted
-    rekey moves them; the line states that, and asks nothing."""
-    key = (store, candidate, "unattributed")
+    rekey moves them. The line states that and asks the user to do nothing.
+    It is logged at WARNING only so the CLI shows it: the CLI configures no
+    handler, and `logging.lastResort` prints WARNING and above. Its key is
+    its own, so a bucket that turns from `included_unverified` to
+    `verified` in one process still gets this line after the warning."""
+    key = (store, candidate, "verified_unattributed")
     if key in _UNPROVEN_WARNED:
         return
     _UNPROVEN_WARNED.add(key)

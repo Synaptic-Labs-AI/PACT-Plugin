@@ -140,6 +140,29 @@ def test_a_verified_bucket_with_no_foreign_row_is_read(checkout, caplog):
     assert len([r for r in caplog.records if "no recorded session" in r.getMessage()]) == 1
 
 
+def test_a_bucket_that_turns_verified_in_one_process_gets_both_lines(checkout, caplog):
+    """The included_unverified warning and the verified line each have their
+    own once-per-process key. A bucket first read on session evidence alone,
+    then placed here by a new file row, gets the warning and then the line.
+    RED WHEN the two share a key, so the first suppresses the second."""
+    repo, store, config = checkout
+    _rows(store, [("m1", "here-1"), ("m2", None)])
+    seed_session_evidence(config, repo, "here-1")
+    _scopes, state, notices = _read(store, caplog)
+    assert state["included_unverified"], state
+    assert any("nothing shows" in n for n in notices), notices
+    with db_connection(store) as conn:
+        conn.execute(
+            "INSERT INTO files (id, path, project_id) VALUES ('f2', ?, 'proj')",
+            (str(repo.resolve() / "src" / "a.py"),),
+        )
+        conn.commit()
+    caplog.clear()
+    _scopes, state, notices = _read(store, caplog)
+    assert state["verified"], state
+    assert len(notices) == 1 and "its file rows place it here" in notices[0], notices
+
+
 def test_a_vouched_bucket_with_no_unattributed_row_reads_quietly(checkout, caplog):
     """The control for the notice: every row's session is recorded here."""
     repo, store, config = checkout
