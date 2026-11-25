@@ -62,6 +62,11 @@ def _rows(store: Path, rows, *, file_path: str = "src/relative.py") -> None:
             (file_path,),
         )
         conn.commit()
+    if Path(file_path).is_absolute():
+        # The file exists: a contained row places the bucket only while its
+        # file is in this checkout (or a later memory links it).
+        Path(file_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(file_path).touch()
 
 
 def _read(store: Path, caplog):
@@ -151,6 +156,8 @@ def test_a_bucket_that_turns_verified_in_one_process_gets_both_lines(checkout, c
     _scopes, state, notices = _read(store, caplog)
     assert state["included_unverified"], state
     assert any("nothing shows" in n for n in notices), notices
+    (repo / "src").mkdir(parents=True, exist_ok=True)
+    (repo / "src" / "a.py").touch()
     with db_connection(store) as conn:
         conn.execute(
             "INSERT INTO files (id, path, project_id) VALUES ('f2', ?, 'proj')",
@@ -161,6 +168,30 @@ def test_a_bucket_that_turns_verified_in_one_process_gets_both_lines(checkout, c
     _scopes, state, notices = _read(store, caplog)
     assert state["verified"], state
     assert len(notices) == 1 and "its file rows place it here" in notices[0], notices
+
+
+def test_another_process_write_mid_command_re_decides_the_bucket(checkout, caplog):
+    """Inside one detection pass, a read decides the bucket is verified; then
+    another connection (another process) deletes its file row; the next read
+    in the same pass must re-decide (unproven), not reuse the cached verdict.
+    RED WHEN the per-bucket verdict cache ignores the store's change stamp."""
+    import sqlite3
+
+    repo, store, _config = checkout
+    _rows(store, [("m1", None)], file_path=str(repo.resolve() / "src" / "a.py"))
+    memory = PACTMemory(session_id="s", db_path=store)
+    with memory_api.detection_pass():
+        memory._read_project_scopes()
+        assert memory._legacy_scope_state["verified"], memory._legacy_scope_state
+        other = sqlite3.connect(str(store))
+        try:
+            other.execute("DELETE FROM files WHERE project_id = 'proj'")
+            other.commit()
+        finally:
+            other.close()
+        memory._read_project_scopes()
+        state = memory._legacy_scope_state
+    assert state["unproven"] and not state["verified"], state
 
 
 def test_a_vouched_bucket_with_no_unattributed_row_reads_quietly(checkout, caplog):
@@ -194,7 +225,7 @@ def test_an_unattributed_row_is_read_with_a_notice(checkout, caplog):
     assert "project-id rekey" in notices[0], notices
     _read(store, caplog)
     assert len([r for r in caplog.records if "no recorded session" in r.getMessage()]) == 1
-    assert "WHAT THIS CANNOT TELL APART" in memory_api._legacy_session_evidence.__doc__
+    assert "WHAT THIS CANNOT TELL APART" in memory_api._legacy_session_census.__doc__
 
 
 def test_a_subfolder_launch_names_its_reason(checkout, caplog):

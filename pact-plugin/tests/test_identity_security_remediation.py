@@ -1143,6 +1143,8 @@ class TestReadScopeCacheKeyIncludesTheIdentityRoot:
         store = tmp_path / "store" / "memory.db"
         store.parent.mkdir()
 
+        (left / "src").mkdir(parents=True, exist_ok=True)
+        (left / "src" / "x.py").touch()
         with db_connection(str(store)) as conn:
             create_memory(conn, {"project_id": "PACT-prompt", "context": "legacy"})
             track_file(conn, str(left / "src" / "x.py"), "PACT-prompt")

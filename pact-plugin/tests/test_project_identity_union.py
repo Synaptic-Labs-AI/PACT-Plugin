@@ -390,6 +390,14 @@ class TestEmptyScopeNeverSelectsTheStore:
         assert normalise_project_scopes(()) == ()
         assert project_scope_predicate("project_id", ()) == ("0", ())
 
+    @pytest.mark.parametrize("value", [5, 3.5, object()])
+    def test_a_value_that_is_no_scope_is_refused_by_name(self, value):
+        """A non-string, non-iterable value is refused with a ValueError that
+        names its type, not a TypeError from inside the read. RED WHEN the
+        normaliser lets iteration raise TypeError."""
+        with pytest.raises(ValueError, match=type(value).__name__):
+            normalise_project_scopes(value)
+
     def test_every_seam_returns_no_rows_for_an_empty_scope(self, union_env):
         """Catches a truthiness test that turns an empty scope into a
         whole-store read. `None` is the positive control: it means no filter,
@@ -825,6 +833,8 @@ class TestGateVerifiesAgainstTheDeclaredRoot:
                 (str(declared / "src" / "x.py"), "A-checkout"),
             )
             conn.commit()
+        (declared / "src").mkdir(parents=True, exist_ok=True)
+        (declared / "src" / "x.py").touch()
 
         memory = PACTMemory(session_id="s", db_path=store)
         assert memory._project_id == "github.com/o/a"
@@ -1384,6 +1394,8 @@ class TestReviewDbGateWorktreeRoots:
             "legacy-nul-plus",
         )
         self._seed_row(union_env, "f-nul3", nul_path, "legacy-nul-contained")
+        (union_env.repo / "src").mkdir(parents=True, exist_ok=True)
+        (union_env.repo / "src" / "kept.py").touch()
         self._seed_row(
             union_env, "f-contained",
             str(union_env.repo / "src" / "kept.py"),
@@ -1451,6 +1463,8 @@ class TestReviewDbGateWorktreeRoots:
         (worktree / "src").mkdir(parents=True, exist_ok=True)
         (main_root / "src").mkdir(parents=True, exist_ok=True)
         linked.symlink_to(worktree, target_is_directory=True)
+        for kept in (main_root / "src" / "m.py", worktree / "src" / "x.py", worktree / "src" / "y.py"):
+            kept.touch()
         rival = _rival_checkout_file(union_env.tmp_path, "legacy-foreign")
 
         self._seed_row(

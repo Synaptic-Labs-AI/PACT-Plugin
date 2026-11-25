@@ -1,10 +1,10 @@
 """The session-evidence check's slug-folder listing is a speedup, not the answer.
 
 Location: pact-plugin/tests/test_remediation_session_evidence_listing.py.
-`memory_api._legacy_session_census` (which `_legacy_session_evidence` reads)
-lists every slug folder under the sessions root once per call, not only the
-gate roots', and treats a listed entry as a live session folder. Only an
-ABSENT entry lets that slug folder's prune ledger stand in for a session. These arms pin that a
+`memory_api._legacy_session_census` lists every slug folder under the
+sessions root once per call, not only the gate roots', and treats a listed
+entry as a live session folder. Only an ABSENT entry, or a present one with no
+readable record, lets that slug folder's prune ledger stand in for a session. These arms pin that a
 folder the listing cannot read changes nothing: the check then falls back to
 the per-session existence test, exactly as before the listing existed.
 """
@@ -59,10 +59,11 @@ def _ledger_line(slug_dir: Path, repo: Path) -> None:
 
 
 def _evidence(store: Path, repo: Path) -> bool:
+    """Whether the census counts a row of `proj` as written here."""
     with db_connection(store) as conn:
-        return memory_api._legacy_session_evidence(
+        return memory_api._legacy_session_census(
             conn, "proj", [str(repo)], repo / ".git"
-        )
+        )["here"] > 0
 
 
 class TestAnUnlistableSlugFolderIsNotAnEmptyOne:
@@ -121,6 +122,16 @@ class TestAnAbsentFolderStillLetsTheLedgerStandIn:
     def test_a_reaped_session_in_a_listable_folder_uses_its_ledger_line(self, tmp_path):
         repo, store, slug_dir = _rig(tmp_path)
         _ledger_line(slug_dir, repo)
+        assert _evidence(store, repo) is True
+
+    def test_a_present_folder_with_no_readable_record_uses_its_ledger_line(self, tmp_path):
+        """A reap whose delete failed after removing the context file leaves
+        the session folder with no record; its ledger line then stands in.
+        RED WHEN a present folder hides its slug's ledger line whatever the
+        folder holds."""
+        repo, store, slug_dir = _rig(tmp_path)
+        _ledger_line(slug_dir, repo)
+        (slug_dir / SESSION).mkdir()
         assert _evidence(store, repo) is True
 
     def test_a_missing_slug_folder_is_no_evidence_and_no_error(self, tmp_path):

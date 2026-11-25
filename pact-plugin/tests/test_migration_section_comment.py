@@ -169,6 +169,17 @@ class TestAnEarlierReleasesCommentIsReplaced:
         assert out.count(WORKING_MEMORY_COMMENT) == 1
         assert f"## Working Memory\n{WORKING_MEMORY_COMMENT}\n" in out
 
+    def test_a_pin_that_starts_like_the_comment_is_the_users_and_stays(self):
+        """`## Pinned Context` never carries the section comment, so a whole-line
+        pin that starts like it is the user's pin, kept through migration.
+        RED WHEN the drop counts Pinned Context as a section that owns the
+        comment."""
+        pin = "<!-- Auto-managed by pact-memory skill. My own reminder. -->"
+        source = _old_format().replace("## Pinned Context\n", f"## Pinned Context\n{pin}\n")
+        assert source.count(pin) == 1
+        out = _build_migrated_content(source)
+        assert out.count(pin) == 1, out
+
     def test_a_quoted_copy_is_the_users_text_and_stays(self):
         """CONTROL: the drop reads marker lines only, so a fenced copy and one
         sharing its line with other text are left alone."""

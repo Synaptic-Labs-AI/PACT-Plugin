@@ -497,34 +497,6 @@ def _pruned_session_index(ledger: Path) -> Dict[str, List[dict]]:
     return index
 
 
-def _legacy_session_evidence(
-    conn: Any, candidate: str, gate_roots: list, common_dir: Optional[Path]
-) -> bool:
-    """Whether a recorded session from one of `gate_roots` wrote `candidate`
-    (`_legacy_session_census` counts a row of it `here`).
-
-    The evidence an UNVERIFIED legacy bucket needs to be read: a session id
-    that wrote into the bucket, whose record names a `project_dir` that IS a
-    gate root and a zone-aware `started_at` later than the ctime of
-    `<common_dir>/description`, or any start when there is no `description`
-    file (`common_dir` is the MAIN repository's, so every linked worktree
-    shares one file). The record is the session folder's context file while
-    the folder exists, and its line in the project's prune ledger once the
-    reaper has removed the folder; both pass the same test. A delivered
-    checkout with the same folder name has no such record. Never raises.
-
-    WHAT THIS CANNOT TELL APART: a row whose writing session has no record
-    anywhere (no session id, a session older than session records, or one
-    pruned past the ledger's tail). Such a row reads like this repository's
-    own once another of the bucket's sessions counts here. A row whose
-    session IS recorded at another checkout keeps the whole bucket out of
-    the read scope (`_legacy_session_census`). A repository that has no
-    origin keeps writing folder-name rows after the upgrade, so a bucket can
-    gain rows of either kind at any time.
-    """
-    return _legacy_session_census(conn, candidate, gate_roots, common_dir)["here"] > 0
-
-
 # Where a legacy bucket's writing sessions are recorded, by row count:
 # `here` (a session that counts as evidence here), `elsewhere` (recorded at a
 # directory outside every gate root, or inside another checkout nested under
@@ -577,9 +549,10 @@ def _legacy_session_census(
     two places counts by the first of elsewhere, here, subfolder,
     description_newer.
 
-    A PRESENT ENTRY IS A LIVE FOLDER: its context file is the record, and
-    anything unreadable there is no record; only an ABSENT entry lets that
-    slug folder's prune ledger stand in. A slug folder that exists but cannot
+    A PRESENT ENTRY IS A LIVE FOLDER: its context file is the record, and a
+    present entry that is not a folder is no record. An absent entry, or a
+    folder with no readable record (a reap whose delete failed after removing
+    the context file), lets that slug folder's prune ledger stand in. A slug folder that exists but cannot
     be listed is not taken as empty: each session is then looked up in it by
     path. Never raises: a store or filesystem failure leaves the affected
     rows `unattributed`.
@@ -589,6 +562,15 @@ def _legacy_session_census(
     of the same origin or pin) is not elsewhere: it
     places the session nowhere, as `bucket_evidence` treats that checkout's
     rows as no rival's.
+
+    WHAT THIS CANNOT TELL APART: a row whose writing session has no record
+    anywhere (no session id, a session older than session records, or one
+    pruned past the ledger's tail). Such a row reads like this repository's
+    own once another of the bucket's sessions counts here. A row whose
+    session IS recorded at another checkout keeps the whole bucket out of
+    the read scope (its `elsewhere` count). A repository that has no
+    origin keeps writing folder-name rows after the upgrade, so a bucket can
+    gain rows of either kind at any time.
     """
     from shared.pact_context import (
         PRUNE_LEDGER_NAME,
@@ -704,7 +686,9 @@ def _legacy_session_census(
                         recorded = read_session_record(sessions_root / slug / safe_id)
                         if recorded is not None:
                             places.add(where(recorded))
-                        continue
+                            continue
+                        if not stat.S_ISDIR(os.lstat(sessions_root / slug / safe_id).st_mode):
+                            continue
                     if (
                         PRUNE_LEDGER_NAME in present
                         if present is not None
@@ -1038,7 +1022,7 @@ def _warn_legacy_unattributed(
     """Disclose a legacy bucket read on session evidence alone
     (`included_unverified`) that holds rows no session record places, once
     per process per bucket. Such a row reads like this repository's own,
-    though nothing shows it is (`_legacy_session_evidence`'s limit). A
+    though nothing shows it is (`_legacy_session_census`'s limit). A
     `verified` bucket's rows are placed by its file rows instead, so it gets
     the informational line (`_note_verified_unattributed`)."""
     if _LEGACY_NOTICES_QUIET.get():
@@ -1723,6 +1707,11 @@ def project_candidate_rows(
 def _store_stat_key(store: str):
     """`(main, wal)` change stamps for the store, or None when it is absent.
 
+    NOT `_store_stamp`: this key asks "did any row possibly change?" for the
+    scope and verdict caches, so it follows the `-wal` file's own stamp;
+    `_store_stamp` asks "may an immutable read have seen a moving file?",
+    so it carries the inode and only whether a journal exists.
+
     The `-wal` leg is load-bearing: under WAL another process's commit can
     land only in the journal, leaving the main file's stamp unchanged, and a
     cache keyed on the main file alone would keep serving a stale legacy
@@ -1828,7 +1817,8 @@ def _read_only_connection(store: str):
 def _store_stamp(store: str):
     """What an immutable read relies on staying put: the store's inode,
     size and mtime, and whether a `-wal` or `-journal` exists
-    (`_journal_present`). None when unreadable."""
+    (`_journal_present`). None when unreadable. The caches' change key is
+    `_store_stat_key`, which answers a different question (see there)."""
     try:
         main = os.stat(store)
     except OSError:
@@ -3927,20 +3917,22 @@ class PACTMemory:
         The evidence is counted on `connection` (`bucket_evidence`), and the
         session census runs only when no file row already shows another owner,
         so it runs at most once per bucket per command. The verdict is cached
-        while a detection pass is open, keyed on the store, the identity root,
-        the scope kind and the bucket, so a folder-name save and the reads
-        around it share one answer; every in-process write clears it
-        (`_invalidate_legacy_scope_cache`).
+        while a detection pass is open, keyed on the store, its change stamp
+        (`_store_stat_key`, as the scope cache is), the identity root and the
+        bucket, so a folder-name save and the reads around it share one
+        answer while the store is unchanged; every in-process write clears it
+        (`_invalidate_legacy_scope_cache`), and a write by another process
+        during the command moves the stamp and re-decides.
         """
         from .database import bucket_evidence
 
         repo_root = self._project_identity_root
-        # NOT KEYED ON THE STORE'S STAT, unlike the scope cache: a save opens
-        # the store read-write between its guard and its own scope read,
-        # which moves the stat with no row changed, and would run the census
-        # twice. In-process writes clear this cache; a change another process
-        # makes mid-command is seen by the next command.
-        key = ("verdict", store, str(repo_root), bucket)
+        # KEYED ON THE STORE'S STAMP, as the scope cache is: another process's
+        # write during this command must re-decide the include/exclude
+        # answer. The cost: a save that opens the store read-write between its
+        # guard and its scope read can move the stamp with no row changed and
+        # count the bucket once more.
+        key = ("verdict", store, _store_stat_key(store), str(repo_root), bucket)
         in_pass = project_identity.DETECTION_ANSWERS.get() is not None
         cached = _LEGACY_SCOPE_CACHE.get(key) if in_pass else None
         if cached is not None:
@@ -4066,7 +4058,7 @@ class PACTMemory:
         For a canonical id, the PRE-change basename joins the scope ONLY when
         its bucket has rows and either the plausibility gate verifies it, or
         the gate finds it unverified and a recorded session from this
-        repository wrote into it (`_legacy_session_evidence`). An excluded or
+        repository wrote into it (`_legacy_session_census`). An excluded or
         unproven bucket is not read.
         The candidate is matched exact-case first and folded only as a
         fallback, and only when the identity root's filesystem PROVABLY
@@ -5896,7 +5888,8 @@ class PACTMemory:
             # change) nor relabel a session in one (a session_id change),
             # because either can create the session evidence that admits that
             # bucket to its own reads. A row with NO project (NULL) is not a
-            # folder-name bucket, so its session_id may change.
+            # folder-name bucket, so its session_id may change, and so may one
+            # this same call moves to this repository's own id.
             if self._detected_identity_is_canonical():
                 if "project_id" in updates and not is_canonical(
                     updates["project_id"]
@@ -5910,6 +5903,7 @@ class PACTMemory:
                     "session_id" in updates
                     and stored_project is not None
                     and not is_canonical(stored_project)
+                    and updates.get("project_id") != self._project_id
                 ):
                     self._refuse_legacy_write(
                         "update of session_id on a row in the folder-name "

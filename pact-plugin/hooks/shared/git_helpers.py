@@ -99,7 +99,9 @@ def answered_once(
     """`run()`, the caller's own call of git command `argv`, made once per
     `git_results_pass` for each question (`_question`): a later caller asking
     the same question gets the same CompletedProcess, or the same exception
-    raised again. `text`, `env` and `cwd` must be the ones `run` passes; a
+    raised again. A timeout is never kept: it measures how long that caller
+    waited, not what git answers, so the next asker, who may wait longer, runs
+    git again. `text`, `env` and `cwd` must be the ones `run` passes; a
     `run` that sets no `cwd=` runs in this process's directory and passes
     none here. Outside a pass, `run()` is called every time. Only a READ may
     come through here: a command that changes the repository must run each
@@ -113,6 +115,8 @@ def answered_once(
     if key not in memo:
         try:
             memo[key] = (run(), None)
+        except subprocess.TimeoutExpired:
+            raise
         except Exception as exc:  # the answer is the failure, kept for every later reader
             memo[key] = (None, exc)
     result, failure = memo[key]

@@ -326,7 +326,7 @@ class TestTheRekeyNoOpGivesTheLibrarysAnswer:
 
         code, envelope = _cli(
             ["project-id", "rekey", f"--from={self.BUCKET}", f"--to={to_id}",
-             *(["--apply"] if apply else [])],
+             *(["--apply", "--into-another-repository"] if apply else [])],
             capfd,
         )
 
@@ -360,7 +360,7 @@ class TestTheRekeyRefusalContract:
         code, envelope = _cli(
             [
                 "project-id", "rekey", "--from=proj", "--to=github.com/o/two",
-                "--apply", "--db-path", str(store),
+                "--apply", "--into-another-repository", "--db-path", str(store),
             ],
             capfd,
         )
@@ -369,6 +369,45 @@ class TestTheRekeyRefusalContract:
         assert result["memories"] == 1
         assert result["target_defaulted"] is False
         assert result["legacy_verdict"] == "excluded"
+
+    def test_an_apply_into_another_repositorys_id_is_refused(
+        self, excluded_rig, store, capfd
+    ):
+        """The cwd is github.com/o/one, so --to=github.com/o/two is another
+        repository's id: --apply is refused as bad input (exit 2) and moves
+        nothing, while a dry run still plans. RED WHEN an apply into another
+        repository's canonical id runs without --into-another-repository."""
+        before = _snapshot(store)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--to=github.com/o/two",
+             "--apply", "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 2 and envelope["error"] == "INVALID_INPUT", envelope
+        assert "not this checkout's id ('github.com/o/one')" in envelope["message"], envelope
+        assert _snapshot(store) == before
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--to=github.com/o/two",
+             "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 0 and envelope["result"]["dry_run"] is True, envelope
+
+    def test_a_rename_into_this_checkouts_own_id_applies(
+        self, excluded_rig, store, capfd
+    ):
+        """A repository rename: the checkout's origin already names the new id
+        (github.com/o/one) and the old canonical bucket moves into it with no
+        override flag. RED WHEN the guard refuses a move into this checkout's
+        own id."""
+        _seed(store, "github.com/o/old-name", memory_id="renamed01", path="r.py")
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=github.com/o/old-name",
+             "--to=github.com/o/one", "--apply", "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1, envelope
 
     def test_a_canonical_source_with_a_defaulted_target_is_refused(
         self, excluded_rig, store, capfd
@@ -2094,7 +2133,7 @@ _EVERY_CLI_COMMAND = (
     ("project-id show", ["project-id", "show"], None),
     ("project-id rekey --dry-run", ["project-id", "rekey", "--from", "a/b", "--to", "c/d", "--dry-run"], None),
     ("project-id rekey", ["project-id", "rekey", "--from", "a/b", "--to", "c/d"], None),
-    ("project-id rekey --apply", ["project-id", "rekey", "--from", "a/b", "--to", "c/d", "--apply"], None),
+    ("project-id rekey --apply", ["project-id", "rekey", "--from", "a/b", "--to", "c/d", "--apply", "--into-another-repository"], None),
     ("project-id rekey --candidates", ["project-id", "rekey", "--candidates"], None),
     ("project-id rekey --from only", ["project-id", "rekey", "--from", "a/b"], None),
     ("delete", ["delete", "MEMID"], None),

@@ -876,11 +876,13 @@ def _legacy_line_spans(doc: Document) -> list[tuple[int, int]]:
     # FOUND, DUPLICATE and a stray's MALFORMED all carry the clean comment
     # rows as spans; an UNKNOWN reading carries none, and drops nothing. ONLY
     # a comment inside a memory section is the section's own: a copy in a
-    # user's section is the user's text and stays.
+    # user's section is the user's text and stays, and so is one in
+    # `## Pinned Context`, which the plugin never writes the comment into: a
+    # whole-line pin that starts like the comment is the user's pin.
     comment = doc.find_marker(_SECTION_COMMENT_PREFIX)
     boundaries = [row for row in doc.find_lines(_SECTION_BOUNDARY_RE) if not doc.lines[row].in_html]
     memory_headings = {
-        row for pattern in _MEMORY_HEADING_RES.values() for row in doc.find_lines(pattern)
+        row for pattern in _COMMENTED_HEADING_RES for row in doc.find_lines(pattern)
         if not doc.lines[row].in_html
     }
     comment_rows = [
@@ -893,8 +895,8 @@ def _legacy_line_spans(doc: Document) -> list[tuple[int, int]]:
 
 def _in_memory_section(row: int, boundaries: list[int], memory_headings: set[int]) -> bool:
     """Whether `row` lies in a memory section: the nearest visible `# ` or
-    `## ` heading above it (`boundaries`, from the finder) is one of the
-    memory headings the migration rebuilds (`memory_headings`)."""
+    `## ` heading above it (`boundaries`, from the finder) is one of
+    `memory_headings`, the memory headings that carry the section comment."""
     above = [heading for heading in boundaries if heading < row]
     return bool(above) and above[-1] in memory_headings
 
@@ -1553,6 +1555,11 @@ _MEMORY_HEADING_RES = {
     heading: re.compile(re.escape(heading) + r"\s*$")
     for heading in ("## Retrieved Context", "## Pinned Context", "## Working Memory")
 }
+# The memory headings the plugin writes the section comment under.
+_COMMENTED_HEADING_RES = (
+    _MEMORY_HEADING_RES["## Retrieved Context"],
+    _MEMORY_HEADING_RES["## Working Memory"],
+)
 # Any `# ` or `## ` heading, indent-tolerant (see the boundary note in
 # _plan_migration).
 _SECTION_BOUNDARY_RE = re.compile(r"\s*#{1,2} +\S")

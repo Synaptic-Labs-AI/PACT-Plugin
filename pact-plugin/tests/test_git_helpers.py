@@ -300,3 +300,29 @@ def test_a_pass_keys_a_question_on_the_directory_its_run_sets(tmp_path, monkeypa
 
     assert answers == [str(b), str(a), str(b), str(b)], answers
     assert runs == [(tuple(toplevel), b), (tuple(toplevel), None)], runs
+
+
+def test_a_timed_out_read_is_not_the_answer_for_a_longer_wait(tmp_path, monkeypatch):
+    """In one pass, a read that timed out is not kept: the same question asked
+    again with a longer timeout runs git and gets its answer, and that answer
+    is then kept. RED WHEN `answered_once` keeps a TimeoutExpired, which hands
+    the longer wait the first caller's None."""
+    from shared.git_helpers import git_results_pass, run_git
+
+    monkeypatch.chdir(tmp_path)
+    answer = subprocess.CompletedProcess(["git"], 0, stdout="true\n", stderr="")
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs["timeout"])
+        if kwargs["timeout"] == 1:
+            raise subprocess.TimeoutExpired(cmd=["git"], timeout=1)
+        return answer
+
+    question = ["rev-parse", "--is-inside-work-tree"]
+    with patch("shared.git_helpers.subprocess.run", side_effect=fake_run), git_results_pass():
+        short = run_git(question, timeout=1, once_per_pass=True)
+        longer = run_git(question, timeout=30, once_per_pass=True)
+        kept = run_git(question, timeout=1, once_per_pass=True)
+
+    assert (short, longer, kept, calls) == (None, answer, answer, [1, 30])

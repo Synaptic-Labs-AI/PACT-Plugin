@@ -71,6 +71,10 @@ def repo_env(tmp_path, monkeypatch):
     """
     assert_outside_repository(tmp_path)
     repo = make_repo(tmp_path / LEGACY, remote=REMOTE)
+    # The file the arms' contained row names exists, so that row places the
+    # legacy bucket here (a row whose file is gone needs a later memory).
+    (repo / "src").mkdir()
+    (repo / "src" / "a.py").touch()
     monkeypatch.chdir(repo)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
     memory_api._LEGACY_SCOPE_CACHE.clear()

@@ -268,6 +268,7 @@ ORIGIN_NOT_OWN_FILE = "not_own_file"
 ORIGIN_INCLUDE_ONLY = "include_only"
 ORIGIN_CONFIG_UNREAD = "config_unread"
 
+
 def _holds_include_section(text: str) -> bool:
     """Whether git config `text` has a section header naming `include` or
     `includeIf`, read as git's own parser reads a header (`git_parse_source`
@@ -479,6 +480,23 @@ def _git_ceiling_directories() -> set:
     return ceilings
 
 
+def _is_git_directory(path: Path) -> bool:
+    """Whether git would accept `path` as a git directory (git's own
+    `is_git_directory`): a `HEAD` entry, and `objects/` and `refs/` in
+    it, or in the directory its `commondir` file names. Never raises."""
+    try:
+        if not os.path.lexists(path / "HEAD"):
+            return False
+        common = path
+        commondir = path / "commondir"
+        if commondir.is_file():
+            named = commondir.read_text(encoding="utf-8", errors="surrogateescape").strip()
+            common = Path(named) if os.path.isabs(named) else path / named
+        return (common / "objects").is_dir() and (common / "refs").is_dir()
+    except (OSError, ValueError):
+        return False
+
+
 def find_git_marker(start) -> Optional[Path]:
     """The `.git` marker (file or directory) git's discovery would reach, or None.
 
@@ -493,7 +511,10 @@ def find_git_marker(start) -> Optional[Path]:
     - it stops at the filesystem root.
 
     An `lstat` of the candidate, so a broken marker (a dangling symlink, a
-    `.git` file naming a missing directory) still counts. Only a missing
+    `.git` file naming a missing directory) still counts. A `.git` FOLDER
+    counts only when git would accept it as a git directory
+    (`_is_git_directory`) or nothing above it is a marker: git walks past
+    any other to a marker above, and so does this. Only a missing
     entry (`FileNotFoundError`, `NotADirectoryError`) lets the walk go on:
     a `.git` whose `lstat` fails for any other reason (a folder that cannot
     be searched, a symlink loop) is returned as the marker, so the caller
@@ -513,26 +534,34 @@ def find_git_marker(start) -> Optional[Path]:
         device = os.stat(level).st_dev
     except OSError:
         return None
+    # GIT SKIPS A `.git` FOLDER THAT IS NOT A GIT DIRECTORY (an empty
+    # `sub/.git`) and goes on up, so the walk does too: a `.git` above it is
+    # the marker git uses, and stopping at the folder would let a `.git` file
+    # above redirect git while this walk saw no redirect. With nothing above,
+    # the first such folder is still returned, so a broken marker declines.
+    skipped: Optional[Path] = None
     while True:
         marker = level / ".git"
         try:
-            os.lstat(marker)
-            return marker
+            mode = os.lstat(marker).st_mode
+            if not stat.S_ISDIR(mode) or _is_git_directory(marker):
+                return marker
+            skipped = skipped or marker
         except (FileNotFoundError, NotADirectoryError):
             pass
         except OSError:
             return marker
         except ValueError:
-            return None
+            return skipped
         parent = level.parent
         if parent == level or parent in ceilings:
-            return None
+            return skipped
         if not cross_filesystem:
             try:
                 if os.stat(parent).st_dev != device:
-                    return None
+                    return skipped
             except OSError:
-                return None
+                return skipped
         level = parent
 
 
@@ -2104,8 +2133,6 @@ def _refuse_submodule_basename(
     )
 
 
-
-
 def _admin_dir_refusal(admin_dir: Path, asked_root: Path) -> Optional[str]:
     """None when a SUBMODULE admin dir records `asked_root` as its checkout,
     else the detail of the refusal: CORE_WORKTREE_UNREAD_DETAIL when git
@@ -2131,7 +2158,10 @@ def _admin_dir_refusal(admin_dir: Path, asked_root: Path) -> Optional[str]:
         from shared.git_helpers import answered_once
         from shared.project_scope import git_env_without_location
 
-        argv = ["git", "--git-dir", str(admin_dir), "config", "--get", "core.worktree"]
+        # `--local`: the admin dir's OWN config only. A global, system or
+        # environment `core.worktree` is not this submodule's record, and
+        # reading one would let machine-local config vouch for a pointer.
+        argv = ["git", "--git-dir", str(admin_dir), "config", "--local", "--get", "core.worktree"]
         result = answered_once(
             argv,
             lambda: subprocess.run(
@@ -2212,8 +2242,6 @@ def _git_names_toplevel(root: Path) -> bool:
         return False
 
 
-
-
 def _redirect_target_refusal(target: Path, marker_root: Path) -> Optional[str]:
     """None unless a `.git` marker's resolved TARGET is another repository's
     git dir; then the detail of the refusal.
@@ -2250,8 +2278,6 @@ def _redirect_target_refusal(target: Path, marker_root: Path) -> Optional[str]:
     if _submodule_admin_dir(target) and not os.path.exists(target / "commondir"):
         return _admin_dir_refusal(target, marker_root)
     return None
-
-
 
 
 def _gitfile_redirect_detail(root: Path) -> Optional[str]:

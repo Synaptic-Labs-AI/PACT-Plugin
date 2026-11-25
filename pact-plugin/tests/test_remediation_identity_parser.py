@@ -38,6 +38,14 @@ NO_PORTABLE = pi.OUTCOME_NO_PORTABLE_ORIGIN
 DECLINE = pi.OUTCOME_DECLINE
 
 
+
+def _git_directory(path):
+    """A minimal folder git accepts as a git directory (HEAD, objects/,
+    refs/): `find_git_marker` walks past a `.git` folder git would not."""
+    (path / "objects").mkdir(parents=True)
+    (path / "refs").mkdir()
+    (path / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+
 def _origin_id(repo: Path):
     """The (outcome, id) the classifier gives for what `read_origin` returns."""
     origin = pi.read_origin(repo / ".git")
@@ -875,7 +883,7 @@ class TestGitDiscoveryHonoursACeilingAsGitDoes:
 
     def test_a_marker_above_with_no_ceiling_is_found(self, tmp_path, monkeypatch):
         (tmp_path / "top" / "sub").mkdir(parents=True)
-        (tmp_path / "top" / ".git").mkdir()
+        _git_directory(tmp_path / "top" / ".git")
         monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
 
         assert pi.find_git_marker(tmp_path / "top" / "sub") == (
@@ -1103,7 +1111,7 @@ class TestCeilingEntriesAreParsedAsGitParsesThem:
         self, tmp_path, monkeypatch
     ):
         (tmp_path / "a" / "sub").mkdir(parents=True)
-        (tmp_path / "a" / ".git").mkdir()
+        _git_directory(tmp_path / "a" / ".git")
         (tmp_path / "link").symlink_to(tmp_path / "a")
         monkeypatch.setenv("GIT_CEILING_DIRECTORIES", os.pathsep + str(tmp_path / "link"))
 

@@ -1298,7 +1298,8 @@ def normalise_project_scopes(
     `is None`, never truthiness.
 
     Elements that are not non-empty strings are dropped: no row can carry
-    them, and `IN (NULL)` never matches. A repeated id is kept once, in
+    them, and `IN (NULL)` never matches. A value that is neither None, a
+    string nor iterable (an int) raises ValueError naming its type. A repeated id is kept once, in
     first-seen order, because a per-scope loop (one KNN per scope) would
     otherwise return the same memory twice.
     """
@@ -1306,8 +1307,17 @@ def normalise_project_scopes(
         return None
     if isinstance(project_ids, str):
         return (project_ids,) if project_ids else ()
+    try:
+        scopes = iter(project_ids)
+    except TypeError:
+        # NOT A SCOPE AT ALL (an int, an object): refused by name rather
+        # than surfacing as a TypeError from deep inside a read.
+        raise ValueError(
+            "a read scope is None, a project id, or a sequence of project ids; "
+            f"got {type(project_ids).__name__}"
+        ) from None
     return tuple(dict.fromkeys(
-        scope for scope in project_ids
+        scope for scope in scopes
         if isinstance(scope, str) and scope
     ))
 
@@ -1862,8 +1872,11 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
         text = raw.decode("utf-8-sig")
     except UnicodeDecodeError:
         return None, "not_utf8"
-    for line in text.splitlines():
-        candidate = line.strip()
+    # LINES END AT "\n" ONLY (one "\r" before it is dropped): `splitlines`
+    # also breaks at \x0b, \x0c, \x1c-\x1e, \x85 and U+2028/2029, which would
+    # cut a control character off a candidate instead of refusing it.
+    for line in text.split("\n"):
+        candidate = (line[:-1] if line.endswith("\r") else line).strip(" \t")
         if not candidate or candidate.startswith("#"):
             continue
         if len(candidate) > CANONICAL_ID_MAX_LENGTH:
@@ -2022,6 +2035,43 @@ BUCKET_EVIDENCE_KEYS = (
 )
 
 
+def _linked_after_description(
+    conn: sqlite3.Connection, file_id: Any, common_dir: Optional[str]
+) -> bool:
+    """Whether a memory linked to file row `file_id` was saved after
+    `<common_dir>/description` last changed (its ctime), the date a clone or
+    `git init` gives this repository. No description file: no ordering
+    check, so True (as a session record's `_description_predates` rule).
+    No common dir, a description that is not a regular file, or a creation
+    time without a zone: False. Never raises."""
+    if not common_dir:
+        return False
+    try:
+        described = os.lstat(os.path.join(common_dir, "description"))
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError):
+        return False
+    if not stat.S_ISREG(described.st_mode):
+        return False
+    try:
+        rows = conn.execute(
+            "SELECT m.created_at FROM memory_files l "
+            "JOIN memories m ON m.id = l.memory_id WHERE l.file_id = ?",
+            (file_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return False
+    for (created,) in rows:
+        try:
+            when = datetime.fromisoformat(str(created))
+        except ValueError:
+            continue
+        if when.tzinfo is not None and when.timestamp() > described.st_ctime:
+            return True
+    return False
+
+
 def bucket_evidence(
     conn: sqlite3.Connection,
     bucket: str,
@@ -2042,9 +2092,12 @@ def bucket_evidence(
       - `contained_rows`: its resolved path lies under a gate root, and no
         directory strictly between the root and the row is a separate
         checkout (`_contained_by_root`; the root's own submodules stay
-        contained). Existence is not required: a deleted file inside this
-        repository still places the bucket here;
-      - `vanished`: not contained, and the path no longer exists;
+        contained), and either its file still exists or a memory linked to
+        it was saved after this repository's `description` last changed
+        (`_linked_after_description`): a deleted file of an earlier project
+        that lived in this folder places nothing;
+      - `vanished`: the path no longer exists, and it is not contained, or
+        it is contained but fails the date test above;
       - `foreign_rows`: exists, not contained, and evidence of another owner
         (`_foreign_kind`), split into `foreign_checkout_rows` (the rival is
         a git checkout) and `foreign_folder_rows` (a marked non-git folder);
@@ -2073,8 +2126,9 @@ def bucket_evidence(
     primitive: it never runs `ensure_initialized`; on a store without the
     table it raises `sqlite3.OperationalError`). Never raises on a row.
     """
+    # BY POSITION, so a plain connection (no sqlite3.Row factory) works too.
     cursor = conn.execute(
-        "SELECT path FROM files WHERE project_id = ?",
+        "SELECT id, path FROM files WHERE project_id = ?",
         (bucket,),
     )
     root_paths = _gate_root_paths(roots)
@@ -2090,7 +2144,7 @@ def bucket_evidence(
     counts["roots"] = len(root_paths)
     for row in cursor.fetchall():
         counts["file_rows"] += 1
-        path = row["path"]
+        file_id, path = row[0], row[1]
         if not path or not os.path.isabs(path):
             counts["relative"] += 1
             continue
@@ -2104,7 +2158,18 @@ def bucket_evidence(
             _contained_by_root(resolved, root, nested, verified_common)
             for root in root_paths
         ):
-            counts["contained_rows"] += 1
+            # A CONTAINED ROW PLACES THE BUCKET HERE ONLY IF ITS FILE IS STILL
+            # IN THIS CHECKOUT, or a memory linked to it was saved after this
+            # repository's `description` last changed. Otherwise the path may
+            # belong to an earlier project that once lived in this folder (an
+            # unrelated repository cloned into a deleted project's path), so
+            # it counts as vanished.
+            if os.path.lexists(resolved) or _linked_after_description(
+                conn, file_id, verified_common
+            ):
+                counts["contained_rows"] += 1
+            else:
+                counts["vanished"] += 1
         elif not os.path.lexists(resolved):
             counts["vanished"] += 1
         else:

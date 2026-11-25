@@ -115,6 +115,33 @@ class TestTheReaperRecordsBeforeItDeletes:
         }]
         assert (slug_dir / LEDGER).stat().st_mode & 0o777 == 0o600
 
+    def test_a_failed_delete_leaves_folder_and_line_and_counts_the_session_once(
+        self, monkeypatch
+    ):
+        """The line is written before the delete, so a delete that fails leaves
+        the folder AND its ledger line. The census reader still counts the
+        session's rows once: a present folder is the record, and a session
+        found in several records is counted at one place. RED WHEN the reader
+        adds a session's rows once per record it finds."""
+        import scripts.database as database
+        from scripts.memory_api import _legacy_session_census
+
+        root = get_claude_config_dir()
+        project = root.parent / "work" / "proj"
+        project.mkdir(parents=True)
+        target, context = pact_context.build_context_cache("session-x", SID, str(project))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        assert pact_context.persist_context(target, context)
+        entry = target.parent
+        _age(entry)
+        monkeypatch.setattr(session_end.shutil, "rmtree", lambda *args, **kwargs: None)
+        session_end.cleanup_old_sessions(pact_context.project_slug(str(project)), OTHER)
+        assert entry.exists() and _ids(entry.parent) == [SID]
+
+        monkeypatch.setattr(database, "bucket_session_counts", lambda conn, candidate: [(SID, 3)])
+        counts = _legacy_session_census(None, "proj", [str(project)], None)
+        assert sum(counts.values()) == 3 and counts["unattributed"] == 0, counts
+
     def test_a_second_reap_appends_and_never_rewrites(self, world):
         """Catches a writer that truncates the ledger. RED WHEN the open drops
         O_APPEND or uses a rewrite."""

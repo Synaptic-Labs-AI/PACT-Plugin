@@ -381,7 +381,8 @@ class TestSecretaryProjectionKey:
             conn.commit()
         seed_session_evidence(tmp_path / "home" / ".claude", repo / launched_in if launched_in else repo, "writer")
         with db_connection(store) as conn:
-            assert memory_api._legacy_session_evidence(conn, "proj", [str(repo)], repo / ".git") is counts
+            census = memory_api._legacy_session_census(conn, "proj", [str(repo)], repo / ".git")
+            assert (census["here"] > 0) is counts
 
     def test_the_retired_folder_name_key_is_gone(self):
         assert "keyed by the basename of the project root" not in _body(SECRETARY).lower()
@@ -504,18 +505,19 @@ class TestOverridePathIsNullWhenNoPinCanRemedy:
         row = _table_row(SKILL, "project-id show")
         assert "because" not in row and "For gitfile_redirect:" not in row
         assert "The decline remedies follow the table" in row
-        assert "Decline remedies. For gitfile_redirect: " in _body(SKILL)
+        assert "Decline remedies. For gitfile_redirect, the CLI prints: " in _body(SKILL)
 
     def test_the_redirect_remedy_is_the_code_remedy(self):
         from scripts.memory_api import _REDIRECT_REMEDY
 
         clause = self._clause()
-        assert "For gitfile_redirect: " + _flatten(_REDIRECT_REMEDY) in clause
+        assert 'For gitfile_redirect, the CLI prints: "' + _flatten(_REDIRECT_REMEDY) + '"' in clause
+        assert "In this skill, that is the next sentence" not in _body(SKILL)
 
     def test_only_the_user_writes_the_separate_git_dir_pin(self):
         clause = self._clause()
         assert (
-            "Such a layout is recovered by a pin at <dir>/.git/pact-project-id, "
+            "For such a layout: it is recovered by a pin at <dir>/.git/pact-project-id, "
             "in the git directory its .git file names, but only the user writes "
             "it, after confirming that directory is theirs."
         ) in clause
@@ -851,7 +853,7 @@ class TestRekeyRemediesNameTheirTarget:
         ) in _body(SKILL)
 
     def test_a_named_absent_store_is_refused_not_reported_absent(self):
-        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply], or project-id rekey --candidates alone")
+        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository], or project-id rekey --candidates alone")
         assert (
             "DB_PATH_NOT_FOUND when --db-path names a store that is not "
             "present, and nothing is created"
@@ -859,7 +861,7 @@ class TestRekeyRemediesNameTheirTarget:
         assert "A store path that does not exist answers store_absent" not in row
 
     def test_the_envelope_field_sentences_are_present(self):
-        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply], or project-id rekey --candidates alone")
+        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository], or project-id rekey --candidates alone")
         assert (
             "When the default store does not exist yet, the command answers "
             "store_absent: true and creates nothing; a --from bucket with no rows answers "
@@ -927,6 +929,32 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
             "folder-name bucket. Both fail with LEGACY_BUCKET_WRITE_REFUSED, "
             "exit 2 and write nothing."
         ) in _body(SKILL)
+
+    def test_a_file_row_places_a_bucket_only_while_dated_or_present(self):
+        assert (
+            "A file row places it only when its file still exists, or a memory "
+            "linked to it was saved after <git-common-dir>/description last changed, "
+            "or the repository has no description file; a deleted file whose "
+            "memories are older than that does not."
+        ) in _body(SKILL)
+
+    def test_a_rekey_into_another_repository_needs_the_flag(self):
+        body = _body(SKILL)
+        assert (
+            "The CLI refuses an --apply into another repository's id unless "
+            "--into-another-repository is passed, which an agent passes only with "
+            "the user's explicit approval."
+        ) in body
+        assert (
+            "2 bad input (including INVALID_INPUT for an --apply whose canonical "
+            "--to is not this checkout's own id; a dry run still plans it)"
+        ) in body
+
+    def test_the_exit_code_table_lists_the_legacy_write_refusal(self):
+        body = _body(SKILL)
+        table = body[body.index("| Code | Meaning |"):body.index("project-id rekey exits 1 when it refuses")]
+        row2 = next(line for line in table.split("|") if line.strip().startswith("Bad input"))
+        assert "LEGACY_BUCKET_WRITE_REFUSED" in row2
 
     def test_the_remedy_is_the_one_the_refusal_prints(self, tmp_path, monkeypatch):
         import sqlite3
@@ -7181,7 +7209,8 @@ class TestEveryRouteEntryConditionIsARoute:
             "test on that text, it asks git nothing"
         ),
         ("call", "<call to no function database: candidate.partition>"): (
-            "pin_file_value splits the pin's text at its host; a string split, it asks git nothing"
+            "pin_file_value, _pin_path_escapes and _github_folded_pin each split the pin's text "
+            "at its host; a string split, it asks git nothing"
         ),
         ("call", "<call to no function database: hostport.lower>"): (
             "pin_file_value lower-cases the pin's host, as a remote's id does; it asks git nothing"

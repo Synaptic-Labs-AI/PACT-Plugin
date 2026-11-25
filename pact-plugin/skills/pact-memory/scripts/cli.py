@@ -1165,6 +1165,25 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
         source.close()
 
 
+def _bucket_file_rows(store: Path, bucket: str) -> int:
+    """How many file rows are filed under `bucket`, read without writing
+    (`_stable_read_only`). 0 for a store with no files table yet."""
+    from scripts.database import sqlite3 as db_sqlite3
+
+    def count() -> int:
+        conn = _read_only_connection(str(store))
+        try:
+            return conn.execute(
+                "SELECT COUNT(*) FROM files WHERE project_id = ?", (bucket,)
+            ).fetchone()[0]
+        except db_sqlite3.OperationalError:
+            return 0
+        finally:
+            conn.close()
+
+    return _stable_read_only(str(store), count)
+
+
 def _own_folder_name_target(memory, from_id: str, to_id: str) -> bool:
     """Whether `to_id` is this session's OWN folder-name id and `from_id` its
     legacy candidate, the one folder-name target a rekey may take.
@@ -1332,6 +1351,25 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         # THIS CHECKOUT'S OWN pre-upgrade name with no rows left under it
         # (already moved) is a no-op, not a foreign bucket: re-running an
         # applied rekey must stay a clean success.
+        # A BUCKET WITH NO MEMORY ROWS HAS NO LEGACY CANDIDATE (candidates
+        # are counted from memories), so its own-name re-run is a no-op only
+        # when nothing at all is filed under it. File rows left there were
+        # never judged, so a defaulted --to may not move them.
+        if (
+            legacy_verdict is None
+            and own_legacy
+            and store.exists()
+            and _bucket_file_rows(store, from_id)
+        ):
+            _error(
+                "REKEY_REFUSED",
+                escape_for_envelope(
+                    f"--from={from_id!r} holds file rows but no memories, so "
+                    "nothing verified it as this checkout's; pass --to "
+                    "explicitly after confirming the rows belong here. "
+                    "Nothing was moved."
+                ),
+            )
         if legacy_verdict is None and not own_legacy:
             _error(
                 "REKEY_REFUSED",
@@ -1400,6 +1438,31 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                     "here. Nothing was moved."
                 ),
             )
+
+    own_id = memory.project_id
+    if (
+        args.apply
+        and not noop
+        and is_canonical(to_id)
+        and to_id != own_id
+        and not args.into_another_repository
+    ):
+        # AN APPLIED MOVE INTO ANOTHER REPOSITORY'S ID IS REFUSED: it files
+        # this bucket's rows under that repository and cannot be undone. A
+        # rename is a move into this checkout's own id (run it where the
+        # origin or pin already names the new id); a dry run still plans.
+        _error(
+            "INVALID_INPUT",
+            escape_for_envelope(
+                f"--to {to_id!r} is not this checkout's id ({own_id!r}), so "
+                "--apply would file these rows under another repository, and "
+                "a rekey cannot be undone. To rename this repository's bucket, "
+                "run from a checkout whose origin or pin names the new id. "
+                "Pass --into-another-repository only with the user's explicit "
+                "approval. Nothing was moved."
+            ),
+            exit_code=2,
+        )
 
     if not store.exists():
         # NOTHING TO MOVE AND NOTHING TO CREATE: a plan against a store that
@@ -1909,6 +1972,15 @@ def build_parser():
         "--apply",
         action="store_true",
         help="Perform the move; only with the user's explicit approval.",
+    )
+    project_id_rekey_parser.add_argument(
+        "--into-another-repository",
+        dest="into_another_repository",
+        action="store_true",
+        help=(
+            "Allow --apply into a canonical --to that is not this checkout's "
+            "own id; only with the user's explicit approval."
+        ),
     )
     project_id_rekey_parser.add_argument(
         "--candidates",

@@ -316,6 +316,31 @@ def test_the_remote_spelling_a_dot_git_pin_differs_from(pin, expected):
     assert pi.pin_remote_spelling(pin) == expected
 
 
+@pytest.mark.parametrize("raw", [
+    b"github.com/a/b\x1cjunk\n",
+    b"github.com/a/b\x0b\n",
+    b"github.com/a/b\x0c\n",
+    b"github.com/a/b\xc2\x85x\n",
+    b"github.com/a/b\x1c\n",
+])
+def test_a_pin_line_holding_a_control_character_is_refused(raw):
+    """A pin line ends at \\n only. splitlines() would also break at \\x0b,
+    \\x0c, \\x1c-\\x1e and \\x85, cutting the control character off a
+    candidate that then reads as a clean id. RED WHEN such a pin binds."""
+    from scripts.database import pin_file_value
+
+    assert pin_file_value(raw) == (None, "control_chars")
+
+
+@pytest.mark.parametrize("raw", [b"github.com/a/b\r\n", b"  github.com/a/b \n", b"# c\n\n\tgithub.com/a/b\t\r\n"])
+def test_a_pin_keeps_its_spaces_crlf_and_comment_lines(raw):
+    """Control: surrounding spaces and tabs, CRLF, blank and # lines still
+    read as before."""
+    from scripts.database import pin_file_value
+
+    assert pin_file_value(raw) == ("github.com/a/b", None)
+
+
 @pytest.mark.parametrize("pin", ["h.example/o/r%c3", "h.example/o/r%2f", "h.example/o/%2e%2e"])
 def test_a_pin_keeps_refusing_a_lower_case_escape_of_any_other_byte(pin):
     """Only an escaped unreserved character is decoded before the canonical

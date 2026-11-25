@@ -403,6 +403,62 @@ class TestALiveDeclinedDeclarationEndsResolution:
             "gitfile_redirect",
         )
 
+    def test_an_empty_git_folder_below_a_redirect_does_not_hide_it(
+        self, identity_env, monkeypatch
+    ):
+        """A `.git` FILE redirecting to another repository, with an empty
+        `sub/.git` FOLDER below it: git skips the empty folder (not a git
+        directory) and follows the redirect, so the marker walk must reach the
+        file and decline. RED WHEN the walk stops at the empty folder and the
+        other repository's id binds."""
+        from scripts.project_identity import find_git_marker
+
+        victim = make_repo(identity_env / "victim", remote="https://github.com/v/victim.git")
+        attacker = identity_env / "attacker"
+        (attacker / "sub" / ".git").mkdir(parents=True)
+        (attacker / ".git").write_text(f"gitdir: {victim / '.git'}\n", encoding="utf-8")
+        assert find_git_marker(attacker / "sub") == (attacker / ".git").resolve()
+        self._elsewhere(identity_env, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(attacker / "sub"))
+        self._assert_declines(
+            PACTMemory._detect_project_identity_with_legacy(),
+            "gitfile_redirect",
+        )
+
+    def test_a_stray_empty_git_folder_in_a_repository_is_walked_past(
+        self, identity_env, monkeypatch
+    ):
+        """Control: an honest repository with an empty `vendor/.git` folder
+        still resolves its own id from `vendor`, as git does."""
+        from scripts.project_identity import find_git_marker
+
+        repo = make_repo(identity_env / "honest", remote="https://github.com/h/honest.git")
+        (repo / "vendor" / ".git").mkdir(parents=True)
+        assert find_git_marker(repo / "vendor") == (repo / ".git").resolve()
+        self._elsewhere(identity_env, monkeypatch)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo / "vendor"))
+        assert PACTMemory._detect_project_identity_with_legacy().project_id == "github.com/h/honest"
+
+    def test_a_global_core_worktree_does_not_vouch_for_a_submodule_pointer(
+        self, identity_env, monkeypatch
+    ):
+        """A `.git` file naming a submodule admin dir whose own config has no
+        `core.worktree`, while the GLOBAL config sets one naming the
+        pointing folder: only the admin dir's own config is its record, so the
+        pointer stays refused. RED WHEN the read falls through to global or
+        system config and the global value vouches for it."""
+        from scripts import project_identity as pi
+
+        admin = identity_env / "sup" / ".git" / "modules" / "lib"
+        run_git("init", "-q", "--bare", str(admin), cwd=identity_env)
+        attacker = identity_env / "attacker"
+        attacker.mkdir()
+        (attacker / ".git").write_text(f"gitdir: {admin}\n", encoding="utf-8")
+        global_config = identity_env / "global.cfg"
+        global_config.write_text(f"[core]\n\tworktree = {attacker}\n", encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        assert pi._admin_dir_refusal(admin, attacker) == pi.FOREIGN_GIT_DIR_DETAIL
+
     def test_a_bare_repository_declines(self, identity_env, monkeypatch):
         bare = identity_env / "declared.git"
         run_git("init", "-q", "--bare", str(bare), cwd=identity_env)
@@ -456,6 +512,10 @@ def name_rig(tmp_path_factory):
     rig["submodule"] = superproject / "vendor" / "lib"
     rig["plain"] = root / "plain"
     (rig["plain"] / ".claude").mkdir(parents=True)
+    rig["plain_deep"] = rig["plain"] / "a" / "b"
+    rig["plain_deep"].mkdir(parents=True)
+    rig["repo_claude"] = repo / ".claude"
+    rig["repo_claude"].mkdir()
     rig["bare"] = root / "bare.git"
     run_git("init", "-q", "--bare", str(rig["bare"]), cwd=root)
     rig["broken"] = root / "broken"
@@ -493,6 +553,19 @@ PRE_CHANGE_CASES = [
     ("declared gone, cwd non-git", "nomark", "gone", None, None),
     ("declared gone, cwd broken", "broken", "gone", None, None),
     ("record repo subdir", "nomark", None, "repo_deep", "repo"),
+    # Rows added after an old-versus-new run of the pre-change resolver
+    # (origin/main's memory_api) on this rig: every row, these and the ones
+    # above, gave the same value under both.
+    ("declared non-git subdir", "nomark", "plain_deep", None, "b"),
+    ("record repo root", "nomark", None, "repo", "repo"),
+    ("record linked worktree", "nomark", None, "repo_wt", "repo"),
+    ("record non-git dir", "nomark", None, "plain", "plain"),
+    ("record gone, cwd in a repo", "repo", None, "gone", "repo"),
+    ("record gone, cwd non-git", "nomark", None, "gone", None),
+    ("declared outranks record", "nomark", "repo", "plain", "repo"),
+    ("git repo root", "repo", None, None, "repo"),
+    ("git .claude dir", "repo_claude", None, None, "repo"),
+    ("cwd non-git marker, deep", "plain_deep", None, None, "plain"),
     ("git repo subdir", "repo_deep", None, None, "repo"),
     ("git linked worktree", "repo_wt", None, None, "repo"),
     ("git separate git dir", "sep", None, None, "ext"),
@@ -747,6 +820,10 @@ def _seed(store: Path, bucket: str, *, session_id: str = "legacy-session",
             ("file-" + memory_id, path, bucket),
         )
         conn.commit()
+    if Path(path).is_absolute() and Path(path).parent.is_dir():
+        # The file exists: a contained row places a bucket only while its
+        # file is in the checkout (or a later memory links it).
+        Path(path).touch()
 
 
 def _config_root(tmp_path: Path) -> Path:
@@ -1259,6 +1336,7 @@ class TestTheReadScopeCacheEndsWithItsPass:
         _seed(identity_env / "store.db", "proj", path=str(worktree / "a.py"))
         assert self._scopes(identity_env) == (CANONICAL,)
         run_git("worktree", "add", "-q", str(worktree), cwd=repo)
+        (worktree / "a.py").touch()
         second = self._scopes(identity_env)
         _fresh_scope_state()
         assert second == self._scopes(identity_env) == (CANONICAL, "proj")
@@ -2227,6 +2305,29 @@ class TestUpdateFindsTheRowBeforeItRefuses:
         with pytest.raises(ValueError, match="folder-name bucket 'proj'"):
             memory.update(row, {"session_id": "new"})
 
+    def test_moving_a_folder_name_row_here_may_change_its_session(
+        self, identity_env, monkeypatch
+    ):
+        """A call that moves a folder-name row to this repository's own id
+        takes it out of the folder-name bucket, so the same call may change
+        its session_id. RED WHEN the session_id refusal ignores the move."""
+        from scripts.database import db_connection, get_memory
+
+        row = "e" * 32
+        memory, store = self._memory(identity_env, monkeypatch, [(row, "proj")])
+        assert memory.update(row, {"project_id": CANONICAL, "session_id": "new"}) == row
+        with db_connection(store) as conn:
+            stored = get_memory(conn, row)
+        assert (stored["project_id"], stored["session_id"]) == (CANONICAL, "new")
+
+    def test_moving_a_folder_name_row_to_another_repository_keeps_its_session_refused(
+        self, identity_env, monkeypatch
+    ):
+        row = "f" * 32
+        memory, _store = self._memory(identity_env, monkeypatch, [(row, "proj")])
+        with pytest.raises(ValueError, match="folder-name bucket 'proj'"):
+            memory.update(row, {"project_id": "github.com/o/other", "session_id": "new"})
+
     def test_filing_an_existing_row_into_a_folder_name_is_still_refused(
         self, identity_env, monkeypatch
     ):
@@ -2681,7 +2782,7 @@ class TestTheGateProseMatchesTheCode:
 
         gate = database.bucket_evidence.__doc__
         assert "COUNTS ONLY" in gate
-        assert "Existence is not required" in gate
+        assert "a deleted file of an earlier project" in " ".join(gate.split())
         assert "the caller INCLUDES the bucket" not in gate
         assert "counts and the rekey command" not in gate
         assert "`description` file last changed" in database.bucket_session_counts.__doc__

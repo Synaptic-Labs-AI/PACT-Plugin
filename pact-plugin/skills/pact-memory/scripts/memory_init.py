@@ -43,14 +43,15 @@ logger = logging.getLogger(__name__)
 #    specifically, persists across process restarts within the same session
 _init_lock = threading.Lock()
 _initialized = False
-# True when initialization ran inside a read scope and so skipped the
-# embedding migration; the first call outside a read scope runs it.
-_migration_deferred = False
-# True when a read postponed the embedding catch-up because it could not do its
-# work there (no vector table, or a migration due). The first call outside a
-# read scope runs it after the migration. A postponed sweep does not touch the
-# session marker, so the marker is not spent.
-_catchup_deferred = False
+# The stores (resolved paths, `_store_key`) whose embedding migration a read
+# postponed: initialization ran inside a read scope and skipped it. The first
+# call outside a read scope ON THAT STORE runs it.
+_migration_deferred: "set[str]" = set()
+# The stores whose embedding catch-up a read postponed because it could not do
+# its work there (no vector table, or a migration due). The first call outside
+# a read scope on that store runs it after the migration. A postponed sweep
+# does not touch the session marker, so the marker is not spent.
+_catchup_deferred: "set[str]" = set()
 
 # Outcome of this session's embedding catch-up, kept so a STATUS READER can see
 # it. `_ensure_ready()` discards `ensure_memory_ready()`'s return value, and an
@@ -339,9 +340,14 @@ try:
 except ImportError:
     from pact_session import get_session_id_from_context_file
 try:
-    from .config import read_only_scope_active
+    from .config import read_only_scope_active, resolve_db_path
 except ImportError:
-    from config import read_only_scope_active
+    from config import read_only_scope_active, resolve_db_path
+
+
+def _store_key() -> str:
+    """The store this call is bound to, resolved, as the postponement key."""
+    return os.path.realpath(resolve_db_path())
 
 
 # Fallback marker name for when the session id cannot be resolved. Process-
@@ -542,25 +548,29 @@ def ensure_memory_ready() -> dict:
             - migration: dict - Migration result
             - embedding: dict - Embedding catch-up result
     """
-    global _initialized, _migration_deferred, _catchup_deferred
-    global _last_catchup_result
+    global _initialized, _last_catchup_result
 
-    # Fast path: already initialized this session
-    if _initialized and not (_migration_deferred and not read_only_scope_active()):
+    # Fast path: already initialized this session, and nothing a read
+    # postponed is due on this call's store.
+    if _initialized and not (
+        _migration_deferred and not read_only_scope_active()
+        and _store_key() in _migration_deferred
+    ):
         return {"already_initialized": True}
 
     with _init_lock:
         # Double-check after acquiring lock
         if _initialized:
-            if _migration_deferred and not read_only_scope_active():
-                _migration_deferred = False
+            store = _store_key()
+            if store in _migration_deferred and not read_only_scope_active():
+                _migration_deferred.discard(store)
                 deferred = {
                     "already_initialized": True,
                     "migration": maybe_migrate_embeddings(),
                 }
-                if _catchup_deferred:
+                if store in _catchup_deferred:
                     # After the migration, which may have rebuilt the table.
-                    _catchup_deferred = False
+                    _catchup_deferred.discard(store)
                     _last_catchup_result = maybe_embed_pending()
                     deferred["embedding"] = _last_catchup_result
                 return deferred
@@ -586,7 +596,7 @@ def ensure_memory_ready() -> dict:
         # the migration drops and recreates the vector table, so inside a read
         # scope it waits for the first call outside one.
         if read_only_scope_active():
-            _migration_deferred = True
+            _migration_deferred.add(_store_key())
             migration_result = {"status": "deferred", "message": None}
         else:
             migration_result = maybe_migrate_embeddings()
@@ -608,7 +618,7 @@ def ensure_memory_ready() -> dict:
         # returns nothing, so an unembedded memory beside embedded ones would
         # not be found.
         if read_only_scope_active() and not _read_can_catch_up():
-            _catchup_deferred = True
+            _catchup_deferred.add(_store_key())
             embedding_result = {"status": "deferred", "message": None}
         else:
             embedding_result = maybe_embed_pending()
@@ -655,11 +665,11 @@ def reset_initialization() -> None:
     on the same machine, so deleting it here would reach outside the caller.
     Call clear_embedding_marker() when the marker itself needs removing.
     """
-    global _initialized, _migration_deferred, _catchup_deferred
+    global _initialized
     with _init_lock:
         _initialized = False
-        _migration_deferred = False
-        _catchup_deferred = False
+        _migration_deferred.clear()
+        _catchup_deferred.clear()
 
 
 def clear_embedding_marker() -> None:

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import struct
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -162,6 +163,10 @@ def _gate_store(tmp_path, bucket, path):
             (str(path), bucket),
         )
         conn.commit()
+    # The file exists, so a contained row places the bucket here (a row
+    # whose file is gone counts only when a later memory links it).
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    Path(path).touch()
     return store
 
 

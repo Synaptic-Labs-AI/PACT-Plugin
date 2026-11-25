@@ -386,6 +386,9 @@ def _store_integrity_fault() -> Optional[str]:
             rows = connection.execute("PRAGMA quick_check").fetchall()
         finally:
             connection.close()
+    except store_sqlite3.OperationalError as exc:
+        # Locked, or the file will not open: no verdict on the store's pages.
+        return f"the store's integrity could not be checked ({exc}); catch-up skipped"
     except store_sqlite3.DatabaseError as exc:
         return f"the store failed its integrity check ({exc}); catch-up skipped"
     if rows != [("ok",)]:

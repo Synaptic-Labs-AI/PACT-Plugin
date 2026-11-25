@@ -539,12 +539,9 @@ class TestTheCatchUpOnASessionThatStartsWithARead:
         if not SQLITE_EXTENSIONS_ENABLED:
             pytest.skip("this sqlite3 cannot load extensions")
         monkeypatch.chdir(make_repo(identity_env / "proj", remote=REMOTE))
-        for name in ("_initialized", "_migration_deferred", "_catchup_deferred",
-                     "_last_catchup_result"):
-            monkeypatch.setattr(
-                memory_init, name, None if name == "_last_catchup_result" else False,
-                raising=False,
-            )
+        for name, value in (("_initialized", False), ("_migration_deferred", set()),
+                            ("_catchup_deferred", set()), ("_last_catchup_result", None)):
+            monkeypatch.setattr(memory_init, name, value, raising=False)
         monkeypatch.setattr(
             memory_init, "_get_embedding_attempted_path", lambda: tmp_path / "marker"
         )

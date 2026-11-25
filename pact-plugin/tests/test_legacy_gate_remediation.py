@@ -775,6 +775,33 @@ def test_a_verified_bucket_still_takes_a_defaulted_target(canonical_session, cap
 
 
 
+def test_a_defaulted_rekey_of_a_files_only_own_bucket_is_refused(canonical_session, capfd):
+    """This checkout's own pre-upgrade bucket holding file rows but no
+    memories has no legacy candidate (candidates are counted from memories),
+    so nothing verified it. A defaulted --to must refuse rather than move
+    those rows; with nothing at all left under it the re-run stays a no-op.
+    RED WHEN the own-name branch moves unjudged file rows."""
+    from scripts.cli import main
+
+    repo, store = canonical_session
+    _seed(store, CANONICAL)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "rekey", f"--from={NAME}", "--apply", "--db-path", str(store)])
+    assert exit_info.value.code == 0, capfd.readouterr().err
+    capfd.readouterr()
+    with db_connection(store) as conn:
+        conn.execute("INSERT INTO files (id, path, project_id) VALUES ('fx', '/elsewhere/a.py', ?)", (NAME,))
+        conn.commit()
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    code, envelope = _cli_err(
+        ["project-id", "rekey", f"--from={NAME}", "--apply", "--db-path", str(store)], capfd
+    )
+    assert code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
+    assert "holds file rows but no memories" in envelope["message"], envelope
+    with sqlite3.connect(str(store)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM files WHERE project_id = ?", (NAME,)).fetchone()[0] == 1
+
+
 def test_an_applied_rekey_prints_no_advice_to_make_the_move_it_makes(canonical_session, capfd, caplog):
     """An unproven bucket's read notice says "NOT in this read scope ...
     preview the move with". A dry run keeps it; an applied move reads the
