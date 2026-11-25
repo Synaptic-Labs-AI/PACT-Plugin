@@ -1692,7 +1692,8 @@ def origin_url_in_config(config_path: Any) -> Optional[str]:
     declines or this reader cannot follow git: EVERY line of the file is read
     before the answer, so it refuses a file that is not a regular file of at
     most `GIT_FILE_LIMIT` bytes, an include section anywhere in it, a header
-    or key line it cannot read, and any origin url (not only the first) that
+    or key line it cannot read (a dotted header such as `[remote.origin]`,
+    which git reads as that section, included), and any origin url (not only the first) that
     is empty, valueless, or holds a quote, a backslash, `#` or `;`. An
     empty one is what `read_origin` declines as `empty_entry`. Never raises.
     """
@@ -1711,7 +1712,10 @@ def origin_url_in_config(config_path: Any) -> Optional[str]:
         if not line or line[0] in "#;":
             continue
         if line.startswith("["):
-            header = re.fullmatch(r'\[([A-Za-z0-9.-]+)(?:\s+"([^"\\]*)")?\]', line)
+            # No dot in the name: git reads a deprecated `[remote.origin]` as
+            # remote.origin, so a dotted header refuses the file rather than
+            # be skipped while git takes a url from it.
+            header = re.fullmatch(r'\[([A-Za-z0-9-]+)(?:\s+"([^"\\]*)")?\]', line)
             if header is None or header.group(1).lower() in ("include", "includeif"):
                 return None
             section = (header.group(1).lower(), header.group(2))

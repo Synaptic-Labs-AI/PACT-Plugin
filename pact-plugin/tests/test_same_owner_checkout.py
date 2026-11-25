@@ -35,6 +35,7 @@ ID = "github.com/acme/proj"
     ('[remote "origin"]\n\turl = https://h/o/r\n\turl\n', None),
     ('[remote "origin"]\n\turl = https://h/o/r\n[remote "origin"]\n\turl = "q"\n', None),
     ('[remote "origin"]\n\turl = https://h/o/r\n[include]\n\tpath = x\n', None),
+    ('[remote.origin]\n\turl = https://h/e/v\n[remote "origin"]\n\turl = https://h/o/r\n', None),
 ])
 def test_the_strict_origin_reader(tmp_path, text, expected):
     config = tmp_path / "config"
@@ -137,7 +138,9 @@ def _git(repo, *args):
     subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
 
 
-@pytest.mark.parametrize("arrange", ["one", "two", "empty_later", "valueless_later", "include", "none"])
+@pytest.mark.parametrize(
+    "arrange", ["one", "two", "empty_later", "valueless_later", "include", "dotted_first", "none"]
+)
 def test_the_file_reader_never_answers_where_read_origin_declines(tmp_path, arrange):
     """Parity with the resolver's own read (git config --get-all): whenever
     the file reader gives a url, read_origin gives the same first url; where
@@ -156,6 +159,11 @@ def test_the_file_reader_never_answers_where_read_origin_declines(tmp_path, arra
     elif arrange == "valueless_later":
         with open(config, "a", encoding="utf-8") as handle:
             handle.write('[remote "origin"]\n\turl\n')
+    elif arrange == "dotted_first":
+        # git reads the deprecated `[remote.origin]` as remote.origin, so its
+        # url comes FIRST and read_origin binds it, not the url after it.
+        text = config.read_text(encoding="utf-8")
+        config.write_text('[remote.origin]\n\turl = https://h/evil/repo\n' + text, encoding="utf-8")
     elif arrange == "include":
         (tmp_path / "extra.config").write_text('[remote "origin"]\n\turl = https://h/x/y\n', encoding="utf-8")
         _git(repo, "config", "include.path", str(tmp_path / "extra.config"))
