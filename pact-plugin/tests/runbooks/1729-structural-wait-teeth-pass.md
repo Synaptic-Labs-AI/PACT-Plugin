@@ -94,3 +94,21 @@ Scope: `tests/test_pact_wait.py`, `tests/test_handoff_schema.py`,
 
 Total observed: 10 kills across 2 classes (list acceptance, item string
 gate), no zero-kill mutation.
+
+## Rename map for the 2026-11-21 reviewer rows (as of a40fb8b8)
+
+Rows M-a to M-g above name the arms as they were at `17e34d3e` and stay as
+recorded. Later cycles renamed or replaced some arms. This map gives the
+current arm for each name those rows cite; a name not listed is unchanged.
+Sites (file:line) have also moved, so read a row's site at its own tree.
+
+| Row | Name at 17e34d3e | Current arm |
+|-----|------------------|-------------|
+| M-a | `test_outlet_template_substitutes_to_the_carveout_shape` | replaced by `test_every_emitted_command_satisfies_the_carveout` (with `test_every_emitted_command_with_a_composed_tail_counts` and `test_emitters_use_the_one_builder`), `tests/test_structural_wait_matrix.py` |
+| M-a | `test_emitted_advisory_command_satisfies_the_carveout_shape`, `test_watcher_does_not_block_lead_turn_end`, `test_watcher_exempt_real_job_still_blocks_on_the_real_job`, `test_duplicate_watcher_re_arm_both_exempt`, `test_is_wait_watcher_command_shape_table` | unchanged |
+| M-b | `test_handoff_predicate_non_string_or_empty_produced_is_absent` | same name; its parameters changed when a non-empty list began to count as present (see the 2026-11-24 entry) |
+| M-c | `test_second_consecutive_corrupt_read_is_terminal` | unchanged |
+| M-d | `test_alternating_corrupt_reads_expire_never_turn_terminal` | `test_alternating_corrupt_reads_never_turn_terminal`, `tests/test_pact_wait.py` (the scripted twin is `test_a_good_read_resets_the_bad_read_streak`) |
+| M-e | (no arm; the zero-kill finding) | closed by `tests/test_wait_poll_teeth.py` |
+| M-f | `test_advisory_message_pinned_verbatim`, `test_deadline_defaults_pinned_on_both_surfaces` | unchanged |
+| M-g | `test_exit_class_numbers_are_pinned` | unchanged |
