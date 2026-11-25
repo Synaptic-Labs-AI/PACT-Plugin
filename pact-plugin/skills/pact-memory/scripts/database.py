@@ -1832,7 +1832,8 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
 
     The first line that is neither blank nor a `#` comment, stripped, after
     an encoding BOM is dropped, is the candidate; it must be a canonical id.
-    A valid candidate then takes GitHub's spelling rules (`_github_folded_pin`):
+    Its host is lower-cased first, as a remote's is. A valid candidate then
+    takes GitHub's spelling rules (`_github_folded_pin`):
     the case and www folds a remote's id takes, checked again after the fold,
     and a port-less one-segment github.com pin is "not_canonical". Nothing
     else is rewritten: a trailing `.git` is kept, because `github.com/o/r.git`
@@ -1860,6 +1861,9 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
             validate_identifier_for_write(candidate)
         except ValueError:
             return None, "control_chars"
+        # A host is case-insensitive, and a remote's id lower-cases it.
+        hostport, slash, path = candidate.partition("/")
+        candidate = hostport.lower() + slash + path
         if not is_canonical_id(candidate):
             return None, "not_canonical"
         folded = _github_folded_pin(_pin_path_escapes(candidate))

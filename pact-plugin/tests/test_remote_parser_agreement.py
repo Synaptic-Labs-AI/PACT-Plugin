@@ -50,7 +50,7 @@ CORPUS = [
     ("https://github.com/o/r", ("o", "r")),
     ("https://github.com/o/r/", ("o", "r")),
     ("https://github.com/o/r.git/", ("o", "r")),
-    ("https://github.com/O/R.GIT", ("o", "r")),
+    ("https://github.com/O/R.GIT", ("o", "r.git")),
     ("https://user:tok@GitHub.com/o/r.git", ("o", "r")),
     ("http://github.com/o/r", ("o", "r")),
     ("https://github.com:443/o/r", ("o", "r")),

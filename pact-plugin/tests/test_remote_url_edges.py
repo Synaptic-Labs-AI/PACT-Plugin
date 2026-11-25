@@ -93,8 +93,11 @@ def test_an_escape_a_segment_needs_survives_the_decode(url, expected):
     [
         ("https://github.com/O/R%2Dx", "github.com/o/r-x"),
         ("https://h.example/O/Caf%c3%a9", "h.example/O/Caf%C3%A9"),
-        ("https://github.com/O/R.GIT", "github.com/o/r"),
-        ("git@github.com:O/R.Git", "github.com/o/r"),
+        # GitHub drops only a literal `.git` (measured: `repo.GIT`, `repo.Git`
+        # and `repo.git.git` reach nothing), so a `.GIT` spelling stays a
+        # lower-cased part of the name and never binds `repo`'s id.
+        ("https://github.com/O/R.GIT", "github.com/o/r.git"),
+        ("git@github.com:O/R.Git", "github.com/o/r.git"),
         ("https://h.example/o/r.GIT", "h.example/o/r.GIT"),
         ("https://h.example/o/r.git", "h.example/o/r"),
     ],
@@ -103,9 +106,9 @@ def test_github_case_folding_keeps_escapes_and_only_dot_git_is_a_suffix(url, exp
     """GitHub's path is lower-cased (an escaped name character is decoded
     first, and a name needing any other escape declines); elsewhere escapes
     stay upper-case as the id grammar requires, and only a lower-case
-    `.git` is dropped, because git looks up exactly `<path>.git`. RED WHEN
-    an escape is lower-cased or `.GIT` is dropped on a case-sensitive
-    server."""
+    `.git` is dropped on every host, because git looks up exactly
+    `<path>.git`. RED WHEN an escape is lower-cased or a `.GIT` is dropped,
+    on GitHub or elsewhere."""
     assert pi.normalize_remote_url(url) == expected
 
 
@@ -440,18 +443,18 @@ def test_control_show_has_no_identity_detail_for_a_canonical_origin(tmp_path, mo
     assert json.loads(capfd.readouterr().out)["result"]["identity_detail"] is None
 
 
-@pytest.mark.parametrize("url", [
-    "https://github.com/O/R.GIT",
-    "git@github.com:O/R.Git",
-    "https://github.com/O/R.git/",
+@pytest.mark.parametrize("url, expected", [
+    ("https://github.com/O/R.GIT", "github.com/o/r.git"),
+    ("git@github.com:O/R.Git", "github.com/o/r.git"),
+    ("https://github.com/O/R.git/", "github.com/o/r"),
 ])
-def test_the_backlog_strips_a_git_suffix_as_the_id_does(url):
-    """A github.com path drops one `.git` in any case, in the id and in the
-    backlog's slug alike."""
+def test_the_backlog_strips_a_git_suffix_as_the_id_does(url, expected):
+    """A github.com path drops one literal `.git`; a `.GIT` spelling stays
+    in the name. The id and the backlog's slug agree on both."""
     from shared import backlog
 
     owner, name = backlog._slug_from_remote_url(url)
-    assert f"github.com/{owner}/{name}".lower() == pi.normalize_remote_url(url) == "github.com/o/r"
+    assert f"github.com/{owner}/{name}" == pi.normalize_remote_url(url) == expected
 
 
 @pytest.mark.parametrize("url", [

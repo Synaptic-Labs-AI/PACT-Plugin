@@ -697,18 +697,17 @@ def _ssh_path_as_git_sends_it(path: str) -> str:
     )
 
 
-def _strip_path_suffixes(path: str) -> Tuple[str, bool]:
-    """Drop one trailing `/`, then one `.git`, then one exposed `/`, and
-    say whether a `.git` was dropped (`_identifier` strips a second
-    spelling only when none was).
+def _strip_path_suffixes(path: str) -> str:
+    """Drop one trailing `/`, then one `.git`, then one exposed `/`.
 
     The `.git` is read in the last segment's normal form
     (`_normalize_segment`), so a percent-encoded spelling of it (`%2Egit`)
     is dropped too; the segment then stays in that normal form, which
     `_split_path` leaves as it is. Only a lower-case `.git` is dropped, as
     git's own lookup appends exactly `.git`: on a server `repo.GIT` is
-    another directory. A `_CASE_INSENSITIVE_PATH_HOSTS` host drops any case
-    (`_identifier`).
+    another directory. github.com too drops only a lower-case `.git`
+    (measured: `repo.GIT` and `repo.Git` reach nothing there, as
+    `repo.git.git` does), so its lower-cased `repo.git` stays a segment.
 
     The second slash strip exists only for the `repo/.git` form (a
     non-bare repository's git dir, which a plain sshd serves): once `.git`
@@ -723,8 +722,8 @@ def _strip_path_suffixes(path: str) -> Tuple[str, bool]:
     normal = _normalize_segment(last)
     if normal is not None and normal.endswith(".git"):
         last = normal[:-4]
-        return (head + separator + last if last else head), True
-    return path, False
+        return head + separator + last if last else head
+    return path
 
 
 def _split_path(path: str) -> Optional[list]:
@@ -799,12 +798,12 @@ _GITHUB_SSH_443_HOST = "ssh.github.com"
 
 
 def _identifier(
-    host: str, port: str, segments: list, git_dropped: bool = False, ssh: bool = False
+    host: str, port: str, segments: list, ssh: bool = False
 ) -> str:
     """`host[:port]/<segments>`, after the bounded Azure DevOps Services rule
-    and the lower-cased path of a `_CASE_INSENSITIVE_PATH_HOSTS` host.
-    `git_dropped` says the case-sensitive strip already removed a `.git`,
-    so no second one is removed: one `.git` per remote on every host.
+    and the lower-cased path of a `_CASE_INSENSITIVE_PATH_HOSTS` host. No
+    `.git` is removed here: `_strip_path_suffixes` drops the one literal
+    `.git`, so a `.GIT` spelling stays part of the name on every host.
     `ssh` says the remote is an ssh or scp one, the only transport
     `ssh.github.com` folds for."""
     if ssh and host == _GITHUB_SSH_443_HOST and port in ("", "443"):
@@ -820,15 +819,9 @@ def _identifier(
         host, segments = "dev.azure.com", azure
     if host in _CASE_INSENSITIVE_PATH_HOSTS:
         # Lower-cased OUTSIDE its percent escapes (`github_folded_segment`).
+        # A `.GIT` spelling is kept, lower-cased: GitHub does not serve
+        # `repo.GIT` as `repo` (measured), so it must not bind repo's id.
         segments = [github_folded_segment(segment) for segment in segments]
-        if (
-            not git_dropped
-            and segments
-            and segments[-1].endswith(".git")
-            and len(segments[-1]) > 4
-        ):
-            # The case-sensitive strip left a `.GIT` spelling for this host.
-            segments[-1] = segments[-1][:-4]
     return f"{host}:{port}/{'/'.join(segments)}" if port else f"{host}/{'/'.join(segments)}"
 
 
@@ -996,13 +989,13 @@ def normalize_remote_url(url: object) -> Optional[str]:
             _ssh_path_as_git_sends_it(path) if scheme in _HOME_RELATIVE_SCHEMES else path
         )
         github_unserved = _github_does_not_serve(sent_path)
-        path, git_dropped = _strip_path_suffixes(sent_path)
+        path = _strip_path_suffixes(sent_path)
         segments = _split_path(path)
         if not segments:
             return None
         if scheme in _HOME_RELATIVE_SCHEMES:
             segments = _drop_home_prefix(segments)
-        identifier = _identifier(host, port, segments, git_dropped, ssh)
+        identifier = _identifier(host, port, segments, ssh)
     else:
         scp_match = _scp_match(value)
         if scp_match is None:
@@ -1049,7 +1042,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
             # the same project as the https spelling's `%20`.
             scp_path = scp_path.replace("%", "%25")
         github_unserved = _github_does_not_serve(scp_path)
-        path, git_dropped = _strip_path_suffixes(scp_path)
+        path = _strip_path_suffixes(scp_path)
         segments = _split_path(path)
         if not segments:
             return None
@@ -1059,7 +1052,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # the same endpoint, and the grammar allows a single segment;
         # declining the scp spelling while accepting the URL spelling would
         # split one repository into two ids.
-        identifier = _identifier(host, "", segments, git_dropped, True)
+        identifier = _identifier(host, "", segments, True)
 
     if len(identifier) > _max_id_length():
         return None
@@ -1198,7 +1191,10 @@ def pin_remote_spelling(pin: object) -> Optional[str]:
     `r.git.git` gives it); this only names the spelling it differs from."""
     if not isinstance(pin, str) or not pin.startswith("github.com/") or not pin.endswith(".git"):
         return None
-    return pin[: -len(".git")]
+    remote = pin[: -len(".git")]
+    # `github.com/o/.git`: no remote gives `github.com/o/`, so there is no
+    # spelling to name.
+    return None if remote.endswith("/") else remote
 
 
 def _is_remote_helper(url: str) -> bool:

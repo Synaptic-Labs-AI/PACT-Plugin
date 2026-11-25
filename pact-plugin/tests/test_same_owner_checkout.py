@@ -185,6 +185,11 @@ def test_the_file_reader_never_answers_where_read_origin_declines(tmp_path, arra
     ("ssh.github.com:443/Acme/Widget", "ssh.github.com:443/Acme/Widget"),
     ("www.github.com:8443/Acme/Widget", "www.github.com:8443/Acme/Widget"),
     ("gitlab.com/Acme/Widget", "gitlab.com/Acme/Widget"),
+    # A host is case-insensitive in a pin as in a remote.
+    ("GitHub.com/Acme/Widget", "github.com/acme/widget"),
+    ("WWW.GitHub.com/Acme/Widget", "github.com/acme/widget"),
+    ("GITHUB.COM:8443/Acme/Widget", "github.com:8443/acme/widget"),
+    ("GitLab.com/Acme/Widget", "gitlab.com/Acme/Widget"),
 ])
 def test_a_pin_takes_githubs_spelling_rules(pin, expected):
     """A github.com or port-less www.github.com pin is folded as its remote
@@ -288,6 +293,22 @@ def test_a_mixed_case_pin_and_its_lower_case_origin_are_one_owner(tmp_path):
     assert pi.read_override(b / ".git").value == "github.com/acme/widget"
     assert pi.detect_id_for_root(a, a / ".git", asked_root=a).project_id == "github.com/acme/widget"
     assert checkout_is_same_owner(str(b), "github.com/acme/widget", "https://github.com/acme/widget.git") is True
+
+
+@pytest.mark.parametrize("pin, expected", [
+    ("github.com/acme/widget.git", "github.com/acme/widget"),
+    ("github.com/acme/.git", None),
+    ("github.com/acme/widget", None),
+    ("github.com:443/acme/widget.git", None),
+])
+def test_the_remote_spelling_a_dot_git_pin_differs_from(pin, expected):
+    """Only a port-less github.com pin whose repository ends in .git has a
+    remote spelling to name, and a repository named only '.git' has none
+    (no remote gives github.com/acme/). RED WHEN github.com/acme/.git
+    names the non-id 'github.com/acme/'."""
+    from scripts import project_identity as pi
+
+    assert pi.pin_remote_spelling(pin) == expected
 
 
 @pytest.mark.parametrize("pin, expected_detail", [

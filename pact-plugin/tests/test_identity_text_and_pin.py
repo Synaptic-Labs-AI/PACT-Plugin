@@ -45,9 +45,13 @@ class TestOneGitSuffixPerRemote:
         assert github == "github.com/o/foo.git"
         assert gitlab == "gitlab.com/o/foo.git"
 
-    @pytest.mark.parametrize("url", ["https://github.com/o/Foo.GIT", "https://github.com/o/foo.git"])
-    def test_control_a_single_suffix_of_any_case_is_dropped_on_github(self, url):
-        assert pi.normalize_remote_url(url) == "github.com/o/foo"
+    def test_control_a_literal_suffix_is_dropped_on_github(self):
+        assert pi.normalize_remote_url("https://github.com/o/foo.git") == "github.com/o/foo"
+
+    def test_a_capitalised_suffix_stays_in_the_name_on_github(self):
+        """GitHub does not serve `repo.GIT` as `repo` (measured), so it keeps
+        its own lower-cased id. RED WHEN `.GIT` binds `repo`'s id."""
+        assert pi.normalize_remote_url("https://github.com/o/Foo.GIT") == "github.com/o/foo.git"
 
 
 class TestNoRemoteDerivesAnInvalidHost:

@@ -472,7 +472,8 @@ Two operator surfaces answer, and they are deliberately ordered:
   working directory. Its first non-blank, non-`#` line is the id, and only a
   canonical `host/owner/repo` id is accepted: a folder-name value is reported
   as `override_ignored` with reason `not_canonical`, and resolution continues
-  without it. A `github.com` or `www.github.com` pin with no port is read as a
+  without it. A pin's host is read case-insensitively, as a remote's is. A
+  `github.com` or `www.github.com` pin with no port is read as a
   github.com remote is: each name is decoded and lower-cased, with
   `www.github.com` read as `github.com`, and it must name exactly owner/repo,
   each a valid GitHub name. A `github.com` pin on another port is lower-cased

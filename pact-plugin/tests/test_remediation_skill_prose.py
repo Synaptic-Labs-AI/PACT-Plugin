@@ -707,7 +707,8 @@ class TestLegacyScopeStatesAreDocumented:
     def test_a_github_pin_is_read_with_githubs_spelling(self):
         body = _body(SKILL)
         assert (
-            "A github.com or www.github.com pin with no port is read as a "
+            "A pin's host is read case-insensitively, as a remote's is. A "
+            "github.com or www.github.com pin with no port is read as a "
             "github.com remote is: each name is decoded and lower-cased, with "
             "www.github.com read as github.com, and it must name exactly owner/repo, "
             "each a valid GitHub name. A "
