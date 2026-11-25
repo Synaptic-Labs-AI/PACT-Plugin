@@ -47,8 +47,9 @@ ROLE-BRANCHED. A lead or a separate-process teammate — whose background
 completion starts their next turn — gets a ready-to-run arm command for
 the structural wait watcher (hooks/pact_wait.py, built by
 shared/wait_target.arm_command with the resolved team substituted) and
-launches it with ONE background `Bash` frame (`run_in_background: true`)
-before ending the turn. An in-process teammate, whose background
+launches it as one background task the harness tracks (a run_in_background
+Bash call, or a REPL-awaited command moved to the background by a short
+timeout) before ending the turn. An in-process teammate, whose background
 completion wakes no one, gets no arm command: it SETs
 metadata.intentional_wait naming the lead and ends the turn. An Agent-tool
 subagent gets no arm command: it ends the turn and reports. A frame with
@@ -174,9 +175,12 @@ _TIER3_HEADER = (
 _ACTIONS = {
     "arm": (
         "arm the structural watcher — this is the wait it exists for, even "
-        "though you cannot write the deliverable — with ONE `Bash` call "
-        "(`run_in_background: true`), substituting the id of the task "
-        "you are waiting on for TASK_ID:\n{command}\n(use --predicate "
+        "though you cannot write the deliverable — as one background task "
+        "the harness tracks: one `Bash` call with `run_in_background: "
+        "true`, or, where `Bash` is reached only through a REPL that "
+        "refuses that flag, the same command awaited with a short timeout "
+        "(for example 3000 ms) so it moves to the background, substituting "
+        "the id of the task you are waiting on for TASK_ID:\n{command}\n(use --predicate "
         "teachback_submit when the awaited deliverable is a teachback "
         "submission), then end your turn with no further tool calls"
     ),

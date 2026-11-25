@@ -285,6 +285,15 @@ def test_emitted_flag_set_is_accepted_by_the_watcher_cli(tmp_path):
     assert rc == pact_wait.EXIT_FIRED
 
 
+def test_advisory_and_arming_texts_share_the_launch_phrase():
+    """The lifecycle advisory and both arming tier-3 texts carry the same
+    two-form launch phrase word for word."""
+    _rule, message = _advisory()
+    assert LAUNCH_FORMS in message
+    for name in _ARMING_TIER3:
+        assert LAUNCH_FORMS in getattr(wait_filler_gate, name), name
+
+
 def test_advisory_message_pinned_verbatim():
     """The advisory message carries termination-adjacent claims (the
     0/3/4 exit contract, the duplicate fast-exit reassurance), so its
@@ -297,8 +306,11 @@ def test_advisory_message_pinned_verbatim():
     expected = (
         "PACT task_lifecycle_gate: teachback accepted — you are about to "
         "wait on a teammate deliverable. Arm the structural wait watcher "
-        "BEFORE you end this turn, with ONE `Bash` call (`run_in_background: "
-        "true`):\n"
+        "BEFORE you end this turn, as one background task the harness "
+        "tracks: one `Bash` call with `run_in_background: true`, or, "
+        "where `Bash` is reached only through a REPL that refuses that "
+        "flag, the same command awaited with a short timeout (for example "
+        "3000 ms) so it moves to the background:\n"
         f"python3 {wait_target.WATCHER_PATH} --team team-x "
         "--task 12 --predicate handoff --deadline 1800\n"
         "Its completion notification re-invokes you: exit 0 deliverable "
@@ -777,6 +789,25 @@ def _check_r_own(table):
         assert own == ["write_now"], role
 
 
+LAUNCH_FORMS = (
+    "as one background task the harness tracks: one `Bash` call with "
+    "`run_in_background: true`, or, where `Bash` is reached only through a "
+    "REPL that refuses that flag, the same command awaited with a short "
+    "timeout (for example 3000 ms) so it moves to the background"
+)
+
+
+def _check_r_launch(table, actions=None):
+    """R-LAUNCH: every arming branch names both launch forms, so a frame
+    whose only shell is a REPL that refuses run_in_background can still
+    arm."""
+    actions = actions or wait_filler_gate._ACTIONS
+    for role in _ARMING_ROLES:
+        for kind, action, _then in table[role]["branches"]:
+            if action == "arm":
+                assert LAUNCH_FORMS in actions[action], (role, kind)
+
+
 def _check_catch_all(table):
     """Every role has a branch for the catch-all wait, so a wait the named
     kinds do not cover (a user reply, a message) still has an action."""
@@ -797,6 +828,7 @@ def test_outlet_table_satisfies_r_arm_r_then_r_role():
     _check_r_role(table)
     _check_r_lead(table)
     _check_r_own(table)
+    _check_r_launch(table)
 
 
 def test_rendered_texts_are_the_table_render():
@@ -858,6 +890,11 @@ def test_outlet_checks_bite_on_bad_tables():
         ]
         with pytest.raises(AssertionError):
             _check_r_own(own_wait)
+    # An arm action that names only the run_in_background form fails R-LAUNCH.
+    one_form = dict(wait_filler_gate._ACTIONS)
+    one_form["arm"] = one_form["arm"].replace(LAUNCH_FORMS, "with ONE `Bash` call")
+    with pytest.raises(AssertionError):
+        _check_r_launch(wait_filler_gate.OUTLET, one_form)
     # A role with no catch-all branch fails the catch-all check.
     no_catch_all = copy.deepcopy(wait_filler_gate.OUTLET)
     no_catch_all["lead"]["branches"] = [

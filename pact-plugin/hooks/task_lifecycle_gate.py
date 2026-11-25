@@ -1434,15 +1434,18 @@ def _wait_arm_advisory(
     for one teammate-deliverable wait, built by shared/wait_target.py's
     arm_command (the one builder every emitter uses). The deadline is a
     sane default the lead edits when the expected wait differs. ADVISORY
-    ONLY: this gate never spawns the watcher; the lead launches it with its
-    own `Bash` frame (`run_in_background: true`), because a hook-spawned
-    process is not harness-tracked and its completion would reach nothing
-    idle."""
+    ONLY: this gate never spawns the watcher; the lead launches it as a
+    background task the harness tracks, because a hook-spawned process is
+    not harness-tracked and its completion would reach nothing idle."""
     command = arm_command(team_name, task_id, predicate, 1800)
     message = (
         f"PACT task_lifecycle_gate: {shape} — you are about to wait on a "
         "teammate deliverable. Arm the structural wait watcher BEFORE you "
-        "end this turn, with ONE `Bash` call (`run_in_background: true`):\n"
+        "end this turn, as one background task the harness tracks: one "
+        "`Bash` call with `run_in_background: true`, or, where `Bash` is "
+        "reached only through a REPL that refuses that flag, the same "
+        "command awaited with a short timeout (for example 3000 ms) so it "
+        "moves to the background:\n"
         f"{command}\n"
         "Its completion notification re-invokes you: exit 0 deliverable "
         "landed, 3 deadline expired with it absent, 4 could not watch at "
