@@ -1038,6 +1038,7 @@ def _project_candidates(memory, db_path) -> list:
         store=store,
         current_id=memory._project_scope(),
         legacy_state=memory._legacy_scope_state,
+        earlier=getattr(memory, "_earlier_canonical", None),
     )
 
 

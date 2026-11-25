@@ -228,6 +228,10 @@ _LEGACY_SCOPE_CACHE: Dict[tuple, tuple] = {}
 _EXCLUSION_WARNED: set = set()
 # Roots whose remote-helper folder-name id was disclosed, once per process.
 _REMOTE_HELPER_WARNED: set = set()
+# Earlier canonical buckets of this repository, computed once per store stamp
+# and root (`PACTMemory._earlier_canonical_buckets`), and the ones named.
+_EARLIER_CANONICAL: Dict[tuple, Dict[str, Optional[str]]] = {}
+_EARLIER_CANONICAL_WARNED: set = set()
 # Roots whose github.com pin ending in .git was disclosed, once per process.
 _PIN_DOT_GIT_WARNED: set = set()
 
@@ -1072,6 +1076,31 @@ def _note_verified_unattributed(store: str, candidate: str, counts: Dict[str, An
     )
 
 
+def _note_earlier_canonical(
+    store: str, bucket: str, scope: str, memories: int, command: Optional[str]
+) -> None:
+    """Name, once per process, a canonical bucket of this repository under an
+    earlier id (`PACTMemory._earlier_canonical_buckets`), with the command
+    that moves it into this checkout's id."""
+    if _LEGACY_NOTICES_QUIET.get():
+        return
+    key = (store, bucket, scope)
+    if key in _EARLIER_CANONICAL_WARNED:
+        return
+    _EARLIER_CANONICAL_WARNED.add(key)
+    logger.warning(
+        "project bucket %r holds %d memor%s whose file rows lie in this "
+        "checkout, but it is not this checkout's id %r (the origin was "
+        "renamed, transferred or spelled another way), so it is NOT in this "
+        "read scope. If its rows are this repository's, preview the move with: %s",
+        bucket,
+        memories,
+        "y" if memories == 1 else "ies",
+        scope,
+        _printed_rekey_remedy([command]),
+    )
+
+
 def _warn_case_variant(
     store: str, legacy: str, variants: list, target: str
 ) -> None:
@@ -1670,15 +1699,19 @@ def project_candidate_rows(
     store: Any,
     current_id: Optional[str],
     legacy_state: Optional[Dict[str, Any]],
+    earlier: Optional[Dict[str, Optional[str]]] = None,
 ) -> List[Dict[str, Any]]:
     """THE ONE CENSUS BUILDER: every non-empty bucket, its relation and remedy.
 
     A command is rendered only for a bucket this session can defend moving
     into its own id: its own legacy candidate (unless the gate excluded it,
-    whose rows lie in another repository) and a case variant of it. The
-    session's own bucket and every other bucket get none, because a printed
-    command is read as advice to run it.
+    whose rows lie in another repository), a case variant of it, and an
+    earlier canonical id of this repository (`earlier`, relation
+    `earlier_id`: its file rows place it in this checkout). The session's
+    own bucket and every other bucket get none, because a printed command is
+    read as advice to run it.
     """
+    earlier = earlier or {}
     state = legacy_state or {}
     candidate = state.get("candidate")
     variants = list(state.get("case_variant") or [])
@@ -1693,6 +1726,8 @@ def project_candidate_rows(
             index = variants.index(bucket_id)
             relation = "case_variant"
             rekey = variant_commands[index] if index < len(variant_commands) else None
+        elif bucket_id in earlier:
+            relation, rekey = "earlier_id", earlier[bucket_id]
         else:
             relation, rekey = "other", None
         rows.append({
@@ -3957,6 +3992,66 @@ class PACTMemory:
             _LEGACY_SCOPE_CACHE[key] = verdict
         return verdict
 
+    def _earlier_canonical_buckets(self, scope: str, conn: Any = None) -> Dict[str, Optional[str]]:
+        """{bucket: rekey command} for each CANONICAL bucket other than
+        `scope` whose file rows place it in this checkout by the legacy
+        placement rule (`bucket_evidence`: contained rows, none foreign).
+        Such a bucket is this repository's under an earlier id (an origin
+        renamed, transferred or respelled). It is not read; one notice per
+        process names it with the command that moves it into `scope`.
+        Buckets with no placing row stay silent. Never raises: a store that
+        cannot be read answers {}."""
+        from .database import bucket_evidence, count_project_memories
+
+        store = str(self._db_path or resolve_db_path())
+        root = self._project_identity_root
+        stat_key = _store_stat_key(store)
+        if root is None or stat_key is None:
+            return {}
+        key = ("earlier", store, stat_key, str(root), scope)
+        if key in _EARLIER_CANONICAL:
+            return _EARLIER_CANONICAL[key]
+        found: Dict[str, Optional[str]] = {}
+        counts: Dict[str, int] = {}
+        try:
+            with _legacy_probe_context(store, conn) as (connection, _reason):
+                if connection is not None:
+                    # ONLY A BUCKET WITH FILE ROWS CAN BE PLACED, so the gate
+                    # roots (a `git worktree list`) are asked for only when a
+                    # canonical one exists: an ordinary read adds no git call.
+                    with_files = [
+                        row[0] for row in connection.execute(
+                            "SELECT DISTINCT project_id FROM files "
+                            "WHERE project_id IS NOT NULL AND project_id != ?",
+                            (scope,),
+                        ).fetchall()
+                        if is_canonical(row[0])
+                    ]
+                    roots, common, own = None, None, None
+                    if with_files:
+                        roots, common = self._legacy_gate_roots(root)
+                        own = self._own_identity(common)
+                    for bucket in sorted(with_files):
+                        evidence = bucket_evidence(
+                            connection, bucket, roots or None, root_common=common,
+                            recorded_dirs=_recorded_project_dirs,
+                            same_owner=(
+                                functools.partial(
+                                    checkout_is_same_owner, own_id=own[0], own_url=own[1]
+                                )
+                                if own else None
+                            ),
+                        )
+                        if evidence["contained_rows"] and not evidence["foreign_rows"]:
+                            found[bucket] = runnable_rekey_command(bucket, scope, db_path=store)
+                            counts[bucket] = count_project_memories(connection, bucket)
+        except (sqlite3.Error, OSError, StoreFaultError):
+            return {}
+        _EARLIER_CANONICAL[key] = found
+        for bucket, command in found.items():
+            _note_earlier_canonical(store, bucket, scope, counts.get(bucket, 0), command)
+        return found
+
     def _own_identity(self, common: Any) -> Optional[Tuple[str, Optional[str]]]:
         """(canonical id, origin url) for a canonical session, else None: what
         a sibling clone must carry to be the same owner
@@ -4110,9 +4205,15 @@ class PACTMemory:
         self._legacy_scope_state = None
         # The canonical legacy candidate's verdict, read by the defaulted rekey.
         self._legacy_verdict = None
+        self._earlier_canonical = {}
         scope = self._project_scope()
         if scope is None:
             return ()
+        if is_canonical(scope):
+            # AN EARLIER CANONICAL ID OF THIS REPOSITORY (an origin renamed,
+            # transferred or respelled) is not read, but it is named once
+            # with its rekey command (`_earlier_canonical_buckets`).
+            self._earlier_canonical = self._earlier_canonical_buckets(scope, conn)
         if not is_canonical(scope):
             # A FOLDER-NAME ID'S OWN BUCKET IS NOT JUDGED: it is read and saved
             # into as before this change, shared with any same-name folder.

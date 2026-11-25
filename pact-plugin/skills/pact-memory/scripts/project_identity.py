@@ -738,7 +738,10 @@ def _strip_path_suffixes(path: str) -> str:
     The `.git` is read in the last segment's normal form
     (`_normalize_segment`), so a percent-encoded spelling of it (`%2Egit`)
     is dropped too; the segment then stays in that normal form, which
-    `_split_path` leaves as it is. Only a lower-case `.git` is dropped, as
+    `_split_path` leaves as it is. EXCEPT ON github.com over https and
+    other non-ssh schemes: GitHub does not drop an escaped suffix
+    (`https://github.com/git/git%2Egit` is not `git/git`), so such a
+    remote declines before this strip matters (`_github_does_not_serve`). Only a lower-case `.git` is dropped, as
     git's own lookup appends exactly `.git`: on a server `repo.GIT` is
     another directory. github.com too drops only a lower-case `.git`
     (measured: `repo.GIT` and `repo.Git` reach nothing there, as

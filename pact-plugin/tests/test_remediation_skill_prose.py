@@ -425,8 +425,12 @@ class TestCanonicaliserSpellings:
 
     def test_two_spellings_are_joined_by_an_approved_rekey(self):
         assert (
-            "Two spellings of one repository can resolve to two ids; project-id "
-            "show then lists the other spelling as an ordinary bucket with no "
+            "Two spellings of one repository can resolve to two ids, as can an origin "
+            "that was renamed or transferred. The bucket under the earlier id is not "
+            "read. When its file rows place it in this checkout, by the rule legacy "
+            "buckets use, project-id show lists it as earlier_id with a rekey command "
+            "into this checkout's id, and a read prints one notice per process naming "
+            "it; otherwise project-id show lists it as an ordinary bucket with no "
             "command. Join them with project-id rekey --from=<id> --to=<id>, and "
             "run it with --apply only with the user's explicit approval."
         ) in _body(SKILL)
@@ -837,9 +841,9 @@ class TestRekeyRemediesNameTheirTarget:
         row = _table_row(SKILL, "project-id show")
         assert (
             "Each candidate row is {id, memory_count, relation, rekey}, with "
-            "relation one of current, legacy_candidate, case_variant or other; "
-            "only a legacy_candidate row that is not excluded and a "
-            "case_variant row carry a rekey command"
+            "relation one of current, legacy_candidate, case_variant, earlier_id "
+            "or other; only a legacy_candidate row that is not excluded, a "
+            "case_variant row and an earlier_id row carry a rekey command"
         ) in row
 
     def test_a_defaulted_target_is_only_for_the_own_candidate(self):
