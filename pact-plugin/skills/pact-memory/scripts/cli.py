@@ -43,7 +43,7 @@ import sys
 import tempfile
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import NoReturn, Optional
+from typing import NoReturn
 
 # Path resolution: add the skill root (parent of scripts/) to sys.path
 # so that `from scripts import PACTMemory` works regardless of cwd.
@@ -1151,6 +1151,12 @@ class _RekeyCopyFailed(Exception):
     leave `-wal`/`-shm` beside a store the dry run never needed to lock."""
 
 
+class _RekeyStoreMissing(Exception):
+    """The dry run's copy failed and the store could no longer be found (moved
+    or deleted while it ran). Its one argument is the store path. Not a
+    `sqlite3.DatabaseError`, so it is not repeated."""
+
+
 class _RekeyStoreFailed(Exception):
     """The dry run's copy failed because the STORE no longer reads whole
     (`_store_reads_whole`). Its one argument is the store path. Not a
@@ -1216,6 +1222,8 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
                 raise _RekeyCopyFailed(folder or tempfile.tempdir) from exc
             if whole is False:
                 raise _RekeyStoreFailed(str(store)) from exc
+            if whole == _STORE_MISSING:
+                raise _RekeyStoreMissing(str(store)) from exc
             # The store changed during the check: re-raise, and
             # `_stable_read_only` repeats the read with locking.
         raise
@@ -1223,16 +1231,23 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
         source.close()
 
 
-def _store_reads_whole(store) -> Optional[bool]:
+_STORE_MISSING = "missing"
+
+
+def _store_reads_whole(store):
     """Whether every page of `store` reads back through a fresh read-only
-    open (`PRAGMA quick_check` answers `ok`), or None when that open was
-    immutable and the store changed while it was checked (its `_store_stamp`
-    differs, a journal appeared, or it cannot be stat'ed). An immutable read
-    beside a writer can read a torn page and answer "malformed", so such a
-    check decides nothing; the read then repeats with locking, where the
-    open is not immutable and its answer stands. Never raises."""
+    open (`PRAGMA quick_check` answers `ok`): True or False. None when that
+    open was immutable and the store changed while it was checked (its
+    `_store_stamp` differs or a journal appeared): an immutable read beside a
+    writer can read a torn page and answer "malformed", so such a check
+    decides nothing; the read then repeats with locking, where the open is
+    not immutable and its answer stands. `_STORE_MISSING` when the store
+    cannot be stat'ed before or after the check (moved or deleted): that
+    says nothing about its disk. Never raises."""
     before = _store_stamp(str(store))
-    immutable = not _LOCKED_READS_ONLY.get() and before is not None and not before[3]
+    if before is None:
+        return _STORE_MISSING
+    immutable = not _LOCKED_READS_ONLY.get() and not before[3]
     try:
         probe = _read_only_connection(str(store))
         try:
@@ -1241,7 +1256,10 @@ def _store_reads_whole(store) -> Optional[bool]:
             probe.close()
     except Exception:
         whole = False
-    if immutable and _store_stamp(str(store)) != before:
+    after = _store_stamp(str(store))
+    if after is None:
+        return _STORE_MISSING
+    if immutable and after != before:
         return None
     return whole
 
@@ -1612,6 +1630,16 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 "the dry run could not write its temporary copy of the store "
                 + (f"in {folder}" if folder else "because no usable temporary folder was found")
                 + f" (set TMPDIR to a writable folder with room for it): {exc.__cause__}"
+            )),
+            exit_code=3,
+        )
+    except _RekeyStoreMissing as exc:
+        _error(
+            "REKEY_FAILED",
+            escape_for_envelope(_scrub(
+                f"the store {exc.args[0]} could not be found while the dry run "
+                f"copied it (it was moved or deleted); nothing was changed: "
+                f"{exc.__cause__}"
             )),
             exit_code=3,
         )

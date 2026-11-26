@@ -382,3 +382,35 @@ def test_a_dry_run_on_a_corrupt_settled_store_leaves_no_sidecars(tmp_path, monke
     assert envelope["error"] == "REKEY_FAILED", envelope
     assert store.read_bytes() == before
     assert sorted(p.name for p in tmp_path.glob("mem.db*")) == ["mem.db"]
+
+
+def test_a_store_that_vanishes_during_the_copy_is_not_called_failing(tmp_path, monkeypatch, capfd):
+    """The store is moved away while the dry run copies it, and the copy
+    fails. The check that would blame the store's disk cannot stat it, so the
+    dry run reports that the store could not be found. RED WHEN a store that
+    cannot be stat'ed is reported as failing an integrity check."""
+    from scripts import cli
+
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/me/proj.git")
+    store = tmp_path / "mem.db"
+    _store_of(store, 3)
+    moved = tmp_path / "moved.db"
+
+    class _VanishingBackup(_FailingBackup):
+        def backup(self, target, **kwargs):
+            store.rename(moved)
+            return super().backup(target, **kwargs)
+
+    real_open = cli._read_only_connection
+    monkeypatch.setattr(
+        cli, "_read_only_connection", lambda path: _VanishingBackup(real_open(path), False)
+    )
+    monkeypatch.chdir(repo)
+    argv = ["project-id", "rekey", "--from=proj", "--to=github.com/me/proj", "--db-path", str(store)]
+    code, envelope = _cli(argv, capfd)
+    assert code == 3, envelope
+    assert envelope["error"] == "REKEY_FAILED", envelope
+    assert f"the store {store} could not be found" in envelope["message"], envelope
+    assert "integrity check" not in envelope["message"], envelope
