@@ -1620,9 +1620,16 @@ def gitfile_target(text: str) -> Optional[str]:
     return target(text)
 
 
-# The most git reads of a `.git` file; equal to
-# `shared.git_helpers.GIT_FILE_LIMIT`, which the one reader enforces.
-GIT_FILE_LIMIT = 1 << 20
+def __getattr__(name: str):
+    """`GIT_FILE_LIMIT`, the most git reads of a `.git` file, is
+    `shared.git_helpers.GIT_FILE_LIMIT`, the one constant the reader
+    enforces; it is imported on first use, as every `shared` import here
+    is, so the two cannot drift."""
+    if name == "GIT_FILE_LIMIT":
+        from shared.git_helpers import GIT_FILE_LIMIT
+
+        return GIT_FILE_LIMIT
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def read_git_file(path) -> Optional[str]:
