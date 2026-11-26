@@ -139,6 +139,23 @@ def test_project_id_show_gives_the_earlier_id_a_rekey_command(renamed, capsys):
         assert (rows[other]["relation"], rows[other]["rekey"]) == ("other", None), rows
 
 
+@pytest.mark.parametrize("verb", [["list"], ["search", "c"]])
+def test_list_and_search_name_the_earlier_id_on_stdout(renamed, capfd, verb):
+    """The earlier id's bucket is left out of the read, so list and search
+    name it on stdout with its rekey command, beside result. RED WHEN only
+    stderr names it."""
+    from scripts.cli import main
+
+    _repo, store = renamed
+    with pytest.raises(SystemExit) as exit_info:
+        main([*verb, "--db-path", str(store)])
+    assert exit_info.value.code == 0
+    envelope = json.loads(capfd.readouterr().out)
+    earlier = {row["id"]: row["rekey"] for row in envelope["earlier_ids"]}
+    assert list(earlier) == [OLD], envelope
+    assert f"--from={OLD}" in earlier[OLD] and f"--to={NEW}" in earlier[OLD], earlier
+
+
 def test_buckets_with_no_row_under_this_checkout_cost_no_git_call(tmp_path, monkeypatch):
     """Forty other canonical buckets whose rows lie elsewhere, and a live
     repository that cross-links one file here: the scan asks for the gate

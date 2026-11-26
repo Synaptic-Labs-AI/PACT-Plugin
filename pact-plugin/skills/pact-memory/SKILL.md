@@ -396,7 +396,8 @@ set, exactly one of `included`, `excluded` and `unproven` is true:
 - `unproven`: it is not read, and its `rekey` command is printed once per
   process, with the cause. That line goes to stderr; `list` and `search` also put
   the bucket's `legacy_scope` record on stdout, beside `result`, whenever a
-  bucket is left out.
+  bucket is left out, and an `earlier_ids` list (`id`, `rekey`) for a bucket
+  of this repository under an earlier canonical id.
   `unproven_reason` names the cause:
   `recorded_elsewhere` (sessions recorded at another existing folder wrote
   some of its rows), `foreign_rows` (some of its file rows lie in another

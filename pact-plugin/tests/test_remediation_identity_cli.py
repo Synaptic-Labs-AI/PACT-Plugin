@@ -864,6 +864,54 @@ class TestTheSyncHelpMatchesWhatSyncReports:
             assert result["sync_status"] == "wrote", result
             assert "an old folder-name memory" not in text and WORKING_MEMORY_COMMENT in text
 
+    @pytest.mark.parametrize("verb", [["list"], ["search", "x"]])
+    def test_an_ambiguous_folded_match_is_named_on_stdout(
+        self, identity_env, store, monkeypatch, capfd, verb
+    ):
+        """list and search put the read's legacy_scope on stdout for an
+        ambiguous folded match (never read), by the stale-section rule
+        (`hidden_legacy_buckets`). RED WHEN only the candidate and case
+        variants count."""
+        from scripts import project_identity
+
+        monkeypatch.setattr(project_identity, "filesystem_case_insensitive", lambda root: True)
+        where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(where)
+        _seed(store, "Proj", memory_id="row000001", path="a.py")
+        _seed(store, "PROJ", memory_id="row000002", path="b.py")
+        code, envelope = _cli([*verb, "--db-path", str(store)], capfd)
+        assert code == 0 and envelope["result"] == [], envelope
+        assert envelope["legacy_scope"]["ambiguous"] == ["PROJ", "Proj"], envelope
+
+    @pytest.mark.parametrize("verb", [["list"], ["search", "x"]])
+    def test_a_submodules_suppressed_bucket_is_named_on_stdout(
+        self, identity_env, store, monkeypatch, capfd, verb
+    ):
+        """A submodule's suppressed pre-change bucket ('modules') is never
+        read; list and search name it on stdout. RED WHEN it is left out."""
+        from fixtures.identity_git import run_git
+
+        upstream = make_repo(identity_env / "libup", remote="https://github.com/acme/lib.git")
+        sup = make_repo(identity_env / "super", remote="https://github.com/acme/super.git")
+        run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                str(upstream), "lib", cwd=sup)
+        lib = sup / "lib"
+        run_git("remote", "set-url", "origin", "https://github.com/acme/lib.git", cwd=lib)
+        monkeypatch.chdir(lib)
+        _seed(store, "modules", memory_id="row000001", path="a.py")
+        code, envelope = _cli([*verb, "--db-path", str(store)], capfd)
+        assert code == 0 and envelope["result"] == [], envelope
+        assert envelope["legacy_scope"]["suppressed_candidate"] == "modules", envelope
+
+    def test_control_a_read_that_hides_nothing_adds_no_key(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(where)
+        _seed(store, "github.com/o/proj", memory_id="row000001", path="a.py")
+        code, envelope = _cli(["list", "--db-path", str(store)], capfd)
+        assert code == 0 and len(envelope["result"]) == 1 and "legacy_scope" not in envelope, envelope
+
     def test_unresolved_is_memories_with_no_claude_md(
         self, identity_env, store, monkeypatch, capfd
     ):

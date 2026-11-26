@@ -72,6 +72,7 @@ from scripts.memory_api import (
     _LOCKED_READS_ONLY,
     _unproven_cause,
     detection_pass,
+    hidden_legacy_buckets,
     legacy_notices_quiet,
     main_repo_root,
     present_store_fault,
@@ -755,16 +756,20 @@ def cmd_search(args, db_path=None):
 
 def _hidden_bucket_scope(memory) -> dict:
     """`{"legacy_scope": <record>}` when this read left an old folder-name
-    bucket out (unproven or excluded, holding rows, or a case variant), else
-    {}. The stderr notice says the same; this puts it on stdout too, beside
+    bucket out (`hidden_legacy_buckets`, the rule the stale Working Memory
+    section uses), and `{"earlier_ids": [{id, rekey}]}` when it left out a
+    bucket of this repository under an earlier canonical id; else {}. The stderr notice says the same; this puts it on stdout too, beside
     `result`, so a caller reading only stdout sees why rows are missing."""
     state = memory._legacy_scope_state
-    if not state:
-        return {}
-    hidden = (
-        state.get("candidate") and not state.get("included") and state.get("memory_count")
-    ) or state.get("case_variant")
-    return {"legacy_scope": state} if hidden else {}
+    extra = {"legacy_scope": state} if hidden_legacy_buckets(state) else {}
+    # A CANONICAL BUCKET UNDER AN EARLIER ID of this repository is not read
+    # either; the stderr notice names it with its rekey command.
+    earlier = getattr(memory, "_earlier_canonical", None) or {}
+    if earlier:
+        extra["earlier_ids"] = [
+            {"id": bucket, "rekey": command} for bucket, command in sorted(earlier.items())
+        ]
+    return extra
 
 
 def cmd_list(args, db_path=None):

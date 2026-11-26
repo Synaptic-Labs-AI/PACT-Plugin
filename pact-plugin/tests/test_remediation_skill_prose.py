@@ -635,7 +635,9 @@ class TestLegacyScopeStatesAreDocumented:
         ) in _body(SKILL)
         assert (
             "That line goes to stderr; list and search also put the bucket's "
-            "legacy_scope record on stdout, beside result, whenever a bucket is left out."
+            "legacy_scope record on stdout, beside result, whenever a bucket is left out, "
+            "and an earlier_ids list (id, rekey) for a bucket of this repository under an "
+            "earlier canonical id."
         ) in _body(SKILL)
 
     def test_an_unattributed_row_is_read_with_a_warning(self):

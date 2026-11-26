@@ -315,6 +315,30 @@ def _legacy_scope_record(**overrides: Any) -> Dict[str, Any]:
     return record
 
 
+def hidden_legacy_buckets(state: Optional[Dict[str, Any]]) -> List[str]:
+    """EVERY BUCKET A READ HIDES FOR THIS CHECKOUT, from its `legacy_scope`
+    record: the legacy candidate when unproven or excluded, its case variants
+    and ambiguous folded matches (never read), and a submodule's suppressed
+    candidate. THE ONE PREDICATE for the stale Working Memory section and the
+    `legacy_scope` key `list` and `search` put on stdout."""
+    legacy = state or {}
+    return [
+        *(
+            [legacy["candidate"]]
+            if legacy.get("candidate") is not None
+            and (legacy.get("unproven") or legacy.get("excluded"))
+            else []
+        ),
+        *(legacy.get("case_variant") or []),
+        *(legacy.get("ambiguous") or []),
+        *(
+            [legacy["suppressed_candidate"]]
+            if legacy.get("suppressed_candidate")
+            else []
+        ),
+    ]
+
+
 def _suppressed_bucket_rows(store: str, bucket: Optional[str]) -> int:
     """Rows in a SUPPRESSED legacy bucket, read read-only; disclosed if any.
 
@@ -6741,25 +6765,7 @@ class PACTMemory:
             return []
         records = self.list(limit=MAX_WORKING_MEMORIES)
         payload = [r.to_dict() for r in records]
-        legacy = self._legacy_scope_state or {}
-        # EVERY BUCKET THIS READ HIDES FOR THIS CHECKOUT: its legacy candidate
-        # when unproven or excluded, its case variants and ambiguous folded
-        # matches (never read), and a submodule's suppressed candidate.
-        hidden = [
-            *(
-                [legacy["candidate"]]
-                if legacy.get("candidate") is not None
-                and (legacy.get("unproven") or legacy.get("excluded"))
-                else []
-            ),
-            *(legacy.get("case_variant") or []),
-            *(legacy.get("ambiguous") or []),
-            *(
-                [legacy["suppressed_candidate"]]
-                if legacy.get("suppressed_candidate")
-                else []
-            ),
-        ]
+        hidden = hidden_legacy_buckets(self._legacy_scope_state)
         if not payload and not hidden:
             # NOTHING HIDDEN (a fresh store, or no old bucket): the section is
             # left as it is, so a committed CLAUDE.md on a new clone keeps it.
