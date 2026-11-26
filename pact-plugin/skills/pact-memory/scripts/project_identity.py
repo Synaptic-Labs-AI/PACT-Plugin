@@ -1698,7 +1698,8 @@ def git_refuses_ownership(start) -> bool:
     """Whether git refuses `start`'s repository as owned by another user
     ("detected dubious ownership"): the same `git -C start rev-parse
     --git-dir` `git_dir_answer` asks (one answer per detection pass), read
-    for git's reason. Never raises; False when git cannot be asked."""
+    for git's reason, which names `safe.directory` in every language. Never
+    raises; False when git cannot be asked."""
     from shared.git_helpers import answered_once
     from shared.project_scope import git_env_without_location
 
@@ -1721,7 +1722,9 @@ def git_refuses_ownership(start) -> bool:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return False
-    return result.returncode != 0 and b"dubious ownership" in (result.stderr or b"")
+    # Keyed on `safe.directory`, the config name git's hint prints in every
+    # language, not on the English "dubious ownership" git translates.
+    return result.returncode != 0 and b"safe.directory" in (result.stderr or b"")
 
 
 # =============================================================================

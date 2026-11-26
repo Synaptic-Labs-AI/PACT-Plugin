@@ -75,3 +75,30 @@ def test_control_the_same_repository_owned_by_this_user_resolves(refused_repo, c
     repo, store = refused_repo
     code, envelope, _ = _cli(["project-id", "show", "--db-path", str(store)], capfd)
     assert code == 0 and envelope["result"]["project_id"] == "github.com/me/proj", envelope
+
+
+def test_a_translated_refusal_is_still_recognised(tmp_path, monkeypatch):
+    """git translates "detected dubious ownership" but its hint names
+    safe.directory in every language, so detection keys on that. RED WHEN it
+    keys on the English words."""
+    import subprocess
+
+    from scripts import project_identity
+
+    german = (
+        b"fatal: Unsicherer Besitz im Repository unter '/x' erkannt\n"
+        b"Um eine Ausnahme f\xc3\xbcr dieses Verzeichnis hinzuzuf\xc3\xbcgen, rufen Sie auf:\n\n"
+        b"\tgit config --global --add safe.directory /x\n"
+    )
+
+    def fake_run(command, **kwargs):
+        return subprocess.CompletedProcess(command, 128, b"", german)
+
+    monkeypatch.setattr(project_identity.subprocess, "run", fake_run)
+    assert project_identity.git_refuses_ownership(tmp_path) is True
+
+    def other_failure(command, **kwargs):
+        return subprocess.CompletedProcess(command, 128, b"", b"fatal: kein Git-Repository\n")
+
+    monkeypatch.setattr(project_identity.subprocess, "run", other_failure)
+    assert project_identity.git_refuses_ownership(tmp_path) is False
