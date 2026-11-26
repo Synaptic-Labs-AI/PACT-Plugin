@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 import tempfile
 from contextlib import contextmanager, nullcontext
@@ -1534,7 +1535,8 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         _best_effort_report(
             print,
             escape_for_envelope(
-                f"note: {unattributed} of the memories in --from={from_id!r} "
+                f"note: {unattributed} of the memories in "
+                f"{shlex.quote('--from=' + from_id)} "
                 "came from no recorded session; this rekey "
                 + ("moved" if args.apply else "would move")
                 + " them with the bucket."

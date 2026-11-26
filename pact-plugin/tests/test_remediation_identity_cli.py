@@ -727,7 +727,8 @@ class TestTheSyncHelpMatchesWhatSyncReports:
     )
 
     @pytest.mark.parametrize(
-        "shape", ["upgrade", "case-variant", "unrelated", "fresh", "declined", "no-section"]
+        "shape",
+        ["upgrade", "case-variant", "unrelated", "mixed", "fresh", "declined", "no-section"],
     )
     def test_a_stale_section_is_emptied_only_when_its_entries_are_hidden(
         self, identity_env, store, monkeypatch, capfd, shape
@@ -739,9 +740,11 @@ class TestTheSyncHelpMatchesWhatSyncReports:
         folder later renamed 'proj'), so it is never read; same outcome.
         unrelated: the same hidden bucket (another project's, same folder
         name), but the committed section's entry names a row it does not
-        hold: untouched. fresh (no rows anywhere), declined and a CLAUDE.md
+        hold: untouched. mixed: one entry names a hidden row and one does
+        not: untouched (every entry must be hidden). fresh (no rows anywhere), declined and a CLAUDE.md
         with no section: untouched. RED WHEN the upgrade section keeps its
-        entry, or any other shape is rewritten."""
+        entry, or any other shape is rewritten (any-entry instead of
+        every-entry reds [mixed])."""
         from scripts.working_memory import WORKING_MEMORY_COMMENT
 
         skill = (Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "SKILL.md")
@@ -767,6 +770,13 @@ class TestTheSyncHelpMatchesWhatSyncReports:
         else:
             named = "foreign00001" if shape == "unrelated" else "row000001"
             original = self.STALE.format(memory_id=named)
+            if shape == "mixed":
+                # One entry from the hidden bucket and one hand entry naming a
+                # row it does not hold: the section is not all stale.
+                original += (
+                    "\n### 2026-01-02 00:00\n**Context**: a hand entry\n"
+                    "**Memory ID**: foreign00001\n"
+                )
         target.write_text(original, encoding="utf-8")
         code, envelope = _cli(
             ["sync", "--db-path", str(store), "--claude-md-root", str(where)], capfd

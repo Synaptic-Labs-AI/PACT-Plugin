@@ -199,7 +199,9 @@ def test_a_rekey_of_unattributed_rows_says_how_many_it_moves(checkout, capfd, ap
     """A defaulted rekey of a verified bucket holding memories from no
     recorded session states their count, for the plan and the move alike
     (the read's own disclosure is quiet during --apply). What moves is
-    unchanged: the whole bucket. RED WHEN either run is silent about them."""
+    unchanged: the whole bucket. The id is shown as typed on the command
+    line (shell-quoted only when it needs it), not as a Python repr. RED WHEN
+    either run is silent about them, or quotes the id with repr."""
     import json
 
     from scripts.cli import main
@@ -215,7 +217,7 @@ def test_a_rekey_of_unattributed_rows_says_how_many_it_moves(checkout, capfd, ap
     assert json.loads(out)["result"]["memories"] == 2, out
     verb = "moved" if apply else "would move"
     assert (
-        "2 of the memories in --from='proj' came from no recorded session; "
+        "2 of the memories in --from=proj came from no recorded session; "
         f"this rekey {verb} them with the bucket."
     ) in err, err
 
