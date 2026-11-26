@@ -620,7 +620,8 @@ def _pruned_session_line(entry: Path) -> str | None:
     """The prune-ledger line for the session folder `entry`, or None.
 
     `{session_id, project_dir, started_at}` copied from the folder's own
-    `pact-session-context.json` (`read_session_record`: a bounded read of a
+    `pact-session-context.json`, with `started_at` the session's earliest
+    known start (`read_session_record`: a bounded read of a
     regular file). None when the context is absent, not a regular file,
     oversized or malformed, when its sanitized session id is not the folder's name, when
     `started_at` is not a zone-aware ISO-8601 timestamp, or when `project_dir`

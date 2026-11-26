@@ -1106,3 +1106,100 @@ def test_a_moved_store_re_decides_the_verdict(canonical_session, monkeypatch):
         memory = PACTMemory(session_id="s", db_path=store)
         assert memory._read_project_scopes() == (CANONICAL, NAME)
     assert len(calls) == 2, calls
+
+
+# ---------------------------------------------------------------------------
+# A resume or heal rewrites started_at; the session is dated by its first start
+# ---------------------------------------------------------------------------
+
+
+_BEFORE_THE_CLONE = "2020-01-01T00:00:00Z"
+
+
+def _journal(session_dir: Path, first_ts: str) -> None:
+    (session_dir / "session-journal.jsonl").write_text(
+        json.dumps({"type": "session_start", "ts": first_ts}) + "\n"
+        + json.dumps({"type": "later", "ts": "2099-01-01T00:00:00Z"}) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _root_census(repo: Path, store: Path) -> dict:
+    with sqlite3.connect(str(store)) as conn:
+        return memory_api._legacy_session_census(
+            conn, NAME, [str(repo.resolve())], (repo / ".git").resolve()
+        )
+
+
+def test_a_session_resumed_after_a_re_clone_is_not_evidence(tmp_path):
+    """The session first started before this clone's description (its
+    journal's first event), and a resume rewrote started_at after it. RED
+    WHEN the evidence is dated by the rewritten started_at."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / NAME)
+    config = tmp_path / "home" / ".claude"
+    context = seed_session_evidence(config, repo, "resumed")
+    _journal(context.parent, _BEFORE_THE_CLONE)
+    store = tmp_path / "store.db"
+    _seed(store, NAME, session_id="resumed")
+    counts = _root_census(repo, store)
+    assert counts["here"] == 0 and counts["description_newer"] == 1, counts
+
+
+def test_a_session_healed_after_a_re_clone_is_not_evidence(tmp_path, monkeypatch):
+    """The heal re-creates the context file through write_context, which
+    records the heal time; the journal in the same folder keeps the first
+    start. RED WHEN the heal time stands as the session's start."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / NAME)
+    config = tmp_path / "home" / ".claude"
+    context = seed_session_evidence(config, repo, "healed", started_at=_BEFORE_THE_CLONE)
+    _journal(context.parent, _BEFORE_THE_CLONE)
+    context.unlink()
+    monkeypatch.setattr(pact_context, "_context_path", None)
+    monkeypatch.setattr(pact_context, "_cache", None)
+    time.sleep(0.01)
+    pact_context.write_context("session-healed", "healed", str(repo), "")
+    healed = json.loads(context.read_text(encoding="utf-8"))
+    assert healed["started_at"] > "2021", healed
+    store = tmp_path / "store.db"
+    _seed(store, NAME, session_id="healed")
+    counts = _root_census(repo, store)
+    assert counts["here"] == 0 and counts["description_newer"] == 1, counts
+
+
+def test_a_fresh_session_after_a_re_clone_is_still_evidence(tmp_path):
+    """Control: a session whose journal starts after the description (a new
+    session, or a /clear, which opens its own folder) still counts."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / NAME)
+    config = tmp_path / "home" / ".claude"
+    context = seed_session_evidence(config, repo, "fresh")
+    started = json.loads(context.read_text(encoding="utf-8"))["started_at"]
+    _journal(context.parent, started)
+    store = tmp_path / "store.db"
+    _seed(store, NAME, session_id="fresh")
+    assert _root_census(repo, store)["here"] == 1
+
+
+def test_the_prune_ledger_line_carries_the_first_start(tmp_path):
+    """The reaper copies the session's earliest known start, so a pruned
+    resumed session is dated as the live one is. RED WHEN the ledger keeps
+    the rewritten started_at."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / NAME)
+    config = tmp_path / "home" / ".claude"
+    context = seed_session_evidence(config, repo, "pruned")
+    _journal(context.parent, _BEFORE_THE_CLONE)
+    line = json.loads(session_end._pruned_session_line(context.parent))
+    assert line["started_at"] == _BEFORE_THE_CLONE, line
+
+
+def test_a_journal_that_starts_later_does_not_move_the_start(tmp_path):
+    """min() only moves the start earlier: a journal whose first event is
+    later than started_at leaves started_at as recorded."""
+    (tmp_path / "pact-session-context.json").write_text(
+        json.dumps({"session_id": "s", "started_at": "2021-01-01T00:00:00+00:00"})
+    )
+    _journal(tmp_path, "2022-01-01T00:00:00Z")
+    assert pact_context.read_session_record(tmp_path)["started_at"] == "2021-01-01T00:00:00+00:00"

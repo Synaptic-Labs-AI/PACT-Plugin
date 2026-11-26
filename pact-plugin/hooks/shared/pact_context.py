@@ -1586,8 +1586,54 @@ PRUNE_LEDGER_NAME = "pruned-sessions.jsonl"
 SESSION_CONTEXT_MAX_BYTES = 64 * 1024
 
 
+def _journal_first_start(folder) -> str | None:
+    """The `ts` of the first event in `<folder>/session-journal.jsonl`, when
+    it is a zone-aware ISO-8601 time, else None. Never raises.
+
+    A resume or a heal rewrites the context file's `started_at` but keeps
+    the session folder and appends to its journal, so the journal's first
+    event dates the session's first start. Reads at most
+    `_JOURNAL_FIRST_LINE_MAX_BYTES` of a regular file (a symlink or FIFO is
+    refused, as for the context file).
+    """
+    path = os.path.join(folder, "session-journal.jsonl")
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except Exception:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        head = os.read(fd, _JOURNAL_FIRST_LINE_MAX_BYTES)
+        first = json.loads(head.split(b"\n", 1)[0].decode("utf-8"))
+        ts = first.get("ts") if isinstance(first, dict) else None
+        if isinstance(ts, str) and datetime.fromisoformat(ts).tzinfo is not None:
+            return ts
+        return None
+    except Exception:
+        return None
+    finally:
+        os.close(fd)
+
+
+# A journal's first event is a small JSON line; a longer one reads as no date.
+_JOURNAL_FIRST_LINE_MAX_BYTES = 64 * 1024
+
+
 def read_session_record(folder) -> dict | None:
     """`<folder>/pact-session-context.json` as a dict, or None. Never raises.
+
+    Its `started_at` is the session's EARLIEST known start: the recorded
+    value, or the first journal event's time when that is earlier
+    (`_journal_first_start`), because a resume or a heal records its own
+    time there. Both readers compare it with a repository's `description`
+    ctime, and an earlier date can only withhold evidence, never add it.
 
     The two readers that take a session folder's record as evidence (the
     reaper's prune-ledger line and the memory store's session census) read it
@@ -1618,11 +1664,20 @@ def read_session_record(folder) -> dict | None:
         if len(data) > SESSION_CONTEXT_MAX_BYTES:
             return None
         record = json.loads(data.decode("utf-8"))
-        return record if isinstance(record, dict) else None
+        if not isinstance(record, dict):
+            return None
     except Exception:
         return None
     finally:
         os.close(fd)
+    first = _journal_first_start(folder)
+    if first is not None:
+        try:
+            if datetime.fromisoformat(first) < datetime.fromisoformat(record["started_at"]):
+                record["started_at"] = first
+        except Exception:
+            pass
+    return record
 
 
 def reconstruct_session_dir(project_dir: str, session_id: str) -> str:
@@ -2780,8 +2835,10 @@ def heal_context_if_missing(input_data: dict) -> bool:
     Content parity with session_init: session_id is persisted as
     str(raw_id) — RAW, exactly as session_init's main() persists it
     (init() sanitizes only the PATH segment, not the stored value).
-    started_at is heal time, not session start — its consumers are
-    journal-naming/display only (cosmetic), documented trade-off.
+    started_at is heal time, not session start. The legacy-bucket evidence
+    readers date the session by its journal's first event instead
+    (read_session_record), so the heal time cannot make an old session
+    count as evidence.
 
     Two-healer race (bootstrap_marker_writer + bootstrap_prompt_gate fire
     on the same prompt; the platform runs same-event hooks in parallel):

@@ -7442,6 +7442,11 @@ class TestEveryRouteEntryConditionIsARoute:
             "decodes the bounded bytes read_session_record read from a session folder's context file"
             + _AFTER_DETECTION
         ),
+        ("call", "<call to no function shared.pact_context: head.split>"): (
+            "splits the first line off the bounded head of a session folder's journal, to date the "
+            "session's first start; it reads the session folder, not git or the identity"
+            + _AFTER_DETECTION
+        ),
         ('call', 'count_project_memories'): (
             "counts a bucket's rows in the store for the bucket census" + _AFTER_DETECTION
         ),
