@@ -2379,6 +2379,11 @@ def rekey_project(
     ).fetchone()[0]
 
     if from_id == to_id:
+        # NOTHING MOVES, but the bucket's size is still reported, so a no-op
+        # on a bucket that holds rows does not read as an empty one.
+        counters["memories"] = conn.execute(
+            "SELECT COUNT(*) FROM memories WHERE project_id = ?", (from_id,)
+        ).fetchone()[0]
         return counters
 
     savepoint = "rekey_project_work"

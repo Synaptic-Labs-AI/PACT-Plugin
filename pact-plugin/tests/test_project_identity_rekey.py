@@ -199,12 +199,14 @@ class TestRekeyLifecycle:
                 "SELECT project_id FROM memories WHERE id = 'm1'"
             ).fetchone()[0] == LEGACY
 
-    def test_from_equals_to_is_a_zero_noop(self, rekey_env):
+    def test_from_equals_to_moves_nothing_and_reports_the_bucket(self, rekey_env):
+        """A no-op moves nothing; its `memories` is the bucket's row count,
+        so a bucket that holds rows does not read as empty."""
         _seed(rekey_env, [("m1", LEGACY)])
         before = _rows(rekey_env.store)
         with db_connection(rekey_env.store) as conn:
             counters = rekey_project(conn, LEGACY, LEGACY, dry_run=False)
-        assert counters["memories"] == 0
+        assert counters["memories"] == 1
         assert _rows(rekey_env.store) == before
 
     def test_null_project_rows_are_never_moved_and_are_reported(self, rekey_env):

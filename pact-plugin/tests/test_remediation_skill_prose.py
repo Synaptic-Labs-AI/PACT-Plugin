@@ -809,6 +809,10 @@ class TestRekeyRemediesNameTheirTarget:
             "from_bucket_empty: true. The envelope also carries "
             "target_defaulted and legacy_verdict."
         ) in row
+        assert (
+            "A --from equal to the target answers noop: true and moves nothing; "
+            "its memories is the number of rows the bucket holds."
+        ) in row
 
     def test_each_documented_envelope_field_is_one_the_cli_emits(self, tmp_path, monkeypatch, capfd):
         """`project-id rekey` against a store that does not exist answers

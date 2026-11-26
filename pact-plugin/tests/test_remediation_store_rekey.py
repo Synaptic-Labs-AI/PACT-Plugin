@@ -292,7 +292,8 @@ class TestTheCounters:
             conn.close()
         assert counters["null_project_memories"] == 1
         assert counters["null_project_files"] == 1
-        assert counters["memories"] == 0
+        # The no-op's `memories` is the bucket's rows; the NULL row is not in it.
+        assert counters["memories"] == 1
 
     def test_every_key_is_present_on_an_apply_and_on_a_no_op(self, tmp_path):
         """Catches a counter that appears only on some outcomes.

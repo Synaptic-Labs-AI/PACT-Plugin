@@ -105,6 +105,8 @@ class TestAnAbsentStoreRefusesWhatAPresentStoreRefuses:
         result = envelope["result"]
         assert (result["noop"], result["target_defaulted"]) == (True, True)
         assert (result["from"], result["to"]) == (CANONICAL, CANONICAL)
+        # A no-op reports the bucket's rows, not 0 (nothing moved either way).
+        assert result["memories"] == (1 if with_store else 0), result
         if with_store:
             assert resolve_db_path().read_bytes() == before
         else:
@@ -131,6 +133,7 @@ class TestAnAbsentStoreRefusesWhatAPresentStoreRefuses:
         result = envelope["result"]
         assert (result["noop"], result["target_defaulted"]) == (True, False)
         assert (result["from"], result["to"]) == ("proj", "proj")
+        assert result["memories"] == (1 if with_store else 0), result
         if with_store:
             assert resolve_db_path().read_bytes() == before
         else:
