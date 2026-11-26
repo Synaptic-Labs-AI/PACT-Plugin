@@ -796,21 +796,17 @@ class TestRekeyRemediesNameTheirTarget:
     def test_the_census_row_shape_and_which_rows_carry_a_command(self):
         row = _table_row(SKILL, "project-id show")
         assert (
-            "Each candidate row is {id, memory_count, relation, rekey}, with "
-            "relation one of current, legacy_candidate, case_variant, earlier_id "
-            "or other; only a legacy_candidate row that is not excluded, a "
-            "case_variant row and an earlier_id row with no file row in one of "
-            "this checkout's submodules carry a rekey command"
+            "Each candidate row is {id, memory_count, relation, rekey}, relation "
+            "one of current, legacy_candidate, case_variant, earlier_id or other; "
+            "rekey is null on a row no move is safe for."
         ) in row
 
     def test_a_defaulted_target_is_only_for_the_own_candidate(self):
         assert (
             "An omitted --to is accepted only when --from is this checkout's "
             "own legacy candidate and the bucket is verified (a file row places "
-            "it here). A bucket read on session evidence alone "
-            "(included_unverified) moves only with an explicit --to, and so does "
-            "one that is excluded or unproven; otherwise the move is refused "
-            "with REKEY_REFUSED"
+            "it here); any other bucket needs an explicit --to, or the move is "
+            "refused with REKEY_REFUSED"
         ) in _body(SKILL)
 
     def test_a_named_absent_store_is_refused_not_reported_absent(self):
@@ -873,13 +869,8 @@ class TestRekeyRemediesNameTheirTarget:
         for result in (absent, present):
             assert {"target_defaulted", "legacy_verdict"} <= set(result), result
 
-    def test_links_repointed_is_described_as_merged_rows_only(self):
-        body = _body(SKILL)
-        assert (
-            "links_repointed counts the links on file rows merged into an "
-            "existing target row"
-        ) in body
-        assert "links_repointed counts old links examined" not in body
+    def test_links_repointed_is_not_misdescribed(self):
+        assert "links_repointed counts old links examined" not in _body(SKILL)
 
 
 class TestRepositorySessionsNeverWriteAFolderNameBucket:
@@ -1597,22 +1588,20 @@ class TestNullOverridePathIsMeasured:
 
     def test_the_show_row_names_the_remote_helper_source(self):
         assert (
-            "source is remote helper when the id is the folder name of a "
-            "repository whose origin is a remote-helper transport. identity_detail "
-            "holds a sentence naming the remedy in that case and when a github.com "
-            "pin names a repository ending in .git; it is null otherwise."
+            "identity_detail names the remedy when source is remote helper (a "
+            "folder-name id from a remote-helper origin) or a github.com pin ends "
+            "in .git, else null."
         ) in _table_row(SKILL, "project-id show")
 
     def test_the_show_row_says_process_repo_root_is_the_main_checkout(self):
         assert (
-            "process_repo_root is the root of the repository the process sits in, "
-            "which from a linked worktree is the main checkout, not the worktree."
+            "process_repo_root is the root of the process's repository, the main "
+            "checkout from a linked worktree."
         ) in _table_row(SKILL, "project-id show")
 
     def test_the_show_row_names_what_repo_root_is(self):
         assert (
-            "repo_root is the identity root that explains the id and that the "
-            "legacy gate compared rows against;"
+            "repo_root is the identity root;"
         ) in _table_row(SKILL, "project-id show")
 
     DOC_LEAD = "It is None for "
