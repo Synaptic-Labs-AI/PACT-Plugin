@@ -4534,8 +4534,23 @@ class PACTMemory:
             and is_canonical(self._project_id)
         )
 
+    def _identity_declined(self) -> bool:
+        """Whether this instance's DETECTION declined (no id was supplied)."""
+        return (
+            self._project_id_source != "supplied"
+            and getattr(self, "_decline_reason", None) is not None
+        )
+
+    def _guards_folder_name_buckets(self) -> bool:
+        """Whether this session may not write into a folder-name bucket: it
+        detected a canonical id, or its detection declined. A declined
+        checkout becomes a repository session once its origin is fixed, so a
+        row it files now would be that session's evidence later."""
+        return self._detected_identity_is_canonical() or self._identity_declined()
+
     def _refuse_legacy_write(self, what: str) -> None:
-        """Refuse a canonical session's write into a non-canonical bucket.
+        """Refuse a canonical (or declined) session's write into a
+        non-canonical bucket.
 
         AFTER THE UPGRADE ONLY A BASENAME-IDENTITY SESSION WRITES A BASENAME
         BUCKET. A canonical session that filed (or relabelled) a row there
@@ -4544,9 +4559,15 @@ class PACTMemory:
         another project's memories. A refusal of caller input
         (`LegacyBucketWriteRefusedError`, exit 2).
         """
+        whose = (
+            "this session's repository identity was not resolved (resolution "
+            f"declined: {(self._decline_reason or {}).get('reason')})"
+            if self._identity_declined()
+            else f"this session's project id is {self._project_id!r} (a "
+            "repository identity)"
+        )
         raise LegacyBucketWriteRefusedError(
-            f"{what}: this session's project id is {self._project_id!r} (a "
-            "repository identity), and a repository session does not write "
+            f"{what}: {whose}, and a repository session does not write "
             "into a folder-name bucket. Nothing was written. To move rows, "
             "preview the move with `project-id rekey --from=FOLDER_NAME "
             "--to=host/owner/repo` and add --apply, with the user's approval, "
@@ -5113,7 +5134,7 @@ class PACTMemory:
             )
         if (
             payload_project is not None
-            and self._detected_identity_is_canonical()
+            and self._guards_folder_name_buckets()
             and not is_canonical(payload_project)
         ):
             self._refuse_legacy_write(
@@ -6086,7 +6107,7 @@ class PACTMemory:
             # bucket to its own reads. A row with NO project (NULL) is not a
             # folder-name bucket, so its session_id may change, and so may one
             # this same call moves to this repository's own id.
-            if self._detected_identity_is_canonical():
+            if self._guards_folder_name_buckets():
                 if "project_id" in updates and not is_canonical(
                     updates["project_id"]
                 ):
@@ -6099,7 +6120,10 @@ class PACTMemory:
                     "session_id" in updates
                     and stored_project is not None
                     and not is_canonical(stored_project)
-                    and updates.get("project_id") != self._project_id
+                    and (
+                        self._project_id is None
+                        or updates.get("project_id") != self._project_id
+                    )
                 ):
                     self._refuse_legacy_write(
                         "update of session_id on a row in the folder-name "

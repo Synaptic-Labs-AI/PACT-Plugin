@@ -936,8 +936,9 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
 
     def test_the_rule_names_both_refused_writes(self):
         assert (
-            "A session whose detected project id is a repository identity "
-            "never writes into a folder-name bucket: save and update refuse a "
+            "A session whose detected project id is a repository identity, or "
+            "whose repository identity declined, never writes into a folder-name "
+            "bucket: save and update refuse a "
             "payload project_id that is not a canonical host/owner/repo id, "
             "and update refuses a session_id change on a row stored under a "
             "folder-name bucket. Both fail with LEGACY_BUCKET_WRITE_REFUSED, "

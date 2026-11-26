@@ -752,6 +752,62 @@ def test_a_legacy_bucket_update_is_refused_with_its_own_envelope(canonical_sessi
     assert "allowed_fields" not in envelope and "Note:" not in envelope["message"]
 
 
+@pytest.fixture
+def declined_session(tmp_path, monkeypatch, scopes_clean):
+    """A checkout whose origin no id can represent: detection declines."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / NAME, remote="https://example.invalid/acme/x.git")
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    return repo, tmp_path / "store.db"
+
+
+def test_a_declined_session_save_into_a_folder_name_bucket_is_refused(declined_session, capfd):
+    """RED WHEN only a canonical detection guards folder-name buckets: a
+    declined checkout becomes a repository session once its origin is fixed,
+    and its rows here would be that session's evidence."""
+    _repo, store = declined_session
+    _seed(store, CANONICAL)
+    code, envelope = _cli_err(
+        ["save", json.dumps({"context": "c", "project_id": "folder"}), "--db-path", str(store)],
+        capfd,
+    )
+    assert code == 2, envelope
+    assert envelope["error"] == "LEGACY_BUCKET_WRITE_REFUSED", envelope
+    assert "does not write into a folder-name bucket" in envelope["message"]
+    assert "resolution declined: origin_unrepresentable" in envelope["message"]
+
+
+@pytest.mark.parametrize("change", [{"project_id": "folder"}, {"session_id": "other"}])
+def test_a_declined_session_update_into_a_folder_name_bucket_is_refused(
+    declined_session, capfd, change
+):
+    _repo, store = declined_session
+    _seed(store, "folder")
+    row_id = "a" * 32
+    with sqlite3.connect(str(store)) as conn:
+        conn.execute("UPDATE memories SET id = ?", (row_id,))
+    code, envelope = _cli_err(
+        ["update", row_id, json.dumps(change), "--db-path", str(store)], capfd
+    )
+    assert code == 2, envelope
+    assert envelope["error"] == "LEGACY_BUCKET_WRITE_REFUSED", envelope
+
+
+def test_a_declined_session_may_save_under_a_supplied_canonical_id(declined_session, capfd):
+    from scripts.cli import main
+
+    _repo, store = declined_session
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["save", "--no-sync", json.dumps({"context": "c", "project_id": CANONICAL}),
+              "--db-path", str(store)])
+    assert exit_info.value.code in (0, None), capfd.readouterr()
+    with sqlite3.connect(str(store)) as conn:
+        assert conn.execute("SELECT project_id FROM memories").fetchall() == [(CANONICAL,)]
+
+
 
 # ---------------------------------------------------------------------------
 # Cycle 7: a bucket read on session evidence alone needs an explicit --to
