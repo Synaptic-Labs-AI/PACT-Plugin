@@ -57,6 +57,7 @@ def test_a_save_names_dubious_ownership_and_its_fix(refused_repo, monkeypatch, c
     message = envelope["message"]
     assert "dubious ownership" in message, message
     assert "git config --global --add safe.directory" in message and str(repo) in message, message
+    assert "the user, not an agent, runs" in message, message
     assert "Check that git is installed" not in message, message
 
 

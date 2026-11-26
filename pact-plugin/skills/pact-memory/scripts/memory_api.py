@@ -1288,7 +1288,7 @@ def _decline_remedy(
     `_UNPINNABLE_REMEDIES` entry.
     """
     token = (record or {}).get("reason")
-    if cause_detail and cause_detail.startswith(_DUBIOUS_OWNERSHIP_PREFIX):
+    if isinstance(cause_detail, _OwnershipDetail):
         # The detail names the fix itself.
         return None
     if token == "gitfile_redirect":
@@ -1512,13 +1512,18 @@ def _root_guard(
 
 # GIT REFUSES A REPOSITORY ANOTHER USER OWNS ("dubious ownership") until it is
 # listed in safe.directory; the generic "can git read it" remedy hides that.
-_DUBIOUS_OWNERSHIP_PREFIX = "git refuses it as owned by another user (dubious ownership)"
+class _OwnershipDetail(str):
+    """A decline detail that names its own remedy (dubious ownership). The
+    type, not the wording, tells `_decline_remedy` to add no generic one."""
 
 
 def _dubious_ownership_detail(repository: Path) -> str:
-    """The cause and fix for a repository git refuses for its owner."""
-    return (
-        f"{_DUBIOUS_OWNERSHIP_PREFIX}; if it is yours to trust, run "
+    """The cause and fix for a repository git refuses for its owner. The fix
+    is the user's to run: safe.directory is git's guard against acting on a
+    repository another user owns."""
+    return _OwnershipDetail(
+        "git refuses it as owned by another user (dubious ownership); if the "
+        "user trusts this repository, the user, not an agent, runs "
         f"`git config --global --add safe.directory {shlex.quote(str(repository))}`"
     )
 

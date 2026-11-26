@@ -1132,6 +1132,14 @@ class TestUserSettingIsReadFromTheUserScope:
             "asks the user for the id instead of writing it."
         ) in _body(SKILL)
 
+    def test_only_the_user_runs_a_safe_directory_remedy(self):
+        """safe.directory is git's guard against acting on a repository
+        another user owns, so an agent never runs a remedy naming it. RED
+        WHEN the clause is deleted or negated."""
+        body = _body(SKILL)
+        assert "When a remedy names safe.directory, the user runs it, not an agent." in body
+        assert "safe.directory, an agent runs it" not in body
+
     def test_the_code_reads_the_user_directory_under_a_store_scope(
         self, monkeypatch, tmp_path
     ):
