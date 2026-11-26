@@ -1090,7 +1090,7 @@ class TestEveryIdentityCallerIsCovered:
         assert _identity_reaches_unread(identity_dynamic_forms) == []
 
     def test_the_unread_form_ban_sees_the_scope_and_spares_honest_names(self, identity_dynamic_forms):
-        """Control: the forms come from the probe (the attribute, namespace,
+        """Control: the forms come from the table (the attribute, namespace,
         code and import builtins among them), every use of one in the scope
         is found, and the uses with a known name that is no identity
         function (`getattr(args, ...)`, `getattr(record, ...)`) are spared."""
@@ -1132,7 +1132,7 @@ class TestEveryIdentityCallerIsCovered:
 
     def test_no_string_names_an_identity_function(self):
         """FAIL CLOSED: a string naming an identity function can reach it
-        through a callable the probe does not model
+        through a callable the form table does not list
         (`operator.methodcaller("__getattribute__", name)`,
         `pkgutil.resolve_name("module:name")`)."""
         assert named_anchor_strings(_identity_caller_files(), IDENTITY_FUNCTIONS.__contains__) == []

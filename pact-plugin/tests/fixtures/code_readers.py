@@ -21,7 +21,6 @@ import ast
 import builtins
 import collections
 import functools
-import subprocess
 import sys
 from pathlib import Path
 
@@ -96,211 +95,45 @@ def chooser_elements(tree, node) -> tuple:
     return texts, unresolved
 
 
-# Run in a child with no PATH, an empty working directory and an alarm per
-# call: every builtin, and every callable of each standard module a census
-# scope imports, is handed a probe module and the name of one of its
-# attributes, a name of a global, a line of code and a module name, and the
-# ways it gives back what that name names are recorded.
-_DYNAMIC_ACCESS_PROBE = r"""
-import builtins, importlib, io, json, os, select, signal, sys, traceback, types
-
-OUT_PATH = sys.argv[2]
-sys.breakpointhook = lambda *args, **kwargs: None
-
-
-def on_alarm(signum, frame):
-    raise TimeoutError
-
-
-signal.signal(signal.SIGALRM, on_alarm)
-modules = sys.argv[1].split(",") if sys.argv[1] else []
-SENT, SENT2 = object(), object()
-secret_global = SENT
-sys.modules["probe_secret_module"] = types.ModuleType("probe_secret_module")
-
-
-def probe_module():
-    module = types.ModuleType("probe")
-    module.secret_attr = SENT
-    return module
-
-
-def attempt(call):
-    signal.alarm(2)
-    try:
-        return call()
-    except BaseException:
-        return None
-    finally:
-        signal.alarm(0)
-
-
-def kinds(callable_):
-    found = []
-    m = probe_module()
-    if attempt(lambda: callable_(m, "secret_attr")) is SENT:
-        found.append(("attribute", 1))
-    m = probe_module()
-    if attempt(lambda: callable_(m, "secret_attr")) is True and attempt(lambda: callable_(m, "no_such_attr")) is False:
-        found.append(("attribute", 1))
-    m = probe_module()
-    attempt(lambda: callable_(m, "secret_attr", SENT2))
-    if getattr(m, "secret_attr", None) is SENT2:
-        found.append(("attribute", 1))
-    m = probe_module()
-    attempt(lambda: callable_(m, "secret_attr"))
-    if not hasattr(m, "secret_attr"):
-        found.append(("attribute", 1))
-    made = attempt(lambda: callable_("secret_attr"))
-    if callable(made) and attempt(lambda: made(probe_module())) is SENT:
-        found.append(("attribute", 0))
-    space = attempt(lambda: callable_(probe_module()))
-    if hasattr(space, "get") and attempt(lambda: space.get("secret_attr")) is SENT:
-        found.append(("namespace", None))
-    if attempt(lambda: callable_("secret_global")) is SENT:
-        found.append(("code", 0))
-    space = {"hit": [], "secret_global": SENT}
-    attempt(lambda: callable_("hit.append(secret_global)", space))
-    if space["hit"] and space["hit"][0] is SENT:
-        found.append(("code", 0))
-    code = attempt(lambda: callable_("secret_global", "<probe>", "eval"))
-    if "secret_global" in getattr(code, "co_names", ()):
-        found.append(("code", 0))
-    if attempt(lambda: callable_("probe_secret_module")) is sys.modules["probe_secret_module"]:
-        found.append(("import", 0))
-    return sorted(set(found), key=str)
-
-
-def call_here(callable_):
-    secret_local = SENT
-    try:
-        return callable_()
-    except BaseException:
-        return None
-
-
-def namespace_without_arguments(callable_):
-    space = attempt(lambda: call_here(callable_))
-    return hasattr(space, "get") and (
-        attempt(lambda: space.get("secret_local")) is SENT
-        or attempt(lambda: space.get("secret_global")) is SENT
-    )
-
-
-def probe_function():
-    return secret_global
-
-
-def probe_frame():
-    secret_local = SENT
-    return sys._getframe()
-
-
-def probe_objects():
-    probe_class = type("ProbeClass", (), {"secret_attr": SENT})
-    instance = type("ProbeInstance", (), {})()
-    instance.secret_attr = SENT
-    return [probe_module(), probe_class, instance, probe_function, probe_frame()]
-
-
-def object_kinds(index, name):
-    probe = probe_objects()[index]
-    value = attempt(lambda: getattr(probe, name))
-    space = attempt(lambda: value.get) if not callable(value) else None
-    if space is not None and any(
-        attempt(lambda: space(key)) is SENT for key in ("secret_attr", "secret_local", "secret_global")
-    ):
-        return [("namespace", None)]
-    if not callable(value) or isinstance(value, type):
-        return []
-    if attempt(lambda: value("secret_attr")) is SENT:
-        return [("attribute", 0)]
-    target = probe_objects()[index]
-    attempt(lambda: getattr(target, name)("secret_attr", SENT2))
-    if attempt(lambda: target.secret_attr) is SENT2:
-        return [("attribute", 0)]
-    target = probe_objects()[index]
-    held = attempt(lambda: target.secret_attr) is SENT
-    attempt(lambda: getattr(target, name)("secret_attr"))
-    if held and attempt(lambda: target.secret_attr) is None:
-        return [("attribute", 0)]
-    return []
-
-
-def isolated(probe):
-    # A probed call can change the interpreter itself (an audit hook, the
-    # working directory, a signal handler), so each runs in a forked child
-    # and one that dies or hangs is recorded as unprobed.
-    read, write = os.pipe()
-    pid = os.fork()
-    if pid == 0:
-        os.close(read)
-        try:
-            data = json.dumps(probe())
-        except BaseException:
-            data = "null"
-        os.write(write, data.encode())
-        os._exit(0)
-    os.close(write)
-    chunks = []
-    ready = select.select([read], [], [], 10)[0]
-    while ready:
-        chunk = os.read(read, 65536)
-        if not chunk:
-            break
-        chunks.append(chunk)
-        ready = select.select([read], [], [], 10)[0]
-    os.close(read)
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    os.waitpid(pid, 0)
-    try:
-        found = json.loads(b"".join(chunks))
-    except ValueError:
-        found = None
-    return [("unprobed", None)] if found is None else [tuple(kind) for kind in found]
-
-
-def builtin_kinds(value):
-    found = kinds(value)
-    if namespace_without_arguments(value):
-        found.append(("namespace", None))
-    return sorted(set(found), key=str)
-
-
-def module_kinds(module_name, name):
-    return kinds(getattr(importlib.import_module(module_name), name))
-
-
-def main():
-    out = {}
-    for name, value in sorted(vars(builtins).items()):
-        if callable(value):
-            out["builtins." + name] = isolated(lambda: builtin_kinds(value))
-    for module_name in modules:
-        module = attempt(lambda: importlib.import_module(module_name))
-        for name in sorted(dir(module) if module else []):
-            if callable(getattr(module, name, None)) and not name.startswith("_"):
-                out[module_name + "." + name] = isolated(lambda: module_kinds(module_name, name))
-    for index, probe in enumerate(probe_objects()):
-        for name in sorted(set(dir(type(probe))) | set(dir(probe))):
-            found = isolated(lambda: object_kinds(index, name))
-            if found:
-                out["." + name] = sorted(set(out.get("." + name, [])) | set(found), key=str)
-    return {name: found for name, found in out.items() if found}
-
-
-sys.stdout = sys.stderr = io.StringIO()
-try:
-    result = {"forms": main()}
-except BaseException:
-    result = {"error": traceback.format_exc()}
-with builtins.open(OUT_PATH, "w") as handle:
-    handle.write(json.dumps(result))
-os._exit(0)
-"""
+# THE WAYS A RUNTIME NAME REACHES WHAT IT NAMES, pinned rather than measured:
+# {qualified callable: ((kind, index of its name argument), ...)}. A key is
+# "builtins.x" for a builtin, "<module>.x" for a function of a standard
+# module, and ".x" for an attribute every object can carry. Kinds: "attribute"
+# (the name is an attribute name), "code" (a line of code), "import" (a module
+# name), "namespace" (the call or attribute gives a whole namespace, so it
+# reaches every name; index None). The trace hooks are namespaces: a trace
+# function receives every frame.
+#
+# A TABLE, NOT A SWEEP. Calling every callable of every imported standard
+# module with made-up arguments runs shell commands and file writers, and
+# its answer moves with the Python version. Add a form here when a scope
+# module starts importing a module that has one.
+_DYNAMIC_ACCESS_FORMS = {
+    "builtins.getattr": (("attribute", 1),),
+    "builtins.hasattr": (("attribute", 1),),
+    "builtins.setattr": (("attribute", 1),),
+    "builtins.delattr": (("attribute", 1),),
+    "builtins.vars": (("namespace", None),),
+    "builtins.globals": (("namespace", None),),
+    "builtins.locals": (("namespace", None),),
+    "builtins.eval": (("code", 0),),
+    "builtins.exec": (("code", 0),),
+    "builtins.compile": (("code", 0),),
+    "builtins.__import__": (("import", 0),),
+    ".__getattribute__": (("attribute", 0),),
+    ".__setattr__": (("attribute", 0),),
+    ".__delattr__": (("attribute", 0),),
+    ".__dict__": (("namespace", None),),
+    ".__globals__": (("namespace", None),),
+    ".f_globals": (("namespace", None),),
+    ".f_locals": (("namespace", None),),
+    "importlib.import_module": (("import", 0),),
+    "inspect.getattr_static": (("attribute", 1),),
+    "operator.attrgetter": (("attribute", 0),),
+    "pkgutil.resolve_name": (("import", 0),),
+    "sys.settrace": (("namespace", None),),
+    "threading.settrace_all_threads": (("namespace", None),),
+}
 
 
 def _scope_standard_modules(paths) -> list:
@@ -319,29 +152,14 @@ def dynamic_access_forms(paths) -> dict:
     """{qualified callable: [(kind, index of its name argument)]} for every
     way the language, and each standard module the files at `paths`
     import, reaches what a runtime name names: by attribute name, as a
-    namespace, as a line of code, or as a module name. Measured by handing
-    each callable a probe in a sandboxed child. `.x` keys are attributes of
-    every module object (`__getattribute__`, `__dict__`)."""
-    import json
-    import tempfile
-
-    with tempfile.TemporaryDirectory() as scratch:
-        # Everything the probed calls write (a temporary file a callable
-        # makes when handed a name) lands in this folder and goes with it.
-        empty, out, temp = (Path(scratch) / part for part in ("cwd", "out", "tmp"))
-        for folder in (empty, out, temp):
-            folder.mkdir()
-        result_path = out / "forms.json"
-        run = subprocess.run(
-            [sys.executable, "-I", "-c", _DYNAMIC_ACCESS_PROBE,
-             ",".join(_scope_standard_modules(paths)), str(result_path)],
-            capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL, cwd=empty,
-            env={"PATH": "", "HOME": str(empty), "TMPDIR": str(temp), "TEMP": str(temp), "TMP": str(temp)},
-        )
-        assert result_path.is_file(), (run.returncode, run.stderr[-2000:])
-        result = json.loads(result_path.read_text(encoding="utf-8"))
-    assert "error" not in result, result.get("error")
-    return {name: [tuple(kind) for kind in kinds] for name, kinds in result["forms"].items()}
+    namespace, as a line of code, or as a module name (`_DYNAMIC_ACCESS_FORMS`).
+    `.x` keys are attributes of every object (`__getattribute__`,
+    `__dict__`)."""
+    modules = {"", "builtins", *_scope_standard_modules(paths)}
+    return {
+        name: list(kinds) for name, kinds in _DYNAMIC_ACCESS_FORMS.items()
+        if name.rsplit(".", 1)[0] in modules
+    }
 
 
 _READERS: dict = {}
@@ -496,7 +314,7 @@ def dynamic_reaches(paths, forms, reaches_by_name, read_outright=lambda path, ca
                     continue
                 function = enclosing(node)
                 for kind, index in forms[name]:
-                    if kind in ("namespace", "unprobed"):
+                    if kind == "namespace":
                         hit = True
                     else:
                         arguments = node.args[index:index + 1]
@@ -1426,7 +1244,7 @@ def call_result_callees(paths) -> list:
     """Each call in the files at `paths` whose callee can be another call's
     result, as (file, line, source). Such a callee (`methodcaller(...)`,
     `attrgetter(...)`) can reach any anchor through a name computed at run
-    time, which neither the probe nor the string rule reads.
+    time, which neither the form table nor the string rule reads.
 
     The callee is followed to every place it can come from (`_CalleeReader`):
     a call; a name bound by any binding form the compiler defines; an

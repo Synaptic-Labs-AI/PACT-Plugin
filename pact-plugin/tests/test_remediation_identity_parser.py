@@ -2835,7 +2835,7 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
         assert unread == [], unread
 
     def test_the_unread_form_ban_sees_the_modules_and_spares_census_reads(self):
-        """Control: the probe found the forms, the guarded `getattr(os,
+        """Control: the table names the forms, the guarded `getattr(os,
         "O_X", 0)` reads are among the uses found, and they and the
         `getattr` reads of other names are not counted as unread."""
         forms, every_use, unread = self._unread_reaches()
@@ -2855,7 +2855,7 @@ class TestEveryOpenFlagReadInTheClaimingModulesIsPortable:
 
     def test_no_string_names_a_flag_outside_a_census_read(self):
         """FAIL CLOSED: a string naming an `os.O_*` flag can reach it through
-        a callable the probe does not model
+        a callable the form table does not list
         (`operator.methodcaller("__getattribute__", "O_X")`,
         `pkgutil.resolve_name("os:O_X")`) unless this census reads it."""
         assert self._flag_strings(self._read_outright()) == []
