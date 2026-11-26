@@ -165,13 +165,13 @@ class TestExitCodeTableMatchesTheCli:
         assert "unknown field name" in _table_row(SKILL, "2")
 
     def test_two_is_a_test_process_opening_the_default_store(self, tmp_path):
+        """The CLI's test-only refusal exits 2; the agent-facing table does
+        not describe it (agents never run under pytest)."""
         result = self._run(tmp_path, "list", test_process=True)
         assert result.returncode == 2, result.stderr
         assert "UNSCOPED_TEST_DB" in result.stderr
-        assert (
-            "a test process (PYTEST_CURRENT_TEST set) opening the default store "
-            "without --db-path"
-        ) in _table_row(SKILL, "2")
+        assert "PYTEST_CURRENT_TEST" not in _table_row(SKILL, "2")
+        assert "or a missing or invalid project-id option" in _table_row(SKILL, "2")
 
     def test_three_is_a_store_fault_on_any_verb(self, tmp_path):
         store = tmp_path / "corrupt.db"

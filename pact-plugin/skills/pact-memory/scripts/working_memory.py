@@ -2447,7 +2447,11 @@ def sync_to_claude_md(
                 new_entry = _format_memory_entry(memory, files, memory_id)
                 all_entries = [new_entry] + existing_entries
             else:
-                # REPLACE: the file's entries are not consulted
+                # REPLACE: the file's entries are not consulted, except that
+                # an empty replacement for a section that holds no entry
+                # writes nothing (it would only add or rewrite a bare section).
+                if not entries and not existing_entries:
+                    return SyncResult(SyncResult.EMPTY)
                 all_entries = list(entries)
             trimmed_entries = all_entries[:MAX_WORKING_MEMORIES]
 

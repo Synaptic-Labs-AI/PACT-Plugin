@@ -655,7 +655,10 @@ class TestTheSyncHelpMatchesWhatSyncReports:
 
     EMPTY_SENTENCE = (
         "When project identity is unresolved or the project has no memories, "
-        "sync reports sync_status 'empty' and leaves the file untouched."
+        "sync reports sync_status 'empty' and leaves the file untouched, except "
+        "that a resolved project with no memories whose old folder-name bucket "
+        "this read hides (unproven or excluded), and whose section still holds "
+        "entries, has the section rewritten with none ('wrote')."
     )
     UNRESOLVED_SENTENCE = (
         "When the project has memories but no CLAUDE.md resolves, sync "
@@ -697,6 +700,56 @@ class TestTheSyncHelpMatchesWhatSyncReports:
         assert result["sync_status"] == "empty"
         assert (result["project_id"] is None) == (remote is not None)
         assert untouched
+
+    STALE = (
+        "# project\n\n## Working Memory\n"
+        "<!-- Auto-managed by pact-memory skill. Full history searchable via "
+        "pact-memory skill. Keyed by folder name, so another checkout with the "
+        "same name shares this section. -->\n\n"
+        "### 2026-01-01 00:00\n**Context**: an old folder-name memory\n"
+    )
+
+    @pytest.mark.parametrize("shape", ["upgrade", "fresh", "declined"])
+    def test_a_stale_section_is_emptied_only_when_a_read_hides_the_old_bucket(
+        self, identity_env, store, monkeypatch, capfd, shape
+    ):
+        """upgrade: the id resolves, has no rows, and the read hides this
+        checkout's old folder-name bucket (unproven), so a section still
+        holding its entries is rewritten with none ('wrote'). fresh: no rows
+        anywhere (a new clone with a committed CLAUDE.md): the section is
+        left as it is. declined: nothing is written. RED WHEN the upgrade
+        section keeps its entries, or a fresh or declined section is
+        rewritten."""
+        from scripts.working_memory import WORKING_MEMORY_COMMENT
+
+        skill = (Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "SKILL.md")
+        assert (
+            "A resolved project with no memories whose old folder-name bucket the "
+            "read hides (unproven or excluded), and whose section still holds "
+            "entries, has the section rewritten with none, and `sync_status` is "
+            "`wrote`."
+        ) in " ".join(skill.read_text(encoding="utf-8").split())
+        remote = UNREPRESENTABLE if shape == "declined" else "https://github.com/o/proj.git"
+        where = make_repo(identity_env / "proj", remote=remote)
+        monkeypatch.chdir(where)
+        if shape != "fresh":
+            _seed(store, "proj", memory_id="row000001", path="a.py")
+        target = where / "CLAUDE.md"
+        target.write_text(self.STALE, encoding="utf-8")
+        code, envelope = _cli(
+            ["sync", "--db-path", str(store), "--claude-md-root", str(where)], capfd
+        )
+        assert code == 0, envelope
+        text = target.read_text(encoding="utf-8")
+        if shape == "upgrade":
+            assert envelope["result"]["sync_status"] == "wrote", envelope
+            _code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+            assert shown["result"]["legacy_scope"]["unproven"] is True, shown
+            assert "an old folder-name memory" not in text and "Keyed by folder name" not in text
+            assert WORKING_MEMORY_COMMENT in text
+        else:
+            assert envelope["result"]["sync_status"] == "empty", envelope
+            assert text == self.STALE
 
     def test_unresolved_is_memories_with_no_claude_md(
         self, identity_env, store, monkeypatch, capfd

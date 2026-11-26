@@ -6626,7 +6626,10 @@ class PACTMemory:
         first, when the file was written; [] otherwise. `last_sync_status`
         carries the outcome as for save(); `empty` means nothing was
         projected -- no project id resolved, or the project has no records --
-        and the file was not touched.
+        and the file was not touched. A resolved id with no records whose old
+        folder-name bucket this read hides (unproven or excluded) gets a
+        section still holding entries rewritten with none (`wrote`), so it
+        never shows what reads no longer return.
 
         Refuses (raises ProjectScopeDisagreementError, status `refused`) when
         CLAUDE_PROJECT_DIR and the session record disagree — UNLESS the caller
@@ -6675,6 +6678,36 @@ class PACTMemory:
             return []
         records = self.list(limit=MAX_WORKING_MEMORIES)
         payload = [r.to_dict() for r in records]
+        legacy = self._legacy_scope_state or {}
+        hidden = legacy.get("candidate") is not None and bool(
+            legacy.get("unproven") or legacy.get("excluded")
+        )
+        if not payload and not hidden:
+            # NOTHING HIDDEN (a fresh store, or no old bucket): the section is
+            # left as it is, so a committed CLAUDE.md on a new clone keeps it.
+            self._last_sync_status = SyncResult.EMPTY
+            return []
+        if not payload:
+            # NO ROWS, AND THIS READ HIDES THIS CHECKOUT'S OLD BUCKET (unproven
+            # or excluded): a section still holding entries from it would show
+            # what reads no longer return, so it is rewritten with none. A
+            # section with no entry, and a refused or failed rewrite, leave the
+            # file as it is: `empty`.
+            try:
+                cleared = sync_to_claude_md(
+                    None, claude_md_root=claude_md_root, entries=[]
+                )
+            except AmbientSyncRefused:
+                cleared = None
+            except Exception as e:
+                logger.warning(f"Failed to clear CLAUDE.md Working Memory: {e}")
+                cleared = None
+            self._last_sync_status = (
+                SyncResult.WROTE
+                if cleared is not None and cleared.reason == SyncResult.WROTE
+                else SyncResult.EMPTY
+            )
+            return []
         try:
             result = project_memories_to_claude_md(
                 payload, claude_md_root=claude_md_root
