@@ -192,7 +192,7 @@ MEMORY_END_MARKER = "<!-- PACT_MEMORY_END -->"
 # `tests/test_managed_comment_mirror.py` holds this copy to that definition.
 # `## Pinned Context` carries no comment in the template, so it gets none here.
 RETRIEVED_CONTEXT_COMMENT = "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->"
-WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. Keyed by repository identity (the repository's override file or its origin remote); the memory skill's `project-id show` command reports the key in use, which can be a folder name, and how it was chosen. When the identity declines, nothing is written to this section. -->"
+WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. The memory skill's `project-id show` reports this section's key. When the identity declines, nothing is written to this section. -->"
 
 # Declared START boundary of the `## Pinned Context` section. The pinned
 # region's extent was INFERRED before this pair existed -- every reader guessed

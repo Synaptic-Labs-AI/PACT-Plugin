@@ -17,7 +17,7 @@ MEM_START = "<!-- PACT_MEMORY_START -->"
 MEM_END = "<!-- PACT_MEMORY_END -->"
 RC = "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->"
 WM = ("<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. "
-      "Keyed by repository identity (the repository's override file or its origin remote); the memory skill's `project-id show` command reports the key in use, which can be a folder name, and how it was chosen. When the identity declines, nothing is written to this section. -->")
+      "The memory skill's `project-id show` reports this section's key. When the identity declines, nothing is written to this section. -->")
 WMH = "## Working Memory"
 
 

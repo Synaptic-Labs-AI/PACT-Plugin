@@ -169,6 +169,12 @@ class TestAnEarlierReleasesCommentIsReplaced:
         "show` command reports the key in use, which can be a folder name, and "
         "how it was chosen. When the identity declines, no memory entry is "
         "written. -->",
+        "<!-- Auto-managed by pact-memory skill. Full history searchable via "
+        "pact-memory skill. Keyed by repository identity (the repository's "
+        "override file or its origin remote); the memory skill's `project-id "
+        "show` command reports the key in use, which can be a folder name, and "
+        "how it was chosen. When the identity declines, nothing is written to "
+        "this section. -->",
     )
 
     @pytest.mark.parametrize("earlier", EARLIER)

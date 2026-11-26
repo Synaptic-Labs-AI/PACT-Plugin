@@ -2203,21 +2203,18 @@ class TestTheScopeSaysWhatDegradesAndWhatRaises:
 
 
 class TestTheWorkingMemoryCommentNamesWhenTheFolderNameKeys:
-    """The managed comment names what keys the projection, where to read the
-    key in use, that it can be a folder name, and that a decline writes
-    nothing.
+    """The managed comment points to `project-id show` for the key and says a
+    decline writes nothing to the section.
 
     Catches the comment telling a reader that any checkout without a
     parseable origin falls back to its folder name ("otherwise by folder
     name"): the override file keys it canonically, and a decline writes
-    nothing. The full precedence is `project-id show`'s report, not the
-    comment's, so the comment points there.
+    nothing. The precedence is `project-id show`'s report, not the comment's,
+    and the comment is loaded every session, so it carries only the pointer.
     """
 
     CLAUSES = (
-        "the repository's override file or its origin remote",
-        "`project-id show` command reports the key in use",
-        "which can be a folder name, and how it was chosen",
+        "`project-id show` reports this section's key.",
         "When the identity declines, nothing is written to this section.",
     )
 

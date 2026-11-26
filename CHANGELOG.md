@@ -106,7 +106,7 @@ pact-memory now files a project's memories under the repository they belong to, 
 - `hooks/shared/backlog.py` records only worktrees whose `.git` and admin entry name each other, reads the listing with the memory skill's reader, and refuses with the memory skill's cause when the checkout cannot be confirmed.
 - A bare repository whose `core.bare` is spelled `yes`, `on` or `1` is now recognised as bare by the CLAUDE.md project-root check, as git reads it.
 - The CLAUDE.md migration drops an old memory-section comment only inside a memory section; a line reading the same in a user's own section is kept.
-- The Working Memory comment in `CLAUDE.md` says the section is keyed by the repository identity, and that nothing is written to that section when the identity declines. The secretary reads the projection by `read_scope`, sends a null `project_id` to `project-id show`, and counts calibration records across every id in the scope.
+- The Working Memory comment in `CLAUDE.md` points to `project-id show` for the section's key and says nothing is written to that section when the identity declines; a section carrying an earlier wording of the comment is rewritten to the current one. The secretary reads the projection by `read_scope`, sends a null `project_id` to `project-id show`, and counts calibration records across every id in the scope.
 
 ### Tests
 

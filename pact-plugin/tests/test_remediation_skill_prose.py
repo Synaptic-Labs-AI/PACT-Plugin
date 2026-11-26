@@ -1661,6 +1661,12 @@ class TestNullOverridePathIsMeasured:
             "pin names a repository ending in .git; it is null otherwise."
         ) in _table_row(SKILL, "project-id show")
 
+    def test_the_show_row_says_process_repo_root_is_the_main_checkout(self):
+        assert (
+            "process_repo_root is the root of the repository the process sits in, "
+            "which from a linked worktree is the main checkout, not the worktree."
+        ) in _table_row(SKILL, "project-id show")
+
     def test_the_show_row_names_what_repo_root_is(self):
         assert (
             "repo_root is the identity root that explains the id and that the "

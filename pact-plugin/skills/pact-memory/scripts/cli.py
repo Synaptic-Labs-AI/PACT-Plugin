@@ -1079,8 +1079,9 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
             # primary field named `repo_root` that named the PROCESS's repository
             # would be the misdirection this field exists to remove; no earlier
             # release had the field, so nothing depends on another meaning.
-            # `process_repo_root` keeps the process location under a name that
-            # says what it is; in a declared-repo session the two differ.
+            # `process_repo_root` is the root of the process's repository, which
+            # from a linked worktree is the main checkout, not the worktree; in a
+            # declared-repo session the two fields differ.
             identity_root = memory._project_identity_root
             process_root = main_repo_root()
             _success({
