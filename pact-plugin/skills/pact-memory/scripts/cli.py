@@ -1523,6 +1523,24 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     if args.apply:
         # The move changed the bucket set this process cached.
         _invalidate_legacy_scope_cache()
+    unattributed = (
+        (state.get("sessions") or {}).get("unattributed", 0)
+        if legacy_verdict is not None and not noop
+        else 0
+    )
+    if unattributed and not counters.get("from_bucket_empty"):
+        # A MOVE OF ROWS NO RECORDED SESSION WROTE IS NEVER SILENT: the read's
+        # disclosure is quiet during --apply, so the rekey states it itself.
+        _best_effort_report(
+            print,
+            escape_for_envelope(
+                f"note: {unattributed} of the memories in --from={from_id!r} "
+                "came from no recorded session; this rekey "
+                + ("moved" if args.apply else "would move")
+                + " them with the bucket."
+            ),
+            file=_envelope_stream(),
+        )
     if counters.get("from_bucket_empty"):
         _best_effort_report(
             print,
@@ -1647,12 +1665,9 @@ def build_parser():
         "sync": f'python3 "{prog}" sync',
         "project-file": f'python3 "{prog}" project-file',
         "project-id": f'python3 "{prog}" project-id show',
-        # THE HELPER ALREADY CARRIES THE INTERPRETER AND THE CLI PATH.
-        # Prefixing `python3 "<prog>"` here made the example
-        # `python3 cli.py pact-memory project-id rekey ...`, which exits 2
-        # with argparse's "invalid choice: 'pact-memory'".
-        "project-id-rekey": render_rekey_command("<id>", "<canonical>")
-        + " --dry-run",
+        # THE SHARED HELPER RENDERS IT (shell-quoted: an unquoted `<id>` is a
+        # redirection), and a dry run is the default, so it names no --dry-run.
+        "project-id-rekey": render_rekey_command("<id>", "<canonical>", prog=prog),
     }
 
     parser = _TeachParser(
@@ -1851,9 +1866,10 @@ def build_parser():
             "or delete and run sync again. When project identity is unresolved "
             "or the project has no memories, sync reports sync_status 'empty' "
             "and leaves the file untouched, except that a resolved project with "
-            "no memories whose old folder-name bucket this read hides (unproven "
-            "or excluded), and whose section still holds entries, has the "
-            "section rewritten with none ('wrote'). When the project has memories but "
+            "no memories whose old folder-name bucket this read hides (unproven, "
+            "excluded, or a case variant), and whose section's every entry names "
+            "a row of such a bucket by its Memory ID, has the section rewritten with none "
+            "('wrote'). When the project has memories but "
             "no CLAUDE.md resolves, sync reports 'unresolved' and writes "
             "nothing. An empty result is not proof the "
             "project has no memories: run `project-id show`. Only this "

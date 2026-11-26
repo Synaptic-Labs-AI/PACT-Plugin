@@ -611,6 +611,21 @@ def _rendered_help() -> dict:
     return found
 
 
+def test_the_rekey_help_example_matches_the_other_examples():
+    """The rekey example names no --dry-run (a dry run is the default) and
+    runs the same CLI path as every other example, rendered by the shared
+    helper. RED WHEN the example carries --dry-run or another CLI path."""
+    import sys
+
+    from scripts.memory_api import render_rekey_command
+
+    rekey = _rendered_help()["project-id rekey"]
+    example = rekey.split("Examples:", 1)[1].strip()
+    assert example == render_rekey_command("<id>", "<canonical>", prog=sys.argv[0]), example
+    assert "--dry-run" not in example
+    assert f'python3 "{sys.argv[0]}" list' in _rendered_help()[""]
+
+
 class TestTheHelpNeverSaysFollowTheCandidate:
     """The rendered help gives the skill's rekey rule, not "follow the candidate".
 
@@ -657,8 +672,9 @@ class TestTheSyncHelpMatchesWhatSyncReports:
         "When project identity is unresolved or the project has no memories, "
         "sync reports sync_status 'empty' and leaves the file untouched, except "
         "that a resolved project with no memories whose old folder-name bucket "
-        "this read hides (unproven or excluded), and whose section still holds "
-        "entries, has the section rewritten with none ('wrote')."
+        "this read hides (unproven, excluded, or a case variant), and whose "
+        "section's every entry names a row of such a bucket by its Memory ID, "
+        "has the section rewritten with none ('wrote')."
     )
     UNRESOLVED_SENTENCE = (
         "When the project has memories but no CLAUDE.md resolves, sync "
@@ -707,49 +723,68 @@ class TestTheSyncHelpMatchesWhatSyncReports:
         "pact-memory skill. Keyed by folder name, so another checkout with the "
         "same name shares this section. -->\n\n"
         "### 2026-01-01 00:00\n**Context**: an old folder-name memory\n"
+        "**Memory ID**: {memory_id}\n"
     )
 
-    @pytest.mark.parametrize("shape", ["upgrade", "fresh", "declined"])
-    def test_a_stale_section_is_emptied_only_when_a_read_hides_the_old_bucket(
+    @pytest.mark.parametrize(
+        "shape", ["upgrade", "case-variant", "unrelated", "fresh", "declined", "no-section"]
+    )
+    def test_a_stale_section_is_emptied_only_when_its_entries_are_hidden(
         self, identity_env, store, monkeypatch, capfd, shape
     ):
-        """upgrade: the id resolves, has no rows, and the read hides this
-        checkout's old folder-name bucket (unproven), so a section still
-        holding its entries is rewritten with none ('wrote'). fresh: no rows
-        anywhere (a new clone with a committed CLAUDE.md): the section is
-        left as it is. declined: nothing is written. RED WHEN the upgrade
-        section keeps its entries, or a fresh or declined section is
-        rewritten."""
+        """upgrade: the id resolves, has no rows, the read hides this
+        checkout's old folder-name bucket (unproven), and the section's every
+        entry names a row of that bucket: it is rewritten with none ('wrote').
+        case-variant: the old bucket differs only by case ('Proj' saved from a
+        folder later renamed 'proj'), so it is never read; same outcome.
+        unrelated: the same hidden bucket (another project's, same folder
+        name), but the committed section's entry names a row it does not
+        hold: untouched. fresh (no rows anywhere), declined and a CLAUDE.md
+        with no section: untouched. RED WHEN the upgrade section keeps its
+        entry, or any other shape is rewritten."""
         from scripts.working_memory import WORKING_MEMORY_COMMENT
 
         skill = (Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "SKILL.md")
         assert (
             "A resolved project with no memories whose old folder-name bucket the "
-            "read hides (unproven or excluded), and whose section still holds "
-            "entries, has the section rewritten with none, and `sync_status` is "
+            "read hides (unproven, excluded, or a case variant), and whose "
+            "section's every entry names a row of such a bucket by its Memory "
+            "ID, has the section rewritten with none, and `sync_status` is "
             "`wrote`."
         ) in " ".join(skill.read_text(encoding="utf-8").split())
         remote = UNREPRESENTABLE if shape == "declined" else "https://github.com/o/proj.git"
         where = make_repo(identity_env / "proj", remote=remote)
         monkeypatch.chdir(where)
-        if shape != "fresh":
+        if shape == "case-variant":
+            # A base-era save from folder 'Proj', then the folder renamed to
+            # 'proj': the bucket is a case variant, never read.
+            _seed(store, "Proj", memory_id="row000001", path="a.py")
+        elif shape != "fresh":
             _seed(store, "proj", memory_id="row000001", path="a.py")
         target = where / "CLAUDE.md"
-        target.write_text(self.STALE, encoding="utf-8")
+        if shape == "no-section":
+            original = "# project\n"
+        else:
+            named = "foreign00001" if shape == "unrelated" else "row000001"
+            original = self.STALE.format(memory_id=named)
+        target.write_text(original, encoding="utf-8")
         code, envelope = _cli(
             ["sync", "--db-path", str(store), "--claude-md-root", str(where)], capfd
         )
         assert code == 0, envelope
         text = target.read_text(encoding="utf-8")
-        if shape == "upgrade":
+        if shape in ("upgrade", "case-variant"):
             assert envelope["result"]["sync_status"] == "wrote", envelope
             _code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
-            assert shown["result"]["legacy_scope"]["unproven"] is True, shown
+            if shape == "upgrade":
+                assert shown["result"]["legacy_scope"]["unproven"] is True, shown
+            else:
+                assert shown["result"]["legacy_scope"]["case_variant"] == ["Proj"], shown
             assert "an old folder-name memory" not in text and "Keyed by folder name" not in text
             assert WORKING_MEMORY_COMMENT in text
         else:
             assert envelope["result"]["sync_status"] == "empty", envelope
-            assert text == self.STALE
+            assert text == original
 
     def test_unresolved_is_memories_with_no_claude_md(
         self, identity_env, store, monkeypatch, capfd

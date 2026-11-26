@@ -109,6 +109,7 @@ from .working_memory import (
     MAX_WORKING_MEMORIES,
     AmbientSyncRefused,
     SyncResult,
+    entry_memory_id,
     project_memories_to_claude_md,
     sync_to_claude_md,
     sync_retrieved_to_claude_md,
@@ -6627,9 +6628,11 @@ class PACTMemory:
         carries the outcome as for save(); `empty` means nothing was
         projected -- no project id resolved, or the project has no records --
         and the file was not touched. A resolved id with no records whose old
-        folder-name bucket this read hides (unproven or excluded) gets a
-        section still holding entries rewritten with none (`wrote`), so it
-        never shows what reads no longer return.
+        folder-name bucket this read hides (unproven, excluded, or a case
+        variant) gets a section whose every entry's Memory ID names a row of
+        such a bucket
+        rewritten with none (`wrote`), so it never shows what reads no
+        longer return.
 
         Refuses (raises ProjectScopeDisagreementError, status `refused`) when
         CLAUDE_PROJECT_DIR and the session record disagree — UNLESS the caller
@@ -6679,9 +6682,17 @@ class PACTMemory:
         records = self.list(limit=MAX_WORKING_MEMORIES)
         payload = [r.to_dict() for r in records]
         legacy = self._legacy_scope_state or {}
-        hidden = legacy.get("candidate") is not None and bool(
-            legacy.get("unproven") or legacy.get("excluded")
-        )
+        # THIS CHECKOUT'S BUCKETS THE READ HIDES: its legacy candidate when
+        # unproven or excluded, and its case variants (never read).
+        hidden = [
+            *(
+                [legacy["candidate"]]
+                if legacy.get("candidate") is not None
+                and (legacy.get("unproven") or legacy.get("excluded"))
+                else []
+            ),
+            *(legacy.get("case_variant") or []),
+        ]
         if not payload and not hidden:
             # NOTHING HIDDEN (a fresh store, or no old bucket): the section is
             # left as it is, so a committed CLAUDE.md on a new clone keeps it.
@@ -6689,13 +6700,35 @@ class PACTMemory:
             return []
         if not payload:
             # NO ROWS, AND THIS READ HIDES THIS CHECKOUT'S OLD BUCKET (unproven
-            # or excluded): a section still holding entries from it would show
-            # what reads no longer return, so it is rewritten with none. A
-            # section with no entry, and a refused or failed rewrite, leave the
-            # file as it is: `empty`.
+            # or excluded, or a case variant): a section whose every entry's
+            # Memory ID names a row of a hidden bucket shows what reads no longer return, so it is
+            # rewritten with none. Any other section (no entry, an entry with
+            # no id or another bucket's id, as in a committed CLAUDE.md on a
+            # new clone), and a refused or failed rewrite, leave the file as
+            # it is: `empty`.
+            store = str(self._db_path or resolve_db_path())
+
+            def entries_from_hidden_bucket(existing: List[str]) -> bool:
+                ids = [entry_memory_id(entry) for entry in existing]
+                if not ids or None in ids:
+                    return False
+                with _legacy_probe_context(store, None) as (connection, _reason):
+                    if connection is None:
+                        return False
+                    found = {
+                        row[0] for row in connection.execute(
+                            "SELECT id, project_id FROM memories WHERE id IN "
+                            f"({', '.join('?' * len(ids))})",
+                            ids,
+                        )
+                        if row[1] in hidden
+                    }
+                return set(ids) <= found
+
             try:
                 cleared = sync_to_claude_md(
-                    None, claude_md_root=claude_md_root, entries=[]
+                    None, claude_md_root=claude_md_root, entries=[],
+                    clear_if=entries_from_hidden_bucket,
                 )
             except AmbientSyncRefused:
                 cleared = None

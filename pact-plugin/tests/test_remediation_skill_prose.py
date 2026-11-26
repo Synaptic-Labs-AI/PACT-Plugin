@@ -7592,6 +7592,10 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', 'bucket_evidence'): (
             "counts from the store's rows what a legacy bucket's file rows show about its owner, for the read scope; it asks git nothing" + _AFTER_DETECTION
         ),
+        ('call', 'entry_memory_id'): (
+            "reads the Memory ID a Working Memory entry names, to decide whether a stale section is emptied"
+            + _AFTER_DETECTION
+        ),
         ('call', '_linked_after_description'): (
             "reads from the store whether a memory linked to a file row was saved after the repository's description changed, for the earlier-id notice; it asks git nothing" + _AFTER_DETECTION
         ),
