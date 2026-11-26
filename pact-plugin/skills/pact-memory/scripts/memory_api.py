@@ -1264,6 +1264,9 @@ def _decline_remedy(
     `_UNPINNABLE_REMEDIES` entry.
     """
     token = (record or {}).get("reason")
+    if cause_detail and cause_detail.startswith(_DUBIOUS_OWNERSHIP_PREFIX):
+        # The detail names the fix itself.
+        return None
     if token == "gitfile_redirect":
         if cause_detail == _REDIRECT_CAUSE_DETAILS[REDIRECT_MOVED]:
             return _REDIRECT_MOVED_REMEDY
@@ -1352,13 +1355,24 @@ def _decline(
     override_ignored: Optional[dict] = None,
     detail: Optional[str] = None,
     cause_detail: Optional[str] = None,
+    broken_marker: Optional[Path] = None,
 ) -> "_DetectedIdentity":
     """THE ONE PLACE a resolver decline is built and reported.
 
     `source` is the rung token recorded in `decline_reason`; `label` is the
     `source` the result discloses, `"unresolved"` unless the rung keeps its
     own label (the declared rungs do). Logs exactly one warning.
+    `broken_marker` is the `.git` a `broken_git_marker` decline rests on:
+    when git refuses that repository for its owner, the decline says so and
+    names the fix (`_dubious_ownership_detail`).
     """
+    if (
+        reason == "broken_git_marker"
+        and broken_marker is not None
+        and cause_detail is None
+        and project_identity.git_refuses_ownership(broken_marker.parent)
+    ):
+        cause_detail = _dubious_ownership_detail(broken_marker.parent)
     record = decline_record(reason, override_path, source)
     _warn_declined(record, root, detail, cause_detail)
     return _DetectedIdentity(
@@ -1449,6 +1463,7 @@ def _root_guard(
     arm = _root_guard_arm(asked_root, common_dir, toplevel=toplevel)
     if arm is None:
         return None
+    cause_detail = _REDIRECT_CAUSE_DETAILS[arm[1]] if arm[1] is not None else None
     # No override path for a redirect: the common dir is the TARGET
     # repository's.
     return _decline(
@@ -1466,7 +1481,21 @@ def _root_guard(
             if arm[2] is not None
             else f"{source}: {str(asked_root)!r}"
         ),
-        cause_detail=_REDIRECT_CAUSE_DETAILS[arm[1]] if arm[1] is not None else None,
+        cause_detail=cause_detail,
+        broken_marker=arm[2] if arm[0] == "broken_git_marker" else None,
+    )
+
+
+# GIT REFUSES A REPOSITORY ANOTHER USER OWNS ("dubious ownership") until it is
+# listed in safe.directory; the generic "can git read it" remedy hides that.
+_DUBIOUS_OWNERSHIP_PREFIX = "git refuses it as owned by another user (dubious ownership)"
+
+
+def _dubious_ownership_detail(repository: Path) -> str:
+    """The cause and fix for a repository git refuses for its owner."""
+    return (
+        f"{_DUBIOUS_OWNERSHIP_PREFIX}; if it is yours to trust, run "
+        f"`git config --global --add safe.directory {shlex.quote(str(repository))}`"
     )
 
 
@@ -3705,6 +3734,7 @@ class PACTMemory:
                     "the working directory is inside that work tree; "
                     f"{_MARKER_CLAUSE}{str(broken_marker)!r}"
                 ),
+                broken_marker=broken_marker,
             )
         # git not installed, not a repo, or command timed out
         logger.debug("Git detection failed, falling back to cwd")
@@ -3792,6 +3822,7 @@ class PACTMemory:
                             if cwd_marker is not None
                             else f"cwd: {str(cwd_root)!r} gave no git dir"
                         ),
+                        broken_marker=cwd_marker,
                     )
                 guarded = _root_guard(
                     cwd_root, cwd_common_dir, "cwd", root=cwd_root, toplevel=marker_toplevel,

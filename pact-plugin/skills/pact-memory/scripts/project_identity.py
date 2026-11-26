@@ -1694,6 +1694,36 @@ def git_dir_answer(start) -> Optional[str]:
     return answer
 
 
+def git_refuses_ownership(start) -> bool:
+    """Whether git refuses `start`'s repository as owned by another user
+    ("detected dubious ownership"): the same `git -C start rev-parse
+    --git-dir` `git_dir_answer` asks (one answer per detection pass), read
+    for git's reason. Never raises; False when git cannot be asked."""
+    from shared.git_helpers import answered_once
+    from shared.project_scope import git_env_without_location
+
+    command = ["git"]
+    if start is not None:
+        command += ["-C", str(start)]
+    command += ["rev-parse", "--git-dir"]
+    try:
+        result = answered_once(
+            command,
+            lambda: subprocess.run(
+                command,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
+            text=False,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return False
+    return result.returncode != 0 and b"dubious ownership" in (result.stderr or b"")
+
+
 # =============================================================================
 # Detection-pass memos and the worktree listing reader
 # =============================================================================
