@@ -49,8 +49,12 @@ class TestOneGitSuffixPerRemote:
         assert pi.normalize_remote_url("https://github.com/o/foo.git") == "github.com/o/foo"
 
     def test_a_capitalised_suffix_stays_in_the_name_on_github(self):
-        """GitHub does not serve `repo.GIT` as `repo` (measured), so it keeps
-        its own lower-cased id. RED WHEN `.GIT` binds `repo`'s id."""
+        """GitHub does not serve `repo.GIT` as `repo`, so it keeps its own
+        lower-cased id. Measured with `git ls-remote <url> HEAD` (git 2.43):
+        https://github.com/cli/cli.git and https://github.com/cli/cli both
+        answer the same HEAD, while https://github.com/cli/cli.GIT answers
+        "could not read Username", GitHub's reply for a repository it does
+        not serve. RED WHEN `.GIT` binds `repo`'s id."""
         assert pi.normalize_remote_url("https://github.com/o/Foo.GIT") == "github.com/o/foo.git"
 
 
