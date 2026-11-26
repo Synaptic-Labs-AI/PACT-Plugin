@@ -1203,3 +1203,43 @@ def test_a_journal_that_starts_later_does_not_move_the_start(tmp_path):
     )
     _journal(tmp_path, "2022-01-01T00:00:00Z")
     assert pact_context.read_session_record(tmp_path)["started_at"] == "2021-01-01T00:00:00+00:00"
+
+
+@pytest.mark.parametrize("how", ["no_journal", "symlinked_journal", "zoneless_first_event"])
+def test_a_session_with_no_confirmed_start_is_not_evidence(tmp_path, how):
+    """A healed or resumed session whose journal gives no readable first
+    event cannot confirm when it first started, so it gives no 'here'
+    evidence even though its recorded start (the heal or resume time) is
+    after the description. RED WHEN an unconfirmed started_at stands."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / NAME)
+    config = tmp_path / "home" / ".claude"
+    context = seed_session_evidence(config, repo, "unconfirmed")
+    journal = context.parent / "session-journal.jsonl"
+    journal.unlink()
+    if how == "symlinked_journal":
+        target = tmp_path / "elsewhere.jsonl"
+        target.write_text(json.dumps({"ts": "2099-01-01T00:00:00+00:00"}) + "\n")
+        journal.symlink_to(target)
+    elif how == "zoneless_first_event":
+        journal.write_text(json.dumps({"ts": "2099-01-01T00:00:00"}) + "\n")
+    store = tmp_path / "store.db"
+    _seed(store, NAME, session_id="unconfirmed")
+    counts = _root_census(repo, store)
+    assert counts["here"] == 0 and counts["description_newer"] == 1, counts
+    line = json.loads(session_end._pruned_session_line(context.parent))
+    assert "started_at" not in line and line["project_dir"] == str(repo), line
+
+
+def test_a_session_with_no_confirmed_start_still_places_its_folder_elsewhere(tmp_path):
+    """Control: the record still names its folder, so a journal-less session
+    recorded in another checkout keeps excluding the bucket as before."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / NAME)
+    other = make_repo(tmp_path / "other" / NAME)
+    config = tmp_path / "home" / ".claude"
+    context = seed_session_evidence(config, other, "far")
+    (context.parent / "session-journal.jsonl").unlink()
+    store = tmp_path / "store.db"
+    _seed(store, NAME, session_id="far")
+    assert _root_census(repo, store)["elsewhere"] == 1

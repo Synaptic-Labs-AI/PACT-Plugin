@@ -621,11 +621,14 @@ def _pruned_session_line(entry: Path) -> str | None:
 
     `{session_id, project_dir, started_at}` copied from the folder's own
     `pact-session-context.json`, with `started_at` the session's earliest
-    known start (`read_session_record`: a bounded read of a
-    regular file). None when the context is absent, not a regular file,
-    oversized or malformed, when its sanitized session id is not the folder's name, when
-    `started_at` is not a zone-aware ISO-8601 timestamp, or when `project_dir`
-    no longer exists. Reads only; never raises.
+    confirmed start (`read_session_record`: a bounded read of a regular
+    file). With no confirmed start (no readable first journal event, or a
+    start that is not a zone-aware ISO-8601 timestamp) the line has no
+    `started_at`: it still places the session's folder, and readers take it
+    as no evidence that a bucket is the repository's. None when the context
+    is absent, not a regular file, oversized or malformed, when its sanitized
+    session id is not the folder's name, or when `project_dir` no longer
+    exists. Reads only; never raises.
     """
     try:
         context = read_session_record(entry)
@@ -640,14 +643,11 @@ def _pruned_session_line(entry: Path) -> str | None:
             return None
         if _UNSAFE_SLUG_CHARS_RE.sub("_", session_id) != entry.name:
             return None
-        if not _aware_iso_timestamp(started_at):
-            return None
         os.stat(project_dir)
-        return json.dumps({
-            "session_id": session_id,
-            "project_dir": project_dir,
-            "started_at": started_at,
-        }) + "\n"
+        line = {"session_id": session_id, "project_dir": project_dir}
+        if _aware_iso_timestamp(started_at):
+            line["started_at"] = started_at
+        return json.dumps(line) + "\n"
     except Exception:
         return None
 

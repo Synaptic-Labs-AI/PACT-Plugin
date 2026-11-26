@@ -1629,11 +1629,14 @@ _JOURNAL_FIRST_LINE_MAX_BYTES = 64 * 1024
 def read_session_record(folder) -> dict | None:
     """`<folder>/pact-session-context.json` as a dict, or None. Never raises.
 
-    Its `started_at` is the session's EARLIEST known start: the recorded
-    value, or the first journal event's time when that is earlier
+    Its `started_at` is the session's EARLIEST CONFIRMED start: the earlier
+    of the recorded value and the first journal event's time
     (`_journal_first_start`), because a resume or a heal records its own
-    time there. Both readers compare it with a repository's `description`
-    ctime, and an earlier date can only withhold evidence, never add it.
+    time there. With no readable first journal event the start cannot be
+    confirmed, and `started_at` is removed: the record then names its
+    folder but dates nothing, so it never counts as evidence that a bucket
+    is this repository's (it can still place the session elsewhere). Both
+    readers compare it with a repository's `description` ctime.
 
     The two readers that take a session folder's record as evidence (the
     reaper's prune-ledger line and the memory store's session census) read it
@@ -1671,12 +1674,15 @@ def read_session_record(folder) -> dict | None:
     finally:
         os.close(fd)
     first = _journal_first_start(folder)
-    if first is not None:
-        try:
-            if datetime.fromisoformat(first) < datetime.fromisoformat(record["started_at"]):
-                record["started_at"] = first
-        except Exception:
-            pass
+    if first is None:
+        record.pop("started_at", None)
+        return record
+    try:
+        if datetime.fromisoformat(record["started_at"]) < datetime.fromisoformat(first):
+            return record
+    except Exception:
+        pass
+    record["started_at"] = first
     return record
 
 
@@ -2836,9 +2842,10 @@ def heal_context_if_missing(input_data: dict) -> bool:
     str(raw_id) — RAW, exactly as session_init's main() persists it
     (init() sanitizes only the PATH segment, not the stored value).
     started_at is heal time, not session start. The legacy-bucket evidence
-    readers date the session by its journal's first event instead
-    (read_session_record), so the heal time cannot make an old session
-    count as evidence.
+    readers (read_session_record) date the session by the earlier of it and
+    the journal's first event, and give no evidence at all when the journal
+    has no readable first event, so the heal time cannot make an old
+    session count as evidence.
 
     Two-healer race (bootstrap_marker_writer + bootstrap_prompt_gate fire
     on the same prompt; the platform runs same-event hooks in parallel):

@@ -7507,6 +7507,14 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', 'bucket_evidence'): (
             "counts from the store's rows what a legacy bucket's file rows show about its owner, for the read scope; it asks git nothing" + _AFTER_DETECTION
         ),
+        ("call", "<name imported from a project module cli: _LOCKED_READS_ONLY>"): (
+            "the flag that says a read already repeats with locking, read so the rekey "
+            "integrity check knows whether its open was immutable" + _AFTER_DETECTION
+        ),
+        ("call", "<call to no function cli: _LOCKED_READS_ONLY.get>"): (
+            "reads whether the read repeats with locking, so the rekey integrity check "
+            "trusts a locked open's answer" + _AFTER_DETECTION
+        ),
         ("call", "<name imported from a project module cli: _UNPROVEN_WARNED>"): (
             "the set of legacy notices this process already printed, read so a rekey "
             "says its unattributed count once" + _AFTER_DETECTION

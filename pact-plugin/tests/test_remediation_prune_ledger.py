@@ -8,7 +8,9 @@ recorded session from this repository, and the session reaper
 (180 if paused). Before it deletes one, it appends that session's evidence line
 `{session_id, project_dir, started_at}` to the slug's prune ledger
 (`shared.pact_context.PRUNE_LEDGER_NAME`), copied from the folder's own
-`pact-session-context.json`, so the evidence outlives the folder. The memory
+`pact-session-context.json`, so the evidence outlives the folder. Its
+`started_at` is the earliest start the session's journal confirms; with no
+readable first journal event the line omits it. The memory
 store's reader then requires the repository at `project_dir` to predate
 `started_at` (its `description` file's ctime), on a live record and a ledger
 line alike.
@@ -54,9 +56,14 @@ def _write_context(entry: Path, record: dict) -> None:
 
 
 def _session(slug_dir: Path, project_dir: Path, session_id: str = SID, **context) -> Path:
-    """An aged session folder whose context names `project_dir`."""
+    """An aged session folder whose context names `project_dir`, with the
+    journal whose first event confirms its start, as a real session has."""
     entry = slug_dir / session_id
     entry.mkdir(parents=True)
+    (entry / "session-journal.jsonl").write_text(
+        json.dumps({"v": 1, "type": "session_start", "ts": STARTED}) + "\n",
+        encoding="utf-8",
+    )
     record = {
         "session_id": session_id,
         "project_dir": str(project_dir),
@@ -168,18 +175,20 @@ class TestNoLineWithoutATrustworthyRecord:
 
     @pytest.mark.parametrize(
         "started_at",
-        [None, "", "yesterday", "2026-09-06T10:00:00", 1757152800],
-        ids=["absent", "empty", "unparseable", "naive", "not-a-string"],
+        [None, "", "yesterday", "2026-09-06T10:00:00", 1757152800, STARTED],
+        ids=["absent", "empty", "unparseable", "naive", "not-a-string", "valid"],
     )
-    def test_a_start_time_that_cannot_be_compared_writes_nothing(
-        self, world, started_at
-    ):
-        """Catches a line the reader could only judge by guessing. A naive
-        timestamp names no zone, so it cannot be ordered against a ctime. RED
-        WHEN the writer copies started_at without parsing it zone-aware."""
+    def test_a_start_no_journal_confirms_is_not_recorded(self, world, started_at):
+        """Catches a line the reader could only judge by guessing. With no
+        readable first journal event the start is not confirmed (a heal or
+        resume records its own time), so the line keeps the folder and omits
+        started_at, whatever the context holds. RED WHEN the writer copies an
+        unconfirmed started_at, or drops the line (its folder still places
+        the session)."""
         project, slug_dir = world
-        expected = _with_control(slug_dir, project)
+        _with_control(slug_dir, project)
         entry = _session(slug_dir, project)
+        (entry / "session-journal.jsonl").unlink()
         record = json.loads((entry / "pact-session-context.json").read_text())
         if started_at is None:
             del record["started_at"]
@@ -188,7 +197,9 @@ class TestNoLineWithoutATrustworthyRecord:
         _write_context(entry, record)
         _reap(slug_dir)
         assert not entry.exists()
-        assert _ids(slug_dir) == expected
+        lines = {line["session_id"]: line for line in _lines(slug_dir)}
+        assert lines[SID] == {"session_id": SID, "project_dir": str(project)}, lines
+        assert lines[GOOD]["started_at"] == STARTED, lines
 
     @pytest.mark.parametrize("body", ["{not json", "[]", '"a string"'])
     def test_a_malformed_context_is_skipped_and_still_reaped(self, world, body):
@@ -327,15 +338,27 @@ class TestEndToEndOverTheRealSeam:
         root = get_claude_config_dir()
         project = root.parent / "work" / "proj"
         project.mkdir(parents=True)
+        from datetime import datetime
+
+        from shared.session_journal import append_event, make_event
+
         target, context = pact_context.build_context_cache("session-x", SID, str(project))
         target.parent.mkdir(parents=True, exist_ok=True)
         assert pact_context.persist_context(target, context)
         entry = target.parent
+        assert append_event(
+            make_event("session_start", session_id=SID, project_dir=str(project)),
+            session_dir=str(entry),
+        )
+        first = json.loads((entry / "session-journal.jsonl").read_text().splitlines()[0])["ts"]
         _age(entry)
         session_end.cleanup_old_sessions(pact_context.project_slug(str(project)), OTHER)
         assert not entry.exists()
+        earliest = min(
+            (context["started_at"], first), key=lambda ts: datetime.fromisoformat(ts)
+        )
         assert _lines(entry.parent) == [{
             "session_id": SID,
             "project_dir": str(project),
-            "started_at": context["started_at"],
+            "started_at": earliest,
         }]

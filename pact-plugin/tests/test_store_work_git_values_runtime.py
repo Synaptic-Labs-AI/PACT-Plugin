@@ -186,6 +186,12 @@ def rig(tmp_path_factory):
         (folder / session_id).mkdir(parents=True, exist_ok=True)
         path = folder / session_id / "pact-session-context.json"
         path.write_text(json.dumps({"session_id": session_id, **fields}), encoding="utf-8")
+        # The journal whose first event confirms the start, as a real
+        # session's does; without it the record dates nothing.
+        (folder / session_id / "session-journal.jsonl").write_text(
+            json.dumps({"type": "session_start", "ts": fields.get("started_at")}) + "\n",
+            encoding="utf-8",
+        )
         return path
 
     record(CURRENT_SESSION, slug_dir, project_dir=str(repo), started_at=LONG_AGO)

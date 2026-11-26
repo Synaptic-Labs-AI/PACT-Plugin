@@ -159,7 +159,8 @@ def seed_session_evidence(
     `project_dir` it records and a zone-aware `started_at`. A legacy bucket
     whose rows carry `session_id` is then read by a session whose identity
     root is `project_dir`, provided the repository's `description` was
-    created before that start.
+    created before that start. Also writes the session's journal, whose first
+    event carries the same start, as a real session's does.
 
     An omitted `started_at` is `start_after_description(project_dir)`, not
     the wall clock: the evidence rule compares against the description's
@@ -182,13 +183,19 @@ def seed_session_evidence(
     )
     session_dir.mkdir(parents=True, exist_ok=True)
     context = session_dir / "pact-session-context.json"
+    start = started_at or start_after_description(project_dir)
     context.write_text(
         json.dumps({
             "project_dir": str(project_dir),
             "session_id": session_id,
-            "started_at": started_at or start_after_description(project_dir),
+            "started_at": start,
         }),
         encoding="utf-8",
+    )
+    # The session's journal, whose first event confirms its start: a record
+    # with no readable first event gives no evidence.
+    (session_dir / "session-journal.jsonl").write_text(
+        json.dumps({"type": "session_start", "ts": start}) + "\n", encoding="utf-8"
     )
     return context
 
