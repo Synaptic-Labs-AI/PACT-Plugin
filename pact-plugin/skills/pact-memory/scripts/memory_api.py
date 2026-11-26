@@ -1895,10 +1895,13 @@ def _stable_read_only(store: str, read: Callable[[], Any]) -> Any:
     repeat it once with SQLite's locking when the store moved under it.
 
     A read counts as moved when the store's stamp (`_store_stamp`) differs
-    before and after it, or when it raised a `sqlite3.DatabaseError` while
-    its opens were immutable. The repeat's own answer or error stands, so a
-    store that is really corrupt still raises and an empty answer is never
-    served for a store that was being written.
+    before and after it, whether it answered or raised a
+    `sqlite3.DatabaseError`. The repeat's own answer or error stands, so an
+    empty answer is never served for a store that was being written. A read
+    that RAISED while the stamp stayed put met a fault of the settled store
+    itself, which a repeat would only meet again: the error is raised at
+    once, because the locked repeat's `mode=ro` open of a WAL store creates
+    `-wal` and `-shm` that a read-only connection cannot remove.
     """
     active = _STABLE_READ_ACTIVE.set(True)
     try:
@@ -1910,7 +1913,8 @@ def _stable_read_only(store: str, read: Callable[[], Any]) -> Any:
         try:
             answer = read()
         except sqlite3.DatabaseError:
-            pass
+            if _store_stamp(store) == before:
+                raise
         else:
             if _store_stamp(store) == before:
                 return answer

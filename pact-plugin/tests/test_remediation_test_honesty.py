@@ -431,10 +431,11 @@ class TestTheReadScopeCacheServesTheSecondRead:
         self, repo_env, monkeypatch
     ):
         """An immutable open reading a store being rewritten can raise
-        "database disk image is malformed". That is the store moving, not the
-        store being corrupt: the read is repeated with locking, and only the
-        repeat's error would stand. RED WHEN the first error escapes, or the
-        repeat is not run with locking."""
+        "database disk image is malformed". That is the store moving (its
+        stamp changes under the read), not the store being corrupt: the read
+        is repeated with locking, and only the repeat's error would stand.
+        RED WHEN the first error escapes, or the repeat is not run with
+        locking."""
         from scripts import database
 
         _repo, store = repo_env
@@ -447,6 +448,9 @@ class TestTheReadScopeCacheServesTheSecondRead:
         def malformed_once(connection):
             locked.append(memory_api._LOCKED_READS_ONLY.get())
             if len(locked) == 1:
+                # The writer that tore this read also moved the store.
+                moved = Path(store).stat().st_mtime_ns + 5_000_000_000
+                os.utime(store, ns=(moved, moved))
                 raise memory_api.sqlite3.DatabaseError("database disk image is malformed")
             return real(connection)
 

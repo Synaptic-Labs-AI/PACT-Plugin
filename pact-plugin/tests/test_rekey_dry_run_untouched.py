@@ -339,9 +339,46 @@ def test_an_integrity_check_the_store_moved_under_decides_nothing(tmp_path, monk
     stamps = iter([(0, 0, 0, False), (1, 0, 0, False)])
     real_stamp = cli._store_stamp
     monkeypatch.setattr(cli, "_store_stamp", lambda path: next(stamps, None) or real_stamp(path))
+    # The writer moved the store, as the repeat's own stamp check sees.
+    from scripts import memory_api
+
+    moved = []
+
+    def outer_stamp(path):
+        stamp = real_stamp(path)
+        if len(checks) == 1 and not moved:
+            moved.append(path)
+            return (stamp, "moved")
+        return stamp
+
+    monkeypatch.setattr(memory_api, "_store_stamp", outer_stamp)
     monkeypatch.chdir(repo)
     argv = ["project-id", "rekey", "--from=proj", "--to=github.com/me/proj", "--db-path", str(store)]
     code, envelope = _cli(argv, capfd)
     assert code == 3, envelope
     assert "temporary copy of the store in " in envelope["message"], envelope
     assert len(checks) == 2, checks
+
+
+def test_a_dry_run_on_a_corrupt_settled_store_leaves_no_sidecars(tmp_path, monkeypatch, capfd):
+    """A settled WAL store with corrupt pages, nothing writing to it. The
+    read fails while the store's stamp stays put, so it is not repeated with
+    locking (whose read-only open would leave -wal and -shm beside the store
+    for good). RED WHEN a read that raised on an unmoved store is repeated."""
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/me/proj.git")
+    store = tmp_path / "mem.db"
+    _store_of(store, 300)
+    data = bytearray(store.read_bytes())
+    for offset in range(4096 * 20, 4096 * 60, 4096):
+        data[offset:offset + 64] = b"\xff" * 64
+    store.write_bytes(bytes(data))
+    before = store.read_bytes()
+    monkeypatch.chdir(repo)
+    argv = ["project-id", "rekey", "--from=proj", "--to=github.com/me/proj", "--db-path", str(store)]
+    code, envelope = _cli(argv, capfd)
+    assert code == 3, envelope
+    assert envelope["error"] == "REKEY_FAILED", envelope
+    assert store.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.glob("mem.db*")) == ["mem.db"]
