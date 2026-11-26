@@ -951,6 +951,20 @@ def _name_the_home(segments: list, login: Optional[str]) -> list:
     return ["~" + login, *segments[1:]]
 
 
+def _home_segments(sent: str, segments: list, login: Optional[str]) -> list:
+    """`segments` with the login's home named (`_name_the_home`) when the
+    path git sends, before its `.git` is dropped, is `~` or starts with
+    `~/`. `~.git` is the home of a user called `.git`, not the login's (a
+    `~<user>` path, kept as written), so it keeps its `.git` rather than
+    becoming the lone `~` the strip leaves.
+    """
+    if sent == "~" or sent.startswith("~/"):
+        return _name_the_home(segments, login)
+    if segments == ["~"]:
+        return _split_path(sent.rstrip("/")) or segments
+    return segments
+
+
 def normalize_remote_url(url: object) -> Optional[str]:
     """Return the canonical `host[:port]/<path>` id for a remote URL.
 
@@ -1048,7 +1062,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         if not segments:
             return None
         if scheme in _HOME_RELATIVE_SCHEMES:
-            segments = _name_the_home(segments, login)
+            segments = _home_segments(sent_path, segments, login)
         identifier = _identifier(host, port, segments, ssh)
     else:
         scp_match = _scp_match(value)
@@ -1102,9 +1116,8 @@ def normalize_remote_url(url: object) -> Optional[str]:
         segments = _split_path(path)
         if not segments:
             return None
-        if path == "~" or path.startswith("~/"):
-            user = scp_match.group("user")
-            segments = _name_the_home(segments, user[:-1] if user else None)
+        user = scp_match.group("user")
+        segments = _home_segments(scp_path, segments, user[:-1] if user else None)
         # ONE SEGMENT IS ENOUGH. `git@host:repo` and `https://host/repo` name
         # the same endpoint, and the grammar allows a single segment;
         # declining the scp spelling while accepting the URL spelling would

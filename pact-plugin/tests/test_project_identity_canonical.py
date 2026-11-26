@@ -95,6 +95,18 @@ class TestNormalizationEquivalence:
     def test_a_home_with_no_login_keeps_its_tilde(self):
         assert pi.normalize_remote_url("ssh://box/~/proj") == "box/~/proj"
 
+    @pytest.mark.parametrize("url", [
+        "alice@host:~.git", "alice@host:~.git/", "ssh://alice@host/~.git",
+        "git+ssh://alice@host/~.git", "host:~.git",
+    ])
+    def test_a_tilde_dot_git_path_is_not_the_home(self, url):
+        """`~.git` names the home of a user called `.git`, a `~<user>`
+        path kept as written, not the login's home or the bare `~`. RED
+        WHEN the lone-~ test runs after the `.git` strip."""
+        assert pi.normalize_remote_url(url) == "host/~.git", url
+        assert pi.normalize_remote_url("alice@host:~") == "host/~alice"
+        assert pi.normalize_remote_url("alice@host:~/.git") == "host/~alice"
+
     def test_an_ssh_url_login_is_decoded_as_git_logs_in(self):
         """git percent-decodes an ssh url's user (`al%69ce` logs in as
         alice), so the home it names is alice's. RED WHEN the login is
