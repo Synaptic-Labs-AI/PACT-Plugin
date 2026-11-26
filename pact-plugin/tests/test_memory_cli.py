@@ -2841,12 +2841,56 @@ class TestSearchWindowContainment:
         "else:\n"
         "    state = 'unavailable'\n"
         "sys.stderr.write('PACT_VECTOR_PATH=' + state + '\\n')\n"
+        # NOT READY NAMES ITS CAUSE: the service's cached state, the extension
+        # flag, and what a fresh model load raises now.
+        "if state != 'ready':\n"
+        "    detail = 'available=%r extensions=%r' % (\n"
+        "        getattr(service, '_available', None), database.SQLITE_EXTENSIONS_ENABLED)\n"
+        "    try:\n"
+        "        from model2vec import StaticModel\n"
+        "        StaticModel.from_pretrained(embeddings._cache_snapshot_for(\n"
+        "            embeddings.MODEL_NAME) or embeddings.MODEL_NAME, force_download=False)\n"
+        "        detail += ' reload=ok'\n"
+        "    except Exception as exc:\n"
+        "        detail += ' reload=' + type(exc).__name__ + ': ' + str(exc)[:300]\n"
+        "    sys.stderr.write('PACT_VECTOR_DETAIL=' + detail + '\\n')\n"
         "sys.stderr.flush()\n"
         "raise SystemExit(code)\n"
     )
 
+    @staticmethod
+    def _diagnosis():
+        """What this process's embedding service reports, and what a fresh
+        model load raises now: the cause a degraded seed names."""
+        from scripts import database, embeddings
+
+        service = embeddings._service
+        detail = (
+            f"available={getattr(service, '_available', None)!r} "
+            f"extensions={database.SQLITE_EXTENSIONS_ENABLED!r}"
+        )
+        try:
+            from model2vec import StaticModel
+
+            StaticModel.from_pretrained(
+                embeddings._cache_snapshot_for(embeddings.MODEL_NAME)
+                or embeddings.MODEL_NAME,
+                force_download=False,
+            )
+            detail += " reload=ok"
+        except Exception as exc:
+            detail += f" reload={type(exc).__name__}: {str(exc)[:300]}"
+        return detail
+
     def _seed(self, db_path):
-        """Seed in-process: one model load for all saves, not one per save."""
+        """Seed in-process: one model load for all saves, not one per save.
+
+        THE SEED STARTS ITS OWN EMBEDDING SERVICE. The service caches a failed
+        model load for the life of the process, so a service an earlier test
+        in this worker left unavailable would degrade every save below."""
+        from scripts import embeddings
+
+        embeddings.reset_embedding_service()
         memory = PACTMemory(db_path=db_path)
         statuses = []
         for i in range(self.FILLERS):
@@ -2870,8 +2914,9 @@ class TestSearchWindowContainment:
         # vector was stored, and names the degradation otherwise.
         assert statuses == [None] * (self.FILLERS + 1), (
             "vector search unavailable for the seed: a record was saved "
-            f"without a vector (embedding statuses {statuses!r}), so the "
-            "ranked window this arm measures does not exist"
+            f"without a vector (embedding statuses {statuses!r}; "
+            f"{self._diagnosis()}), so the ranked window this arm measures "
+            "does not exist"
         )
         return target_id
 
@@ -2893,7 +2938,27 @@ class TestSearchWindowContainment:
             "cannot be measured: "
             f"markers {markers!r}, stderr {result.stderr!r}"
         )
-        return json.loads(result.stdout)["result"]
+        try:
+            return json.loads(result.stdout)["result"]
+        except (ValueError, KeyError) as exc:
+            raise AssertionError(
+                f"the CLI child's stdout is not a result envelope ({exc!r}): "
+                f"stdout {result.stdout!r}, stderr {result.stderr!r}"
+            ) from exc
+
+    def test_a_load_failure_an_earlier_test_cached_does_not_degrade_the_seed(
+        self, cli_db
+    ):
+        """An earlier test in this worker that left the embedding service
+        unavailable must not degrade the seed. RED WHEN the seed reuses the
+        process's cached service."""
+        from scripts import embeddings
+
+        embeddings.get_embedding_service()._available = False
+        try:
+            self._seed(cli_db)
+        finally:
+            embeddings.reset_embedding_service()
 
     def test_target_below_window_invisible_at_5_visible_at_default(
         self, cli_script_path, cli_db
