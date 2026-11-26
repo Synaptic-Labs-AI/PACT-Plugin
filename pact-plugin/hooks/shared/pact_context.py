@@ -1585,6 +1585,9 @@ PRUNE_LEDGER_NAME = "pruned-sessions.jsonl"
 # A session context file is a few hundred bytes; anything larger is not one.
 SESSION_CONTEXT_MAX_BYTES = 64 * 1024
 
+# A journal's first event is a small JSON line; a longer one reads as no date.
+_JOURNAL_FIRST_LINE_MAX_BYTES = 64 * 1024
+
 
 def _journal_first_start(folder) -> str | None:
     """The `ts` of the first event in `<folder>/session-journal.jsonl`, when
@@ -1621,9 +1624,6 @@ def _journal_first_start(folder) -> str | None:
     finally:
         os.close(fd)
 
-
-# A journal's first event is a small JSON line; a longer one reads as no date.
-_JOURNAL_FIRST_LINE_MAX_BYTES = 64 * 1024
 
 
 def read_session_record(folder) -> dict | None:
