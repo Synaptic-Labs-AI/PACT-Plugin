@@ -930,21 +930,25 @@ _HOME_RELATIVE_SCHEMES = frozenset({"ssh", "git+ssh", "ssh+git"})
 
 
 def _name_the_home(segments: list, login: Optional[str]) -> list:
-    """`segments` with a leading `~` (the login's home, with more path after
-    it) spelled as `~<login>`.
+    """`segments` with a leading `~` (the login's home, alone or with more
+    path after it) spelled as `~<login>`.
 
     git sends `~/srv/repo` for `ssh://alice@host/~/srv/repo` and
     `alice@host:~/srv/repo`, which a plain sshd resolves in alice's home,
     the directory `~alice/srv/repo` names from any login. So the id is
     `host/~alice/srv/repo` and two logins' homes stay two ids. With no login
-    in the URL the home is unknown, and `~` stays as written. `~user/...`
-    is kept as is (another user's home, and SourceHut's real path), and so
-    is a lone `~`. A path with no `~` is not touched: on a forge it is
-    virtual, so `git@host:o/r` keeps the https spelling's id.
+    in the URL the home is unknown, and `~` stays as written; so does it
+    when the login holds a character a segment may not hold raw (`%`, a
+    space, `/`, non-ASCII) or is `.` or `..`, rather than the remote
+    declining. `~user/...` is kept as is (another user's home, and
+    SourceHut's real path). A path with no `~` is not touched: on a forge
+    it is virtual, so `git@host:o/r` keeps the https spelling's id.
     """
-    if len(segments) > 1 and segments[0] == "~" and login:
-        return ["~" + login, *segments[1:]]
-    return segments
+    if not segments or segments[0] != "~" or not login:
+        return segments
+    if login in (".", "..") or not set(login) <= _SEGMENT_RAW_CHARS:
+        return segments
+    return ["~" + login, *segments[1:]]
 
 
 def normalize_remote_url(url: object) -> Optional[str]:
@@ -997,6 +1001,10 @@ def normalize_remote_url(url: object) -> Optional[str]:
         if "@" in authority:
             userinfo, authority = authority.rsplit("@", 1)
             login = userinfo.split(":", 1)[0] or None
+            if login and scheme in _HOME_RELATIVE_SCHEMES:
+                # git decodes an ssh url's user as it does the path (measured:
+                # `ssh://al%69ce@box/~/proj` logs in as alice).
+                login = unquote(login, errors="surrogateescape")
         if authority.startswith("["):
             # An IPv6 literal: its colons are inside the brackets, and a port
             # can only follow the closing bracket.
@@ -1094,7 +1102,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         segments = _split_path(path)
         if not segments:
             return None
-        if path.startswith("~/"):
+        if path == "~" or path.startswith("~/"):
             user = scp_match.group("user")
             segments = _name_the_home(segments, user[:-1] if user else None)
         # ONE SEGMENT IS ENOUGH. `git@host:repo` and `https://host/repo` name

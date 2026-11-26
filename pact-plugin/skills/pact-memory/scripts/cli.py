@@ -227,7 +227,8 @@ def _own_stderr_for_envelope():
     no thread today. Add a worker thread that logs, and its output joins the
     capture. Do not read this guard as a per-caller channel.
 
-    FAILS OPEN. If the descriptor cannot be duplicated, this yields without
+    FAILS OPEN. If the descriptor cannot be duplicated, or the capture file
+    cannot be created (an unusable temporary folder), this yields without
     guarding, so the command behaves as it did before rather than failing for
     a reason the caller cannot act on.
 
@@ -253,7 +254,12 @@ def _own_stderr_for_envelope():
         yield None
         return
 
-    capture = tempfile.TemporaryFile()
+    try:
+        capture = tempfile.TemporaryFile()
+    except OSError:
+        os.close(saved_fd)
+        yield None
+        return
     previous_envelope = _ENVELOPE_STREAM
     envelope_stream = os.fdopen(saved_fd, "w", buffering=1, closefd=False)
     replay = False
@@ -1135,6 +1141,22 @@ _REKEY_ZERO_COUNTERS = (
 )
 
 
+class _RekeyCopyFailed(Exception):
+    """The dry run's temporary copy could not be made or written (an unusable
+    or full temporary folder). Not a `sqlite3.DatabaseError`, so
+    `_stable_read_only` does not repeat the read with locking, which would
+    leave `-wal`/`-shm` beside a store the dry run never needed to lock."""
+
+
+# SQLite's messages for a file it cannot write, grow or open (SQLITE_IOERR,
+# SQLITE_FULL, SQLITE_CANTOPEN): faults of the copy's folder, never of a store
+# that moved during the read. Matched on the message because pysqlite3's
+# errors carry no `sqlite_errorcode`.
+_COPY_FAULT_MESSAGES = (
+    "disk I/O error", "database or disk is full", "unable to open database file",
+)
+
+
 def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: bool) -> dict:
     """`rekey_project`'s counters, computed on a COPY of `store` in a private
     temporary folder, removed afterwards.
@@ -1168,6 +1190,12 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
                 )
             finally:
                 copy.close()
+    except OSError as exc:
+        raise _RekeyCopyFailed(exc) from exc
+    except db_sqlite3.DatabaseError as exc:
+        if str(exc).startswith(_COPY_FAULT_MESSAGES):
+            raise _RekeyCopyFailed(exc) from exc
+        raise
     finally:
         source.close()
 
@@ -1527,6 +1555,16 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             "INVALID_INPUT",
             escape_for_envelope(str(exc)),
             exit_code=2,
+        )
+    except _RekeyCopyFailed as exc:
+        _error(
+            "REKEY_FAILED",
+            escape_for_envelope(_scrub(
+                "the dry run could not write its temporary copy of the store "
+                f"in {tempfile.gettempdir()} (set TMPDIR to a writable folder "
+                f"with room for it): {exc.__cause__}"
+            )),
+            exit_code=3,
         )
     except db_sqlite3.DatabaseError as exc:
         # OPERATIONAL FAILURE, NOT BAD INPUT: a locked store, an integrity

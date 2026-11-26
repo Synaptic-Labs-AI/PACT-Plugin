@@ -123,3 +123,83 @@ def test_the_rekey_help_says_the_dry_run_uses_a_copy():
     text = " ".join(rekey.format_help().split())
     assert "on a temporary copy of the store, which is then deleted" in text
     assert "savepoint" not in text
+
+
+def _store_of(path, rows):
+    conn = sqlite3.connect(str(path))
+    conn.execute("PRAGMA journal_mode=WAL")
+    create_test_schema(conn)
+    for index in range(rows):
+        conn.execute(
+            "INSERT INTO memories (id, context, project_id, created_at, updated_at) "
+            "VALUES (?, ?, 'proj', ?, ?)",
+            (f"m{index}", "x" * 2000, NOW, NOW),
+        )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("shape", ["missing", "read_only", "full"])
+def test_a_dry_run_whose_temporary_folder_fails_is_a_named_fault(tmp_path, monkeypatch, capfd, shape):
+    """An unusable temporary folder (absent, not writable, or out of room)
+    fails the dry run as REKEY_FAILED, exit 3, naming the folder; the store's
+    bytes are unchanged, no -wal or -shm appears beside it, and no copy is
+    left. RED WHEN the stderr guard refuses the command for want of its own
+    temporary file (SYSTEM_ERROR), when the copy's fault is not named, or when
+    it is read as a moved store and repeated with locking (sidecars)."""
+    import os
+    import subprocess
+    import sys
+    import tempfile
+
+    if shape == "read_only" and os.geteuid() == 0:
+        pytest.skip("root writes into a read-only folder")
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/me/proj.git")
+    store = tmp_path / "mem.db"
+    _store_of(store, 300)
+    before = store.read_bytes()
+    folder = tmp_path / "tmp"
+    if shape != "missing":
+        folder.mkdir()
+    argv = ["project-id", "rekey", "--from=proj", "--to=github.com/me/proj", "--db-path", str(store)]
+    if shape == "full":
+        # A file-size limit stands in for a full disk: the copy's writes fail
+        # with an I/O error, as they do on a filesystem out of room.
+        plugin = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE_")}
+        env["PYTHONPATH"] = os.pathsep.join(
+            [os.path.join(plugin, "skills", "pact-memory"), os.path.join(plugin, "hooks")]
+        )
+        script = (
+            "import resource, signal, sys, tempfile\n"
+            "signal.signal(signal.SIGXFSZ, signal.SIG_IGN)\n"
+            "resource.setrlimit(resource.RLIMIT_FSIZE, (65536, 65536))\n"
+            "tempfile.tempdir = sys.argv[1]\n"
+            "from scripts.cli import main\n"
+            "main(sys.argv[2:])\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(folder), *argv],
+            capture_output=True, text=True, env=env, cwd=repo,
+        )
+        code, envelope = result.returncode, json.loads(result.stderr.strip().splitlines()[-1])
+    else:
+        monkeypatch.chdir(repo)
+        if shape == "read_only":
+            folder.chmod(0o500)
+        saved = tempfile.tempdir
+        tempfile.tempdir = str(folder)
+        try:
+            code, envelope = _cli(argv, capfd)
+        finally:
+            tempfile.tempdir = saved
+            if shape == "read_only":
+                folder.chmod(0o700)
+    assert code == 3, envelope
+    assert envelope["error"] == "REKEY_FAILED", envelope
+    assert "temporary copy of the store in " + str(folder) in envelope["message"], envelope
+    assert store.read_bytes() == before, "the failed dry run wrote the store file"
+    assert sorted(p.name for p in tmp_path.glob("mem.db*")) == ["mem.db"]
+    assert not folder.exists() or list(folder.iterdir()) == []

@@ -95,6 +95,44 @@ class TestNormalizationEquivalence:
     def test_a_home_with_no_login_keeps_its_tilde(self):
         assert pi.normalize_remote_url("ssh://box/~/proj") == "box/~/proj"
 
+    def test_an_ssh_url_login_is_decoded_as_git_logs_in(self):
+        """git percent-decodes an ssh url's user (`al%69ce` logs in as
+        alice), so the home it names is alice's. RED WHEN the login is
+        copied raw."""
+        for url in ("ssh://al%69ce@box/~/proj", "git+ssh://al%69ce@box/~/proj.git"):
+            assert pi.normalize_remote_url(url) == "box/~alice/proj", url
+        assert pi.normalize_remote_url("ssh://al%69ce@box/~") == "box/~alice"
+
+    @pytest.mark.parametrize("url", [
+        "ssh://al%C3%A9@box/~/proj",
+        "ssh://a%20b@box/~/proj",
+        "ssh://a%00b@box/~/proj",
+        "ssh://a%2Fb@box/~/proj",
+        "ssh://a%25b@box/~/proj",
+        "ssh://..@box/~/proj",
+        "ssh://.@box/~/proj",
+        "al%69ce@box:~/proj",
+    ])
+    def test_a_login_a_segment_cannot_hold_keeps_the_bare_home(self, url):
+        """A login that cannot sit in an id segment leaves the home unnamed
+        (`box/~/proj`, as with no login) instead of declining the remote.
+        RED WHEN such a login reaches the id or declines it."""
+        assert pi.normalize_remote_url(url) == "box/~/proj", url
+
+    @pytest.mark.parametrize("left, right", [
+        ("alice@box:~", "ssh://alice@box/~"),
+        ("alice@box:~/.git", "ssh://alice@box/~/.git"),
+        ("alice@box:~/", "bob@box:~alice"),
+    ])
+    def test_a_lone_home_names_its_login(self, left, right):
+        """A repository at the home itself (a dotfiles repository) is the
+        login's home too: two logins' homes are two ids. RED WHEN a lone
+        `~` keeps no login."""
+        assert pi.normalize_remote_url(left) == "box/~alice"
+        assert pi.normalize_remote_url(right) == "box/~alice"
+        assert pi.normalize_remote_url("bob@box:~") == "box/~bob"
+        assert pi.normalize_remote_url("box:~") == "box/~"
+
     def test_a_path_with_no_tilde_ignores_the_login(self):
         """The remaining plain-sshd case, unchanged on purpose: a forge's
         path is virtual, so `git@host:o/r` must keep the https spelling's id.
@@ -128,11 +166,13 @@ class TestNormalizationEquivalence:
 
     def test_a_tilde_with_no_home_expansion_is_kept(self):
         """Only the ssh family and scp go through a remote shell; https and
-        git:// keep `~` as an ordinary segment, and the home itself stays."""
+        git:// keep `~` as an ordinary segment; over ssh the home itself is
+        the login's."""
         assert pi.normalize_remote_url("https://host/~/x") == "host/~/x"
         assert pi.normalize_remote_url("git://host/~/x") == "host/~/x"
-        assert pi.normalize_remote_url("git@host:~") == "host/~"
-        assert pi.normalize_remote_url("ssh://git@host/~") == "host/~"
+        assert pi.normalize_remote_url("https://host/~") == "host/~"
+        assert pi.normalize_remote_url("git@host:~") == "host/~git"
+        assert pi.normalize_remote_url("ssh://git@host/~") == "host/~git"
 
     def test_the_literal_format_is_pinned_in_exactly_one_place(self):
         """The user-visible shape, pinned once so a format change is one edit.
