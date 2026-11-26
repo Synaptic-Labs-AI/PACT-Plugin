@@ -334,7 +334,7 @@ def _own_stderr_for_envelope():
         capture.close()
 
 
-def _success(result) -> NoReturn:
+def _success(result, **extra) -> NoReturn:
     """Print a success JSON envelope to stdout and exit 0.
 
     PAYLOADS ARE DATA, MESSAGES ARE DISPLAY. A success payload is a machine
@@ -360,9 +360,11 @@ def _success(result) -> NoReturn:
     `_neutralise_unwritable_std_streams`, called from the `__main__` block, is
     what closes the second case. Read the two together: this wrap keeps the
     exception out of the handler, and that step keeps the exit status intact.
+
+    `extra` adds top-level keys beside `result` (`_hidden_bucket_scope`).
     """
     _best_effort_report(
-        print, json.dumps({"ok": True, "result": result}, indent=2, default=str)
+        print, json.dumps({"ok": True, "result": result, **extra}, indent=2, default=str)
     )
     sys.exit(0)
 
@@ -748,14 +750,28 @@ def cmd_search(args, db_path=None):
         args.query, current_file=current_file, limit=args.limit,
         sync_to_claude=False, **search_kwargs
     )
-    _success([r.to_dict() for r in results])
+    _success([r.to_dict() for r in results], **_hidden_bucket_scope(memory))
+
+
+def _hidden_bucket_scope(memory) -> dict:
+    """`{"legacy_scope": <record>}` when this read left an old folder-name
+    bucket out (unproven or excluded, holding rows, or a case variant), else
+    {}. The stderr notice says the same; this puts it on stdout too, beside
+    `result`, so a caller reading only stdout sees why rows are missing."""
+    state = memory._legacy_scope_state
+    if not state:
+        return {}
+    hidden = (
+        state.get("candidate") and not state.get("included") and state.get("memory_count")
+    ) or state.get("case_variant")
+    return {"legacy_scope": state} if hidden else {}
 
 
 def cmd_list(args, db_path=None):
     """Handle the 'list' subcommand."""
     memory = PACTMemory(db_path=db_path)
     results = memory.list(limit=args.limit)
-    _success([r.to_dict() for r in results])
+    _success([r.to_dict() for r in results], **_hidden_bucket_scope(memory))
 
 
 def cmd_get(args, db_path=None):

@@ -634,8 +634,8 @@ class TestLegacyScopeStatesAreDocumented:
             "per process, with the cause."
         ) in _body(SKILL)
         assert (
-            "That line goes to stderr: read stderr as well as stdout, or the "
-            "bucket's memories seem to vanish with no message."
+            "That line goes to stderr; list and search also put the bucket's "
+            "legacy_scope record on stdout, beside result, whenever a bucket is left out."
         ) in _body(SKILL)
 
     def test_an_unattributed_row_is_read_with_a_warning(self):

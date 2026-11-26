@@ -394,8 +394,9 @@ set, exactly one of `included`, `excluded` and `unproven` is true:
   not read and no rekey command is printed anywhere; `unproven_reason` is
   `foreign_rows` or `recorded_elsewhere`.
 - `unproven`: it is not read, and its `rekey` command is printed once per
-  process, with the cause. That line goes to stderr: read stderr as well as
-  stdout, or the bucket's memories seem to vanish with no message.
+  process, with the cause. That line goes to stderr; `list` and `search` also put
+  the bucket's `legacy_scope` record on stdout, beside `result`, whenever a
+  bucket is left out.
   `unproven_reason` names the cause:
   `recorded_elsewhere` (sessions recorded at another existing folder wrote
   some of its rows), `foreign_rows` (some of its file rows lie in another
