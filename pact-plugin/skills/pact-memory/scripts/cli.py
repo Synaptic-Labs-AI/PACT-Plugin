@@ -1493,6 +1493,8 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 "launched in a subfolder of this repository, "
                 f"{sessions['description_newer']} from sessions that started "
                 "before its `description` file last changed, "
+                f"{sessions['undated']} from sessions recorded here with no "
+                "confirmed start, "
                 f"{sessions['elsewhere']} from sessions recorded at another "
                 f"existing folder, and {sessions['unattributed']} from no "
                 "recorded session."

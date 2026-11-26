@@ -691,7 +691,9 @@ def _evidence(**counts):
 
 
 def _sessions(**counts):
-    base = dict.fromkeys(("here", "elsewhere", "subfolder", "description_newer", "unattributed"), 0)
+    base = dict.fromkeys(
+        ("here", "elsewhere", "subfolder", "description_newer", "undated", "unattributed"), 0
+    )
     base.update(counts)
     return base
 

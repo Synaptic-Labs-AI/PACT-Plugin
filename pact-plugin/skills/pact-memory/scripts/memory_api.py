@@ -507,10 +507,14 @@ def _pruned_session_index(ledger: Path) -> Dict[str, List[dict]]:
 # directory outside every gate root, or inside another checkout nested under
 # one), `subfolder` (recorded at a folder of a gate root's own checkout, below
 # the root), `description_newer` (recorded at a gate
-# root but started before `description` last changed), `unattributed`
+# root but started before `description` last changed), `undated` (recorded
+# at a gate root with no confirmed start: its journal has no readable first
+# event, so it cannot be dated against `description`), `unattributed`
 # (no session id, no record found, or a record whose directory no longer
 # exists). Every place but `unattributed` is a directory that exists.
-_SESSION_CENSUS_KEYS = ("here", "elsewhere", "subfolder", "description_newer", "unattributed")
+_SESSION_CENSUS_KEYS = (
+    "here", "elsewhere", "subfolder", "description_newer", "undated", "unattributed",
+)
 
 
 # Directory listings the session census and the recorded-dir loader reuse
@@ -552,7 +556,7 @@ def _legacy_session_census(
     checkout's, and a subfolder launch is recorded under the subfolder's own
     slug. Each slug folder is listed once per call. A session with records in
     two places counts by the first of elsewhere, here, subfolder,
-    description_newer.
+    description_newer, undated.
 
     A PRESENT ENTRY IS A LIVE FOLDER: its context file is the record, and a
     present entry that is not a folder is no record. An absent entry, or a
@@ -637,11 +641,13 @@ def _legacy_session_census(
             # record and the reaped one both leave the row unattributed.
             return None
         if project_dir in roots:
-            return (
-                "here"
-                if _session_record_counts(record, roots, common_dir)
-                else "description_newer"
-            )
+            if _session_record_counts(record, roots, common_dir):
+                return "here"
+            # NO CONFIRMED START IS ITS OWN CAUSE: the record dates nothing
+            # (`read_session_record` drops an unconfirmed start), so it is not
+            # a session that started before `description` changed.
+            started = record.get("started_at")
+            return "description_newer" if isinstance(started, str) and started else "undated"
         if any(
             project_dir.startswith(root if root.endswith(os.sep) else root + os.sep)
             for root in roots
@@ -705,7 +711,7 @@ def _legacy_session_census(
                             places.add(where(record))
                 except Exception:
                     continue
-        for place in ("elsewhere", "here", "subfolder", "description_newer"):
+        for place in ("elsewhere", "here", "subfolder", "description_newer", "undated"):
             if place in places:
                 counts[place] += count
                 break
@@ -845,6 +851,11 @@ _UNPROVEN_CAUSES = {
         "chmod or chown changes it), or git could not name the repository "
         "to date them by"
     ),
+    "undated": (
+        "no file row places it, and the sessions recorded here that wrote it "
+        "have no confirmed start (their journal has no readable first event), "
+        "so they cannot be dated against this repository's `description` file"
+    ),
     "no_session": (
         "no file row places it and no session launched at the root of this "
         "repository or of one of its linked worktrees wrote it"
@@ -956,6 +967,7 @@ def decide_bucket(
         reason = (
             "subfolder_launch" if counts["subfolder"]
             else "description_newer" if counts["description_newer"]
+            else "undated" if counts["undated"]
             else "no_session"
         )
     read = state in ("verified", "included_unverified")

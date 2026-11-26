@@ -1407,27 +1407,33 @@ class TestADefaultedTargetRefusesAnUnprovenBucket:
                 "no_session",
                 "no file row places it and no session launched at the root of "
                 "this repository or of one of its linked worktrees wrote it",
-                (0, 0, 0, 0, 1),
+                (0, 0, 0, 0, 0, 1),
             ),
             (
                 "recorded_elsewhere",
                 "1 of its memories were written by sessions recorded at "
                 "another existing folder (0 by sessions recorded here)",
-                (0, 0, 0, 1, 0),
+                (0, 0, 0, 0, 1, 0),
             ),
             (
                 "subfolder_launch",
                 "no file row places it, and the sessions recorded as writing "
                 "it were launched in a "
                 "subfolder of this repository",
-                (0, 1, 0, 0, 0),
+                (0, 1, 0, 0, 0, 0),
             ),
             (
                 "description_newer",
                 "no file row places it, and this repository's `description` "
                 "file changed after the "
                 "sessions that wrote it started",
-                (0, 0, 1, 0, 0),
+                (0, 0, 1, 0, 0, 0),
+            ),
+            (
+                "undated",
+                "no file row places it, and the sessions recorded here that "
+                "wrote it have no confirmed start",
+                (0, 0, 0, 1, 0, 0),
             ),
         ],
     )
@@ -1455,6 +1461,9 @@ class TestADefaultedTargetRefusesAnUnprovenBucket:
             seed_session_evidence(
                 config, repo, "legacy-session", started_at="2000-01-01T00:00:00+00:00"
             )
+        elif cause == "undated":
+            context = seed_session_evidence(config, repo, "legacy-session")
+            (context.parent / "session-journal.jsonl").unlink()
         code, envelope = _cli(
             ["project-id", "rekey", "--from=proj", "--apply", "--db-path", str(store)], capfd
         )
@@ -1463,12 +1472,13 @@ class TestADefaultedTargetRefusesAnUnprovenBucket:
         # Elsewhere-only evidence with nothing placing it here is excluded.
         reading = "was excluded" if cause == "recorded_elsewhere" else "is unproven"
         assert f"--from='proj' {reading}: {clause}" in message, message
-        here, subfolder, newer, elsewhere_count, unattributed = counts
+        here, subfolder, newer, undated, elsewhere_count, unattributed = counts
         assert (
             f"Of its memories, {here} came from sessions recorded here, "
             f"{subfolder} from sessions launched in a subfolder of this repository, "
             f"{newer} from sessions that started before its `description` file "
-            f"last changed, {elsewhere_count} from sessions recorded at another "
+            f"last changed, {undated} from sessions recorded here with no confirmed "
+            f"start, {elsewhere_count} from sessions recorded at another "
             f"existing folder, and {unattributed} from no recorded session."
         ) in message, message
         assert message.endswith("Nothing was moved."), message

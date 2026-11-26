@@ -401,14 +401,16 @@ set, exactly one of `included`, `excluded` and `unproven` is true:
   them, split into `foreign_checkout_rows` and `foreign_folder_rows`, and a
   rekey needs an explicit `--to`), `subfolder_launch` (its writing sessions
   were launched in a subfolder of this repository), `description_newer`
-  (`description` changed after its writing sessions started) or `no_session`
+  (`description` changed after its writing sessions started), `undated` (its
+  writing sessions recorded here have no confirmed start: their journal has
+  no readable first event) or `no_session`
   (no session launched at the root of this repository or of one of its linked
   worktrees wrote it). Its rows move only with that command and `--apply`,
   which needs the user's explicit approval.
 
 `sessions` counts the bucket's memories by where their writing session is
-recorded: `here`, `elsewhere`, `subfolder`, `description_newer` and
-`unattributed`; it is `null` when a file row placing it elsewhere already
+recorded: `here`, `elsewhere`, `subfolder`, `description_newer`, `undated`
+and `unattributed`; it is `null` when a file row placing it elsewhere already
 decided the bucket, or there is no candidate. `detail` counts the bucket's
 file rows: `file_rows`, `absolute_rows`, `contained_rows`, `foreign_rows`,
 `foreign_checkout_rows`, `foreign_folder_rows`, `neutral_outside`,

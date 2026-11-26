@@ -1226,7 +1226,11 @@ def test_a_session_with_no_confirmed_start_is_not_evidence(tmp_path, how):
     store = tmp_path / "store.db"
     _seed(store, NAME, session_id="unconfirmed")
     counts = _root_census(repo, store)
-    assert counts["here"] == 0 and counts["description_newer"] == 1, counts
+    # Its own cause, not "description changed after it started": it has no
+    # start to compare.
+    assert (counts["here"], counts["description_newer"], counts["undated"]) == (0, 0, 1), counts
+    verdict = memory_api.decide_bucket({"contained_rows": 0, "foreign_rows": 0}, counts)
+    assert (verdict.read, verdict.state, verdict.reason) == (False, "unproven", "undated"), verdict
     line = json.loads(session_end._pruned_session_line(context.parent))
     assert "started_at" not in line and line["project_dir"] == str(repo), line
 

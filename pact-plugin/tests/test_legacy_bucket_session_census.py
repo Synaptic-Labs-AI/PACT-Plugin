@@ -92,7 +92,8 @@ def test_a_row_recorded_at_another_checkout_keeps_an_unverified_bucket_out(check
     assert state["unproven"] and not state["included"], state
     assert state["unproven_reason"] == "recorded_elsewhere", state
     assert state["sessions"] == {
-        "here": 2, "elsewhere": 1, "subfolder": 0, "description_newer": 0, "unattributed": 0,
+        "here": 2, "elsewhere": 1, "subfolder": 0, "description_newer": 0, "undated": 0,
+        "unattributed": 0,
     }, state
     assert len(notices) == 1, notices
     assert (
