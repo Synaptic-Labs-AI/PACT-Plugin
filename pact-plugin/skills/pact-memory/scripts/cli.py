@@ -1807,6 +1807,12 @@ def build_parser():
         "--db-path",
         help=argparse.SUPPRESS,  # Hidden flag for testing
     )
+    # A nested action's own --db-path: with no default it leaves the value
+    # parsed before the action (`project-id --db-path X show`) in place.
+    action_parent = argparse.ArgumentParser(add_help=False)
+    action_parent.add_argument(
+        "--db-path", default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
 
     prog = sys.argv[0]
     fmt = argparse.RawDescriptionHelpFormatter
@@ -2091,7 +2097,7 @@ def build_parser():
     project_id_show_parser = project_id_actions.add_parser(
         "show",
         help="Show the detected identity and the bucket census",
-        parents=[parent],
+        parents=[action_parent],
         description=(
             "The detected project id, `source`, `id_shape`, any structured "
             "`decline_reason` (with the override path that remedies it), the "
@@ -2107,7 +2113,7 @@ def build_parser():
     project_id_rekey_parser = project_id_actions.add_parser(
         "rekey",
         help="Move an entire project bucket to the canonical id",
-        parents=[parent],
+        parents=[action_parent],
         description=(
             "Move EVERY row filed under `--from` to `--to` in one "
             "transaction: memories, file rows (merging the UNIQUE(path, "

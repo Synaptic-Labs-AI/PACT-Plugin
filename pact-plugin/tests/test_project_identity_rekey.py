@@ -607,6 +607,40 @@ class TestCliSurface:
         )
         assert code == 0 and payload["result"]["memories"] == 0
 
+    @pytest.mark.parametrize("before_action", [True, False])
+    def test_db_path_before_or_after_the_action_names_the_store(
+        self, rekey_env, capfd, monkeypatch, before_action
+    ):
+        """RED WHEN the action's own --db-path default overwrites the value
+        given before the action, so the command reads the default store."""
+        default_dir = rekey_env.tmp_path / "default-store"
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(default_dir))
+        _seed(rekey_env, [("l1", LEGACY)])
+        seed_session_evidence(
+            rekey_env.tmp_path / "home" / ".claude", rekey_env.repo, "s"
+        )
+        store = ["--db-path", str(rekey_env.store)]
+
+        def argv(action, *rest):
+            if before_action:
+                return ["project-id", *store, action, *rest]
+            return ["project-id", action, *rest, *store]
+
+        code, payload = _cli(argv("show"), capfd)
+        assert code == 0 and not payload["result"].get("store_absent"), payload
+        assert LEGACY in [c["id"] for c in payload["result"]["candidates"]], payload
+        rekey = ("--from", LEGACY, "--to", CANONICAL)
+        code, payload = _cli(argv("rekey", *rekey), capfd)
+        assert code == 0 and payload["result"]["dry_run"] is True, payload
+        assert payload["result"]["memories"] == 1, payload
+        code, payload = _cli(argv("rekey", *rekey, "--apply"), capfd)
+        assert code == 0 and payload["result"]["memories"] == 1, payload
+        with db_connection(rekey_env.store) as conn:
+            assert conn.execute(
+                "SELECT COUNT(*) FROM memories WHERE project_id = ?", (CANONICAL,)
+            ).fetchone()[0] == 1
+        assert not default_dir.exists()
+
     def test_a_non_canonical_target_is_bad_input(self, rekey_env, capfd):
         """Catches a rekey that moves rows into a basename bucket."""
         _seed(rekey_env, [("l1", LEGACY)])
