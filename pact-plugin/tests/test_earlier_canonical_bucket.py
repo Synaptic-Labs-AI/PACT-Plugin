@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -346,6 +347,34 @@ def test_a_bucket_mostly_in_a_submodule_gets_no_rekey_command(tmp_path, monkeypa
     assert exit_info.value.code == 0
     rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)["result"]["candidates"]}
     assert (rows[bucket]["relation"], rows[bucket]["rekey"]) == ("earlier_id", None), rows
+
+
+def test_many_submodule_rows_do_not_hide_the_notice(tmp_path, monkeypatch):
+    """Twenty file rows in the submodule, on a connection whose SQLite allows
+    fifteen bound variables: the bucket is still named, with one linked
+    memory. RED WHEN the submodule rows are bound one per variable into the
+    linked-count query, which then fails and hides every earlier id."""
+    assert_outside_repository(tmp_path)
+    upstream = make_repo(tmp_path / "libup", remote="https://github.com/acme/lib.git")
+    sup = make_repo(tmp_path / "super", remote="https://github.com/acme/super.git")
+    run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
+            str(upstream), "lib", cwd=sup)
+    store = tmp_path / "store.db"
+    bucket = "github.com/acme/oldlib"
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        for index in range(20):
+            _memory(conn, f"s{index}", bucket, _later(), sup / "lib" / f"f{index}.py")
+        _memory(conn, "r1", bucket, _later(), sup / "README")
+        conn.commit()
+    _fresh(monkeypatch, sup)
+    memory = PACTMemory(session_id="s", db_path=store)
+    conn = sqlite3.connect(str(store))  # the standard module: it can lower the limit
+    try:
+        conn.setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, 15)
+        assert memory._earlier_canonical_buckets("github.com/acme/super", conn) == {bucket: None}
+    finally:
+        conn.close()
 
 
 def test_another_buckets_memories_do_not_date_an_earlier_id(tmp_path, monkeypatch):

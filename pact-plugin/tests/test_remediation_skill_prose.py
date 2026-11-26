@@ -7344,6 +7344,10 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function shared.git_helpers: PASS_GIT_RESULTS.get>"): (
             "reads the pass's memo of git results, set only by git_results_pass"
         ),
+        ("call", "<call to no function shared.git_helpers: exc.with_traceback>"): (
+            "re-raises a git failure the pass kept, from the traceback it first had; "
+            "it reads no input"
+        ),
         ("env", "<shared.git_helpers._question: environment.items>"): (
             "the copy of the environment a git command runs with, scanned by prefix "
             "(git reads arbitrary GIT_* variables) only to key the pass's memo of that "

@@ -118,10 +118,13 @@ def answered_once(
         except subprocess.TimeoutExpired:
             raise
         except Exception as exc:  # the answer is the failure, kept for every later reader
-            memo[key] = (None, exc)
+            memo[key] = (None, (exc, exc.__traceback__))
     result, failure = memo[key]
     if failure is not None:
-        raise failure
+        # Each raise starts from the traceback git's failure had, so the
+        # stored exception does not gather one more frame per asker.
+        exc, traceback = failure
+        raise exc.with_traceback(traceback)
     return result
 
 

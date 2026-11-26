@@ -4150,15 +4150,21 @@ class PACTMemory:
                                 None if in_submodules
                                 else runnable_rekey_command(bucket, scope, db_path=store)
                             )
-                            linked = connection.execute(
-                                "SELECT COUNT(DISTINCT mf.memory_id) FROM memory_files mf "
-                                "JOIN files f ON f.id = mf.file_id "
-                                "JOIN memories m ON m.id = mf.memory_id "
-                                "WHERE f.project_id = ? AND m.project_id = ? "
-                                f"AND ({' OR '.join(clauses)}) "
-                                f"AND f.id NOT IN ({', '.join('?' * len(in_submodules))})",
-                                [bucket, bucket, *params[1:], *in_submodules],
-                            ).fetchone()[0]
+                            # Submodule rows are dropped here, not bound into the
+                            # SQL: a list past SQLite's variable limit would fail
+                            # the whole scan.
+                            submodule_ids = set(in_submodules)
+                            linked = len({
+                                memory_id for memory_id, file_id in connection.execute(
+                                    "SELECT mf.memory_id, f.id FROM memory_files mf "
+                                    "JOIN files f ON f.id = mf.file_id "
+                                    "JOIN memories m ON m.id = mf.memory_id "
+                                    "WHERE f.project_id = ? AND m.project_id = ? "
+                                    f"AND ({' OR '.join(clauses)})",
+                                    [bucket, bucket, *params[1:]],
+                                )
+                                if file_id not in submodule_ids
+                            })
                             counts[bucket] = (memories, linked, len(in_submodules))
         except (sqlite3.Error, OSError, StoreFaultError):
             return {}

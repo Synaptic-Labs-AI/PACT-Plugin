@@ -264,6 +264,28 @@ def test_a_pass_answers_each_git_question_once_and_no_other(tmp_path, monkeypatc
     assert (PASS_GIT_RESULTS.get(), after) == (None, len(runs)), "the pass ended with its block"
 
 
+def test_a_kept_failure_does_not_grow_its_traceback_per_asker():
+    """A failure kept for a pass is raised again for each asker. RED WHEN
+    each raise extends the stored exception's traceback, so the tenth asker
+    gets a longer one than the second."""
+    import traceback
+
+    from shared.git_helpers import answered_once, git_results_pass
+
+    def run():
+        raise OSError("could not run")
+
+    lengths = []
+    with git_results_pass():
+        for _ in range(10):
+            try:
+                answered_once(["git", "rev-parse", "--x"], run, text=True, env=None)
+            except OSError as exc:
+                assert str(exc) == "could not run"
+                lengths.append(len(traceback.extract_tb(exc.__traceback__)))
+    assert len(set(lengths)) == 1, lengths
+
+
 def test_a_pass_keys_a_question_on_the_directory_its_run_sets(tmp_path, monkeypatch):
     """A `run` that sets its own `cwd=` is keyed on that directory, given to
     `answered_once` as `cwd`: in one pass the same argv run in two
