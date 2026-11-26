@@ -33,6 +33,7 @@ import contextvars
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -1698,8 +1699,9 @@ def git_refuses_ownership(start) -> bool:
     """Whether git refuses `start`'s repository as owned by another user
     ("detected dubious ownership"): the same `git -C start rev-parse
     --git-dir` `git_dir_answer` asks (one answer per detection pass), read
-    for git's reason, which names `safe.directory` in every language. Never
-    raises; False when git cannot be asked."""
+    for git's hint line, `git config --global --add safe.directory <path>`,
+    which git prints untranslated, naming `start` itself. Never raises;
+    False when git cannot be asked."""
     from shared.git_helpers import answered_once
     from shared.project_scope import git_env_without_location
 
@@ -1722,9 +1724,28 @@ def git_refuses_ownership(start) -> bool:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return False
-    # Keyed on `safe.directory`, the config name git's hint prints in every
-    # language, not on the English "dubious ownership" git translates.
-    return result.returncode != 0 and b"safe.directory" in (result.stderr or b"")
+    if result.returncode == 0:
+        return False
+    # Keyed on git's untranslated hint line, not on the English "dubious
+    # ownership" git translates, nor on "safe.directory" anywhere, which a
+    # path git echoes can contain; the line must name `start`, since a path
+    # holding a newline can carry a whole hint line naming somewhere else.
+    try:
+        asked = os.path.realpath(str(start) if start is not None else os.getcwd())
+    except (OSError, ValueError):
+        return False
+    prefix = b"git config --global --add safe.directory "
+    for line in (result.stderr or b"").splitlines():
+        line = line.lstrip()
+        if not line.startswith(prefix):
+            continue
+        try:
+            named = shlex.split(os.fsdecode(line[len(prefix):]))
+        except ValueError:
+            continue
+        if len(named) == 1 and os.path.realpath(named[0]) == asked:
+            return True
+    return False
 
 
 # =============================================================================

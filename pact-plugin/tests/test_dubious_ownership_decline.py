@@ -78,17 +78,18 @@ def test_control_the_same_repository_owned_by_this_user_resolves(refused_repo, c
 
 
 def test_a_translated_refusal_is_still_recognised(tmp_path, monkeypatch):
-    """git translates "detected dubious ownership" but its hint names
-    safe.directory in every language, so detection keys on that. RED WHEN it
-    keys on the English words."""
+    """git translates "detected dubious ownership" but prints its hint line,
+    `git config --global --add safe.directory <path>`, untranslated, so
+    detection keys on that line. RED WHEN it keys on the English words."""
     import subprocess
 
     from scripts import project_identity
 
+    path = bytes(tmp_path)
     german = (
-        b"fatal: Unsicherer Besitz im Repository unter '/x' erkannt\n"
+        b"fatal: Unsicherer Besitz im Repository unter '" + path + b"' erkannt\n"
         b"Um eine Ausnahme f\xc3\xbcr dieses Verzeichnis hinzuzuf\xc3\xbcgen, rufen Sie auf:\n\n"
-        b"\tgit config --global --add safe.directory /x\n"
+        b"\tgit config --global --add safe.directory " + path + b"\n"
     )
 
     def fake_run(command, **kwargs):
@@ -102,3 +103,82 @@ def test_a_translated_refusal_is_still_recognised(tmp_path, monkeypatch):
 
     monkeypatch.setattr(project_identity.subprocess, "run", other_failure)
     assert project_identity.git_refuses_ownership(tmp_path) is False
+
+    def echoed_path(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command, 128, b"",
+            b"fatal: not a git repository: /x/dubious ownership/safe.directory/missing\n",
+        )
+
+    monkeypatch.setattr(project_identity.subprocess, "run", echoed_path)
+    assert project_identity.git_refuses_ownership(tmp_path) is False
+
+
+def test_a_path_naming_safe_directory_is_not_an_ownership_refusal(tmp_path, monkeypatch, capfd):
+    """git echoes a broken gitfile's target, so "safe.directory" in a path is
+    not git's hint. RED WHEN detection matches "safe.directory" anywhere in
+    stderr instead of git's hint line."""
+    from scripts import project_identity
+
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".git").write_text(f"gitdir: {proj / 'safe.directory' / 'missing'}\n")
+    store = tmp_path / "mem.db"
+    conn = sqlite3.connect(str(store))
+    create_test_schema(conn)
+    conn.commit()
+    conn.close()
+    monkeypatch.chdir(proj)
+    assert project_identity.git_refuses_ownership(proj) is False
+    code, envelope, _ = _cli(
+        ["save", "--stdin", "--db-path", str(store)], capfd,
+        stdin=json.dumps({"context": "x"}), monkeypatch=monkeypatch,
+    )
+    assert code != 0 and envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED", envelope
+    message = envelope["message"]
+    assert "dubious ownership" not in message and "git config --global" not in message, message
+    assert "Check that git is installed" in message, message
+
+
+def test_the_real_refusal_is_recognised_by_its_hint_line(refused_repo, monkeypatch):
+    from scripts import project_identity
+
+    repo, _ = refused_repo
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    assert project_identity.git_refuses_ownership(repo) is True
+
+
+def test_a_hint_line_naming_another_path_is_not_this_refusal(tmp_path, monkeypatch):
+    """A directory name holding a newline makes git echo a whole hint line.
+    RED WHEN any hint line counts, whatever path it names."""
+    import subprocess
+
+    from scripts import project_identity
+
+    assert_outside_repository(tmp_path)
+    proj = tmp_path / "a\n\tgit config --global --add safe.directory /elsewhere"
+    proj.mkdir(parents=True)
+    (proj / ".git").write_text("gitdir: missing\n")
+    assert project_identity.git_refuses_ownership(proj) is False
+
+    def names_elsewhere(command, **kwargs):
+        return subprocess.CompletedProcess(
+            command, 128, b"",
+            b"fatal: not a git repository: /a\n\tgit config --global --add safe.directory /elsewhere\n",
+        )
+
+    monkeypatch.setattr(project_identity.subprocess, "run", names_elsewhere)
+    assert project_identity.git_refuses_ownership(tmp_path) is False
+
+
+def test_a_quoted_hint_path_still_names_this_repository(tmp_path, monkeypatch):
+    """git single-quotes a path holding a space in its hint."""
+    from scripts import project_identity
+
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    repo = make_repo(tmp_path / "my proj", remote="https://github.com/me/proj.git")
+    monkeypatch.setenv("GIT_TEST_ASSUME_DIFFERENT_OWNER", "1")
+    assert project_identity.git_refuses_ownership(repo) is True
