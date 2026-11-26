@@ -633,6 +633,10 @@ class TestLegacyScopeStatesAreDocumented:
             "unproven: it is not read, and its rekey command is printed once "
             "per process, with the cause."
         ) in _body(SKILL)
+        assert (
+            "That line goes to stderr: read stderr as well as stdout, or the "
+            "bucket's memories seem to vanish with no message."
+        ) in _body(SKILL)
 
     def test_an_unattributed_row_is_read_with_a_warning(self):
         assert (
