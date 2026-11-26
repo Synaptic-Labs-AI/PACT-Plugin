@@ -289,8 +289,11 @@ def git_ceiling_directories(value: Optional[str]) -> set:
     every walk, so the walks stop where git stops.
 
     Split on `os.pathsep`; a relative entry is dropped. Before the first
-    EMPTY entry each entry is its real path, and one git cannot resolve (a
-    missing component) is dropped. After it each entry is kept AS WRITTEN,
+    EMPTY entry each entry is its real path, and an entry with any missing
+    component is dropped. git drops one whose missing component is in the
+    middle (measured below) and keeps one whose LAST component is missing,
+    but such a directory does not exist, so it is never a parent of the
+    directory a walk starts from: dropping it stops no walk git would not. After it each entry is kept AS WRITTEN,
     with one trailing `/` removed and nothing else normalised. Measured on
     git 2.43: after the empty entry `<r>/z/../x`, `<r>/x/.`, `<r>//x` and
     `<r>/x//` do not stop discovery at `<r>/x` while `<r>/x/` does; before
