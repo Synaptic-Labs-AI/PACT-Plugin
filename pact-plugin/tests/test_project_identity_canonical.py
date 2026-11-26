@@ -63,18 +63,52 @@ class TestNormalizationEquivalence:
         )
         assert len(outputs) == 1, f"spellings diverged: {outputs}"
 
-    def test_one_home_relative_repository_spelled_five_ways_has_one_id(self):
-        """Catches `~/` (the login's home) splitting from the scp-relative
-        spelling git resolves in that same home."""
+    def test_an_explicit_home_names_its_login(self):
+        """`~/` is the login's home, so every spelling of git's home path
+        for login git is `host/~git/...`, and it is the id `~git/...` gives
+        from any login. RED WHEN the `~` is dropped (two logins' homes, and
+        a home and an absolute path, would share an id) or the login is
+        ignored."""
         urls = [
-            "git@host:srv/repo.git",
             "git@host:~/srv/repo.git",
             "ssh://git@host/~/srv/repo.git",
             "git+ssh://git@host/~/srv/repo",
             "ssh+git://git@host/%7E/srv/repo",
+            "ssh://git:secret@host/~/srv/repo",
+            "alice@host:~git/srv/repo",
         ]
         outputs = {pi.normalize_remote_url(url) for url in urls}
-        assert outputs == {"host/srv/repo"}, outputs
+        assert outputs == {"host/~git/srv/repo"}, outputs
+
+    @pytest.mark.parametrize("left, right, same", [
+        ("ssh://alice@box/~/proj", "bob@box:~alice/proj", True),
+        ("alice@box:~/proj", "ssh://alice@box/~alice/proj", True),
+        ("alice@box:~/proj", "bob@box:~/proj", False),
+        ("alice@box:~/proj", "alice@box:/proj", False),
+        ("ssh://box/~/proj", "ssh://alice@box/~/proj", False),
+    ])
+    def test_each_home_spelling_meets_the_home_it_names(self, left, right, same):
+        assert (pi.normalize_remote_url(left) == pi.normalize_remote_url(right)) is same, (
+            pi.normalize_remote_url(left), pi.normalize_remote_url(right)
+        )
+
+    def test_a_home_with_no_login_keeps_its_tilde(self):
+        assert pi.normalize_remote_url("ssh://box/~/proj") == "box/~/proj"
+
+    def test_a_path_with_no_tilde_ignores_the_login(self):
+        """The remaining plain-sshd case, unchanged on purpose: a forge's
+        path is virtual, so `git@host:o/r` must keep the https spelling's id.
+        Two logins' relative paths and an absolute path share one id there
+        (a pin separates them)."""
+        assert {
+            pi.normalize_remote_url("alice@box:proj"),
+            pi.normalize_remote_url("bob@box:proj"),
+            pi.normalize_remote_url("box:/proj"),
+            pi.normalize_remote_url("ssh://carol@box/proj"),
+        } == {"box/proj"}
+        assert pi.normalize_remote_url("git@gitlab.com:Org/Repo.git") == (
+            pi.normalize_remote_url("https://gitlab.com/Org/Repo")
+        )
 
     def test_another_users_home_is_never_stripped(self):
         """`~user/...` names another user's home, and is SourceHut's real
@@ -87,6 +121,9 @@ class TestNormalizationEquivalence:
         assert sourcehut == {"git.sr.ht/~user/repo"}, sourcehut
         assert pi.normalize_remote_url("git@host:~user/repo") != (
             pi.normalize_remote_url("git@host:~/repo")
+        )
+        assert pi.normalize_remote_url("user@host:~/repo") == (
+            pi.normalize_remote_url("git@host:~user/repo")
         )
 
     def test_a_tilde_with_no_home_expansion_is_kept(self):

@@ -497,7 +497,7 @@ def test_a_github_path_github_does_not_serve_declines(url):
 
 
 @pytest.mark.parametrize("url, expected", [
-    ("git@host:~/srv/repo", "host/srv/repo"),
+    ("git@host:~/srv/repo", "host/~git/srv/repo"),
     ("git@host:srv/repo/.git", "host/srv/repo"),
     ("https://github.com/o/r.git/", "github.com/o/r"),
 ])

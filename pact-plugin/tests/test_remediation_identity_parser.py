@@ -1484,9 +1484,10 @@ class TestHomeRelativeSpellingsFollowGitsParse:
     sends (`git-upload-pack '<path>'`) for each spelling; nothing is contacted.
 
     On a plain sshd, a sent `~/P` and a sent `P` are one directory (the
-    login's home). A sent `/P` also shares the id by the accepted rule that
-    relative and absolute scp paths are one id. A sent `~user/P` is another
-    home and must keep its own id. An scp path is sent literally, so scp
+    login's home), but only the `~` spelling says so, so a sent `~/P` is
+    the login's home, `~git/P`, its own id. A sent `/P` shares the id of
+    `P` by the accepted rule that relative and absolute scp paths are one
+    id. A sent `~user/P` is another home and keeps its own id. An scp path is sent literally, so scp
     `%7E/...` is a directory named `%7E`, not the home."""
 
     SPELLINGS = (
@@ -1530,8 +1531,9 @@ class TestHomeRelativeSpellingsFollowGitsParse:
 
     @staticmethod
     def _home_key(sent_path: str) -> str:
+        # Every spelling logs in as `git`, so a sent `~/P` is `~git/P`.
         if sent_path.startswith("~/"):
-            return sent_path[2:]
+            return "~git/" + sent_path[2:]
         return sent_path.lstrip("/")
 
     def test_spellings_git_sends_to_one_directory_share_one_id(self, tmp_path):
@@ -1554,7 +1556,7 @@ class TestHomeRelativeSpellingsFollowGitsParse:
         sent = self._sent_paths(tmp_path)
 
         keys = {self._home_key(path) for path in sent.values()}
-        assert keys == {"srv/repo", "~user/srv/repo", "%7E/srv/repo"}, sent
+        assert keys == {"srv/repo", "~git/srv/repo", "~user/srv/repo", "%7E/srv/repo"}, sent
         assert sent["ssh://git@host/~%2Fsrv/repo"] == "~/srv/repo", sent
 
 

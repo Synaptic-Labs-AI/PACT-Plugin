@@ -498,6 +498,10 @@ Two operator surfaces answer, and they are deliberately ordered:
   `gh/acme/widget`.
   The pin is the remedy: a pin holding `github.com/acme/widget` in the alias
   clone gives it the https clone's bucket.
+  On a plain ssh server (not a forge), `alice@box:proj`, `bob@box:proj` and
+  `box:/proj` all give `box/proj` though they can be three repositories; a
+  path written with `~` keeps its login (`alice@box:~/proj` gives
+  `box/~alice/proj`). A pin gives each of the others its own id.
   It must be a regular file: a FIFO or a symlink in that position is refused, and an
   unusable file is reported as `override_ignored` and resolution continues
   without it. The file is never read, so nothing is reported, when git

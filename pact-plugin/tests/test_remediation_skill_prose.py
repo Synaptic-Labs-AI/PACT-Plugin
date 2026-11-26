@@ -737,6 +737,14 @@ class TestLegacyScopeStatesAreDocumented:
         ) in body
         assert "earlier mixed-case spelling" not in body
 
+    def test_the_plain_ssh_collapse_and_its_pin_remedy_are_stated(self):
+        assert (
+            "On a plain ssh server (not a forge), alice@box:proj, bob@box:proj and "
+            "box:/proj all give box/proj though they can be three repositories; a "
+            "path written with ~ keeps its login (alice@box:~/proj gives "
+            "box/~alice/proj). A pin gives each of the others its own id."
+        ) in _body(SKILL)
+
     def test_an_alias_id_is_shared_only_by_clones_using_that_alias(self):
         assert (
             "Only clones whose origin uses that same alias share an alias id. "

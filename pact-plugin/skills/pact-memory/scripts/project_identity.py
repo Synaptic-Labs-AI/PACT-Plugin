@@ -929,17 +929,21 @@ def _has_control_character(value: str) -> bool:
 _HOME_RELATIVE_SCHEMES = frozenset({"ssh", "git+ssh", "ssh+git"})
 
 
-def _drop_home_prefix(segments: list) -> list:
-    """`segments` without a leading `~` segment that has more path after it.
+def _name_the_home(segments: list, login: Optional[str]) -> list:
+    """`segments` with a leading `~` (the login's home, with more path after
+    it) spelled as `~<login>`.
 
-    git sends `~/srv/repo` for `ssh://host/~/srv/repo` and `git@host:~/srv/repo`,
-    and `srv/repo` for `git@host:srv/repo`. A plain sshd resolves all three
-    in the login's home, so they are one repository and must be one id.
-    Only the bare `~` is dropped: `~user/...` names ANOTHER user's home (and
-    is a forge's real path on SourceHut), and a lone `~` is the home itself.
+    git sends `~/srv/repo` for `ssh://alice@host/~/srv/repo` and
+    `alice@host:~/srv/repo`, which a plain sshd resolves in alice's home,
+    the directory `~alice/srv/repo` names from any login. So the id is
+    `host/~alice/srv/repo` and two logins' homes stay two ids. With no login
+    in the URL the home is unknown, and `~` stays as written. `~user/...`
+    is kept as is (another user's home, and SourceHut's real path), and so
+    is a lone `~`. A path with no `~` is not touched: on a forge it is
+    virtual, so `git@host:o/r` keeps the https spelling's id.
     """
-    if len(segments) > 1 and segments[0] == "~":
-        return segments[1:]
+    if len(segments) > 1 and segments[0] == "~" and login:
+        return ["~" + login, *segments[1:]]
     return segments
 
 
@@ -989,8 +993,10 @@ def normalize_remote_url(url: object) -> Optional[str]:
         authority, separator, path = rest.partition("/")
         if not separator or not path:
             return None
+        login = None
         if "@" in authority:
-            authority = authority.rsplit("@", 1)[1]
+            userinfo, authority = authority.rsplit("@", 1)
+            login = userinfo.split(":", 1)[0] or None
         if authority.startswith("["):
             # An IPv6 literal: its colons are inside the brackets, and a port
             # can only follow the closing bracket.
@@ -1034,7 +1040,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         if not segments:
             return None
         if scheme in _HOME_RELATIVE_SCHEMES:
-            segments = _drop_home_prefix(segments)
+            segments = _name_the_home(segments, login)
         identifier = _identifier(host, port, segments, ssh)
     else:
         scp_match = _scp_match(value)
@@ -1058,13 +1064,14 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # `bob@host:repo` share one), and nothing in the URL says which kind
         # of server it is.
         #
-        # HOME-RELATIVE SPELLINGS JOIN THAT SAME ID: `git@host:~/srv/repo` and
-        # `ssh://git@host/~/srv/repo` send `~/srv/repo`, which a plain sshd
-        # resolves exactly as it resolves `srv/repo` (`_drop_home_prefix`). So
-        # the one accepted collision above is reached by more spellings, and
-        # no new kind of collision is added. The `~` is tested on the RAW scp
-        # path, because git sends an scp path literally: `%7E/srv/repo` is a
-        # directory named `%7E`, not the home.
+        # AN EXPLICIT HOME NAMES ITS LOGIN: `alice@host:~/srv/repo` and
+        # `ssh://alice@host/~/srv/repo` send `~/srv/repo`, alice's home, so
+        # their id is `host/~alice/srv/repo`, the id `~alice/srv/repo` gives
+        # from any login (`_name_the_home`). Only the `~` spelling says the
+        # path is home-relative; a forge never uses it (GitHub declines it).
+        # The `~` is tested on the RAW scp path, because git sends an scp
+        # path literally: `%7E/srv/repo` is a directory named `%7E`, not the
+        # home.
         #
         # Exactly ONE leading slash is removed, mirroring the URL branch's
         # `partition("/")`: a doubled separator still declines in BOTH
@@ -1087,7 +1094,8 @@ def normalize_remote_url(url: object) -> Optional[str]:
         if not segments:
             return None
         if path.startswith("~/"):
-            segments = _drop_home_prefix(segments)
+            user = scp_match.group("user")
+            segments = _name_the_home(segments, user[:-1] if user else None)
         # ONE SEGMENT IS ENOUGH. `git@host:repo` and `https://host/repo` name
         # the same endpoint, and the grammar allows a single segment;
         # declining the scp spelling while accepting the URL spelling would
