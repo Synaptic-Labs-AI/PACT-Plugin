@@ -362,3 +362,53 @@ class TestEndToEndOverTheRealSeam:
             "project_dir": str(project),
             "started_at": earliest,
         }]
+
+
+
+class TestAHeldLedgerLockIsWaitedOnOnce:
+    def test_a_held_lock_costs_one_wait_and_every_folder_is_still_reaped(
+        self, tmp_path, monkeypatch
+    ):
+        """RED WHEN each reaped folder waits out the held lock again, so a
+        contended ledger stalls SessionEnd about a second per folder."""
+        import fcntl
+
+        slug_dir = tmp_path / "slug"
+        project = tmp_path / "proj"
+        project.mkdir()
+        entries = [
+            _session(slug_dir, project, session_id=f"{i:08d}-1111-2222-3333-444444444444")
+            for i in range(5)
+        ]
+        ledger = slug_dir / LEDGER
+        ledger.write_bytes(b"")
+        waits = []
+        real_lock = session_end._lock_ledger_bounded
+
+        def counted(fd):
+            waits.append(fd)
+            return real_lock(fd)
+
+        monkeypatch.setattr(session_end, "_lock_ledger_bounded", counted)
+        holder = os.open(ledger, os.O_RDWR)
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        try:
+            started = time.monotonic()
+            _reap(slug_dir)
+            elapsed = time.monotonic() - started
+        finally:
+            os.close(holder)
+        assert len(waits) == 1, waits
+        assert elapsed < 3, elapsed
+        assert not any(entry.exists() for entry in entries)
+        assert _lines(slug_dir) == []
+
+    def test_control_a_free_lock_records_every_folder(self, tmp_path):
+        slug_dir = tmp_path / "slug"
+        project = tmp_path / "proj"
+        project.mkdir()
+        ids = [f"{i:08d}-1111-2222-3333-444444444444" for i in range(5)]
+        for session_id in ids:
+            _session(slug_dir, project, session_id=session_id)
+        _reap(slug_dir)
+        assert sorted(_ids(slug_dir)) == ids
