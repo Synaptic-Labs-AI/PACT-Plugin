@@ -1414,16 +1414,10 @@ def read_origin(git_dir: Path) -> OriginRead:
                 capture_output=True,
                 text=False,
                 timeout=5,
-                # Inline, so the resolver git-env guard can check the shape: a
-                # pure key filter over the location-free environment.
-                env={
-                    name: setting
-                    for name, setting in git_env_without_location().items()
-                    if name != "GIT_CONFIG"
-                },
+                env=git_env_without_location(without=("GIT_CONFIG",)),
             ),
             text=False,
-            env={name: setting for name, setting in git_env_without_location().items() if name != "GIT_CONFIG"},
+            env=git_env_without_location(without=("GIT_CONFIG",)),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return OriginRead(ORIGIN_UNAVAILABLE, None)

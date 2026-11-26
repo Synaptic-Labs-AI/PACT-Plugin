@@ -7002,10 +7002,6 @@ class TestEveryRouteEntryConditionIsARoute:
             "start; it replaces the start the git rung and the declared rungs ask from, and "
             "its own body is read like any reached function"
         ),
-        ("call", "<call to no function project_identity: git_env_without_location().items>"): (
-            "iterates the environment copy git_env_without_location builds for a git "
-            "subprocess"
-        ),
         ("call", "<call to no function memory_api: PACTMemory._identity_at_root(...)._replace>"): (
             "_replace on the result of _identity_at_root"
         ),

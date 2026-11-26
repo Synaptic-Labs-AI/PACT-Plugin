@@ -116,8 +116,9 @@ def same_path(a: Path, b: Path) -> bool:
     return _same_file(a, b) is True
 
 
-def git_env_without_location() -> dict:
-    """Return this process's environment without the git location variables.
+def git_env_without_location(without: "tuple[str, ...]" = ()) -> dict:
+    """Return this process's environment without the git location variables,
+    and without the names in `without` (it only removes, never adds).
 
     Every git call that decides which project a directory belongs to runs with
     it -- this module's guard and the CLAUDE.md resolvers alike -- so the
@@ -126,7 +127,7 @@ def git_env_without_location() -> dict:
     return {
         key: value
         for key, value in os.environ.items()
-        if key not in _GIT_LOCATION_VARIABLES
+        if key not in _GIT_LOCATION_VARIABLES and key not in without
     }
 
 
