@@ -6628,10 +6628,10 @@ class PACTMemory:
         carries the outcome as for save(); `empty` means nothing was
         projected -- no project id resolved, or the project has no records --
         and the file was not touched. A resolved id with no records whose old
-        folder-name bucket this read hides (unproven, excluded, or a case
-        variant) gets a section whose every entry's Memory ID names a row of
-        such a bucket
-        rewritten with none (`wrote`), so it never shows what reads no
+        folder-name bucket this read hides (unproven, excluded, a case
+        variant, an ambiguous match or a submodule's suppressed name) gets a
+        section whose every entry's Memory ID names a row of a bucket this
+        read hides rewritten with none (`wrote`), so it never shows what reads no
         longer return.
 
         Refuses (raises ProjectScopeDisagreementError, status `refused`) when
@@ -6682,8 +6682,9 @@ class PACTMemory:
         records = self.list(limit=MAX_WORKING_MEMORIES)
         payload = [r.to_dict() for r in records]
         legacy = self._legacy_scope_state or {}
-        # THIS CHECKOUT'S BUCKETS THE READ HIDES: its legacy candidate when
-        # unproven or excluded, and its case variants (never read).
+        # EVERY BUCKET THIS READ HIDES FOR THIS CHECKOUT: its legacy candidate
+        # when unproven or excluded, its case variants and ambiguous folded
+        # matches (never read), and a submodule's suppressed candidate.
         hidden = [
             *(
                 [legacy["candidate"]]
@@ -6692,6 +6693,12 @@ class PACTMemory:
                 else []
             ),
             *(legacy.get("case_variant") or []),
+            *(legacy.get("ambiguous") or []),
+            *(
+                [legacy["suppressed_candidate"]]
+                if legacy.get("suppressed_candidate")
+                else []
+            ),
         ]
         if not payload and not hidden:
             # NOTHING HIDDEN (a fresh store, or no old bucket): the section is
@@ -6699,9 +6706,9 @@ class PACTMemory:
             self._last_sync_status = SyncResult.EMPTY
             return []
         if not payload:
-            # NO ROWS, AND THIS READ HIDES THIS CHECKOUT'S OLD BUCKET (unproven
-            # or excluded, or a case variant): a section whose every entry's
-            # Memory ID names a row of a hidden bucket shows what reads no longer return, so it is
+            # NO ROWS, AND THIS READ HIDES A BUCKET OF THIS CHECKOUT (`hidden`):
+            # a section whose every entry's Memory ID names a row of a bucket
+            # this read hides shows what reads no longer return, so it is
             # rewritten with none. Any other section (no entry, an entry with
             # no id or another bucket's id, as in a committed CLAUDE.md on a
             # new clone), and a refused or failed rewrite, leave the file as

@@ -7592,6 +7592,10 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', 'bucket_evidence'): (
             "counts from the store's rows what a legacy bucket's file rows show about its owner, for the read scope; it asks git nothing" + _AFTER_DETECTION
         ),
+        ("call", "<name imported from a project module cli: _UNPROVEN_WARNED>"): (
+            "the set of legacy notices this process already printed, read so a rekey "
+            "says its unattributed count once" + _AFTER_DETECTION
+        ),
         ('call', 'entry_memory_id'): (
             "reads the Memory ID a Working Memory entry names, to decide whether a stale section is emptied"
             + _AFTER_DETECTION

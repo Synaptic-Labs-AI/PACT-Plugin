@@ -64,6 +64,7 @@ from scripts.memory_api import (
     PACTMemory,
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
+    _UNPROVEN_WARNED,
     _invalidate_legacy_scope_cache,
     _read_only_connection,
     _stable_read_only,
@@ -1300,8 +1301,15 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         # AN APPLIED MOVE READS THE SCOPE QUIETLY: the legacy notices advise
         # the very move this run performs, so printing them beside its result
         # contradicts it. A dry run keeps them.
+        warned_before = set(_UNPROVEN_WARNED)
         with legacy_notices_quiet() if args.apply else nullcontext():
             memory._read_project_scopes()
+        # Whether THIS read disclosed --from's unattributed memories itself.
+        read_disclosed = any(
+            len(key) == 3 and key[1] == from_id
+            and key[2] in ("unattributed", "verified_unattributed")
+            for key in set(_UNPROVEN_WARNED) - warned_before
+        )
     except db_sqlite3.DatabaseError as exc:
         _exit_store_fault(exc, store, "REKEY_FAILED")
     state = memory._legacy_scope_state or {}
@@ -1529,9 +1537,10 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         if legacy_verdict is not None and not noop
         else 0
     )
-    if unattributed and not counters.get("from_bucket_empty"):
-        # A MOVE OF ROWS NO RECORDED SESSION WROTE IS NEVER SILENT: the read's
-        # disclosure is quiet during --apply, so the rekey states it itself.
+    if unattributed and not counters.get("from_bucket_empty") and not read_disclosed:
+        # A MOVE OF ROWS NO RECORDED SESSION WROTE IS SAID EXACTLY ONCE: the
+        # read's disclosure is quiet during --apply, so the rekey states it
+        # then; a dry run states it only when its read did not.
         _best_effort_report(
             print,
             escape_for_envelope(
@@ -1868,10 +1877,9 @@ def build_parser():
             "or delete and run sync again. When project identity is unresolved "
             "or the project has no memories, sync reports sync_status 'empty' "
             "and leaves the file untouched, except that a resolved project with "
-            "no memories whose old folder-name bucket this read hides (unproven, "
-            "excluded, or a case variant), and whose section's every entry names "
-            "a row of such a bucket by its Memory ID, has the section rewritten with none "
-            "('wrote'). When the project has memories but "
+            "no memories whose section's every entry names, by its Memory ID, a "
+            "row of a bucket this read hides for this checkout has the section "
+            "rewritten with none ('wrote'). When the project has memories but "
             "no CLAUDE.md resolves, sync reports 'unresolved' and writes "
             "nothing. An empty result is not proof the "
             "project has no memories: run `project-id show`. Only this "

@@ -194,14 +194,16 @@ def test_another_process_write_mid_command_re_decides_the_bucket(checkout, caplo
     assert state["unproven"] and not state["verified"], state
 
 
-@pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
-def test_a_rekey_of_unattributed_rows_says_how_many_it_moves(checkout, capfd, apply):
+@pytest.mark.parametrize("run", ["dry-run", "apply", "dry-run-again"])
+def test_a_rekey_of_unattributed_rows_says_how_many_it_moves_once(checkout, capfd, caplog, run):
     """A defaulted rekey of a verified bucket holding memories from no
-    recorded session states their count, for the plan and the move alike
-    (the read's own disclosure is quiet during --apply). What moves is
-    unchanged: the whole bucket. The id is shown as typed on the command
-    line (shell-quoted only when it needs it), not as a Python repr. RED WHEN
-    either run is silent about them, or quotes the id with repr."""
+    recorded session states their count exactly once per run. A dry run's
+    read discloses it (the informational line), so the rekey adds nothing;
+    --apply reads quietly, so the rekey prints its note; a second dry run in
+    the same process, whose read stays silent (once per process), gets the
+    note. What moves is unchanged: the whole bucket. The id is shown as typed
+    (shell-quoted only when it needs it). RED WHEN a run is silent about
+    them, says it twice, or quotes the id with repr."""
     import json
 
     from scripts.cli import main
@@ -210,16 +212,27 @@ def test_a_rekey_of_unattributed_rows_says_how_many_it_moves(checkout, capfd, ap
     _rows(store, [("m1", None), ("m2", None)],
           file_path=str(repo.resolve() / "src" / "a.py"))
     argv = ["project-id", "rekey", "--from=proj", "--db-path", str(store)]
-    with pytest.raises(SystemExit) as exit_info:
-        main(argv + (["--apply"] if apply else []))
+    if run == "dry-run-again":
+        with pytest.raises(SystemExit):
+            main(argv)
+        capfd.readouterr()
+        caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(SystemExit) as exit_info:
+            main(argv + (["--apply"] if run == "apply" else []))
     out, err = capfd.readouterr()
     assert exit_info.value.code == 0, err
     assert json.loads(out)["result"]["memories"] == 2, out
-    verb = "moved" if apply else "would move"
-    assert (
-        "2 of the memories in --from=proj came from no recorded session; "
-        f"this rekey {verb} them with the bucket."
-    ) in err, err
+    read_lines = [r.getMessage() for r in caplog.records if "no recorded session" in r.getMessage()]
+    note = (
+        "2 of the memories in --from=proj came from no recorded session; this "
+        f"rekey {'moved' if run == 'apply' else 'would move'} them with the bucket."
+    )
+    assert len(read_lines) + err.count("came from no recorded session") == 1, (read_lines, err)
+    if run == "dry-run":
+        assert read_lines and "2 of its memories came from no recorded session" in read_lines[0]
+    else:
+        assert note in err, err
 
 
 def test_a_vouched_bucket_with_no_unattributed_row_reads_quietly(checkout, caplog):

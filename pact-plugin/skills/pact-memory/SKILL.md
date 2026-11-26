@@ -773,7 +773,7 @@ Shows recent memories (default: 20).
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/scripts/cli.py" sync
 ```
-The Working Memory section of CLAUDE.md is a derived view of the store. `sync` replaces it with this project's newest 3 memories, each under its own date; to change what the section shows, `update` or `delete` the record, then run `sync` again. A `sync_status` of `empty` means either that no project identity resolved or that the resolved project has no memories; the file was not touched. A resolved project with no memories whose old folder-name bucket the read hides (unproven, excluded, or a case variant), and whose section's every entry names a row of such a bucket by its Memory ID, has the section rewritten with none, and `sync_status` is `wrote`. Check the envelope's `project_id` against the project you expected: `null` means no project identity resolved.
+The Working Memory section of CLAUDE.md is a derived view of the store. `sync` replaces it with this project's newest 3 memories, each under its own date; to change what the section shows, `update` or `delete` the record, then run `sync` again. A `sync_status` of `empty` means either that no project identity resolved or that the resolved project has no memories; the file was not touched. A resolved project with no memories whose section's every entry names, by its Memory ID, a row of a bucket this read hides for this checkout (the old folder-name bucket when unproven or excluded, a case variant or ambiguous match of it, or a submodule's suppressed name) has the section rewritten with none, and `sync_status` is `wrote`. Check the envelope's `project_id` against the project you expected: `null` means no project identity resolved.
 
 ## Best Practices
 

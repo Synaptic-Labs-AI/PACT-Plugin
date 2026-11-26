@@ -671,10 +671,9 @@ class TestTheSyncHelpMatchesWhatSyncReports:
     EMPTY_SENTENCE = (
         "When project identity is unresolved or the project has no memories, "
         "sync reports sync_status 'empty' and leaves the file untouched, except "
-        "that a resolved project with no memories whose old folder-name bucket "
-        "this read hides (unproven, excluded, or a case variant), and whose "
-        "section's every entry names a row of such a bucket by its Memory ID, "
-        "has the section rewritten with none ('wrote')."
+        "that a resolved project with no memories whose section's every entry "
+        "names, by its Memory ID, a row of a bucket this read hides for this "
+        "checkout has the section rewritten with none ('wrote')."
     )
     UNRESOLVED_SENTENCE = (
         "When the project has memories but no CLAUDE.md resolves, sync "
@@ -749,10 +748,11 @@ class TestTheSyncHelpMatchesWhatSyncReports:
 
         skill = (Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "SKILL.md")
         assert (
-            "A resolved project with no memories whose old folder-name bucket the "
-            "read hides (unproven, excluded, or a case variant), and whose "
-            "section's every entry names a row of such a bucket by its Memory "
-            "ID, has the section rewritten with none, and `sync_status` is "
+            "A resolved project with no memories whose section's every entry "
+            "names, by its Memory ID, a row of a bucket this read hides for this "
+            "checkout (the old folder-name bucket when unproven or excluded, a "
+            "case variant or ambiguous match of it, or a submodule's suppressed "
+            "name) has the section rewritten with none, and `sync_status` is "
             "`wrote`."
         ) in " ".join(skill.read_text(encoding="utf-8").split())
         remote = UNREPRESENTABLE if shape == "declined" else "https://github.com/o/proj.git"
@@ -795,6 +795,74 @@ class TestTheSyncHelpMatchesWhatSyncReports:
         else:
             assert envelope["result"]["sync_status"] == "empty", envelope
             assert text == original
+
+    def _sync_stale(self, where, store, capfd, memory_id="row000001"):
+        target = where / "CLAUDE.md"
+        original = self.STALE.format(memory_id=memory_id)
+        target.write_text(original, encoding="utf-8")
+        code, envelope = _cli(
+            ["sync", "--db-path", str(store), "--claude-md-root", str(where)], capfd
+        )
+        assert code == 0, envelope
+        return envelope["result"], original, target.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("foreign", [False, True], ids=["hidden", "foreign"])
+    def test_an_ambiguous_folded_match_is_a_hidden_bucket(
+        self, identity_env, store, monkeypatch, capfd, foreign
+    ):
+        """On a filesystem that folds case, buckets 'Proj' and 'PROJ' both
+        match folder 'proj', so neither is read (ambiguous). A section whose
+        entry names a row of one of them is rewritten ('wrote'); one naming a
+        foreign row stays. RED WHEN ambiguous buckets are not counted as
+        hidden."""
+        from scripts import project_identity
+        from scripts.working_memory import WORKING_MEMORY_COMMENT
+
+        monkeypatch.setattr(project_identity, "filesystem_case_insensitive", lambda root: True)
+        where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(where)
+        _seed(store, "Proj", memory_id="row000001", path="a.py")
+        _seed(store, "PROJ", memory_id="row000002", path="b.py")
+        result, original, text = self._sync_stale(
+            where, store, capfd, "foreign00001" if foreign else "row000001"
+        )
+        _code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert shown["result"]["legacy_scope"]["ambiguous"] == ["PROJ", "Proj"], shown
+        if foreign:
+            assert result["sync_status"] == "empty" and text == original, result
+        else:
+            assert result["sync_status"] == "wrote", result
+            assert "an old folder-name memory" not in text and WORKING_MEMORY_COMMENT in text
+
+    @pytest.mark.parametrize("foreign", [False, True], ids=["hidden", "foreign"])
+    def test_a_submodules_suppressed_bucket_is_a_hidden_bucket(
+        self, identity_env, store, monkeypatch, capfd, foreign
+    ):
+        """A submodule checkout's pre-change name (its admin dir's parent,
+        'modules') is suppressed, never read. A section whose entry names a
+        row of it is rewritten ('wrote'); one naming a foreign row stays.
+        RED WHEN the suppressed bucket is not counted as hidden."""
+        from fixtures.identity_git import run_git
+        from scripts.working_memory import WORKING_MEMORY_COMMENT
+
+        upstream = make_repo(identity_env / "libup", remote="https://github.com/acme/lib.git")
+        sup = make_repo(identity_env / "super", remote="https://github.com/acme/super.git")
+        run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                str(upstream), "lib", cwd=sup)
+        lib = sup / "lib"
+        run_git("remote", "set-url", "origin", "https://github.com/acme/lib.git", cwd=lib)
+        monkeypatch.chdir(lib)
+        _seed(store, "modules", memory_id="row000001", path="a.py")
+        result, original, text = self._sync_stale(
+            lib, store, capfd, "foreign00001" if foreign else "row000001"
+        )
+        _code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert shown["result"]["legacy_scope"]["suppressed_candidate"] == "modules", shown
+        if foreign:
+            assert result["sync_status"] == "empty" and text == original, result
+        else:
+            assert result["sync_status"] == "wrote", result
+            assert "an old folder-name memory" not in text and WORKING_MEMORY_COMMENT in text
 
     def test_unresolved_is_memories_with_no_claude_md(
         self, identity_env, store, monkeypatch, capfd
