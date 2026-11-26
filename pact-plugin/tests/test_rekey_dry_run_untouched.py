@@ -307,3 +307,41 @@ def test_a_disk_fault_during_the_copy_is_blamed_on_the_side_that_failed(
         assert "temporary copy of the store in " in envelope["message"], envelope
     assert store.read_bytes() == before
     assert sorted(p.name for p in tmp_path.glob("mem.db*")) == ["mem.db"], "sidecars beside the store"
+
+
+def test_an_integrity_check_the_store_moved_under_decides_nothing(tmp_path, monkeypatch, capfd):
+    """A writer commits during the integrity check: the immutable read
+    answers "malformed" and the store's stamp moves. That answer is not
+    trusted; the read repeats with locking, where the check passes and the
+    copy's fault is reported as the temporary folder's. RED WHEN the first
+    "malformed" blames the store."""
+    from scripts import cli
+
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/me/proj.git")
+    store = tmp_path / "mem.db"
+    _store_of(store, 3)
+    checks = []
+
+    class _TornFirstCheck(_FailingBackup):
+        def execute(self, sql, *args, **kwargs):
+            if sql == "PRAGMA quick_check":
+                checks.append(sql)
+                if len(checks) == 1:
+                    return self._real.execute("SELECT 'database disk image is malformed'")
+            return self._real.execute(sql, *args, **kwargs)
+
+    real_open = cli._read_only_connection
+    monkeypatch.setattr(
+        cli, "_read_only_connection", lambda path: _TornFirstCheck(real_open(path), False)
+    )
+    stamps = iter([(0, 0, 0, False), (1, 0, 0, False)])
+    real_stamp = cli._store_stamp
+    monkeypatch.setattr(cli, "_store_stamp", lambda path: next(stamps, None) or real_stamp(path))
+    monkeypatch.chdir(repo)
+    argv = ["project-id", "rekey", "--from=proj", "--to=github.com/me/proj", "--db-path", str(store)]
+    code, envelope = _cli(argv, capfd)
+    assert code == 3, envelope
+    assert "temporary copy of the store in " in envelope["message"], envelope
+    assert len(checks) == 2, checks

@@ -43,7 +43,7 @@ import sys
 import tempfile
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, Optional
 
 # Path resolution: add the skill root (parent of scripts/) to sys.path
 # so that `from scripts import PACTMemory` works regardless of cwd.
@@ -68,6 +68,8 @@ from scripts.memory_api import (
     _invalidate_legacy_scope_cache,
     _read_only_connection,
     _stable_read_only,
+    _store_stamp,
+    _LOCKED_READS_ONLY,
     _unproven_cause,
     detection_pass,
     legacy_notices_quiet,
@@ -1209,25 +1211,39 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
         # A failing disk under the STORE raises the same messages, so the
         # copy is blamed only when the store still reads whole.
         if str(exc).startswith(_COPY_FAULT_MESSAGES):
-            if _store_reads_whole(store):
+            whole = _store_reads_whole(store)
+            if whole is True:
                 raise _RekeyCopyFailed(folder or tempfile.tempdir) from exc
-            raise _RekeyStoreFailed(str(store)) from exc
+            if whole is False:
+                raise _RekeyStoreFailed(str(store)) from exc
+            # The store changed during the check: re-raise, and
+            # `_stable_read_only` repeats the read with locking.
         raise
     finally:
         source.close()
 
 
-def _store_reads_whole(store) -> bool:
+def _store_reads_whole(store) -> Optional[bool]:
     """Whether every page of `store` reads back through a fresh read-only
-    open (`PRAGMA quick_check` answers `ok`). Never raises."""
+    open (`PRAGMA quick_check` answers `ok`), or None when that open was
+    immutable and the store changed while it was checked (its `_store_stamp`
+    differs, a journal appeared, or it cannot be stat'ed). An immutable read
+    beside a writer can read a torn page and answer "malformed", so such a
+    check decides nothing; the read then repeats with locking, where the
+    open is not immutable and its answer stands. Never raises."""
+    before = _store_stamp(str(store))
+    immutable = not _LOCKED_READS_ONLY.get() and before is not None and not before[3]
     try:
         probe = _read_only_connection(str(store))
         try:
-            return probe.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+            whole = probe.execute("PRAGMA quick_check").fetchone()[0] == "ok"
         finally:
             probe.close()
     except Exception:
-        return False
+        whole = False
+    if immutable and _store_stamp(str(store)) != before:
+        return None
+    return whole
 
 
 def _bucket_file_rows(store: Path, bucket: str) -> int:
