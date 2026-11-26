@@ -439,7 +439,10 @@ class TestCanonicaliserSpellings:
             "it; otherwise project-id show lists it as an ordinary bucket with no "
             "command, as it does for every bucket when the repository has no "
             "description file, and for a bucket with an existing file in a linked "
-            "worktree outside the repository folder. Join them with project-id "
+            "worktree outside the repository folder. A bucket that also has a file "
+            "row in one of this checkout's submodules is listed as earlier_id with "
+            "no command, and its notice gives that row count, since a whole-bucket "
+            "rekey would move those rows too. Join them with project-id "
             "rekey --from=<id> --to=<id>, and "
             "run it with --apply only with the user's explicit approval."
         ) in _body(SKILL)
@@ -854,7 +857,8 @@ class TestRekeyRemediesNameTheirTarget:
             "Each candidate row is {id, memory_count, relation, rekey}, with "
             "relation one of current, legacy_candidate, case_variant, earlier_id "
             "or other; only a legacy_candidate row that is not excluded, a "
-            "case_variant row and an earlier_id row carry a rekey command"
+            "case_variant row and an earlier_id row with no file row in one of "
+            "this checkout's submodules carry a rekey command"
         ) in row
 
     def test_a_defaulted_target_is_only_for_the_own_candidate(self):

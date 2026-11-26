@@ -300,6 +300,54 @@ def test_a_submodule_row_does_not_hide_a_superprojects_earlier_id(tmp_path, monk
     assert "github.com/acme/oldsuper" in memory._earlier_canonical
 
 
+def test_a_bucket_mostly_in_a_submodule_gets_no_rekey_command(tmp_path, monkeypatch, caplog, capsys):
+    """Five memories link a file in the submodule and one links the
+    superproject's README, all after the clone: the bucket is still named,
+    but its submodule rows are left out of the linked count, the notice says
+    they may be the submodule's, and no rekey command is offered (a whole-
+    bucket rekey would move them into the superproject). RED WHEN a bucket
+    with submodule rows is offered the command or counts them as linked here."""
+    from scripts.cli import main
+
+    assert_outside_repository(tmp_path)
+    upstream = make_repo(tmp_path / "libup", remote="https://github.com/acme/lib.git")
+    (upstream / "x.py").write_text("x\n", encoding="utf-8")
+    run_git("add", "x.py", cwd=upstream)
+    run_git("commit", "-qm", "x", cwd=upstream)
+    sup = make_repo(tmp_path / "super", remote="https://github.com/acme/super.git")
+    run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
+            str(upstream), "lib", cwd=sup)
+    store = tmp_path / "store.db"
+    bucket = "github.com/acme/oldlib"
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        conn.execute("INSERT INTO files (id, path, project_id) VALUES ('fx', ?, ?)",
+                     (str(sup / "lib" / "x.py"), bucket))
+        for index in range(5):
+            _memory(conn, f"s{index}", bucket, _later())
+            conn.execute("INSERT INTO memory_files (memory_id, file_id) VALUES (?, 'fx')",
+                         (f"s{index}",))
+        _memory(conn, "r1", bucket, _later(), sup / "README")
+        conn.commit()
+    _fresh(monkeypatch, sup)
+    memory = PACTMemory(session_id="s", db_path=store)
+    with caplog.at_level(logging.WARNING):
+        memory._read_project_scopes()
+    assert bucket in memory._earlier_canonical
+    assert memory._earlier_canonical[bucket] is None
+    notice = [r.getMessage() for r in caplog.records if bucket in r.getMessage()]
+    assert len(notice) == 1, notice
+    assert "holds 6 memories, 1 linked to files in this checkout outside its submodules" in notice[0]
+    assert "1 of its file rows lies in a submodule of this checkout" in notice[0]
+    assert "--from=" not in notice[0], notice[0]
+    _fresh(monkeypatch, sup)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "show", "--db-path", str(store)])
+    assert exit_info.value.code == 0
+    rows = {row["id"]: row for row in json.loads(capsys.readouterr().out)["result"]["candidates"]}
+    assert (rows[bucket]["relation"], rows[bucket]["rekey"]) == ("earlier_id", None), rows
+
+
 def test_another_buckets_memories_do_not_date_an_earlier_id(tmp_path, monkeypatch):
     """Bucket widget has one memory and no link of its own; its file row here
     is linked only by memories of this checkout's own bucket, saved after the

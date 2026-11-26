@@ -1078,19 +1078,38 @@ def _note_verified_unattributed(store: str, candidate: str, counts: Dict[str, An
 
 def _note_earlier_canonical(
     store: str, bucket: str, scope: str, memories: int, linked: int,
-    command: Optional[str],
+    command: Optional[str], in_submodules: int = 0,
 ) -> None:
     """Name, once per process, a canonical bucket that may be this repository
     under an earlier id (`PACTMemory._earlier_canonical_buckets`), with the
     command that moves it into this checkout's id. `memories` is the
-    bucket's memory count, `linked` those linked to a file in this checkout.
-    A bucket with no memories is not named."""
+    bucket's memory count, `linked` those linked to a file in this checkout
+    outside its submodules, `in_submodules` its file rows inside one; such a
+    bucket gets no command. A bucket with no memories is not named."""
     if _LEGACY_NOTICES_QUIET.get() or not memories:
         return
     key = (store, bucket, scope)
     if key in _EARLIER_CANONICAL_WARNED:
         return
     _EARLIER_CANONICAL_WARNED.add(key)
+    if in_submodules:
+        logger.warning(
+            "project bucket %r holds %d memor%s, %d linked to files in this "
+            "checkout outside its submodules (at least one saved after this "
+            "checkout was cloned). %d of its file rows %s in a submodule of "
+            "this checkout, so it may be that submodule's bucket, and a "
+            "whole-bucket rekey would move those rows too, so no rekey command "
+            "is offered. It may be this repository under an earlier id, but it "
+            "is not this checkout's id %r, so it is NOT in this read scope.",
+            bucket,
+            memories,
+            "y" if memories == 1 else "ies",
+            linked,
+            in_submodules,
+            "lies" if in_submodules == 1 else "lie",
+            scope,
+        )
+        return
     logger.warning(
         "project bucket %r holds %d memor%s, %d linked to files in this "
         "checkout (at least one saved after this checkout was cloned), and "
@@ -4094,6 +4113,7 @@ class PACTMemory:
                         self._read_gate_roots = (str(root), (roots, common))
                         own = self._own_identity(common)
                     for bucket in sorted(with_files):
+                        in_submodules: List[Any] = []
                         evidence = bucket_evidence(
                             connection, bucket, roots or None, root_common=common,
                             recorded_dirs=_recorded_project_dirs,
@@ -4107,6 +4127,7 @@ class PACTMemory:
                             # earlier id: a file that merely exists here (a
                             # README) is shared by unrelated repositories.
                             dated_only=True,
+                            submodule_rows=in_submodules,
                         )
                         # A LIVE OTHER REPOSITORY that cross-links one file here
                         # also has rows in its own checkout (outside): those
@@ -4121,16 +4142,24 @@ class PACTMemory:
                                 # Its rows are linked by another bucket's
                                 # memories: nothing of its own would move.
                                 continue
-                            found[bucket] = runnable_rekey_command(bucket, scope, db_path=store)
+                            # ROWS IN ONE OF THIS CHECKOUT'S SUBMODULES may be the
+                            # submodule's: they are left out of the count, and a
+                            # whole-bucket rekey would move them too, so no
+                            # command is offered for such a bucket.
+                            found[bucket] = (
+                                None if in_submodules
+                                else runnable_rekey_command(bucket, scope, db_path=store)
+                            )
                             linked = connection.execute(
                                 "SELECT COUNT(DISTINCT mf.memory_id) FROM memory_files mf "
                                 "JOIN files f ON f.id = mf.file_id "
                                 "JOIN memories m ON m.id = mf.memory_id "
                                 "WHERE f.project_id = ? AND m.project_id = ? "
-                                f"AND ({' OR '.join(clauses)})",
-                                [bucket, bucket, *params[1:]],
+                                f"AND ({' OR '.join(clauses)}) "
+                                f"AND f.id NOT IN ({', '.join('?' * len(in_submodules))})",
+                                [bucket, bucket, *params[1:], *in_submodules],
                             ).fetchone()[0]
-                            counts[bucket] = (memories, linked)
+                            counts[bucket] = (memories, linked, len(in_submodules))
         except (sqlite3.Error, OSError, StoreFaultError):
             return {}
         # A QUIET RUN (a rekey --apply) is not cached: its notice was
@@ -4142,8 +4171,10 @@ class PACTMemory:
             del _EARLIER_CANONICAL[stale]
         _EARLIER_CANONICAL[key] = found
         for bucket, command in found.items():
-            memories, linked = counts.get(bucket, (0, 0))
-            _note_earlier_canonical(store, bucket, scope, memories, linked, command)
+            memories, linked, in_submodules = counts.get(bucket, (0, 0, 0))
+            _note_earlier_canonical(
+                store, bucket, scope, memories, linked, command, in_submodules
+            )
         return found
 
     def _own_identity(self, common: Any) -> Optional[Tuple[str, Optional[str]]]:

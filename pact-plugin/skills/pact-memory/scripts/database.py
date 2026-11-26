@@ -2102,6 +2102,7 @@ def bucket_evidence(
     recorded_dirs: Optional[Callable[[], Any]] = None,
     same_owner: Optional[Callable[[str], bool]] = None,
     dated_only: bool = False,
+    submodule_rows: Optional[List[Any]] = None,
 ) -> Dict[str, int]:
     """Count a bucket's file rows by what they show about its owner.
 
@@ -2123,7 +2124,8 @@ def bucket_evidence(
         every same-named folder did before this change.
         With `dated_only` only dated rows count, and a row in one of the
         root's submodules is skipped: in no class, though it counts in
-        `file_rows` and `absolute_rows` (an earlier canonical id,
+        `file_rows` and `absolute_rows`, and its id is appended to
+        `submodule_rows` when a list is given (an earlier canonical id,
         `memory_api.PACTMemory._earlier_canonical_buckets`);
       - `vanished`: the path no longer exists, and it is not contained, or
         it is contained but does not count by the rule above (a deleted file
@@ -2196,6 +2198,8 @@ def bucket_evidence(
         if contained and dated_only and not any(
             _contained_by_root(resolved, root, strict, None) for root in root_paths
         ):
+            if submodule_rows is not None:
+                submodule_rows.append(file_id)
             continue
         if contained:
             # A CONTAINED ROW PLACES THE BUCKET HERE ONLY IF ITS FILE IS STILL
