@@ -614,6 +614,20 @@ class TestLegacyScopeStatesAreDocumented:
         for reason in _UNPROVEN_CAUSES:
             assert reason + " (" in body, reason
 
+    def test_no_unproven_cause_says_so_before_the_template_does(self):
+        """The read warning and the rekey refusal append ", so it is ..." to
+        every cause clause, so a clause with its own "so" reads doubled.
+        RED WHEN any cause clause, filled with counts, holds a "so"."""
+        import re
+
+        from scripts.memory_api import _UNPROVEN_CAUSES, _unproven_cause
+
+        counts = {"contained_rows": 1, "foreign_rows": 1, "foreign_checkout_rows": 1,
+                  "elsewhere": 1, "here": 1}
+        for reason in _UNPROVEN_CAUSES:
+            clause = _unproven_cause(reason, counts, "proj")
+            assert not re.search(r"\bso\b", clause), (reason, clause)
+
     def test_unproven_is_not_read_and_names_its_command(self):
         assert (
             "unproven: it is not read, and its rekey command is printed once "

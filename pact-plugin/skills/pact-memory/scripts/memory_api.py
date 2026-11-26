@@ -853,8 +853,8 @@ _UNPROVEN_CAUSES = {
     ),
     "undated": (
         "no file row places it, and the sessions recorded here that wrote it "
-        "have no confirmed start (their journal has no readable first event), "
-        "so they cannot be dated against this repository's `description` file"
+        "have no confirmed start (their journal has no readable first event) "
+        "to date against this repository's `description` file"
     ),
     "no_session": (
         "no file row places it and no session launched at the root of this "
