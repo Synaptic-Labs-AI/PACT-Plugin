@@ -909,6 +909,29 @@ class TestGitDiscoveryHonoursACeilingAsGitDoes:
         (git_dir / "commondir").write_bytes(b"." + b"/" * GIT_FILE_LIMIT)
         assert pi._is_git_directory(git_dir) is False
 
+    @pytest.mark.parametrize("shape", ["{p}\n", "{p}\r\n", " {p}\n", "{p}\t\n", "{p} \n"])
+    def test_commondir_whitespace_is_read_as_git_reads_it(self, tmp_path, shape):
+        """A folder with HEAD whose commondir names the real common dir with
+        whitespace around it: it is a git directory exactly when git accepts
+        it (git drops only trailing CRs and LFs). RED WHEN the whole value is
+        stripped, which accepts a leading space or a trailing tab or space
+        that git keeps in the path."""
+        import subprocess
+
+        from shared.project_scope import git_env_without_location
+
+        real = tmp_path / "real"
+        subprocess.run(["git", "init", "-q", str(real)], check=True)
+        probe = tmp_path / "probe"
+        probe.mkdir()
+        (probe / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (probe / "commondir").write_text(shape.format(p=real / ".git"), encoding="utf-8")
+        git = subprocess.run(
+            ["git", "--git-dir", str(probe), "rev-parse", "--git-common-dir"],
+            capture_output=True, text=True, env=git_env_without_location(), check=False,
+        )
+        assert pi._is_git_directory(probe) is (git.returncode == 0), git.stderr
+
     def test_git_object_directory_does_not_make_git_and_the_walk_disagree(
         self, tmp_path, monkeypatch
     ):

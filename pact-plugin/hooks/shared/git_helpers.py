@@ -213,8 +213,9 @@ def read_git_file(path) -> Optional[str]:
 def worktree_admin_gitdir(text: str) -> str:
     """The path a worktree admin dir's `gitdir` file names, read as git
     reads it (`get_linked_worktree`): the whole file, trailing whitespace
-    trimmed."""
-    return text.rstrip(" \t\n\v\f\r")
+    trimmed as git's `strbuf_rtrim` does (git's `isspace`: space, tab, CR
+    and LF; a vertical tab or form feed stays in the path)."""
+    return text.rstrip(" \t\n\r")
 
 
 def gitfile_target(text: str) -> Optional[str]:

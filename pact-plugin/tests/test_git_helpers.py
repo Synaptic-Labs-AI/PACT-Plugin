@@ -13,6 +13,8 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def test_run_git_success_returns_completed_process():
     """Happy path: run_git returns the CompletedProcess (regardless of returncode)."""
@@ -262,6 +264,20 @@ def test_a_pass_answers_each_git_question_once_and_no_other(tmp_path, monkeypatc
     assert len(failures) == 2 and failures[0] is failures[1], failures
     assert [r for r in runs if r[0][-1] == "--raises"] == [(("git", "rev-parse", "--raises"), False)]
     assert (PASS_GIT_RESULTS.get(), after) == (None, len(runs)), "the pass ended with its block"
+
+
+@pytest.mark.parametrize("tail, kept", [
+    (" \t\r\n", ""),  # git's isspace: trimmed
+    ("\v\n", "\v"),  # not git whitespace: stays in the path
+    ("\f\n", "\f"),
+])
+def test_a_worktree_gitdir_is_trimmed_as_git_trims_it(tail, kept):
+    """`git worktree list` keeps a trailing vertical tab or form feed in the
+    path a worktree's admin gitdir names (strbuf_rtrim trims only space, tab,
+    CR and LF). RED WHEN those two are trimmed too."""
+    from shared.git_helpers import worktree_admin_gitdir
+
+    assert worktree_admin_gitdir("/wt/.git" + tail) == "/wt/.git" + kept
 
 
 def test_a_kept_failure_does_not_grow_its_traceback_per_asker():

@@ -496,7 +496,9 @@ def _is_git_directory(path: Path) -> bool:
             text = read_git_file(commondir)
             if text is None:
                 return False
-            named = text.strip()
+            # git drops only trailing CRs and LFs (`get_common_dir_noenv`):
+            # leading and other trailing whitespace stays in the path.
+            named = text.rstrip("\r\n")
             common = Path(named) if os.path.isabs(named) else path / named
         return (common / "objects").is_dir() and (common / "refs").is_dir()
     except (OSError, ValueError):
