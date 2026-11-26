@@ -517,9 +517,18 @@ def test_control_a_plain_sshd_keeps_home_and_dot_git_paths(url, expected):
     "https://[::1]/o/r",
     "git@[::1]:o/r",
     "ssh://git@[::1]:2222/o/r",
+    "https://0.0.0.0/o/r",
+    "https://0/o/r",
+    "git@0.0:o/r",
+    "https://0x0:8080/o/r",
+    "https://[::]/o/r",
+    "https://[::0]/o/r",
+    "git@[0:0:0:0:0:0:0:0]:o/r",
 ])
 def test_a_loopback_remote_declines(url):
-    """A loopback remote is a local server or a tunnel on this machine: two
+    """A loopback remote, or one on the unspecified address (measured on
+    Linux: a connection to 0.0.0.0, 0, 0x0 or [::] reaches this machine), is
+    a local server or a tunnel on this machine: two
     unrelated repositories reached that way would share an id, so it declines
     as a `.invalid` host does (a pin is the remedy), in the memory id and
     the backlog slug alike. RED WHEN a loopback host gets an id."""
@@ -534,6 +543,10 @@ def test_a_loopback_remote_declines(url):
     ("https://localhost.example.com/o/r", "localhost.example.com/o/r"),
     ("https://128.0.0.1/o/r", "128.0.0.1/o/r"),
     ("https://10.0.0.1/o/r", "10.0.0.1/o/r"),
+    ("https://10.0.0.0/o/r", "10.0.0.0/o/r"),
+    # A connection to 0.0.0.1 does not reach this machine (measured).
+    ("https://0.0.0.1/o/r", "0.0.0.1/o/r"),
+    ("https://[::2]/o/r", "[::2]/o/r"),
 ])
 def test_a_host_that_only_looks_local_keeps_its_id(url, expected):
     """Control: only loopback declines."""

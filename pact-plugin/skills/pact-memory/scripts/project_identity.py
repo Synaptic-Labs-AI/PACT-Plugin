@@ -613,9 +613,9 @@ def _ipv6_host(host: str) -> Optional[str]:
     # two ids.
     if address.ipv4_mapped is not None:
         return None
-    # A LOOPBACK LITERAL (`[::1]`) names this machine, as `localhost` does
-    # (`_reserved_host`), so it declines.
-    if address.is_loopback:
+    # A LOOPBACK OR UNSPECIFIED LITERAL (`[::1]`, `[::]`) reaches this
+    # machine, as `localhost` does (`_reserved_host`), so it declines.
+    if address.is_loopback or address.is_unspecified:
         return None
     return "[" + address.compressed + "]"
 
@@ -635,9 +635,11 @@ def _url_host(host: str, ssh: bool = False) -> Optional[str]:
 
 def _reserved_host(host: str) -> bool:
     """Whether a lowercased host is in the `.invalid` namespace (RFC 2606)
-    or names this machine (`localhost`, a `.localhost` name, RFC 6761, or
-    an IPv4 loopback address in any spelling `inet_aton` reads, such as
-    `127.0.0.1`, `127.1` or `0x7f.1`).
+    or names this machine (`localhost`, a `.localhost` name, RFC 6761, an
+    IPv4 loopback address in any spelling `inet_aton` reads, such as
+    `127.0.0.1`, `127.1` or `0x7f.1`, or the unspecified address
+    `0.0.0.0`, also `0` or `0x0`: measured on Linux, a connection to it
+    reaches this machine, while one to `0.0.0.1` does not).
 
     No remote is portably there: a loopback remote is a local server or a
     tunnel, so two unrelated repositories reached that way would share an id,
@@ -648,9 +650,10 @@ def _reserved_host(host: str) -> bool:
     import socket
 
     try:
-        return socket.inet_aton(host)[0] == 127
+        packed = socket.inet_aton(host)
     except (OSError, ValueError):
         return False
+    return packed[0] == 127 or packed == bytes(4)
 
 
 def _valid_port(port: str) -> bool:
