@@ -68,6 +68,7 @@ pact-memory now files a project's memories under the repository they belong to, 
 - The user-scope memory `config.json` is read like the other identity inputs: only a regular file, never through a symlink or a FIFO, at most 1 MiB; anything else is ignored rather than followed or waited on.
 - Each git question is asked once per command.
 - A repository whose origin URL has a non-ASCII digit in its port (a superscript two, for example) no longer makes every memory command fail with `SYSTEM_ERROR`; the identity declines instead.
+- A user-scope `config.json` or a session record whose JSON nests deeper than Python can parse is skipped as unreadable, instead of failing memory commands with `SYSTEM_ERROR` ("maximum recursion depth exceeded").
 - A `GIT_DISCOVERY_ACROSS_FILESYSTEM` value longer than 4300 digits is read as an invalid boolean instead of raising.
 
 ### Store, search and rekey

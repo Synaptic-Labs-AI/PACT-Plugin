@@ -1185,7 +1185,7 @@ def _session_record_on_disk(env_session: str, filename: str) -> dict:
 
     try:
         data = json.loads(matches[0].read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, ValueError):
+    except (OSError, ValueError, RecursionError):  # RecursionError: deeply nested JSON
         return {}
 
     return data if isinstance(data, dict) else {}

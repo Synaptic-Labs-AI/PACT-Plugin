@@ -60,6 +60,31 @@ def test_an_oversized_config_is_refused(tmp_path):
     assert pi.read_user_setting(config) is None
 
 
+NESTED = '{"project_id": ' + "[" * 100_000 + "]" * 100_000 + "}"
+
+
+def test_a_deeply_nested_config_is_skipped(tmp_path):
+    """A config whose JSON nests past Python's recursion limit is skipped,
+    as the setting promises (never raises). RED WHEN json.loads's
+    RecursionError escapes and every resolution reaching the setting fails."""
+    config = tmp_path / "config.json"
+    config.write_text(NESTED, encoding="utf-8")
+    assert pi.read_user_setting(config) is None
+
+
+def test_a_deeply_nested_session_record_reads_as_empty(tmp_path, monkeypatch):
+    """The session record reader (worktree identity, session context) answers
+    {} for a record nested past the recursion limit. RED WHEN the
+    RecursionError escapes."""
+    from shared import project_scope
+
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path))
+    record = tmp_path / "pact-sessions" / "proj" / "sess" / "pact-session-context.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(NESTED, encoding="utf-8")
+    assert project_scope._session_record_on_disk("sess", "pact-session-context.json") == {}
+
+
 def test_the_ledger_index_sees_a_same_size_file_renamed_over_it(tmp_path, monkeypatch):
     """A compaction renames a new file over the ledger; one of the same size
     whose mtime lands in the old tick must not be served the old index."""

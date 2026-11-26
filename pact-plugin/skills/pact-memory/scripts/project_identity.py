@@ -1519,7 +1519,7 @@ def read_user_setting(config_path: Path) -> Optional[str]:
         if len(data) > _MAX_USER_SETTING_BYTES:
             return None
         payload = json.loads(data.decode("utf-8"))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):  # RecursionError: deeply nested JSON
         return None
     if not isinstance(payload, dict):
         return None
