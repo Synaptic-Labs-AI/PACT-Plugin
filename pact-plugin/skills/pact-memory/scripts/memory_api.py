@@ -934,12 +934,25 @@ def decide_bucket(
     it was skipped because file rows already showed another owner.
 
     FOREIGN = `foreign_rows` or `elsewhere`; OWN = `contained_rows` or
-    `here`. The bucket is read only with OWN and no FOREIGN. A bucket that
-    is not read is `excluded` when the foreign evidence stands
-    alone and `unproven` when this repository's evidence is there too; with
-    foreign file rows the census is skipped and `contained_rows` alone
-    decides that label. `excluded` always has foreign evidence: neutral
-    rows (vanished, unresolvable, relative, outside any rival) never exclude.
+    `here`. The bucket is read only with OWN and no FOREIGN. The verdicts,
+    tried in this order:
+
+    - foreign file rows (`foreign_rows`): `unproven` when `contained_rows`
+      is there too, else `excluded`; reason `foreign_rows`. The census is
+      skipped, so `contained_rows` alone decides between the two.
+    - sessions recorded elsewhere (`elsewhere`): `unproven` when
+      `contained_rows` or `here` is there too, else `excluded`; reason
+      `recorded_elsewhere`.
+    - `contained_rows`: `verified` (read; a defaulted rekey may move it).
+    - `here`: `included_unverified` (read; it moves only with an explicit
+      --to).
+    - no evidence either way: `unproven`, with the first reason that holds:
+      `subfolder_launch` (sessions launched below a root), `description_newer`
+      (root sessions that started before `description` changed), `undated`
+      (root sessions with no confirmed start), else `no_session`.
+
+    `excluded` always has foreign evidence: neutral rows (vanished,
+    unresolvable, relative, outside any rival) never exclude.
 
     Returns a `BucketVerdict` (read, rekey_default, state, reason, counts,
     sessions_counted): `state` is `verified`, `included_unverified`,
