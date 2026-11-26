@@ -1,0 +1,15 @@
+{
+  "schema": "pact-bench/task/1",
+  "id": "notes-api-crud",
+  "title": "Add update and delete operations to the notes API",
+  "class": "low",
+  "variety": 5,
+  "revision": 1,
+  "timeout_seconds": 1500,
+  "max_turns": 80,
+  "prompt": "prompt.md",
+  "fixture": "fixture",
+  "hidden_tests": "hidden_tests",
+  "gold_patch": "gold.patch",
+  "rubric": "rubric.md"
+}

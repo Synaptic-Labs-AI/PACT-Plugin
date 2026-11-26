@@ -1,0 +1,23 @@
+{
+  "schema": "pact-bench/plan/1",
+  "id": "track-b",
+  "description": "Interactive PTY PACT-vs-solo outcome matrix.",
+  "external": [
+    "track-b"
+  ],
+  "tasks": [
+    "notes-api-crud",
+    "invoice-rounding-bug",
+    "jwt-auth",
+    "discount-strategy-refactor",
+    "oauth-pkce-flow",
+    "job-queue-retries"
+  ],
+  "conditions": [
+    "pact",
+    "solo"
+  ],
+  "samples": 3,
+  "jobs": 6,
+  "timeout_seconds": 2700
+}

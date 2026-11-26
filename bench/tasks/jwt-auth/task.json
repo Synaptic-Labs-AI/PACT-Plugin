@@ -1,0 +1,15 @@
+{
+  "schema": "pact-bench/task/1",
+  "id": "jwt-auth",
+  "title": "Add HMAC-SHA256 JWT authentication to authsvc",
+  "class": "medium",
+  "variety": 9,
+  "revision": 1,
+  "timeout_seconds": 2100,
+  "max_turns": 100,
+  "prompt": "prompt.md",
+  "fixture": "fixture",
+  "hidden_tests": "hidden_tests",
+  "gold_patch": "gold.patch",
+  "rubric": "rubric.md"
+}

@@ -1,0 +1,156 @@
+diff --git a/notes_api/__init__.py b/notes_api/__init__.py
+index c8f7cbf..a4c5161 100644
+--- a/notes_api/__init__.py
++++ b/notes_api/__init__.py
+@@ -1,7 +1,14 @@
+ """Small in-memory notes service used by the fixture tests."""
+ 
+ from .errors import ConflictError, NoteNotFoundError, NotesError, ValidationError
+-from .service import create_note, get_note, list_notes, reset_store
++from .service import (
++    create_note,
++    delete_note,
++    get_note,
++    list_notes,
++    reset_store,
++    update_note,
++)
+ 
+ __all__ = [
+     "ConflictError",
+@@ -9,7 +16,9 @@ __all__ = [
+     "NotesError",
+     "ValidationError",
+     "create_note",
++    "delete_note",
+     "get_note",
+     "list_notes",
+     "reset_store",
++    "update_note",
+ ]
+diff --git a/notes_api/service.py b/notes_api/service.py
+index e6e086f..9480007 100644
+--- a/notes_api/service.py
++++ b/notes_api/service.py
+@@ -45,8 +45,11 @@ def _validate_body(body: Any) -> str:
+     return body
+ 
+ 
+-def _title_taken(title: str) -> bool:
+-    return any(note["title"] == title for note in _notes.values())
++def _title_taken(title: str, *, ignore_id: str | None = None) -> bool:
++    return any(
++        note["title"] == title and note["id"] != ignore_id
++        for note in _notes.values()
++    )
+ 
+ 
+ def create_note(title: str, body: str = "") -> Note:
+@@ -76,6 +79,39 @@ def get_note(note_id: str) -> Note:
+     return dict(note)
+ 
+ 
++def update_note(
++    note_id: str,
++    *,
++    title: str | None = None,
++    body: str | None = None,
++) -> Note:
++    """Update the given fields of a note and return a copy of the result."""
++    if title is None and body is None:
++        raise ValidationError("update_note requires a title or a body")
++    new_title = _validate_title(title) if title is not None else None
++    new_body = _validate_body(body) if body is not None else None
++
++    note = get_note(note_id)
++    if new_title is not None:
++        if _title_taken(new_title, ignore_id=note_id):
++            raise ConflictError(f"a note titled {new_title!r} already exists")
++        note["title"] = new_title
++    if new_body is not None:
++        note["body"] = new_body
++    note["updated_at"] = _now()
++    _notes[note_id] = note
++    return dict(note)
++
++
++def delete_note(note_id: str) -> Note:
++    """Remove and return a copy of the note with *note_id*."""
++    try:
++        note = _notes.pop(note_id)
++    except KeyError:
++        raise NoteNotFoundError(note_id) from None
++    return dict(note)
++
++
+ def list_notes() -> list[Note]:
+     """Return copies of every note in creation order."""
+     return [dict(note) for note in _notes.values()]
+diff --git a/tests/test_update_delete.py b/tests/test_update_delete.py
+new file mode 100644
+index 0000000..ee38fc9
+--- /dev/null
++++ b/tests/test_update_delete.py
+@@ -0,0 +1,62 @@
++import pytest
++
++from notes_api import (
++    ConflictError,
++    NoteNotFoundError,
++    ValidationError,
++    create_note,
++    delete_note,
++    get_note,
++    list_notes,
++    update_note,
++)
++
++
++def test_update_note_changes_fields_and_keeps_the_rest():
++    created = create_note("Original", "body")
++    updated = update_note(created["id"], title="Renamed", body="new body")
++
++    assert updated["id"] == created["id"]
++    assert updated["title"] == "Renamed"
++    assert updated["body"] == "new body"
++    assert updated["created_at"] == created["created_at"]
++    assert get_note(created["id"]) == updated
++
++
++def test_update_note_requires_at_least_one_field():
++    created = create_note("Untouched")
++
++    with pytest.raises(ValidationError):
++        update_note(created["id"])
++
++
++def test_update_note_rejects_title_conflicts():
++    first = create_note("First")
++    second = create_note("Second")
++
++    with pytest.raises(ConflictError):
++        update_note(second["id"], title="First")
++
++    assert get_note(second["id"]) == second
++    assert get_note(first["id"]) == first
++
++
++def test_update_note_unknown_id_raises_not_found():
++    with pytest.raises(NoteNotFoundError):
++        update_note("note-missing", body="nope")
++
++
++def test_delete_note_returns_and_forgets_the_note():
++    created = create_note("Temporary")
++
++    deleted = delete_note(created["id"])
++
++    assert deleted == created
++    assert list_notes() == []
++    with pytest.raises(NoteNotFoundError):
++        get_note(created["id"])
++
++
++def test_delete_note_unknown_id_raises_not_found():
++    with pytest.raises(NoteNotFoundError):
++        delete_note("note-missing")

@@ -1,0 +1,288 @@
+diff --git a/authsvc/api.py b/authsvc/api.py
+index e25bc1f..e356877 100644
+--- a/authsvc/api.py
++++ b/authsvc/api.py
+@@ -7,12 +7,17 @@ or network access.
+ 
+ from __future__ import annotations
+ 
++import os
+ from dataclasses import dataclass
+ from typing import Any
+ from urllib.parse import parse_qs, urlsplit
+ 
++from .tokens import TokenError, issue_token, verify_token
+ from .users import User, UserStore
+ 
++_TOKEN_TTL_SECONDS = 900
++_DEVELOPMENT_SECRET = "authsvc-development-secret"
++
+ 
+ @dataclass(frozen=True)
+ class Response:
+@@ -21,10 +26,18 @@ class Response:
+ 
+ 
+ class Api:
+-    """Routes requests to the user store."""
++    """Routes requests to the user store and enforces token authentication."""
+ 
+-    def __init__(self, store: UserStore) -> None:
++    def __init__(self, store: UserStore, secret: str | bytes | None = None) -> None:
+         self.store = store
++        if secret is None:
++            secret = os.environ.get("AUTHSVC_SECRET") or _DEVELOPMENT_SECRET
++        if isinstance(secret, bytes):
++            if not secret:
++                raise ValueError("secret must be a non-empty str or bytes")
++        elif not isinstance(secret, str) or not secret:
++            raise ValueError("secret must be a non-empty str or bytes")
++        self._secret = secret
+ 
+     def handle_request(
+         self,
+@@ -43,8 +56,49 @@ class Api:
+             return self._login(body)
+         if method == "GET" and parts.path == "/profile":
+             return self._profile(parts.query)
++        if method == "GET" and parts.path == "/me":
++            return self._me(headers)
++        if method == "GET" and parts.path == "/admin/users":
++            return self._admin_users(headers)
+         return Response(404, {"error": "not_found"})
+ 
++    # -- token authentication helpers -------------------------------------
++
++    @staticmethod
++    def _bearer_token(headers: dict[str, Any]) -> str | None:
++        value: Any = None
++        for name, candidate in headers.items():
++            if isinstance(name, str) and name.lower() == "authorization":
++                value = candidate
++                break
++        if not isinstance(value, str):
++            return None
++        scheme, _, credentials = value.strip().partition(" ")
++        if scheme.lower() != "bearer":
++            return None
++        credentials = credentials.strip()
++        return credentials or None
++
++    def _claims(self, headers: dict[str, Any]) -> dict[str, Any] | None:
++        token = self._bearer_token(headers)
++        if token is None:
++            return None
++        try:
++            return verify_token(token, self._secret)
++        except TokenError:
++            return None
++
++    def _authenticated_user(
++        self, headers: dict[str, Any]
++    ) -> tuple[User | None, dict[str, Any] | None]:
++        claims = self._claims(headers)
++        if claims is None:
++            return None, None
++        user = self.store.get(claims["sub"])
++        return (user, claims) if user is not None else (None, None)
++
++    # -- routes ------------------------------------------------------------
++
+     def _login(self, body: dict[str, Any]) -> Response:
+         username = body.get("username")
+         password = body.get("password")
+@@ -53,11 +107,19 @@ class Api:
+         user = self.store.authenticate(username, password)
+         if user is None:
+             return Response(401, {"error": "invalid_credentials"})
++        token = issue_token(
++            user.username,
++            self._secret,
++            roles=user.roles,
++            ttl_seconds=_TOKEN_TTL_SECONDS,
++        )
+         return Response(
+             200,
+             {
+                 "username": user.username,
+                 "roles": list(user.roles),
++                "token": token,
++                "expires_in": _TOKEN_TTL_SECONDS,
+             },
+         )
+ 
+@@ -70,13 +132,34 @@ class Api:
+             return Response(404, {"error": "not_found"})
+         return self._profile_body(user)
+ 
+-    @staticmethod
+-    def _profile_body(user: User) -> Response:
++    def _me(self, headers: dict[str, Any]) -> Response:
++        user, _claims = self._authenticated_user(headers)
++        if user is None:
++            return Response(401, {"error": "unauthorized"})
++        return self._profile_body(user)
++
++    def _admin_users(self, headers: dict[str, Any]) -> Response:
++        user, claims = self._authenticated_user(headers)
++        if user is None or claims is None:
++            return Response(401, {"error": "unauthorized"})
++        roles = claims.get("roles")
++        if not isinstance(roles, list) or "admin" not in roles:
++            return Response(403, {"error": "forbidden"})
+         return Response(
+             200,
+-            {
+-                "username": user.username,
+-                "display_name": user.display_name,
+-                "roles": list(user.roles),
+-            },
++            {"users": [self._user_body(member) for member in self.store.list_users()]},
+         )
++
++    # -- response bodies ---------------------------------------------------
++
++    @staticmethod
++    def _user_body(user: User) -> dict[str, Any]:
++        return {
++            "username": user.username,
++            "display_name": user.display_name,
++            "roles": list(user.roles),
++        }
++
++    @classmethod
++    def _profile_body(cls, user: User) -> Response:
++        return Response(200, cls._user_body(user))
+diff --git a/authsvc/tokens.py b/authsvc/tokens.py
+new file mode 100644
+index 0000000..f1881f1
+--- /dev/null
++++ b/authsvc/tokens.py
+@@ -0,0 +1,127 @@
++"""HS256 JSON Web Tokens implemented with the Python standard library.
++
++The wire format is the compact JWT serialisation: three base64url segments
++(header, payload, signature) joined by "." with no "=" padding.
++"""
++
++from __future__ import annotations
++
++import base64
++import binascii
++import hashlib
++import hmac
++import json
++import time
++from collections.abc import Iterable
++from typing import Any
++
++_ALGORITHM = "HS256"
++_HEADER: dict[str, str] = {"alg": _ALGORITHM, "typ": "JWT"}
++_DEFAULT_TTL_SECONDS = 900
++
++
++class TokenError(ValueError):
++    """Raised when a token is malformed, tampered with, or expired."""
++
++
++def _b64url_encode(raw: bytes) -> str:
++    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
++
++
++def _b64url_decode(segment: str) -> bytes:
++    if not isinstance(segment, str) or not segment:
++        raise TokenError("empty token segment")
++    padded = segment + "=" * (-len(segment) % 4)
++    try:
++        return base64.urlsafe_b64decode(padded.encode("ascii"))
++    except (binascii.Error, UnicodeEncodeError, ValueError) as exc:
++        raise TokenError("invalid token encoding") from exc
++
++
++def _decode_json(segment: str, label: str) -> Any:
++    raw = _b64url_decode(segment)
++    try:
++        return json.loads(raw.decode("utf-8"))
++    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
++        raise TokenError(f"invalid token {label}") from exc
++
++
++def _secret_bytes(secret: str | bytes) -> bytes:
++    if isinstance(secret, bytes):
++        if not secret:
++            raise ValueError("secret must be a non-empty str or bytes")
++        return secret
++    if isinstance(secret, str) and secret:
++        return secret.encode("utf-8")
++    raise ValueError("secret must be a non-empty str or bytes")
++
++
++def _clock(now: float | None) -> float:
++    return time.time() if now is None else float(now)
++
++
++def _sign(secret: str | bytes, signing_input: str) -> bytes:
++    return hmac.new(
++        _secret_bytes(secret), signing_input.encode("ascii"), hashlib.sha256
++    ).digest()
++
++
++def issue_token(
++    subject: str,
++    secret: str | bytes,
++    *,
++    roles: Iterable[str] = (),
++    ttl_seconds: float = _DEFAULT_TTL_SECONDS,
++    now: float | None = None,
++) -> str:
++    """Return a signed compact JWT for `subject`."""
++    if not isinstance(subject, str) or not subject:
++        raise ValueError("subject must be a non-empty string")
++    if not isinstance(ttl_seconds, (int, float)) or ttl_seconds < 0:
++        raise ValueError("ttl_seconds must be a non-negative number")
++    issued_at = _clock(now)
++    payload = {
++        "sub": subject,
++        "iat": int(issued_at),
++        "exp": int(issued_at + float(ttl_seconds)),
++        "roles": [str(role) for role in roles],
++    }
++    header_segment = _b64url_encode(
++        json.dumps(_HEADER, separators=(",", ":"), sort_keys=True).encode("utf-8")
++    )
++    payload_segment = _b64url_encode(
++        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
++    )
++    signature = _sign(secret, f"{header_segment}.{payload_segment}")
++    return f"{header_segment}.{payload_segment}.{_b64url_encode(signature)}"
++
++
++def verify_token(
++    token: str, secret: str | bytes, *, now: float | None = None
++) -> dict[str, Any]:
++    """Validate `token` and return a fresh copy of its claims."""
++    if not isinstance(token, str) or not token:
++        raise TokenError("malformed token")
++    parts = token.split(".")
++    if len(parts) != 3:
++        raise TokenError("malformed token")
++    header_segment, payload_segment, signature_segment = parts
++    header = _decode_json(header_segment, "header")
++    if not isinstance(header, dict) or header.get("alg") != _ALGORITHM:
++        raise TokenError("unsupported algorithm")
++    expected = _sign(secret, f"{header_segment}.{payload_segment}")
++    provided = _b64url_decode(signature_segment)
++    if not hmac.compare_digest(expected, provided):
++        raise TokenError("signature mismatch")
++    claims = _decode_json(payload_segment, "payload")
++    if not isinstance(claims, dict):
++        raise TokenError("invalid token payload")
++    expiry = claims.get("exp")
++    if isinstance(expiry, bool) or not isinstance(expiry, (int, float)):
++        raise TokenError("missing expiry")
++    if _clock(now) >= expiry:
++        raise TokenError("token expired")
++    subject = claims.get("sub")
++    if not isinstance(subject, str) or not subject:
++        raise TokenError("missing subject")
++    return claims
