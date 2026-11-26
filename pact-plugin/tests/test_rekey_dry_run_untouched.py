@@ -280,7 +280,8 @@ def test_a_disk_fault_during_the_copy_is_blamed_on_the_side_that_failed(
     and from a temporary folder out of room. Only a store that still reads
     whole sends the user to TMPDIR; a store that does not is reported as a
     store fault. RED WHEN every such error blames the copy (store arm) or
-    every one blames the store (copy arm)."""
+    every one blames the store (copy arm), or when the store-side fault is
+    retried with locking (leaving -wal/-shm) or does not name the store."""
     from scripts import cli
 
     assert_outside_repository(tmp_path)
@@ -301,6 +302,8 @@ def test_a_disk_fault_during_the_copy_is_blamed_on_the_side_that_failed(
     assert envelope["error"] == "REKEY_FAILED", envelope
     if side == "store":
         assert "temporary copy" not in envelope["message"], envelope
+        assert f"the store {store} failed an integrity check" in envelope["message"], envelope
     else:
         assert "temporary copy of the store in " in envelope["message"], envelope
     assert store.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.glob("mem.db*")) == ["mem.db"], "sidecars beside the store"

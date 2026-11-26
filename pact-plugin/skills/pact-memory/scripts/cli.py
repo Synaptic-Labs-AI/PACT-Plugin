@@ -1149,6 +1149,13 @@ class _RekeyCopyFailed(Exception):
     leave `-wal`/`-shm` beside a store the dry run never needed to lock."""
 
 
+class _RekeyStoreFailed(Exception):
+    """The dry run's copy failed because the STORE no longer reads whole
+    (`_store_reads_whole`). Its one argument is the store path. Not a
+    `sqlite3.DatabaseError`, so `_stable_read_only` does not repeat the read
+    with locking beside a store that is failing."""
+
+
 # SQLite's messages for a file it cannot write, grow or open (SQLITE_IOERR,
 # SQLITE_FULL, SQLITE_CANTOPEN): faults of the copy's folder, never of a store
 # that moved during the read. Matched on the message because pysqlite3's
@@ -1201,8 +1208,10 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
     except db_sqlite3.DatabaseError as exc:
         # A failing disk under the STORE raises the same messages, so the
         # copy is blamed only when the store still reads whole.
-        if str(exc).startswith(_COPY_FAULT_MESSAGES) and _store_reads_whole(store):
-            raise _RekeyCopyFailed(folder or tempfile.tempdir) from exc
+        if str(exc).startswith(_COPY_FAULT_MESSAGES):
+            if _store_reads_whole(store):
+                raise _RekeyCopyFailed(folder or tempfile.tempdir) from exc
+            raise _RekeyStoreFailed(str(store)) from exc
         raise
     finally:
         source.close()
@@ -1585,6 +1594,15 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 "the dry run could not write its temporary copy of the store "
                 + (f"in {folder}" if folder else "because no usable temporary folder was found")
                 + f" (set TMPDIR to a writable folder with room for it): {exc.__cause__}"
+            )),
+            exit_code=3,
+        )
+    except _RekeyStoreFailed as exc:
+        _error(
+            "REKEY_FAILED",
+            escape_for_envelope(_scrub(
+                f"the store {exc.args[0]} failed an integrity check while the "
+                f"dry run copied it, so its disk may be failing: {exc.__cause__}"
             )),
             exit_code=3,
         )
