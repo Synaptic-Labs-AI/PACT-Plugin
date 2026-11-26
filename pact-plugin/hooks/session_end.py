@@ -806,6 +806,7 @@ def _append_ledger_line(slug_dir: Path, line: str) -> None:
     refuses a symlink planted after the lstat, and O_NONBLOCK keeps a planted
     FIFO from hanging the hook on open. The append and any compaction run
     under an exclusive lock, so concurrent session ends do not interleave.
+    A write that fails partway is cut back, so no partial line remains.
     """
     try:
         ledger = slug_dir / PRUNE_LEDGER_NAME
@@ -818,7 +819,14 @@ def _append_ledger_line(slug_dir: Path, line: str) -> None:
         if fd is None:
             return
         try:
-            _write_all(fd, line.encode("utf-8"))
+            before = os.fstat(fd).st_size
+            try:
+                _write_all(fd, line.encode("utf-8"))
+            except BaseException:
+                # A short write (ENOSPC) would leave a partial line the next
+                # append joins onto; cut back to the last whole line.
+                os.ftruncate(fd, before)
+                raise
             size = os.fstat(fd).st_size
             if size > _PRUNE_LEDGER_COMPACT_BYTES:
                 _compact_ledger(ledger, fd, size)

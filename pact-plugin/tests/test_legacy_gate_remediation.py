@@ -329,6 +329,29 @@ def test_held_ledger_lock_skips_the_line_within_the_bound(tmp_path, monkeypatch)
     assert ledger.read_bytes() == b'{"session_id": "x"}\n'
 
 
+def test_an_append_that_fails_partway_leaves_no_partial_line(tmp_path, monkeypatch):
+    """RED WHEN a short write followed by ENOSPC leaves the partial line for
+    the next append to join onto."""
+    ledger = tmp_path / session_end.PRUNE_LEDGER_NAME
+    ledger.write_bytes(b'{"session_id": "a"}\n')
+    real_write = os.write
+    calls = []
+
+    def short_then_full(fd, data):
+        calls.append(len(data))
+        if len(calls) == 1:
+            return real_write(fd, data[:5])
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(session_end.os, "write", short_then_full)
+    session_end._append_ledger_line(tmp_path, '{"session_id": "b"}\n')
+    monkeypatch.setattr(session_end.os, "write", real_write)
+    assert len(calls) == 2
+    assert ledger.read_bytes() == b'{"session_id": "a"}\n'
+    session_end._append_ledger_line(tmp_path, '{"session_id": "c"}\n')
+    assert ledger.read_bytes() == b'{"session_id": "a"}\n{"session_id": "c"}\n'
+
+
 # ---------------------------------------------------------------------------
 # C-8: a hot rollback journal blocks the immutable open
 # ---------------------------------------------------------------------------
