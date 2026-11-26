@@ -242,3 +242,65 @@ def test_a_dry_run_with_no_usable_temporary_folder_is_a_named_fault(tmp_path, mo
     assert "no usable temporary folder" in envelope["message"], envelope
     assert store.read_bytes() == before
     assert sorted(p.name for p in tmp_path.glob("mem.db*")) == ["mem.db"]
+
+
+class _FailingBackup:
+    """A source connection whose backup fails with a disk I/O error; with
+    `store_fails` its every other read fails the same way (a failing disk
+    under the store), otherwise it reads through `real`."""
+
+    def __init__(self, real, store_fails):
+        self._real = real
+        self._store_fails = store_fails
+
+    def backup(self, target, **kwargs):
+        from scripts.database import sqlite3 as db_sqlite3
+
+        raise db_sqlite3.OperationalError("disk I/O error")
+
+    def execute(self, *args, **kwargs):
+        from scripts.database import sqlite3 as db_sqlite3
+
+        if self._store_fails:
+            raise db_sqlite3.OperationalError("disk I/O error")
+        return self._real.execute(*args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def close(self):
+        self._real.close()
+
+
+@pytest.mark.parametrize("side", ["store", "copy"])
+def test_a_disk_fault_during_the_copy_is_blamed_on_the_side_that_failed(
+    tmp_path, monkeypatch, capfd, side
+):
+    """The same "disk I/O error" comes from a failing disk under the store
+    and from a temporary folder out of room. Only a store that still reads
+    whole sends the user to TMPDIR; a store that does not is reported as a
+    store fault. RED WHEN every such error blames the copy (store arm) or
+    every one blames the store (copy arm)."""
+    from scripts import cli
+
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/me/proj.git")
+    store = tmp_path / "mem.db"
+    _store_of(store, 3)
+    before = store.read_bytes()
+    real_open = cli._read_only_connection
+    monkeypatch.setattr(
+        cli, "_read_only_connection",
+        lambda path: _FailingBackup(real_open(path), side == "store"),
+    )
+    monkeypatch.chdir(repo)
+    argv = ["project-id", "rekey", "--from=proj", "--to=github.com/me/proj", "--db-path", str(store)]
+    code, envelope = _cli(argv, capfd)
+    assert code == 3, envelope
+    assert envelope["error"] == "REKEY_FAILED", envelope
+    if side == "store":
+        assert "temporary copy" not in envelope["message"], envelope
+    else:
+        assert "temporary copy of the store in " in envelope["message"], envelope
+    assert store.read_bytes() == before

@@ -1199,11 +1199,26 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
     except OSError as exc:
         raise _RekeyCopyFailed(folder or tempfile.tempdir) from exc
     except db_sqlite3.DatabaseError as exc:
-        if str(exc).startswith(_COPY_FAULT_MESSAGES):
+        # A failing disk under the STORE raises the same messages, so the
+        # copy is blamed only when the store still reads whole.
+        if str(exc).startswith(_COPY_FAULT_MESSAGES) and _store_reads_whole(store):
             raise _RekeyCopyFailed(folder or tempfile.tempdir) from exc
         raise
     finally:
         source.close()
+
+
+def _store_reads_whole(store) -> bool:
+    """Whether every page of `store` reads back through a fresh read-only
+    open (`PRAGMA quick_check` answers `ok`). Never raises."""
+    try:
+        probe = _read_only_connection(str(store))
+        try:
+            return probe.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        finally:
+            probe.close()
+    except Exception:
+        return False
 
 
 def _bucket_file_rows(store: Path, bucket: str) -> int:
