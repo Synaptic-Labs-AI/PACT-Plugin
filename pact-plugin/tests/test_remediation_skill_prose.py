@@ -738,11 +738,20 @@ class TestLegacyScopeStatesAreDocumented:
         assert "earlier mixed-case spelling" not in body
 
     def test_the_plain_ssh_collapse_and_its_pin_remedy_are_stated(self):
+        # The ~ and no-~ spellings of one home get two ids; the CHANGELOG says so too.
+        changelog = (PLUGIN_ROOT.parent / "CHANGELOG.md").read_text(encoding="utf-8")
+        assert (
+            "So a path written with `~` gets a different id from the same directory "
+            "written without it"
+        ) in changelog
         assert (
             "On a plain ssh server (not a forge), alice@box:proj, bob@box:proj and "
             "box:/proj all give box/proj though they can be three repositories; a "
             "path written with ~ keeps its login (alice@box:~/proj gives "
-            "box/~alice/proj). A pin gives each of the others its own id."
+            "box/~alice/proj, and box:~/proj gives box/~/proj), so it gets a "
+            "different id from the same directory written without ~. A pin gives "
+            "each of the others its own id, and a pin gives both spellings of one "
+            "directory one id."
         ) in _body(SKILL)
 
     def test_an_alias_id_is_shared_only_by_clones_using_that_alias(self):

@@ -501,7 +501,10 @@ Two operator surfaces answer, and they are deliberately ordered:
   On a plain ssh server (not a forge), `alice@box:proj`, `bob@box:proj` and
   `box:/proj` all give `box/proj` though they can be three repositories; a
   path written with `~` keeps its login (`alice@box:~/proj` gives
-  `box/~alice/proj`). A pin gives each of the others its own id.
+  `box/~alice/proj`, and `box:~/proj` gives `box/~/proj`), so it gets a
+  different id from the same directory written without `~`. A pin gives
+  each of the others its own id, and a pin gives both spellings of one
+  directory one id.
   It must be a regular file: a FIFO or a symlink in that position is refused, and an
   unusable file is reported as `override_ignored` and resolution continues
   without it. The file is never read, so nothing is reported, when git
