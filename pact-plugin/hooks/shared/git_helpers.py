@@ -283,6 +283,37 @@ def git_config_bool(value: str) -> Optional[bool]:
     return number != 0
 
 
+def git_ceiling_directories(value: Optional[str]) -> set:
+    """The `GIT_CEILING_DIRECTORIES` entries git honours, as paths (str) a
+    marker walk compares its real-path parents with. THE ONE PARSER for
+    every walk, so the walks stop where git stops.
+
+    Split on `os.pathsep`; a relative entry is dropped. Before the first
+    EMPTY entry each entry is its real path, and one git cannot resolve (a
+    missing component) is dropped. After it each entry is kept AS WRITTEN,
+    with one trailing `/` removed and nothing else normalised. Measured on
+    git 2.43: after the empty entry `<r>/z/../x`, `<r>/x/.`, `<r>//x` and
+    `<r>/x//` do not stop discovery at `<r>/x` while `<r>/x/` does; before
+    it `<r>/z/../x` and `<r>//x` do, and `<r>/q/../x` with `q` missing
+    does not."""
+    ceilings = set()
+    resolve = True
+    for entry in (value or "").split(os.pathsep):
+        if not entry:
+            resolve = False
+            continue
+        if not os.path.isabs(entry):
+            continue
+        if resolve:
+            try:
+                ceilings.add(os.path.realpath(entry, strict=True))
+            except (OSError, ValueError):
+                continue
+        else:
+            ceilings.add(entry[:-1] if len(entry) > 1 and entry.endswith("/") else entry)
+    return ceilings
+
+
 def git_env_bool(value: Optional[str]) -> bool:
     """A git boolean environment value (`GIT_DISCOVERY_ACROSS_FILESYSTEM`),
     read as git reads it (`git_config_bool`). THE ONE READER for every

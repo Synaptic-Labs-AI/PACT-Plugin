@@ -38,6 +38,7 @@ from typing import List, NamedTuple, Optional, Set, Tuple
 from . import state_file
 from .git_helpers import (
     git_config_bool,
+    git_ceiling_directories,
     git_env_bool,
     read_git_file,
     run_git,
@@ -229,29 +230,9 @@ def _unanswered_cause(given: Path) -> str:
 
 
 def _git_ceiling_directories() -> Set[str]:
-    """The GIT_CEILING_DIRECTORIES entries git honours, in both spellings.
-
-    Only absolute entries count, as in git: a relative entry is ignored. Each
-    is kept as written (normalised) and, until the first EMPTY entry, as its
-    real path too: git resolves symlinks in the entries before an empty one
-    and compares the entries after it as written.
-    """
-    ceilings: Set[str] = set()
-    resolve_symlinks = True
-    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
-        if not entry:
-            resolve_symlinks = False
-            continue
-        if not os.path.isabs(entry):
-            continue
-        ceilings.add(os.path.normpath(entry))
-        if not resolve_symlinks:
-            continue
-        try:
-            ceilings.add(os.path.realpath(entry))
-        except (OSError, ValueError):
-            continue
-    return ceilings
+    """The GIT_CEILING_DIRECTORIES entries git honours
+    (`git_helpers.git_ceiling_directories`, the one parser)."""
+    return git_ceiling_directories(os.environ.get("GIT_CEILING_DIRECTORIES"))
 
 
 def _git_metadata_at_or_above(directory: Path) -> bool:

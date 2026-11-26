@@ -457,27 +457,11 @@ def _git_env_bool(name: str) -> bool:
 
 
 def _git_ceiling_directories() -> set:
-    """`GIT_CEILING_DIRECTORIES` parsed exactly as git parses it.
+    """`GIT_CEILING_DIRECTORIES` parsed exactly as git parses it, by the one
+    parser (`shared.git_helpers.git_ceiling_directories`): str paths."""
+    from shared.git_helpers import git_ceiling_directories
 
-    Split on `os.pathsep`. An empty entry is dropped, and every entry AFTER
-    the first empty one is kept AS WRITTEN, without resolving symlinks (git
-    documents an empty entry as the way to skip that cost); entries before
-    it are resolved. A relative entry is dropped. Measured: with
-    `:<symlink to a>`, git keeps walking from `a/sub` into `a`.
-    """
-    ceilings = set()
-    after_empty = False
-    for entry in os.environ.get("GIT_CEILING_DIRECTORIES", "").split(os.pathsep):
-        if not entry:
-            after_empty = True
-            continue
-        if not os.path.isabs(entry):
-            continue
-        try:
-            ceilings.add(Path(entry) if after_empty else Path(entry).resolve())
-        except (OSError, RuntimeError, ValueError):
-            continue
-    return ceilings
+    return git_ceiling_directories(os.environ.get("GIT_CEILING_DIRECTORIES"))
 
 
 def _is_git_directory(path: Path) -> bool:
@@ -562,7 +546,7 @@ def find_git_marker(start) -> Optional[Path]:
         except ValueError:
             return skipped
         parent = level.parent
-        if parent == level or parent in ceilings:
+        if parent == level or str(parent) in ceilings:
             return skipped
         if not cross_filesystem:
             try:

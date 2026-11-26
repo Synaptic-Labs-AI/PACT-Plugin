@@ -7270,6 +7270,10 @@ class TestEveryRouteEntryConditionIsARoute:
             "parses the text read_git_file returned as git reads a .git file; its own "
             "body is read like any reached function"
         ),
+        ("call", "git_ceiling_directories"): (
+            "parses GIT_CEILING_DIRECTORIES the way git does (the one shared parser); "
+            "the variable is the input, and its own body is read like any reached function"
+        ),
         ("call", "git_env_bool"): (
             "parses the value of a git boolean environment variable the way git does "
             "(the one shared reader); the variable is the input, and its own body is "
