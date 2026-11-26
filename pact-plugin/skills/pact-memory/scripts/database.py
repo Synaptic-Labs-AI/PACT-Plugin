@@ -2037,14 +2037,15 @@ BUCKET_EVIDENCE_KEYS = (
 
 def _linked_after_description(
     conn: sqlite3.Connection, file_id: Any, common_dir: Optional[str],
-    missing_counts: bool = True,
+    missing_counts: bool = True, memory_bucket: Optional[str] = None,
 ) -> bool:
     """Whether a memory linked to file row `file_id` was saved after
     `<common_dir>/description` last changed (its ctime), the date a clone or
     `git init` gives this repository. No description file: no ordering
     check, so `missing_counts` (True, as a session record's
     `_description_predates` rule; False for an earlier id, which no
-    undated row may place).
+    undated row may place). With `memory_bucket`, only that bucket's own
+    memories date the row (an earlier id is dated by its own memories).
     No common dir, a description that is not a regular file, or a creation
     time without a zone: False. Never raises."""
     if not common_dir:
@@ -2060,8 +2061,9 @@ def _linked_after_description(
     try:
         rows = conn.execute(
             "SELECT m.created_at FROM memory_files l "
-            "JOIN memories m ON m.id = l.memory_id WHERE l.file_id = ?",
-            (file_id,),
+            "JOIN memories m ON m.id = l.memory_id WHERE l.file_id = ?"
+            + (" AND m.project_id = ?" if memory_bucket is not None else ""),
+            (file_id,) if memory_bucket is None else (file_id, memory_bucket),
         ).fetchall()
     except sqlite3.Error:
         return False
@@ -2153,9 +2155,6 @@ def bucket_evidence(
             verified_common = None
     counts = dict.fromkeys(BUCKET_EVIDENCE_KEYS, 0)
     counts["roots"] = len(root_paths)
-    # (exists, dated) for each contained row, judged after the walk: whether a
-    # file that exists may count depends on every other contained row.
-    contained: List[Tuple[bool, bool]] = []
     for row in cursor.fetchall():
         counts["file_rows"] += 1
         file_id, path = row[0], row[1]
@@ -2182,12 +2181,14 @@ def bucket_evidence(
             # belong to an earlier project that once lived in this folder (an
             # unrelated repository cloned into a deleted project's path), so
             # it counts as vanished.
-            contained.append((
-                os.path.lexists(resolved),
-                _linked_after_description(
-                    conn, file_id, verified_common, missing_counts=not dated_only
-                ),
-            ))
+            dated = _linked_after_description(
+                conn, file_id, verified_common, missing_counts=not dated_only,
+                memory_bucket=bucket if dated_only else None,
+            )
+            if dated or (not dated_only and os.path.lexists(resolved)):
+                counts["contained_rows"] += 1
+            else:
+                counts["vanished"] += 1
         elif not os.path.lexists(resolved):
             counts["vanished"] += 1
         else:
@@ -2197,11 +2198,6 @@ def bucket_evidence(
             else:
                 counts["foreign_rows"] += 1
                 counts[f"foreign_{kind}_rows"] += 1
-    for exists, dated in contained:
-        if dated or (exists and not dated_only):
-            counts["contained_rows"] += 1
-        else:
-            counts["vanished"] += 1
     return counts
 
 

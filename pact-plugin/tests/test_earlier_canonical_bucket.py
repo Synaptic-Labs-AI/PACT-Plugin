@@ -89,6 +89,10 @@ def renamed(tmp_path, monkeypatch):
         _memory(conn, "m2", SHARED, OLD_STAMP, repo / "README")
         _memory(conn, "m3", ELSEWHERE, _later(), elsewhere)
         _memory(conn, "m1b", OLD, _later())
+        # This checkout's own memory linked to the same file row: it is not
+        # OLD's, so it neither dates OLD nor counts among OLD's linked ones.
+        _memory(conn, "m8", NEW, _later())
+        conn.execute("INSERT INTO memory_files (memory_id, file_id) VALUES ('m8', 'f-m1')")
         _memory(conn, "m4", LIVE, _later(), repo / "src" / "a.py")
         _memory(conn, "m5", LIVE, _later(), beta / "own.py")
         _memory(conn, "m6", NESTED, _later(), repo / "src" / "a.py")
@@ -271,6 +275,74 @@ def test_a_submodule_is_not_an_earlier_id_of_its_superproject(tmp_path, monkeypa
         assert memory._read_project_scopes() == ("github.com/acme/super",)
     assert memory._earlier_canonical == {}
     assert "github.com/acme/lib" not in caplog.text
+
+
+def test_another_buckets_memories_do_not_date_an_earlier_id(tmp_path, monkeypatch):
+    """Bucket widget has one memory and no link of its own; its file row here
+    is linked only by memories of this checkout's own bucket, saved after the
+    clone. RED WHEN any bucket's memory dates the row, in the pre-git filter
+    (a gate-roots call) or in the evidence walk (widget is named)."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/acme/renamed.git")
+    (repo / "a.py").write_text("a\n", encoding="utf-8")
+    store = tmp_path / "store.db"
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        _memory(conn, "w1", OLD, _later())
+        conn.execute("INSERT INTO files (id, path, project_id) VALUES ('fw', ?, ?)",
+                     (str(repo / "a.py"), OLD))
+        for index in range(3):
+            _memory(conn, f"n{index}", NEW, _later())
+            conn.execute("INSERT INTO memory_files (memory_id, file_id) VALUES (?, 'fw')",
+                         (f"n{index}",))
+        conn.commit()
+    _fresh(monkeypatch, repo)
+    asked = []
+    real = PACTMemory._legacy_gate_roots
+    monkeypatch.setattr(PACTMemory, "_legacy_gate_roots",
+                        lambda self, root: asked.append(root) or real(self, root))
+    memory = PACTMemory(session_id="s", db_path=store)
+    memory._read_project_scopes()
+    assert memory._earlier_canonical == {}
+    assert asked == [], "the pre-git filter let another bucket's memory date it"
+    monkeypatch.setattr(PACTMemory, "_legacy_gate_roots", real)
+    _fresh(monkeypatch, repo)
+    memory = PACTMemory(session_id="s", db_path=store)
+    monkeypatch.setattr(memory, "_project_common_dir", None)
+    assert memory._earlier_canonical_buckets(NEW) == {}, "the evidence walk dated it"
+
+
+def test_a_quiet_first_read_does_not_silence_a_later_one(renamed, caplog):
+    """RED WHEN a read under legacy_notices_quiet (rekey --apply) caches the
+    answer and the next read in the process never names the bucket."""
+    _repo, store = renamed
+    memory = PACTMemory(session_id="s", db_path=store)
+    with caplog.at_level(logging.WARNING):
+        with memory_api.legacy_notices_quiet():
+            memory._read_project_scopes()
+        assert "is not this checkout's id" not in caplog.text
+        memory._read_project_scopes()
+    assert f"project bucket {OLD!r}" in caplog.text
+
+
+def test_the_legacy_check_reuses_the_earlier_scans_gate_roots(renamed, monkeypatch):
+    """A legacy candidate (the folder's old name) and an earlier id in one
+    read: the gate roots (a `git worktree list`) are asked for once. RED WHEN
+    the legacy verdict asks again."""
+    repo, store = renamed
+    with db_connection(store) as conn:
+        _memory(conn, "lg", "widget", OLD_STAMP, repo / "src" / "a.py")
+        conn.commit()
+    _fresh(monkeypatch, repo)
+    asked = []
+    real = PACTMemory._legacy_gate_roots
+    monkeypatch.setattr(PACTMemory, "_legacy_gate_roots",
+                        lambda self, root: asked.append(root) or real(self, root))
+    memory = PACTMemory(session_id="s", db_path=store)
+    scopes = memory._read_project_scopes()
+    assert OLD in memory._earlier_canonical
+    assert "widget" in scopes, scopes
+    assert len(asked) == 1, asked
 
 
 def test_a_new_store_stamp_replaces_the_cached_answer(renamed):

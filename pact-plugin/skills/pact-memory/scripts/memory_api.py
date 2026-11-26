@@ -3978,7 +3978,12 @@ class PACTMemory:
         cached = _LEGACY_SCOPE_CACHE.get(key) if in_pass else None
         if cached is not None:
             return cached
-        roots, common = self._legacy_gate_roots(repo_root)
+        memo = getattr(self, "_read_gate_roots", None)
+        self._read_gate_roots = None
+        if memo is not None and memo[0] == str(repo_root):
+            roots, common = memo[1]
+        else:
+            roots, common = self._legacy_gate_roots(repo_root)
         own = self._own_identity(common)
         evidence = bucket_evidence(
             connection, bucket, roots or None, root_common=common,
@@ -4072,7 +4077,8 @@ class PACTMemory:
                             bucket for bucket in with_files
                             if any(
                                 _linked_after_description(
-                                    connection, file_id, recorded_common, missing_counts=False
+                                    connection, file_id, recorded_common,
+                                    missing_counts=False, memory_bucket=bucket,
                                 )
                                 for (file_id,) in connection.execute(
                                     "SELECT id FROM files WHERE project_id = ? "
@@ -4084,6 +4090,8 @@ class PACTMemory:
                     roots, common, own = None, None, None
                     if with_files:
                         roots, common = self._legacy_gate_roots(root)
+                        # The legacy verdict in this same read reuses it.
+                        self._read_gate_roots = (str(root), (roots, common))
                         own = self._own_identity(common)
                     for bucket in sorted(with_files):
                         evidence = bucket_evidence(
@@ -4117,12 +4125,18 @@ class PACTMemory:
                             linked = connection.execute(
                                 "SELECT COUNT(DISTINCT mf.memory_id) FROM memory_files mf "
                                 "JOIN files f ON f.id = mf.file_id "
-                                f"WHERE f.project_id = ? AND ({' OR '.join(clauses)})",
-                                [bucket, *params[1:]],
+                                "JOIN memories m ON m.id = mf.memory_id "
+                                "WHERE f.project_id = ? AND m.project_id = ? "
+                                f"AND ({' OR '.join(clauses)})",
+                                [bucket, bucket, *params[1:]],
                             ).fetchone()[0]
                             counts[bucket] = (memories, linked)
         except (sqlite3.Error, OSError, StoreFaultError):
             return {}
+        # A QUIET RUN (a rekey --apply) is not cached: its notice was
+        # suppressed, and a cached answer would keep a later read silent.
+        if _LEGACY_NOTICES_QUIET.get():
+            return found
         # One entry per store, root and scope: a newer store stamp replaces it.
         for stale in [k for k in _EARLIER_CANONICAL if k[1] == store and k[3:] == key[3:]]:
             del _EARLIER_CANONICAL[stale]
@@ -4286,6 +4300,7 @@ class PACTMemory:
         # The canonical legacy candidate's verdict, read by the defaulted rekey.
         self._legacy_verdict = None
         self._earlier_canonical = {}
+        self._read_gate_roots = None
         scope = self._project_scope()
         if scope is None:
             return ()

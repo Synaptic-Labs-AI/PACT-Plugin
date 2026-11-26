@@ -522,7 +522,7 @@ Two operator surfaces answer, and they are deliberately ordered:
 
 Two spellings of one repository can resolve to two ids, as can an origin that
 was renamed or transferred. The bucket under the earlier id is not read. When
-a file row in this checkout is linked by a memory saved after
+a file row in this checkout is linked by one of the bucket's own memories saved after
 `<git-common-dir>/description` last changed (a file that merely exists here
 never counts), every existing absolute file row of the bucket lies in this
 checkout and outside its submodules, and the bucket holds memories, `project-id show` lists it as `earlier_id` with a rekey command into this
