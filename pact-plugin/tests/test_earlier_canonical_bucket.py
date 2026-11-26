@@ -277,6 +277,29 @@ def test_a_submodule_is_not_an_earlier_id_of_its_superproject(tmp_path, monkeypa
     assert "github.com/acme/lib" not in caplog.text
 
 
+def test_a_submodule_row_does_not_hide_a_superprojects_earlier_id(tmp_path, monkeypatch, caplog):
+    """The superproject's earlier bucket links a file of its own and a file
+    in its submodule, both after the clone: the submodule row is skipped,
+    neither placing nor ruling out the bucket, so the earlier id is named.
+    RED WHEN a submodule row counts as a row outside this checkout."""
+    assert_outside_repository(tmp_path)
+    upstream = make_repo(tmp_path / "libup", remote="https://github.com/acme/lib.git")
+    sup = make_repo(tmp_path / "super", remote="https://github.com/acme/super.git")
+    run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
+            str(upstream), "lib", cwd=sup)
+    store = tmp_path / "store.db"
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+        _memory(conn, "m1", "github.com/acme/oldsuper", _later(), sup / "README")
+        _memory(conn, "m2", "github.com/acme/oldsuper", _later(), sup / "lib" / "README")
+        conn.commit()
+    _fresh(monkeypatch, sup)
+    memory = PACTMemory(session_id="s", db_path=store)
+    with caplog.at_level(logging.WARNING):
+        memory._read_project_scopes()
+    assert "github.com/acme/oldsuper" in memory._earlier_canonical
+
+
 def test_another_buckets_memories_do_not_date_an_earlier_id(tmp_path, monkeypatch):
     """Bucket widget has one memory and no link of its own; its file row here
     is linked only by memories of this checkout's own bucket, saved after the
@@ -343,6 +366,17 @@ def test_the_legacy_check_reuses_the_earlier_scans_gate_roots(renamed, monkeypat
     assert OLD in memory._earlier_canonical
     assert "widget" in scopes, scopes
     assert len(asked) == 1, asked
+
+
+def test_a_reads_shared_worktree_list_does_not_outlive_it(renamed):
+    """The earlier-id scan's worktree list, shared with the legacy check in
+    the same read, is gone when the read returns, so a later write-path
+    verdict lists again. RED WHEN it is cleared only by the next read."""
+    _repo, store = renamed
+    memory = PACTMemory(session_id="s", db_path=store)
+    memory._read_project_scopes()
+    assert OLD in memory._earlier_canonical
+    assert getattr(memory, "_read_gate_roots", None) is None
 
 
 def test_a_new_store_stamp_replaces_the_cached_answer(renamed):

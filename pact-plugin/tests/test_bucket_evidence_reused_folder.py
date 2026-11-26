@@ -200,6 +200,12 @@ def test_folder_resolution_matches_realpath(tmp_path, shape):
     assert database._realpath_by_folder(str(path), {}) == os.path.realpath(str(path))
 
 
-def test_folder_resolution_raises_on_nul_like_realpath():
+@pytest.mark.parametrize("path", ["/tmp/a\0b/c.py", "/tmp/a/b\0c.py"], ids=["folder", "file_name"])
+def test_folder_resolution_raises_on_nul_like_realpath(path):
+    """A NUL anywhere raises ValueError, as realpath does, so the row counts as
+    unresolvable. The file-name case is the guard's own: `islink` and
+    `lexists` swallow the error there. RED WHEN the guard is removed."""
     with pytest.raises(ValueError):
-        database._realpath_by_folder("/tmp/a\0b/c.py", {})
+        os.path.realpath(path)
+    with pytest.raises(ValueError):
+        database._realpath_by_folder(path, {})

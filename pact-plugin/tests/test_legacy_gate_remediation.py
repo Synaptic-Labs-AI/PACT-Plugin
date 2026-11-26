@@ -775,7 +775,8 @@ def test_a_declined_session_save_into_a_folder_name_bucket_is_refused(declined_s
     assert code == 2, envelope
     assert envelope["error"] == "LEGACY_BUCKET_WRITE_REFUSED", envelope
     assert "does not write into a folder-name bucket" in envelope["message"]
-    assert "resolution declined: origin_unrepresentable" in envelope["message"]
+    assert "identity declined (origin_unrepresentable)" in envelope["message"]
+    assert "None" not in envelope["message"]
 
 
 @pytest.mark.parametrize("change", [{"project_id": "folder"}, {"session_id": "other"}])
@@ -792,6 +793,43 @@ def test_a_declined_session_update_into_a_folder_name_bucket_is_refused(
     )
     assert code == 2, envelope
     assert envelope["error"] == "LEGACY_BUCKET_WRITE_REFUSED", envelope
+
+
+def test_a_stale_declaration_in_a_plain_folder_may_save_its_folder_name(
+    tmp_path, monkeypatch, scopes_clean, capfd
+):
+    """CLAUDE_PROJECT_DIR names a deleted directory and the session sits in a
+    plain (non-git) folder: no repository declined, so a save into that
+    folder's own name is not refused. RED WHEN every named decline, a gone
+    declaration included, guards folder-name buckets."""
+    from scripts.cli import main
+
+    assert_outside_repository(tmp_path)
+    plain = tmp_path / "plainfolder"
+    plain.mkdir()
+    monkeypatch.chdir(plain)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(tmp_path / "gone"))
+    store = tmp_path / "store.db"
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["save", "--no-sync", json.dumps({"context": "c", "project_id": "plainfolder"}),
+              "--db-path", str(store)])
+    assert exit_info.value.code in (0, None), capfd.readouterr()
+    with sqlite3.connect(str(store)) as conn:
+        assert conn.execute("SELECT project_id FROM memories").fetchall() == [("plainfolder",)]
+
+
+@pytest.mark.parametrize("reason, guarded", [
+    (None, False),  # the final unnamed decline: a deleted or nameless cwd
+    ("declaration_unresolved", False),  # a declared directory that is gone
+    ("origin_unrepresentable", True),  # a live repository that declined
+])
+def test_only_a_live_repository_decline_guards_folder_name_buckets(tmp_path, reason, guarded):
+    memory = PACTMemory(project_id="x", session_id="s", db_path=tmp_path / "s.db")
+    memory._project_id, memory._project_id_source = None, "unresolved"
+    memory._decline_reason = None if reason is None else {"source": "cwd", "reason": reason}
+    assert memory._guards_folder_name_buckets() is guarded
 
 
 def test_a_declined_session_may_save_under_a_supplied_canonical_id(declined_session, capfd):

@@ -256,11 +256,12 @@ and noncharacters, is accepted by design; the residual is display
 spoofing only.
 
 A session whose detected project id is a repository identity, or whose
-repository identity declined, never writes into a folder-name bucket: `save` and `update` refuse a payload `project_id` that is
+identity declined at a live repository (not a declared directory that is
+gone), never writes into a folder-name bucket: `save` and `update` refuse a payload `project_id` that is
 not a canonical `host/owner/repo` id, and `update` refuses a `session_id`
 change on a row stored under a folder-name bucket. Both fail with
 `LEGACY_BUCKET_WRITE_REFUSED`, exit 2 and write nothing. `get` by its full id, and an
-`update` that leaves the row in its bucket, still work on a row in a bucket the
+`update` that changes neither `project_id` nor `session_id`, still work on a row in a bucket the
 read scope does not cover. To move rows, preview the move with `project-id rekey --from=FOLDER_NAME --to=host/owner/repo`,
 with the folder-name bucket and the canonical id filled in, and add `--apply`, with the user's approval, to perform it; to write a
 folder-name bucket, save from a folder whose project id is that name
@@ -529,7 +530,8 @@ was renamed or transferred. The bucket under the earlier id is not read. When
 a file row in this checkout is linked by one of the bucket's own memories saved after
 `<git-common-dir>/description` last changed (a file that merely exists here
 never counts), every existing absolute file row of the bucket lies in this
-checkout and outside its submodules, and the bucket holds memories, `project-id show` lists it as `earlier_id` with a rekey command into this
+checkout (a row in one of its submodules is skipped, so a submodule is never
+named), and the bucket holds memories, `project-id show` lists it as `earlier_id` with a rekey command into this
 checkout's id, and a read prints one notice per process naming it; otherwise
 `project-id show` lists it as an ordinary bucket with no command, as it does
 for every bucket when the repository has no `description` file, and for a

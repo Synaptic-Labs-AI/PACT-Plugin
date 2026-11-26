@@ -431,7 +431,8 @@ class TestCanonicaliserSpellings:
             "memories saved after "
             "<git-common-dir>/description last changed (a file that merely exists here "
             "never counts), every existing absolute file row of the bucket lies in this "
-            "checkout and outside its submodules, and the bucket holds memories, "
+            "checkout (a row in one of its submodules is skipped, so a submodule is "
+            "never named), and the bucket holds memories, "
             "project-id show lists it as "
             "earlier_id with a rekey command "
             "into this checkout's id, and a read prints one notice per process naming "
@@ -937,7 +938,8 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
     def test_the_rule_names_both_refused_writes(self):
         assert (
             "A session whose detected project id is a repository identity, or "
-            "whose repository identity declined, never writes into a folder-name "
+            "whose identity declined at a live repository (not a declared "
+            "directory that is gone), never writes into a folder-name "
             "bucket: save and update refuse a "
             "payload project_id that is not a canonical host/owner/repo id, "
             "and update refuses a session_id change on a row stored under a "
@@ -968,8 +970,8 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
 
     def test_get_and_an_in_place_update_still_reach_a_hidden_row(self):
         assert (
-            "get by its full id, and an update that leaves the row in its bucket, still "
-            "work on a row in a bucket the read scope does not cover."
+            "get by its full id, and an update that changes neither project_id nor "
+            "session_id, still work on a row in a bucket the read scope does not cover."
         ) in _body(SKILL)
 
     def test_the_exit_code_table_lists_the_legacy_write_refusal(self):

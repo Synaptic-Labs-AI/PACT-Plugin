@@ -1093,8 +1093,8 @@ def _note_earlier_canonical(
     _EARLIER_CANONICAL_WARNED.add(key)
     logger.warning(
         "project bucket %r holds %d memor%s, %d linked to files in this "
-        "checkout (at least one saved after this checkout was cloned) and "
-        "none to an existing file elsewhere. It may be this repository under "
+        "checkout (at least one saved after this checkout was cloned), and "
+        "none of its file rows names an existing file outside it. It may be this repository under "
         "an earlier id, but it is not this checkout's id %r, so it is NOT in "
         "this read scope. If its rows are this repository's, preview the move "
         "with: %s",
@@ -4288,6 +4288,16 @@ class PACTMemory:
         `_store_stat_key`). An in-process write clears the cache as well, so a save
         that changes the bucket set is observed immediately.
         """
+        # THE OUTERMOST CALL CLEARS the worktree list the earlier-id scan
+        # shares with the legacy check, so no later write-path verdict reuses
+        # this read's list.
+        if not getattr(self, "_in_scope_read", False):
+            self._in_scope_read = True
+            try:
+                return self._read_project_scopes(conn)
+            finally:
+                self._in_scope_read = False
+                self._read_gate_roots = None
         # A READ ON ITS OWN CONNECTION IS REPEATED WITH LOCKING when the store
         # moved under its immutable open (`_stable_read_only`); a caller's
         # connection is read as it is.
@@ -4535,10 +4545,15 @@ class PACTMemory:
         )
 
     def _identity_declined(self) -> bool:
-        """Whether this instance's DETECTION declined (no id was supplied)."""
+        """Whether this instance's DETECTION declined at a LIVE repository
+        (no id was supplied): the `_is_live_decline` rule. A gone declared
+        directory (`declaration_unresolved`) and the final unnamed
+        `unresolved` (a deleted or nameless cwd) name no repository."""
+        reason = (getattr(self, "_decline_reason", None) or {}).get("reason")
         return (
             self._project_id_source != "supplied"
-            and getattr(self, "_decline_reason", None) is not None
+            and self._project_id is None
+            and reason not in (None, "declaration_unresolved")
         )
 
     def _guards_folder_name_buckets(self) -> bool:
@@ -4559,15 +4574,18 @@ class PACTMemory:
         another project's memories. A refusal of caller input
         (`LegacyBucketWriteRefusedError`, exit 2).
         """
-        whose = (
-            "this session's repository identity was not resolved (resolution "
-            f"declined: {(self._decline_reason or {}).get('reason')})"
-            if self._identity_declined()
-            else f"this session's project id is {self._project_id!r} (a "
-            "repository identity)"
-        )
+        if self._identity_declined():
+            raise LegacyBucketWriteRefusedError(
+                f"{what}: this session is in a repository whose identity "
+                f"declined ({self._decline_reason['reason']}), and a repository "
+                "checkout, resolved or not, does not write into a folder-name "
+                "bucket. Nothing was written. Fix the identity (`project-id "
+                "show` names the remedy), or save with a canonical "
+                "host/owner/repo project_id."
+            )
         raise LegacyBucketWriteRefusedError(
-            f"{what}: {whose}, and a repository session does not write "
+            f"{what}: this session's project id is {self._project_id!r} (a "
+            "repository identity), and a repository session does not write "
             "into a folder-name bucket. Nothing was written. To move rows, "
             "preview the move with `project-id rekey --from=FOLDER_NAME "
             "--to=host/owner/repo` and add --apply, with the user's approval, "

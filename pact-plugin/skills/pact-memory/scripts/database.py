@@ -2122,7 +2122,8 @@ def bucket_evidence(
         shares a file such as a README therefore places the bucket too, as
         every same-named folder did before this change.
         With `dated_only` only dated rows count, and a row in one of the
-        root's submodules is not contained (an earlier canonical id,
+        root's submodules is skipped: in no class, though it counts in
+        `file_rows` and `absolute_rows` (an earlier canonical id,
         `memory_api.PACTMemory._earlier_canonical_buckets`);
       - `vanished`: the path no longer exists, and it is not contained, or
         it is contained but does not count by the rule above (a deleted file
@@ -2172,6 +2173,7 @@ def bucket_evidence(
     counts = dict.fromkeys(BUCKET_EVIDENCE_KEYS, 0)
     counts["roots"] = len(root_paths)
     real_dirs: Dict[str, str] = {}
+    strict: Dict[tuple, bool] = {}
     for row in cursor.fetchall():
         counts["file_rows"] += 1
         file_id, path = row[0], row[1]
@@ -2184,14 +2186,18 @@ def bucket_evidence(
         except (OSError, ValueError):
             counts["unresolvable"] += 1
             continue
-        # AN EARLIER ID (`dated_only`) TAKES NO SUBMODULE: a submodule has its
-        # own origin and id, so its rows are not the superproject's earlier ones.
-        if any(
-            _contained_by_root(
-                resolved, root, nested, None if dated_only else verified_common
-            )
+        contained = any(
+            _contained_by_root(resolved, root, nested, verified_common)
             for root in root_paths
+        )
+        # AN EARLIER ID (`dated_only`) TAKES NO SUBMODULE ROW: a submodule has
+        # its own origin and id, so its rows neither place the superproject's
+        # earlier id nor count against it; they are skipped.
+        if contained and dated_only and not any(
+            _contained_by_root(resolved, root, strict, None) for root in root_paths
         ):
+            continue
+        if contained:
             # A CONTAINED ROW PLACES THE BUCKET HERE ONLY IF ITS FILE IS STILL
             # IN THIS CHECKOUT, or a memory linked to it was saved after this
             # repository's `description` last changed. Otherwise the path may
