@@ -67,12 +67,10 @@ included. Never add `--db-path` to a command yourself.
 
 ### What you must not do, and why
 
-- Do not run a pact-memory CLI verb to inspect the store. A read does NOT
-  create the schema of, migrate or change the journal mode of an existing
-  store, but it can add vector rows for memories not yet embedded, and the
-  first read of an absent store in the default location creates the store
-  and its schema. A CLI run also reaches the same functions an import
-  reaches, so it defeats the next rule.
+- Do not run a pact-memory CLI verb to inspect the store: a read can add
+  vector rows, and the first read of an absent default store creates it. A
+  CLI run also reaches the same functions an import reaches, so it defeats
+  the next rule.
 - Do not import a module below `skills/pact-memory/scripts/`. In that package,
   functions create the live store directory as a side result of a path
   resolution, so an import puts each of them one call away. Do not read an
@@ -269,22 +267,18 @@ folder-name bucket, save from a folder whose project id is that name
 
 A session whose project id is a folder name (a repository with no portable
 origin or with a remote-helper transport origin (`<helper>::<address>`,
-`codecommit://`, `persistent-https://`, `sso://` or `keybase://`), a non-git project folder, the home-directory landing, or the
-user-scope `project_id` setting) is not judged: it reads and saves its
-same-name bucket as before, so it shares that bucket with every folder of the
-same name. That includes a repository with an origin whose pre-upgrade
-folder-name bucket has not yet been moved with `project-id rekey`: any
-same-name folder-name session can still read and write that bucket. To give
-such a project its own id, add an `origin` remote, or ask the user to write a
-canonical id to `<git-common-dir>/pact-project-id`.
+`codecommit://`, `persistent-https://`, `sso://` or `keybase://`), a non-git
+project folder, the home-directory landing, or the user-scope `project_id`
+setting) reads and saves its same-name bucket, shared with every folder of
+the same name. To give such a project its own id, add an `origin` remote, or
+ask the user to write a canonical id to `<git-common-dir>/pact-project-id`.
 
-A folder-name id whose pre-change name differs, such as a
-`--separate-git-dir` checkout without a portable origin (the old resolver named
-it after the external git dir's parent), has a legacy candidate like a
-canonical id: it is judged by the same rule and disclosed in `legacy_scope`.
-Its rows move with `project-id rekey --from=<old> --to=<this folder-name id>` and `--apply`, with the user's approval.
-The session's own folder-name id is the one non-canonical target a rekey
-accepts, only as an explicit `--to`, and only for its own legacy candidate.
+A folder-name id whose pre-change name differs (a `--separate-git-dir`
+checkout without a portable origin) is disclosed in `legacy_scope` like a
+canonical id. Move its rows with
+`project-id rekey --from=<old> --to=<this folder-name id>` and `--apply`, with
+the user's approval; that explicit `--to` is the one non-canonical target a
+rekey accepts.
 
 A `project_id` or `session_id` DETECTED from the environment or the session
 context is held to the same rule, and the outcome depends on the operation. A
@@ -357,27 +351,21 @@ Decline remedies. For `gitfile_redirect`, the CLI prints: "Check that git can an
 WHEN A PROJECT RETURNS NO MEMORIES, run `project-id show` before concluding
 anything. It reports the identity this session resolved, how it was decided,
 and every populated bucket; the rows it offers a command for carry a literal,
-runnable rekey command that names its target — interpreter-prefixed
-(`python3 "<skill>/scripts/cli.py" project-id rekey --from=<id> --to=<canonical> --db-path=<store>`),
-because there is no `pact-memory` executable on PATH. Its `--db-path` is the
-store the CLI resolved, not one you selected: keep it, and run the command
-exactly as printed. Run that command with
+runnable rekey command that names its target, interpreter-prefixed
+(`python3 "<skill>/scripts/cli.py" project-id rekey --from=<id> --to=<canonical> --db-path=<store>`).
+Its `--db-path` is the store the CLI resolved, not one you selected: keep it,
+and run the command exactly as printed. Run that command with
 `--apply` ONLY with the user's explicit approval, and NEVER for an excluded
-bucket or for another repository's canonical id: a rekey merges rows into the
-target and cannot be undone. The CLI refuses an `--apply` into another
-repository's id unless `--into-another-repository` is passed, which an agent
-passes only with the user's explicit approval. An `update` whose payload `project_id` names another repository's canonical id does move that one row there; only a whole-bucket rekey needs `--into-another-repository`. The dry run, the default, does not write the store: it computes on a temporary copy of the store file, which it then deletes, leaves the store file unchanged and creates no journal files beside it (journal files another process already holds stay). A bucket can hold
-thousands of records that this session's read scope does not include — an
-identity it cannot derive, or a legacy bucket left `excluded` or `unproven` —
-and an empty result never means those records do not exist. A full id still
+bucket or for another repository's canonical id. The CLI refuses an `--apply`
+into another repository's id unless `--into-another-repository` is passed,
+which an agent passes only with the user's explicit approval. An `update` whose payload `project_id` names another repository's canonical id does move that one row there; only a whole-bucket rekey needs `--into-another-repository`. The dry run, the default, does not write the store: it computes on a temporary copy of the store file, which it then deletes, leaves the store file unchanged and creates no journal files beside it (journal files another process already holds stay). When the dry run cannot write that copy (no usable temporary folder, or a full one), it fails as `REKEY_FAILED` (exit 3) naming the folder; set `TMPDIR` to a writable folder with room for a copy of the store and run it again. A bucket can hold
+thousands of records that this session's read scope does not include, and an
+empty result never means those records do not exist. A full id still
 resolves by id, so `get <id>` is a way to check one record when you know it.
 
-A WIDENED READ IS NOT A CLAIM OF OWNERSHIP. An `included_unverified` bucket is
-read because a session recorded at this repository's root wrote into it, not because
-its file rows place it here, so a result can contain rows from another checkout
-that shares the folder name, including one that used this exact folder before
-this repository was moved into it. Treat it as a discovery to review, not as proof
-that every row belongs here.
+Rows read from an `included_unverified` bucket can belong to another checkout
+that shares the folder name: review them before treating them as this
+repository's.
 
 `legacy_scope` carries the same keys in every state: `candidate`,
 `memory_count`, `file_paths`, `rekey`, `included`, `verified`,
@@ -386,82 +374,45 @@ that every row belongs here.
 `case_variant`, `case_variant_rekey`, `suppressed`, `suppressed_candidate` and
 `degraded`. It is `null` when no identity resolves, when the store does not
 exist yet, when the id is supplied, or when this checkout has no pre-change
-name that differs from its id (a folder-name id with no other pre-change name
-included). Otherwise it is an object, and its `candidate` is `null` when no
-bucket in the store matches that pre-change name (`case_variant` then lists a
-case-differing one), when the store has no schema yet or could not be opened
-(`degraded`), or when the candidate is withheld (`suppressed`). A `save` whose
-payload names another project's id carries an object with only
-`canonical_count`, that bucket's prior row count, set. When `candidate` is set, exactly
-one of `included`, `excluded` and `unproven` is true:
+name that differs from its id. Otherwise it is an object, and its `candidate`
+is `null` when no bucket in the store matches that pre-change name (`case_variant` then
+lists a case-differing one), when the store could not be checked
+(`degraded`), or when the candidate is withheld (`suppressed`). A `save`
+whose payload names another project's id carries an object with only
+`canonical_count`, that bucket's prior row count, set. When `candidate` is
+set, exactly one of `included`, `excluded` and `unproven` is true:
 
-- `included`: the whole bucket is read. `verified` means an absolute file row
-  places it in this repository and no evidence places it elsewhere. A file row
-  places it when a memory linked to it was saved after
-  `<git-common-dir>/description` last changed, or when its file still exists,
-  even beside missing rows, so a file another repository shares with it (a
-  README) places it too. With no `description` file, every row counts. `included_unverified` means no file row places
-  it but a recorded session from this repository wrote into it
-  (`session_evidence` is `true`). A recorded session counts only when it was
-  launched at the root of this repository or of one of its linked worktrees (a
-  session launched in a subfolder is not read), and `<git-common-dir>/description` is a
-  regular file whose ctime is earlier than the session's start, or the
-  repository has no `description` file. A session folder that was cleaned up
-  counts the same way through the line recorded for it when it was removed.
-  Neither kind is read when any of its rows was written by a session recorded
-  at an existing directory outside this repository and its linked worktrees:
-  it is then `unproven`. A row with no recorded session, or whose session's
-  recorded directory no longer exists (a removed worktree or a deleted
-  checkout), does not block it; an `included_unverified` bucket that holds such rows is read with a warning,
-  once per process, that gives their count (`sessions.unattributed`) and the
-  rekey command, and a `verified` bucket is read with one informational line,
-  once per process, that gives their count and says its file rows place it here.
-- `excluded`: evidence places it elsewhere and nothing places it here, so it
-  is not read and no rekey command is printed anywhere. `unproven_reason` names
-  the evidence (`foreign_rows` or `recorded_elsewhere`; a bucket written only by
-  sessions recorded at another existing folder is excluded). Evidence of another
-  owner is a file row that exists in another checkout or project folder with
-  this bucket's name (a git checkout, or a folder marked by `.claude` or a
-  recorded session), or a session recorded at another existing folder. Rows
-  that are gone, unreadable, relative, in an unmarked folder, in a checkout
-  with another name, or outside any other checkout are no evidence either way. Another
-  clone of this same repository is not a rival: its rows and sessions are no
-  evidence either way when its `.git` is a directory and either its usable
-  pin (read by the same rule as this repository's own) is this repository's
-  id or, when it has no usable pin, its own config's first origin url is this
-  repository's, written the same way (a url is compared only when this
-  repository's id came from a url). A clone with a different pin, a
-  differently spelled url (ssh against https, or with or without `.git`), a
-  config holding an include, a dotted section header such as
-  `[remote.origin]`, or an empty origin url anywhere, or a `.git`
-  that is a file or link (a linked worktree or separate-git-dir checkout of
-  another clone) still counts as a rival.
+- `included`: the whole bucket is read. `verified` means a file row places
+  it in this repository and nothing places it elsewhere; `included_unverified`
+  means no file row places it but a session recorded at the root of this
+  repository or of one of its linked worktrees wrote into it
+  (`session_evidence` is `true`). A bucket holding memories no recorded
+  session wrote (`sessions.unattributed`) is read with a warning
+  (`included_unverified`) or an informational line (`verified`), once per
+  process.
+- `excluded`: evidence places it elsewhere and nothing places it here. It is
+  not read and no rekey command is printed anywhere; `unproven_reason` is
+  `foreign_rows` or `recorded_elsewhere`.
 - `unproven`: it is not read, and its `rekey` command is printed once per
   process, with the cause. `unproven_reason` names the cause:
-  `recorded_elsewhere` (some of its rows were written by sessions recorded at
-  another existing folder), `foreign_rows` (some of its file rows lie in another
-  checkout or project folder with its name, beside rows under this
-  repository; `detail.foreign_rows` counts them, split into
-  `foreign_checkout_rows` and `foreign_folder_rows`, and a rekey needs an
-  explicit `--to`), `subfolder_launch` (no file row places it, and
-  its writing sessions were launched in a subfolder of this repository),
-  `description_newer` (no file row places it, and `description` changed after
-  its writing sessions started) or `no_session` (no file row places it and no
-  session launched at the root of this repository or of one of its linked
-  worktrees wrote it). `sessions` counts the bucket's memories by where their
-  writing session is recorded: `here`, `elsewhere`, `subfolder`,
-  `description_newer` and `unattributed`; it is `null` when a file row placing it
-  elsewhere already decided the bucket, or there is no candidate.
-  `detail` counts the bucket's file rows: `file_rows`, `absolute_rows`,
-  `contained_rows`, `foreign_rows`, `foreign_checkout_rows`,
-  `foreign_folder_rows`, `neutral_outside`, `vanished`, `unresolvable`,
-  `relative` and `roots`. A repository that was moved, copied,
-  restored or cloned again, and a folder that is not a repository, read as
-  `unproven` too. A
-  session folder removed before the session ledger existed left no line,
-  so a project whose writing sessions were all removed that way reads as
-  `unproven` until its rows are moved with that rekey command and `--apply`,
+  `recorded_elsewhere` (sessions recorded at another existing folder wrote
+  some of its rows), `foreign_rows` (some of its file rows lie in another
+  checkout or project folder with its name; `detail.foreign_rows` counts
+  them, split into `foreign_checkout_rows` and `foreign_folder_rows`, and a
+  rekey needs an explicit `--to`), `subfolder_launch` (its writing sessions
+  were launched in a subfolder of this repository), `description_newer`
+  (`description` changed after its writing sessions started) or `no_session`
+  (no session launched at the root of this repository or of one of its linked
+  worktrees wrote it). Its rows move only with that command and `--apply`,
   which needs the user's explicit approval.
+
+`sessions` counts the bucket's memories by where their writing session is
+recorded: `here`, `elsewhere`, `subfolder`, `description_newer` and
+`unattributed`; it is `null` when a file row placing it elsewhere already
+decided the bucket, or there is no candidate. `detail` counts the bucket's
+file rows: `file_rows`, `absolute_rows`, `contained_rows`, `foreign_rows`,
+`foreign_checkout_rows`, `foreign_folder_rows`, `neutral_outside`,
+`vanished`, `unresolvable`, `relative` and `roots`.
 
 `suppressed` is set for a submodule checkout, as `{source:
 submodule_admin_dir, reason: repository_chosen_name, override_path: null,
@@ -471,26 +422,14 @@ store could not be checked, else `null`.
 
 ### Choosing a Project Identity
 
-Two operator surfaces answer, and they are deliberately ordered:
-
-- `<git-common-dir>/pact-project-id` — a REPOSITORY-scoped pin. Only the user
-  writes it: it decides which bucket every checkout of the repository reads
-  and writes, so an agent that meets a remedy naming this file asks the user
-  for the id instead of writing it. It follows the
-  repository that won resolution (the identity root), not the process's
-  working directory. Its first non-blank, non-`#` line is the id, and only a
-  canonical `host/owner/repo` id is accepted: a folder-name value is reported
-  as `override_ignored` with reason `not_canonical`, and resolution continues
-  without it. A pin's host is read case-insensitively, as a remote's is. A
-  `github.com` or `www.github.com` pin with no port is read as a
-  github.com remote is: each name is decoded and lower-cased, with
-  `www.github.com` read as `github.com`, and it must name exactly owner/repo,
-  each a valid GitHub name. A `github.com` pin on another port is lower-cased
-  outside its `%XX` escapes. In any pin, an escaped unreserved character such as
-  `%41` is decoded, as in a remote. Write the pin as the id `project-id show`
-  reports for the remote (`github.com/owner/repo`, with no `.git`).
-  To move a copied store's folder-name bucket, use
-  `project-id rekey --from=<old> --to=<canonical>`. An ssh host alias from
+- `<git-common-dir>/pact-project-id` is a REPOSITORY-scoped pin, shared by
+  every checkout of the repository. Only the user writes it: an agent that
+  meets a remedy naming this file asks the user for the id instead of writing
+  it. Its first non-blank, non-`#` line is the id, and only a canonical
+  `host/owner/repo` id is accepted: a folder-name value is reported as
+  `override_ignored` with reason `not_canonical`, and resolution continues
+  without it. Write the pin as the id `project-id show` reports for the
+  remote (`github.com/owner/repo`, with no `.git`). An ssh host alias from
   the user's ssh config stays in the id: `git@github-work:Acme/Widget` gives `github-work/Acme/Widget`,
   while an https clone of the same repository gives `github.com/acme/widget`.
   Only clones whose origin uses that same alias share an alias id.
@@ -507,45 +446,30 @@ Two operator surfaces answer, and they are deliberately ordered:
   directory one id.
   It must be a regular file: a FIFO or a symlink in that position is refused, and an
   unusable file is reported as `override_ignored` and resolution continues
-  without it. The file is never read, so nothing is reported, when git
-  gives no working tree for the repository, when the checkout's `.git` names a linked
+  without it. The file is never read, so nothing is reported, when git gives no
+  working tree for the repository, when the checkout's `.git` names a linked
   worktree's admin directory that does not link back to it, when the checkout
   the session is in is the user's home directory (a linked worktree
-  included), or when no git directory is found (a broken `.git` marker or a declaration that cannot be
-  resolved). Inside a repository, a stray `.git` that git looks past, such as
-  an empty directory or a dangling symlink, does not make its folder a
-  checkout. When git cannot see
-  that home checkout from the working directory, the user-scope `project_id` below binds there if it is set. A
-  session in a checkout outside the home directory reads its pin even when
-  the repository's main checkout is the home directory.
+  included), or when no git directory is found (a broken `.git` marker or a
+  declaration that cannot be resolved).
 - `config.json` → `"project_id"` in the user memory directory, the directory
-  that holds the default `memory.db` named under Storage — a USER-scoped
-  setting, read there whatever store a command names: `--db-path` does not
-  move it. It
-  answers ONLY when no declaration was present and no repository was found,
-  from the working directory or by walking up to its project marker (a home
-  directory the walk reaches is not asked, as above), so a repository pin
-  outranks it wherever one is read: when the session's checkout is the home
-  directory no pin is read, and when git cannot see that home from the
-  working directory this setting binds there. Use it for a non-repository working
-  directory that should share one identity. Only the user sets it: it changes
-  the identity of every session it answers for, so an agent asks the user
-  instead of writing it.
+  that holds the default `memory.db` named under Storage, is a USER-scoped
+  setting, read there whatever store a command names. It answers ONLY when no
+  declaration was present and no repository was found, so a repository pin
+  outranks it wherever one is read; when the session's checkout is the home
+  directory no pin is read, and this setting binds there when git cannot see
+  that home from the working directory. Only the user sets it: an agent asks
+  the user instead of writing it.
 
 Two spellings of one repository can resolve to two ids, as can an origin that
-was renamed or transferred. The bucket under the earlier id is not read. When
-a file row in this checkout is linked by one of the bucket's own memories saved after
-`<git-common-dir>/description` last changed (a file that merely exists here
-never counts), every existing absolute file row of the bucket lies in this
-checkout (a row in one of its submodules is skipped, so a submodule is never
-named), and the bucket holds memories, `project-id show` lists it as `earlier_id` with a rekey command into this
-checkout's id, and a read prints one notice per process naming it; otherwise
-`project-id show` lists it as an ordinary bucket with no command, as it does
-for every bucket when the repository has no `description` file, and for a
-bucket with an existing file in a linked worktree outside the repository
-folder. A bucket that also has a file row in one of this checkout's
-submodules is listed as `earlier_id` with no command, and its notice gives
-that row count, since a whole-bucket rekey would move those rows too. Join them with
+was renamed or transferred; the bucket under the earlier id is not read.
+`project-id show` lists such a bucket as `earlier_id`, with a rekey command
+into this checkout's id, only when one of its own recent memories links a file
+in this checkout and every existing absolute file row of the bucket lies in
+this checkout, and a read prints one notice per process naming it. An
+`earlier_id` row that also has a file row in one of this checkout's
+submodules has no command, and its notice gives that row count. Any other
+such bucket is an ordinary `other` row with no command. Join the two with
 `project-id rekey --from=<id> --to=<id>`, and run it with `--apply` only with
 the user's explicit approval.
 
@@ -553,16 +477,12 @@ On `update`, an omitted `project_id` leaves the row's project unchanged and an e
 
 ### A Short Search Is Not an Empty Project
 
-`search` returns **at most** `--limit`, not exactly it. Every hit is confirmed
-against its stored project before it is returned, and the confirmation widens
-the fetch only up to a fixed budget of 200 candidates. On a store where many
-vector rows belong to another project — a rekey that could not move its
-vectors, or a copied store — a search can return fewer results than you asked
-for, including none, while matching memories exist.
-
-So a short or empty search is **not evidence** that this project has no
-memories. Check the read scope and any excluded bucket with the
-`project-id show` verb, then retry with a narrower query.
+`search` returns **at most** `--limit`, not exactly it. On a store where many
+vector rows belong to another project, a search can return fewer results than
+you asked for, including none, while matching memories exist. So a short or
+empty search is **not evidence** that this project has no memories. Check the
+read scope and any excluded bucket with the `project-id show` verb, then retry
+with a narrower query.
 
 ### Exit Codes
 

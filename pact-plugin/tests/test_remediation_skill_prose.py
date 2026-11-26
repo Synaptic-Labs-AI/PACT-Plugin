@@ -213,21 +213,14 @@ class TestCliReadEffectOnTheStore:
         finally:
             conn.close()
         body = _body(SKILL)
-        assert (
-            "A read does NOT create the schema of, migrate or change the journal "
-            "mode of an existing store, but it can add vector rows for memories "
-            "not yet embedded"
-        ) in body
+        assert "a read can add vector rows" in body
         assert "journal_mode=WAL" not in body
 
     def test_the_first_read_of_an_absent_default_store_creates_it(self, tmp_path):
         result = self._cli._run(tmp_path, "list")
         assert result.returncode == 0, result.stderr
         assert (tmp_path / "memory-home" / "memory.db").exists()
-        assert (
-            "the first read of an absent store in the default location creates "
-            "the store and its schema"
-        ) in _body(SKILL)
+        assert "the first read of an absent default store creates it" in _body(SKILL)
 
 
 class TestSecretaryProjectionKey:
@@ -397,12 +390,6 @@ class TestOverrideAcceptsCanonicalIdsOnly:
             "value is reported as override_ignored with reason not_canonical"
         ) in _body(SKILL)
 
-    def test_the_copied_store_route_is_an_explicit_rekey(self):
-        assert (
-            "To move a copied store's folder-name bucket, use project-id "
-            "rekey --from=<old> --to=<canonical>"
-        ) in _body(SKILL)
-
     def test_the_retired_folder_name_pin_is_gone(self):
         assert "legacy folder name are both accepted" not in _body(SKILL).lower()
 
@@ -426,24 +413,15 @@ class TestCanonicaliserSpellings:
     def test_two_spellings_are_joined_by_an_approved_rekey(self):
         assert (
             "Two spellings of one repository can resolve to two ids, as can an origin "
-            "that was renamed or transferred. The bucket under the earlier id is not "
-            "read. When a file row in this checkout is linked by one of the bucket's own "
-            "memories saved after "
-            "<git-common-dir>/description last changed (a file that merely exists here "
-            "never counts), every existing absolute file row of the bucket lies in this "
-            "checkout (a row in one of its submodules is skipped, so a submodule is "
-            "never named), and the bucket holds memories, "
-            "project-id show lists it as "
-            "earlier_id with a rekey command "
-            "into this checkout's id, and a read prints one notice per process naming "
-            "it; otherwise project-id show lists it as an ordinary bucket with no "
-            "command, as it does for every bucket when the repository has no "
-            "description file, and for a bucket with an existing file in a linked "
-            "worktree outside the repository folder. A bucket that also has a file "
-            "row in one of this checkout's submodules is listed as earlier_id with "
-            "no command, and its notice gives that row count, since a whole-bucket "
-            "rekey would move those rows too. Join them with project-id "
-            "rekey --from=<id> --to=<id>, and "
+            "that was renamed or transferred; the bucket under the earlier id is not "
+            "read. project-id show lists such a bucket as earlier_id, with a rekey "
+            "command into this checkout's id, only when one of its own recent "
+            "memories links a file in this checkout and every existing absolute file "
+            "row of the bucket lies in this checkout, and a read prints one notice "
+            "per process naming it. An earlier_id row that also has a file row in "
+            "one of this checkout's submodules has no command, and its notice gives "
+            "that row count. Any other such bucket is an ordinary other row with no "
+            "command. Join the two with project-id rekey --from=<id> --to=<id>, and "
             "run it with --apply only with the user's explicit approval."
         ) in _body(SKILL)
 
@@ -600,63 +578,25 @@ class TestLegacyScopeStatesAreDocumented:
 
     def test_included_unverified_rests_on_session_evidence(self):
         assert (
-            "included_unverified means no file row places it but a recorded "
-            "session from this repository wrote into it (session_evidence is true)"
+            "included_unverified means no file row places it but a session recorded "
+            "at the root of this repository or of one of its linked worktrees wrote "
+            "into it (session_evidence is true)"
         ) in _body(SKILL)
 
-    def test_a_recorded_session_counts_only_before_the_description_ctime(self):
-        body = _body(SKILL)
+    def test_an_unverified_read_is_reviewed_before_it_is_trusted(self):
         assert (
-            "A recorded session counts only when it was launched at the root of "
-            "this repository or of one of its linked worktrees (a session "
-            "launched in a subfolder is not read), and <git-common-dir>/description is a "
-            "regular file whose ctime is earlier than the session's start, or the "
-            "repository has no description file."
-        ) in body
-        assert (
-            "A session folder that was cleaned up counts the same way through "
-            "the line recorded for it when it was removed."
-        ) in body
-        assert "inode" not in body.lower()
-
-    def test_sessions_removed_before_the_ledger_read_as_unproven(self):
-        assert (
-            "A session folder removed before the session ledger existed left "
-            "no line, so a project whose writing sessions were all "
-            "removed that way reads as unproven until its rows are moved with "
-            "that rekey command and --apply, which needs the user's explicit "
-            "approval."
-        ) in _body(SKILL)
-
-    def test_a_copied_or_recloned_repository_reads_as_unproven(self):
-        assert (
-            "A repository that was moved, copied, restored or cloned again, and "
-            "a folder that is not a repository, read as unproven too."
-        ) in _body(SKILL)
-
-    def test_the_moved_repository_residual_is_stated(self):
-        assert (
-            "a result can contain rows from another checkout that shares the "
-            "folder name, including one that used this exact folder before "
-            "this repository was moved into it."
+            "Rows read from an included_unverified bucket can belong to another "
+            "checkout that shares the folder name: review them before treating them "
+            "as this repository's."
         ) in _body(SKILL)
 
     def test_excluded_needs_evidence_of_another_owner(self):
         body = _body(SKILL)
         assert (
-            "excluded: evidence places it elsewhere and nothing places it here, "
-            "so it is not read and no rekey command is printed anywhere."
-        ) in body
-        assert (
-            "Rows that are gone, unreadable, relative, in an unmarked folder, in "
-            "a checkout with another name, or outside any other checkout are no "
-            "evidence either way."
+            "excluded: evidence places it elsewhere and nothing places it here. It "
+            "is not read and no rekey command is printed anywhere"
         ) in body
         assert "excluded: its absolute file rows place it in another repository" not in body
-        assert (
-            "a bucket written only by sessions recorded at another existing "
-            "folder is excluded"
-        ) in body
 
     def test_the_documented_detail_counts_are_the_code_key_set(self):
         from scripts.database import BUCKET_EVIDENCE_KEYS
@@ -682,31 +622,16 @@ class TestLegacyScopeStatesAreDocumented:
 
     def test_an_unattributed_row_is_read_with_a_warning(self):
         assert (
-            "an included_unverified bucket that holds such rows is read with a "
-            "warning, once per process, that gives their count "
-            "(sessions.unattributed) and the rekey command, and a verified bucket "
-            "is read with one informational line, once per process, that gives "
-            "their count and says its file rows place it here."
-        ) in _body(SKILL)
-
-    def test_a_foreign_row_keeps_either_kind_out(self):
-        assert (
-            "Neither kind is read when any of its rows was written by a session "
-            "recorded at an existing directory outside this repository and its "
-            "linked worktrees: it is then unproven."
-        ) in _body(SKILL)
-
-    def test_a_vanished_recorded_directory_is_unattributed(self):
-        assert (
-            "A row with no recorded session, or whose session's recorded "
-            "directory no longer exists (a removed worktree or a deleted "
-            "checkout), does not block it"
+            "A bucket holding memories no recorded session wrote "
+            "(sessions.unattributed) is read with a warning (included_unverified) "
+            "or an informational line (verified), once per process."
         ) in _body(SKILL)
 
     def test_a_folder_name_legacy_candidate_moves_only_with_apply(self):
         assert (
-            "Its rows move with project-id rekey --from=<old> --to=<this "
-            "folder-name id> and --apply, with the user's approval."
+            "Move its rows with project-id rekey --from=<old> --to=<this "
+            "folder-name id> and --apply, with the user's approval; that explicit "
+            "--to is the one non-canonical target a rekey accepts."
         ) in _body(SKILL)
 
     def test_legacy_scope_null_and_null_candidate_are_distinguished(self):
@@ -722,18 +647,11 @@ class TestLegacyScopeStatesAreDocumented:
         ) in body
         assert "when this checkout has no legacy candidate to report" not in body
 
-    def test_a_github_pin_is_read_with_githubs_spelling(self):
+    def test_the_pin_is_written_as_show_reports_it(self):
         body = _body(SKILL)
         assert (
-            "A pin's host is read case-insensitively, as a remote's is. A "
-            "github.com or www.github.com pin with no port is read as a "
-            "github.com remote is: each name is decoded and lower-cased, with "
-            "www.github.com read as github.com, and it must name exactly owner/repo, "
-            "each a valid GitHub name. A "
-            "github.com pin on another port is lower-cased outside its %XX escapes. "
-            "In any pin, an escaped unreserved character such as %41 is decoded, as "
-            "in a remote. Write the pin as the id project-id show reports for the "
-            "remote (github.com/owner/repo, with no .git)."
+            "Write the pin as the id project-id show reports for the remote "
+            "(github.com/owner/repo, with no .git)."
         ) in body
         assert "earlier mixed-case spelling" not in body
 
@@ -761,22 +679,6 @@ class TestLegacyScopeStatesAreDocumented:
             "gh/acme/widget. The pin is the remedy"
         ) in _body(SKILL)
 
-    def test_a_sibling_clone_is_not_a_rival(self):
-        assert (
-            "Another clone of this same repository is not a rival: its rows and "
-            "sessions are no evidence either way when its .git is a directory and "
-            "either its usable pin (read by the same rule as this repository's "
-            "own) is this repository's id or, when it has no usable pin, its own "
-            "config's first origin url is this repository's, written the same way "
-            "(a url is compared only when this repository's id came from a url)."
-        ) in _body(SKILL)
-        assert (
-            "A clone with a different pin, a differently spelled url (ssh against "
-            "https, or with or without .git), a config holding an include, a "
-            "dotted section header such as [remote.origin], or an empty origin "
-            "url anywhere, or a .git that is a file or link"
-        ) in _body(SKILL)
-
     def test_the_rekey_dry_run_states_what_it_leaves(self):
         body = _body(SKILL)
         assert (
@@ -785,6 +687,14 @@ class TestLegacyScopeStatesAreDocumented:
             "store file unchanged and creates no journal files beside it"
         ) in body
         assert "The dry run, the default, changes nothing." not in body
+
+    def test_a_dry_run_that_cannot_write_its_copy_names_the_remedy(self):
+        assert (
+            "When the dry run cannot write that copy (no usable temporary folder, "
+            "or a full one), it fails as REKEY_FAILED (exit 3) naming the folder; "
+            "set TMPDIR to a writable folder with room for a copy of the store and "
+            "run it again."
+        ) in _body(SKILL)
 
     def test_update_may_move_one_row_into_another_repository(self):
         assert (
@@ -801,31 +711,19 @@ class TestLegacyScopeStatesAreDocumented:
             "A session whose project id is a folder name (a repository with no "
             "portable origin or with a remote-helper transport origin "
             "(<helper>::<address>, codecommit://, persistent-https://, sso:// or "
-            "keybase://), a non-git project folder, the home-directory "
-            "landing, or the user-scope project_id setting) is not judged: it "
-            "reads and saves its same-name bucket as before, so it shares that "
-            "bucket with every folder of the same name."
+            "keybase://), a non-git project folder, the home-directory landing, or "
+            "the user-scope project_id setting) reads and saves its same-name "
+            "bucket, shared with every folder of the same name."
         ) in body
         for gone in ("FOLDER_NAME_BUCKET_REFUSED", "local.invalid/<digest>",
                      "Clones of a local-only repository", "local-pin remedy"):
             assert gone not in body, gone
-        assert (
-            "That includes a repository with an origin whose pre-upgrade "
-            "folder-name bucket has not yet been moved with project-id rekey: any "
-            "same-name folder-name session can still read and write that bucket."
-        ) in body
-        assert (
-            "The session's own folder-name id is the one non-canonical target a "
-            "rekey accepts, only as an explicit --to, and only for its own legacy "
-            "candidate."
-        ) in body
 
     def test_foreign_rows_is_a_documented_unproven_reason(self):
         assert (
             "foreign_rows (some of its file rows lie in another checkout or "
-            "project folder with its name, beside rows under this "
-            "repository; detail.foreign_rows counts them, split into "
-            "foreign_checkout_rows and foreign_folder_rows, and a rekey needs "
+            "project folder with its name; detail.foreign_rows counts them, split "
+            "into foreign_checkout_rows and foreign_folder_rows, and a rekey needs "
             "an explicit --to)"
         ) in _body(SKILL)
 
@@ -973,15 +871,6 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
             "and update refuses a session_id change on a row stored under a "
             "folder-name bucket. Both fail with LEGACY_BUCKET_WRITE_REFUSED, "
             "exit 2 and write nothing."
-        ) in _body(SKILL)
-
-    def test_a_file_row_places_a_bucket_only_while_dated_or_present(self):
-        assert (
-            "A file row places it when a memory linked to it was saved after "
-            "<git-common-dir>/description last changed, or when its file still "
-            "exists, even beside missing rows, so a file another repository "
-            "shares with it (a README) places it too. With no description file, "
-            "every row counts."
         ) in _body(SKILL)
 
     def test_a_rekey_into_another_repository_needs_the_flag(self):
@@ -1200,9 +1089,8 @@ class TestUserSettingIsReadFromTheUserScope:
     def test_the_bullet_names_the_user_directory_and_not_the_store(self):
         assert (
             "config.json \u2192 \"project_id\" in the user memory directory, the "
-            "directory that holds the default memory.db named under Storage \u2014 "
-            "a USER-scoped setting, read there whatever store a command names: "
-            "--db-path does not move it."
+            "directory that holds the default memory.db named under Storage, is a "
+            "USER-scoped setting, read there whatever store a command names."
         ) in _body(SKILL)
 
     def test_the_store_relative_location_is_gone(self):
@@ -1210,16 +1098,14 @@ class TestUserSettingIsReadFromTheUserScope:
 
     def test_only_the_user_sets_the_user_setting(self):
         assert (
-            "Only the user sets it: it changes the identity of every session "
-            "it answers for, so an agent asks the user instead of writing it."
+            "Only the user sets it: an agent asks the user instead of writing it."
         ) in _body(SKILL)
 
     def test_only_the_user_writes_the_repository_pin(self):
         assert (
-            "a REPOSITORY-scoped pin. Only the user writes it: it decides which "
-            "bucket every checkout of the repository reads and writes, so an "
-            "agent that meets a remedy naming this file asks the user for the "
-            "id instead of writing it."
+            "a REPOSITORY-scoped pin, shared by every checkout of the repository. "
+            "Only the user writes it: an agent that meets a remedy naming this file "
+            "asks the user for the id instead of writing it."
         ) in _body(SKILL)
 
     def test_the_code_reads_the_user_directory_under_a_store_scope(
