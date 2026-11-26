@@ -335,8 +335,11 @@ class TestAControlCharacterInTheOriginDeclines:
         refused visibly rather than read as a folder name."""
         assert pi.classify_remote_origin(url) == (DECLINE, None)
 
-    def test_one_trailing_terminator_is_still_tolerated(self):
-        assert pi.classify_remote_origin("https://host/o/r\n") == (CANONICAL, "host/o/r")
+    def test_a_trailing_newline_is_part_of_the_value(self):
+        """git keeps it and reaches no repository (see
+        test_a_trailing_newline_or_space_declines), so a network remote with
+        one declines; a local path with one still falls through."""
+        assert pi.classify_remote_origin("https://host/o/r\n") == (DECLINE, None)
         assert pi.classify_remote_origin("/srv/repo\n") == (NO_PORTABLE, None)
 
 

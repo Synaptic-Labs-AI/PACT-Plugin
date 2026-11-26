@@ -65,7 +65,9 @@ CORPUS = [
     ("me@github.com:o/r", ("o", "r")),
     ("github.com:o/r", ("o", "r")),
     ("git@ssh.github.com:o/r", ("o", "r")),
-    ("https://github.com/o/r\n", ("o", "r")),
+    # A trailing newline is part of the stored value: git keeps it and reaches
+    # no repository (measured, git 2.43), so the value declines.
+    ("https://github.com/o/r\n", None),
     ("https://github.com/a.b/c_d-e", ("a.b", "c_d-e")),
     # Refused for a security reason: backslash, more than one `@`.
     ("https://evil.com\\@github.com/o/n", None),

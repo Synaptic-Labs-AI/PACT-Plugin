@@ -982,7 +982,15 @@ def normalize_remote_url(url: object) -> Optional[str]:
     if not isinstance(url, str):
         return None
 
-    value = _strip_one_terminator(url)
+    # A TRAILING NEWLINE IS PART OF THE URL, NOT A TERMINATOR: every caller
+    # passes the stored value (`read_origin` reads with `-z`), and git keeps
+    # the newline too (measured, git 2.43: `url = "<path>\n"` makes
+    # `git ls-remote origin` fail with "'<path>\n' does not appear to be a
+    # git repository"). So such a value names no repository git reaches and
+    # declines (`_is_network_shaped` still reads it as a network remote).
+    value = url
+    if _has_control_character(value):
+        return None
 
     # Refuse the whole value before any parsing. Python's `urlsplit` and git
     # disagree on where the host ends in `https://evil.com\\@github.com/o/n`,

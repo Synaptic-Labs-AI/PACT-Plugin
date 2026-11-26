@@ -236,7 +236,6 @@ def test_slug_from_remote_url_accepts_github_forms_and_refuses_the_rest():
         "ssh://git@github.com:22/o/r",
         "git@github.com:o/r.git",
         "git://github.com/o/r",
-        "https://github.com/o/r\n",  # git's one terminator
         "me@github.com:o/r",  # B-F14: any non-empty scp user
     ]
     for url in accepted:
@@ -251,6 +250,9 @@ def test_slug_from_remote_url_accepts_github_forms_and_refuses_the_rest():
         'https://github.com/o/r"x', "https://github.com/o/r x",
         # The id declines leading whitespace, and the slug comes from the id.
         "  https://github.com/o/r\n",
+        # A trailing newline is part of the stored value; git keeps it and
+        # reaches no repository (measured, git 2.43), so it gives no slug.
+        "https://github.com/o/r\n",
     ]
     for url in refused:
         assert backlog._slug_from_remote_url(url) is None, url

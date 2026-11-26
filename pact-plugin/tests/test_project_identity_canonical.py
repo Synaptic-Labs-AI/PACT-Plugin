@@ -273,15 +273,18 @@ class TestNormalizationEquivalence:
             "host/repo",
         )
 
-    def test_a_trailing_newline_is_the_only_stripped_terminator(self):
-        """Catches a broad .strip() that repairs a remote git should reject.
+    def test_a_trailing_newline_or_space_declines(self):
+        """Catches a strip that repairs a remote git does not reach.
 
-        git writes one newline; a trailing space must DECLINE visibly rather
-        than be silently accepted.
+        The origin is read with `-z`, so a trailing newline is part of the
+        stored value, and git keeps it: measured on git 2.43, a config value
+        `url = "file://<path>/bare.git\\n"` makes `git ls-remote origin` fail
+        with "'<path>/bare.git\\n' does not appear to be a git repository".
+        So the value declines rather than binding host/owner/repo, and a
+        trailing space declines too.
         """
-        assert pi.normalize_remote_url("https://host/owner/repo\n") == (
-            "host/owner/repo"
-        )
+        assert pi.normalize_remote_url("https://host/owner/repo\n") is None
+        assert pi.classify_remote_origin("https://host/owner/repo\n") == (DECLINE, None)
         assert pi.classify_remote_origin("https://host/owner/repo ") == (DECLINE, None)
 
     @pytest.mark.parametrize(
