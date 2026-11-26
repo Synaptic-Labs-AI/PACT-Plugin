@@ -963,6 +963,12 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
             "--to is not this checkout's own id; a dry run still plans it)"
         ) in body
 
+    def test_get_and_an_in_place_update_still_reach_a_hidden_row(self):
+        assert (
+            "get by id, and an update that leaves the row in its bucket, still "
+            "work on a row in a bucket the read scope does not cover."
+        ) in _body(SKILL)
+
     def test_the_exit_code_table_lists_the_legacy_write_refusal(self):
         body = _body(SKILL)
         table = body[body.index("| Code | Meaning |"):body.index("project-id rekey exits 1 when it refuses")]
