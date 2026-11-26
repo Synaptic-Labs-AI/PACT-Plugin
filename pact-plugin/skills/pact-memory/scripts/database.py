@@ -2251,7 +2251,9 @@ def rekey_project(
 
     DRY RUN IS THE SAME CODE PATH, ROLLED BACK. A SAVEPOINT wraps the work
     and is rolled back and released before returning, so the reported
-    counters are what an apply would produce.
+    counters are what an apply would produce. The CLI's dry run calls this
+    on a temporary copy of the store (`cli._rekey_on_copy`), so the store
+    itself is never opened for writing.
 
     NO SCHEMA IS EVER CREATED. A store without the `memories` table has
     nothing to move: the zero counters come back with `schema_absent: True`

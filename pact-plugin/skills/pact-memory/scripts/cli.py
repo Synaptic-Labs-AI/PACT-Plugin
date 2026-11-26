@@ -1136,7 +1136,8 @@ _REKEY_ZERO_COUNTERS = (
 
 
 def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: bool) -> dict:
-    """`rekey_project`'s counters, computed on an IN-MEMORY COPY of `store`.
+    """`rekey_project`'s counters, computed on a COPY of `store` in a private
+    temporary folder, removed afterwards.
 
     A rolled-back SAVEPOINT on the store itself still commits an empty
     transaction, which rewrites the store's header and, on a WAL store,
@@ -1144,27 +1145,29 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
     through the read-only open (`_read_only_connection`), which on a settled
     store takes no lock and creates no sidecar, so the store file is not
     touched. Its caller wraps it in `_stable_read_only`, which repeats the
-    read with locking when the store moved under it.
-
-    shortcut: the copy holds the whole store in memory; fine for a memory
-    store's size, revisit if stores grow past what a dry run may hold in RAM.
+    read with locking when the store moved under it. The copy is a file,
+    not an in-memory database, so a large store (vectors included) does not
+    have to fit in memory.
     """
     from scripts.database import rekey_project
     from scripts.database import sqlite3 as db_sqlite3
 
     source = _read_only_connection(str(store))
     try:
-        copy = db_sqlite3.connect(":memory:")
-        try:
-            source.backup(copy)
-            copy.row_factory = db_sqlite3.Row
-            copy.execute("PRAGMA foreign_keys=ON")
-            return rekey_project(
-                copy, from_id, to_id, dry_run=dry_run,
-                own_folder_name_target=own_target,
-            )
-        finally:
-            copy.close()
+        # A private folder (mode 0700), so the copy and any journal beside it
+        # go with it and no other user can read the store's rows.
+        with tempfile.TemporaryDirectory(prefix="pact-rekey-dry-run-") as scratch:
+            copy = db_sqlite3.connect(str(Path(scratch) / "copy.db"))
+            try:
+                source.backup(copy)
+                copy.row_factory = db_sqlite3.Row
+                copy.execute("PRAGMA foreign_keys=ON")
+                return rekey_project(
+                    copy, from_id, to_id, dry_run=dry_run,
+                    own_folder_name_target=own_target,
+                )
+            finally:
+                copy.close()
     finally:
         source.close()
 
@@ -1965,7 +1968,8 @@ def build_parser():
             "transaction: memories, file rows (merging the UNIQUE(path, "
             "project_id) collision), graph links and vector partitions. "
             "`--dry-run` is the default and reports the plan by running it "
-            "inside a rolled-back savepoint. Name both ends: an omitted `--to` "
+            "on a temporary copy of the store, which is then deleted. Name "
+            "both ends: an omitted `--to` "
             "is accepted only when `--from` is this checkout's own legacy "
             "bucket and it is verified (a file row places it here). Run --apply only "
             "with the user's "
