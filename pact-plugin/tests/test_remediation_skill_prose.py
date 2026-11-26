@@ -781,10 +781,17 @@ class TestLegacyScopeStatesAreDocumented:
         body = _body(SKILL)
         assert (
             "The dry run, the default, does not write the store: it computes on "
-            "an in-memory copy, leaves the store file unchanged and creates no "
-            "journal files beside it"
+            "a temporary copy of the store file, which it then deletes, leaves the "
+            "store file unchanged and creates no journal files beside it"
         ) in body
         assert "The dry run, the default, changes nothing." not in body
+
+    def test_update_may_move_one_row_into_another_repository(self):
+        assert (
+            "An update whose payload project_id names another repository's "
+            "canonical id does move that one row there; only a whole-bucket "
+            "rekey needs --into-another-repository."
+        ) in _body(SKILL)
 
     def test_a_folder_name_id_is_not_judged(self):
         """Folder-name ids keep the pre-change shared bucket; the removed
@@ -7391,10 +7398,10 @@ class TestEveryRouteEntryConditionIsARoute:
             "is opened"
         ),
         ("call", "<call to no function cli: db_sqlite3.connect>"): (
-            "opens the in-memory copy a rekey dry run computes on; it asks git nothing"
+            "opens the temporary file copy a rekey dry run computes on; it asks git nothing"
         ),
         ("call", "<call to no function cli: a method of what db_sqlite3.connect returns>"): (
-            "copies the store into that in-memory connection, sets its row factory and pragma, "
+            "copies the store into that temporary file connection, sets its row factory and pragma, "
             "and closes it"
         ),
         ("call", "<call to no function cli: a method of what _stable_read_only or rekey_project returns>"): (

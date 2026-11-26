@@ -1058,8 +1058,9 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # `ssh://git@github.com/o/r` sends `/o/r` to one repository, so
         # telling them apart would split every forge's scp and https pair.
         # The cost is a plain sshd host, where the relative form is resolved
-        # under the login's home: two distinct repositories at `~login/srv/repo`
-        # and `/srv/repo`, both used against one store, share an id. That is
+        # under the login's home: the two directories that `git@host:srv/repo`
+        # (in the login's home) and `git@host:/srv/repo` reach can be distinct
+        # repositories, and if both are used against one store they share an id. That is
         # the class the userinfo strip already accepts (`alice@host:repo` and
         # `bob@host:repo` share one), and nothing in the URL says which kind
         # of server it is.

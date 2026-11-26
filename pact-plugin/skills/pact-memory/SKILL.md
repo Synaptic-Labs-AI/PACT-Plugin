@@ -366,7 +366,7 @@ exactly as printed. Run that command with
 bucket or for another repository's canonical id: a rekey merges rows into the
 target and cannot be undone. The CLI refuses an `--apply` into another
 repository's id unless `--into-another-repository` is passed, which an agent
-passes only with the user's explicit approval. The dry run, the default, does not write the store: it computes on an in-memory copy, leaves the store file unchanged and creates no journal files beside it (journal files another process already holds stay). A bucket can hold
+passes only with the user's explicit approval. An `update` whose payload `project_id` names another repository's canonical id does move that one row there; only a whole-bucket rekey needs `--into-another-repository`. The dry run, the default, does not write the store: it computes on a temporary copy of the store file, which it then deletes, leaves the store file unchanged and creates no journal files beside it (journal files another process already holds stay). A bucket can hold
 thousands of records that this session's read scope does not include — an
 identity it cannot derive, or a legacy bucket left `excluded` or `unproven` —
 and an empty result never means those records do not exist. A full id still

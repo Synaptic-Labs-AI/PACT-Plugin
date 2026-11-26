@@ -1498,8 +1498,8 @@ def _project_id_rekey(args, db_path) -> NoReturn:
 
     # ON A PRESENT STORE `--from` EQUAL TO `--to` IS ANSWERED BY THE LIBRARY
     # TOO, so the no-op envelope carries every counter a plan carries.
-    # A DRY RUN AND A NO-OP NEVER OPEN THE STORE FOR WRITING: they run on an
-    # in-memory copy read through the read-only open (`_rekey_on_copy`).
+    # A DRY RUN AND A NO-OP NEVER OPEN THE STORE FOR WRITING: they run on a
+    # temporary file copy read through the read-only open (`_rekey_on_copy`).
     # Only an apply writes, and only an apply may convert a DELETE-mode store
     # to WAL.
     # A non-canonical target reaching here is an explicit --to that passed

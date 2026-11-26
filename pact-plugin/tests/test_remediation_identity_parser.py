@@ -344,9 +344,10 @@ class TestRelativeAndAbsoluteScpPathsShareAnId:
     def test_the_relative_absolute_and_url_spellings_are_one_id(self):
         """Kept equal on purpose. On a forge the leading slash is not
         meaningful, so splitting would give every forge's scp and https
-        spellings two ids. The accepted cost: on a plain sshd host,
-        `~login/srv/repo` and `/srv/repo` are two repositories that share
-        this id if both are used against one store."""
+        spellings two ids. The accepted cost: on a plain sshd host, the
+        directories that git@host:srv/repo (in the login's home) and
+        git@host:/srv/repo reach can be two repositories that share this id
+        if both are used against one store."""
         spellings = (
             "git@host:srv/repo",
             "git@host:/srv/repo",
