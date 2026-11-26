@@ -40,6 +40,12 @@ class TestOneGitSuffixPerRemote:
         ],
     )
     def test_github_drops_one_git_as_other_hosts_do(self, url):
+        """GitHub does not serve `repo.git.git` as `repo`: measured with
+        `git ls-remote <url> HEAD` (git 2.43), https://github.com/cli/cli
+        answers its HEAD while https://github.com/cli/cli.git.git answers
+        "could not read Username", GitHub's reply for a repository it does
+        not serve. So only one `.git` is dropped. RED WHEN a repeated
+        `.git` is stripped on github.com."""
         github = pi.normalize_remote_url(url)
         gitlab = pi.normalize_remote_url(url.replace("github.com", "gitlab.com"))
         assert github == "github.com/o/foo.git"
