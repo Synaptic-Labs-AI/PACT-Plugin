@@ -360,9 +360,9 @@ def test_a_remote_helper_transport_has_no_portable_origin(url):
 @pytest.mark.parametrize("url, outcome", [
     ("ftp://host.example/o/r", "decline"),
     ("rsync://host.example/o/r", "decline"),
-    ("git@[::1]:o/r", "canonical"),
+    ("git@[2001:db8::2]:o/r", "canonical"),
     ("ssh://git@[2001:db8::1]/o/r", "canonical"),
-    ("https://[::1]/o/r", "canonical"),
+    ("https://[2001:db8::3]/o/r", "canonical"),
     ("codecommit::\x01x", "decline"),
 ])
 def test_control_other_schemes_and_ipv6_classify_as_before(url, outcome):
@@ -502,4 +502,39 @@ def test_a_github_path_github_does_not_serve_declines(url):
     ("https://github.com/o/r.git/", "github.com/o/r"),
 ])
 def test_control_a_plain_sshd_keeps_home_and_dot_git_paths(url, expected):
+    assert pi.normalize_remote_url(url) == expected
+
+
+@pytest.mark.parametrize("url", [
+    "https://localhost/o/r",
+    "https://LOCALHOST:8443/o/r",
+    "git@localhost:o/r",
+    "ssh://git@dev.localhost/o/r",
+    "ssh://git@127.0.0.1/o/r",
+    "https://127.255.0.9:3000/o/r",
+    "https://127.1/o/r",
+    "https://0x7f.1/o/r",
+    "https://[::1]/o/r",
+    "git@[::1]:o/r",
+    "ssh://git@[::1]:2222/o/r",
+])
+def test_a_loopback_remote_declines(url):
+    """A loopback remote is a local server or a tunnel on this machine: two
+    unrelated repositories reached that way would share an id, so it declines
+    as a `.invalid` host does (a pin is the remedy), in the memory id and
+    the backlog slug alike. RED WHEN a loopback host gets an id."""
+    from shared import backlog
+
+    assert pi.normalize_remote_url(url) is None, url
+    assert pi.classify_remote_origin(url) == (pi.OUTCOME_DECLINE, None), url
+    assert backlog._slug_from_remote_url(url) is None
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("https://localhost.example.com/o/r", "localhost.example.com/o/r"),
+    ("https://128.0.0.1/o/r", "128.0.0.1/o/r"),
+    ("https://10.0.0.1/o/r", "10.0.0.1/o/r"),
+])
+def test_a_host_that_only_looks_local_keeps_its_id(url, expected):
+    """Control: only loopback declines."""
     assert pi.normalize_remote_url(url) == expected

@@ -613,13 +613,18 @@ def _ipv6_host(host: str) -> Optional[str]:
     # two ids.
     if address.ipv4_mapped is not None:
         return None
+    # A LOOPBACK LITERAL (`[::1]`) names this machine, as `localhost` does
+    # (`_reserved_host`), so it declines.
+    if address.is_loopback:
+        return None
     return "[" + address.compressed + "]"
 
 
 def _url_host(host: str, ssh: bool = False) -> Optional[str]:
     """The host as it goes into an id: a bracketed IPv6 literal compressed,
     a name lower-cased and checked; None for anything else (including a host
-    in the reserved `.invalid` namespace)."""
+    in the reserved `.invalid` namespace and a loopback host,
+    `_reserved_host`)."""
     if host.startswith("["):
         return _ipv6_host(host)
     host = host.lower()
@@ -629,11 +634,23 @@ def _url_host(host: str, ssh: bool = False) -> Optional[str]:
 
 
 def _reserved_host(host: str) -> bool:
-    """Whether a lowercased host is in the `.invalid` namespace (RFC 2606):
-    no remote can be there, and a hand-written pin may use it for an id no
-    remote can derive (`local.invalid/...`), so a remote naming one declines
-    rather than derive such a pin's id."""
-    return host == "invalid" or host.endswith(".invalid")
+    """Whether a lowercased host is in the `.invalid` namespace (RFC 2606)
+    or names this machine (`localhost`, a `.localhost` name, RFC 6761, or
+    an IPv4 loopback address in any spelling `inet_aton` reads, such as
+    `127.0.0.1`, `127.1` or `0x7f.1`).
+
+    No remote is portably there: a loopback remote is a local server or a
+    tunnel, so two unrelated repositories reached that way would share an id,
+    and a hand-written pin may use `.invalid` for an id no remote can derive
+    (`local.invalid/...`). A remote naming one declines; a pin is the remedy."""
+    if host in ("invalid", "localhost") or host.endswith((".invalid", ".localhost")):
+        return True
+    import socket
+
+    try:
+        return socket.inet_aton(host)[0] == 127
+    except (OSError, ValueError):
+        return False
 
 
 def _valid_port(port: str) -> bool:
