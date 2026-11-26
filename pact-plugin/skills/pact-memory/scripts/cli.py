@@ -1143,7 +1143,8 @@ _REKEY_ZERO_COUNTERS = (
 
 class _RekeyCopyFailed(Exception):
     """The dry run's temporary copy could not be made or written (an unusable
-    or full temporary folder). Not a `sqlite3.DatabaseError`, so
+    or full temporary folder). Its one argument is that folder, or None when
+    Python found no usable one. Not a `sqlite3.DatabaseError`, so
     `_stable_read_only` does not repeat the read with locking, which would
     leave `-wal`/`-shm` beside a store the dry run never needed to lock."""
 
@@ -1175,10 +1176,15 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
     from scripts.database import sqlite3 as db_sqlite3
 
     source = _read_only_connection(str(store))
+    # The folder the copy went to, for the failure message. Before the
+    # folder exists it is the one Python already chose (`tempfile.tempdir`),
+    # or None when it found none: `gettempdir()` would raise again.
+    folder = None
     try:
         # A private folder (mode 0700), so the copy and any journal beside it
         # go with it and no other user can read the store's rows.
         with tempfile.TemporaryDirectory(prefix="pact-rekey-dry-run-") as scratch:
+            folder = str(Path(scratch).parent)
             copy = db_sqlite3.connect(str(Path(scratch) / "copy.db"))
             try:
                 source.backup(copy)
@@ -1191,10 +1197,10 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
             finally:
                 copy.close()
     except OSError as exc:
-        raise _RekeyCopyFailed(exc) from exc
+        raise _RekeyCopyFailed(folder or tempfile.tempdir) from exc
     except db_sqlite3.DatabaseError as exc:
         if str(exc).startswith(_COPY_FAULT_MESSAGES):
-            raise _RekeyCopyFailed(exc) from exc
+            raise _RekeyCopyFailed(folder or tempfile.tempdir) from exc
         raise
     finally:
         source.close()
@@ -1557,12 +1563,13 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             exit_code=2,
         )
     except _RekeyCopyFailed as exc:
+        folder = exc.args[0] if exc.args else None
         _error(
             "REKEY_FAILED",
             escape_for_envelope(_scrub(
                 "the dry run could not write its temporary copy of the store "
-                f"in {tempfile.gettempdir()} (set TMPDIR to a writable folder "
-                f"with room for it): {exc.__cause__}"
+                + (f"in {folder}" if folder else "because no usable temporary folder was found")
+                + f" (set TMPDIR to a writable folder with room for it): {exc.__cause__}"
             )),
             exit_code=3,
         )

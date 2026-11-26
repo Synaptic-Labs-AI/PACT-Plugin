@@ -203,3 +203,42 @@ def test_a_dry_run_whose_temporary_folder_fails_is_a_named_fault(tmp_path, monke
     assert store.read_bytes() == before, "the failed dry run wrote the store file"
     assert sorted(p.name for p in tmp_path.glob("mem.db*")) == ["mem.db"]
     assert not folder.exists() or list(folder.iterdir()) == []
+
+
+def test_a_dry_run_with_no_usable_temporary_folder_is_a_named_fault(tmp_path, monkeypatch, capfd):
+    """Python's only candidate folder is read-only, so it finds no usable
+    temporary folder at all. The dry run still fails as REKEY_FAILED, exit
+    3, saying so, and leaves the store as it was. RED WHEN the failure
+    handler asks Python for the folder again (that raises inside the
+    handler and the command ends as SYSTEM_ERROR)."""
+    import os
+    import tempfile
+
+    if os.geteuid() == 0:
+        pytest.skip("root writes into a read-only folder")
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    repo = make_repo(tmp_path / "proj", remote="https://github.com/me/proj.git")
+    store = tmp_path / "mem.db"
+    _store_of(store, 3)
+    before = store.read_bytes()
+    only = tmp_path / "only"
+    only.mkdir()
+    monkeypatch.chdir(repo)
+    argv = ["project-id", "rekey", "--from=proj", "--to=github.com/me/proj", "--db-path", str(store)]
+    saved = tempfile.tempdir
+    candidates = tempfile._candidate_tempdir_list
+    only.chmod(0o500)
+    tempfile.tempdir = None
+    tempfile._candidate_tempdir_list = lambda: [str(only)]
+    try:
+        code, envelope = _cli(argv, capfd)
+    finally:
+        tempfile._candidate_tempdir_list = candidates
+        tempfile.tempdir = saved
+        only.chmod(0o700)
+    assert code == 3, envelope
+    assert envelope["error"] == "REKEY_FAILED", envelope
+    assert "no usable temporary folder" in envelope["message"], envelope
+    assert store.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.glob("mem.db*")) == ["mem.db"]
