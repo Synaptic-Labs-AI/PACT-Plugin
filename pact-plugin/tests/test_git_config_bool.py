@@ -11,7 +11,6 @@ parser GIT_DISCOVERY_ACROSS_FILESYSTEM goes through (`git_env_bool` calls
 
 import os
 import random
-import re
 import subprocess
 
 import pytest
@@ -54,31 +53,18 @@ def _git_answer(value: str):
     return None
 
 
-_AT_INT_MIN = re.compile(
-    r"[ \t\n\v\f\r]*-(?:0[xX](?P<hex>[0-9a-fA-F]+)|(?P<oct>0[0-7]*)|(?P<dec>[1-9][0-9]*))"
-    r"(?P<unit>[kKmMgG]?)"
-)
-_UNITS = {"": 1, "k": 1 << 10, "m": 1 << 20, "g": 1 << 30}
-
-
-def _at_int_min(value: str) -> bool:
-    """Whether `value` is exactly -2^31, the one integer git versions
-    disagree on: git 2.43 refuses it, a newer git accepts it."""
-    match = _AT_INT_MIN.fullmatch(value)
-    if match is None:
-        return False
-    number = (
-        int(match["hex"], 16) if match["hex"] is not None
-        else int(match["oct"], 8) if match["oct"] is not None
-        else int(match["dec"])
-    )
-    return number * _UNITS[match["unit"].lower()] == 1 << 31
+# The spellings of -2^31 among the values below, the one integer git
+# versions disagree on (git 2.43 refuses it, a newer git accepts it); the
+# parser accepts it. Written out, not derived, so a bug the test and the
+# parser shared could not hide. A seed or list change that brings in another
+# spelling reds against the installed git until it is added here.
+_INT_MIN_SPELLINGS = frozenset({"-2147483648", "-2g"})
 
 
 @pytest.mark.parametrize("value", _NAMED + _random_values(400))
 def test_the_shared_parser_answers_as_git_does(value):
     """Every value the installed git agrees on with every supported git."""
-    if _at_int_min(value):
+    if value in _INT_MIN_SPELLINGS:
         assert git_config_bool(value) is True, value
         return
     assert git_config_bool(value) is _git_answer(value)
@@ -91,7 +77,6 @@ def test_the_shared_parser_answers_as_git_does(value):
 def test_minus_two_to_the_31_is_accepted_as_a_newer_git_accepts_it(value):
     """The parser accepts what any supported git accepts. RED WHEN the
     negative bound is git 2.43's -(2^31-1) rather than -2^31."""
-    assert _at_int_min(value)
     assert git_config_bool(value) is True
 
 
@@ -115,13 +100,44 @@ def test_both_walks_read_one_shared_answer(value, monkeypatch):
     assert git_env_bool(value) is expected
 
 
-def test_project_scope_reads_the_variable_through_the_shared_reader(monkeypatch):
-    """project_scope's walk takes its cross-filesystem answer from the one
-    shared reader, not a copy of its own."""
-    import inspect
+@pytest.mark.parametrize("value, crosses", [
+    ("1k", True), ("0x1", True), (" 1", True), ("0", False), ("false", False),
+    ("maybe", True),
+])
+def test_project_scopes_walk_reads_the_variable_as_git_does(tmp_path, value, crosses, monkeypatch):
+    """project_scope's marker walk crosses a filesystem boundary to a `.git`
+    above exactly when GIT_DISCOVERY_ACROSS_FILESYSTEM is git-true (a value
+    git refuses reads true, fail closed). The boundary is staged by giving
+    the start directory its own device number. RED WHEN the walk reads the
+    variable with any parser but the shared one (`1k`, `0x1` and ` 1` are
+    git-true, which a truthiness or word check gets wrong)."""
+    import os as os_module
 
-    assert not hasattr(project_scope, "_git_env_bool")
-    assert "git_env_bool(" in inspect.getsource(project_scope)
+    (tmp_path / ".git").mkdir()
+    start = tmp_path / "mount"
+    start.mkdir()
+    real_stat = os_module.stat
+    start_real = os_module.path.realpath(start)
+
+    class _Moved:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        @property
+        def st_dev(self):
+            return self._inner.st_dev + 1
+
+    def stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        return _Moved(result) if os_module.path.realpath(path) == start_real else result
+
+    monkeypatch.setattr(project_scope.os, "stat", stat)
+    monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", value)
+    monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+    assert project_scope._git_metadata_at_or_above(start) is crosses
 
 
 @pytest.mark.parametrize(
