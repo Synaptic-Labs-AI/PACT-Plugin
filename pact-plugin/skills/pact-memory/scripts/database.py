@@ -2077,6 +2077,22 @@ def _linked_after_description(
     return False
 
 
+def _realpath_by_folder(path: str, real_dirs: Dict[str, str]) -> str:
+    """`os.path.realpath(path)`, resolving each parent folder once per call
+    of `bucket_evidence` (`real_dirs`): a bucket's rows share a few folders,
+    and resolving every row's whole path walked each folder again. The last
+    component is followed when it is a symlink; anything unusual (a NUL,
+    `.` or `..` last) takes the plain realpath. Raises as realpath does."""
+    folder, name = os.path.split(path)
+    if "\0" in path or name in ("", ".", ".."):
+        return os.path.realpath(path)
+    real_folder = real_dirs.get(folder)
+    if real_folder is None:
+        real_folder = real_dirs[folder] = os.path.realpath(folder)
+    candidate = os.path.join(real_folder, name)
+    return os.path.realpath(candidate) if os.path.islink(candidate) else candidate
+
+
 def bucket_evidence(
     conn: sqlite3.Connection,
     bucket: str,
@@ -2155,6 +2171,7 @@ def bucket_evidence(
             verified_common = None
     counts = dict.fromkeys(BUCKET_EVIDENCE_KEYS, 0)
     counts["roots"] = len(root_paths)
+    real_dirs: Dict[str, str] = {}
     for row in cursor.fetchall():
         counts["file_rows"] += 1
         file_id, path = row[0], row[1]
@@ -2163,7 +2180,7 @@ def bucket_evidence(
             continue
         counts["absolute_rows"] += 1
         try:
-            resolved = os.path.realpath(path)
+            resolved = _realpath_by_folder(path, real_dirs)
         except (OSError, ValueError):
             counts["unresolvable"] += 1
             continue
@@ -2181,11 +2198,12 @@ def bucket_evidence(
             # belong to an earlier project that once lived in this folder (an
             # unrelated repository cloned into a deleted project's path), so
             # it counts as vanished.
-            dated = _linked_after_description(
+            # An existing file counts without a date (legacy rule), so the
+            # per-row date query runs only where it can change the answer.
+            if (not dated_only and os.path.lexists(resolved)) or _linked_after_description(
                 conn, file_id, verified_common, missing_counts=not dated_only,
                 memory_bucket=bucket if dated_only else None,
-            )
-            if dated or (not dated_only and os.path.lexists(resolved)):
+            ):
                 counts["contained_rows"] += 1
             else:
                 counts["vanished"] += 1

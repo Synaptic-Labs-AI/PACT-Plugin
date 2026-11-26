@@ -20,6 +20,9 @@ from datetime import datetime, timedelta, timezone
 
 from fixtures.identity_git import assert_outside_repository, make_repo
 
+import pytest
+
+from scripts import database
 from scripts.database import bucket_evidence, db_connection, ensure_initialized
 
 OLD = "2020-01-01T00:00:00+00:00"
@@ -160,3 +163,43 @@ def test_no_description_counts_for_a_legacy_bucket_but_not_for_an_earlier_id(tmp
     finally:
         conn.close()
     assert (counts["contained_rows"], counts["vanished"]) == (0, 1), counts
+
+
+def test_rows_in_one_folder_resolve_that_folder_once(tmp_path, monkeypatch):
+    """Two hundred rows in one folder: realpath runs a handful of times, not
+    once per row (a 5,000-row legacy bucket cost about 270 ms per CLI read
+    that way). RED WHEN every row's whole path is resolved."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "foo", remote="https://github.com/acme/foo.git")
+    (repo / "src").mkdir()
+    paths = [repo / "src" / f"f{index}.py" for index in range(200)]
+    for path in paths[::2]:
+        path.write_text("x\n", encoding="utf-8")
+    _seed_rows(tmp_path / "m.db", paths, OLD)
+    calls = []
+    real = os.path.realpath
+    monkeypatch.setattr(os.path, "realpath", lambda p, *a, **k: calls.append(p) or real(p, *a, **k))
+    counts = _evidence(tmp_path / "m.db", repo)
+    assert (counts["contained_rows"], counts["vanished"]) == (100, 100), counts
+    assert len(calls) < 10, len(calls)
+
+
+@pytest.mark.parametrize("shape", ["plain", "missing_dir", "file_link", "dir_link", "dotdot"])
+def test_folder_resolution_matches_realpath(tmp_path, shape):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "a.py").write_text("x", encoding="utf-8")
+    (tmp_path / "link.py").symlink_to(tmp_path / "real" / "a.py")
+    (tmp_path / "dirlink").symlink_to(tmp_path / "real")
+    path = {
+        "plain": tmp_path / "real" / "a.py",
+        "missing_dir": tmp_path / "gone" / "deeper" / "b.py",
+        "file_link": tmp_path / "link.py",
+        "dir_link": tmp_path / "dirlink" / "a.py",
+        "dotdot": tmp_path / "real" / ".." / "real" / "a.py",
+    }[shape]
+    assert database._realpath_by_folder(str(path), {}) == os.path.realpath(str(path))
+
+
+def test_folder_resolution_raises_on_nul_like_realpath():
+    with pytest.raises(ValueError):
+        database._realpath_by_folder("/tmp/a\0b/c.py", {})

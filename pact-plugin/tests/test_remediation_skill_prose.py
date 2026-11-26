@@ -735,7 +735,9 @@ class TestLegacyScopeStatesAreDocumented:
 
     def test_an_alias_id_is_shared_only_by_clones_using_that_alias(self):
         assert (
-            "Only clones whose origin uses that same alias share an alias id."
+            "Only clones whose origin uses that same alias share an alias id. "
+            "A git insteadOf alias is also kept as written: gh:acme/widget gives "
+            "gh/acme/widget. The pin is the remedy"
         ) in _body(SKILL)
 
     def test_a_sibling_clone_is_not_a_rival(self):
@@ -965,7 +967,7 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
 
     def test_get_and_an_in_place_update_still_reach_a_hidden_row(self):
         assert (
-            "get by id, and an update that leaves the row in its bucket, still "
+            "get by its full id, and an update that leaves the row in its bucket, still "
             "work on a row in a bucket the read scope does not cover."
         ) in _body(SKILL)
 
