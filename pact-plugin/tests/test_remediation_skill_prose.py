@@ -7252,9 +7252,15 @@ class TestEveryRouteEntryConditionIsARoute:
             "names a --separate-git-dir repository's folder-name id from its git dir's path, "
             "which the identity already resolved; it reads no input"
         ),
-        ("call", "git_config_bool"): (
+        ("call", "core_bare_answer_from"): (
             "reads git's core.bare answer as git reads a boolean, to keep a bare hub's "
             "worktree at its own folder name"
+        ),
+        ("call", "<name imported from a project module project_identity: CORE_BARE_ARGS>"): (
+            "the fixed core.bare question every reader asks git; a constant"
+        ),
+        ("call", "<name imported from a project module shared.project_scope: CORE_BARE_ARGS>"): (
+            "the fixed core.bare question every reader asks git; a constant"
         ),
         ("call", "<call to no function memory_api: _REKEY_PREVIEW.get>"): (
             "a legacy read notice checks whether this run is the dry run it would "

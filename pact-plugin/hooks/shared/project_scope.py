@@ -37,7 +37,8 @@ from typing import List, NamedTuple, Optional, Set, Tuple
 
 from . import state_file
 from .git_helpers import (
-    git_config_bool,
+    CORE_BARE_ARGS,
+    core_bare_answer_from,
     git_ceiling_directories,
     git_env_bool,
     read_git_file,
@@ -405,21 +406,18 @@ def _repository_is_bare(common_dir: Path) -> bool:
     """
     try:
         result = run_git(
-            ["--git-dir", str(common_dir), "config", "--get", "core.bare"],
+            ["--git-dir", str(common_dir), *CORE_BARE_ARGS],
             timeout=5,
             text=False,
             env=git_env_without_location(),
         )
     except (OSError, ValueError):
         return False
-    if result is None or result.returncode != 0:
-        return False
-    # Read as git reads a boolean (`git_config_bool`): `yes`, `on` and `1`
-    # are true too. A value git refuses reads as not bare, the direction that
-    # does not accept the checkout. Only git's own record terminator is
-    # dropped; the value itself is not stripped.
-    value = _fsdecode(result.stdout)
-    return git_config_bool(value[:-1] if value.endswith("\n") else value) is True
+    # The memory identity's own reading (`core_bare_answer_from`): the
+    # repository's own config, as git reads a boolean. An unknown answer
+    # (git refused, or did not answer) reads as not bare, the direction that
+    # does not accept the checkout.
+    return core_bare_answer_from(result) is True
 
 
 def git_dir_checkout(start: str | os.PathLike[str]) -> tuple[bool, Optional[Path]]:

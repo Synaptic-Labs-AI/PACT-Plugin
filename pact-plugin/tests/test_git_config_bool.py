@@ -155,3 +155,34 @@ def test_core_bare_is_read_as_git_reads_a_boolean(tmp_path, value, bare):
         ["git", "--git-dir", str(common), "config", "core.bare", value], check=True
     )
     assert project_scope._repository_is_bare(common) is bare
+
+
+def test_a_valueless_core_bare_reads_as_bare_and_global_config_is_ignored(tmp_path, monkeypatch):
+    """project_scope reads core.bare as the memory identity does: the
+    repository's own config, as `git config --bool` reads it. A hand-written
+    valueless `bare` (git config cannot write one) is bare; a global
+    core.bare does not make a non-bare repository bare. RED WHEN the check
+    reads every config level or drops --bool."""
+    from scripts import project_identity
+
+    common = tmp_path / "repo.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(common)], check=True)
+    config = common / "config"
+    config.write_text(config.read_text().replace("bare = true", "bare"))
+    assert "\tbare\n" in config.read_text()
+    assert project_scope._repository_is_bare(common) is True
+    assert project_identity._git_dir_is_bare(common) is True
+
+    plain = tmp_path / "plain"
+    subprocess.run(["git", "init", "-q", str(plain)], check=True)
+    plain_common = plain / ".git"
+    text = (plain_common / "config").read_text()
+    (plain_common / "config").write_text(text.replace("\tbare = false\n", ""))
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[core]\n\tbare = true\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    assert project_scope._repository_is_bare(plain_common) is False
+    assert project_identity._git_dir_is_bare(plain_common) is False

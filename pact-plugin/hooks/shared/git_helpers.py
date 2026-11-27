@@ -24,7 +24,7 @@ import re
 import stat
 import subprocess
 from contextlib import contextmanager
-from typing import Callable, Iterator, Mapping, Optional, Sequence, TypeVar
+from typing import Any, Callable, Iterator, Mapping, Optional, Sequence, TypeVar
 
 _Answer = TypeVar("_Answer")
 
@@ -281,6 +281,27 @@ def git_config_bool(value: str) -> Optional[bool]:
     if number > limit // factor:
         return None
     return number != 0
+
+
+# The one question every reader asks for `core.bare`, after `--git-dir
+# <common dir>`: the repository's own config only, read as git reads a
+# boolean (a valueless key is true, an empty one false).
+CORE_BARE_ARGS = ("config", "--local", "--bool", "--get", "core.bare")
+
+
+def core_bare_answer_from(result: Any) -> Optional[bool]:
+    """`core.bare` from git's answer to `CORE_BARE_ARGS`: True or False, False
+    when the key is unset (exit 1 with no output), None for any other exit,
+    which includes a config or a value git refuses. `stdout` may be bytes or
+    str; only git's own record terminator is dropped."""
+    if result is None:
+        return None
+    if result.returncode == 1 and not result.stdout:
+        return False
+    if result.returncode != 0:
+        return None
+    value = result.stdout if isinstance(result.stdout, str) else os.fsdecode(result.stdout)
+    return git_config_bool(value[:-1] if value.endswith("\n") else value)
 
 
 def git_ceiling_directories(value: Optional[str]) -> set:

@@ -2541,13 +2541,10 @@ def _git_dir_is_bare(common_dir: Path) -> Optional[bool]:
     answers from the config file.
     """
     try:
-        from shared.git_helpers import answered_once, git_config_bool
+        from shared.git_helpers import CORE_BARE_ARGS, answered_once, core_bare_answer_from
         from shared.project_scope import git_env_without_location
 
-        argv = [
-            "git", "--git-dir", str(common_dir), "config", "--local", "--bool", "--get",
-            "core.bare",
-        ]
+        argv = ["git", "--git-dir", str(common_dir), *CORE_BARE_ARGS]
         result = answered_once(
             argv,
             lambda: subprocess.run(
@@ -2562,12 +2559,9 @@ def _git_dir_is_bare(common_dir: Path) -> Optional[bool]:
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         return None
-    if result.returncode == 1 and not result.stdout:
-        return False
-    if result.returncode != 0:
-        return None
-    value = one_git_answer(result)
-    return None if value is None else git_config_bool(value)
+    # The one reading of git's answer, shared with the CLAUDE.md root's
+    # bare check (`project_scope._repository_is_bare`).
+    return core_bare_answer_from(result)
 
 
 # Why a folder-name id could not be chosen (`repository_folder_name`).
