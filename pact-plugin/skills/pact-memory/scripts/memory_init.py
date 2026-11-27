@@ -388,14 +388,18 @@ def _remove_process_marker() -> None:
     never runs atexit handlers and leaves its marker behind. Those markers are
     empty and unmatchable rather than harmful, so nothing recovers them.
     """
-    base = _MARKER_DIR / f"pact_embedding_attempted_{_PROCESS_MARKER_TOKEN}"
     try:
-        base.unlink(missing_ok=True)
-        # And this process's read-attempt markers (`_read_attempt_path`).
-        for read_marker in _MARKER_DIR.glob(f"{base.name}_read_*"):
-            read_marker.unlink(missing_ok=True)
+        _unlink_marker(_MARKER_DIR / f"pact_embedding_attempted_{_PROCESS_MARKER_TOKEN}")
     except OSError:
         pass
+
+
+def _unlink_marker(base: Path) -> None:
+    """Remove the attempt marker `base` and every read-attempt marker beside
+    it (`_read_attempt_path`, one per read scope). Raises what unlink raises."""
+    base.unlink(missing_ok=True)
+    for read_marker in base.parent.glob(f"{base.name}_read_*"):
+        read_marker.unlink(missing_ok=True)
 
 
 # Registered unconditionally: it is a no-op when no fallback marker was created,
@@ -699,13 +703,13 @@ def reset_initialization() -> None:
 
 def clear_embedding_marker() -> None:
     """
-    Delete the embedding attempt marker so maybe_embed_pending() can run again.
+    Delete the embedding attempt marker, and the session's read-attempt
+    markers, so maybe_embed_pending() can run again for a write and a read.
 
     Separated from reset_initialization() so that resetting the in-memory flag
     cannot remove a marker belonging to another process.
     """
-    marker_path = _get_embedding_attempted_path()
-    marker_path.unlink(missing_ok=True)
+    _unlink_marker(_get_embedding_attempted_path())
 
 
 def is_initialized() -> bool:

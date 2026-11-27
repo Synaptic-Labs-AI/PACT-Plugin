@@ -3820,3 +3820,31 @@ def test_a_session_less_read_process_leaves_no_marker_behind(tmp_path, monkeypat
     assert len(list(markers.iterdir())) == 2, list(markers.iterdir())
     memory_init._remove_process_marker()
     assert list(markers.iterdir()) == [], list(markers.iterdir())
+
+
+def test_clearing_the_marker_lets_reads_try_again(tmp_path, monkeypatch):
+    """clear_embedding_marker removes the session marker and the session's
+    read-attempt markers (one per read scope), so a read's catch-up runs
+    again after it, as its docstring says. RED WHEN the read markers outlive
+    the clear and keep reads suppressed."""
+    from scripts import config, embedding_catchup, memory_init
+
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    monkeypatch.setattr(memory_init, "_MARKER_DIR", markers)
+    monkeypatch.setattr(memory_init, "get_session_id_from_context_file", lambda: "sess-1")
+    ran = []
+    monkeypatch.setattr(
+        embedding_catchup, "embed_pending_memories",
+        lambda **kwargs: (ran.append(1), {"processed": 0, "failed": False, "skipped_ram": False})[1],
+    )
+    for scope in (("github.com/o/a",), ("github.com/o/b",)):
+        with config.catchup_projects(scope):
+            memory_init.maybe_embed_pending()
+    memory_init.maybe_embed_pending()
+    assert len(ran) == 3 and len(list(markers.iterdir())) == 3, list(markers.iterdir())
+    memory_init.clear_embedding_marker()
+    assert list(markers.iterdir()) == [], list(markers.iterdir())
+    with config.catchup_projects(("github.com/o/a",)):
+        memory_init.maybe_embed_pending()
+    assert len(ran) == 4, ran

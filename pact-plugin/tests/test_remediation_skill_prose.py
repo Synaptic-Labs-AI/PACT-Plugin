@@ -7268,15 +7268,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function shared.git_helpers: a method of what PASS_GIT_RESULTS.get returns>"): (
             "answered_once reads the pass's memo of git answers; it changes no answer"
         ),
-        ("call", "<call to no function memory_init: base.unlink>"): (
-            "the exit cleanup removes this process's own marker; it reads no input"
-        ),
-        ("call", "<call to no function memory_init: _MARKER_DIR.glob>"): (
-            "the exit cleanup finds this process's read markers; it reads no input"
-        ),
-        ("call", "<call to no function memory_init: a method of what _MARKER_DIR.glob returns>"): (
-            "the exit cleanup removes this process's read markers; it reads no input"
-        ),
         ("call", "<call to no function memory_init: attempt_path.touch>"): (
             "the embedding catch-up records its attempt for the session; it changes no identity answer"
         ),
