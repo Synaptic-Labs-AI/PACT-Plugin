@@ -1625,15 +1625,16 @@ def _journal_first_start(folder) -> str | None:
         os.close(fd)
 
 
-
 def read_session_record(folder) -> dict | None:
     """`<folder>/pact-session-context.json` as a dict, or None. Never raises.
 
-    Its `started_at` is the session's EARLIEST CONFIRMED start: the earlier
-    of the recorded value and the first journal event's time
-    (`_journal_first_start`), because a resume or a heal records its own
-    time there. With no readable first journal event the start cannot be
-    confirmed, and `started_at` is removed: the record then names its
+    Its `started_at` is the EARLIER of the recorded value and the first
+    journal event's time (`_journal_first_start`), because a resume or a
+    heal records its own time there. A recorded value earlier than the
+    journal's first event is kept although the journal does not confirm it:
+    the earlier date is the safe one to compare with a repository's
+    creation. With no readable first journal event the start cannot be
+    checked, and `started_at` is removed: the record then names its
     folder but dates nothing, so it never counts as evidence that a bucket
     is this repository's (it can still place the session elsewhere). Both
     readers compare it with a repository's `description` ctime.
