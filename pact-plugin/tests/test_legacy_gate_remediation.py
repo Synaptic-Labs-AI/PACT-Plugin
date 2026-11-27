@@ -800,6 +800,55 @@ def test_core_bare_is_an_answer_only_when_git_gives_one(tmp_path, monkeypatch, a
         assert pi.repository_folder_name(root, common) == ("work" if expected else common.name)
 
 
+@pytest.mark.parametrize("bare", [True, False])
+def test_core_bare_from_the_config_file_matches_git(tmp_path, bare):
+    """`database.core_bare_answer` reads the config file to the answer git
+    gives, on a real repository of each kind."""
+    import subprocess
+
+    from scripts.database import core_bare_answer
+
+    repo = tmp_path / "r"
+    subprocess.run(["git", "init", "-q", *(["--bare"] if bare else []), str(repo)], check=True)
+    common = repo if bare else repo / ".git"
+    assert core_bare_answer(str(common)) is bare
+    (common / "config").write_text("[core]\n\tbare = maybe\n")
+    assert core_bare_answer(str(common)) is None
+
+
+def test_a_bare_hub_worktree_is_its_own_folder_names_rival_not_the_hubs(
+    tmp_path, monkeypatch, scopes_clean
+):
+    """A bare repository's linked worktree files under its own folder's name,
+    so its rows are foreign to that bucket and not to the hub's git-dir name.
+    RED WHEN the rival check credits it with the hub's name."""
+    import subprocess
+
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    git = ["git", "-c", "user.email=t@e.invalid", "-c", "user.name=t", "-c", "init.defaultBranch=main"]
+    seed = tmp_path / "seed"
+    subprocess.run([*git, "init", "-q", str(seed)], check=True, env=env)
+    (seed / "a").write_text("a\n")
+    subprocess.run([*git, "-C", str(seed), "add", "a"], check=True, env=env)
+    subprocess.run([*git, "-C", str(seed), "commit", "-qm", "a"], check=True, env=env)
+    (tmp_path / "hubs").mkdir()
+    hub = tmp_path / "hubs" / "hub.git"
+    subprocess.run([*git, "clone", "-q", "--bare", str(seed), str(hub)], check=True, env=env)
+    wt = tmp_path / "trees" / "lane"
+    subprocess.run([*git, "--git-dir", str(hub), "worktree", "add", "-q", str(wt)], check=True, env=env)
+    (wt / "f.py").write_text("x\n")
+    mine = make_repo(tmp_path / "mine", remote=ORIGIN)
+    store = tmp_path / "store.db"
+    _seed(store, "hub", files=[wt / "f.py"])
+    assert _evidence(store, "hub", [mine])["foreign_checkout_rows"] == 0
+    store2 = tmp_path / "store2.db"
+    _seed(store2, "lane", files=[wt / "f.py"])
+    assert _evidence(store2, "lane", [mine])["foreign_checkout_rows"] == 1
+
+
 def test_only_the_old_bucket_moves_into_the_own_folder_name_id(separate_git_dir, capfd):
     """Control: a bucket that is not this session's legacy candidate cannot
     be moved into its folder-name id."""

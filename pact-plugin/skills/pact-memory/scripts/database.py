@@ -1687,10 +1687,69 @@ def git_dir_own_name(common: Any) -> str:
     return path.name
 
 
+def core_bare_answer(common: Any) -> Optional[bool]:
+    """`core.bare` from the git dir's own `config` file, with the answers
+    `project_identity._git_dir_is_bare` gives from git: True or False as git
+    reads the boolean, False when the key is unset, None when the file
+    cannot be read or the value is one git refuses. Reads that one file only
+    (`--local`, no includes); the last value wins, as in git. A line this
+    reader does not parse (a continued line, an unclosed quote or section)
+    is None. Never raises."""
+    from shared.git_helpers import git_config_bool
+
+    try:
+        with open(os.path.join(common, "config"), "rb") as handle:
+            data = handle.read(_CONFIG_READ_LIMIT + 1)
+    except (OSError, ValueError):
+        return None
+    if len(data) > _CONFIG_READ_LIMIT:
+        return None
+    section = None
+    value: Optional[str] = None
+    for raw in os.fsdecode(data).splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            end = line.find("]")
+            if end < 0:
+                return None
+            header = line[1:end].strip()
+            section = header.lower() if not any(c in header for c in ' ".') else None
+            line = line[end + 1:].strip()
+        if not line or line[0] in "#;":
+            continue
+        if line.endswith("\\"):
+            return None
+        key, sep, rest = line.partition("=")
+        if section != "core" or key.strip().lower() != "bare":
+            continue
+        if not sep:
+            value = "true"
+            continue
+        text, quoted = [], False
+        for char in rest.strip():
+            if char == '"':
+                quoted = not quoted
+                continue
+            if not quoted and char in "#;":
+                break
+            text.append(char)
+        if quoted:
+            return None
+        value = "".join(text).strip()
+    return False if value is None else git_config_bool(value)
+
+
+# A git config file larger than this is not read for `core.bare`.
+_CONFIG_READ_LIMIT = 1 << 20
+
+
 def own_folder_name(directory: str, cache: Optional[Dict[Any, Any]] = None) -> Any:
     """The folder-name id a checkout at `directory` with no portable origin
     files under after this change: its git dir's own name when that git dir
-    is not `<directory>/.git` (`git_dir_own_name`), else the folder's name.
+    is not `<directory>/.git` and the repository is not bare
+    (`git_dir_own_name`, `core_bare_answer`), else the folder's name. An
+    unreadable `core.bare` takes the git dir's name, which the rival check
+    adds to the folder's name rather than replacing it.
     UNKNOWN_NAME when its `.git` cannot be read. Read from files, cached in
     `cache` beside `pre_change_name`'s entries. Never raises."""
     key = (directory, "own")
@@ -1700,6 +1759,10 @@ def own_folder_name(directory: str, cache: Optional[Dict[Any, Any]] = None) -> A
     if common is UNKNOWN_NAME:
         name = UNKNOWN_NAME
     elif common is None or os.path.dirname(os.path.realpath(common)) == os.path.realpath(directory):
+        name = os.path.basename(directory)
+    elif core_bare_answer(os.path.realpath(common)) is True:
+        # A bare hub's worktree files under its own folder's name, as
+        # `project_identity.repository_folder_name` gives it.
         name = os.path.basename(directory)
     else:
         name = git_dir_own_name(os.path.realpath(common))
