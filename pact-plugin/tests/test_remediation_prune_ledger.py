@@ -370,7 +370,8 @@ class TestAHeldLedgerLockIsWaitedOnOnce:
         self, tmp_path, monkeypatch
     ):
         """RED WHEN each reaped folder waits out the held lock again, so a
-        contended ledger stalls SessionEnd about a second per folder."""
+        contended ledger stalls SessionEnd about a second per folder. After the
+        one wait, each later line gets one attempt without waiting."""
         import fcntl
 
         slug_dir = tmp_path / "slug"
@@ -385,9 +386,9 @@ class TestAHeldLedgerLockIsWaitedOnOnce:
         waits = []
         real_lock = session_end._lock_ledger_bounded
 
-        def counted(fd):
-            waits.append(fd)
-            return real_lock(fd)
+        def counted(fd, wait=True):
+            waits.append(wait)
+            return real_lock(fd, wait)
 
         monkeypatch.setattr(session_end, "_lock_ledger_bounded", counted)
         holder = os.open(ledger, os.O_RDWR)
@@ -398,7 +399,7 @@ class TestAHeldLedgerLockIsWaitedOnOnce:
             elapsed = time.monotonic() - started
         finally:
             os.close(holder)
-        assert len(waits) == 1, waits
+        assert waits == [True, False, False, False, False], waits
         assert elapsed < 3, elapsed
         assert not any(entry.exists() for entry in entries)
         assert _lines(slug_dir) == []
@@ -412,3 +413,42 @@ class TestAHeldLedgerLockIsWaitedOnOnce:
             _session(slug_dir, project, session_id=session_id)
         _reap(slug_dir)
         assert sorted(_ids(slug_dir)) == ids
+
+    def test_a_lock_freed_mid_sweep_records_the_later_folders(
+        self, tmp_path, monkeypatch
+    ):
+        """RED WHEN the sweep gives up on the ledger after its one wait, so a
+        lock released mid-sweep loses every later line."""
+        import fcntl
+
+        slug_dir = tmp_path / "slug"
+        project = tmp_path / "proj"
+        project.mkdir()
+        ids = [f"{i:08d}-1111-2222-3333-444444444444" for i in range(5)]
+        for session_id in ids:
+            _session(slug_dir, project, session_id=session_id)
+        ledger = slug_dir / LEDGER
+        ledger.write_bytes(b"")
+        holder = [os.open(ledger, os.O_RDWR)]
+        fcntl.flock(holder[0], fcntl.LOCK_EX)
+        waits = []
+        real_lock = session_end._lock_ledger_bounded
+
+        def release_after_first_wait(fd, wait=True):
+            waits.append(wait)
+            taken = real_lock(fd, wait)
+            if holder:
+                os.close(holder.pop())
+            return taken
+
+        monkeypatch.setattr(session_end, "_lock_ledger_bounded", release_after_first_wait)
+        try:
+            started = time.monotonic()
+            _reap(slug_dir)
+            elapsed = time.monotonic() - started
+        finally:
+            for fd in holder:
+                os.close(fd)
+        assert waits == [True, False, False, False, False], waits
+        assert elapsed < 3, elapsed
+        assert len(_ids(slug_dir)) == 4 and set(_ids(slug_dir)) < set(ids), _ids(slug_dir)

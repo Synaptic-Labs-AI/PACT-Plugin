@@ -537,7 +537,7 @@ def _reap_slug_dir(
     if not slug_dir.exists():
         return
 
-    ledger_usable = True
+    ledger_wait = True
     try:
         for entry in slug_dir.iterdir():
             # Skip symlinks (live or dangling) — is_symlink uses lstat
@@ -586,11 +586,14 @@ def _reap_slug_dir(
                     ) is False:
                         # The evidence line goes BEFORE the removal, and it
                         # never raises, so it cannot keep a folder alive.
-                        # After one lock timeout the run stops waiting on
-                        # the ledger, so a held lock costs ~1 s, not 1 s a
-                        # folder.
-                        if ledger_usable:
-                            ledger_usable = _record_pruned_session(slug_dir, entry)
+                        # After one lock timeout the run tries each later
+                        # line once without waiting, so a held lock costs
+                        # ~1 s, not 1 s a folder, and a lock freed mid-sweep
+                        # still records the rest.
+                        if not _record_pruned_session(
+                            slug_dir, entry, wait=ledger_wait
+                        ):
+                            ledger_wait = False
                         shutil.rmtree(entry, ignore_errors=True)
             except Exception:
                 # Wider than OSError, and the width is load-bearing HERE
@@ -745,20 +748,21 @@ _LEDGER_LOCK_ATTEMPTS = 20
 _LEDGER_LOCK_PAUSE_SECONDS = 0.05
 
 
-def _lock_ledger_bounded(fd: int) -> bool:
-    """Take the exclusive lock on `fd` within the bounded retry; False when
-    another holder kept it the whole time."""
-    for attempt in range(_LEDGER_LOCK_ATTEMPTS):
+def _lock_ledger_bounded(fd: int, wait: bool = True) -> bool:
+    """Take the exclusive lock on `fd` within the bounded retry, or in one
+    attempt when `wait` is False; False when another holder kept it."""
+    attempts = _LEDGER_LOCK_ATTEMPTS if wait else 1
+    for attempt in range(attempts):
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             return True
         except BlockingIOError:
-            if attempt + 1 < _LEDGER_LOCK_ATTEMPTS:
+            if attempt + 1 < attempts:
                 time.sleep(_LEDGER_LOCK_PAUSE_SECONDS)
     return False
 
 
-def _open_locked_ledger(ledger: Path) -> int | None:
+def _open_locked_ledger(ledger: Path, wait: bool = True) -> int | None:
     """Open the ledger for append and take its exclusive lock; return the fd,
     or None when the path is not a regular file or the lock stayed held past
     the bounded retry (`_lock_ledger_bounded`).
@@ -780,7 +784,7 @@ def _open_locked_ledger(ledger: Path) -> int | None:
             if not stat.S_ISREG(held.st_mode):
                 os.close(fd)
                 return None
-            if not _lock_ledger_bounded(fd):
+            if not _lock_ledger_bounded(fd, wait):
                 # Another session end holds the lock too long: skip this
                 # evidence line rather than hang the hook.
                 os.close(fd)
@@ -804,11 +808,12 @@ def _write_all(fd: int, data: bytes) -> None:
         data = data[os.write(fd, data):]
 
 
-def _append_ledger_line(slug_dir: Path, line: str) -> bool:
+def _append_ledger_line(slug_dir: Path, line: str, wait: bool = True) -> bool:
     """Append `line` to the slug's prune ledger. Never raises. False when the
     ledger could not be opened and locked (another holder kept the lock past
     the bounded wait, or the ledger is not a regular file), so a caller can
-    skip its remaining appends rather than wait again for each.
+    try its remaining appends with `wait=False` (one lock attempt, no wait)
+    rather than wait again for each.
 
     Refuses a ledger that is a symlink or not a regular file. O_NOFOLLOW
     refuses a symlink planted after the lstat, and O_NONBLOCK keeps a planted
@@ -823,7 +828,7 @@ def _append_ledger_line(slug_dir: Path, line: str) -> bool:
                 return False
         except FileNotFoundError:
             pass
-        fd = _open_locked_ledger(ledger)
+        fd = _open_locked_ledger(ledger, wait)
         if fd is None:
             return False
         try:
@@ -845,7 +850,7 @@ def _append_ledger_line(slug_dir: Path, line: str) -> bool:
     return True
 
 
-def _record_pruned_session(slug_dir: Path, entry: Path) -> bool:
+def _record_pruned_session(slug_dir: Path, entry: Path, wait: bool = True) -> bool:
     """Record `entry`'s evidence in the slug's prune ledger before it is reaped.
 
     A failure here must never keep a folder alive or raise out of the hook;
@@ -855,7 +860,7 @@ def _record_pruned_session(slug_dir: Path, entry: Path) -> bool:
     line = _pruned_session_line(entry)
     if line is None:
         return True
-    return _append_ledger_line(slug_dir, line)
+    return _append_ledger_line(slug_dir, line, wait)
 
 
 def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
