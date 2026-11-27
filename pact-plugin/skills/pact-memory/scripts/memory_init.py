@@ -340,9 +340,9 @@ try:
 except ImportError:
     from pact_session import get_session_id_from_context_file
 try:
-    from .config import read_only_scope_active, resolve_db_path
+    from .config import catchup_projects_bound, read_only_scope_active, resolve_db_path
 except ImportError:
-    from config import read_only_scope_active, resolve_db_path
+    from config import catchup_projects_bound, read_only_scope_active, resolve_db_path
 
 
 def _store_key() -> str:
@@ -452,9 +452,14 @@ def maybe_embed_pending() -> dict:
     # file may exist and be unreadable; telling the caller creation failed
     # sends them to the wrong remedy (permissions or the path, not a write
     # that was never attempted). Both skip the sweep.
+    # A READ'S CATCH-UP IS LIMITED TO ITS SCOPE (`catchup_projects`), so it
+    # neither checks nor spends the session marker: the store-wide sweep stays
+    # due, and `ensure_memory_ready` postpones it to the first call outside
+    # the read scope.
+    scoped = catchup_projects_bound() is not None
     marker_path = _get_embedding_attempted_path()
     try:
-        already_attempted = marker_path.exists()
+        already_attempted = False if scoped else marker_path.exists()
     except OSError:
         result["message"] = "Could not check session marker"
         return result
@@ -462,7 +467,8 @@ def maybe_embed_pending() -> dict:
         result["message"] = "Already attempted this session"
         return result
     try:
-        marker_path.touch()
+        if not scoped:
+            marker_path.touch()
     except OSError:
         result["message"] = "Could not create session marker"
         return result
@@ -626,6 +632,9 @@ def ensure_memory_ready() -> dict:
             # rather than inside `maybe_embed_pending` so there is ONE write
             # site instead of one per early return.
             _last_catchup_result = embedding_result
+            if catchup_projects_bound() is not None:
+                # A read's scoped catch-up leaves the store-wide sweep due.
+                _catchup_deferred.add(_store_key())
         result["embedding"] = embedding_result
 
         if embedding_result.get("message") and embedding_result.get("status") == "ok":

@@ -676,6 +676,14 @@ class TestTheCatchUpOnASessionThatStartsWithARead:
 
         memory_api.PACTMemory().search("zebra")
         assert [m for m, _ in self._vectors(store)] == ["a" * 32, "b" * 32]
+        # The read spent neither the session marker nor the store-wide
+        # sweep: the next call outside the read scope, a save in the same
+        # process, embeds the other project's row. RED WHEN the scoped
+        # read's catch-up uses up the session's sweep.
+        assert not (tmp_path / "marker").exists()
+        memory_api.PACTMemory().save({"context": "a later write"})
+        assert "c" * 32 in [m for m, _ in self._vectors(store)]
+        assert (tmp_path / "marker").exists()
 
     @pytest.mark.parametrize("old_table_empty", [False, True])
     def test_a_migration_due_postpones_until_after_the_migration(
