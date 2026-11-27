@@ -685,6 +685,35 @@ class TestTheCatchUpOnASessionThatStartsWithARead:
         assert "c" * 32 in [m for m, _ in self._vectors(store)]
         assert (tmp_path / "marker").exists()
 
+    def test_a_read_honours_a_marker_already_written(
+        self, monkeypatch, tmp_path, identity_env
+    ):
+        """Once the session's sweep has run (its marker exists), a read's
+        scoped catch-up does not try again, so a memory whose embedding keeps
+        failing is not retried by every read. RED WHEN a read ignores the
+        marker."""
+        import struct
+
+        from scripts import embeddings, memory_api
+        from scripts.database import ensure_initialized, get_connection, load_sqlite_vec
+
+        store, memory_init = self._session(monkeypatch, tmp_path, identity_env)
+        conn = get_connection(store)
+        ensure_initialized(conn)
+        self._memories(conn, ("a" * 32, "alpha widgets"), ("b" * 32, "zebra crossing"))
+        load_sqlite_vec(conn)
+        conn.execute(
+            "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
+            ("a" * 32, CANONICAL, struct.pack(f"{embeddings.EMBEDDING_DIM}f",
+                                             *[0.5] * embeddings.EMBEDDING_DIM)),
+        )
+        conn.commit()
+        conn.close()
+        (tmp_path / "marker").touch()
+
+        memory_api.PACTMemory().search("zebra")
+        assert [m for m, _ in self._vectors(store)] == ["a" * 32]
+
     @pytest.mark.parametrize("old_table_empty", [False, True])
     def test_a_migration_due_postpones_until_after_the_migration(
         self, monkeypatch, tmp_path, identity_env, old_table_empty

@@ -453,13 +453,14 @@ def maybe_embed_pending() -> dict:
     # sends them to the wrong remedy (permissions or the path, not a write
     # that was never attempted). Both skip the sweep.
     # A READ'S CATCH-UP IS LIMITED TO ITS SCOPE (`catchup_projects`), so it
-    # neither checks nor spends the session marker: the store-wide sweep stays
-    # due, and `ensure_memory_ready` postpones it to the first call outside
-    # the read scope.
+    # does not spend the session marker: the store-wide sweep stays due, and
+    # `ensure_memory_ready` postpones it to the first call outside the read
+    # scope. It still honours a marker already written, so a memory whose
+    # embedding keeps failing is not retried by every read in the session.
     scoped = catchup_projects_bound() is not None
     marker_path = _get_embedding_attempted_path()
     try:
-        already_attempted = False if scoped else marker_path.exists()
+        already_attempted = marker_path.exists()
     except OSError:
         result["message"] = "Could not check session marker"
         return result
