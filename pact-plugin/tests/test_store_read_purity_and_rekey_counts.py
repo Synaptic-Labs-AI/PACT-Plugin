@@ -1238,9 +1238,14 @@ class TestThePruneLedgerIsBounded:
     ):
         """Control: the removal runs only under the ledger's lock, so a second
         writer that would cut back too waits while a cut-back's new file is
-        being written, and that file is not removed under it."""
+        being written, and that file is not removed under it. Synchronized on
+        the second writer's first refused lock attempt (an event), not on a
+        timed wait, and that writer retries until the lock is released, so
+        load cannot make it give up and drop its line."""
         import os
         import threading
+        import time as real_time
+        import types
 
         import session_end
 
@@ -1248,7 +1253,14 @@ class TestThePruneLedgerIsBounded:
         ledger, line = self._ledger_one_line_below_compaction(slug)
         main = threading.get_ident()
         real_fsync = os.fsync
+        blocked = threading.Event()
         seen = {}
+
+        def sleep(seconds):
+            # The bounded lock retry sleeps only after a refused attempt.
+            if threading.current_thread().name == "other-writer":
+                blocked.set()
+            real_time.sleep(min(seconds, 0.01))
 
         def fsync(fd):
             if threading.get_ident() == main and "scratch" not in seen:
@@ -1259,16 +1271,22 @@ class TestThePruneLedgerIsBounded:
                 other = threading.Thread(
                     target=session_end._append_ledger_line,
                     args=(slug, line("other") * 6000),
+                    name="other-writer",
                 )
                 other.start()
-                other.join(0.5)
-                seen["other_waited"] = other.is_alive()
+                seen["other_waited"] = blocked.wait(30) and other.is_alive()
                 seen["scratch_kept"] = all(p.exists() for p in scratch)
                 seen["other"] = other
             return real_fsync(fd)
 
+        clock = types.SimpleNamespace(**{
+            name: getattr(real_time, name) for name in dir(real_time) if not name.startswith("_")
+        })
+        clock.sleep = sleep
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(os, "fsync", fsync)
+            patch.setattr(session_end, "time", clock)
+            patch.setattr(session_end, "_LEDGER_LOCK_ATTEMPTS", 1_000_000)
             session_end._append_ledger_line(slug, line("trigger"))
             seen["other"].join(30)
 
