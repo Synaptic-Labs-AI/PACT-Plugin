@@ -329,6 +329,32 @@ def test_held_ledger_lock_skips_the_line_within_the_bound(tmp_path, monkeypatch)
     assert ledger.read_bytes() == b'{"session_id": "x"}\n'
 
 
+def test_a_symlink_planted_after_the_lstat_is_refused_as_unopened(tmp_path, monkeypatch):
+    """A ledger swapped for a symlink between the lstat and the open is
+    refused by O_NOFOLLOW, and the append answers False (not opened), so the
+    caller tries its remaining lines without waiting. RED WHEN the refused
+    open is swallowed and answered True, or the symlink's target is written."""
+    ledger = tmp_path / session_end.PRUNE_LEDGER_NAME
+    ledger.write_bytes(b"")
+    target = tmp_path / "elsewhere"
+    target.write_bytes(b"")
+    real_lstat = os.lstat
+    swapped = []
+
+    def lstat_then_swap(path, *args, **kwargs):
+        result = real_lstat(path, *args, **kwargs)
+        if Path(path) == ledger and not swapped:
+            swapped.append(1)
+            ledger.unlink()
+            ledger.symlink_to(target)
+        return result
+
+    monkeypatch.setattr(session_end.os, "lstat", lstat_then_swap)
+    assert session_end._append_ledger_line(tmp_path, '{"session_id": "x"}\n') is False
+    assert swapped == [1]
+    assert target.read_bytes() == b""
+
+
 def test_an_append_that_fails_partway_leaves_no_partial_line(tmp_path, monkeypatch):
     """RED WHEN a short write followed by ENOSPC leaves the partial line for
     the next append to join onto."""

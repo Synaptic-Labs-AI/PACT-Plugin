@@ -828,7 +828,12 @@ def _append_ledger_line(slug_dir: Path, line: str, wait: bool = True) -> bool:
                 return False
         except FileNotFoundError:
             pass
-        fd = _open_locked_ledger(ledger, wait)
+        try:
+            fd = _open_locked_ledger(ledger, wait)
+        except OSError:
+            # A symlink planted after the lstat (O_NOFOLLOW refuses it), or
+            # any other failed open: the ledger was not opened.
+            return False
         if fd is None:
             return False
         try:
