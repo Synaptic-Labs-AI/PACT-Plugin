@@ -861,12 +861,15 @@ def test_core_bare_from_the_config_file_matches_git(tmp_path, bare):
         '[core "x"]\n\tbare = true\n',
         '[core  "x"]\n\tbare = true\n[core]\n\tbare = false\n',
         '[core\t"x"]\n\tbare = true\n',
+        '[core "a]b"]\n\tbare = true\n',
+        '[core "a]b"]\n\tbare = true\n[core]\n\tbare = yes\n',
         "[core]\n\tbare = maybe\n",
         "[core]\n\trepositoryformatversion = 0\n",
     ],
     ids=["true", "Core", "CORE", "no-comment", "valueless", "empty", "spaced-header",
          "quoted-space", "empty-key", "bom", "continued", "nul", "subsection",
-         "subsection-two-spaces", "subsection-tab", "bad-boolean", "unset"],
+         "subsection-two-spaces", "subsection-tab", "subsection-bracket",
+         "subsection-bracket-then-core", "bad-boolean", "unset"],
 )
 def test_the_config_file_reader_agrees_with_the_identity(tmp_path, text):
     """For each config, the file reader gives the answer the identity takes

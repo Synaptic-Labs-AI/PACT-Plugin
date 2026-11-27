@@ -1740,14 +1740,13 @@ def _git_config_values(text: str, section: str, key: str) -> Optional[List[Optio
                 i += 1
             continue
         if c == "[":
-            close = text.find("]", i)
-            if close < 0:
+            # The header ends at the first `]` outside its quoted subsection.
+            match = _CONFIG_HEADER_RE.match(text, i + 1)
+            if match is None or not text.startswith("]", match.end()):
                 return None
-            header = text[i + 1:close]
-            if not _CONFIG_HEADER_RE.fullmatch(header):
-                return None
+            header = match.group(0)
             current = header.lower() if _CONFIG_SECTION_RE.fullmatch(header) else None
-            i = close + 1
+            i = match.end() + 1
             continue
         start = i
         while i < n and (text[i].isascii() and (text[i].isalnum() or text[i] == "-")):
