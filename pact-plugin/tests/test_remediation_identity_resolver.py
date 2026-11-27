@@ -4689,6 +4689,10 @@ def _union_admits_str(annotation) -> bool:
 _OBSERVED = "reports what was observed"
 _DETAIL = "part of a rung detail: the rung and the path it read"
 _DESCRIBED_PRINTED_CLAUSES = {
+    # The core.bare decline (BARE_UNREAD_DETAIL): no change to a `.git`.
+    "git could not say whether this repository is bare (core.bare)": _OBSERVED,
+    "it cannot tell which folder name the repository is filed under":
+        "says why the decline names no folder-name id",
     # The .git pin disclosure (PIN_DOT_GIT_DETAIL): it names the pin file's
     # value, never a change to a `.git` directory or file.
     "a github.com pin whose repository name ends in .git names the id a remote spelled "

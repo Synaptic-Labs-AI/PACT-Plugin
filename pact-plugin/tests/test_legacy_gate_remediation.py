@@ -751,6 +751,50 @@ def test_a_separate_git_dir_repository_is_one_bucket_from_every_checkout(
     assert saved in [m.id for m in PACTMemory(session_id="s-wt", db_path=db).list()]
 
 
+@pytest.mark.parametrize(
+    "answer, expected",
+    [
+        ("timeout", None),
+        ("exit128", None),
+        ("bad-boolean", None),
+        ("unset", False),
+        ("false", False),
+        ("true", True),
+    ],
+)
+def test_core_bare_is_an_answer_only_when_git_gives_one(tmp_path, monkeypatch, answer, expected):
+    """Exit 0 with a boolean and exit 1 (unset) are answers; a timeout, any
+    other exit or a value git refuses is no answer, and the folder-name id
+    declines (`origin_unreadable`, the core.bare cause) rather than fall back
+    to a name. RED WHEN an unanswered core.bare reads as not bare."""
+    import subprocess as sp
+
+    from scripts import project_identity as pi
+
+    def fake_run(argv, **kwargs):
+        if answer == "timeout":
+            raise sp.TimeoutExpired(argv, 5)
+        code, out = {
+            "exit128": (128, b""), "bad-boolean": (0, b"maybe\n"),
+            "unset": (1, b""), "false": (0, b"false\n"), "true": (0, b"true\n"),
+        }[answer]
+        return sp.CompletedProcess(argv, code, out, b"")
+
+    monkeypatch.setattr(pi.subprocess, "run", fake_run)
+    common = tmp_path / ("store-" + answer)
+    common.mkdir()
+    assert pi._git_dir_is_bare(common) is expected
+    root = tmp_path / "work"
+    if expected is None:
+        assert pi.repository_folder_name(root, common) is None
+        declined = pi._folder_name_identity(root, common, None, None)
+        assert declined.project_id is None
+        assert declined.decline_reason["reason"] == "origin_unreadable"
+        assert declined.detail == pi.BARE_UNREAD_DETAIL
+    else:
+        assert pi.repository_folder_name(root, common) == ("work" if expected else common.name)
+
+
 def test_only_the_old_bucket_moves_into_the_own_folder_name_id(separate_git_dir, capfd):
     """Control: a bucket that is not this session's legacy candidate cannot
     be moved into its folder-name id."""

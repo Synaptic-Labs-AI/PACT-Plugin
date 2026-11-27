@@ -2501,7 +2501,7 @@ def _marker_names_external_git_dir(root: Path) -> bool:
     return not _submodule_admin_dir(git_dir)
 
 
-def repository_folder_name(root: Path, common_dir: Path) -> str:
+def repository_folder_name(root: Path, common_dir: Path) -> Optional[str]:
     """The folder-name id of a repository with no portable origin.
 
     The checkout's name, except for a non-bare repository whose git dir is
@@ -2509,7 +2509,9 @@ def repository_folder_name(root: Path, common_dir: Path) -> str:
     checkout for such a git dir, so each checkout would otherwise name its
     own bucket. There the id is the git dir's own name without a trailing
     `.git` (its parent's name when the git dir is named `.git`), the same
-    for the main checkout and every linked worktree. Never raises.
+    for the main checkout and every linked worktree. None when git cannot
+    say whether the repository is bare (`_git_dir_is_bare`): the caller
+    declines rather than guess between two names. Never raises.
     """
     name = Path(root).name
     try:
@@ -2518,16 +2520,22 @@ def repository_folder_name(root: Path, common_dir: Path) -> str:
             return name
     except (OSError, RuntimeError, ValueError):
         return name
-    if _git_dir_is_bare(common):
+    bare = _git_dir_is_bare(common)
+    if bare is None:
+        return None
+    if bare:
         return name
     from .database import git_dir_own_name
 
     return git_dir_own_name(common) or name
 
 
-def _git_dir_is_bare(common_dir: Path) -> bool:
+def _git_dir_is_bare(common_dir: Path) -> Optional[bool]:
     """Whether the repository's own config (`--local`) says `core.bare`, read
-    as git reads a boolean. False when git cannot answer."""
+    as git reads a boolean (`database.core_bare_answer` gives the same
+    answers from the config file). An unset key is not bare. None when git
+    cannot answer (a timeout, no git, an exit other than 0 or 1, or a value
+    git refuses as a boolean)."""
     try:
         from shared.git_helpers import answered_once, git_config_bool
         from shared.project_scope import git_env_without_location
@@ -2546,9 +2554,46 @@ def _git_dir_is_bare(common_dir: Path) -> bool:
             env=git_env_without_location(),
         )
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None
+    if result.returncode == 1 and not result.stdout:
         return False
-    value = one_git_answer(result) if result.returncode == 0 else None
-    return value is not None and git_config_bool(value) is True
+    if result.returncode != 0:
+        return None
+    value = one_git_answer(result)
+    return None if value is None else git_config_bool(value)
+
+
+# Why a folder-name id could not be chosen (`repository_folder_name`).
+BARE_UNREAD_DETAIL = (
+    "git could not say whether this repository is bare (core.bare), so it "
+    "cannot tell which folder name the repository is filed under"
+)
+
+
+def _bare_unread_decline(
+    override_ignored: Optional[dict], override_path: Optional[str]
+) -> RootIdentity:
+    """The `origin_unreadable` decline of a repository whose folder-name id
+    cannot be chosen (`repository_folder_name` gave None)."""
+    return RootIdentity(
+        None, None, "declined", override_ignored,
+        decline_record("origin_unreadable", override_path), BARE_UNREAD_DETAIL,
+    )
+
+
+def _folder_name_identity(
+    root: Path,
+    common_dir: Path,
+    override_ignored: Optional[dict],
+    override_path: Optional[str],
+) -> RootIdentity:
+    """The folder-name identity of a repository with no portable origin
+    (`repository_folder_name`), or `_bare_unread_decline` when that name
+    cannot be chosen."""
+    folder = repository_folder_name(root, common_dir)
+    if folder is None:
+        return _bare_unread_decline(override_ignored, override_path)
+    return RootIdentity(folder, "basename", "basename", override_ignored)
 
 
 def detect_id_for_root(
@@ -2688,10 +2733,7 @@ def detect_id_for_root(
     if origin.state == ORIGIN_ABSENT:
         if submodule_controlled:
             return _refuse_submodule_basename(root, common_dir, override_ignored)
-        return RootIdentity(
-            repository_folder_name(root, common_dir), "basename", "basename",
-            override_ignored,
-        )
+        return _folder_name_identity(root, common_dir, override_ignored, override_path)
 
     outcome, identifier = classify_remote_origin(origin.value)
     if outcome == OUTCOME_CANONICAL:
