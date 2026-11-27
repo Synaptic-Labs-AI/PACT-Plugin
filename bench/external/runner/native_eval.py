@@ -29,6 +29,12 @@ def run(args: argparse.Namespace) -> int:
     manifest: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
     scratch = Path(manifest["paths"]["out"])
     plugin = Path(manifest["paths"]["plugin"])
+    cases_dir = Path(args.cases_dir).expanduser().resolve() if args.cases_dir else _default_cases()
+    if not cases_dir.is_dir():
+        raise SystemExit(f"native eval cases directory does not exist: {cases_dir}")
+    if not any(cases_dir.iterdir()):
+        raise SystemExit(f"native eval cases directory is empty: {cases_dir}")
+
     settings = json.loads((scratch / "config" / "settings.json").read_text(encoding="utf-8"))
     settings_env = dict(settings.get("env") or {})
     token_file = Path(manifest["provider"]["token_file"])
@@ -49,12 +55,6 @@ def run(args: argparse.Namespace) -> int:
     env["HOME"] = str(short_root / "home")
     env.pop("TMP", None)
     env.pop("TEMP", None)
-
-    cases_dir = Path(args.cases_dir).expanduser().resolve() if args.cases_dir else _default_cases()
-    if not cases_dir.is_dir():
-        raise SystemExit(f"native eval cases directory does not exist: {cases_dir}")
-    if not any(cases_dir.iterdir()):
-        raise SystemExit(f"native eval cases directory is empty: {cases_dir}")
 
     injected = plugin / "evals"
     if injected.exists():
@@ -133,6 +133,7 @@ def run(args: argparse.Namespace) -> int:
         "report_html": str(out / "report.html") if (out / "report.html").is_file() else None,
     }
     (out / "result.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    shutil.rmtree(short_root, ignore_errors=True)
     print(json.dumps(record, indent=2))
     return 0 if code == 0 and not timed_out else 1
 

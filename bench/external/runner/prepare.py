@@ -176,9 +176,13 @@ def build_scratch_settings(
     model: str = DEFAULT_MODEL,
 ) -> tuple[dict[str, Any], dict[str, str]]:
     data = json.loads(source.read_text(encoding="utf-8"))
-    env = dict(data.get("env") or {})
+    env = {
+        key: value
+        for key, value in (data.get("env") or {}).items()
+        if key not in LIVE_ONLY_KEYS
+    }
     for key in MODEL_ENV_KEYS:
-        env.setdefault(key, model)
+        env[key] = model
     env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     settings = {
         "env": env,

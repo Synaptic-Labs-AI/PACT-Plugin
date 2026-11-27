@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 from pathlib import Path
 
 from external.runner import native_eval, prepare
@@ -55,6 +56,7 @@ def test_native_eval_injects_cases_and_records_command(tmp_path: Path) -> None:
     )
     fake.chmod(0o755)
 
+    short_root = Path(tempfile.mkdtemp(prefix="pnt-", dir="/tmp"))
     args = native_eval.build_parser().parse_args(
         [
             "--manifest",
@@ -66,19 +68,19 @@ def test_native_eval_injects_cases_and_records_command(tmp_path: Path) -> None:
             "--runs",
             "1",
             "--temp-root",
-            str(Path.home()),
+            str(short_root),
         ]
     )
     assert native_eval.run(args) == 0
     short_env = json.loads(fake_env.read_text(encoding="utf-8"))
-    assert short_env["TMPDIR"].startswith(str(Path.home() / "pact-native-"))
-    assert short_env["HOME"].startswith(str(Path.home() / "pact-native-"))
+    assert short_env["TMPDIR"].startswith(str(short_root / "pact-native-"))
+    assert short_env["HOME"].startswith(str(short_root / "pact-native-"))
     assert (plugin / "evals" / "probe" / "prompt.md").is_file()
     record = json.loads((scratch / "native-eval" / "result.json").read_text(encoding="utf-8"))
     assert record["exit_code"] == 0
-    assert record["temp_root"].startswith(str(Path.home() / "pact-native-"))
+    assert record["temp_root"].startswith(str(short_root / "pact-native-"))
     assert record["report_json"].endswith("report.json")
-    shutil.rmtree(record["temp_root"], ignore_errors=True)
+    shutil.rmtree(short_root, ignore_errors=True)
     assert any(str(plugin) in str(part) for part in record["command"])
 
 
