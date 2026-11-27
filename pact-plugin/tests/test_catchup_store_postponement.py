@@ -69,3 +69,40 @@ def test_control_a_file_that_is_not_a_database_still_fails_the_check(tmp_path):
     with store_scope(store):
         fault = embedding_catchup._store_integrity_fault()
     assert fault is not None and "failed its integrity check" in fault, fault
+
+
+def test_the_integrity_check_runs_once_per_store_after_a_pass(tmp_path, monkeypatch):
+    """A passing `quick_check` is kept for the process, so a second catch-up
+    on the same store does not scan it again; a failed or unanswered check
+    is not kept. RED WHEN every catch-up with pending work rescans the
+    store."""
+    from scripts import database
+    from scripts.database import db_connection, ensure_initialized
+
+    monkeypatch.setattr(embedding_catchup, "_INTEGRITY_PASSED", set())
+    store = tmp_path / "store.db"
+    with db_connection(store) as conn:
+        ensure_initialized(conn)
+    opened = []
+    real_connect = database.sqlite3.connect
+
+    def counting(target, *args, **kwargs):
+        if str(target).endswith("?mode=ro"):
+            opened.append(target)
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(database.sqlite3, "connect", counting)
+    with store_scope(store):
+        assert embedding_catchup._store_integrity_fault() is None
+        assert embedding_catchup._store_integrity_fault() is None
+    assert len(opened) == 1, opened
+    other = tmp_path / "other.db"
+    with db_connection(other) as conn:
+        ensure_initialized(conn)
+    with store_scope(other):
+        assert embedding_catchup._store_integrity_fault() is None
+    assert len(opened) == 2, opened
+    with store_scope(tmp_path / "gone" / "store.db"):
+        assert embedding_catchup._store_integrity_fault() is not None
+        assert embedding_catchup._store_integrity_fault() is not None
+    assert len(opened) == 4, opened

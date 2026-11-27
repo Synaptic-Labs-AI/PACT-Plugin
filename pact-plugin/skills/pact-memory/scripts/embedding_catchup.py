@@ -15,6 +15,7 @@ Used by:
 from __future__ import annotations
 
 import logging
+import os
 import platform
 import struct
 import subprocess
@@ -372,7 +373,8 @@ def _store_integrity_fault() -> Optional[str]:
     writes nothing. A store whose pages are corrupt can still answer the
     pending-work query, and the catch-up's vector inserts would then write
     into it. The check reads the whole file, so it runs only once there is
-    work to do, never on the common no-pending path.
+    work to do, never on the common no-pending path, and a pass is kept for
+    the process (`_INTEGRITY_PASSED`), so it runs at most once per store.
 
     THE STORE'S OWN DRIVER, WITH ITS OWN EXTENSION. The connection comes from
     the module `database` reads the store with (pysqlite3 when installed),
@@ -384,6 +386,9 @@ def _store_integrity_fault() -> Optional[str]:
     from .database import sqlite3 as store_sqlite3
 
     store = resolve_db_path()
+    key = os.path.realpath(store)
+    if key in _INTEGRITY_PASSED:
+        return None
     try:
         connection = store_sqlite3.connect(
             Path(store).resolve().as_uri() + "?mode=ro", uri=True
@@ -401,7 +406,15 @@ def _store_integrity_fault() -> Optional[str]:
     if rows != [("ok",)]:
         first = rows[0][0] if rows and rows[0] else "unknown"
         return f"the store failed its integrity check ({first}); catch-up skipped"
+    _INTEGRITY_PASSED.add(key)
     return None
+
+
+# Stores whose `PRAGMA quick_check` passed in this process. The check reads
+# the whole file, and a read's scoped catch-up and the store-wide catch-up
+# after it would otherwise scan it twice; a failed or unanswered check is not
+# kept, so it runs again.
+_INTEGRITY_PASSED: set = set()
 
 
 def embed_pending_memories(
