@@ -2309,10 +2309,12 @@ class TestCIEnvironmentBinding:
         """A census raised the session's status to 1 in its own sessionfinish,
         after pytest had passed every sessionfinish hook the status as it stood
         before any ran (0). With drift at session end the note names that 1,
-        read from session.exitstatus, not the 0 the hook was passed."""
+        read from session.exitstatus, not the 0 the hook was passed. The stub
+        is built before the gate is set, so outside a source checkout the arm
+        skips as its siblings do (`_stub`)."""
+        stub = self._stub(False)
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
-        monkeypatch.setattr(binding, "_load_verify_script",
-                            lambda script: self._stub(False))
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
         raised = self._Session(1)
         binding.CIEnvironmentBinding().pytest_sessionfinish(raised, 0)
         assert raised.exitstatus == 3
