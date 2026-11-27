@@ -246,6 +246,32 @@ _LEGACY_NOTICES_QUIET: contextvars.ContextVar = contextvars.ContextVar(
 )
 
 
+# Set while `project-id rekey` dry-runs a move (`rekey_preview`): a notice
+# whose printed command is that same move does not print it again.
+_REKEY_PREVIEW: contextvars.ContextVar = contextvars.ContextVar(
+    "pact_rekey_preview", default=None
+)
+
+
+@contextmanager
+def rekey_preview(from_id: str, to_id: str):
+    """Mark the reads inside as `project-id rekey --from=from_id --to=to_id`'s
+    dry run, so a legacy notice does not print that command back."""
+    token = _REKEY_PREVIEW.set((from_id, to_id))
+    try:
+        yield
+    finally:
+        _REKEY_PREVIEW.reset(token)
+
+
+def _preview_clause(lead: str, candidate: str, target: str, command) -> str:
+    """` <lead> <command>`, the sentence a legacy notice ends with, or "" when
+    this run is already that preview."""
+    if _REKEY_PREVIEW.get() == (candidate, target):
+        return ""
+    return " " + lead + " " + _printed_rekey_remedy([command])
+
+
 @contextmanager
 def legacy_notices_quiet():
     """Suppress the legacy-bucket read notices for the reads inside, as
@@ -1057,16 +1083,16 @@ def _warn_legacy_unproven(
     logger.warning(
         "legacy project bucket %r holds %d memor%s and %d file path%s, but "
         "%s, so it is NOT in this read scope: its folder name alone does not "
-        "show that the rows are this repository's. If they are, preview the "
-        "move with: %s",
+        "show that the rows are this repository's.%s",
         candidate,
         memories,
         "y" if memories == 1 else "ies",
         file_paths,
         "" if file_paths == 1 else "s",
         cause,
-        _printed_rekey_remedy(
-            [runnable_rekey_command(candidate, target, db_path=store)]
+        _preview_clause(
+            "If they are, preview the move with:", candidate, target,
+            runnable_rekey_command(candidate, target, db_path=store),
         ),
     )
 
@@ -1090,13 +1116,14 @@ def _warn_legacy_unattributed(
         "legacy project bucket %r is in this read scope because %d of its "
         "memories came from sessions recorded here, but %d of its memories "
         "came from no recorded session, so nothing shows they are this "
-        "repository's. If every row belongs here, preview the move to this "
-        "repository's id with: %s",
+        "repository's.%s",
         candidate,
         counts["here"],
         counts["unattributed"],
-        _printed_rekey_remedy(
-            [runnable_rekey_command(candidate, target, db_path=store)]
+        _preview_clause(
+            "If every row belongs here, preview the move to this repository's "
+            "id with:", candidate, target,
+            runnable_rekey_command(candidate, target, db_path=store),
         ),
     )
 
@@ -1166,14 +1193,16 @@ def _note_earlier_canonical(
         "checkout (at least one saved after this checkout was cloned), and "
         "none of its file rows names an existing file outside it. It may be this repository under "
         "an earlier id, but it is not this checkout's id %r, so it is NOT in "
-        "this read scope. If its rows are this repository's, preview the move "
-        "with: %s",
+        "this read scope.%s",
         bucket,
         memories,
         "y" if memories == 1 else "ies",
         linked,
         scope,
-        _printed_rekey_remedy([command]),
+        _preview_clause(
+            "If its rows are this repository's, preview the move with:",
+            bucket, scope, command,
+        ),
     )
 
 

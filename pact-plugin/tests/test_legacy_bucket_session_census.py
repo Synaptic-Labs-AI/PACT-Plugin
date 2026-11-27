@@ -308,6 +308,46 @@ def test_an_unattributed_row_is_read_with_a_notice(checkout, caplog):
     assert "WHAT THIS CANNOT TELL APART" in memory_api._legacy_session_census.__doc__
 
 
+def test_a_dry_run_of_this_bucket_does_not_print_its_own_command(checkout, capfd, caplog):
+    """The dry run of the very move a notice would preview keeps the notice
+    and drops its "preview the move" command. RED WHEN it prints the command
+    the user just ran."""
+    from scripts.cli import main
+
+    repo, store, config = checkout
+    _rows(store, [("m1", "here-1"), ("m2", "other-sess"), ("m3", None)])
+    seed_session_evidence(config, repo, "here-1")
+    argv = ["project-id", "rekey", "--from=proj", "--db-path", str(store)]
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(SystemExit) as exit_info:
+            main(argv + ["--to=" + CANONICAL])
+    capfd.readouterr()
+    assert exit_info.value.code == 0
+    notices = [r.getMessage() for r in caplog.records if "no recorded session" in r.getMessage()]
+    assert len(notices) == 1, notices
+    assert "is in this read scope because 1 of its memories" in notices[0], notices
+    assert "preview the move" not in notices[0] and "project-id rekey" not in notices[0], notices
+
+
+def test_a_dry_run_of_another_move_keeps_the_notice_command(checkout, capfd, caplog):
+    """Control: a dry run to a different target still prints the notice's
+    own command, which is not the move being run."""
+    from scripts.cli import main
+
+    repo, store, config = checkout
+    _rows(store, [("m1", "here-1"), ("m2", "other-sess"), ("m3", None)])
+    seed_session_evidence(config, repo, "here-1")
+    with caplog.at_level(logging.WARNING):
+        with pytest.raises(SystemExit):
+            main([
+                "project-id", "rekey", "--from=proj", "--to=github.com/o/elsewhere",
+                "--db-path", str(store),
+            ])
+    capfd.readouterr()
+    notices = [r.getMessage() for r in caplog.records if "no recorded session" in r.getMessage()]
+    assert len(notices) == 1 and "preview the move" in notices[0], notices
+
+
 def test_a_subfolder_launch_names_its_reason(checkout, caplog):
     """RED WHEN a session launched in a subfolder of the repository counts,
     or the warning does not say why it did not."""

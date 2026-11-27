@@ -41,7 +41,7 @@ import os
 import shlex
 import sys
 import tempfile
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from typing import NoReturn
 
@@ -74,6 +74,7 @@ from scripts.memory_api import (
     detection_pass,
     hidden_legacy_buckets,
     legacy_notices_quiet,
+    rekey_preview,
     main_repo_root,
     present_store_fault,
     project_candidate_rows,
@@ -1433,7 +1434,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         own_from = bool(legacy_name) and from_id.casefold() == legacy_name.casefold()
         warned_before = set(_UNPROVEN_WARNED)
         quiet = args.apply or not own_from
-        with legacy_notices_quiet() if quiet else nullcontext():
+        with legacy_notices_quiet() if quiet else rekey_preview(from_id, to_id):
             memory._read_project_scopes()
         # Whether THIS read disclosed --from's unattributed memories itself.
         read_disclosed = any(

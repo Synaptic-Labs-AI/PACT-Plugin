@@ -7226,6 +7226,16 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function memory_api: _LEGACY_NOTICES_QUIET.reset>"): (
             "legacy_notices_quiet restores the legacy read notices when its block ends"
         ),
+        ("call", "<call to no function memory_api: _REKEY_PREVIEW.get>"): (
+            "a legacy read notice checks whether this run is the dry run it would "
+            "preview; it changes no answer, only whether the notice's command prints"
+        ),
+        ("call", "<call to no function memory_api: _REKEY_PREVIEW.set>"): (
+            "rekey_preview marks a rekey dry run's scope read with the move it previews"
+        ),
+        ("call", "<call to no function memory_api: _REKEY_PREVIEW.reset>"): (
+            "rekey_preview unmarks the scope read when its block ends"
+        ),
         ("call", "<call to no function cli: legacy_name.casefold>"): (
             "a rekey dry run compares --from with this checkout's folder name only to decide "
             "whether its scope read prints the legacy notices; it changes no answer"
