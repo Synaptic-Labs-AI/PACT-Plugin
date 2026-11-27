@@ -11,6 +11,8 @@ def test_workflow_is_read_only_and_hermetic() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
     assert "permissions:\n  contents: read" in text
     assert "python -m pytest bench/tests -q" in text
+    assert text.count("python scripts/verify_ci_environment.py") == 2
+    assert "if: always()" in text
     assert not re.search(r"secrets\.|ANTHROPIC|OPENAI|claude\s+-p|claude plugin eval", text)
     uses = re.findall(r"uses: [^@\s]+@([0-9a-f]{40})", text)
     assert len(uses) == 2
