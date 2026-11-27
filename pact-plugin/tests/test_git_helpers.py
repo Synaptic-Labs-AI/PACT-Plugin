@@ -251,7 +251,7 @@ def test_a_pass_answers_each_git_question_once_and_no_other(tmp_path, monkeypatc
             ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env={**env, "HOME": str(b)}),
         ]
         failures = []
-        for _ in range(2):
+        for _ in range(3):
             try:
                 ask(["git", "rev-parse", "--raises"])
             except OSError as exc:
@@ -261,8 +261,9 @@ def test_a_pass_answers_each_git_question_once_and_no_other(tmp_path, monkeypatc
     assert outside == (1, 2), "outside a pass every call runs"
     assert same == [first] * 5, (first, same)
     assert len(set(other)) == len(other) and first not in other, (first, other)
-    assert len(failures) == 2 and failures[0] is failures[1], failures
-    assert [r for r in runs if r[0][-1] == "--raises"] == [(("git", "rev-parse", "--raises"), False)]
+    # A failure to start git is retried once, then kept for every later asker.
+    assert len(failures) == 3 and failures[1] is failures[2] and failures[0] is not failures[1], failures
+    assert [r for r in runs if r[0][-1] == "--raises"] == [(("git", "rev-parse", "--raises"), False)] * 2
     assert (PASS_GIT_RESULTS.get(), after) == (None, len(runs)), "the pass ended with its block"
 
 
@@ -280,10 +281,48 @@ def test_a_worktree_gitdir_is_trimmed_as_git_trims_it(tail, kept):
     assert worktree_admin_gitdir("/wt/.git" + tail) == "/wt/.git" + kept
 
 
+def test_a_failure_to_start_git_is_retried_once_in_a_pass():
+    """A transient failure to start git (EAGAIN) is not kept as the pass's
+    answer: the next asker runs git again and gets its answer, and later
+    askers share that answer. A completed run that git refused (a nonzero
+    exit) is an answer and is kept. RED WHEN the first OSError is re-raised
+    to every later reader."""
+    import subprocess
+
+    from shared.git_helpers import answered_once, git_results_pass
+
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError(11, "Resource temporarily unavailable")
+        return subprocess.CompletedProcess(["git"], 0, "ok\n", "")
+
+    refusals = []
+
+    def refused():
+        refusals.append(1)
+        return subprocess.CompletedProcess(["git"], 128, "", "fatal: no\n")
+
+    with git_results_pass():
+        try:
+            answered_once(["git", "rev-parse", "--flaky"], flaky, text=True, env=None)
+            raise AssertionError("the first start failure must reach its caller")
+        except OSError:
+            pass
+        second = answered_once(["git", "rev-parse", "--flaky"], flaky, text=True, env=None)
+        third = answered_once(["git", "rev-parse", "--flaky"], flaky, text=True, env=None)
+        kept = [answered_once(["git", "rev-parse", "--no"], refused, text=True, env=None) for _ in range(3)]
+    assert second.stdout == "ok\n" and third is second and len(calls) == 2, calls
+    assert len(refusals) == 1 and kept[0].returncode == 128 and kept[0] is kept[2], refusals
+
+
 def test_a_kept_failure_does_not_grow_its_traceback_per_asker():
     """A failure kept for a pass is raised again for each asker. RED WHEN
     each raise extends the stored exception's traceback, so the tenth asker
-    gets a longer one than the second."""
+    gets a longer one than the third. (The first failure to start git is not
+    kept: the second asker retries, and its failure is the kept one.)"""
     import traceback
 
     from shared.git_helpers import answered_once, git_results_pass
@@ -299,7 +338,7 @@ def test_a_kept_failure_does_not_grow_its_traceback_per_asker():
             except OSError as exc:
                 assert str(exc) == "could not run"
                 lengths.append(len(traceback.extract_tb(exc.__traceback__)))
-    assert len(set(lengths)) == 1, lengths
+    assert len(lengths) == 10 and len(set(lengths[1:])) == 1, lengths
 
 
 def test_a_pass_keys_a_question_on_the_directory_its_run_sets(tmp_path, monkeypatch):

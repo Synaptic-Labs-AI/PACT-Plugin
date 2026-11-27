@@ -4698,7 +4698,8 @@ def test_a_result_passing_function_returns_its_run_result():
     on every path. For `answered_once`: outside a pass and on the first ask
     inside one, it returns the very object `run` returned. A later ask of the
     same question in the pass gets the first asker's object, and its own
-    runner never runs; a raise is the same exception again. That is sound
+    runner never runs; a failure to start git is retried by the next asker
+    once, and its second failure is raised again for every later one. That is sound
     because each question has one runner (`test_each_git_question_has_one_runner`).
     The argument sits where the table says, by position and by keyword. A
     new entry fails here until it has a pin of its own."""
@@ -4736,8 +4737,10 @@ def test_a_result_passing_function_returns_its_run_result():
         again = git_helpers.answered_once(argv, run=lambda: made.append(object()) or made[-1], text=False, env=env)
         failing = ["git", "rev-parse", "--absolute-git-dir"]
         errors = [raised(lambda: git_helpers.answered_once(failing, raising, text=False, env=env))
-                  for _ in range(2)]
-    assert (again is first, len(made), errors[0] is made[-1], errors[1] is made[-1]) == (True, 3, True, True)
+                  for _ in range(3)]
+    # A failure to start git is retried once, then the kept one is raised again.
+    assert (again is first, len(made), errors[1] is made[-1], errors[2] is made[-1],
+            errors[0] is not errors[1]) == (True, 4, True, True, True)
 
 
 def _parse_files(paths, root) -> dict:
@@ -7261,6 +7264,9 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "<name imported from a project module shared.project_scope: CORE_BARE_ARGS>"): (
             "the fixed core.bare question every reader asks git; a constant"
+        ),
+        ("call", "<call to no function shared.git_helpers: a method of what PASS_GIT_RESULTS.get returns>"): (
+            "answered_once reads the pass's memo of git answers; it changes no answer"
         ),
         ("call", "<call to no function memory_api: _REKEY_PREVIEW.get>"): (
             "a legacy read notice checks whether this run is the dry run it would "

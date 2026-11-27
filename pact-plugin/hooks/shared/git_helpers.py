@@ -88,6 +88,10 @@ def _question(
     return where, tuple(rest), bool(text), relevant
 
 
+# `answered_once`'s mark for a question whose first run failed to start git.
+_START_FAILED_ONCE = object()
+
+
 def answered_once(
     argv: Sequence[str],
     run: Callable[[], _Answer],
@@ -101,7 +105,9 @@ def answered_once(
     the same question gets the same CompletedProcess, or the same exception
     raised again. A timeout is never kept: it measures how long that caller
     waited, not what git answers, so the next asker, who may wait longer, runs
-    git again. `text`, `env` and `cwd` must be the ones `run` passes; a
+    git again. A failure to start git (`run()` raising) is kept only the
+    second time: the next asker after the first retries once. git's own
+    refusal (a completed run with a nonzero exit) is an answer and is kept. `text`, `env` and `cwd` must be the ones `run` passes; a
     `run` that sets no `cwd=` runs in this process's directory and passes
     none here. Outside a pass, `run()` is called every time. Only a READ may
     come through here: a command that changes the repository must run each
@@ -112,12 +118,19 @@ def answered_once(
     key = _question(argv, text, env, cwd)
     if key is None:
         return run()
-    if key not in memo:
+    entry = memo.get(key)
+    if entry is None or entry[0] is _START_FAILED_ONCE:
         try:
             memo[key] = (run(), None)
         except subprocess.TimeoutExpired:
             raise
-        except Exception as exc:  # the answer is the failure, kept for every later reader
+        except Exception as exc:
+            # A failure to start git (EAGAIN, a missing binary) is not git's
+            # answer: the first is not kept, so the next asker runs git once
+            # more, and a second is kept for every later reader.
+            if entry is None:
+                memo[key] = (_START_FAILED_ONCE, None)
+                raise
             memo[key] = (None, (exc, exc.__traceback__))
     result, failure = memo[key]
     if failure is not None:
