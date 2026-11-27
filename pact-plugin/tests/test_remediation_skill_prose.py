@@ -164,6 +164,23 @@ class TestExitCodeTableMatchesTheCli:
         assert result.returncode == 2, result.stderr
         assert "unknown field name" in _table_row(SKILL, "2")
 
+    def test_two_is_bad_args_and_a_missing_or_non_object_payload(self, tmp_path):
+        """RED WHEN 'bad args' moves back to row 1, or row 2 stops naming a
+        missing payload or a payload that is not a JSON object."""
+        store = self._store(tmp_path)
+        for args in (
+            ("save", "--db-path", str(store)),
+            ("save", "[1]", "--db-path", str(store)),
+            ("list", "--no-such-flag"),
+        ):
+            result = self._run(tmp_path, *args)
+            assert result.returncode == 2, (args, result.stderr)
+        row_one, row_two = _table_row(SKILL, "1"), _table_row(SKILL, "2")
+        assert "bad args" not in row_one, row_one
+        assert "a usage error (bad args, or no command)" in row_two, row_two
+        assert "with no payload (MISSING_INPUT)" in row_two, row_two
+        assert "a payload that is not a JSON object (INVALID_INPUT)" in row_two, row_two
+
     def test_two_is_a_test_process_opening_the_default_store(self, tmp_path):
         """The CLI's test-only refusal exits 2; the agent-facing table does
         not describe it (agents never run under pytest)."""

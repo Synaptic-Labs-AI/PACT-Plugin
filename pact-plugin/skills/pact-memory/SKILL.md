@@ -495,8 +495,8 @@ with a narrower query.
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| 1 | User error or refusal (bad args, invalid JSON, not found, a too-short or ambiguous prefix, no project identity resolved, a `--db-path` store that is not present) |
-| 2 | Bad input: a usage error; `LEGACY_BUCKET_WRITE_REFUSED`, a repository-identity session's `save` or `update` into a folder-name bucket; a validation error (unknown field name, unknown sub-object key; unusable supplied `project_id` or `session_id` on `save` or `update`), whose envelope includes an `allowed_fields` list; or a missing or invalid `project-id` option |
+| 1 | User error or refusal (invalid JSON, not found, a too-short or ambiguous prefix, no project identity resolved, a `--db-path` store that is not present) |
+| 2 | Bad input: a usage error (bad args, or no command); a `save` or `update` with no payload (`MISSING_INPUT`) or with a payload that is not a JSON object (`INVALID_INPUT`); `LEGACY_BUCKET_WRITE_REFUSED`, a repository-identity session's `save` or `update` into a folder-name bucket; a validation error (unknown field name, unknown sub-object key; unusable supplied `project_id` or `session_id` on `save` or `update`), whose envelope includes an `allowed_fields` list; or a missing or invalid `project-id` option |
 | 3 | Operational fault on any verb: the store cannot be opened, read or written (the message names the store's remedy when it has one), `setup` failed, a `save` whose read-back found no row, or an unexpected internal error. `project-file`: this session's project memory file is unavailable; the printed line names why. `project-id rekey`: an operational failure; nothing was moved |
 
 `project-id rekey` exits 1 when it refuses — `--to` is omitted and no canonical identity resolves, or `--to` is omitted and `--from` is not this checkout's own verified legacy candidate, or `--db-path` names a store that is not present — and 2 for bad input.
