@@ -298,3 +298,27 @@ def compute_db_path() -> Path:
     failing loudly. There is no longer a `get_db_path` here to reach for.
     """
     return resolve_db_path()
+
+
+# The project ids a read may touch, bound while its lazy initialization runs
+# (`catchup_projects`); None outside such a block.
+_CATCHUP_PROJECTS: ContextVar[Optional[tuple]] = ContextVar(
+    "pact_memory_catchup_projects", default=None
+)
+
+
+@contextmanager
+def catchup_projects(project_ids) -> Iterator[None]:
+    """Limit the embedding catch-up inside this block to `project_ids`, the
+    read scope of the read that runs it, so a read embeds no other project's
+    memories. An empty scope embeds nothing."""
+    token = _CATCHUP_PROJECTS.set(tuple(project_ids))
+    try:
+        yield
+    finally:
+        _CATCHUP_PROJECTS.reset(token)
+
+
+def catchup_projects_bound() -> Optional[tuple]:
+    """The project ids `catchup_projects` bound, or None when unbound."""
+    return _CATCHUP_PROJECTS.get()

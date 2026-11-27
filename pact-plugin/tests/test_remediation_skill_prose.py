@@ -7230,6 +7230,19 @@ class TestEveryRouteEntryConditionIsARoute:
             "a rekey dry run compares --from with this checkout's folder name only to decide "
             "whether its scope read prints the legacy notices; it changes no answer"
         ),
+        ("call", "catchup_projects"): (
+            "a read binds its read scope so its embedding catch-up embeds only those "
+            "projects' memories; it changes no identity answer"
+        ),
+        ("call", "<call to no function config: _CATCHUP_PROJECTS.set>"): (
+            "catchup_projects binds a read's scope for its embedding catch-up"
+        ),
+        ("call", "<call to no function config: _CATCHUP_PROJECTS.reset>"): (
+            "catchup_projects unbinds the read's scope when its block ends"
+        ),
+        ("call", "<call to no function config: _CATCHUP_PROJECTS.get>"): (
+            "the embedding catch-up reads the bound read scope to pick which memories to embed"
+        ),
         ("call", "<name imported from a project module memory_api: project_identity.DETECTION_ANSWERS>"): (
             "detection_pass names the identity layer's per-pass answer memo, to start it and to hand it back on a join"
         ),

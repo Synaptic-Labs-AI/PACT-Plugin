@@ -644,6 +644,39 @@ class TestTheCatchUpOnASessionThatStartsWithARead:
         assert sqlite3.connect(str(store)).execute(
             "SELECT name, sql FROM sqlite_master ORDER BY name").fetchall() == tables
 
+    def test_the_read_embeds_no_row_outside_its_scope(
+        self, monkeypatch, tmp_path, identity_env
+    ):
+        """A read on this project catches up its own unembedded row and leaves
+        another project's unembedded row alone. RED WHEN the read's catch-up
+        sweeps the whole store."""
+        import struct
+
+        from scripts import embeddings, memory_api
+        from scripts.database import ensure_initialized, get_connection, load_sqlite_vec
+
+        store, memory_init = self._session(monkeypatch, tmp_path, identity_env)
+        conn = get_connection(store)
+        ensure_initialized(conn)
+        self._memories(conn, ("a" * 32, "alpha widgets"), ("b" * 32, "zebra crossing"))
+        conn.execute(
+            "INSERT INTO memories (id, context, project_id, created_at, updated_at) "
+            "VALUES (?, 'other zebra', 'github.com/other/repo', "
+            "'2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+            ("c" * 32,),
+        )
+        load_sqlite_vec(conn)
+        conn.execute(
+            "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
+            ("a" * 32, CANONICAL, struct.pack(f"{embeddings.EMBEDDING_DIM}f",
+                                             *[0.5] * embeddings.EMBEDDING_DIM)),
+        )
+        conn.commit()
+        conn.close()
+
+        memory_api.PACTMemory().search("zebra")
+        assert [m for m, _ in self._vectors(store)] == ["a" * 32, "b" * 32]
+
     @pytest.mark.parametrize("old_table_empty", [False, True])
     def test_a_migration_due_postpones_until_after_the_migration(
         self, monkeypatch, tmp_path, identity_env, old_table_empty

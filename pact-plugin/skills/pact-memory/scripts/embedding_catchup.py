@@ -25,7 +25,7 @@ from typing import Any, List, Optional
 # Configure logging
 logger = logging.getLogger(__name__)
 
-from .config import read_only_scope
+from .config import catchup_projects_bound, read_only_scope
 from .database import (
     db_connection,
     ensure_initialized,
@@ -256,6 +256,13 @@ def get_unembedded_memories(
             if project_id is not None:
                 query += " AND m.project_id = ?"
                 params.append(project_id)
+            # A read's catch-up embeds only the projects that read covers.
+            scope = catchup_projects_bound()
+            if scope is not None:
+                if not scope:
+                    return UnembeddedResult()
+                query += f" AND m.project_id IN ({', '.join('?' for _ in scope)})"
+                params.extend(scope)
 
             query += " ORDER BY m.created_at ASC LIMIT ?"
             params.append(limit)

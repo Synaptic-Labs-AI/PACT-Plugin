@@ -43,6 +43,7 @@ except ImportError:
 
 from .config import (
     DERIVED_STORE_ORIGINS,
+    catchup_projects,
     get_user_memory_dir,
     read_only_scope,
     resolve_db_path,
@@ -4048,7 +4049,13 @@ class PACTMemory:
             store = self._db_path or resolve_db_path()
         if Path(store).exists():
             with read_only_scope():
-                _ensure_ready()
+                # The catch-up embeds only the rows this read covers.
+                try:
+                    scope = self._read_project_scopes()
+                except Exception:
+                    scope = ()
+                with catchup_projects(scope):
+                    _ensure_ready()
         else:
             _ensure_ready()
             # THE SCHEMA IS CREATED HERE, not left to `_ensure_ready()`: only
