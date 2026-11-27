@@ -1818,10 +1818,11 @@ def _git_config_values(text: str, section: str, key: str) -> Optional[List[Optio
 
 
 # The config file grammar git accepts (`config.c`): a section name of
-# alphanumerics, `-` and `.`, with an optional quoted subsection after any
-# run of whitespace (git's isspace).
+# alphanumerics, `-` and `.`, with an optional quoted subsection after a
+# run of spaces, tabs and carriage returns (git 2.43 refuses a vertical tab, a
+# form feed and a newline there).
 _CONFIG_SECTION_RE = re.compile(r"[A-Za-z0-9.-]+")
-_CONFIG_HEADER_RE = re.compile(r'[A-Za-z0-9.-]+(?:[ \t\v\f\r]+"(?:[^"\\\n]|\\.)*")?')
+_CONFIG_HEADER_RE = re.compile(r'[A-Za-z0-9.-]+(?:[ \t\r]+"(?:[^"\\\n]|\\.)*")?')
 
 
 # A git config file larger than this is not read for `core.bare`.

@@ -862,6 +862,9 @@ def test_core_bare_from_the_config_file_matches_git(tmp_path, bare):
         '[core "x"]\n\tbare = true\n',
         '[core  "x"]\n\tbare = true\n[core]\n\tbare = false\n',
         '[core\t"x"]\n\tbare = true\n',
+        '[core\v"x"]\n\tbare = true\n',
+        '[core\f"x"]\n\tbare = true\n',
+        '[core\r"x"]\n\tbare = true\n[core]\n\tbare = false\n',
         '[core "a]b"]\n\tbare = true\n',
         '[core "a]b"]\n\tbare = true\n[core]\n\tbare = yes\n',
         "[core]\n\tbare = maybe\n",
@@ -869,7 +872,8 @@ def test_core_bare_from_the_config_file_matches_git(tmp_path, bare):
     ],
     ids=["true", "Core", "CORE", "no-comment", "valueless", "empty", "spaced-header",
          "quoted-space", "empty-key", "bom", "continued", "nul", "subsection",
-         "subsection-two-spaces", "subsection-tab", "subsection-bracket",
+         "subsection-two-spaces", "subsection-tab", "subsection-vt", "subsection-ff",
+         "subsection-cr", "subsection-bracket",
          "subsection-bracket-then-core", "bad-boolean", "unset"],
 )
 def test_the_config_file_reader_agrees_with_the_identity(tmp_path, text):
