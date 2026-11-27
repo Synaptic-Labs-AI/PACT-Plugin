@@ -426,6 +426,14 @@ def _get_embedding_attempted_path() -> Path:
     return Path("/tmp") / f"pact_embedding_attempted_{slug}"
 
 
+def _read_attempt_path(marker_path: Path, scope) -> Path:
+    """The marker a read's catch-up writes for this session and `scope` (its
+    project ids), beside the session marker, which only a store-wide sweep
+    writes."""
+    digest = hashlib.sha256("\0".join(sorted(scope)).encode("utf-8")).hexdigest()[:16]
+    return marker_path.with_name(f"{marker_path.name}_read_{digest}")
+
+
 def maybe_embed_pending() -> dict:
     """
     Check for and process unembedded memories.
@@ -455,12 +463,15 @@ def maybe_embed_pending() -> dict:
     # A READ'S CATCH-UP IS LIMITED TO ITS SCOPE (`catchup_projects`), so it
     # does not spend the session marker: the store-wide sweep stays due, and
     # `ensure_memory_ready` postpones it to the first call outside the read
-    # scope. It still honours a marker already written, so a memory whose
-    # embedding keeps failing is not retried by every read in the session.
-    scoped = catchup_projects_bound() is not None
+    # scope. It honours that marker, and records its own attempt in a marker
+    # for the session and that scope (`_read_attempt_path`), so a memory
+    # whose embedding keeps failing is tried once per session by reads, not by
+    # every read.
+    scope = catchup_projects_bound()
     marker_path = _get_embedding_attempted_path()
+    attempt_path = marker_path if scope is None else _read_attempt_path(marker_path, scope)
     try:
-        already_attempted = marker_path.exists()
+        already_attempted = marker_path.exists() or attempt_path.exists()
     except OSError:
         result["message"] = "Could not check session marker"
         return result
@@ -468,8 +479,7 @@ def maybe_embed_pending() -> dict:
         result["message"] = "Already attempted this session"
         return result
     try:
-        if not scoped:
-            marker_path.touch()
+        attempt_path.touch()
     except OSError:
         result["message"] = "Could not create session marker"
         return result

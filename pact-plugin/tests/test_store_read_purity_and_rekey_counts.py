@@ -714,6 +714,47 @@ class TestTheCatchUpOnASessionThatStartsWithARead:
         memory_api.PACTMemory().search("zebra")
         assert [m for m, _ in self._vectors(store)] == ["a" * 32]
 
+    def test_two_reads_in_a_session_make_one_attempt_and_a_write_still_sweeps(
+        self, monkeypatch, tmp_path, identity_env
+    ):
+        """A read records its own attempt for the session and its scope, so a
+        second read process in that session does not try a failing embedding
+        again; a write still runs the store-wide sweep and writes the session
+        marker. RED WHEN every read retries."""
+        import struct
+
+        from scripts import embedding_catchup, embeddings, memory_api
+        from scripts.database import ensure_initialized, get_connection, load_sqlite_vec
+
+        store, memory_init = self._session(monkeypatch, tmp_path, identity_env)
+        conn = get_connection(store)
+        ensure_initialized(conn)
+        self._memories(conn, ("a" * 32, "alpha widgets"), ("b" * 32, "zebra crossing"))
+        load_sqlite_vec(conn)
+        conn.execute(
+            "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
+            ("a" * 32, CANONICAL, struct.pack(f"{embeddings.EMBEDDING_DIM}f",
+                                             *[0.5] * embeddings.EMBEDDING_DIM)),
+        )
+        conn.commit()
+        conn.close()
+        tried = []
+        monkeypatch.setattr(
+            embedding_catchup, "embed_single_memory", lambda mid: (tried.append(mid), False)[1]
+        )
+        for _process in range(2):
+            # A new process: the in-process state is fresh, the /tmp markers persist.
+            for name, value in (("_initialized", False), ("_migration_deferred", set()),
+                                ("_catchup_deferred", set()), ("_last_catchup_result", None)):
+                monkeypatch.setattr(memory_init, name, value)
+            memory_api.PACTMemory().search("zebra")
+        assert tried == ["b" * 32], tried
+        assert not (tmp_path / "marker").exists()
+        monkeypatch.setattr(embedding_catchup, "embed_single_memory", lambda mid: (tried.append(mid), True)[1])
+        memory_api.PACTMemory().save({"context": "a later write"})
+        assert tried[1:] and "b" * 32 in tried[1:], tried
+        assert (tmp_path / "marker").exists()
+
     @pytest.mark.parametrize("old_table_empty", [False, True])
     def test_a_migration_due_postpones_until_after_the_migration(
         self, monkeypatch, tmp_path, identity_env, old_table_empty
