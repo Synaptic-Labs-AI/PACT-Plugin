@@ -1395,6 +1395,37 @@ def test_a_separate_git_dir_checkout_whose_git_dir_is_named_like_the_bucket_is_a
     assert _evidence(store, NAME, [mine])["foreign_checkout_rows"] == 1
 
 
+@pytest.mark.parametrize("payload", ["github.com/Acme/Widget", "www.github.com/ACME/widget"])
+def test_a_github_payload_id_is_folded_into_the_detected_bucket(canonical_session, payload):
+    """A save or update whose project_id spells this repository's github.com
+    id in another case, or with a www host, files under the id its sessions
+    read, so list shows it. RED WHEN the payload id is filed as given, in a
+    bucket nothing reads."""
+    repo, store = canonical_session
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory.project_id == CANONICAL
+    saved = memory.save({"context": "spelled another way", "project_id": payload})
+    other = memory.save({"context": "moved by update"})
+    memory.update(other, {"project_id": payload})
+    listed = {m.id: m.project_id for m in PACTMemory(session_id="s", db_path=store).list()}
+    assert listed.get(saved) == CANONICAL and listed.get(other) == CANONICAL, listed
+    with sqlite3.connect(str(store)) as conn:
+        assert {row[0] for row in conn.execute("SELECT project_id FROM memories")} == {CANONICAL}
+
+
+def test_a_github_payload_id_keeps_its_git_suffix_as_a_pin_does(canonical_session):
+    """A payload `github.com/Acme/Widget.git` is folded as a pin is: lower-
+    cased, its `.git` kept, because `github.com/acme/widget.git` is the id
+    of the remote `https://github.com/acme/widget.git.git`, a repository of
+    its own. RED WHEN the suffix is dropped, filing it in this repository."""
+    repo, store = canonical_session
+    memory = PACTMemory(session_id="s", db_path=store)
+    memory.save({"context": "a repository named widget.git", "project_id": "github.com/Acme/Widget.git"})
+    with sqlite3.connect(str(store)) as conn:
+        filed = {row[0] for row in conn.execute("SELECT project_id FROM memories")}
+    assert filed == {CANONICAL + ".git"}, filed
+
+
 def test_a_moved_store_re_decides_the_verdict(canonical_session, monkeypatch):
     """When the stable read repeats with locking, the cached verdict is
     dropped and the legacy bucket is counted again."""

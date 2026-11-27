@@ -68,6 +68,7 @@ from .database import (
     checkout_is_same_owner,
     common_dir_parent_name,
     origin_url_in_config,
+    pin_file_value,
     pre_change_name,
     pre_change_name_of_common,
     validate_identifier_for_write,
@@ -1303,6 +1304,23 @@ _REDIRECT_MOVED_REMEDY = (
     _REDIRECT_REMEDY + " A linked worktree you moved is re-registered by "
     "running `git worktree repair` in it; the user runs that, not an agent."
 )
+
+
+def _folded_payload_project(payload_id: Any) -> Any:
+    """A caller's github.com `project_id` spelled as a pin naming it is
+    (`database.pin_file_value`): owner and repository lower-cased, a
+    port-less `www.` host dropped, so `github.com/Acme/Widget` names the
+    bucket `github.com/acme/widget` that repository's sessions read. A
+    trailing `.git` is kept, as a pin keeps it, because
+    `github.com/o/r.git` is itself an id a remote gives. Any other value,
+    and a github.com value no pin may hold, is returned unchanged."""
+    if not isinstance(payload_id, str) or not is_canonical(payload_id):
+        return payload_id
+    host = payload_id.partition("/")[0].partition(":")[0].lower()
+    if host not in ("github.com", "www.github.com"):
+        return payload_id
+    pin_spelled, _ = pin_file_value(payload_id.encode("utf-8"))
+    return payload_id if pin_spelled is None else pin_spelled
 
 
 def _decline_cause(token: Optional[str], cause_detail: Optional[str]) -> Optional[str]:
@@ -5338,6 +5356,13 @@ class PACTMemory:
                 "surrogates (U+D800-U+DFFF); omit it to auto-detect the "
                 "project. Nothing was written."
             )
+        # A github.com id is spelled as a pin naming it is, so a payload
+        # spelling of a repository GitHub reads as the same one files where
+        # that repository's sessions read (`_folded_payload_project`).
+        folded_project = _folded_payload_project(payload_project)
+        if folded_project != payload_project:
+            memory = {**memory, "project_id": folded_project}
+            payload_project = folded_project
         if (
             payload_project is not None
             and self._guards_folder_name_buckets()
@@ -6278,6 +6303,11 @@ class PACTMemory:
                     "(U+D800-U+DFFF); omit it to leave the row's "
                     f"{_identity_field} unchanged. Nothing was written."
                 )
+
+        if "project_id" in updates:
+            folded_project = _folded_payload_project(updates["project_id"])
+            if folded_project != updates["project_id"]:
+                updates = {**updates, "project_id": folded_project}
 
         # NO ADOPTED-SESSION GUARD BELONGS HERE. `update_memory` writes only
         # the fields this payload carries, so update() never binds

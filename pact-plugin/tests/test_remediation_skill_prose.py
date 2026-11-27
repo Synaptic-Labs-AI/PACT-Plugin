@@ -7785,6 +7785,12 @@ class TestEveryRouteEntryConditionIsARoute:
         ('call', '<call to no function memory_api: memory_dict.get>'): (
             'reads a field of a memory row the store listed' + _AFTER_DETECTION
         ),
+        ('call', '<call to no function memory_api: memory.get>'): (
+            "reads a field of the payload save() was given, with a github.com project_id spelled as a pin is" + _AFTER_DETECTION
+        ),
+        ('call', '<call to no function memory_api: updates.get>'): (
+            "reads a field of the payload update() was given, with a github.com project_id spelled as a pin is" + _AFTER_DETECTION
+        ),
         ('call', '<call to no function memory_api: read_project_bucket_census(...).get>'): (
             "reads a bucket's row count from the bucket census" + _AFTER_DETECTION
         ),
