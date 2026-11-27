@@ -842,6 +842,55 @@ def test_core_bare_from_the_config_file_matches_git(tmp_path, bare):
     assert core_bare_answer(str(common)) is None
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "[core]\n\tbare = true\n",
+        "[Core]\n\tbare = true\n",
+        "[CORE]\n\tBARE = yes\n",
+        "[Core]\n\tBARE = no ; c\n",
+        "[core]\n\tbare\n",
+        "[core]\n\tbare =\n",
+        "[ core ]\n\tbare = true\n",
+        '[core]\n\tbare = "true "\n',
+        "[core]\n=true\n",
+        "\ufeff[core]\n\tbare = true\n",
+        "[core]\n\tbare = tr\\\nue\n",
+        "[core]\n\tbare = true\x00\n",
+        '[core "x"]\n\tbare = true\n',
+        "[core]\n\tbare = maybe\n",
+        "[core]\n\trepositoryformatversion = 0\n",
+    ],
+    ids=["true", "Core", "CORE", "no-comment", "valueless", "empty", "spaced-header",
+         "quoted-space", "empty-key", "bom", "continued", "nul", "subsection",
+         "bad-boolean", "unset"],
+)
+def test_the_config_file_reader_agrees_with_the_identity(tmp_path, text):
+    """For each config, the file reader gives the answer the identity takes
+    from `git config --bool`: a valueless key is true, an empty one false, a
+    continued line is joined, a BOM is skipped, a section name matches in any
+    case, and a file or value git refuses is None in both. The expected
+    answers pin git's own reading too. RED WHEN the two readers disagree."""
+    from scripts import project_identity as pi
+    from scripts.database import core_bare_answer
+
+    common = tmp_path / "store"
+    for sub in ("objects", "refs"):
+        (common / sub).mkdir(parents=True)
+    (common / "HEAD").write_text("ref: refs/heads/main\n")
+    (common / "config").write_bytes(text.encode("utf-8"))
+    answer = pi._git_dir_is_bare(common)
+    assert core_bare_answer(str(common)) is answer
+    expected = {
+        "[core]\n\tbare\n": True, "[core]\n\tbare =\n": False,
+        "[Core]\n\tbare = true\n": True, "[CORE]\n\tBARE = yes\n": True,
+        "[core]\n\tbare = tr\\\nue\n": True, "\ufeff[core]\n\tbare = true\n": True,
+        "[ core ]\n\tbare = true\n": None, "[core]\n=true\n": None,
+    }
+    if text in expected:
+        assert answer is expected[text], (text, answer)
+
+
 def test_a_bare_hub_worktree_is_its_own_folder_names_rival_not_the_hubs(
     tmp_path, monkeypatch, scopes_clean
 ):

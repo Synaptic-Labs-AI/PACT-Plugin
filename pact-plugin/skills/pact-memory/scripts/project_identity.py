@@ -2533,16 +2533,21 @@ def repository_folder_name(root: Path, common_dir: Path) -> Optional[str]:
 
 
 def _git_dir_is_bare(common_dir: Path) -> Optional[bool]:
-    """Whether the repository's own config (`--local`) says `core.bare`, read
-    as git reads a boolean (`database.core_bare_answer` gives the same
-    answers from the config file). An unset key is not bare. None when git
-    cannot answer (a timeout, no git, an exit other than 0 or 1, or a value
-    git refuses as a boolean)."""
+    """Whether the repository's own config (`--local`) says `core.bare`, as
+    `git config --bool` reads it: a valueless `bare` is true, an empty
+    `bare =` false. An unset key is not bare. None when git cannot answer (a
+    timeout, no git, or an exit other than 0 or 1, which includes a config
+    or a value git refuses). `database.core_bare_answer` gives the same
+    answers from the config file.
+    """
     try:
         from shared.git_helpers import answered_once, git_config_bool
         from shared.project_scope import git_env_without_location
 
-        argv = ["git", "--git-dir", str(common_dir), "config", "--local", "--get", "core.bare"]
+        argv = [
+            "git", "--git-dir", str(common_dir), "config", "--local", "--bool", "--get",
+            "core.bare",
+        ]
         result = answered_once(
             argv,
             lambda: subprocess.run(

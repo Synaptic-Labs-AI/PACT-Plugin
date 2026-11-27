@@ -1689,12 +1689,13 @@ def git_dir_own_name(common: Any) -> str:
 
 def core_bare_answer(common: Any) -> Optional[bool]:
     """`core.bare` from the git dir's own `config` file, with the answers
-    `project_identity._git_dir_is_bare` gives from git: True or False as git
-    reads the boolean, False when the key is unset, None when the file
-    cannot be read or the value is one git refuses. Reads that one file only
-    (`--local`, no includes); the last value wins, as in git. A line this
-    reader does not parse (a continued line, an unclosed quote or section)
-    is None. Never raises."""
+    `project_identity._git_dir_is_bare` takes from `git config --local
+    --bool`: True or False as git reads the boolean (a valueless `bare` is
+    true, an empty `bare =` false), False when the key is unset, None when
+    the file cannot be read, git refuses it as fatal, or the value is one git
+    refuses as a boolean. The file is read as git's config parser reads it
+    (`_git_config_values`): one file only (no includes), the last value
+    wins, a leading UTF-8 BOM is skipped. Never raises."""
     from shared.git_helpers import git_config_bool
 
     try:
@@ -1704,39 +1705,124 @@ def core_bare_answer(common: Any) -> Optional[bool]:
         return None
     if len(data) > _CONFIG_READ_LIMIT:
         return None
-    section = None
-    value: Optional[str] = None
-    for raw in os.fsdecode(data).splitlines():
-        line = raw.strip()
-        if line.startswith("["):
-            end = line.find("]")
-            if end < 0:
+    values = _git_config_values(os.fsdecode(data), "core", "bare")
+    if values is None:
+        return None
+    if not values:
+        return False
+    value = values[-1]
+    if value is None:
+        return True
+    return git_config_bool(value) if value else False
+
+
+def _git_config_values(text: str, section: str, key: str) -> Optional[List[Optional[str]]]:
+    """The values of `<section>.<key>` (no subsection) in a git config file,
+    parsed as git's `config.c` parses it: section and key names compared
+    case-insensitively, a valueless key as None, a value's leading and
+    trailing unquoted blanks dropped and inner runs kept, `"` quoting,
+    `#`/`;` comments outside quotes, the escapes `\\\\`, `\\"`, `\\n`, `\\t`,
+    `\\b` and a backslash-newline continuation, a value cut at a NUL as git's
+    C string is. None for a file git refuses (a bad header, key, escape,
+    unterminated quote or a line with no `=` after a key)."""
+    if text.startswith("\ufeff"):
+        text = text[1:]
+    n, i = len(text), 0
+    current: Optional[str] = None
+    found: List[Optional[str]] = []
+    while i < n:
+        c = text[i]
+        if c in " \t\r\n":
+            i += 1
+            continue
+        if c in "#;":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if c == "[":
+            close = text.find("]", i)
+            if close < 0:
                 return None
-            header = line[1:end].strip()
-            section = header.lower() if not any(c in header for c in ' ".') else None
-            line = line[end + 1:].strip()
-        if not line or line[0] in "#;":
+            header = text[i + 1:close]
+            if not _CONFIG_HEADER_RE.fullmatch(header):
+                return None
+            current = header.lower() if _CONFIG_SECTION_RE.fullmatch(header) else None
+            i = close + 1
             continue
-        if line.endswith("\\"):
+        start = i
+        while i < n and (text[i].isascii() and (text[i].isalnum() or text[i] == "-")):
+            i += 1
+        name = text[start:i]
+        if not name or not name[0].isalpha():
             return None
-        key, sep, rest = line.partition("=")
-        if section != "core" or key.strip().lower() != "bare":
-            continue
-        if not sep:
-            value = "true"
-            continue
-        text, quoted = [], False
-        for char in rest.strip():
-            if char == '"':
-                quoted = not quoted
-                continue
-            if not quoted and char in "#;":
-                break
-            text.append(char)
-        if quoted:
+        while i < n and text[i] in " \t":
+            i += 1
+        if i >= n or text[i] in "\r\n":
+            value: Optional[str] = None
+        elif text[i] == "=":
+            i += 1
+            chars: List[str] = []
+            pending = 0
+            quoted = False
+            started = False
+            while True:
+                if i >= n:
+                    if quoted:
+                        return None
+                    break
+                c = text[i]
+                if c == "\n":
+                    if quoted:
+                        return None
+                    break
+                if c in " \t\r" and not quoted:
+                    if started:
+                        pending += 1
+                    i += 1
+                    continue
+                if c in "#;" and not quoted:
+                    while i < n and text[i] != "\n":
+                        i += 1
+                    break
+                if pending:
+                    chars.append(" " * pending)
+                    pending = 0
+                if c == "\\":
+                    i += 1
+                    nxt = text[i] if i < n else ""
+                    if nxt == "\n":
+                        i += 1
+                        continue
+                    escaped = {"\\": "\\", '"': '"', "n": "\n", "t": "\t", "b": "\b"}.get(nxt)
+                    if escaped is None:
+                        return None
+                    chars.append(escaped)
+                    started = True
+                    i += 1
+                    continue
+                if c == '"':
+                    quoted = not quoted
+                    started = True
+                    i += 1
+                    continue
+                chars.append(c)
+                started = True
+                i += 1
+            value = "".join(chars).split("\0", 1)[0]
+        else:
             return None
-        value = "".join(text).strip()
-    return False if value is None else git_config_bool(value)
+        if current == section and name.lower() == key:
+            found.append(value)
+        while i < n and text[i] != "\n":
+            i += 1
+    return found
+
+
+# The config file grammar git accepts (`config.c`): a section name of
+# alphanumerics, `-` and `.`, with an optional quoted subsection after one
+# space.
+_CONFIG_SECTION_RE = re.compile(r"[A-Za-z0-9.-]+")
+_CONFIG_HEADER_RE = re.compile(r'[A-Za-z0-9.-]+(?: "(?:[^"\\\n]|\\.)*")?')
 
 
 # A git config file larger than this is not read for `core.bare`.
