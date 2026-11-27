@@ -1,0 +1,15 @@
+{
+  "schema": "pact-bench/task/1",
+  "id": "invoice-rounding-bug",
+  "title": "Fix half-cent rounding in the invoice calculator",
+  "class": "low",
+  "variety": 5,
+  "revision": 1,
+  "timeout_seconds": 1200,
+  "max_turns": 80,
+  "prompt": "prompt.md",
+  "fixture": "fixture",
+  "hidden_tests": "hidden_tests",
+  "gold_patch": "gold.patch",
+  "rubric": "rubric.md"
+}

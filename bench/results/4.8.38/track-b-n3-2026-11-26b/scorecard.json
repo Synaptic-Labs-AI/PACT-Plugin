@@ -1,0 +1,304 @@
+{
+  "schema": "pact-bench/track-b-scorecard/1",
+  "run_id": "n3-2026-11-26b",
+  "model": "deepseek-flash[1m]",
+  "samples": 3,
+  "n_runs": 36,
+  "tasks": [
+    "discount-strategy-refactor",
+    "invoice-rounding-bug",
+    "job-queue-retries",
+    "jwt-auth",
+    "notes-api-crud",
+    "oauth-pkce-flow"
+  ],
+  "conditions": [
+    "pact",
+    "solo"
+  ],
+  "overall": [
+    {
+      "condition": "pact",
+      "n": 18,
+      "outcome_passes": 18,
+      "outcome_pass_rate": 1.0,
+      "completed": 15,
+      "completion_rate": 0.8333333333333334,
+      "timeouts": 3,
+      "mean_elapsed_seconds": 1103.4166666666667,
+      "mean_tokens": 74122480.05555555
+    },
+    {
+      "condition": "solo",
+      "n": 18,
+      "outcome_passes": 18,
+      "outcome_pass_rate": 1.0,
+      "completed": 18,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 233.17222222222222,
+      "mean_tokens": 4199297.055555556
+    }
+  ],
+  "rows": [
+    {
+      "task": "discount-strategy-refactor",
+      "condition": "pact",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 3,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 1199.8666666666666,
+      "mean_tokens": 93805979.66666667,
+      "handoffs_mean": 4.666666666666667,
+      "task_tools": [
+        [
+          "TaskGet",
+          "TaskList",
+          "TaskUpdate"
+        ]
+      ]
+    },
+    {
+      "task": "discount-strategy-refactor",
+      "condition": "solo",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 3,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 197.56666666666666,
+      "mean_tokens": 3934255.6666666665,
+      "handoffs_mean": 0,
+      "task_tools": [
+        []
+      ]
+    },
+    {
+      "task": "invoice-rounding-bug",
+      "condition": "pact",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 3,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 657.4,
+      "mean_tokens": 43710946.333333336,
+      "handoffs_mean": 2.6666666666666665,
+      "task_tools": [
+        [
+          "TaskGet",
+          "TaskList",
+          "TaskUpdate"
+        ]
+      ]
+    },
+    {
+      "task": "invoice-rounding-bug",
+      "condition": "solo",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 3,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 169.53333333333333,
+      "mean_tokens": 2638381,
+      "handoffs_mean": 0,
+      "task_tools": [
+        []
+      ]
+    },
+    {
+      "task": "job-queue-retries",
+      "condition": "pact",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 2,
+      "completion_rate": 0.6666666666666666,
+      "timeouts": 1,
+      "mean_elapsed_seconds": 1747.9666666666667,
+      "mean_tokens": 116419815.66666667,
+      "handoffs_mean": 5.333333333333333,
+      "task_tools": [
+        [
+          "TaskGet",
+          "TaskList",
+          "TaskUpdate"
+        ]
+      ]
+    },
+    {
+      "task": "job-queue-retries",
+      "condition": "solo",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 3,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 333.76666666666665,
+      "mean_tokens": 5304754,
+      "handoffs_mean": 0,
+      "task_tools": [
+        []
+      ]
+    },
+    {
+      "task": "jwt-auth",
+      "condition": "pact",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 1,
+      "completion_rate": 0.3333333333333333,
+      "timeouts": 2,
+      "mean_elapsed_seconds": 1543.8333333333333,
+      "mean_tokens": 87147784,
+      "handoffs_mean": 3.3333333333333335,
+      "task_tools": [
+        [
+          "TaskGet",
+          "TaskList",
+          "TaskUpdate"
+        ]
+      ]
+    },
+    {
+      "task": "jwt-auth",
+      "condition": "solo",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 3,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 348.1333333333333,
+      "mean_tokens": 6738570,
+      "handoffs_mean": 0,
+      "task_tools": [
+        []
+      ]
+    },
+    {
+      "task": "notes-api-crud",
+      "condition": "pact",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 3,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 450.2,
+      "mean_tokens": 22556442.333333332,
+      "handoffs_mean": 0.6666666666666666,
+      "task_tools": [
+        [
+          "TaskGet",
+          "TaskList",
+          "TaskUpdate"
+        ]
+      ]
+    },
+    {
+      "task": "notes-api-crud",
+      "condition": "solo",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 3,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 147.46666666666667,
+      "mean_tokens": 2605507.3333333335,
+      "handoffs_mean": 0,
+      "task_tools": [
+        []
+      ]
+    },
+    {
+      "task": "oauth-pkce-flow",
+      "condition": "pact",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 3,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 1021.2333333333332,
+      "mean_tokens": 81093912.33333333,
+      "handoffs_mean": 3.6666666666666665,
+      "task_tools": [
+        [
+          "TaskGet",
+          "TaskList",
+          "TaskUpdate"
+        ]
+      ]
+    },
+    {
+      "task": "oauth-pkce-flow",
+      "condition": "solo",
+      "n": 3,
+      "outcome_passes": 3,
+      "outcome_pass_rate": 1.0,
+      "completed": 3,
+      "completion_rate": 1.0,
+      "timeouts": 0,
+      "mean_elapsed_seconds": 202.56666666666666,
+      "mean_tokens": 3974314.3333333335,
+      "handoffs_mean": 0,
+      "task_tools": [
+        []
+      ]
+    }
+  ],
+  "status_counts": {
+    "success": 33,
+    "timeout": 3
+  },
+  "timeouts": [
+    {
+      "task": "job-queue-retries",
+      "condition": "pact",
+      "sample": 1,
+      "elapsed_seconds": 1812.9,
+      "hidden_passed": true
+    },
+    {
+      "task": "jwt-auth",
+      "condition": "pact",
+      "sample": 1,
+      "elapsed_seconds": 1811.7,
+      "hidden_passed": true
+    },
+    {
+      "task": "jwt-auth",
+      "condition": "pact",
+      "sample": 3,
+      "elapsed_seconds": 1811.0,
+      "hidden_passed": true
+    }
+  ],
+  "verifier_reruns": [
+    {
+      "task": "job-queue-retries",
+      "condition": "solo",
+      "sample": 3,
+      "first_rc": "timeout_120s",
+      "rerun": "12 passed in 7.69s"
+    }
+  ],
+  "caveats": [
+    "n=3 per task/condition; no statistical significance claim.",
+    "Outcome is hidden-test pass; completion is sentinel/exit. Three PACT runs hit the 1800s harness cap but hidden-passed; task configs allow 2700s.",
+    "PACT token counts are summed assistant usage across main and subagent transcripts; they are tokens, not USD.",
+    "PACT teammate mode was in-process; all PACT task groups show TaskGet/TaskList/TaskUpdate in subagent transcripts.",
+    "One solo verifier run timed out at 120s under load and passed on rerun; the runner timeout is now 300s."
+  ]
+}

@@ -1,0 +1,190 @@
+diff --git a/jobqueue/jobs.py b/jobqueue/jobs.py
+index 203e563..ef4eaf7 100644
+--- a/jobqueue/jobs.py
++++ b/jobqueue/jobs.py
+@@ -20,6 +20,10 @@ class Job:
+     ``attempts`` counts how many times the handler has been invoked,
+     ``last_error`` keeps the message of the most recent failure, and
+     ``result`` keeps the handler's return value after a success.
++
++    ``max_retries`` and ``base_delay`` hold the retry policy,
++    ``next_run_at`` is the clock time at which the job may run again and
++    ``idempotency_key`` binds the job to a logical enqueue key.
+     """
+ 
+     id: str
+@@ -30,6 +34,10 @@ class Job:
+     last_error: str | None = None
+     result: Any = None
+     created_at: float = 0.0
++    max_retries: int = 3
++    base_delay: float = 1.0
++    next_run_at: float = 0.0
++    idempotency_key: str | None = None
+ 
+     def to_dict(self) -> dict[str, Any]:
+         """Return a JSON-friendly representation of the job."""
+@@ -42,6 +50,10 @@ class Job:
+             "last_error": self.last_error,
+             "result": self.result,
+             "created_at": self.created_at,
++            "max_retries": self.max_retries,
++            "base_delay": self.base_delay,
++            "next_run_at": self.next_run_at,
++            "idempotency_key": self.idempotency_key,
+         }
+ 
+     @classmethod
+@@ -56,4 +68,8 @@ class Job:
+             last_error=data.get("last_error"),
+             result=data.get("result"),
+             created_at=float(data.get("created_at", 0.0)),
++            max_retries=int(data.get("max_retries", 3)),
++            base_delay=float(data.get("base_delay", 1.0)),
++            next_run_at=float(data.get("next_run_at", 0.0)),
++            idempotency_key=data.get("idempotency_key"),
+         )
+diff --git a/jobqueue/runner.py b/jobqueue/runner.py
+index 8d8908d..2ce3e11 100644
+--- a/jobqueue/runner.py
++++ b/jobqueue/runner.py
+@@ -17,9 +17,9 @@ class JobQueue:
+     """Run jobs registered by kind, one at a time, in enqueue order.
+ 
+     ``clock`` is a callable returning the current time in seconds and is used
+-    for job timestamps. When ``store_path`` is given the queue loads an
+-    existing JSON snapshot at construction time and writes the snapshot after
+-    every state change.
++    for job timestamps and for the retry schedule. When ``store_path`` is
++    given the queue loads an existing JSON snapshot at construction time and
++    writes the snapshot after every state change.
+     """
+ 
+     def __init__(
+@@ -32,6 +32,7 @@ class JobQueue:
+         self._handlers: dict[str, Handler] = {}
+         self._jobs: dict[str, Job] = {}
+         self._order: list[str] = []
++        self._idempotency: dict[str, str] = {}
+         if self._store_path is not None and self._store_path.exists():
+             self.load()
+ 
+@@ -40,21 +41,46 @@ class JobQueue:
+         """Register the callable that executes jobs of ``kind``."""
+         self._handlers[kind] = handler
+ 
+-    def enqueue(self, kind: str, payload: dict[str, Any] | None = None) -> str:
++    def enqueue(
++        self,
++        kind: str,
++        payload: dict[str, Any] | None = None,
++        *,
++        idempotency_key: str | None = None,
++        max_retries: int = 3,
++        base_delay: float = 1.0,
++    ) -> str:
+         """Add a job of a registered kind and return its id.
+ 
+-        Raises ``KeyError`` when no handler has been registered for ``kind``.
++        Raises ``KeyError`` when no handler has been registered for ``kind``
++        and ``ValueError` for an invalid retry policy.
++
++        When ``idempotency_key`` is not ``None`` and a job with that key is
++        already known, the existing job id is returned and nothing changes.
+         """
+         if kind not in self._handlers:
+             raise KeyError(f"no handler registered for job kind {kind!r}")
++        if isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0:
++            raise ValueError("max_retries must be a non-negative integer")
++        if isinstance(base_delay, bool) or not isinstance(base_delay, (int, float)) or base_delay < 0:
++            raise ValueError("base_delay must be a non-negative number")
++        if idempotency_key is not None and idempotency_key in self._idempotency:
++            return self._idempotency[idempotency_key]
++        now = self._clock()
+         job = Job(
+             id=uuid.uuid4().hex,
+             kind=kind,
+             payload=dict(payload or {}),
+-            created_at=self._clock(),
++            created_at=now,
++            max_retries=max_retries,
++            base_delay=float(base_delay),
++            next_run_at=now,
++            idempotency_key=idempotency_key,
+         )
+         self._jobs[job.id] = job
+         self._order.append(job.id)
++        if idempotency_key is not None:
++            self._idempotency[idempotency_key] = job.id
+         self.save()
+         return job.id
+ 
+@@ -69,7 +95,7 @@ class JobQueue:
+ 
+     # -- execution ----------------------------------------------------
+     def run_next(self) -> Job | None:
+-        """Run the next runnable job and return it, or ``None`` when idle."""
++        """Run the next due job and return it, or ``None`` when idle."""
+         job = self._next_runnable()
+         if job is None:
+             return None
+@@ -79,15 +105,21 @@ class JobQueue:
+         try:
+             job.result = self._handlers[job.kind](dict(job.payload))
+         except Exception as exc:  # noqa: BLE001 - the failure is recorded on the job
+-            job.state = FAILED
+             job.last_error = str(exc) or exc.__class__.__name__
++            if job.attempts <= job.max_retries:
++                job.state = PENDING
++                delay = job.base_delay * (2 ** (job.attempts - 1))
++                job.next_run_at = self._clock() + delay
++            else:
++                job.state = FAILED
+         else:
+             job.state = COMPLETED
++            job.last_error = None
+         self.save()
+         return job
+ 
+     def drain(self) -> int:
+-        """Run runnable jobs until none are left; return the execution count."""
++        """Run due jobs until none are left; return the execution count."""
+         executed = 0
+         while True:
+             job = self.run_next()
+@@ -96,9 +128,10 @@ class JobQueue:
+             executed += 1
+ 
+     def _next_runnable(self) -> Job | None:
++        now = self._clock()
+         for job_id in self._order:
+             job = self._jobs[job_id]
+-            if job.state == PENDING:
++            if job.state == PENDING and job.next_run_at <= now:
+                 return job
+         return None
+ 
+@@ -110,11 +143,23 @@ class JobQueue:
+         if not self._store_path.exists():
+             self._jobs = {}
+             self._order = []
++            self._idempotency = {}
+             return
+         data = json.loads(self._store_path.read_text(encoding="utf-8"))
+         items = data.get("jobs", [])
+         self._jobs = {item["id"]: Job.from_dict(item) for item in items}
+         self._order = [item["id"] for item in items if item["id"] in self._jobs]
++        self._idempotency = {}
++        now = self._clock()
++        for job in self._jobs.values():
++            if job.state == RUNNING:
++                # The previous process stopped while this attempt was in
++                # flight; make the job runnable again without losing the
++                # attempt count.
++                job.state = PENDING
++                job.next_run_at = now
++            if job.idempotency_key is not None:
++                self._idempotency[job.idempotency_key] = job.id
+ 
+     def save(self) -> None:
+         """Write the current state to ``store_path`` when one is configured."""

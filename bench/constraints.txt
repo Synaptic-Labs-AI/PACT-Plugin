@@ -1,1 +1,2 @@
 pytest==9.2.0
+pexpect==4.9.0

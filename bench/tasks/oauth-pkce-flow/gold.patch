@@ -1,0 +1,172 @@
+diff --git a/oauth_pkce/client.py b/oauth_pkce/client.py
+index 200dd95..e47aed7 100644
+--- a/oauth_pkce/client.py
++++ b/oauth_pkce/client.py
+@@ -2,10 +2,13 @@
+ 
+ from __future__ import annotations
+ 
++import secrets
+ from dataclasses import dataclass
+ from typing import Any
++from urllib.parse import parse_qs, urlencode, urlparse
+ 
+ from .errors import OAuthError
++from .pkce import code_challenge_s256, generate_code_verifier
+ 
+ 
+ @dataclass
+@@ -51,7 +54,25 @@ class OAuthClient:
+         Generates a fresh code verifier and state, remembers them for the
+         redirect back, and returns the :class:`AuthorizationRequest`.
+         """
+-        raise NotImplementedError("begin_authorization is not implemented yet")
++        verifier = generate_code_verifier()
++        state = secrets.token_urlsafe(32)
++        query = urlencode(
++            {
++                "response_type": "code",
++                "client_id": self.client_id,
++                "redirect_uri": self.redirect_uri,
++                "state": state,
++                "code_challenge": code_challenge_s256(verifier),
++                "code_challenge_method": "S256",
++            }
++        )
++        request = AuthorizationRequest(
++            url=f"{self.authorize_url}?{query}",
++            state=state,
++            code_verifier=verifier,
++        )
++        self._pending = request
++        return request
+ 
+     def exchange_callback(self, callback_url: str) -> dict[str, Any]:
+         """Handle the redirect back from the authorization server.
+@@ -59,4 +80,31 @@ class OAuthClient:
+         Validates the state value and redeems the authorization code at the
+         stub token endpoint, returning the token response dict.
+         """
+-        raise NotImplementedError("exchange_callback is not implemented yet")
++        pending = self._pending
++        self._pending = None
++        if pending is None:
++            raise OAuthError("invalid_state", "no authorization request is pending")
++        params = parse_qs(urlparse(callback_url).query)
++
++        def first(name: str) -> str | None:
++            values = params.get(name)
++            return values[0] if values else None
++
++        error = first("error")
++        if error:
++            raise OAuthError(error, first("error_description") or "")
++        state = first("state")
++        if state is None or not secrets.compare_digest(state, pending.state):
++            raise OAuthError(
++                "invalid_state",
++                "state does not match the pending authorization request",
++            )
++        code = first("code")
++        if not code:
++            raise OAuthError("invalid_request", "callback is missing the authorization code")
++        return self.server.token(
++            code=code,
++            client_id=self.client_id,
++            redirect_uri=self.redirect_uri,
++            code_verifier=pending.code_verifier,
++        )
+diff --git a/oauth_pkce/pkce.py b/oauth_pkce/pkce.py
+index 34b193d..83d7adb 100644
+--- a/oauth_pkce/pkce.py
++++ b/oauth_pkce/pkce.py
+@@ -6,6 +6,10 @@ and must send the matching S256 challenge to the authorization server.
+ 
+ from __future__ import annotations
+ 
++import base64
++import hashlib
++import secrets
++
+ #: Characters allowed in an RFC 7636 code verifier.
+ UNRESERVED_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~"
+ MIN_VERIFIER_LENGTH = 43
+@@ -28,7 +32,13 @@ def generate_code_verifier(length: int = 64) -> str:
+     (inclusive) drawn from the unreserved character set. Raise ``ValueError``
+     when ``length`` is outside that range.
+     """
+-    raise NotImplementedError("generate_code_verifier is not implemented yet")
++    if isinstance(length, bool) or not isinstance(length, int):
++        raise ValueError("length must be an integer")
++    if not MIN_VERIFIER_LENGTH <= length <= MAX_VERIFIER_LENGTH:
++        raise ValueError(
++            f"length must be between {MIN_VERIFIER_LENGTH} and {MAX_VERIFIER_LENGTH}"
++        )
++    return "".join(secrets.choice(UNRESERVED_CHARS) for _ in range(length))
+ 
+ 
+ def code_challenge_s256(verifier: str) -> str:
+@@ -37,4 +47,7 @@ def code_challenge_s256(verifier: str) -> str:
+     The challenge is ``base64url(sha256(verifier))`` without ``=`` padding.
+     Raise ``ValueError`` when ``verifier`` is not a valid RFC 7636 verifier.
+     """
+-    raise NotImplementedError("code_challenge_s256 is not implemented yet")
++    if not _is_valid_verifier(verifier):
++        raise ValueError("verifier must be 43 to 128 unreserved characters")
++    digest = hashlib.sha256(verifier.encode("ascii")).digest()
++    return base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+diff --git a/oauth_pkce/server.py b/oauth_pkce/server.py
+index 51e6910..42df2e6 100644
+--- a/oauth_pkce/server.py
++++ b/oauth_pkce/server.py
+@@ -13,6 +13,7 @@ import time
+ from typing import Any, Callable
+ 
+ from .errors import OAuthError
++from .pkce import code_challenge_s256
+ 
+ 
+ class StubAuthServer:
+@@ -48,6 +49,13 @@ class StubAuthServer:
+         """
+         if not redirect_uri:
+             raise OAuthError("invalid_request", "redirect_uri is required")
++        if not code_challenge:
++            raise OAuthError("invalid_request", "PKCE code_challenge is required")
++        if code_challenge_method != "S256":
++            raise OAuthError(
++                "invalid_request",
++                "only the S256 code challenge method is supported",
++            )
+         code = secrets.token_urlsafe(32)
+         self._codes[code] = {
+             "client_id": client_id,
+@@ -78,13 +86,26 @@ class StubAuthServer:
+                 "unsupported_grant_type",
+                 "only the authorization_code grant is supported",
+             )
+-        record = self._codes.get(code)
++        record = self._codes.pop(code, None)
+         if record is None:
+-            raise OAuthError("invalid_grant", "unknown authorization code")
++            raise OAuthError("invalid_grant", "unknown or already used authorization code")
+         if client_id != record["client_id"]:
+             raise OAuthError("invalid_grant", "client_id does not match the authorization request")
+         if redirect_uri != record["redirect_uri"]:
+             raise OAuthError("invalid_grant", "redirect_uri does not match the authorization request")
++        if self._clock() - record["issued_at"] > self.ttl_seconds:
++            raise OAuthError("invalid_grant", "authorization code expired")
++        challenge = record["code_challenge"]
++        if not challenge:
++            raise OAuthError("invalid_grant", "authorization code was not issued with PKCE")
++        if code_verifier is None:
++            raise OAuthError("invalid_grant", "code_verifier is required")
++        try:
++            computed = code_challenge_s256(code_verifier)
++        except ValueError as exc:
++            raise OAuthError("invalid_grant", "code_verifier is malformed") from exc
++        if not secrets.compare_digest(computed, challenge):
++            raise OAuthError("invalid_grant", "PKCE verification failed")
+         return {
+             "access_token": secrets.token_urlsafe(32),
+             "token_type": "Bearer",

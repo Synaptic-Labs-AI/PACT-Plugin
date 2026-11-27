@@ -1,0 +1,269 @@
+diff --git a/pricing/__init__.py b/pricing/__init__.py
+index d959287..c6b343b 100644
+--- a/pricing/__init__.py
++++ b/pricing/__init__.py
+@@ -1,13 +1,32 @@
+ """pricing - small checkout pricing library."""
+ 
+ from .checkout import CheckoutSummary, checkout_summary
+-from .discounts import discount_cents
++from .discounts import discount_cents, discount_details
+ from .models import CartItem, Order
++from .policy import DiscountDetails, DiscountPolicy, default_policy
++from .strategies import (
++    BulkOrder,
++    CouponDiscount,
++    DiscountStrategy,
++    NoDiscount,
++    PercentDiscount,
++    TierDiscount,
++)
+ 
+ __all__ = [
++    "BulkOrder",
+     "CartItem",
+     "CheckoutSummary",
++    "CouponDiscount",
++    "DiscountDetails",
++    "DiscountPolicy",
++    "DiscountStrategy",
++    "NoDiscount",
+     "Order",
++    "PercentDiscount",
++    "TierDiscount",
+     "checkout_summary",
++    "default_policy",
+     "discount_cents",
++    "discount_details",
+ ]
+diff --git a/pricing/discounts.py b/pricing/discounts.py
+index dde6785..6e9da4b 100644
+--- a/pricing/discounts.py
++++ b/pricing/discounts.py
+@@ -1,33 +1,29 @@
+ """Discount calculation for the pricing service.
+ 
+-The current rules are simple: a percentage off for the customer's loyalty tier
+-and a percentage off for a coupon code. The customer receives whichever single
+-discount is larger; discounts never stack.
++This module is now a thin compatibility layer over the strategy-based
++discount policy in 'pricing.policy'.
+ """
+ 
+ from __future__ import annotations
+ 
+ from .models import Order
++from .policy import DiscountDetails, default_policy
++from .strategies import COUPON_PERCENT, TIER_PERCENT, percent_off_cents
+ 
+-TIER_PERCENT: dict[str, int] = {"standard": 0, "silver": 5, "gold": 10}
+-COUPON_PERCENT: dict[str, int] = {"SAVE10": 10}
++__all__ = [
++    "COUPON_PERCENT",
++    "TIER_PERCENT",
++    "discount_cents",
++    "discount_details",
++    "percent_off_cents",
++]
+ 
+ 
+-def percent_off_cents(subtotal_cents: int, percent: int) -> int:
+-    """Return 'percent' of 'subtotal_cents', rounded down to whole cents."""
+-    return subtotal_cents * percent // 100
++def discount_details(order: Order) -> DiscountDetails:
++    """Return the winning strategy and discount for the order."""
++    return default_policy().discount_details(order)
+ 
+ 
+ def discount_cents(order: Order) -> int:
+     """Return the absolute discount in whole cents for the order."""
+-    subtotal = order.subtotal_cents
+-    best = 0
+-    tier_percent = TIER_PERCENT.get(order.customer_tier, 0)
+-    if tier_percent > 0:
+-        best = percent_off_cents(subtotal, tier_percent)
+-    coupon_percent = COUPON_PERCENT.get(order.coupon or "", 0)
+-    if coupon_percent > 0:
+-        coupon_discount = percent_off_cents(subtotal, coupon_percent)
+-        if coupon_discount > best:
+-            best = coupon_discount
+-    return best
++    return discount_details(order).amount_cents
+diff --git a/pricing/policy.py b/pricing/policy.py
+new file mode 100644
+index 0000000..75e487c
+--- /dev/null
++++ b/pricing/policy.py
+@@ -0,0 +1,61 @@
++"""Discount policy: pick the best applicable discount strategy."""
++
++from __future__ import annotations
++
++from collections.abc import Iterable
++from dataclasses import dataclass
++
++from .models import Order
++from .strategies import (
++    BulkOrder,
++    CouponDiscount,
++    DiscountStrategy,
++    NoDiscount,
++    TierDiscount,
++)
++
++
++@dataclass(frozen=True)
++class DiscountDetails:
++    strategy_name: str
++    amount_cents: int
++
++
++def _default_strategies() -> tuple[DiscountStrategy, ...]:
++    return (TierDiscount(), CouponDiscount(), BulkOrder(), NoDiscount())
++
++
++class DiscountPolicy:
++    """Evaluates discount strategies and keeps the single best discount."""
++
++    def __init__(self, strategies: Iterable[DiscountStrategy] | None = None) -> None:
++        if strategies is None:
++            self.strategies: tuple[DiscountStrategy, ...] = _default_strategies()
++            return
++        resolved = tuple(strategies)
++        for strategy in resolved:
++            if not isinstance(strategy, DiscountStrategy):
++                raise TypeError("discount strategies must be DiscountStrategy instances")
++        self.strategies = resolved
++
++    def discount_details(self, order: Order) -> DiscountDetails:
++        subtotal = order.subtotal_cents
++        best_name = "none"
++        best_amount = 0
++        for strategy in self.strategies:
++            amount = strategy.amount_cents(order)
++            if isinstance(amount, bool) or not isinstance(amount, int):
++                raise TypeError("amount_cents() must return a whole number of cents")
++            clamped = min(max(amount, 0), subtotal)
++            if clamped > best_amount:
++                best_amount = clamped
++                best_name = strategy.name
++        return DiscountDetails(strategy_name=best_name, amount_cents=best_amount)
++
++    def discount_cents(self, order: Order) -> int:
++        return self.discount_details(order).amount_cents
++
++
++def default_policy() -> DiscountPolicy:
++    """Return a fresh policy with the default rule order."""
++    return DiscountPolicy()
+diff --git a/pricing/strategies.py b/pricing/strategies.py
+new file mode 100644
+index 0000000..dc656a6
+--- /dev/null
++++ b/pricing/strategies.py
+@@ -0,0 +1,105 @@
++"""Discount strategies for the pricing service.
++
++A strategy is a small, stateless object exposing a human-readable name and an
++amount_cents(order) method. New discount rules only need to subclass
++DiscountStrategy; the policy and checkout code do not change.
++"""
++
++from __future__ import annotations
++
++from abc import ABC, abstractmethod
++
++from .models import Order
++
++TIER_PERCENT: dict[str, int] = {"standard": 0, "silver": 5, "gold": 10}
++COUPON_PERCENT: dict[str, int] = {"SAVE10": 10}
++DEFAULT_BULK_MIN_UNITS = 10
++DEFAULT_BULK_PERCENT = 15
++
++
++def percent_off_cents(subtotal_cents: int, percent: int) -> int:
++    """Return 'percent' of 'subtotal_cents', rounded down to whole cents."""
++    return subtotal_cents * percent // 100
++
++
++class DiscountStrategy(ABC):
++    """Base class for order discount rules."""
++
++    name: str = "unnamed"
++
++    @abstractmethod
++    def amount_cents(self, order: Order) -> int:
++        """Return the absolute discount in whole cents for the order."""
++
++
++class NoDiscount(DiscountStrategy):
++    """Strategy that never discounts."""
++
++    name = "none"
++
++    def amount_cents(self, order: Order) -> int:
++        return 0
++
++
++class PercentDiscount(DiscountStrategy):
++    """Fixed percentage off the order subtotal."""
++
++    name = "percent"
++
++    def __init__(self, name: str, percent: int) -> None:
++        if not isinstance(name, str) or not name:
++            raise ValueError("name must be a non-empty string")
++        if isinstance(percent, bool) or not isinstance(percent, int):
++            raise ValueError("percent must be an integer between 0 and 100")
++        if not 0 <= percent <= 100:
++            raise ValueError("percent must be an integer between 0 and 100")
++        self.name = name
++        self.percent = percent
++
++    def amount_cents(self, order: Order) -> int:
++        return percent_off_cents(order.subtotal_cents, self.percent)
++
++
++class TierDiscount(DiscountStrategy):
++    """Loyalty-tier percentage discount."""
++
++    name = "tier"
++
++    def amount_cents(self, order: Order) -> int:
++        percent = TIER_PERCENT.get(order.customer_tier, 0)
++        return percent_off_cents(order.subtotal_cents, percent)
++
++
++class CouponDiscount(DiscountStrategy):
++    """Coupon-code percentage discount."""
++
++    name = "coupon"
++
++    def amount_cents(self, order: Order) -> int:
++        percent = COUPON_PERCENT.get(order.coupon or "", 0)
++        return percent_off_cents(order.subtotal_cents, percent)
++
++
++class BulkOrder(DiscountStrategy):
++    """Percentage discount for orders with enough total units."""
++
++    name = "bulk"
++
++    def __init__(
++        self,
++        min_units: int = DEFAULT_BULK_MIN_UNITS,
++        percent: int = DEFAULT_BULK_PERCENT,
++    ) -> None:
++        if isinstance(min_units, bool) or not isinstance(min_units, int) or min_units < 1:
++            raise ValueError("min_units must be a positive integer")
++        if isinstance(percent, bool) or not isinstance(percent, int):
++            raise ValueError("percent must be an integer between 0 and 100")
++        if not 0 <= percent <= 100:
++            raise ValueError("percent must be an integer between 0 and 100")
++        self.min_units = min_units
++        self.percent = percent
++
++    def amount_cents(self, order: Order) -> int:
++        if order.total_units < self.min_units:
++            return 0
++        return percent_off_cents(order.subtotal_cents, self.percent)

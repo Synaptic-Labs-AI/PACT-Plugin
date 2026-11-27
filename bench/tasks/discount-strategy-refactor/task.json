@@ -1,0 +1,15 @@
+{
+  "schema": "pact-bench/task/1",
+  "id": "discount-strategy-refactor",
+  "title": "Refactor pricing discounts onto a strategy interface with bulk orders",
+  "class": "medium",
+  "variety": 10,
+  "revision": 1,
+  "timeout_seconds": 2100,
+  "max_turns": 100,
+  "prompt": "prompt.md",
+  "fixture": "fixture",
+  "hidden_tests": "hidden_tests",
+  "gold_patch": "gold.patch",
+  "rubric": "rubric.md"
+}

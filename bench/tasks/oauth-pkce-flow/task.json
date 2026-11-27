@@ -1,0 +1,15 @@
+{
+  "schema": "pact-bench/task/1",
+  "id": "oauth-pkce-flow",
+  "title": "Complete the PKCE authorization-code flow",
+  "class": "high",
+  "variety": 13,
+  "revision": 1,
+  "timeout_seconds": 2700,
+  "max_turns": 120,
+  "prompt": "prompt.md",
+  "fixture": "fixture",
+  "hidden_tests": "hidden_tests",
+  "gold_patch": "gold.patch",
+  "rubric": "rubric.md"
+}
