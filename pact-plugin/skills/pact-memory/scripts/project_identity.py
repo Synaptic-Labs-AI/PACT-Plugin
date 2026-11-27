@@ -1251,8 +1251,10 @@ _REMOTE_HELPER_SCHEMES = frozenset({"codecommit", "persistent-https", "sso", "ke
 # remote-helper transport (`_is_remote_helper`).
 REMOTE_HELPER_DETAIL = (
     "its origin is a remote-helper transport, which has no portable id, so it "
-    "uses its folder name: a bucket shared with any folder of that name. A "
-    "canonical id written to <git-common-dir>/pact-project-id gives it its own"
+    "uses its folder-name id (its folder's name, or its git dir's name for a "
+    "--separate-git-dir repository): a bucket shared with any folder of that "
+    "name. A canonical id written to <git-common-dir>/pact-project-id gives it "
+    "its own"
 )
 
 

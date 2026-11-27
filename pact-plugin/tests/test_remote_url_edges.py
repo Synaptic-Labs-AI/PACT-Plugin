@@ -396,6 +396,36 @@ def test_a_remote_helper_origin_binds_and_discloses_its_folder_name(tmp_path, mo
     assert "pact-project-id" in warned[0] and "SECRETTOKEN" not in caplog.text
 
 
+def test_a_remote_helper_separate_git_dir_names_the_id_it_uses(tmp_path, monkeypatch, caplog):
+    """A separate-git-dir repository with a remote-helper origin binds its git
+    dir's name, and the disclosure says the id is its folder-name id (the git
+    dir's name here), not the checkout's folder name. RED WHEN the warning or
+    the detail names the checkout's folder name as the id."""
+    import logging
+    import subprocess
+
+    from fixtures.identity_git import assert_outside_repository
+    from scripts import memory_api
+    from scripts.memory_api import PACTMemory
+
+    assert_outside_repository(tmp_path)
+    (tmp_path / "e2e").mkdir()
+    work = tmp_path / "work"
+    subprocess.run(["git", "init", "-q", "--separate-git-dir", str(tmp_path / "e2e" / "store"), str(work)], check=True)
+    subprocess.run(["git", "-C", str(work), "remote", "add", "origin", "codecommit::us-east-1://myrepo"], check=True)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.chdir(work)
+    monkeypatch.setattr(memory_api, "_REMOTE_HELPER_WARNED", set())
+    with caplog.at_level(logging.WARNING):
+        memory = PACTMemory(session_id="s", db_path=tmp_path / "m.db")
+    assert memory.project_id == "store"
+    warned = [r.getMessage() for r in caplog.records if "remote-helper transport" in r.getMessage()]
+    assert len(warned) == 1, warned
+    assert "is its folder-name id 'store'" in warned[0], warned
+    assert "or its git dir's name for a --separate-git-dir repository" in pi.REMOTE_HELPER_DETAIL
+    assert "uses its folder name:" not in pi.REMOTE_HELPER_DETAIL
+
+
 def _present_store(path):
     from scripts.database import db_connection, ensure_initialized
 

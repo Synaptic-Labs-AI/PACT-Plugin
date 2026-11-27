@@ -4705,7 +4705,8 @@ _DESCRIBED_PRINTED_CLAUSES = {
     "A canonical id written to <git-common-dir>/pact-project-id gives it its own":
         "names the pin as the remedy, written by the user",
     "a bucket shared with any folder of that name": "says what the folder-name id shares",
-    "it uses its folder name": "says which id it binds",
+    "it uses its folder-name id (its folder's name, or its git dir's name for a "
+    "--separate-git-dir repository)": "says which id it binds",
     "its origin is a remote-helper transport, which has no portable id": _OBSERVED,
     "A `git init --separate-git-dir` layout of your own is a user decision":
         "names the user's own layout as theirs to decide",

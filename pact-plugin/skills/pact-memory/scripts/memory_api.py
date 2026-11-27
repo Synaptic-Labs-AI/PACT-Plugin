@@ -3635,7 +3635,7 @@ class PACTMemory:
             # account id or a token.
             _REMOTE_HELPER_WARNED.add(str(root))
             logger.warning(
-                "project_id for %r is its folder name %r: %s.",
+                "project_id for %r is its folder-name id %r: %s.",
                 str(root), identity.project_id, identity.detail,
                 extra=_IDENTITY_RECORD,
             )
