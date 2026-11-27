@@ -2566,8 +2566,8 @@ def _git_dir_is_bare(common_dir: Path) -> Optional[bool]:
 
 # Why a folder-name id could not be chosen (`repository_folder_name`).
 BARE_UNREAD_DETAIL = (
-    "git could not say whether this repository is bare (core.bare), so it "
-    "cannot tell which folder name the repository is filed under"
+    "git could not say whether this repository is bare (core.bare), which "
+    "decides the folder name the repository is filed under"
 )
 
 

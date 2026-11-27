@@ -814,6 +814,7 @@ def test_a_core_bare_decline_does_not_blame_the_origin(caplog, override_path):
     text = " ".join(r.getMessage() for r in caplog.records)
     assert text.startswith(pi.BARE_UNREAD_DETAIL + ", so no project id was derived."), text
     assert "origin remote" not in text, text
+    assert text.split(". ")[0].count(" so ") == 1, text  # one "so" clause in the cause sentence
     if override_path is None:
         assert "`git config --local --get core.bare`" in text, text
         assert "remote.origin.url" not in text, text
