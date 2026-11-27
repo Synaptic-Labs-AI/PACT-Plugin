@@ -4745,7 +4745,7 @@ _DESCRIBED_PRINTED_CLAUSES = {
     "X)": _DETAIL,
     "`git config --get remote.origin.url` run here prints git's own reason":
         "names a read-only git command",
-    "`git config --get core.bare` run here prints git's own reason":
+    "`git config --local --get core.bare` run here prints git's own reason":
         "names a read-only git command",
     "`git rev-parse --git-dir` run here prints git's own reason": "names a read-only git command",
     "a bare repository has none": _OBSERVED,

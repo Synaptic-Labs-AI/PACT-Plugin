@@ -1323,7 +1323,7 @@ def _decline_cause(token: Optional[str], cause_detail: Optional[str]) -> Optiona
 # override file is named.
 _BARE_UNREAD_REMEDY = (
     "Check that git can read the repository's config here: "
-    "`git config --get core.bare` run here prints git's own reason."
+    "`git config --local --get core.bare` run here prints git's own reason."
 )
 
 

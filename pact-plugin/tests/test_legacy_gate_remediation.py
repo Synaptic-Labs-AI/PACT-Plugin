@@ -815,7 +815,8 @@ def test_a_core_bare_decline_does_not_blame_the_origin(caplog, override_path):
     assert text.startswith(pi.BARE_UNREAD_DETAIL + ", so no project id was derived."), text
     assert "origin remote" not in text, text
     if override_path is None:
-        assert "`git config --get core.bare`" in text, text
+        assert "`git config --local --get core.bare`" in text, text
+        assert "remote.origin.url" not in text, text
     else:
         assert override_path in text, text
     instance = PACTMemory.__new__(PACTMemory)
