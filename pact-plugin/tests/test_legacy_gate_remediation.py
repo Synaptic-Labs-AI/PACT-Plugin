@@ -815,10 +815,9 @@ def test_a_core_bare_decline_does_not_blame_the_origin(caplog, override_path):
     assert text.startswith(pi.BARE_UNREAD_DETAIL + ", so no project id was derived."), text
     assert "origin remote" not in text, text
     assert text.split(". ")[0].count(" so ") == 1, text  # one "so" clause in the cause sentence
-    if override_path is None:
-        assert "`git config --local --get core.bare`" in text, text
-        assert "remote.origin.url" not in text, text
-    else:
+    assert "`git config --local --get core.bare`" in text, text
+    assert "remote.origin.url" not in text, text
+    if override_path is not None:
         assert override_path in text, text
     instance = PACTMemory.__new__(PACTMemory)
     instance._decline_reason = record
@@ -826,6 +825,41 @@ def test_a_core_bare_decline_does_not_blame_the_origin(caplog, override_path):
     instance._decline_detail = pi.BARE_UNREAD_DETAIL
     refusal = instance._unresolved_identity_message("save refused")
     assert pi.BARE_UNREAD_DETAIL in refusal and "origin remote" not in refusal, refusal
+
+
+@pytest.mark.parametrize("checkout", ["work", "wt"])
+def test_a_core_bare_decline_names_the_core_bare_read_from_every_checkout(
+    tmp_path, monkeypatch, scopes_clean, caplog, checkout
+):
+    """From the main checkout and from a linked worktree of a separate-git-dir
+    repository, a core.bare decline's remedy names `git config --local --get
+    core.bare` first; a pin, where one is named, follows as the alternative.
+    RED WHEN a named override path replaces the core.bare remedy."""
+    import subprocess
+
+    from scripts import project_identity as pi
+
+    assert_outside_repository(tmp_path)
+    (tmp_path / "e2e").mkdir()
+    work, wt = tmp_path / "work", tmp_path / "wt"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    git = ["git", "-c", "user.email=t@e.invalid", "-c", "user.name=t", "-c", "init.defaultBranch=main"]
+    subprocess.run([*git, "init", "-q", "--separate-git-dir", str(tmp_path / "e2e" / "store"), str(work)], check=True, env=env)
+    subprocess.run([*git, "-C", str(work), "commit", "-q", "--allow-empty", "-m", "a"], check=True, env=env)
+    subprocess.run([*git, "-C", str(work), "worktree", "add", "-q", str(wt)], check=True, env=env)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.setattr(pi, "_git_dir_is_bare", lambda common_dir: None)
+    monkeypatch.chdir(tmp_path / checkout)
+    with caplog.at_level(logging.WARNING):
+        memory = PACTMemory(session_id="s", db_path=tmp_path / "m.db")
+    assert memory.project_id is None
+    assert memory._decline_detail == pi.BARE_UNREAD_DETAIL, memory._decline_detail
+    text = " ".join(r.getMessage() for r in caplog.records if pi.BARE_UNREAD_DETAIL in r.getMessage())
+    assert "`git config --local --get core.bare`" in text, text
+    pin = (memory._decline_reason or {}).get("override_path")
+    if pin is not None:
+        assert text.index("core.bare` run here") < text.index(str(pin)), text
 
 
 @pytest.mark.parametrize("bare", [True, False])

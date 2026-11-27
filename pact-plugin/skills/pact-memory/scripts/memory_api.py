@@ -1348,10 +1348,14 @@ def _decline_remedy(
             return _REDIRECT_MOVED_REMEDY
         return _REDIRECT_REMEDY
     override_path = (record or {}).get("override_path")
+    if cause_detail == project_identity.BARE_UNREAD_DETAIL:
+        # The core.bare read is the cause's own remedy from every checkout;
+        # a pin, where one would fix it, follows as the alternative.
+        if override_path is None:
+            return _BARE_UNREAD_REMEDY
+        return f"{_BARE_UNREAD_REMEDY} {_pin_remedy(override_path)}"
     if override_path is not None:
         return _pin_remedy(override_path)
-    if cause_detail == project_identity.BARE_UNREAD_DETAIL:
-        return _BARE_UNREAD_REMEDY
     return _UNPINNABLE_REMEDIES.get(token)
 
 
