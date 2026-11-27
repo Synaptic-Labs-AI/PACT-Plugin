@@ -1426,9 +1426,14 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     try:
         # AN APPLIED MOVE READS THE SCOPE QUIETLY: the legacy notices advise
         # the very move this run performs, so printing them beside its result
-        # contradicts it. A dry run keeps them.
+        # contradicts it. A dry run keeps them only when --from is this
+        # checkout's own legacy bucket (any case variant of its folder name);
+        # for another bucket they are about a bucket the run does not touch.
+        legacy_name = memory._legacy_project_basename
+        own_from = bool(legacy_name) and from_id.casefold() == legacy_name.casefold()
         warned_before = set(_UNPROVEN_WARNED)
-        with legacy_notices_quiet() if args.apply else nullcontext():
+        quiet = args.apply or not own_from
+        with legacy_notices_quiet() if quiet else nullcontext():
             memory._read_project_scopes()
         # Whether THIS read disclosed --from's unattributed memories itself.
         read_disclosed = any(

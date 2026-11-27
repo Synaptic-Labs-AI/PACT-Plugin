@@ -7226,6 +7226,10 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function memory_api: _LEGACY_NOTICES_QUIET.reset>"): (
             "legacy_notices_quiet restores the legacy read notices when its block ends"
         ),
+        ("call", "<call to no function cli: legacy_name.casefold>"): (
+            "a rekey dry run compares --from with this checkout's folder name only to decide "
+            "whether its scope read prints the legacy notices; it changes no answer"
+        ),
         ("call", "<name imported from a project module memory_api: project_identity.DETECTION_ANSWERS>"): (
             "detection_pass names the identity layer's per-pass answer memo, to start it and to hand it back on a join"
         ),

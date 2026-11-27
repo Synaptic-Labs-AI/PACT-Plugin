@@ -236,6 +236,44 @@ def test_a_rekey_of_unattributed_rows_says_how_many_it_moves_once(checkout, capf
         assert note in err, err
 
 
+def test_a_dry_run_of_another_bucket_prints_no_legacy_notice(checkout, capfd, caplog):
+    """A dry run whose --from is not this checkout's legacy bucket reads the
+    scope quietly: the legacy notices are about a bucket it does not touch.
+    The control is the dry run of --from=proj above, whose read discloses.
+    RED WHEN the unrelated dry run still prints them."""
+    import json
+
+    from scripts.cli import main
+
+    repo, store, _config = checkout
+    _rows(store, [("m1", None), ("m2", None)],
+          file_path=str(repo.resolve() / "src" / "a.py"))
+    with db_connection(store) as conn:
+        conn.execute(
+            "INSERT INTO memories "
+            "(id, context, project_id, session_id, created_at, updated_at) "
+            "VALUES ('o1', 'other', 'unrelated', NULL, ?, ?)",
+            (CREATED_AT, CREATED_AT),
+        )
+        conn.commit()
+    with caplog.at_level(logging.INFO):
+        with pytest.raises(SystemExit) as exit_info:
+            main([
+                "project-id", "rekey", "--from=unrelated",
+                "--to=github.com/o/other", "--db-path", str(store),
+            ])
+    out, err = capfd.readouterr()
+    assert exit_info.value.code == 0, err
+    assert json.loads(out)["result"]["memories"] == 1, out
+    legacy = [
+        r.getMessage() for r in caplog.records
+        if "legacy project bucket" in r.getMessage()
+        or "no recorded session" in r.getMessage()
+    ]
+    assert legacy == [], legacy
+    assert "no recorded session" not in err and "legacy project bucket" not in err, err
+
+
 def test_a_vouched_bucket_with_no_unattributed_row_reads_quietly(checkout, caplog):
     """The control for the notice: every row's session is recorded here."""
     repo, store, config = checkout
