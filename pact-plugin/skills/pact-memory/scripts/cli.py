@@ -589,11 +589,12 @@ def cmd_save(args, db_path=None):
                 "MISSING_INPUT",
                 f"{channel} received empty input; provide JSON via "
                 "--stdin or as an argument",
+                exit_code=2,
             )
     elif args.json_data:
         raw = args.json_data
     else:
-        _error("MISSING_INPUT", "Provide JSON as argument or use --stdin")
+        _error("MISSING_INPUT", "Provide JSON as argument or use --stdin", exit_code=2)
 
     try:
         memory_dict = json.loads(raw)
@@ -601,7 +602,11 @@ def cmd_save(args, db_path=None):
         _error("INVALID_JSON", f"Failed to parse JSON: {exc}")
 
     if not isinstance(memory_dict, dict):
-        _error("INVALID_INPUT", "JSON input must be an object, not a list or scalar")
+        _error(
+            "INVALID_INPUT",
+            "JSON input must be an object, not a list or scalar",
+            exit_code=2,
+        )
 
     memory = PACTMemory(db_path=db_path)
     try:
@@ -875,11 +880,12 @@ def cmd_update(args, db_path=None):
                 "MISSING_INPUT",
                 f"{channel} received empty input; provide JSON via "
                 "--stdin or as an argument",
+                exit_code=2,
             )
     elif args.json_data:
         raw = args.json_data
     else:
-        _error("MISSING_INPUT", "Provide JSON as argument or use --stdin")
+        _error("MISSING_INPUT", "Provide JSON as argument or use --stdin", exit_code=2)
 
     try:
         updates = json.loads(raw)
@@ -887,7 +893,11 @@ def cmd_update(args, db_path=None):
         _error("INVALID_JSON", f"Failed to parse JSON: {exc}")
 
     if not isinstance(updates, dict):
-        _error("INVALID_INPUT", "JSON input must be an object, not a list or scalar")
+        _error(
+            "INVALID_INPUT",
+            "JSON input must be an object, not a list or scalar",
+            exit_code=2,
+        )
 
     memory = PACTMemory(db_path=db_path)
     try:
@@ -2225,8 +2235,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if not args.command:
+        # A missing command is a usage error, exit 2 like any other.
         parser.print_help(sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
 
     handler = _COMMANDS.get(args.command)
     if handler is None:

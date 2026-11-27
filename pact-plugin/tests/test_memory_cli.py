@@ -477,7 +477,7 @@ class TestCliSaveCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "'-'" in err_output["message"]
@@ -493,7 +493,7 @@ class TestCliSaveCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "--stdin" in err_output["message"]
@@ -533,7 +533,7 @@ class TestCliSaveCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
@@ -545,7 +545,7 @@ class TestCliSaveCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
@@ -1422,7 +1422,7 @@ class TestCliUpdateCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_update(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "--stdin" in err_output["message"]
@@ -1439,7 +1439,7 @@ class TestCliUpdateCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_update(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "'-'" in err_output["message"]
@@ -1464,7 +1464,7 @@ class TestCliUpdateCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_update(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "INVALID_INPUT"
@@ -1475,7 +1475,7 @@ class TestCliUpdateCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_update(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "MISSING_INPUT"
@@ -1893,10 +1893,10 @@ class TestLiveDbGuardScope:
 class TestCliErrorHandling:
     """Test error paths, exit codes, and the main() entry point."""
 
-    def test_no_command_exits_1(self, capsys):
+    def test_no_command_is_a_usage_error_exit_2(self, capsys):
         with pytest.raises(SystemExit) as exc_info:
             main([])
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
 
     def test_system_error_exits_3(self, capsys):
         parser = build_parser()
@@ -1976,12 +1976,12 @@ class TestCliSubprocess:
         """
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(cli_db.parent))
 
-    def test_no_command_exits_1(self, cli_script_path):
+    def test_no_command_is_a_usage_error_exit_2(self, cli_script_path):
         result = subprocess.run(
             [sys.executable, cli_script_path],
             capture_output=True, text=True, timeout=60,
         )
-        assert result.returncode == 1
+        assert result.returncode == 2
 
     def test_save_and_get_roundtrip(self, cli_script_path, cli_db, tmp_path):
         """E2E roundtrip, and THE ONLY E2E ARM THAT DECLARES A ROOT.
@@ -2619,13 +2619,13 @@ class TestCliSubprocess:
         output = json.loads(result.stdout)
         assert len(output["result"]) == 2
 
-    def test_save_non_dict_exits_1(self, cli_script_path, cli_db):
+    def test_save_non_dict_exits_2(self, cli_script_path, cli_db):
         result = subprocess.run(
             [sys.executable, cli_script_path, "save", '"just a string"',
              "--no-sync", "--db-path", str(cli_db)],
             capture_output=True, text=True, timeout=60,
         )
-        assert result.returncode == 1
+        assert result.returncode == 2
         err_output = json.loads(result.stderr)
         assert err_output["error"] == "INVALID_INPUT"
 
@@ -3231,7 +3231,7 @@ class TestCliSaveAdversarial:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "INVALID_INPUT"
@@ -3242,7 +3242,7 @@ class TestCliSaveAdversarial:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "INVALID_INPUT"
@@ -3253,7 +3253,7 @@ class TestCliSaveAdversarial:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "INVALID_INPUT"
@@ -3333,13 +3333,13 @@ class TestCliHelpOutput:
         with pytest.raises(json.JSONDecodeError):
             json.loads(captured.err)
 
-    def test_bare_invocation_prints_help_with_examples_exit_one(self, capsys):
-        # This CLI's pre-existing bare contract: subparsers are not required,
-        # so main() prints the full help (epilog Examples included) to stderr
-        # and exits 1 — not the argparse usage-error path.
+    def test_bare_invocation_prints_help_with_examples_exit_two(self, capsys):
+        # Subparsers are not required, so main() prints the full help (epilog
+        # Examples included) to stderr, not argparse's one-line usage, and
+        # exits 2 as the usage error it is.
         with pytest.raises(SystemExit) as exc_info:
             main([])
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert captured.out == ""
         assert self._example_lines()["save"] in captured.err

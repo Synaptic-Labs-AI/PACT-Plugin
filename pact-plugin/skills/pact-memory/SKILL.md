@@ -194,7 +194,7 @@ echo '{"context": "...", "goal": "..."}' | python3 "${CLAUDE_SKILL_DIR}/scripts/
 
 A bare `-` in place of the JSON argument is a stdin sentinel (Unix convention):
 `save -` and `update <id|prefix> -` read the payload from stdin, exactly like
-`--stdin`. Empty or whitespace-only input on either channel exits 1 with a
+`--stdin`. Empty or whitespace-only input on either channel exits 2 with a
 `MISSING_INPUT` error.
 
 ## Memory Structure
