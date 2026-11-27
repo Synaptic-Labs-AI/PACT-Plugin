@@ -446,6 +446,9 @@ store could not be checked, else `null`.
   `gh/acme/widget`.
   The pin is the remedy: a pin holding `github.com/acme/widget` in the alias
   clone gives it the https clone's bucket.
+  Only a `github.com` remote's owner and repository are lower-cased. Every
+  other host keeps its path's case, so two clones whose remotes differ only in
+  case get two ids; a pin gives them one.
   On a plain ssh server (not a forge), `alice@box:proj`, `bob@box:proj` and
   `box:/proj` all give `box/proj` though they can be three repositories; a
   path written with `~` keeps its login (`alice@box:~/proj` gives
