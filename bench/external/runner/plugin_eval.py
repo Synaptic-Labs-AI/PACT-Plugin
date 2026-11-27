@@ -23,9 +23,8 @@ DEFAULT_SKILLS = (
     "pact-agent-teams",
     "pact-handoff-harvest",
     "pact-memory",
-    "pact-teachback",
-    "pact-coding-standards",
 )
+DEFAULT_SKILLS_FILE = prepare.REPO_ROOT / "bench" / "external" / "plugin-eval-skills.txt"
 
 
 def _parse_json(text: str) -> dict[str, Any]:
@@ -91,10 +90,11 @@ def run(args: argparse.Namespace) -> int:
         Path(manifest["provider"]["token_file"]),
         str(manifest["provider"]["base_url"]),
     )
-    if args.skills_file:
+    skills_file = Path(args.skills_file) if args.skills_file else DEFAULT_SKILLS_FILE
+    if skills_file.is_file():
         skills = [
             line.strip()
-            for line in Path(args.skills_file).read_text(encoding="utf-8").splitlines()
+            for line in skills_file.read_text(encoding="utf-8").splitlines()
             if line.strip()
         ]
     else:

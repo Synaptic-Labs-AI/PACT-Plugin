@@ -89,3 +89,33 @@ def test_verify_provider_rejects_non_deepseek_model(tmp_path: Path) -> None:
         assert "DeepSeek model" in str(exc)
     else:
         raise AssertionError("expected provider verification to fail")
+
+
+
+def test_scratch_settings_strip_live_credentials_and_override_models(tmp_path: Path) -> None:
+    source = tmp_path / "settings.json"
+    source.write_text(
+        json.dumps(
+            {
+                "env": {
+                    "ANTHROPIC_MODEL": "live-model",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "live-sonnet",
+                    "ANTHROPIC_AUTH_TOKEN": "secret-token",
+                    "ANTHROPIC_API_KEY": "secret-api-key",
+                    "CLAUDE_CODE_OAUTH_TOKEN": "secret-oauth",
+                    "CLAUDE_CODE_SESSION_ID": "live-session",
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings, env = prepare.build_scratch_settings(
+        source, tmp_path / "config", tmp_path, "deepseek-flash[1m]"
+    )
+    serialized = json.dumps(settings)
+    assert "secret-token" not in serialized
+    assert "secret-api-key" not in serialized
+    assert "secret-oauth" not in serialized
+    assert "live-session" not in serialized
+    assert env["ANTHROPIC_MODEL"] == "deepseek-flash[1m]"
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "deepseek-flash[1m]"

@@ -56,7 +56,7 @@ def _prepare_git(work: Path) -> None:
     child.update(env)
     subprocess.run(["git", "init", "-q", "-b", "main"], cwd=str(work), env=child, check=True)
     subprocess.run(["git", "add", "-A"], cwd=str(work), env=child, check=True)
-    subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=str(work), env=child, check=True)
+    subprocess.run(["git", "commit", "-q", "--no-gpg-sign", "-m", "seed"], cwd=str(work), env=child, check=True)
 
 
 def validate_task(task_dir: Path, python: str) -> dict[str, Any]:
@@ -84,13 +84,13 @@ def validate_task(task_dir: Path, python: str) -> dict[str, Any]:
         shutil.copytree(fixture, work)
         _prepare_git(work)
 
-        seed = _run([python, "-m", "pytest", "-q"], work)
+        seed = _run([python, "-m", "pytest", "-q", "-p", "no:randomly"], work)
         if seed.returncode != 0:
             raise SystemExit(f"{meta['id']}: seed tests failed:\n{seed.stdout[-4000:]}\n{seed.stderr[-2000:]}")
 
         hidden_copy = work / "hidden_tests"
         shutil.copytree(hidden, hidden_copy)
-        before = _run([python, "-m", "pytest", "-q", "hidden_tests"], work)
+        before = _run([python, "-m", "pytest", "-q", "-p", "no:randomly", "hidden_tests"], work)
         if before.returncode == 0:
             raise SystemExit(f"{meta['id']}: hidden tests passed on the untouched fixture (vacuous)")
 
@@ -101,11 +101,11 @@ def validate_task(task_dir: Path, python: str) -> dict[str, Any]:
         if changed.returncode == 0:
             raise SystemExit(f"{meta['id']}: gold patch applied but changed nothing")
 
-        after = _run([python, "-m", "pytest", "-q", "hidden_tests"], work)
+        after = _run([python, "-m", "pytest", "-q", "-p", "no:randomly", "hidden_tests"], work)
         if after.returncode != 0:
             raise SystemExit(f"{meta['id']}: hidden tests failed after gold patch:\n{after.stdout[-4000:]}\n{after.stderr[-2000:]}")
 
-        seed_after = _run([python, "-m", "pytest", "-q"], work)
+        seed_after = _run([python, "-m", "pytest", "-q", "-p", "no:randomly"], work)
         if seed_after.returncode != 0:
             raise SystemExit(f"{meta['id']}: seed tests failed after gold patch:\n{seed_after.stdout[-4000:]}")
 
