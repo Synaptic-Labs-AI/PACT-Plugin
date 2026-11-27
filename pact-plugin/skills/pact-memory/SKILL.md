@@ -273,8 +273,10 @@ setting) reads and saves its same-name bucket, shared with every folder of
 the same name. To give such a project its own id, add an `origin` remote, or
 ask the user to write a canonical id to `<git-common-dir>/pact-project-id`.
 
-A folder-name id whose pre-change name differs (a `--separate-git-dir`
-checkout without a portable origin) is disclosed in `legacy_scope` like a
+A `--separate-git-dir` repository without a portable origin has one
+folder-name id, its git dir's name without a trailing `.git`, from its main
+checkout and every linked worktree. A folder-name id whose pre-change name
+differs (such a repository's) is disclosed in `legacy_scope` like a
 canonical id. Move its rows with
 `project-id rekey --from=<old> --to=<this folder-name id>` and `--apply`, with
 the user's approval; that explicit `--to` is the one non-canonical target a

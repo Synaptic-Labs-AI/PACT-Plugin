@@ -7243,6 +7243,14 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function memory_api: _LEGACY_NOTICES_QUIET.reset>"): (
             "legacy_notices_quiet restores the legacy read notices when its block ends"
         ),
+        ("call", "git_dir_own_name"): (
+            "names a --separate-git-dir repository's folder-name id from its git dir's path, "
+            "which the identity already resolved; it reads no input"
+        ),
+        ("call", "git_config_bool"): (
+            "reads git's core.bare answer as git reads a boolean, to keep a bare hub's "
+            "worktree at its own folder name"
+        ),
         ("call", "<call to no function memory_api: _REKEY_PREVIEW.get>"): (
             "a legacy read notice checks whether this run is the dry run it would "
             "preview; it changes no answer, only whether the notice's command prints"

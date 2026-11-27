@@ -2501,6 +2501,56 @@ def _marker_names_external_git_dir(root: Path) -> bool:
     return not _submodule_admin_dir(git_dir)
 
 
+def repository_folder_name(root: Path, common_dir: Path) -> str:
+    """The folder-name id of a repository with no portable origin.
+
+    The checkout's name, except for a non-bare repository whose git dir is
+    not `<checkout>/.git` (`git init --separate-git-dir`): git names no main
+    checkout for such a git dir, so each checkout would otherwise name its
+    own bucket. There the id is the git dir's own name without a trailing
+    `.git` (its parent's name when the git dir is named `.git`), the same
+    for the main checkout and every linked worktree. Never raises.
+    """
+    name = Path(root).name
+    try:
+        common = Path(common_dir).resolve()
+        if common.parent == Path(root).resolve():
+            return name
+    except (OSError, RuntimeError, ValueError):
+        return name
+    if _git_dir_is_bare(common):
+        return name
+    from .database import git_dir_own_name
+
+    return git_dir_own_name(common) or name
+
+
+def _git_dir_is_bare(common_dir: Path) -> bool:
+    """Whether the repository's own config (`--local`) says `core.bare`, read
+    as git reads a boolean. False when git cannot answer."""
+    try:
+        from shared.git_helpers import answered_once, git_config_bool
+        from shared.project_scope import git_env_without_location
+
+        argv = ["git", "--git-dir", str(common_dir), "config", "--local", "--get", "core.bare"]
+        result = answered_once(
+            argv,
+            lambda: subprocess.run(
+                argv,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
+            text=False,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return False
+    value = one_git_answer(result) if result.returncode == 0 else None
+    return value is not None and git_config_bool(value) is True
+
+
 def detect_id_for_root(
     root: Optional[Path],
     common_dir: Optional[Path] = None,
@@ -2525,9 +2575,10 @@ def detect_id_for_root(
       an empty value, or no url comes from the repository's own config file
       -> DECLINE (`origin_unrepresentable`);
     - the origin is ABSENT (none configured, `file://`, a local path) ->
-      the basename, the designed non-git form (so in a `--separate-git-dir`
-      repository with no origin, each linked worktree, being its own root,
-      gets its own folder's name and its own bucket), EXCEPT in a submodule: there
+      the repository's folder name (`repository_folder_name`: the
+      checkout's name, or the git dir's own name for a `--separate-git-dir`
+      repository, shared by its main checkout and every linked worktree),
+      EXCEPT in a submodule: there
       the checkout path is chosen by the superproject's tracked `.gitmodules`,
       so a basename would let a repository name another project's bucket. A
       submodule-controlled basename DECLINES and names the override as the
@@ -2637,7 +2688,10 @@ def detect_id_for_root(
     if origin.state == ORIGIN_ABSENT:
         if submodule_controlled:
             return _refuse_submodule_basename(root, common_dir, override_ignored)
-        return RootIdentity(name, "basename", "basename", override_ignored)
+        return RootIdentity(
+            repository_folder_name(root, common_dir), "basename", "basename",
+            override_ignored,
+        )
 
     outcome, identifier = classify_remote_origin(origin.value)
     if outcome == OUTCOME_CANONICAL:

@@ -1630,13 +1630,25 @@ def _read_pre_change_name(directory: str) -> Any:
     it. `UNKNOWN_NAME` when a `.git` cannot be read or resolved. Never
     raises.
     """
+    common = _read_common_dir(directory)
+    if common is None:
+        return os.path.basename(directory)
+    if common is UNKNOWN_NAME:
+        return UNKNOWN_NAME
+    return pre_change_name_of_common(common)
+
+
+def _read_common_dir(directory: str) -> Any:
+    """The common dir of the repository whose `.git` sits in `directory`,
+    derived from files with no git call: None with no `.git`, UNKNOWN_NAME
+    when one cannot be read or resolved. Never raises."""
     from shared.git_helpers import read_git_file
 
     marker = os.path.join(directory, ".git")
     try:
         info = os.lstat(marker)
     except FileNotFoundError:
-        return os.path.basename(directory)
+        return None
     except (OSError, ValueError):
         return UNKNOWN_NAME
     try:
@@ -1658,7 +1670,42 @@ def _read_pre_change_name(directory: str) -> Any:
                 common = target
     except (OSError, ValueError):
         return UNKNOWN_NAME
-    return pre_change_name_of_common(common)
+    return common
+
+
+def git_dir_own_name(common: Any) -> str:
+    """A git dir's own folder-name id: its name without a trailing `.git`, or
+    its parent's name when it is named `.git` (`proj.git` and `proj/.git`
+    both give `proj`). The id of a `--separate-git-dir` repository with no
+    portable origin (`project_identity.repository_folder_name`). Never
+    raises."""
+    path = Path(common)
+    if path.name == ".git":
+        return path.parent.name
+    if path.name.endswith(".git") and len(path.name) > len(".git"):
+        return path.name[: -len(".git")]
+    return path.name
+
+
+def own_folder_name(directory: str, cache: Optional[Dict[Any, Any]] = None) -> Any:
+    """The folder-name id a checkout at `directory` with no portable origin
+    files under after this change: its git dir's own name when that git dir
+    is not `<directory>/.git` (`git_dir_own_name`), else the folder's name.
+    UNKNOWN_NAME when its `.git` cannot be read. Read from files, cached in
+    `cache` beside `pre_change_name`'s entries. Never raises."""
+    key = (directory, "own")
+    if cache is not None and key in cache:
+        return cache[key]
+    common = _read_common_dir(directory)
+    if common is UNKNOWN_NAME:
+        name = UNKNOWN_NAME
+    elif common is None or os.path.dirname(os.path.realpath(common)) == os.path.realpath(directory):
+        name = os.path.basename(directory)
+    else:
+        name = git_dir_own_name(os.path.realpath(common))
+    if cache is not None:
+        cache[key] = name
+    return name
 
 
 def pre_change_name_of_common(common: Any) -> Optional[str]:
@@ -1982,8 +2029,9 @@ def _foreign_kind(
     evidence of another owner, else None.
 
     (a) Its nearest checkout is not nested inside a gate root, and that
-    checkout's pre-change name or its folder-name id (its own folder's name,
-    which differs for a `--separate-git-dir` checkout) is the bucket's, or
+    checkout's pre-change name, its folder's name or its folder-name id
+    (`own_folder_name`: its git dir's own name for a `--separate-git-dir`
+    checkout) is the bucket's, or
     its name cannot be read: a rival checkout. Under folder-name keying a checkout with another name could
     only have written another bucket, so a row in it is a cross-reference,
     whether the checkout lies elsewhere or around a root (a `$HOME` dotfiles
@@ -2003,8 +2051,10 @@ def _foreign_kind(
     nearest = _nearest_checkout(resolved, walk.checkouts)
     if nearest is not None and not any(_within(nearest, root) for root in roots):
         name = pre_change_name(nearest, walk.names)
+        own = own_folder_name(nearest, walk.names)
         if (
-            name is UNKNOWN_NAME or bucket in (name, os.path.basename(nearest))
+            name is UNKNOWN_NAME
+            or bucket in (name, os.path.basename(nearest), own)
         ) and not walk.same_owner(nearest):
             return "checkout"
     directory = os.path.dirname(resolved)

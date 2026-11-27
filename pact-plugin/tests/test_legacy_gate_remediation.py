@@ -639,7 +639,8 @@ def test_a_tracked_directory_named_like_the_bucket_is_not_its_own_rival(basename
 @pytest.fixture
 def separate_git_dir(tmp_path, monkeypatch, scopes_clean):
     """Cold S1: `git init --separate-git-dir=store/proj.git work/proj`, no
-    remote. The old resolver named it `store`; the new id is `proj`."""
+    remote. The old resolver named it `store`; the new id is `proj`, the git
+    dir's own name without its `.git`."""
     import subprocess
 
     assert_outside_repository(tmp_path)
@@ -702,6 +703,52 @@ def test_another_folder_name_target_is_still_refused(separate_git_dir, capfd):
         main(["project-id", "rekey", "--from=store", "--to=other", "--apply", "--db-path", str(db)])
     assert exit_info.value.code == 2, capfd.readouterr()
 
+
+
+def test_a_separate_git_dir_repository_is_one_bucket_from_every_checkout(
+    tmp_path, monkeypatch, scopes_clean
+):
+    """`git init --separate-git-dir=e2e/store work` with a linked worktree
+    `wt`, no remote: git names no main checkout for the store, so the id is
+    the git dir's own name, `store`, from both checkouts, and the old
+    `e2e` bucket is one legacy candidate with one target. A save from one
+    checkout is read from the other. RED WHEN each checkout keys its own
+    folder name (`work`, `wt`), splitting the repository's memory."""
+    import subprocess
+
+    assert_outside_repository(tmp_path)
+    (tmp_path / "e2e").mkdir()
+    work, wt = tmp_path / "work", tmp_path / "wt"
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+    git = ["git", "-c", "user.email=t@e.invalid", "-c", "user.name=t", "-c", "init.defaultBranch=main"]
+    subprocess.run([*git, "init", "-q", "--separate-git-dir", str(tmp_path / "e2e" / "store"), str(work)], check=True, env=env)
+    (work / "a").write_text("a\n")
+    subprocess.run([*git, "-C", str(work), "add", "a"], check=True, env=env)
+    subprocess.run([*git, "-C", str(work), "commit", "-qm", "a"], check=True, env=env)
+    subprocess.run([*git, "-C", str(work), "worktree", "add", "-q", str(wt)], check=True, env=env)
+    db = tmp_path / "memory.db"
+    _seed(db, "e2e", session_id="unrecorded")
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+
+    seen = {}
+    for checkout in (work, wt):
+        monkeypatch.chdir(checkout)
+        memory_api._UNPROVEN_WARNED.clear()
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        memory = PACTMemory(session_id="s-" + checkout.name, db_path=db)
+        memory._read_project_scopes()
+        seen[checkout.name] = (
+            memory._project_id,
+            memory._legacy_project_basename,
+            (memory._legacy_scope_state or {}).get("candidate"),
+        )
+    assert seen == {"work": ("store", "e2e", "e2e"), "wt": ("store", "e2e", "e2e")}, seen
+
+    monkeypatch.chdir(work)
+    saved = PACTMemory(session_id="s-work", db_path=db).save({"context": "from work"})
+    monkeypatch.chdir(wt)
+    assert saved in [m.id for m in PACTMemory(session_id="s-wt", db_path=db).list()]
 
 
 def test_only_the_old_bucket_moves_into_the_own_folder_name_id(separate_git_dir, capfd):
@@ -1080,9 +1127,9 @@ def test_a_separate_git_dir_checkout_named_like_the_bucket_is_a_rival(
     tmp_path, monkeypatch, scopes_clean
 ):
     """N-S5: a rival `--separate-git-dir` checkout `rival/widget` (git dir
-    under `store/`, so its pre-change name is `store`) still writes bucket
-    `widget` under its folder-name id, so its rows are foreign to the
-    canonical `widget`'s legacy candidate."""
+    `store/x.git`, so its pre-change name is `store` and its folder-name id
+    `x`) is named like the bucket, so its rows are foreign to the canonical
+    `widget`'s legacy candidate."""
     import subprocess
 
     assert_outside_repository(tmp_path)
@@ -1103,6 +1150,31 @@ def test_a_separate_git_dir_checkout_named_like_the_bucket_is_a_rival(
     memory = PACTMemory(session_id="s", db_path=store)
     assert memory._read_project_scopes() == (CANONICAL,)
     assert memory._legacy_scope_state["excluded"] is True
+
+
+def test_a_separate_git_dir_checkout_whose_git_dir_is_named_like_the_bucket_is_a_rival(
+    tmp_path, monkeypatch, scopes_clean
+):
+    """A rival `--separate-git-dir` checkout `rival/other` whose git dir is
+    `store/widget.git` files under the folder-name id `widget`, so its rows
+    are foreign to the canonical `widget`'s legacy candidate. RED WHEN the
+    rival check knows only the checkout's folder name and pre-change name."""
+    import subprocess
+
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    mine = make_repo(tmp_path / NAME, remote=ORIGIN)
+    (tmp_path / "rival").mkdir()
+    (tmp_path / "store").mkdir()
+    rival = tmp_path / "rival" / "other"
+    subprocess.run(
+        ["git", "init", "-q", "--separate-git-dir", str(tmp_path / "store" / f"{NAME}.git"), str(rival)],
+        check=True,
+    )
+    (rival / "f.py").write_text("x\n")
+    store = tmp_path / "store.db"
+    _seed(store, NAME, files=[rival / "f.py"])
+    assert _evidence(store, NAME, [mine])["foreign_checkout_rows"] == 1
 
 
 def test_a_moved_store_re_decides_the_verdict(canonical_session, monkeypatch):
