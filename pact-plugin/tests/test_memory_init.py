@@ -3795,3 +3795,28 @@ class TestTheEmbeddingAttemptMarkerPathIsLengthBounded:
         assert result["message"] == "Could not create session marker", result
         assert result["status"] == "skipped", result
         marker.touch.assert_called_once_with()
+
+
+def test_a_session_less_read_process_leaves_no_marker_behind(tmp_path, monkeypatch):
+    """A read in a process with no session id writes its attempt marker
+    under the per-process token; the exit cleanup removes it with the
+    process's base marker, so nothing is left in the marker directory. RED
+    WHEN the cleanup removes only the base marker."""
+    from scripts import config, embedding_catchup, memory_init
+
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    monkeypatch.setattr(memory_init, "_MARKER_DIR", markers)
+    monkeypatch.setattr(memory_init, "get_session_id_from_context_file", lambda: None)
+    monkeypatch.setattr(
+        embedding_catchup, "embed_pending_memories",
+        lambda **kwargs: {"processed": 0, "failed": False, "skipped_ram": False},
+    )
+    with config.catchup_projects(("github.com/o/a",)):
+        memory_init.maybe_embed_pending()
+    read_markers = list(markers.glob("pact_embedding_attempted_process-*_read_*"))
+    assert len(read_markers) == 1, list(markers.iterdir())
+    memory_init.maybe_embed_pending()  # a write's sweep writes the base marker
+    assert len(list(markers.iterdir())) == 2, list(markers.iterdir())
+    memory_init._remove_process_marker()
+    assert list(markers.iterdir()) == [], list(markers.iterdir())

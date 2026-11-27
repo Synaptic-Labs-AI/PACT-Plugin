@@ -360,6 +360,9 @@ def _store_key() -> str:
 # worst case is that a sweep runs more than once.
 _PROCESS_MARKER_TOKEN = f"process-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
+# Where the session markers live.
+_MARKER_DIR = Path("/tmp")
+
 # Upper bound for the session-derived part of the /tmp marker filename. 64
 # keeps the whole name far below NAME_MAX (255 on the usual filesystems) while
 # leaving room for the hash suffix used when the slug is longer.
@@ -385,10 +388,12 @@ def _remove_process_marker() -> None:
     never runs atexit handlers and leaves its marker behind. Those markers are
     empty and unmatchable rather than harmful, so nothing recovers them.
     """
+    base = _MARKER_DIR / f"pact_embedding_attempted_{_PROCESS_MARKER_TOKEN}"
     try:
-        (Path("/tmp") / f"pact_embedding_attempted_{_PROCESS_MARKER_TOKEN}").unlink(
-            missing_ok=True
-        )
+        base.unlink(missing_ok=True)
+        # And this process's read-attempt markers (`_read_attempt_path`).
+        for read_marker in _MARKER_DIR.glob(f"{base.name}_read_*"):
+            read_marker.unlink(missing_ok=True)
     except OSError:
         pass
 
@@ -423,7 +428,7 @@ def _get_embedding_attempted_path() -> Path:
     if len(slug) > _MAX_MARKER_SLUG_CHARS:
         digest = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:16]
         slug = f"{slug[:_MAX_MARKER_SLUG_CHARS - 17]}-{digest}"
-    return Path("/tmp") / f"pact_embedding_attempted_{slug}"
+    return _MARKER_DIR / f"pact_embedding_attempted_{slug}"
 
 
 def _read_attempt_path(marker_path: Path, scope) -> Path:
