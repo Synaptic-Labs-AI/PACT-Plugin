@@ -413,7 +413,10 @@ def _store_integrity_fault() -> Optional[str]:
 # Stores whose `PRAGMA quick_check` passed in this process. The check reads
 # the whole file, and a read's scoped catch-up and the store-wide catch-up
 # after it would otherwise scan it twice; a failed or unanswered check is not
-# kept, so it runs again.
+# kept, so it runs again. A pass is not re-checked later in the process: the
+# check guards against embedding into a store that was already corrupt when
+# the process opened it, and corruption that happens afterwards surfaces as a
+# sqlite error on the next write.
 _INTEGRITY_PASSED: set = set()
 
 
