@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 import concurrent.futures
 import json
+from collections import Counter
 import os
 import shutil
 import subprocess
@@ -222,26 +223,49 @@ def parse_tokens(run_dir: Path) -> int:
     return total
 
 
-def run_hidden_tests(task: Task, workspace: Path) -> dict[str, Any]:
+def run_hidden_tests(task: Task, workspace: Path, attempts: int = 2) -> dict[str, Any]:
     hidden = workspace / "hidden_tests"
     if hidden.exists():
         shutil.rmtree(hidden)
     shutil.copytree(task.hidden_tests, hidden)
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    proc = subprocess.run(
-        [str(BENCH_PYTHON), "-m", "pytest", "-q", "hidden_tests"],
-        cwd=workspace,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=300,
-    )
-    shutil.rmtree(hidden, ignore_errors=True)
+    last_error = ""
+    try:
+        for attempt in range(1, attempts + 1):
+            try:
+                proc = subprocess.run(
+                    [
+                        str(BENCH_PYTHON),
+                        "-m",
+                        "pytest",
+                        "-q",
+                        "-p",
+                        "no:randomly",
+                        "hidden_tests",
+                    ],
+                    cwd=workspace,
+                    env=env,
+                    capture_output=True,
+                    text=True,
+                    timeout=300,
+                )
+                return {
+                    "rc": proc.returncode,
+                    "passed": proc.returncode == 0,
+                    "attempts": attempt,
+                    "output_tail": (proc.stdout + proc.stderr)[-2000:],
+                }
+            except subprocess.TimeoutExpired as exc:
+                last_error = f"verifier timeout on attempt {attempt}: {exc}"
+    finally:
+        shutil.rmtree(hidden, ignore_errors=True)
     return {
-        "rc": proc.returncode,
-        "passed": proc.returncode == 0,
-        "output_tail": (proc.stdout + proc.stderr)[-2000:],
+        "rc": None,
+        "passed": False,
+        "attempts": attempts,
+        "timeout": True,
+        "output_tail": last_error[-2000:],
     }
 
 
@@ -418,38 +442,57 @@ def run_one(
     return result
 
 
+def _summary_row(task: str, condition: str, items: list[dict[str, Any]]) -> dict[str, Any]:
+    outcome_passes = sum(
+        1 for item in items if item.get("outcome_pass", item.get("status") == "success")
+    )
+    completed = sum(
+        1 for item in items if item.get("completed", item.get("status") == "success")
+    )
+    timeouts = sum(
+        1 for item in items if item.get("timeout") or item.get("status") == "timeout"
+    )
+    elapsed = [item.get("elapsed_seconds") or 0 for item in items]
+    tokens = [item.get("tokens") or 0 for item in items]
+    return {
+        "task": task,
+        "condition": condition,
+        "n": len(items),
+        "outcome_passes": outcome_passes,
+        "outcome_pass_rate": outcome_passes / len(items),
+        "completed": completed,
+        "completion_rate": completed / len(items),
+        "timeouts": timeouts,
+        "mean_elapsed_seconds": sum(elapsed) / len(elapsed),
+        "mean_tokens": sum(tokens) / len(tokens),
+        "handoffs_mean": sum((item.get("journal") or {}).get("handoffs") or 0 for item in items) / len(items),
+        "task_tools": sorted(
+            {tuple((item.get("subagents") or {}).get("task_tools") or []) for item in items}
+        ),
+    }
+
+
 def aggregate(results: list[dict[str, Any]]) -> dict[str, Any]:
     groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for result in results:
         groups.setdefault((result["task"], result["condition"]), []).append(result)
-    rows = []
-    for (task, condition), items in sorted(groups.items()):
-        passed = sum(
-            1 for item in items if item.get("outcome_pass", item.get("status") == "success")
-        )
-        completed = sum(
-            1 for item in items if item.get("completed", item.get("status") == "success")
-        )
-        elapsed = [item.get("elapsed_seconds") or 0 for item in items]
-        tokens = [item.get("tokens") or 0 for item in items]
-        rows.append(
-            {
-                "task": task,
-                "condition": condition,
-                "n": len(items),
-                "passed": passed,
-                "pass_rate": passed / len(items),
-                "completed": completed,
-                "completion_rate": completed / len(items),
-                "mean_elapsed_seconds": sum(elapsed) / len(elapsed),
-                "mean_tokens": sum(tokens) / len(tokens),
-                "handoffs_mean": sum((item.get("journal") or {}).get("handoffs") or 0 for item in items) / len(items),
-                "task_tool_agents": sorted(
-                    {tuple((item.get("subagents") or {}).get("task_tools") or []) for item in items}
-                ),
-            }
-        )
+    rows = [
+        _summary_row(task, condition, items)
+        for (task, condition), items in sorted(groups.items())
+    ]
     return {"rows": rows, "n_runs": len(results)}
+
+
+def aggregate_overall(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for result in results:
+        groups.setdefault(result["condition"], []).append(result)
+    overall = []
+    for condition, items in sorted(groups.items()):
+        row = _summary_row("overall", condition, items)
+        row.pop("task", None)
+        overall.append(row)
+    return overall
 
 
 def run_matrix(args: argparse.Namespace) -> int:
@@ -517,6 +560,7 @@ def run_matrix(args: argparse.Namespace) -> int:
                     ),
                     flush=True,
                 )
+    agg = aggregate(results)
     scorecard = {
         "schema": "pact-bench/track-b-scorecard/1",
         "run_id": run_id,
@@ -525,11 +569,37 @@ def run_matrix(args: argparse.Namespace) -> int:
         "jobs": args.jobs,
         "tasks": [task.id for task in tasks],
         "conditions": conditions,
-        "results": results,
-        "aggregate": aggregate(results),
+        "status_counts": dict(Counter(item.get("status") for item in results)),
+        "overall": aggregate_overall(results),
+        "rows": agg["rows"],
+        "timeouts": [
+            {
+                "task": item.get("task"),
+                "condition": item.get("condition"),
+                "sample": item.get("sample"),
+                "elapsed_seconds": item.get("elapsed_seconds"),
+                "hidden_passed": bool((item.get("hidden") or {}).get("passed")),
+            }
+            for item in results
+            if item.get("timeout") or item.get("status") == "timeout"
+        ],
+        "verifier_reruns": [
+            {
+                "task": item.get("task"),
+                "condition": item.get("condition"),
+                "sample": item.get("sample"),
+                "attempts": (item.get("hidden") or {}).get("attempts"),
+            }
+            for item in results
+            if int((item.get("hidden") or {}).get("attempts") or 1) > 1
+        ],
+        "caveats": [
+            "outcome_pass uses hidden tests; completed uses sentinel/exit",
+            "PACT token counts are summed assistant usage, not USD",
+        ],
     }
     (out_dir / "scorecard.json").write_text(json.dumps(scorecard, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(scorecard["aggregate"], indent=2), flush=True)
+    print(json.dumps(scorecard["overall"], indent=2), flush=True)
     return 0
 
 

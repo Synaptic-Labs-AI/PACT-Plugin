@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+pytest.importorskip("pexpect")
+
 from runner import track_b
 
 
@@ -35,5 +39,5 @@ def test_aggregate_scores_by_task_and_condition() -> None:
     agg = track_b.aggregate(results)
     rows = {(row["task"], row["condition"]): row for row in agg["rows"]}
     assert rows[("a", "pact")]["n"] == 2
-    assert rows[("a", "pact")]["pass_rate"] == 0.5
-    assert rows[("a", "solo")]["pass_rate"] == 1.0
+    assert rows[("a", "pact")]["outcome_pass_rate"] == 0.5
+    assert rows[("a", "solo")]["outcome_pass_rate"] == 1.0
