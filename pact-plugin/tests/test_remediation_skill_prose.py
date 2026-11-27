@@ -750,7 +750,8 @@ class TestLegacyScopeStatesAreDocumented:
             "(<helper>::<address>, codecommit://, persistent-https://, sso:// or "
             "keybase://), a non-git project folder, the home-directory landing, or "
             "the user-scope project_id setting) reads and saves its same-name "
-            "bucket, shared with every folder of the same name."
+            "bucket, shared with every folder of the same name and every "
+            "--separate-git-dir repository whose git dir has that name."
         ) in body
         for gone in ("FOLDER_NAME_BUCKET_REFUSED", "local.invalid/<digest>",
                      "Clones of a local-only repository", "local-pin remedy"):

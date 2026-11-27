@@ -270,7 +270,8 @@ origin or with a remote-helper transport origin (`<helper>::<address>`,
 `codecommit://`, `persistent-https://`, `sso://` or `keybase://`), a non-git
 project folder, the home-directory landing, or the user-scope `project_id`
 setting) reads and saves its same-name bucket, shared with every folder of
-the same name. To give such a project its own id, add an `origin` remote, or
+the same name and every `--separate-git-dir` repository whose git dir has
+that name. To give such a project its own id, add an `origin` remote, or
 ask the user to write a canonical id to `<git-common-dir>/pact-project-id`.
 
 A `--separate-git-dir` repository without a portable origin has one
