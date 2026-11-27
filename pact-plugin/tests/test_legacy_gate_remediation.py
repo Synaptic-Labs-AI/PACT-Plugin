@@ -705,8 +705,9 @@ def test_another_folder_name_target_is_still_refused(separate_git_dir, capfd):
 
 
 
+@pytest.mark.parametrize("origin", [None, "codecommit::us-east-1://myrepo", "   "])
 def test_a_separate_git_dir_repository_is_one_bucket_from_every_checkout(
-    tmp_path, monkeypatch, scopes_clean
+    tmp_path, monkeypatch, scopes_clean, origin
 ):
     """`git init --separate-git-dir=e2e/store work` with a linked worktree
     `wt`, no remote: git names no main checkout for the store, so the id is
@@ -727,6 +728,10 @@ def test_a_separate_git_dir_repository_is_one_bucket_from_every_checkout(
     subprocess.run([*git, "-C", str(work), "add", "a"], check=True, env=env)
     subprocess.run([*git, "-C", str(work), "commit", "-qm", "a"], check=True, env=env)
     subprocess.run([*git, "-C", str(work), "worktree", "add", "-q", str(wt)], check=True, env=env)
+    if origin is not None:
+        # A remote-helper or whitespace-only origin is no portable origin
+        # either, so it files under the same shared folder-name id.
+        subprocess.run([*git, "-C", str(work), "config", "remote.origin.url", origin], check=True, env=env)
     db = tmp_path / "memory.db"
     _seed(db, "e2e", session_id="unrecorded")
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)

@@ -2750,7 +2750,10 @@ def detect_id_for_root(
     if submodule_controlled:
         return _refuse_submodule_basename(root, common_dir, override_ignored)
     if _is_remote_helper(origin.value):
+        folder = repository_folder_name(root, common_dir)
+        if folder is None:
+            return _bare_unread_decline(override_ignored, override_path)
         return RootIdentity(
-            name, "basename", "basename", override_ignored, None, REMOTE_HELPER_DETAIL
+            folder, "basename", "basename", override_ignored, None, REMOTE_HELPER_DETAIL
         )
-    return RootIdentity(name, "basename", "basename", override_ignored)
+    return _folder_name_identity(root, common_dir, override_ignored, override_path)
