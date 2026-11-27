@@ -800,6 +800,32 @@ def test_core_bare_is_an_answer_only_when_git_gives_one(tmp_path, monkeypatch, a
         assert pi.repository_folder_name(root, common) == ("work" if expected else common.name)
 
 
+@pytest.mark.parametrize("override_path", [None, "/r/.git/pact-project-id"])
+def test_a_core_bare_decline_does_not_blame_the_origin(caplog, override_path):
+    """The warning a core.bare decline prints opens with that cause, not with
+    the origin_unreadable sentence about the origin remote, and its remedy is
+    the core.bare read or the pin. RED WHEN it says the origin could not be
+    read."""
+    from scripts import project_identity as pi
+
+    record = {"reason": "origin_unreadable", "source": "cwd", "override_path": override_path}
+    with caplog.at_level(logging.WARNING):
+        memory_api._warn_declined(record, root="/r", cause_detail=pi.BARE_UNREAD_DETAIL)
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert text.startswith(pi.BARE_UNREAD_DETAIL + ", so no project id was derived."), text
+    assert "origin remote" not in text, text
+    if override_path is None:
+        assert "`git config --get core.bare`" in text, text
+    else:
+        assert override_path in text, text
+    instance = PACTMemory.__new__(PACTMemory)
+    instance._decline_reason = record
+    instance._override_ignored = None
+    instance._decline_detail = pi.BARE_UNREAD_DETAIL
+    refusal = instance._unresolved_identity_message("save refused")
+    assert pi.BARE_UNREAD_DETAIL in refusal and "origin remote" not in refusal, refusal
+
+
 @pytest.mark.parametrize("bare", [True, False])
 def test_core_bare_from_the_config_file_matches_git(tmp_path, bare):
     """`database.core_bare_answer` reads the config file to the answer git

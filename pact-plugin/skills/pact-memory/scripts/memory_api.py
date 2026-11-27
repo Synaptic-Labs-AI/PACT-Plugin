@@ -1305,6 +1305,28 @@ _REDIRECT_MOVED_REMEDY = (
 )
 
 
+def _decline_cause(token: Optional[str], cause_detail: Optional[str]) -> Optional[str]:
+    """The cause a decline prints: its reason's sentence (`_DECLINE_CAUSES`)
+    with the decline's own detail appended, or None for no known reason.
+    A folder-name id declined because git could not read `core.bare` is an
+    `origin_unreadable` decline whose origin was never the problem, so its
+    detail is the whole cause."""
+    if cause_detail == project_identity.BARE_UNREAD_DETAIL:
+        return cause_detail
+    cause = _DECLINE_CAUSES.get(token) if token else None
+    if cause is not None and cause_detail:
+        cause = f"{cause}; {cause_detail}"
+    return cause
+
+
+# The remedy of a `core.bare` read that failed (`_decline_cause`), when no
+# override file is named.
+_BARE_UNREAD_REMEDY = (
+    "Check that git can read the repository's config here: "
+    "`git config --get core.bare` run here prints git's own reason."
+)
+
+
 def _decline_remedy(
     record: Optional[dict], cause_detail: Optional[str] = None
 ) -> Optional[str]:
@@ -1328,6 +1350,8 @@ def _decline_remedy(
     override_path = (record or {}).get("override_path")
     if override_path is not None:
         return _pin_remedy(override_path)
+    if cause_detail == project_identity.BARE_UNREAD_DETAIL:
+        return _BARE_UNREAD_REMEDY
     return _UNPINNABLE_REMEDIES.get(token)
 
 
@@ -1356,14 +1380,12 @@ def _warn_declined(
     the decline's own fixed sentence, appended to the cause.
     """
     token = (record or {}).get("reason")
-    cause = _DECLINE_CAUSES.get(token) if token else None
+    cause = _decline_cause(token, cause_detail)
     if cause is None:
         cause = (
             "the repository at %r has an origin remote that could not be "
             "read or represented as a project id" % (str(root),)
         )
-    if cause_detail:
-        cause = f"{cause}; {cause_detail}"
     if detail:
         cause = f"{cause} ({detail})"
     remedy = _decline_remedy(record, cause_detail)
@@ -5144,10 +5166,9 @@ class PACTMemory:
         ignored = self._override_ignored or {}
         parts = []
         if reason.get("reason"):
-            cause = _DECLINE_CAUSES.get(reason["reason"], reason["reason"])
-            detail = getattr(self, "_decline_detail", None)
-            if detail:
-                cause = f"{cause}; {detail}"
+            cause = _decline_cause(
+                reason["reason"], getattr(self, "_decline_detail", None)
+            ) or reason["reason"]
             parts.append(f"The {reason.get('source') or 'resolver'} rung declined: {cause}.")
         if declarations:
             parts.append("Declarations present: " + "; ".join(declarations) + ".")

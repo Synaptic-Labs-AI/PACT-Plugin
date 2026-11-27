@@ -7244,6 +7244,10 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function memory_api: _LEGACY_NOTICES_QUIET.reset>"): (
             "legacy_notices_quiet restores the legacy read notices when its block ends"
         ),
+        ("call", "<name imported from a project module memory_api: project_identity.BARE_UNREAD_DETAIL>"): (
+            "the core.bare decline's fixed sentence, compared to print it as the whole cause "
+            "with its own remedy; it changes no answer"
+        ),
         ("call", "git_dir_own_name"): (
             "names a --separate-git-dir repository's folder-name id from its git dir's path, "
             "which the identity already resolved; it reads no input"
