@@ -325,6 +325,18 @@ def test_commands_run_from_a_clean_cwd_with_the_checkout_as_project(tmp_path: Pa
     assert not Path(calls[0]["cwd"]).exists()
 
 
+def test_symlinked_temp_root_is_used_by_its_real_path(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    real = tmp_path / "real-root"
+    real.mkdir()
+    link = tmp_path / "link-root"
+    link.symlink_to(real)
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--temp-root", str(link))) == 0
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert {Path(call["cwd"]).parent for call in calls} == {real}
+    assert _result(manifest)["temp_root"] == str(real)
+
+
 def test_temp_root_below_a_memory_file_is_refused_and_recorded(tmp_path: Path) -> None:
     manifest, tool, uv, skills = _setup(tmp_path, ["good"])
     dirty = tmp_path / "dirty"

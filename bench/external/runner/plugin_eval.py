@@ -148,6 +148,7 @@ def run(args: argparse.Namespace) -> int:
     summary: dict[str, Any] = {
         "schema": "pact-bench/plugin-eval/1",
         "plugin_eval_dir": None,
+        "temp_root": None,
         "complete": False,
         "error": None,
         "aborted_command": None,
@@ -173,8 +174,8 @@ def run(args: argparse.Namespace) -> int:
             )
             # uv sync only installs packages; it never needs the provider token.
             sync_env = {key: value for key, value in env.items() if key != "ANTHROPIC_AUTH_TOKEN"}
-            temp_root = Path(args.temp_root).expanduser().absolute()
-            prepare.check_clean_root(temp_root)
+            temp_root = prepare.check_clean_root(Path(args.temp_root))
+            summary["temp_root"] = str(temp_root)
             temp_root.mkdir(parents=True, exist_ok=True)
             cwd = Path(tempfile.mkdtemp(prefix="pact-plugin-eval-", dir=str(temp_root)))
             sync, commands = build_commands(args.uv, plugin_eval_dir, plugin, skills)
