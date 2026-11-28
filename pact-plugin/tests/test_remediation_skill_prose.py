@@ -1618,8 +1618,8 @@ class TestNullOverridePathIsMeasured:
             "identity_detail names the remedy when source is remote helper (a "
             "folder-name id from a remote-helper origin), or when source is origin "
             "remote and the origin is an ssh or scp url whose host looks like an ssh "
-            "host alias (no dot, or a name starting with github.com that is not "
-            "github.com itself, such as github.com-work); else null."
+            "host alias (no dot, or a name in which github.com is followed by a "
+            "character other than a dot, such as github.com-work); else null."
         ) in _table_row(SKILL, "project-id show")
 
     def test_the_show_row_says_process_repo_root_is_the_main_checkout(self):

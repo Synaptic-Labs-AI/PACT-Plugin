@@ -1393,9 +1393,8 @@ SSH_ALIAS_GITHUB_DETAIL = (
 def ssh_alias_detail(url: Optional[str]) -> Optional[str]:
     """The note for an ssh or scp origin whose host looks like an ssh host
     alias, or None: a host with no dot (not a fully qualified name), or one
-    that starts with `github.com` without being github.com, www.github.com or
-    ssh.github.com (`git@github.com-work:o/r`), which gets the github.com
-    example. A fully qualified host that merely contains "github" (a GitHub
+    that starts with `github.com` followed by a character other than a dot
+    (`git@github.com-work:o/r`), which gets the github.com example. A fully qualified host that merely contains "github" (a GitHub
     Enterprise host such as `github.mycorp.com`) gets none."""
     if not isinstance(url, str):
         return None
@@ -1415,7 +1414,9 @@ def ssh_alias_detail(url: Optional[str]) -> Optional[str]:
     host = host.lower()
     if not host or host.startswith("[") or host in ("github.com", "www.github.com", _GITHUB_SSH_443_HOST):
         return None
-    if host.startswith("github.com"):
+    if host.startswith("github.com") and host[len("github.com"):][:1] not in ("", "."):
+        # `github.com-work` is an alias; `github.com.evil.example` is a real,
+        # fully qualified host that only starts with the name.
         return SSH_ALIAS_GITHUB_DETAIL
     return SSH_ALIAS_DETAIL if "." not in host else None
 

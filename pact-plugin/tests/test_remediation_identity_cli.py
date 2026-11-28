@@ -2594,6 +2594,7 @@ def test_a_declined_origin_names_its_reason_and_the_pin(tmp_path, monkeypatch, c
     ("git@gh_work:Owner/Repo.git", "neutral"),
     ("ssh://git@githubwork/Owner/Repo", "neutral"),
     ("git@github.mycorp.com:Owner/Repo.git", None),
+    ("git@github.com.evil.example:Owner/Repo.git", None),
     ("git@github.com:Owner/Repo.git", None),
     ("git@gitlab.example.com:Owner/Repo.git", None),
     ("https://github.com/Owner/Repo", None),
