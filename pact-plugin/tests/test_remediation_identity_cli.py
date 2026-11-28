@@ -436,6 +436,10 @@ class TestTheRekeyRefusalContract:
         assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
         assert reason in envelope["message"], envelope
         assert "--from-another-repository" in envelope["message"], envelope
+        # Only a canonical source can be an earlier id the detection missed.
+        assert ("earlier id of this repository that could not be detected" in envelope["message"]) is (
+            source.startswith("github.com/")
+        ), envelope
         assert _snapshot(store) == before
         code, envelope = _cli([*argv, "--from-another-repository"], capfd)
         assert code == 0, envelope

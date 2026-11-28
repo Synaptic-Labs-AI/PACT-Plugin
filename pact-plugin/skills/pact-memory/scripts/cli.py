@@ -1617,6 +1617,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
 
     own_id = memory.project_id
     foreign_source = None
+    undetected_earlier = ""
     if to_id == own_id and not noop and not args.from_another_repository:
         if legacy_verdict == "excluded":
             foreign_source = (
@@ -1630,6 +1631,11 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 "is a canonical id that is neither this checkout's nor an "
                 "earlier id of it (no file row here places it)"
             )
+            undetected_earlier = (
+                " It is also how to move an earlier id of this repository that "
+                "could not be detected, such as the bucket of a rename that has "
+                "no file row here."
+            )
     if foreign_source is not None:
         # A MOVE INTO THIS CHECKOUT'S ID OF A BUCKET THE READ RULES SAY IS NOT
         # ITS OWN merges another repository's rows into this one and cannot be
@@ -1641,8 +1647,8 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 f"checkout's id ({own_id!r}) would merge another repository's "
                 "rows here, and a rekey cannot be undone. Pass "
                 "--from-another-repository only with the user's explicit "
-                "approval that these rows belong to this repository. Nothing "
-                "was moved."
+                "approval that these rows belong to this repository."
+                f"{undetected_earlier} Nothing was moved."
             ),
         )
     if (
