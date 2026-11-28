@@ -436,7 +436,7 @@ class TestTheRekeyRefusalContract:
     @pytest.mark.parametrize(
         ("source", "reason"),
         [("proj", "was excluded for this checkout"),
-         ("github.com/o/two", "neither this checkout's nor an earlier id")],
+         ("github.com/o/two", "neither this checkout's nor a detected earlier id of it (no file row here places it)")],
         ids=["excluded bucket", "another repository's id"],
     )
     def test_a_foreign_bucket_into_this_checkouts_own_id_is_refused(

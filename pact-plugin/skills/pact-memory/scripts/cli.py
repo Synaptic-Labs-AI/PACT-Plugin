@@ -1338,6 +1338,32 @@ def _bucket_file_rows(store: Path, bucket: str) -> int:
     return _stable_read_only(str(store), count)
 
 
+def _bucket_rows_under(store: Path, bucket: str, roots: list) -> int:
+    """How many of `bucket`'s file rows lie under any of `roots` (this
+    checkout and its worktrees), read without writing. 0 for a store with no
+    files table yet."""
+    from scripts.database import sqlite3 as db_sqlite3
+
+    def count() -> int:
+        conn = _read_only_connection(str(store))
+        try:
+            total = 0
+            for root in roots:
+                prefix = str(root).rstrip("/") + "/"
+                total += conn.execute(
+                    "SELECT COUNT(*) FROM files WHERE project_id = ? AND "
+                    "(path = ? OR substr(path, 1, ?) = ?)",
+                    (bucket, str(root), len(prefix), prefix),
+                ).fetchone()[0]
+            return total
+        except db_sqlite3.OperationalError:
+            return 0
+        finally:
+            conn.close()
+
+    return _stable_read_only(str(store), count)
+
+
 def _own_folder_name_target(memory, from_id: str, to_id: str) -> bool:
     """Whether `to_id` is this session's OWN folder-name id and `from_id` its
     legacy candidate, the one folder-name target a rekey may take.
@@ -1661,9 +1687,22 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         elif is_canonical(from_id) and from_id not in (
             getattr(memory, "_earlier_canonical", None) or {}
         ):
+            roots = (
+                memory._legacy_gate_roots(memory._project_identity_root)[0]
+                if memory._project_identity_root is not None and store.exists()
+                else []
+            )
+            rows_here = _bucket_rows_under(store, from_id, roots) if roots else 0
             foreign_source = (
-                "is a canonical id that is neither this checkout's nor an "
-                "earlier id of it (no file row here places it)"
+                "is a canonical id that is neither this checkout's nor a "
+                "detected earlier id of it "
+                + (
+                    f"(its {rows_here} file row{'' if rows_here == 1 else 's'} "
+                    "here belong to memories saved before this clone, which do "
+                    "not show the rows are this repository's)"
+                    if rows_here
+                    else "(no file row here places it)"
+                )
             )
             undetected_earlier = (
                 " It is also how to move an earlier id of this repository that "

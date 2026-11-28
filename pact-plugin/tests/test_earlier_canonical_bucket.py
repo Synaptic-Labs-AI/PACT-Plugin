@@ -158,6 +158,28 @@ def test_the_earlier_id_moves_into_this_checkouts_id_with_no_override(renamed, c
     assert envelope["result"]["memories"] == 2, envelope
 
 
+@pytest.mark.parametrize("source, reason", [
+    (SHARED, "its 1 file row here belong to memories saved before this clone"),
+    (ELSEWHERE, "(no file row here places it)"),
+])
+def test_the_refusal_says_why_a_canonical_bucket_is_no_detected_earlier_id(renamed, capfd, source, reason):
+    """A repository cloned again after its rename has its old rows inside the
+    checkout, saved before this clone, so they do not make the bucket a
+    detected earlier id; the refusal says that, not that no row is here.
+    RED WHEN the reason is not the bucket's own."""
+    from scripts.cli import main
+
+    _repo, store = renamed
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "rekey", f"--from={source}", f"--to={NEW}", "--db-path", str(store)])
+    captured = capfd.readouterr()
+    envelope = json.loads(captured.out or captured.err)
+    assert exit_info.value.code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
+    assert reason in envelope["message"], envelope
+    assert "--from-another-repository" in envelope["message"], envelope
+    assert "earlier id of this repository that could not be detected" in envelope["message"], envelope
+
+
 @pytest.mark.parametrize("verb", [["list"], ["search", "c"]])
 def test_list_and_search_name_the_earlier_id_on_stdout(renamed, capfd, verb):
     """The earlier id's bucket is left out of the read, so list and search
