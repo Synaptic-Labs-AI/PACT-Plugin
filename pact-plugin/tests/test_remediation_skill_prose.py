@@ -749,7 +749,8 @@ class TestLegacyScopeStatesAreDocumented:
             "portable origin or with a remote-helper or ftp transport origin "
             "(<helper>::<address>, any <scheme>:// git does not transport "
             "itself, such as s3://, hf://, rad:// or codecommit://, or ftp:// "
-            "and ftps://), a non-git "
+            "and ftps://), an origin git cannot use (text before its :// that is "
+            "not a scheme, such as a_b://), a non-git "
             "project folder, the home-directory landing, or "
             "the user-scope project_id setting) reads and saves its same-name "
             "bucket, shared with every folder of the same name and every "
@@ -1618,7 +1619,8 @@ class TestNullOverridePathIsMeasured:
     def test_the_show_row_names_the_remote_helper_source(self):
         assert (
             "identity_detail names the remedy when source is remote helper (a "
-            "folder-name id from a remote-helper origin), or when source is origin "
+            "folder-name id from a remote-helper or ftp origin) or unusable origin "
+            "(a folder-name id from an origin git cannot use), or when source is origin "
             "remote and the origin is an ssh or scp url whose host looks like an ssh "
             "host alias (no dot, or a name in which github.com is followed by a "
             "character other than a dot, such as github.com-work); else null."
@@ -7295,6 +7297,14 @@ class TestEveryRouteEntryConditionIsARoute:
         ),
         ("call", "<name imported from a project module memory_api: project_identity.REMOTE_HELPER_DETAIL>"): (
             "the identity layer's fixed remote-helper sentence, compared to a detected detail to "
+            "disclose the source and warn once"
+        ),
+        ("call", "<name imported from a project module cli: UNUSABLE_ORIGIN_DETAIL>"): (
+            "the identity layer's fixed unusable-origin sentence, which project-id show reports "
+            "for an 'unusable origin' source"
+        ),
+        ("call", "<name imported from a project module memory_api: project_identity.UNUSABLE_ORIGIN_DETAIL>"): (
+            "the identity layer's fixed unusable-origin sentence, compared to a detected detail to "
             "disclose the source and warn once"
         ),
         ("call", "<call to no function memory_api: _LEGACY_NOTICES_QUIET.get>"): (

@@ -87,6 +87,7 @@ from scripts.memory_api import (
 )
 from scripts.project_identity import (
     REMOTE_HELPER_DETAIL,
+    UNUSABLE_ORIGIN_DETAIL,
     is_canonical,
     ssh_alias_detail,
 )
@@ -1150,6 +1151,8 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
                 "identity_detail": (
                     REMOTE_HELPER_DETAIL
                     if memory._project_id_source == "remote helper"
+                    else UNUSABLE_ORIGIN_DETAIL
+                    if memory._project_id_source == "unusable origin"
                     else ssh_alias_detail(_origin_url_of(memory))
                     if memory._project_id_source == "origin remote"
                     else None

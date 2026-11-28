@@ -3102,6 +3102,28 @@ def test_a_partial_move_prints_no_bucket_wide_unattributed_note(identity_env, st
     assert "came from no recorded session" not in output([*base, "--only-placed-here", "--db-path", str(store)])
 
 
+@pytest.mark.parametrize(("remote", "source", "detail"), [
+    ("a_b://bad", "unusable origin", "git cannot use its origin"),
+    ("git@host:x://y", "unusable origin", "git cannot use its origin"),
+    ("1x://bad", "remote helper", "remote-helper or ftp transport"),
+])
+def test_a_save_from_an_origin_git_cannot_use_uses_the_folder_name(
+    identity_env, store, monkeypatch, capfd, remote, source, detail
+):
+    """git refuses an origin whose text before :// is no scheme ("protocol
+    'a_b' is not supported") and hands a digit-first scheme to a helper;
+    either saves under the folder name, as the merge base did, and show names
+    what happened. RED WHEN the save is refused, or the detail misnames it."""
+    repo = make_repo(identity_env / "widget", remote=remote)
+    monkeypatch.chdir(repo)
+    code, saved = _cli(["save", json.dumps({"context": "odd origin"}), "--db-path", str(store)], capfd)
+    assert code == 0, saved
+    code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    result = shown["result"]
+    assert (result["project_id"], result["source"]) == ("widget", source), shown
+    assert detail in result["identity_detail"], shown
+
+
 @pytest.mark.parametrize("remote", [
     "s3://my-bucket/widget", "hf://datasets/acme/widget",
     "ftp://host.example/acme/widget", "ftps://host.example/acme/widget",

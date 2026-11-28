@@ -1831,6 +1831,8 @@ def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
     if identity.detail == project_identity.REMOTE_HELPER_DETAIL:
         # The folder-name id of a remote-helper origin: disclosed as such.
         return "remote helper"
+    if identity.detail == project_identity.UNUSABLE_ORIGIN_DETAIL:
+        return "unusable origin"
     return rung_label
 
 
@@ -3695,7 +3697,10 @@ class PACTMemory:
         PACTMemory._warn_override_ignored(identity)
         if (
             identity.project_id is not None
-            and identity.detail == project_identity.REMOTE_HELPER_DETAIL
+            and identity.detail in (
+                project_identity.REMOTE_HELPER_DETAIL,
+                project_identity.UNUSABLE_ORIGIN_DETAIL,
+            )
             and str(root) not in _REMOTE_HELPER_WARNED
         ):
             # ONCE PER ROOT, AND NEVER THE URL: a helper address can carry an

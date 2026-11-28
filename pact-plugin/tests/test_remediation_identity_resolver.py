@@ -4727,6 +4727,9 @@ _DESCRIBED_PRINTED_CLAUSES = {
     "it uses its folder-name id (its folder's name, or its git dir's name for a "
     "--separate-git-dir repository)": "says which id it binds",
     "its origin is a remote-helper or ftp transport, which has no portable id": _OBSERVED,
+    # The unusable-origin disclosure (UNUSABLE_ORIGIN_DETAIL): no change to a `.git`.
+    "git cannot use its origin (the text before its :// is not a scheme git accepts": _OBSERVED,
+    "git reports the protocol as not supported), which has no portable id": _OBSERVED,
     "A `git init --separate-git-dir` layout of your own is a user decision":
         "names the user's own layout as theirs to decide",
     "A full 32-character id still resolves": "says which lookups still work",

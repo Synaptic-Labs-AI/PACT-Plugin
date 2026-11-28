@@ -3473,15 +3473,25 @@ def test_the_classifier_docstring_states_the_host_rule_valid_host_applies():
     ("https://github.com/acme/widget", pi.OUTCOME_CANONICAL),
     ("ftp://host.example/acme/widget", pi.OUTCOME_NO_PORTABLE_ORIGIN),
     ("FTPS://host.example/acme/widget", pi.OUTCOME_NO_PORTABLE_ORIGIN),
-    ("1x://host.example/acme/widget", pi.OUTCOME_DECLINE),
+    ("1x://host.example/acme/widget", pi.OUTCOME_NO_PORTABLE_ORIGIN),
+    ("9://bad", pi.OUTCOME_NO_PORTABLE_ORIGIN),
+    ("a_b://bad", pi.OUTCOME_NO_PORTABLE_ORIGIN),
+    ("-x://bad", pi.OUTCOME_NO_PORTABLE_ORIGIN),
+    ("git@host:x://y", pi.OUTCOME_NO_PORTABLE_ORIGIN),
+    ("https://h.example:0/o/r", pi.OUTCOME_DECLINE),
+    ("a_b://bad\x01", pi.OUTCOME_DECLINE),
 ])
 def test_any_scheme_git_hands_to_a_helper_is_a_remote_helper(url, outcome):
     """git hands any scheme it does not transport itself to
     git-remote-<scheme>, so s3://, hf:// and rad:// have no portable id and
     fall back to the folder name, as a remote-helper origin does; so do ftp://
-    and ftps://, which git fetches over curl. A malformed scheme still
-    declines. RED WHEN an unknown helper scheme or an ftp origin declines,
-    refusing every save."""
+    and ftps://, which git fetches over curl. git's scheme may start with a
+    digit (git 2.43 hands 1x:// to git-remote-1x), and text before :// that
+    is no scheme (a_b, -x, git@host:x) is a url git refuses ("protocol ... is
+    not supported"): both fall back to the folder name. An id scheme with a
+    bad port, and a control character, still decline. RED WHEN an origin
+    git cannot use, or a digit-first helper scheme, declines, refusing every
+    save."""
     assert pi.classify_remote_origin(url)[0] == outcome
 
 

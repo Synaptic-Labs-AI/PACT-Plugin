@@ -58,8 +58,11 @@ _LOCAL_SCHEMES = frozenset({"file"})
 
 # `scheme://` — the scheme is matched here and validated against the accepted
 # set afterwards, so an unsupported scheme can be classified rather than
-# silently treated as a local path.
-_SCHEME_PREFIX_RE = re.compile(r"^(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*)://")
+# silently treated as a local path. git's own scheme rule: a letter or digit,
+# then letters, digits, `+`, `-` and `.` (git 2.43 hands `1x://` to
+# git-remote-1x); any other text before a `://` is a url git cannot use
+# (`_git_cannot_use`).
+_SCHEME_PREFIX_RE = re.compile(r"^(?P<scheme>[A-Za-z0-9][A-Za-z0-9+.-]*)://")
 
 # scp-style `[user@]host:path`, by GIT'S OWN RULE: a value is scp syntax when
 # it contains `:` and no `/` precedes the first `:`. The user is optional, so
@@ -1300,6 +1303,31 @@ REMOTE_HELPER_DETAIL = (
 )
 
 
+# The `detail` for a folder-name id bound because git cannot use the origin
+# at all (`_git_cannot_use`).
+UNUSABLE_ORIGIN_DETAIL = (
+    "git cannot use its origin (the text before its :// is not a scheme git "
+    "accepts, so git reports the protocol as not supported), which has no "
+    "portable id, so it uses its folder-name id (its folder's name, or its git "
+    "dir's name for a --separate-git-dir repository): a bucket shared with any "
+    "folder of that name. A canonical id written to "
+    "<git-common-dir>/pact-project-id gives it its own"
+)
+
+
+def _git_cannot_use(url: str) -> bool:
+    """Whether git refuses an origin value outright: it holds a `://` and
+    the text before the first one is not a scheme (`_SCHEME_PREFIX_RE`),
+    which git reports as "protocol '<text>' is not supported" whatever the
+    text holds (`a_b`, `-x`, `git@host:x`, a path). A value with a
+    control character, a leading BOM or leading whitespace is not one (it
+    declines as before)."""
+    value = _strip_one_terminator(url)
+    if _has_control_character(value) or value[:1] in ("\ufeff", " ", "\t"):
+        return False
+    return "://" in value and _SCHEME_PREFIX_RE.match(value) is None
+
+
 def _is_unportable_transport(url: str) -> bool:
     """Whether an origin value names a transport with no portable id: the
     `<helper>::<address>` form, or a `<scheme>://` outside the schemes an id
@@ -1436,8 +1464,9 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
 
     - canonical: a network remote that parses under the canonical grammar.
     - no_portable_origin: no origin, an empty or whitespace-only string, a
-      local path or `file://`, or a remote-helper or ftp transport
-      (`_is_unportable_transport`). The caller falls through to the basename.
+      local path or `file://`, a remote-helper or ftp transport
+      (`_is_unportable_transport`), or a url git cannot use
+      (`_git_cannot_use`). The caller falls through to the basename.
       (An empty value inside the url list never reaches this function:
       `read_origin` reports it as `empty_entry`, which declines. A
       whitespace-only value does reach it, as an ordinary first url.)
@@ -1465,7 +1494,7 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
     identifier = normalize_remote_url(url)
     if identifier is not None:
         return OUTCOME_CANONICAL, identifier
-    if _is_unportable_transport(url):
+    if _is_unportable_transport(url) or _git_cannot_use(url):
         return OUTCOME_NO_PORTABLE_ORIGIN, None
     if _is_network_shaped(url):
         return OUTCOME_DECLINE, None
@@ -2893,5 +2922,12 @@ def detect_id_for_root(
             return _bare_unread_decline(override_ignored, override_path)
         return RootIdentity(
             folder, "basename", "basename", override_ignored, None, REMOTE_HELPER_DETAIL
+        )
+    if _git_cannot_use(origin.value):
+        folder = repository_folder_name(root, common_dir)
+        if folder is None:
+            return _bare_unread_decline(override_ignored, override_path)
+        return RootIdentity(
+            folder, "basename", "basename", override_ignored, None, UNUSABLE_ORIGIN_DETAIL
         )
     return _folder_name_identity(root, common_dir, override_ignored, override_path)
