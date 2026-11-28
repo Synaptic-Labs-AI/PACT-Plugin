@@ -304,7 +304,7 @@ def test_a_repository_on_an_underscore_http_host_saves_under_its_id(tmp_path, mo
     """Parity with the merge base, which saved such a repository under its
     folder name: a save succeeds and files under the remote's id. RED WHEN
     the save fails with PROJECT_IDENTITY_UNRESOLVED."""
-    import sqlite3
+    from scripts.database import sqlite3
 
     from fixtures.identity_git import assert_outside_repository, make_repo
     from scripts.memory_api import PACTMemory

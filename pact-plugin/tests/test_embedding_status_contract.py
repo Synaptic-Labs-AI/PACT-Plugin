@@ -464,7 +464,7 @@ class TestAmbientWorkingMemorySyncIsRefusedUnderPytest:
 
         # POSITIVE ARM 2: the record really is in the database, so the sync is
         # the ONLY thing that did not happen.
-        import sqlite3 as _sqlite3
+        from scripts.database import sqlite3 as _sqlite3
         with _sqlite3.connect(db) as con:
             count = con.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         assert count == 1, f"expected the probe record to be stored, found {count}"

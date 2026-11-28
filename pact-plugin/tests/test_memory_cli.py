@@ -74,10 +74,7 @@ def mock_pact_memory():
 def cli_db(tmp_path):
     """Create a temporary database for subprocess tests."""
     # Use the same sqlite3 module as the codebase
-    try:
-        import pysqlite3 as sqlite3
-    except ImportError:
-        import sqlite3
+    from scripts.database import sqlite3
 
     db_path = tmp_path / "cli_test.db"
     conn = sqlite3.connect(str(db_path))
@@ -707,7 +704,7 @@ class TestApiSaveVerification:
     @pytest.fixture
     def api_memory(self, tmp_path):
         """Create a PACTMemory instance with a real temp database."""
-        import sqlite3
+        from scripts.database import sqlite3
         db_path = tmp_path / "verify_test.db"
         conn = sqlite3.connect(str(db_path))
         create_test_schema(conn)
@@ -772,7 +769,7 @@ class TestApiSaveVerification:
         """
         import scripts.memory_api as memory_api_module
 
-        import sqlite3
+        from scripts.database import sqlite3
         db_path = tmp_path / "order_test.db"
         conn = sqlite3.connect(str(db_path))
         create_test_schema(conn)
@@ -2050,10 +2047,7 @@ class TestCliSubprocess:
     def test_get_unique_prefix_resolves_via_subprocess(self, cli_script_path, cli_db):
         """E2E: real cli.py → memory_api → database → SQL roundtrip on a unique prefix."""
         from scripts.database import create_memory
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
 
         full_id = "fa11ce5" + "1" + "0" * 24  # 32 chars; prefix "fa11ce5" is 7 chars
         conn = sqlite3.connect(str(cli_db))
@@ -2080,10 +2074,7 @@ class TestCliSubprocess:
     def test_get_ambiguous_prefix_envelope_via_subprocess(self, cli_script_path, cli_db):
         """E2E: ambiguous prefix returns AMBIGUOUS_PREFIX envelope with full match list."""
         from scripts.database import create_memory
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
 
         id_a = "ambig00" + "a" + "0" * 24
         id_b = "ambig00" + "b" + "0" * 24
@@ -2140,10 +2131,7 @@ class TestCliSubprocess:
     def _seed_memory(self, db_path, memory_id, context):
         """Helper: insert one memory via storage primitive (bypasses CLI ingress strip)."""
         from scripts.database import create_memory
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         with patch("scripts.database.ensure_initialized"):
@@ -3544,10 +3532,7 @@ class TestErrorEnvelopeSurvivesASharedStderr:
         the noisy path unexercised.
         """
         from scripts.database import create_memory
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
 
         id_a = "ambig00" + "a" + "0" * 24
         id_b = "ambig00" + "b" + "0" * 24
@@ -4367,7 +4352,7 @@ def _backdate(db_path, memory_id, stamp):
     here are the space form, which is what the schema DEFAULT emits and not
     what the writer emits -- an arm that needs the production form must say
     so explicitly."""
-    import sqlite3
+    from scripts.database import sqlite3
     conn = sqlite3.connect(str(db_path))
     conn.execute("UPDATE memories SET created_at = ? WHERE id = ?", (stamp, memory_id))
     conn.commit()
@@ -4504,7 +4489,7 @@ class TestApiSync:
 
     @pytest.fixture
     def api_memory(self, tmp_path):
-        import sqlite3
+        from scripts.database import sqlite3
         db_path = tmp_path / "sync_test.db"
         conn = sqlite3.connect(str(db_path))
         create_test_schema(conn)
@@ -4951,10 +4936,7 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
         content assertion below.
         """
         from scripts.config import resolve_db_path, store_scope
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
 
         with store_scope(cli_db):
             assert Path(resolve_db_path()).resolve() == Path(cli_db).resolve(), (
@@ -5084,10 +5066,7 @@ _ROW_B2 = _PREFIX + "4" + "0" * 24
 def _seed_scoped_rows(cli_db, rows):
     """Seed (id, project_id) rows, BOUND to the throwaway store in-process."""
     from scripts.config import resolve_db_path, store_scope
-    try:
-        import pysqlite3 as sqlite3
-    except ImportError:
-        import sqlite3
+    from scripts.database import sqlite3
 
     with store_scope(cli_db):
         assert Path(resolve_db_path()).resolve() == Path(cli_db).resolve(), (
@@ -5110,10 +5089,7 @@ def _seed_scoped_rows(cli_db, rows):
 
 
 def _resolver_connection(cli_db):
-    try:
-        import pysqlite3 as sqlite3
-    except ImportError:
-        import sqlite3
+    from scripts.database import sqlite3
 
     conn = sqlite3.connect(str(cli_db))
     conn.row_factory = sqlite3.Row
@@ -5335,10 +5311,7 @@ class TestTheCliPrefixResolvesOnlyWithinItsProject:
         self, cli_script_path, cli_db
     ):
         from scripts.database import create_memory
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
 
         conn = sqlite3.connect(str(cli_db))
         conn.row_factory = sqlite3.Row

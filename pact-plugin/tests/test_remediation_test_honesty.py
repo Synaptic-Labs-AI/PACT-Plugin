@@ -28,7 +28,7 @@ import functools
 import logging
 import os
 import re
-import sqlite3
+from scripts.database import sqlite3
 from pathlib import Path
 
 import pytest

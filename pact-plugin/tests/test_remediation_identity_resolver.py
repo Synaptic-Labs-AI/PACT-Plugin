@@ -2310,7 +2310,7 @@ class TestUpdateFindsTheRowBeforeItRefuses:
         its session_id. RED WHEN the session_id refusal ignores the move."""
         from scripts.database import db_connection, get_memory
 
-        import sqlite3
+        from scripts.database import sqlite3
 
         row = "e" * 32
         memory, store = self._memory(identity_env, monkeypatch, [(row, "proj")])

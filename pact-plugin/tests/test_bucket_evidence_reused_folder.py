@@ -14,7 +14,7 @@ Used by: pytest; exercises scripts.database.bucket_evidence on real files.
 
 from __future__ import annotations
 
-import sqlite3
+from scripts.database import sqlite3
 import os
 from datetime import datetime, timedelta, timezone
 

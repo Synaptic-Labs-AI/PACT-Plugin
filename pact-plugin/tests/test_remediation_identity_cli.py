@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
-import sqlite3
+from scripts.database import sqlite3
 from pathlib import Path
 
 import pytest

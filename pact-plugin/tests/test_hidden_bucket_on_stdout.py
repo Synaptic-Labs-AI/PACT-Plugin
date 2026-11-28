@@ -9,7 +9,7 @@ Used by: pytest; runs the CLI in process against a real repository and store.
 from __future__ import annotations
 
 import json
-import sqlite3
+from scripts.database import sqlite3
 
 import pytest
 from fixtures.identity_git import assert_outside_repository, make_repo

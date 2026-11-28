@@ -34,10 +34,7 @@ import pytest
 
 from helpers import create_test_schema
 
-try:
-    import pysqlite3 as sqlite3
-except ImportError:
-    import sqlite3
+from scripts.database import sqlite3
 
 from scripts.database import create_memory  # noqa: E402
 

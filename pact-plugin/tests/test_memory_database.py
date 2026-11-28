@@ -36,10 +36,7 @@ import scripts.embedding_catchup as embedding_catchup
 import scripts.search as memory_search
 
 # Use the same sqlite3 module that database.py uses (pysqlite3 if available)
-try:
-    import pysqlite3 as sqlite3
-except ImportError:
-    import sqlite3
+from scripts.database import sqlite3
 
 
 @pytest.fixture
@@ -1360,12 +1357,12 @@ class TestTOCTOUMitigation:
     def test_new_db_file_created_with_600(self, tmp_path):
         """New database file should be created with mode 0o600 via O_CREAT|O_EXCL."""
         import stat
-        import sqlite3 as stdlib_sqlite3
+        from scripts.database import sqlite3 as store_sqlite3
 
         db_path = tmp_path / "new.db"
         assert not db_path.exists()
 
-        with patch("scripts.database.sqlite3", stdlib_sqlite3):
+        with patch("scripts.database.sqlite3", store_sqlite3):
             from scripts.database import get_connection
             conn = get_connection(db_path=db_path)
             conn.close()
@@ -1376,7 +1373,7 @@ class TestTOCTOUMitigation:
 
     def test_race_condition_file_exists_error_handled(self, tmp_path):
         """FileExistsError during O_CREAT|O_EXCL should be handled gracefully."""
-        import sqlite3 as stdlib_sqlite3
+        from scripts.database import sqlite3 as store_sqlite3
 
         db_path = tmp_path / "race.db"
 
@@ -1387,7 +1384,7 @@ class TestTOCTOUMitigation:
                 raise FileExistsError("simulated race condition")
             return original_open(path, flags, mode)
 
-        with patch("scripts.database.sqlite3", stdlib_sqlite3), \
+        with patch("scripts.database.sqlite3", store_sqlite3), \
              patch("scripts.database.os.open", side_effect=mock_open):
             from scripts.database import get_connection
             conn = get_connection(db_path=db_path)
@@ -1399,11 +1396,11 @@ class TestTOCTOUMitigation:
     def test_wal_sidecar_permissions_set_on_new_db(self, tmp_path):
         """WAL sidecar files should be chmod'd to 0o600 on new database creation."""
         import stat
-        import sqlite3 as stdlib_sqlite3
+        from scripts.database import sqlite3 as store_sqlite3
 
         db_path = tmp_path / "wal_test.db"
 
-        with patch("scripts.database.sqlite3", stdlib_sqlite3):
+        with patch("scripts.database.sqlite3", store_sqlite3):
             from scripts.database import get_connection
             conn = get_connection(db_path=db_path)
             # Force WAL creation by writing data
@@ -1423,7 +1420,7 @@ class TestTOCTOUMitigation:
 
     def test_existing_db_skips_toctou(self, tmp_path):
         """Pre-existing database file should not trigger O_CREAT|O_EXCL."""
-        import sqlite3 as stdlib_sqlite3
+        from scripts.database import sqlite3 as store_sqlite3
 
         db_path = tmp_path / "existing.db"
         # Pre-create the file
@@ -1436,7 +1433,7 @@ class TestTOCTOUMitigation:
                 call_log.append(flags)
             return original_open(path, flags, mode)
 
-        with patch("scripts.database.sqlite3", stdlib_sqlite3), \
+        with patch("scripts.database.sqlite3", store_sqlite3), \
              patch("scripts.database.os.open", side_effect=tracking_open):
             from scripts.database import get_connection
             conn = get_connection(db_path=db_path)

@@ -35,7 +35,7 @@ import json
 import logging
 import os
 import shutil
-import sqlite3
+from scripts.database import sqlite3
 import subprocess
 import sys
 import uuid

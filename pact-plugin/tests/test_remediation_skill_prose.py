@@ -216,7 +216,7 @@ class TestCliReadEffectOnTheStore:
     _cli = TestExitCodeTableMatchesTheCli()
 
     def test_a_read_keeps_an_existing_stores_journal_mode(self, tmp_path):
-        import sqlite3
+        from scripts.database import sqlite3
 
         store = self._cli._store(tmp_path)
         conn = sqlite3.connect(store)
@@ -854,7 +854,7 @@ class TestRekeyRemediesNameTheirTarget:
         an empty --from bucket answers from_bucket_empty; both carry
         target_defaulted and legacy_verdict."""
         import json
-        import sqlite3
+        from scripts.database import sqlite3
 
         from fixtures.identity_git import assert_outside_repository
         from helpers import create_test_schema
@@ -931,7 +931,7 @@ class TestRepositorySessionsNeverWriteAFolderNameBucket:
         assert "LEGACY_BUCKET_WRITE_REFUSED" in row2
 
     def test_the_remedy_is_the_one_the_refusal_prints(self, tmp_path, monkeypatch):
-        import sqlite3
+        from scripts.database import sqlite3
 
         from fixtures.identity_git import assert_outside_repository, make_repo
         from helpers import create_test_schema
@@ -1035,7 +1035,7 @@ class TestCalibrationCountReadsTheWholeScope:
     def test_the_documented_sql_and_binding_count_both_buckets(self, tmp_path):
         """Executes the prose's SQL with the prose's own binding, warnings fatal."""
         import json
-        import sqlite3
+        from scripts.database import sqlite3
         import warnings
 
         store = tmp_path / "memory.db"

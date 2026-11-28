@@ -18,7 +18,7 @@ import ast
 import json
 import logging
 import os
-import sqlite3
+from scripts.database import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 

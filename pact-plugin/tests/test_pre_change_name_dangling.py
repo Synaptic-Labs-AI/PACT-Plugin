@@ -11,7 +11,7 @@ Used by: pytest; exercises scripts.database.bucket_evidence with real files.
 from __future__ import annotations
 
 import os
-import sqlite3
+from scripts.database import sqlite3
 
 import pytest
 

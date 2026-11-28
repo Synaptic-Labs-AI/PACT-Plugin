@@ -972,7 +972,7 @@ class TestSaveIngressRejectsNulFilePaths:
         # NOTHING WRITTEN. `_ensure_ready()` legitimately creates the store
         # FILE, so the assertion is on ROWS: before the fix the memory row
         # persisted while the error text claimed nothing was written.
-        import sqlite3
+        from scripts.database import sqlite3
 
         rows = 0
         if store.exists():
@@ -993,7 +993,7 @@ class TestSaveIngressRejectsNulFilePaths:
         a NUL test either way, so only this arm distinguishes "refused the
         type" from "decoded it and let the original bytes through" — measured
         under the old handling: 1 memory row, 0 file rows."""
-        import sqlite3
+        from scripts.database import sqlite3
 
         import scripts.memory_api as memory_api
 
@@ -1036,7 +1036,7 @@ class TestSaveIngressRejectsNulFilePaths:
         memory row was committed and the file layer raised TypeError later.
         The row count is checked BEFORE the error type, so that regression
         reds at the row count whichever exception the late failure raises."""
-        import sqlite3
+        from scripts.database import sqlite3
 
         import scripts.memory_api as memory_api
 

@@ -92,7 +92,7 @@ def _env(project):
 
 
 def _store(tmp_path, name):
-    import sqlite3
+    from scripts.database import sqlite3
     db = tmp_path / name
     conn = sqlite3.connect(str(db))
     create_test_schema(conn)

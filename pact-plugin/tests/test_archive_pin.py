@@ -49,7 +49,7 @@ import ast
 import json
 import os
 import re
-import sqlite3
+from scripts.database import sqlite3  # noqa: E402
 import subprocess
 import sys
 from pathlib import Path

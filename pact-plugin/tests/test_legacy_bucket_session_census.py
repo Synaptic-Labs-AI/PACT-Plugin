@@ -176,7 +176,7 @@ def test_another_process_write_mid_command_re_decides_the_bucket(checkout, caplo
     another connection (another process) deletes its file row; the next read
     in the same pass must re-decide (unproven), not reuse the cached verdict.
     RED WHEN the per-bucket verdict cache ignores the store's change stamp."""
-    import sqlite3
+    from scripts.database import sqlite3
 
     repo, store, _config = checkout
     _rows(store, [("m1", None)], file_path=str(repo.resolve() / "src" / "a.py"))
