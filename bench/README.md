@@ -39,15 +39,17 @@ nothing else, then the scratch settings env, then:
 prepare writes ANTHROPIC_BASE_URL (--base-url) and the model (--model) into the
 scratch settings env, so the settings and the child agree; native-eval takes no
 --model and uses the prepared model. The harness itself writes the token to no
-file, and the manifest and prepare's stdout carry no child output, but files
+file, and the manifest, prepare's stdout and its error messages carry no child output or
+child-reported string, but files
 that hold child output (provider-check.json, kept transcripts) can contain it: keep --out under bench/.runs/,
 which is gitignored. prepare warns when --out is inside the repository but
 outside bench/.runs/.
 
 The harness starts each claude child (prepare --verify, native-eval) from a
 fresh directory under --temp-root (default /tmp). Its real path must be outside
-the repository with no CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md or
-non-empty .claude/rules directory in it or any parent. Sessions that claude plugin eval starts in its own scaffolds choose
+the repository with no CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md,
+.claude/settings.json, .claude/settings.local.json or non-empty .claude/rules
+directory in it or any parent. Sessions that claude plugin eval starts in its own scaffolds choose
 their own directories.
 
 ## Inspect-only first step

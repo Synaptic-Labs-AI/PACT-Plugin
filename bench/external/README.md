@@ -100,15 +100,22 @@ native-eval results land under `<out>/native-eval/`. All three plugin sources
 object `env`, a non-empty token file, `--plugin-dir`, a clean source unless
 `--allow-dirty`, and the `claude` binary with `--verify`) before it creates
 `<out>` (an `--out` that exists and is not a directory is refused first); `--plugin-ref` and `--plugin-dir` cannot be combined.
+The clean-source check counts every untracked file under `pact-plugin/`, and
+prepare's git commands ignore inherited `GIT_*` variables and the global and
+system git config, so a file that only your global `excludesFile` ignores counts
+as dirty (use `--allow-dirty` or a repository `.gitignore` entry), and a
+repository trusted only through a global `safe.directory` entry fails with a git
+error.
 
 **The harness starts each `claude` child from a clean directory.** Claude Code
 can load `CLAUDE.md` files from the working directory and its parents, so
 `prepare --verify` and `native-eval` start their child from a fresh directory
 under `--temp-root` (default `/tmp` for both). The temp root is resolved to its
 real path (symlinks followed) and refused if it resolves into the repository,
-has a `CLAUDE.md`, `CLAUDE.local.md` or `.claude/CLAUDE.md`, or a `.claude/rules`
-directory holding any file (an unreadable one counts), in it or any parent, or
-exists and is not a directory. These are the locations the harness checks, not
+has a `CLAUDE.md`, `CLAUDE.local.md`, `.claude/CLAUDE.md`, `.claude/settings.json`
+or `.claude/settings.local.json`, or a `.claude/rules` directory holding any file
+(an unreadable one, or one holding a symlinked subdirectory, counts), in it or
+any parent, or exists and is not a directory. These are the locations the harness checks, not
 a list of every location Claude Code reads. A temp root under `$HOME` fails the check when
 `~/.claude/CLAUDE.md` exists. `provider-check.json` and
 `native-eval/result.json` record the real working directory as `cwd`. This
@@ -124,9 +131,9 @@ is `native-eval/kept-temp/`, `native-eval/runs/`, `report.json`/`report.html`,
 `native-eval/stdout.txt`/`stderr.txt`, `plugin-eval/result.json`,
 `plugin-eval/*.stdout.json`/`*.stderr.txt`, `plugin-eval/sync.stdout.txt`/`sync.stderr.txt`,
 `provider-check.json` and `config/` (session transcripts). `manifest.json`,
-`settings.json` and `prepare`'s stdout carry no child output; the manifest's
-`provider.check` holds only `path`, `exit_code`, `model_keys`, `is_error` and
-`cwd`, and the full check record is in `provider-check.json`. Only `bench/.runs/` is gitignored. `prepare` warns on stderr when `--out` is
+`settings.json`, `prepare`'s stdout and its error messages carry no child
+output or child-reported string; the manifest's `provider.check` holds only
+`path`, `cwd`, `exit_code` and two booleans (`is_error`, `resolved_model`), and the full check record is in `provider-check.json`. Only `bench/.runs/` is gitignored. `prepare` warns on stderr when `--out` is
 inside the repository but outside `bench/.runs/`; it does not refuse.
 
 ## Provider configuration (DeepSeek)
@@ -213,7 +220,10 @@ is created. `--keep-temp` scaffolds are moved to
 `pact-native-XXXXXXXX` name), and the temp root is then deleted, also when a
 move fails (for example across filesystems); a failure is recorded in
 `cleanup_error`, which names the keep target and says when a partial copy was
-left there, and the run exits 1. A
+left there, and the run exits 1. When `--out` is on a different filesystem from
+`--temp-root` (for example the default `/tmp` on tmpfs), keeping scaffolds is a
+copy, which can fail on files such as Unix sockets, so such a run with
+`--keep-temp` output can end with `cleanup_error` and exit 1. A
 previous run's `report.json` and `report.html` are deleted at the start of each
 run, so `result.json` names only reports this run wrote. While the eval child
 runs, a SIGTERM or SIGHUP kills its process group, is recorded as
@@ -238,8 +248,9 @@ authored cases and the inventory they must meet are in
 ```
 
 Runs `uv sync --frozen --extra llm` (without the provider token; the score
-commands get `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL`, which PluginEval's
-judge passes to the `claude` CLI it runs, per its source at the pinned commit),
+commands get `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL`, which are expected
+to reach the `claude` CLI that PluginEval's judge runs, through claude-agent-sdk
+passing its inherited environment; this is not verified in this tree),
 then
 `plugin-eval score <scratch plugin> --depth quick` (whole plugin; static layer
 only) and `plugin-eval score <scratch plugin>/skills/<skill> --depth standard`
@@ -262,7 +273,9 @@ before they were resolved. A command
 that times out is recorded with exit code 124 and `timed_out: true`, with the
 output drained after the kill (`output_complete` false if that bounded drain ran
 out), and the run continues. An unexpected error in one command is recorded as
-`{label, command, exit_code: null, error}` and the run continues; a missing `uv`
+`{label, command, exit_code: null, error}` and the run continues. Each
+command's raw output is saved as `<NN>-<slug>.stdout.json`/`.stderr.txt` (`NN` is
+its position, `00` the whole plugin; the record's `output_stem` names it); a missing `uv`
 or a `uv sync` failure or timeout aborts, setting `error` and `aborted_command`
 and listing the rest in `not_run`. `complete` is true only when every command
 was attempted. The runner exits 1 if any command failed, timed out or printed no
