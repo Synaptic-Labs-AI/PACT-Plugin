@@ -19,7 +19,8 @@ contents fails (an evals/results/ dir the
 tool wrote is moved to <run>/native-eval/plugin-evals-results/<run id>/ first).
 The scaffold dirs that --keep-temp leaves under TMPDIR are moved to
 <run>/native-eval/kept-temp/<run id>/ first (the eval tool makes some of them read-only, so they are made writable
-before the move). A cleanup failure is recorded and makes the run exit 1.
+before the move). A cleanup failure is recorded and makes the run exit 1; a
+failed keep names its target and says when a partial copy was left there.
 """
 from __future__ import annotations
 
@@ -151,15 +152,17 @@ def _cleanup(short_root: Path | None, injected: Path | None, out: Path, record: 
         if root is None or not root.exists():
             continue
         source = root / keep
+        target = out / ("kept-temp" if field == "kept_temp" else "plugin-evals-results") / run_id
         try:
             make_writable(root)
             if source.is_dir() and any(source.iterdir()):
-                target = out / ("kept-temp" if field == "kept_temp" else "plugin-evals-results") / run_id
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(source), str(target))
                 record[field] = str(target)
         except OSError as exc:
-            errors.append(f"keeping {label} {source}: {exc}")
+            # A failed cross-filesystem move can leave a partial copy at target; name it.
+            partial = f" (partial copy left at {target})" if target.exists() else ""
+            errors.append(f"keeping {label} {source} -> {target}{partial}: {exc}")
         try:
             make_writable(root)
             shutil.rmtree(root)

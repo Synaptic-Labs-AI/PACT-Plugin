@@ -374,6 +374,7 @@ def test_native_eval_removes_the_temp_root_when_keeping_fails(
     assert native_eval.run(_args(manifest, cases, fake, short_root)) == 1
     record = _result(manifest)
     assert "keeping temp root" in record["cleanup_error"]
+    assert str(manifest.parent / "native-eval" / "kept-temp" / Path(record["temp_root"]).name) in record["cleanup_error"]
     assert record["kept_temp"] is None
     assert _leftovers(short_root) == []
 

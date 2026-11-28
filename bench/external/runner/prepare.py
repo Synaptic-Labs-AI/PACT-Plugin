@@ -11,10 +11,12 @@ WHAT THIS OWNS
     CLAUDE_CONFIG_DIR and additionalDirectories.
   - Build the child environment from an allowlist (see build_child_env).
   - Verify the provider with a trivial headless claude -p call and record the
-    resolved model.
-  - Write a manifest with provenance. Never write the provider token to disk;
-    run transcripts kept under --out can still hold it, so keep --out under
-    bench/.runs (gitignored) when it is inside the repo (a warning says so).
+    resolved model. The child's output tails go only to provider-check.json.
+  - Write a manifest with provenance. The harness never writes the provider
+    token itself, and manifest.json and stdout carry no child output.
+    provider-check.json and the run transcripts kept under --out do carry child
+    output, which can contain the token, so keep --out under bench/.runs
+    (gitignored) when it is inside the repo (a warning says so).
 
 WHY
   The evaluation must not read or write the live ~/.claude-deepseek state, and
@@ -88,8 +90,11 @@ RUNS_DIR = REPO_ROOT / "bench" / ".runs"
 # Child claude processes run under this root; it must hold no memory file in it or its parents.
 DEFAULT_TEMP_ROOT = Path("/tmp")
 MEMORY_FILE_NAMES = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
+MEMORY_RULES_DIR = ".claude/rules"
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 KILL_DRAIN_SECONDS = 10
+# provider-check.json fields copied into manifest.json; none can hold child output.
+CHECK_SUMMARY_KEYS = ("exit_code", "model_keys", "is_error", "cwd")
 
 
 def utc_now() -> str:
@@ -208,20 +213,35 @@ def run_process_group(
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
+def _holds_files(directory: Path) -> bool:
+    """True when directory holds any file at any depth (symlinked subdirectories are
+    not followed); an unreadable one counts as holding files."""
+    def fail(exc: OSError) -> None:
+        raise exc
+
+    try:
+        # os.walk, not Path.rglob: rglob silently skips a directory it cannot read.
+        return any(files for _root, _dirs, files in os.walk(directory, onerror=fail))
+    except OSError:
+        return True
+
+
 def memory_files_above(path: Path) -> list[Path]:
-    """The MEMORY_FILE_NAMES files present in path or any of its ancestors."""
-    return [
-        directory / name
-        for directory in (path, *path.parents)
-        for name in MEMORY_FILE_NAMES
-        if (directory / name).is_file()
-    ]
+    """The MEMORY_FILE_NAMES files, and any MEMORY_RULES_DIR holding files, in path
+    or any of its ancestors."""
+    found: list[Path] = []
+    for directory in (path, *path.parents):
+        found.extend(directory / name for name in MEMORY_FILE_NAMES if (directory / name).is_file())
+        rules = directory / MEMORY_RULES_DIR
+        if rules.is_dir() and _holds_files(rules):
+            found.append(rules)
+    return found
 
 
 def check_clean_root(root: Path) -> Path:
     """Return root's real path (symlinks resolved, as the child will see its cwd),
     refusing one inside the repo, one that exists but is not a directory, or one
-    below any Claude Code memory file."""
+    below a memory file or a non-empty .claude/rules directory (memory_files_above)."""
     root = root.expanduser().resolve()
     if root.exists() and not root.is_dir():
         raise SystemExit(f"--temp-root {root} is not a directory")
@@ -597,6 +617,8 @@ def prepare(args: argparse.Namespace) -> int:
     warning = out_location_warning(out)
     if warning:
         print(warning, file=sys.stderr)
+    if out.exists() and not out.is_dir():
+        raise SystemExit(f"--out {out} exists and is not a directory")
     replace = out.exists() and any(out.iterdir())
     if replace and not args.force:
         raise SystemExit(f"output directory is not empty: {out}; pass --force to replace")
@@ -649,9 +671,12 @@ def prepare(args: argparse.Namespace) -> int:
         },
     }
     if claude_bin is not None:
-        manifest["provider"]["check"] = verify_provider(
-            out, out, claude_bin, child_env, model=args.model, temp_root=temp_root
-        )
+        check = verify_provider(out, out, claude_bin, child_env, model=args.model, temp_root=temp_root)
+        # Summary fields only: the child's output tails stay in provider-check.json.
+        manifest["provider"]["check"] = {
+            "path": str(out / "provider-check.json"),
+            **{key: check.get(key) for key in CHECK_SUMMARY_KEYS},
+        }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(manifest, indent=2))
     return 0

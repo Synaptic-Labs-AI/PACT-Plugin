@@ -449,13 +449,40 @@ def test_every_model_key_is_pinned_including_small_fast(tmp_path: Path) -> None:
     assert {key: env[key] for key in prepare.MODEL_ENV_KEYS} == dict.fromkeys(prepare.MODEL_ENV_KEYS, "deepseek-pro")
 
 
-def test_clean_root_refuses_memory_files_in_parents(tmp_path: Path) -> None:
-    # CLAUDE.local.md stands in for every memory file name; the test never writes a CLAUDE.md.
-    (tmp_path / "CLAUDE.local.md").write_text("memory", encoding="utf-8")
+# Literal names, not prepare.MEMORY_FILE_NAMES: dropping a name from the constant must fail a case.
+@pytest.mark.parametrize("name", ["CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md"])
+def test_clean_root_refuses_each_memory_file_in_parents(tmp_path: Path, name: str) -> None:
+    # Written only under pytest's tmp_path (neither a project nor a home dir); removed with it.
+    (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / name).write_text("memory", encoding="utf-8")
     root = tmp_path / "a" / "b"
     with pytest.raises(SystemExit, match="memory files"):
         prepare.check_clean_root(root)
-    assert prepare.memory_files_above(root) == [tmp_path / "CLAUDE.local.md"]
+    assert prepare.memory_files_above(root) == [tmp_path / name]
+
+
+def test_clean_root_refuses_a_rules_dir_holding_files(tmp_path: Path) -> None:
+    rules = tmp_path / ".claude" / "rules"
+    (rules / "nested").mkdir(parents=True)
+    root = tmp_path / "a"
+    assert prepare.check_clean_root(root) == root.resolve()  # an empty rules dir loads nothing
+    (rules / "nested" / "r.md").write_text("rule", encoding="utf-8")
+    with pytest.raises(SystemExit, match="memory files"):
+        prepare.check_clean_root(root)
+    assert prepare.memory_files_above(root) == [rules]
+
+
+def test_clean_root_counts_an_unreadable_rules_dir_as_memory(tmp_path: Path) -> None:
+    rules = tmp_path / ".claude" / "rules"
+    rules.mkdir(parents=True)
+    rules.chmod(0)
+    try:
+        if os.access(rules, os.R_OK):
+            pytest.skip("running as a user who can read a mode-000 dir")
+        with pytest.raises(SystemExit, match="memory files"):
+            prepare.check_clean_root(tmp_path / "a")
+    finally:
+        rules.chmod(0o700)
 
 
 def test_clean_root_refuses_the_repo() -> None:
@@ -613,3 +640,36 @@ def test_text_mode_output_with_undecodable_bytes_is_kept() -> None:
     proc = prepare.run_process_group(child, 10, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     assert proc.returncode == 0
     assert proc.stdout == "�� ok\n"
+
+
+def test_provider_output_stays_out_of_the_manifest_and_stdout(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    out = tmp_path / "out"
+    token = "provider-token-9b1e4d"
+    (tmp_path / "live-token").write_text(token + "\n", encoding="utf-8")
+    fake = _fake_claude(
+        tmp_path / "claude",
+        "import os\n"
+        "sys.stderr.write('auth debug: ' + os.environ['ANTHROPIC_AUTH_TOKEN'] + '\\n')\n"
+        "print(json.dumps({'result': os.environ['ANTHROPIC_AUTH_TOKEN'], 'is_error': False,\n"
+        "                  'modelUsage': {'deepseek-flash': {}}}))\n",
+    )
+    assert prepare.main(_prepare_args(tmp_path, out, "--verify", "--claude-bin", str(fake))) == 0
+    captured = capsys.readouterr()
+    manifest_text = (out / "manifest.json").read_text(encoding="utf-8")
+    assert token not in manifest_text
+    assert token not in captured.out and token not in captured.err
+    check = json.loads(manifest_text)["provider"]["check"]
+    assert set(check) == {"path", *prepare.CHECK_SUMMARY_KEYS}
+    assert check["model_keys"] == ["deepseek-flash"] and check["exit_code"] == 0
+    # The full record, with the child's output tails, is only in provider-check.json.
+    assert token in Path(check["path"]).read_text(encoding="utf-8")
+
+
+def test_out_that_is_a_file_is_refused(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    out.write_text("not a dir", encoding="utf-8")
+    with pytest.raises(SystemExit, match="exists and is not a directory"):
+        prepare.main(_prepare_args(tmp_path, out))
+    assert out.read_text(encoding="utf-8") == "not a dir"
