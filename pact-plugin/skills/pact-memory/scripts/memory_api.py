@@ -3057,6 +3057,14 @@ class LegacyBucketWriteRefusedError(ValueError):
     it as `LEGACY_BUCKET_WRITE_REFUSED`, exit 2, with no field list."""
 
 
+class HiddenBucketMoveRefusedError(LegacyBucketWriteRefusedError):
+    """An update's `project_id` change on a row whose bucket this session's
+    read hides (`hidden_legacy_buckets`: an excluded or unproven legacy
+    candidate, a case variant, an ambiguous match or a suppressed name) was
+    refused. Moving such a bucket is `project-id rekey`'s job, which judges
+    the whole bucket; the CLI reports it as `LEGACY_BUCKET_WRITE_REFUSED`."""
+
+
 class ProjectIdentityUnresolvedError(ProjectScopeDisagreementError):
     """A WRITE was refused because no project identity could be resolved.
 
@@ -6320,6 +6328,33 @@ class PACTMemory:
             stored = get_memory(conn, memory_id)
             if stored is None:
                 return None
+
+            # A ROW OF A BUCKET THIS READ HIDES IS NOT MOVED ONE ROW AT A TIME.
+            # Its bucket is hidden because nothing shows it belongs to this
+            # checkout (or something shows it does not); `project-id rekey`
+            # judges and moves the whole bucket, with its refusals. A row in a
+            # bucket the read scope reads, or in any other bucket, keeps the
+            # per-row move.
+            if (
+                "project_id" in updates
+                and updates["project_id"] != stored.get("project_id")
+            ):
+                self._read_project_scopes(conn)
+                if stored.get("project_id") in hidden_legacy_buckets(
+                    self._legacy_scope_state
+                ):
+                    raise HiddenBucketMoveRefusedError(
+                        f"update to project_id {updates['project_id']!r} was "
+                        "refused: the row is in the bucket "
+                        f"{stored.get('project_id')!r}, which this checkout's "
+                        "reads hide (`project-id show` says why). Nothing was "
+                        "written. Preview moving that bucket with "
+                        + render_rekey_command(
+                            stored.get("project_id"), updates["project_id"],
+                            db_path=self._db_path,
+                        )
+                        + " and add --apply only with the user's approval."
+                    )
 
             # THE WRITE-INGRESS RULE PROTECTS FOLDER-NAME BUCKETS ONLY: a
             # canonical session may neither file a row into one (a project_id

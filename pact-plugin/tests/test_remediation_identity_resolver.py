@@ -2310,8 +2310,21 @@ class TestUpdateFindsTheRowBeforeItRefuses:
         its session_id. RED WHEN the session_id refusal ignores the move."""
         from scripts.database import db_connection, get_memory
 
+        import sqlite3
+
         row = "e" * 32
         memory, store = self._memory(identity_env, monkeypatch, [(row, "proj")])
+        # A file row inside this checkout verifies the bucket, so the read
+        # scope reads it and the row may move (a hidden bucket's row may not).
+        (identity_env / "proj" / "a.py").write_text("x\n")
+        with sqlite3.connect(str(store)) as conn:
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+                ("f-e", str(identity_env / "proj" / "a.py"), "proj"),
+            )
+            conn.commit()
+        _fresh_scope_state()
+        assert "proj" in memory._read_project_scopes()
         assert memory.update(row, {"project_id": CANONICAL, "session_id": "new"}) == row
         with db_connection(store) as conn:
             stored = get_memory(conn, row)
@@ -2322,7 +2335,9 @@ class TestUpdateFindsTheRowBeforeItRefuses:
     ):
         row = "f" * 32
         memory, _store = self._memory(identity_env, monkeypatch, [(row, "proj")])
-        with pytest.raises(ValueError, match="folder-name bucket 'proj'"):
+        # The bucket has no evidence, so the read hides it and the move itself
+        # is refused before the session_id rule is reached.
+        with pytest.raises(ValueError, match="'proj', which this checkout's reads hide"):
             memory.update(row, {"project_id": "github.com/o/other", "session_id": "new"})
 
     def test_filing_an_existing_row_into_a_folder_name_is_still_refused(

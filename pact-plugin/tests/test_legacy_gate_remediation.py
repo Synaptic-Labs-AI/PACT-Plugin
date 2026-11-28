@@ -1474,6 +1474,77 @@ def test_a_github_payload_id_drops_its_git_suffix(canonical_session, payload):
     assert filed == {CANONICAL}, filed
 
 
+_ROW = "0123456789abcdef0123456789abcdef"
+
+
+def _hidden_bucket_session(tmp_path, monkeypatch):
+    """A canonical session whose folder-name bucket is excluded (its file row
+    is in a rival clone), with one row there under the full id `_ROW`."""
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    mine = make_repo(tmp_path / NAME, remote=ORIGIN)
+    rival = make_repo(tmp_path / "rival" / NAME, remote="https://gitlab.com/other/widget")
+    (rival / "f.py").write_text("x\n")
+    store = tmp_path / "store.db"
+    _seed(store, NAME, files=[rival / "f.py"])
+    with sqlite3.connect(str(store)) as conn:
+        conn.execute("UPDATE memories SET id = ?", (_ROW,))
+        conn.commit()
+    monkeypatch.chdir(mine)
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory._read_project_scopes() == (CANONICAL,)
+    assert memory._legacy_scope_state["excluded"] is True
+    return memory, store
+
+
+def _row_project(store):
+    with sqlite3.connect(str(store)) as conn:
+        return conn.execute("SELECT project_id FROM memories WHERE id = ?", (_ROW,)).fetchone()[0]
+
+
+def test_an_update_may_not_move_a_row_out_of_a_bucket_the_read_hides(
+    tmp_path, monkeypatch, scopes_clean
+):
+    """A per-row project_id change would do what `project-id rekey` refuses.
+    RED WHEN the row moves, or the refusal does not point to rekey."""
+    memory, store = _hidden_bucket_session(tmp_path, monkeypatch)
+    with pytest.raises(memory_api.HiddenBucketMoveRefusedError) as refused:
+        memory.update(_ROW, {"project_id": "gitlab.com/other/widget"})
+    message = str(refused.value)
+    assert f"in the bucket {NAME!r}, which this checkout's reads hide" in message, message
+    assert "project-id rekey --from=widget --to=gitlab.com/other/widget" in message, message
+    assert "Nothing was written" in message, message
+    assert _row_project(store) == NAME
+    # Another field of the same row is still editable.
+    assert memory.update(_ROW, {"context": "edited"}) == _ROW
+    assert _row_project(store) == NAME
+
+
+def test_the_cli_refuses_the_hidden_bucket_move_with_its_envelope(
+    tmp_path, monkeypatch, scopes_clean, capfd
+):
+    memory, store = _hidden_bucket_session(tmp_path, monkeypatch)
+    code, envelope = _cli_err(
+        ["update", _ROW, json.dumps({"project_id": "gitlab.com/other/widget"}),
+         "--db-path", str(store)],
+        capfd,
+    )
+    assert code == 2, envelope
+    assert envelope["error"] == "LEGACY_BUCKET_WRITE_REFUSED", envelope
+    assert "project-id rekey" in envelope["message"], envelope
+    assert _row_project(store) == NAME
+
+
+def test_an_update_still_moves_a_row_of_a_bucket_the_read_reads(canonical_session):
+    """Control: a row in this checkout's own bucket moves as before."""
+    repo, store = canonical_session
+    memory = PACTMemory(session_id="s", db_path=store)
+    row = memory.save({"context": "mine"})
+    assert memory.update(row, {"project_id": "gitlab.com/other/widget"}) == row
+    with sqlite3.connect(str(store)) as conn:
+        assert conn.execute("SELECT project_id FROM memories").fetchone()[0] == "gitlab.com/other/widget"
+
+
 def test_a_moved_store_re_decides_the_verdict(canonical_session, monkeypatch):
     """When the stable read repeats with locking, the cached verdict is
     dropped and the legacy bucket is counted again."""
