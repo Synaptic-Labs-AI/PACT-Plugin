@@ -1637,6 +1637,30 @@ def _rekey_cli(argv, capfd):
     return exit_info.value.code, json.loads(captured.out or captured.err)
 
 
+@pytest.mark.parametrize("spelling", [
+    "github.com/Acme/Widget",
+    "www.github.com/acme/widget",
+    "github.com/acme/widget.git",
+    "github.com:443/acme/widget",
+])
+def test_an_older_spelling_of_this_checkouts_id_moves_unflagged(canonical_session, capfd, spelling):
+    """A bucket filed under another spelling of this checkout's own id is
+    this checkout's: it folds to github.com/acme/widget, so the move into it
+    runs with no --from-another-repository, and reads the stored spelling.
+    RED WHEN it is refused as another repository's rows."""
+    repo, store = canonical_session
+    _seed(store, spelling)
+    code, envelope = _rekey_cli(
+        ["project-id", "rekey", f"--from={spelling}", f"--to={CANONICAL}", "--apply",
+         "--db-path", str(store)],
+        capfd,
+    )
+    assert code == 0, envelope
+    assert envelope["result"]["memories"] == 1, envelope
+    with sqlite3.connect(str(store)) as conn:
+        assert {r[0] for r in conn.execute("SELECT project_id FROM memories")} == {CANONICAL}
+
+
 def test_a_rekey_target_is_folded_as_a_payload_is(canonical_session, capfd):
     """From a checkout whose id is github.com/acme/widget,
     --to=github.com/ACME/Widget names that same bucket: the move applies with

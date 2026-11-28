@@ -1618,7 +1618,19 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     own_id = memory.project_id
     foreign_source = None
     undetected_earlier = ""
-    if to_id == own_id and not noop and not args.from_another_repository:
+    try:
+        # An older spelling of this checkout's own id (`github.com/Acme/Widget`,
+        # `github.com:443/...`) folds to it, so it is this checkout's bucket.
+        # The fold decides ownership only: the move reads the stored spelling.
+        from_as_id = folded_github_id(from_id, "--from")
+    except ValueError:
+        from_as_id = from_id
+    if (
+        to_id == own_id
+        and not noop
+        and not args.from_another_repository
+        and from_as_id != own_id
+    ):
         candidate = state.get("candidate")
         if legacy_verdict == "excluded":
             foreign_source = (
