@@ -4225,9 +4225,11 @@ class PACTMemory:
             logger.warning(
                 "this checkout's folder-name bucket %r holds %d memor%s, which no "
                 "read sees while no project id resolves. Writing the canonical id "
-                "that names this repository to %r gives this checkout an id, and "
-                "its reads then judge that bucket as this repository's legacy "
-                "bucket.",
+                "that names this repository to %r gives this checkout an id. Its "
+                "reads then include that bucket when its file rows or the "
+                "sessions recorded here place it in this repository; otherwise "
+                "they leave it out and print the `project-id rekey` command that "
+                "moves it.",
                 legacy,
                 count,
                 "y" if count == 1 else "ies",

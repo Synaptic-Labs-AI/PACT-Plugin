@@ -2766,3 +2766,36 @@ def test_every_read_from_a_declined_checkout_names_its_folder_name_bucket(
         _cli([*verb, "--db-path", str(store)], capfd)
     warned = " ".join(record.getMessage() for record in caplog.records)
     assert "this checkout's folder-name bucket 'repoL' holds 1 memory" in warned, warned
+
+
+@pytest.mark.parametrize("placed", [True, False], ids=["file row here", "no evidence"])
+def test_writing_the_pin_brings_the_folder_name_bucket_back_as_the_warning_says(
+    identity_env, store, monkeypatch, capfd, caplog, placed
+):
+    """After the pin a declined checkout has an id, and its old folder-name
+    bucket is judged as its legacy bucket: read when a file row places it
+    here, and otherwise left out with the rekey that moves it. RED WHEN the
+    pin does not do what the declined-checkout warning says."""
+    import logging
+
+    from scripts import memory_api
+
+    for memo in (memory_api._DECLINED_BUCKET_WARNED, memory_api._LEGACY_SCOPE_CACHE, memory_api._UNPROVEN_WARNED):
+        memo.clear()
+    repo = make_repo(identity_env / "repoL", remote="http://localhost:3000/o/repoL")
+    (repo / "a.py").write_text("x\n")
+    _seed(store, "repoL", memory_id="old000001", path=str(repo / "a.py") if placed else "a.py")
+    monkeypatch.chdir(repo)
+    with caplog.at_level(logging.WARNING):
+        _cli(["list", "--db-path", str(store)], capfd)
+    warned = " ".join(record.getMessage() for record in caplog.records)
+    assert "include that bucket when its file rows or the sessions recorded here place it" in warned, warned
+    (repo / ".git" / "pact-project-id").write_text("local.invalid/o/repoL\n")
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        code, envelope = _cli(["list", "--db-path", str(store)], capfd)
+    assert code == 0, envelope
+    assert [row["id"] for row in envelope["result"]] == (["old000001"] if placed else []), envelope
+    if not placed:
+        assert "--from=repoL --to=local.invalid/o/repoL" in caplog.text, caplog.text
