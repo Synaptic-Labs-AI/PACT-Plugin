@@ -2175,6 +2175,9 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
         # remote's is; any other escape keeps its spelling, so a lower-case
         # one (`%c3`) is still refused by the canonical check.
         hostport, slash, path = candidate.partition("/")
+        if not hostport.isascii():
+            # Checked BEFORE lower-casing, which maps the Kelvin sign onto "k".
+            return None, "not_canonical"
         candidate = hostport.lower() + slash + _unreserved_escapes_decoded(path)
         if not is_canonical_id(candidate):
             return None, "not_canonical"

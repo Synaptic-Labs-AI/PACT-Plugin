@@ -3425,3 +3425,31 @@ def test_an_ipv4_in_ipv6_loopback_literal_declines(host, expected):
 
     assert normalize_remote_url(f"https://{host}/o/r") == expected
     assert normalize_remote_url(f"ssh://git@{host}/o/r") == expected
+
+
+KELVIN = "\u212a"  # the Kelvin sign; str.lower() maps it onto ASCII "k"
+
+
+@pytest.mark.parametrize(
+    "url",
+    [f"https://{KELVIN}ex.com/o/r", f"git@{KELVIN}ex.com:o/r", f"ssh://git@{KELVIN}ex.com/o/r"],
+)
+def test_a_host_that_lower_cases_onto_ascii_declines(url):
+    """The ASCII check comes before the case fold, so a host spelled with the
+    Kelvin sign does not take kex.com's id, and its decline says why. RED
+    WHEN the host is lower-cased first."""
+    assert pi.classify_remote_origin(url) == (pi.OUTCOME_DECLINE, None)
+    assert pi.unrepresentable_detail(url) == "its host is not a valid host name"
+    assert pi.classify_remote_origin(url.replace(KELVIN, "K"))[1] == "kex.com/o/r"
+
+
+def test_a_pin_or_alias_host_that_lower_cases_onto_ascii_is_refused():
+    """The pin reader and the ssh-alias note check ASCII before lower-casing
+    too. RED WHEN a Kelvin-sign pin names kex.com/o/r, or a Kelvin-sign host
+    is noted as an alias of a real host."""
+    from scripts.database import pin_file_value
+
+    assert pin_file_value(f"{KELVIN}ex.com/o/r".encode("utf-8")) == (None, "not_canonical")
+    assert pin_file_value(b"Kex.com/o/r") == ("kex.com/o/r", None)
+    assert pi.ssh_alias_origin(f"git@gh_wor{KELVIN}:o/r") is False
+    assert pi.ssh_alias_origin("git@gh_work:o/r") is True

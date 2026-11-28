@@ -7236,6 +7236,10 @@ class TestEveryRouteEntryConditionIsARoute:
             "database's one copy of the github.com payload fold, applied to a project_id value "
             "a caller passed; pure, it asks git nothing"
         ),
+        ("call", "<call to no function database: hostport.isascii>"): (
+            "pin_file_value's ASCII test on the host of a pin's text read_override already "
+            "read; a string test, it asks git nothing"
+        ),
         ("call", "<call to no function database: candidate.startswith>"): (
             "pin_file_value reads the text of a pin file read_override already read; a string "
             "test on that text, it asks git nothing"

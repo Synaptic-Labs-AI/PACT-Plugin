@@ -623,6 +623,11 @@ def _url_host(host: str) -> Optional[str]:
     `_reserved_host`)."""
     if host.startswith("["):
         return _ipv6_host(host)
+    # ASCII BEFORE LOWER-CASING: `str.lower` maps some non-ASCII characters
+    # onto ASCII (the Kelvin sign U+212A becomes "k"), so a host checked after
+    # the fold would take another host's id.
+    if not host.isascii():
+        return None
     host = host.lower()
     if not _valid_host(host) or _reserved_host(host):
         return None
@@ -1336,6 +1341,8 @@ def unrepresentable_detail(url: Optional[str]) -> Optional[str]:
         host, port = authority, ""
     if port and not _valid_port(port):
         return "its port is not a valid port number (1-65535, no leading zero)"
+    if not host.isascii():
+        return "its host is not a valid host name"
     host = host.lower()
     if host.startswith("["):
         if _ipv6_host(host) is None:
@@ -1389,6 +1396,8 @@ def ssh_alias_origin(url: Optional[str]) -> bool:
         if scp_match is None:
             return False
         host = scp_match.group("host")
+    if not host.isascii():
+        return False
     host = host.lower()
     if not host or host.startswith("[") or host in ("github.com", "www.github.com", _GITHUB_SSH_443_HOST):
         return False
