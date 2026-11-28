@@ -864,8 +864,9 @@ def _identifier(host: str, port: str, segments: list) -> str:
     and the lower-cased path of a `_CASE_INSENSITIVE_PATH_HOSTS` host. No
     `.git` is removed here: `_strip_path_suffixes` drops the one literal
     `.git`, so a `.GIT` spelling stays part of the name on every host.
-    `ssh.github.com` with no port left or with a port some scheme takes as
-    its default is github.com on every scheme, as a pin naming it is
+    On `github.com`, `www.github.com` and `ssh.github.com` a port some
+    scheme takes as its default is dropped on every scheme, and a port-less
+    `ssh.github.com` is github.com, as a pin naming it is
     (`database._github_folded_pin`): an id holds no scheme, so the two share
     one rule."""
     from .database import (
@@ -877,6 +878,10 @@ def _identifier(host: str, port: str, segments: list) -> str:
     if host == _GITHUB_SSH_443_HOST and (not port or github_default_port(host, ":", port)):
         # GitHub's SSH-over-443 endpoint is github.com itself.
         host, port = "github.com", ""
+    if port and github_default_port(host, ":", port):
+        # A github.com or www.github.com remote on any scheme's default port
+        # (`ssh://git@github.com:443`) drops it, as a pin naming it does.
+        port = ""
 
     # GitHub redirects www.github.com to github.com: one repository. The
     # rule is database's one copy, which a pin takes too.

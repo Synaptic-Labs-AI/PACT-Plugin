@@ -205,9 +205,7 @@ def test_a_pin_takes_githubs_spelling_rules(pin, expected):
     from scripts.database import pin_file_value
 
     assert pin_file_value((pin + "\n").encode()) == (expected, None)
-    # An https remote on github.com:22 keeps its port, a remote GitHub never
-    # serves (test_a_remote_on_another_schemes_default_port_keeps_it).
-    if expected.startswith("github.com/") and not pin.startswith("github.com:22/"):
+    if expected.startswith("github.com/"):
         assert pi.normalize_remote_url("https://" + pin) == expected
 
 
@@ -411,23 +409,25 @@ def test_a_pasted_dot_git_pin_is_the_checkouts_id_with_no_detail(tmp_path, monke
     ("ssh://git@ssh.github.com:2222/O/N", "ssh.github.com:2222/O/N"),
 ])
 def test_a_ported_pin_copied_from_its_url_names_the_remotes_id(url, pin):
-    """The one exception is a remote GitHub never serves: a github.com or
-    www.github.com remote on another scheme's default port
-    (`ssh://git@github.com:443/O/N`) keeps its port, while a pin naming it
-    drops it (test_a_remote_on_another_schemes_default_port_keeps_it)."""
     _pin_copied_from_url_names_its_remotes_id(url, pin)
 
 
-def test_a_remote_on_another_schemes_default_port_keeps_it():
-    """GitHub serves ssh on github.com:22 and https on :443, so
-    `ssh://git@github.com:443/O/N` reaches nothing. Its id keeps the port; a
-    pin or payload naming github.com:443 names github.com. RED WHEN either
-    side changes without the documentation."""
+@pytest.mark.parametrize("url, pin", [
+    ("ssh://git@github.com:443/O/N", "github.com:443/O/N"),
+    ("https://github.com:22/O/N", "github.com:22/O/N"),
+    ("http://github.com:443/O/N", "github.com:443/O/N"),
+    ("https://github.com:9418/O/N", "github.com:9418/O/N"),
+    ("ssh://git@www.github.com:443/O/N", "www.github.com:443/O/N"),
+])
+def test_a_remote_on_another_schemes_default_port_drops_it_as_its_pin_does(url, pin):
+    """GitHub serves none of these endpoints, and an id holds no scheme, so a
+    github.com or www.github.com remote on any scheme's default port drops it
+    by the pin's one rule: the remote and the pin copied from it name
+    github.com/o/n. RED WHEN the remote keeps the port."""
     from scripts import project_identity as pi
-    from scripts.database import pin_file_value
 
-    assert pi.normalize_remote_url("ssh://git@github.com:443/O/N") == "github.com:443/o/n"
-    assert pin_file_value(b"github.com:443/O/N\n") == ("github.com/o/n", None)
+    assert pi.normalize_remote_url(url) == "github.com/o/n"
+    _pin_copied_from_url_names_its_remotes_id(url, pin)
 
 
 def _pin_copied_from_url_names_its_remotes_id(url, pin):
