@@ -4251,7 +4251,7 @@ class PACTMemory:
                 "they leave it out and say why: a bucket nothing places gets the "
                 "`project-id rekey` command that moves it, one shared with "
                 "another checkout gets the move of only the memories placed "
-                "here, and one whose rows are all another checkout's gets no "
+                "here when it has any, and one whose rows are all another checkout's gets no "
                 "move.",
                 legacy,
                 count,

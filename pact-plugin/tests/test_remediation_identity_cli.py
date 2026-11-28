@@ -2794,6 +2794,7 @@ def test_writing_the_pin_brings_the_folder_name_bucket_back_as_the_warning_says(
     warned = " ".join(record.getMessage() for record in caplog.records)
     assert "include that bucket when its file rows or the sessions recorded here place it" in warned, warned
     assert "one whose rows are all another checkout's gets no move" in warned, warned
+    assert "gets the move of only the memories placed here when it has any," in warned, warned
     (repo / ".git" / "pact-project-id").write_text("local.invalid/o/repoL\n")
     memory_api._LEGACY_SCOPE_CACHE.clear()
     caplog.clear()
