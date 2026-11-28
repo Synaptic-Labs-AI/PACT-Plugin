@@ -2921,11 +2921,12 @@ def test_only_placed_here_is_refused_for_another_target(shared_app, store, capfd
     assert _snapshot(store) == before
 
 
-def test_only_placed_here_moves_a_placed_row_of_an_excluded_bucket(identity_env, store, monkeypatch, capfd):
+def test_only_placed_here_moves_nothing_of_an_excluded_bucket(identity_env, store, monkeypatch, capfd):
     """'app' is excluded here: y/app holds its only existing file row, and x's
-    memory's file is gone (a vanished row is no evidence). That memory is
-    still placed by its path, so --only-placed-here moves it, and show names
-    the command. RED WHEN an excluded bucket's placed memory cannot move."""
+    memory's file is gone and undated, so the gate does not count it as here
+    (it is vanished). No memory is placed, so show prints no command and the
+    move moves nothing. RED WHEN a row the gate does not count as here
+    places a memory."""
     from scripts import memory_api
 
     memory_api._LEGACY_SCOPE_CACHE.clear()
@@ -2938,13 +2939,46 @@ def test_only_placed_here_moves_a_placed_row_of_an_excluded_bucket(identity_env,
     code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
     assert shown["result"]["legacy_scope"]["excluded"] is True, shown
     rows = {row["id"]: row for row in shown["result"]["candidates"]}
-    assert "--only-placed-here" in (rows["app"]["rekey"] or ""), rows
+    assert rows["app"]["rekey"] is None, rows
     code, applied = _cli(
         ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--only-placed-here", "--apply",
          "--db-path", str(store)], capfd,
     )
-    assert code == 0 and applied["result"]["memories"] == 1, applied
-    assert _placed_rows(store)["memories"] == {"mine00001": "github.com/a/app", "theirs001": "app"}
+    assert code == 0 and applied["result"]["memories"] == 0, applied
+    assert applied["result"]["left_files_elsewhere"] == 2, applied
+
+
+def test_only_placed_here_places_a_row_as_the_gate_does(identity_env, store, monkeypatch, capfd):
+    """Placement is the gate's own row classification. A path that climbs out
+    of x/app with '..' into y/app's file is y's row, not placed; a row reached
+    through a symlink into x/app is here, placed; a sibling x/app2 is not
+    inside x/app. RED WHEN placement compares the stored string instead of
+    the gate's resolved containment."""
+    from scripts import memory_api
+
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    x = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    y = make_repo(identity_env / "y" / "app", remote="https://github.com/b/app.git")
+    (x / "f.py").write_text("x\n")
+    (y / "f.py").write_text("y\n")
+    sibling = identity_env / "x" / "app2"
+    sibling.mkdir()
+    (sibling / "s.py").write_text("s\n")
+    link = identity_env / "via"
+    link.symlink_to(x)
+    _seed_linked(store, "app", "climb0001", [str(x) + "/../../y/app/f.py"])
+    _seed_linked(store, "app", "link00001", [str(link / "f.py")])
+    _seed_linked(store, "app", "sibling01", [str(sibling / "s.py")])
+    monkeypatch.chdir(x)
+    code, applied = _cli(
+        ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--only-placed-here", "--apply",
+         "--db-path", str(store)], capfd,
+    )
+    assert code == 0, applied
+    assert _placed_rows(store)["memories"] == {
+        "climb0001": "app", "link00001": "github.com/a/app", "sibling01": "app",
+    }, applied
+
 
 
 def test_only_placed_here_moves_a_memory_placed_in_a_linked_worktree(identity_env, store, monkeypatch, capfd):

@@ -1350,14 +1350,14 @@ def _placed_split(memory, store: Path, bucket: str) -> dict:
     from scripts.database import placed_memory_split
 
     root = memory._project_identity_root
-    roots = memory._legacy_gate_roots(root)[0] if root is not None else []
+    roots, common = memory._legacy_gate_roots(root) if root is not None else ([], None)
     if not store.exists():
         return {"placed": [], "left_no_files": 0, "left_files_elsewhere": 0}
 
     def split() -> dict:
         conn = _read_only_connection(str(store))
         try:
-            return placed_memory_split(conn, bucket, roots)
+            return placed_memory_split(conn, bucket, roots, common)
         finally:
             conn.close()
 

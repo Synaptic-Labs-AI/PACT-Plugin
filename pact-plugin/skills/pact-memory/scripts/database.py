@@ -2493,90 +2493,131 @@ def bucket_evidence(
     for row in cursor.fetchall():
         counts["file_rows"] += 1
         file_id, path = row[0], row[1]
-        if not path or not os.path.isabs(path):
-            counts["relative"] += 1
-            continue
-        counts["absolute_rows"] += 1
-        try:
-            resolved = _realpath_by_folder(path, real_dirs)
-        except (OSError, ValueError):
-            counts["unresolvable"] += 1
-            continue
-        contained = any(
-            _contained_by_root(resolved, root, nested, verified_common)
-            for root in root_paths
+        kind, resolved = _row_place(
+            conn, file_id, path, bucket, root_paths, nested, verified_common,
+            real_dirs, strict, dated_only,
         )
-        # AN EARLIER ID (`dated_only`) TAKES NO SUBMODULE ROW: a submodule has
-        # its own origin and id, so its rows neither place the superproject's
-        # earlier id nor count against it; they are skipped.
-        if contained and dated_only and not any(
-            _contained_by_root(resolved, root, strict, None) for root in root_paths
-        ):
+        if kind == "submodule":
             if submodule_rows is not None:
                 submodule_rows.append(file_id)
+            counts["absolute_rows"] += 1
             continue
-        if contained:
-            # A CONTAINED ROW PLACES THE BUCKET HERE ONLY IF ITS FILE IS STILL
-            # IN THIS CHECKOUT, or a memory linked to it was saved after this
-            # repository's `description` last changed. Otherwise the path may
-            # belong to an earlier project that once lived in this folder (an
-            # unrelated repository cloned into a deleted project's path), so
-            # it counts as vanished.
-            # An existing file counts without a date (legacy rule), so the
-            # per-row date query runs only where it can change the answer.
-            if (not dated_only and os.path.lexists(resolved)) or _linked_after_description(
-                conn, file_id, verified_common, missing_counts=not dated_only,
-                memory_bucket=bucket if dated_only else None,
-            ):
-                counts["contained_rows"] += 1
-            else:
-                counts["vanished"] += 1
+        if kind != "relative":
+            counts["absolute_rows"] += 1
+        if kind != "outside":
+            counts[kind] += 1
         elif not os.path.lexists(resolved):
             counts["vanished"] += 1
         else:
-            kind = _foreign_kind(resolved, bucket, root_paths, walk)
-            if kind is None:
+            rival = _foreign_kind(resolved, bucket, root_paths, walk)
+            if rival is None:
                 counts["neutral_outside"] += 1
             else:
                 counts["foreign_rows"] += 1
-                counts[f"foreign_{kind}_rows"] += 1
+                counts[f"foreign_{rival}_rows"] += 1
     return counts
 
 
+def _row_place(
+    conn: sqlite3.Connection,
+    file_id: Any,
+    path: Any,
+    bucket: str,
+    root_paths: Sequence[Any],
+    nested: Dict[tuple, bool],
+    verified_common: Optional[str],
+    real_dirs: Dict[str, str],
+    strict: Dict[tuple, bool],
+    dated_only: bool,
+) -> "tuple[str, Optional[str]]":
+    """`(class, resolved path)` of one file row against a checkout's gate
+    roots: `relative`, `unresolvable`, `submodule` (skipped under
+    `dated_only`), `contained_rows` (the row places the bucket HERE),
+    `vanished` (contained, but neither existing nor dated), or `outside`.
+    THE ONE CLASSIFICATION of where a row lies, read by `bucket_evidence`
+    and by `placed_memory_split`, so a memory is placed exactly when every
+    row it links is one the gate counts as here."""
+    if not path or not os.path.isabs(path):
+        return "relative", None
+    try:
+        resolved = _realpath_by_folder(path, real_dirs)
+    except (OSError, ValueError):
+        return "unresolvable", None
+    contained = any(
+        _contained_by_root(resolved, root, nested, verified_common)
+        for root in root_paths
+    )
+    # AN EARLIER ID (`dated_only`) TAKES NO SUBMODULE ROW: a submodule has
+    # its own origin and id, so its rows neither place the superproject's
+    # earlier id nor count against it; they are skipped.
+    if contained and dated_only and not any(
+        _contained_by_root(resolved, root, strict, None) for root in root_paths
+    ):
+        return "submodule", resolved
+    if not contained:
+        return "outside", resolved
+    # A CONTAINED ROW PLACES THE BUCKET HERE ONLY IF ITS FILE IS STILL IN
+    # THIS CHECKOUT, or a memory linked to it was saved after this
+    # repository's `description` last changed. Otherwise the path may belong
+    # to an earlier project that once lived in this folder (an unrelated
+    # repository cloned into a deleted project's path), so it counts as
+    # vanished. An existing file counts without a date (legacy rule), so the
+    # per-row date query runs only where it can change the answer.
+    if (not dated_only and os.path.lexists(resolved)) or _linked_after_description(
+        conn, file_id, verified_common, missing_counts=not dated_only,
+        memory_bucket=bucket if dated_only else None,
+    ):
+        return "contained_rows", resolved
+    return "vanished", resolved
+
+
 def placed_memory_split(
-    conn: sqlite3.Connection, bucket: str, roots: Sequence[Any]
+    conn: sqlite3.Connection,
+    bucket: str,
+    roots: Sequence[Any],
+    root_common: Optional[Union[Path, str]] = None,
 ) -> Dict[str, Any]:
-    """Which of `bucket`'s memories are PLACED in a checkout whose roots are
-    `roots` (its identity root and linked worktrees): a memory is placed when
-    it links at least one file row and every file row it links has an
-    absolute path under one of the roots, whether or not the file exists. A
-    relative path is not placed. Returns `{placed: [ids], left_no_files: N,
+    """Which of `bucket`'s memories are PLACED in a checkout whose gate roots
+    are `roots` (its identity root and linked worktrees; `root_common` as
+    `bucket_evidence` takes it): a memory is placed when it links at least
+    one file row and the gate counts every row it links as here
+    (`_row_place` gives `contained_rows`, the class `bucket_evidence`
+    counts for this repository). Returns `{placed: [ids], left_no_files: N,
     left_files_elsewhere: N}`. Read only."""
-    prefixes = [os.path.join(os.fspath(root), "") for root in roots]
-
-    def inside(path: Any) -> bool:
-        if not isinstance(path, str) or not os.path.isabs(path):
-            return False
-        return any(path == prefix[:-1] or path.startswith(prefix) for prefix in prefixes)
-
-    paths: Dict[str, List[Any]] = {
+    root_paths = _gate_root_paths(roots)
+    verified_common: Optional[str] = None
+    if root_common:
+        try:
+            verified_common = os.path.realpath(str(root_common))
+        except (OSError, ValueError):
+            verified_common = None
+    nested: Dict[tuple, bool] = {}
+    strict: Dict[tuple, bool] = {}
+    real_dirs: Dict[str, str] = {}
+    rows: Dict[str, List[Any]] = {
         row[0]: [] for row in conn.execute(
             "SELECT id FROM memories WHERE project_id = ?", (bucket,)
         ).fetchall()
     }
-    for memory_id, path in conn.execute(
-        "SELECT mf.memory_id, f.path FROM memory_files mf "
+    for memory_id, file_id, path in conn.execute(
+        "SELECT mf.memory_id, f.id, f.path FROM memory_files mf "
         "JOIN files f ON f.id = mf.file_id "
         "JOIN memories m ON m.id = mf.memory_id WHERE m.project_id = ?",
         (bucket,),
     ).fetchall():
-        paths[memory_id].append(path)
+        rows[memory_id].append((file_id, path))
     split: Dict[str, Any] = {"placed": [], "left_no_files": 0, "left_files_elsewhere": 0}
-    for memory_id in sorted(paths):
-        linked = paths[memory_id]
+    for memory_id in sorted(rows):
+        linked = rows[memory_id]
         if not linked:
             split["left_no_files"] += 1
-        elif all(inside(path) for path in linked):
+        elif all(
+            _row_place(
+                conn, file_id, path, bucket, root_paths, nested, verified_common,
+                real_dirs, strict, False,
+            )[0] == "contained_rows"
+            for file_id, path in linked
+        ):
             split["placed"].append(memory_id)
         else:
             split["left_files_elsewhere"] += 1

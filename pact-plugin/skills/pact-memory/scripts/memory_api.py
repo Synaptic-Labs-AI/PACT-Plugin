@@ -4754,8 +4754,9 @@ class PACTMemory:
                 if foreign_held:
                     from .database import placed_memory_split
 
+                    gate_roots, gate_common = self._legacy_gate_roots(repo_root)
                     placed = placed_memory_split(
-                        connection, candidate, self._legacy_gate_roots(repo_root)[0]
+                        connection, candidate, gate_roots, gate_common
                     )["placed"]
                     placed_command = (
                         runnable_rekey_command(candidate, scope, db_path=store, only_placed=True)
