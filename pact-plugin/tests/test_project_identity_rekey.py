@@ -945,6 +945,32 @@ class TestSubsetMove:
             assert conn.execute("SELECT COUNT(*) FROM file_relations").fetchone()[0] == 2
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
+    def test_a_copied_row_takes_a_self_relation_as_its_own(self, rekey_env):
+        """A shared row related to itself, with an incoming edge from another
+        row: the copy is related to itself and takes the incoming edge, and no
+        edge joins the copy and the original. RED WHEN the self-relation f->f
+        also becomes copy->f and f->copy."""
+        _seed(
+            rekey_env,
+            [("m1", LEGACY), ("m2", LEGACY)],
+            files=[("f-shared", "src/x.py", LEGACY), ("f-other", "src/y.py", LEGACY)],
+            links=[("m1", "f-shared"), ("m2", "f-shared"), ("m2", "f-other")],
+            relations=[("f-shared", "f-shared"), ("f-other", "f-shared")],
+        )
+        with db_connection(rekey_env.store) as conn:
+            applied = rekey_project(conn, LEGACY, CANONICAL, dry_run=False, memory_ids=["m1"])
+            assert applied["files_copied"] == 1, applied
+            copy_id = conn.execute(
+                "SELECT id FROM files WHERE path = 'src/x.py' AND project_id = ?", (CANONICAL,)
+            ).fetchone()[0]
+            assert sorted(tuple(row) for row in conn.execute(
+                "SELECT source_file, target_file FROM file_relations"
+            ).fetchall()) == sorted([
+                ("f-shared", "f-shared"), (copy_id, copy_id),
+                ("f-other", "f-shared"), ("f-other", copy_id),
+            ])
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
     def test_a_subset_move_moves_only_its_memories_vectors(self, rekey_env, monkeypatch):
         """With the vector extension loaded, only the moved memory's vector
         changes partition, with the same blob; the staying memory's vector
