@@ -766,7 +766,9 @@ def _strip_path_suffixes(path: str) -> str:
     The second slash strip exists only for the `repo/.git` form (a
     non-bare repository's git dir, which a plain sshd serves): once `.git`
     is removed the path ends in the separator that used to precede it, and
-    leaving it would create an empty final segment. It does NOT rescue
+    leaving it would create an empty final segment. In that form a
+    `repo.git` before it loses its `.git` too, since git reaches
+    `repo.git/.git` from `repo`. It does NOT rescue
     `owner/repo//`: that form has no `.git`, so the single strip runs out and
     the empty segment reaches validation.
     """
@@ -776,7 +778,16 @@ def _strip_path_suffixes(path: str) -> str:
     normal = _normalize_segment(last)
     if normal is not None and normal.endswith(".git"):
         last = normal[:-4]
-        return head + separator + last if last else head
+        if last:
+            return head + separator + last
+        # `repo.git/.git`: the git dir of a checkout at `repo.git`, which
+        # git reaches from `repo` too (it tries `repo.git/.git`), so it
+        # loses that `.git` as well (measured, git 2.43).
+        parent_head, parent_separator, parent = head.rpartition("/")
+        parent_normal = _normalize_segment(parent)
+        if parent_normal is not None and parent_normal.endswith(".git") and parent_normal[:-4]:
+            return parent_head + parent_separator + parent_normal[:-4]
+        return head
     return path
 
 

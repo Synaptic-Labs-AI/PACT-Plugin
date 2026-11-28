@@ -3394,3 +3394,18 @@ def test_the_url_readers_never_raise_on_random_text():
         url = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 12)))
         normalize_remote_url(url)
         classify_remote_origin(url)
+
+
+@pytest.mark.parametrize("url", [
+    "https://h.example/o/r", "https://h.example/o/r.git", "https://h.example/o/r/.git",
+    "https://h.example/o/r.git/.git", "ssh://git@h.example/o/r.git/.git",
+    "git@h.example:o/r.git/.git",
+])
+def test_the_git_dir_of_a_checkout_named_repo_git_is_repos_id(url):
+    """git looks up `repo.git/.git` from `repo` too (measured, git 2.43: a
+    checkout at `o/r.git` answers ls-remote for `o/r`, `o/r.git` and
+    `o/r.git/.git` alike), so all of them give one id. RED WHEN
+    `r.git/.git` keeps the inner `.git`."""
+    from scripts.project_identity import normalize_remote_url
+
+    assert normalize_remote_url(url) == "h.example/o/r"
