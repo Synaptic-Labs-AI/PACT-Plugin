@@ -53,8 +53,8 @@ DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic"
 DEFAULT_MODEL = "deepseek-flash[1m]"
 MANIFEST_SCHEMA = "pact-bench/prepare/1"
 OUT_MARKER = ".pact-bench-out"
-# Every env key Claude Code reads as a model id (from the 2.1.x binary's
-# strings); all are pinned to the prepared model so no role falls back to a live value.
+# The env keys that the claude 2.1.332 binary's strings name as model ids; all
+# are pinned to the prepared model so none of those roles keeps a live value.
 MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_MODEL",
@@ -177,14 +177,18 @@ def run_process_group(
     cmd: list[str], timeout: int, **kwargs: Any
 ) -> subprocess.CompletedProcess[str]:
     """subprocess.run, but the child leads its own session, and a timeout, a
-    SIGTERM/SIGHUP to this process or any other interruption kills the whole
-    process group, so grandchildren cannot outlive it.
+    SIGTERM/SIGHUP to this process or a KeyboardInterrupt kills the whole process
+    group, so grandchildren in that group cannot outlive it (one that starts its
+    own session escapes the kill).
 
     On timeout it raises subprocess.TimeoutExpired carrying all the output
     drained after the kill (stdout/stderr) and output_complete (False when the
     bounded drain expired). A signal raises SignalExit after the kill.
     """
     text = bool(kwargs.get("text") or kwargs.get("universal_newlines"))
+    if text:
+        # Undecodable bytes in a child's output must not turn its result into an error.
+        kwargs.setdefault("errors", "replace")
     with _signals_kill_child():
         # shortcut: a signal landing inside Popen itself, before proc exists,
         # skips the group kill; blocking signals around Popen would leak the mask into the child.
@@ -205,7 +209,7 @@ def run_process_group(
 
 
 def memory_files_above(path: Path) -> list[Path]:
-    """Claude Code memory files in path or any of its ancestors (each would load as project memory)."""
+    """The MEMORY_FILE_NAMES files present in path or any of its ancestors."""
     return [
         directory / name
         for directory in (path, *path.parents)
@@ -214,9 +218,13 @@ def memory_files_above(path: Path) -> list[Path]:
     ]
 
 
-def check_clean_root(root: Path) -> None:
-    """Refuse a child cwd root inside the repo or below any Claude Code memory file."""
-    root = root.expanduser().absolute()
+def check_clean_root(root: Path) -> Path:
+    """Return root's real path (symlinks resolved, as the child will see its cwd),
+    refusing one inside the repo, one that exists but is not a directory, or one
+    below any Claude Code memory file."""
+    root = root.expanduser().resolve()
+    if root.exists() and not root.is_dir():
+        raise SystemExit(f"--temp-root {root} is not a directory")
     if root.is_relative_to(REPO_ROOT):
         raise SystemExit(f"--temp-root {root} is inside the repository; choose one outside it, e.g. /tmp")
     found = memory_files_above(root)
@@ -225,6 +233,7 @@ def check_clean_root(root: Path) -> None:
             f"--temp-root {root} has Claude Code memory files in it or its parents, which every "
             f"child session would load: {[str(path) for path in found]}; choose a --temp-root without them"
         )
+    return root
 
 
 def is_scratch_env_key(key: str) -> bool:
@@ -472,7 +481,7 @@ def verify_provider(
     repo, with no memory files above it); write provider-check.json on every outcome."""
     record: dict[str, Any] = {"checked_at": utc_now(), "requested_model": model, "cwd": None}
     try:
-        check_clean_root(temp_root)
+        temp_root = check_clean_root(temp_root)
         temp_root.mkdir(parents=True, exist_ok=True)
         cwd = Path(tempfile.mkdtemp(prefix="pact-verify-", dir=str(temp_root)))
         record["cwd"] = str(cwd)
@@ -599,9 +608,9 @@ def prepare(args: argparse.Namespace) -> int:
     check_inputs(settings_source, token_file)
     prov = check_source(REPO_ROOT, args.plugin_ref, plugin_dir, args.allow_dirty)
     claude_bin = resolve_claude_bin(args.claude_bin) if args.verify else None
-    temp_root = Path(args.temp_root).expanduser().absolute()
+    temp_root = Path(args.temp_root)
     if claude_bin is not None:
-        check_clean_root(temp_root)
+        temp_root = check_clean_root(temp_root)
 
     if replace:
         shutil.rmtree(out)
@@ -668,7 +677,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--temp-root",
         default=str(DEFAULT_TEMP_ROOT),
-        help="parent of the --verify call's cwd; must be outside the repo with no CLAUDE.md in it or its parents",
+        help="parent of the --verify call's cwd; must be outside the repo with no CLAUDE.md, "
+        "CLAUDE.local.md or .claude/CLAUDE.md in it or its parents",
     )
     parser.add_argument(
         "--force",

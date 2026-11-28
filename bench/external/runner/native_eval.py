@@ -4,14 +4,18 @@
 Reads the prepare manifest, injects bench/external/native-evals/evals into the
 scratch plugin copy, runs claude plugin eval headlessly with the scratch
 DeepSeek environment, and records the command/result/exit code in
-<run>/native-eval/result.json on every exit path, including a SIGTERM/SIGHUP
-to this process. The eval runs from <temp-root>/pact-native-XXXXXXXX/work, outside
-the repo and with no Claude Code memory file above it (checked up front). The model (CLI --model and
+<run>/native-eval/result.json on every exit path once the manifest is read and
+its run directory is writable. A
+SIGTERM/SIGHUP is recorded only while the eval child runs; at any other moment
+it gets the default action. The eval runs from <temp-root>/pact-native-XXXXXXXX/work
+(the temp root's real path), outside the repo and with no Claude Code memory
+file above it, checked before the temp root is created. The model (CLI --model and
 --judge-model) is the one fixed at prepare time, read from the manifest. A
 timeout kills the eval's whole process group.
 
 Cleanup contract: the short TMPDIR/HOME root under --temp-root and the
-injected evals/ dir are removed on every exit path (an evals/results/ dir the
+injected evals/ dir are removed on every exit path, even when keeping their
+contents fails (an evals/results/ dir the
 tool wrote is moved to <run>/native-eval/plugin-evals-results/<run id>/ first).
 The scaffold dirs that --keep-temp leaves under TMPDIR are moved to
 <run>/native-eval/kept-temp/<run id>/ first (the eval tool makes some of them read-only, so they are made writable
@@ -138,51 +142,56 @@ def _cleanup(short_root: Path | None, injected: Path | None, out: Path, record: 
     injected is only ever set after short_root exists."""
     errors: list[str] = []
     run_id = short_root.name if short_root is not None else "unknown-run"
-    if short_root is not None and short_root.exists():
+    # Keeping and removing are separate steps, so a failed keep (e.g. a cross-filesystem
+    # move that cannot copy a socket) still removes the directory.
+    for root, keep, field, label in (
+        (short_root, "tmp", "kept_temp", "temp root"),
+        (injected, "results", "plugin_evals_results", "injected evals"),
+    ):
+        if root is None or not root.exists():
+            continue
+        source = root / keep
         try:
-            make_writable(short_root)
-            kept = short_root / "tmp"
-            if kept.is_dir() and any(kept.iterdir()):
-                target = out / "kept-temp" / run_id
+            make_writable(root)
+            if source.is_dir() and any(source.iterdir()):
+                target = out / ("kept-temp" if field == "kept_temp" else "plugin-evals-results") / run_id
                 target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(kept), str(target))
-                record["kept_temp"] = str(target)
-            shutil.rmtree(short_root)
+                shutil.move(str(source), str(target))
+                record[field] = str(target)
         except OSError as exc:
-            errors.append(f"temp root {short_root}: {exc}")
-    if injected is not None and injected.exists():
+            errors.append(f"keeping {label} {source}: {exc}")
         try:
-            make_writable(injected)
-            results = injected / "results"
-            if results.is_dir():
-                target = out / "plugin-evals-results" / run_id
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(results), str(target))
-                record["plugin_evals_results"] = str(target)
-            shutil.rmtree(injected)
+            make_writable(root)
+            shutil.rmtree(root)
         except OSError as exc:
-            errors.append(f"injected evals {injected}: {exc}")
+            errors.append(f"removing {label} {root}: {exc}")
     if errors:
         record["cleanup_error"] = "; ".join(errors)
         print(f"native eval cleanup failed: {record['cleanup_error']}", file=sys.stderr)
 
 
 def _load_manifest(path: Path) -> tuple[dict[str, Any], Path, Path, str]:
-    """Read the prepare manifest; SystemExit naming what is wrong, before anything is written."""
+    """Read the prepare manifest; SystemExit naming what is wrong, before anything is written.
+
+    The plugin path must be the run's own <out>/pact-plugin copy, because the run
+    injects and later deletes evals/ inside it.
+    """
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
-        return manifest, Path(manifest["paths"]["out"]), Path(manifest["paths"]["plugin"]), str(
-            manifest["provider"]["model"]
-        )
+        scratch, plugin = Path(manifest["paths"]["out"]), Path(manifest["paths"]["plugin"])
+        model = str(manifest["provider"]["model"])
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise SystemExit(f"cannot read prepare manifest {path}: {type(exc).__name__}: {exc}") from exc
+    if plugin.resolve() != (scratch / "pact-plugin").resolve():
+        raise SystemExit(f"prepare manifest {path}: plugin {plugin} is not the run's own {scratch / 'pact-plugin'}")
+    return manifest, scratch, plugin, model
 
 
 def run(args: argparse.Namespace) -> int:
     manifest_path = Path(args.manifest).expanduser().resolve()
     manifest, scratch, plugin, model = _load_manifest(manifest_path)
     cases_dir = Path(args.cases_dir).expanduser().resolve() if args.cases_dir else _default_cases()
-    temp_parent = Path(args.temp_root).expanduser().absolute()
+    temp_parent = Path(args.temp_root).expanduser().resolve()
     out = scratch / "native-eval"
     out.mkdir(parents=True, exist_ok=True)
     # The reports are rewritten each run; a stale one must not be recorded as this run's.
@@ -214,7 +223,7 @@ def run(args: argparse.Namespace) -> int:
                 f"{predicted_tmpdir_length(temp_parent)} chars (max {MAX_TMPDIR_CHARS}); "
                 "choose a shorter --temp-root"
             )
-        prepare.check_clean_root(temp_parent)
+        temp_parent = prepare.check_clean_root(temp_parent)
         env = _child_env(manifest, scratch)
         temp_parent.mkdir(parents=True, exist_ok=True)
         short_root = Path(tempfile.mkdtemp(prefix=TEMP_PREFIX, dir=str(temp_parent)))
@@ -256,7 +265,8 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         "--temp-root",
         default=str(prepare.DEFAULT_TEMP_ROOT),
         help="short writable parent for the eval's cwd, TMPDIR and HOME: outside the repo, with no "
-        f"CLAUDE.md in it or its parents, and TMPDIR within {MAX_TMPDIR_CHARS} chars (sandbox bridge "
+        "CLAUDE.md, CLAUDE.local.md or .claude/CLAUDE.md in it or its parents, and TMPDIR within "
+        f"{MAX_TMPDIR_CHARS} chars (sandbox bridge "
         "sockets must stay under the Unix socket path limit)",
     )
     parser.add_argument("--runs", type=int, default=3)

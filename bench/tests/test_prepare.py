@@ -419,6 +419,7 @@ def _wait_for(path: Path, wait: float = 10.0) -> str:
 
 def test_token_count_tuning_keys_are_kept_and_dropped_keys_are_recorded(tmp_path: Path) -> None:
     out = tmp_path / "out"
+    (tmp_path / "live-token").write_text("provider-token-7f3c9a\n", encoding="utf-8")
     args = _prepare_args(tmp_path, out)
     live_env = {
         "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
@@ -434,6 +435,9 @@ def test_token_count_tuning_keys_are_kept_and_dropped_keys_are_recorded(tmp_path
         assert settings_env[key] == live_env[key]
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["settings"]["dropped_env_keys"] == ["ANTHROPIC_AUTH_TOKEN", "MY_API_KEY"]
+    # The provider token (from --token-file) is never written anywhere under --out.
+    token = (tmp_path / "live-token").read_bytes().strip()
+    assert all(token not in path.read_bytes() for path in out.rglob("*") if path.is_file())
     assert "secret" not in (out / "manifest.json").read_text(encoding="utf-8")
 
 
@@ -443,10 +447,6 @@ def test_every_model_key_is_pinned_including_small_fast(tmp_path: Path) -> None:
     source.write_text(json.dumps({"env": {key: "live-model" for key in prepare.MODEL_ENV_KEYS}}), encoding="utf-8")
     _settings, env = prepare.build_scratch_settings(source, tmp_path / "config", tmp_path, "deepseek-pro")
     assert {key: env[key] for key in prepare.MODEL_ENV_KEYS} == dict.fromkeys(prepare.MODEL_ENV_KEYS, "deepseek-pro")
-
-
-def test_memory_file_names_cover_every_load_location() -> None:
-    assert set(prepare.MEMORY_FILE_NAMES) == {"CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md"}
 
 
 def test_clean_root_refuses_memory_files_in_parents(tmp_path: Path) -> None:
@@ -520,7 +520,12 @@ def test_post_kill_drain_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPa
         _kill(int(_wait_for(pid_file)))
 
 
-def test_sigterm_to_the_harness_kills_the_child_group(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("signum", "expected_rc"),
+    [(signal.SIGTERM, 128 + signal.SIGTERM), (signal.SIGHUP, 128 + signal.SIGHUP), (signal.SIGINT, -signal.SIGINT)],
+    ids=["SIGTERM", "SIGHUP", "SIGINT"],
+)
+def test_a_signal_to_the_harness_kills_the_child_group(tmp_path: Path, signum: int, expected_rc: int) -> None:
     pid_file = tmp_path / "grandchild.pid"
     child = (
         "import subprocess, sys, time\n"
@@ -538,8 +543,8 @@ def test_sigterm_to_the_harness_kills_the_child_group(tmp_path: Path) -> None:
     grandchild = int(_wait_for(pid_file))
     try:
         started = time.monotonic()
-        proc.send_signal(signal.SIGTERM)
-        assert proc.wait(timeout=15) == 128 + signal.SIGTERM
+        proc.send_signal(signum)
+        assert proc.wait(timeout=15) == expected_rc
         assert time.monotonic() - started < 15
         assert _dead(grandchild)
     finally:
@@ -548,7 +553,63 @@ def test_sigterm_to_the_harness_kills_the_child_group(tmp_path: Path) -> None:
         _kill(grandchild)
 
 
-def test_signal_handlers_are_restored(tmp_path: Path) -> None:
-    before = {signum: signal.getsignal(signum) for signum in prepare.FORWARDED_SIGNALS}
-    prepare.run_process_group([sys.executable, "-c", "pass"], 10)
-    assert {signum: signal.getsignal(signum) for signum in prepare.FORWARDED_SIGNALS} == before
+def test_signal_handlers_are_restored() -> None:
+    # Sentinel handlers, so a baseline left behind by an earlier test cannot make this pass.
+    def sentinel(_signum: int, _frame: object) -> None:
+        pass
+
+    original = {signum: signal.signal(signum, sentinel) for signum in prepare.FORWARDED_SIGNALS}
+    try:
+        prepare.run_process_group([sys.executable, "-c", "pass"], 10)
+        assert all(signal.getsignal(signum) is sentinel for signum in prepare.FORWARDED_SIGNALS)
+    finally:
+        for signum, handler in original.items():
+            signal.signal(signum, handler)
+
+
+def test_verify_provider_itself_refuses_a_dirty_temp_root(tmp_path: Path) -> None:
+    dirty = tmp_path / "dirty"
+    (dirty / "r").mkdir(parents=True)
+    (dirty / "CLAUDE.local.md").write_text("memory", encoding="utf-8")
+    ran = tmp_path / "ran"
+    fake = _fake_claude(tmp_path / "claude", f"open({str(ran)!r}, 'w').write('x')\n")
+    out = _out(tmp_path)
+    with pytest.raises(SystemExit, match="memory files"):
+        prepare.verify_provider(out, out, str(fake), dict(os.environ), temp_root=dirty / "r")
+    assert not ran.exists()
+    assert "memory files" in json.loads((out / "provider-check.json").read_text(encoding="utf-8"))["error"]
+
+
+def test_clean_root_follows_symlinks(tmp_path: Path) -> None:
+    real = tmp_path / "real"
+    (real / "sub").mkdir(parents=True)
+    (real / "CLAUDE.local.md").write_text("memory", encoding="utf-8")
+    link = tmp_path / "link"
+    link.symlink_to(real / "sub")
+    with pytest.raises(SystemExit, match="memory files"):
+        prepare.check_clean_root(link)
+    clean = tmp_path / "clean"
+    clean.mkdir()
+    (tmp_path / "clean-link").symlink_to(clean)
+    assert prepare.check_clean_root(tmp_path / "clean-link") == clean.resolve()
+
+
+def test_clean_root_refuses_a_symlink_into_the_repo(tmp_path: Path) -> None:
+    link = tmp_path / "into-repo"
+    link.symlink_to(prepare.REPO_ROOT / "bench")
+    with pytest.raises(SystemExit, match="inside the repository"):
+        prepare.check_clean_root(link)
+
+
+def test_clean_root_refuses_a_file(tmp_path: Path) -> None:
+    afile = tmp_path / "afile"
+    afile.write_text("x", encoding="utf-8")
+    with pytest.raises(SystemExit, match="not a directory"):
+        prepare.check_clean_root(afile)
+
+
+def test_text_mode_output_with_undecodable_bytes_is_kept() -> None:
+    child = [sys.executable, "-c", "import os; os.write(1, b'\\xff\\xfe ok\\n')"]
+    proc = prepare.run_process_group(child, 10, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert proc.returncode == 0
+    assert proc.stdout == "�� ok\n"

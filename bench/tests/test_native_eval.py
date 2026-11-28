@@ -346,3 +346,45 @@ def test_native_eval_rejects_empty_cases(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="is empty"):
         native_eval.run(_args(manifest, neutral, tmp_path / "nope", tmp_path))
     assert _leftovers(tmp_path) == []
+
+
+def test_native_eval_stores_the_real_temp_root(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    link = Path(tempfile.mkdtemp(prefix="pnl-", dir="/tmp")) / "l"
+    try:
+        link.symlink_to(short_root)
+        assert native_eval.run(_args(manifest, cases, _fake_claude(tmp_path), link)) == 0
+        record = _result(manifest)
+        assert record["temp_root"].startswith(str(short_root.resolve()) + "/")
+        assert record["cwd"].startswith(str(short_root.resolve()) + "/")
+    finally:
+        shutil.rmtree(link.parent, ignore_errors=True)
+
+
+def test_native_eval_removes_the_temp_root_when_keeping_fails(
+    tmp_path: Path, short_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    fake = _fake_claude(tmp_path, "os.makedirs(os.path.join(os.environ['TMPDIR'], 'claude-eval-x'))\n")
+
+    def failing_move(*_args: object) -> None:
+        raise OSError("cross-device copy failed")
+
+    monkeypatch.setattr(native_eval.shutil, "move", failing_move)
+    assert native_eval.run(_args(manifest, cases, fake, short_root)) == 1
+    record = _result(manifest)
+    assert "keeping temp root" in record["cleanup_error"]
+    assert record["kept_temp"] is None
+    assert _leftovers(short_root) == []
+
+
+def test_native_eval_refuses_a_manifest_whose_plugin_is_not_its_own_copy(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, plugin = _prepared(tmp_path)
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    elsewhere = tmp_path / "real-plugin"
+    (elsewhere / "evals").mkdir(parents=True)
+    data["paths"]["plugin"] = str(elsewhere)
+    manifest.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(SystemExit, match="not the run's own"):
+        native_eval.run(_args(manifest, cases, _fake_claude(tmp_path), short_root))
+    assert (elsewhere / "evals").is_dir()
