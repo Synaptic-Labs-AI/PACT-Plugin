@@ -737,3 +737,18 @@ class TestDuplicateWritesOnTheProductionConnection:
             "a duplicate file relation raised instead of returning False on "
             "the production connection class"
         )
+
+
+@pytest.fixture(scope="module")
+def _copy_probe_seen_by_a_module_fixture():
+    from fixtures.sqlite_copy_probe import ACTIVE
+
+    return ACTIVE.get("test_memory_graph.py")
+
+
+def test_a_module_fixture_runs_under_the_copy_probe(_copy_probe_seen_by_a_module_fixture):
+    """This module is ALLOWED, so the standard-sqlite3 probe must already be
+    installed when one of its module-scoped fixtures runs: a connection such a
+    fixture opens is probed too. RED WHEN the probe is installed per test
+    only (tests/conftest.py `_sqlite_copy_probe_for_module`)."""
+    assert _copy_probe_seen_by_a_module_fixture is not None

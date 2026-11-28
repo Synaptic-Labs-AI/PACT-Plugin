@@ -155,7 +155,8 @@ from fixtures.root_guard import non_root_skip_reason  # noqa: E402
 from fixtures.session_marker import remove_importer_markers  # noqa: E402
 from fixtures.sqlite_copy_probe import ALLOWED as _STDLIB_SQLITE3_ALLOWED  # noqa: E402
 from fixtures.sqlite_copy_probe import STDLIB_SQLITE3 as _STDLIB_SQLITE3  # noqa: E402
-from fixtures.sqlite_copy_probe import CopyProbe  # noqa: E402
+from fixtures.sqlite_copy_probe import ACTIVE as _ACTIVE_COPY_PROBES  # noqa: E402
+from fixtures.sqlite_copy_probe import ModuleProbe as _ModuleProbe  # noqa: E402
 
 # These copy names from shared modules at first import; loading them here keeps a test patch from being copied.
 # tests/test_conftest_import_guard.py derives which modules need a line here.
@@ -1028,30 +1029,58 @@ def _confine_embedding_markers(tmp_path_factory, monkeypatch):
     yield
 
 
-@pytest.fixture(autouse=True)
-def _probe_sqlite_copies(request, monkeypatch):
-    """Fail a test of an ALLOWED module (fixtures/sqlite_copy_probe.py) in which a
-    standard-library sqlite3 connection to a file is open while a store-code
-    connection to the same file opens or closes, or the reverse. Those modules
-    import the standard module beside the memory scripts; where pysqlite3 links
-    SQLite statically that is a second SQLite copy, and an overlap corrupts the
-    store's WAL. Every other module keeps the standard module out
-    (tests/test_store_sqlite_copy_guard.py), so only these are wrapped.
-    """
-    if request.node.path.name not in _STDLIB_SQLITE3_ALLOWED:
-        yield
+@pytest.fixture(scope="module", autouse=True)
+def _sqlite_copy_probe_for_module(request):
+    """The probe for an ALLOWED module (fixtures/sqlite_copy_probe.py), or
+    None. Module-scoped and autouse, so it is installed before the module's
+    own module-scoped fixtures run and a connection they open is probed too
+    (a session- or package-scoped fixture there is refused by
+    tests/test_store_sqlite_copy_guard.py). An overlap no test reported, such
+    as one in a module fixture's teardown, fails the module's teardown."""
+    name = request.node.path.name
+    if name not in _STDLIB_SQLITE3_ALLOWED:
+        yield None
         return
     try:
         from scripts import database
     except Exception:  # noqa: BLE001 — a broken import fails its own tests
-        yield
+        yield None
         return
-    probe = CopyProbe(_STDLIB_SQLITE3, database.sqlite3)
-    probe.install(monkeypatch)
-    yield
-    assert not probe.overlaps, (
+    patcher = pytest.MonkeyPatch()
+    probe = _ModuleProbe(_STDLIB_SQLITE3, database.sqlite3)
+    probe.install(patcher)
+    _ACTIVE_COPY_PROBES[name] = probe
+    try:
+        yield probe
+    finally:
+        _ACTIVE_COPY_PROBES.pop(name, None)
+        patcher.undo()
+    left = probe.unreported()
+    assert not left, (
         "a standard-library and a store-code connection to one file overlapped "
-        "(two SQLite copies corrupt its WAL): " + "; ".join(probe.overlaps)
+        "(two SQLite copies corrupt its WAL): " + "; ".join(left)
+    )
+
+
+@pytest.fixture(autouse=True)
+def _probe_sqlite_copies(_sqlite_copy_probe_for_module):
+    """Fail a test of an ALLOWED module (fixtures/sqlite_copy_probe.py) during
+    or before which a standard-library sqlite3 connection to a file was open
+    while a store-code connection to the same file opened or closed, or the
+    reverse. Those modules import the standard module beside the memory
+    scripts; where pysqlite3 links SQLite statically that is a second SQLite
+    copy, and an overlap corrupts the store's WAL. Every other module keeps
+    the standard module out (tests/test_store_sqlite_copy_guard.py), so only
+    these are wrapped.
+    """
+    probe = _sqlite_copy_probe_for_module
+    yield
+    if probe is None:
+        return
+    overlaps = probe.unreported()
+    assert not overlaps, (
+        "a standard-library and a store-code connection to one file overlapped "
+        "(two SQLite copies corrupt its WAL): " + "; ".join(overlaps)
     )
 
 

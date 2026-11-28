@@ -327,6 +327,25 @@ def test_the_bypass_scan_sees_each_form():
         assert bool(_probe_bypasses(ast.parse(source))) is bypasses, source
 
 
+def test_a_module_probe_reports_an_overlap_from_before_a_test_once(tmp_path, monkeypatch):
+    """A module-scoped fixture's overlap happens before any test starts: the
+    module probe holds it for the next test's report, which names it once.
+    RED WHEN an overlap recorded before a test is dropped, or reported
+    twice."""
+    from fixtures.sqlite_copy_probe import ModuleProbe
+
+    store_driver = _fake_store_driver()
+    module_probe = ModuleProbe(STDLIB_SQLITE3, store_driver)
+    module_probe.install(monkeypatch)
+    db = tmp_path / "store.db"
+    held = STDLIB_SQLITE3.connect(str(db))
+    store_driver.connect(str(db)).close()
+    held.close()
+    first = module_probe.unreported()
+    assert len(first) == 2 and all(str(db.resolve()) in line for line in first), first
+    assert module_probe.unreported() == []
+
+
 def test_the_probe_passes_a_positional_factory_through(tmp_path, monkeypatch):
     """connect's positional arguments, a factory among them, go through
     unchanged. RED WHEN a positional factory makes the probe raise TypeError,

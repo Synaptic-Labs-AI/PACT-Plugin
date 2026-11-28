@@ -161,4 +161,28 @@ class CopyProbe:
         return wrapper
 
 
+class ModuleProbe:
+    """One `CopyProbe` for a whole ALLOWED module, installed before the
+    module's own module-scoped fixtures run, so a connection one of them opens
+    is probed too. Each overlap is reported once: to the test during or before
+    which it happened, or at the module's teardown."""
+
+    def __init__(self, stdlib_module, store_module):
+        self.probe = CopyProbe(stdlib_module, store_module)
+        self.reported = 0
+
+    def install(self, monkeypatch):
+        self.probe.install(monkeypatch)
+
+    def unreported(self):
+        """The overlaps recorded since the last call."""
+        new = self.probe.overlaps[self.reported:]
+        self.reported = len(self.probe.overlaps)
+        return new
+
+
+# The ModuleProbe of each ALLOWED module whose tests are running, by file name
+# (conftest's `_sqlite_copy_probe_for_module`).
+ACTIVE = {}
+
 STDLIB_SQLITE3 = _stdlib_sqlite3
