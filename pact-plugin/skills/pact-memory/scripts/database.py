@@ -2029,7 +2029,8 @@ def github_repo_path(path: str) -> Optional[str]:
     if parts[1].lower().endswith(".git"):
         # GitHub removes a trailing `.git` from a name when the repository is
         # created, so no repository there has one: `r.git.git`, `r.GIT` and
-        # `r%2Egit` reach nothing.
+        # an https or scp `r%2Egit` reach nothing (an `ssh://` path arrives
+        # here decoded, with its one `.git` already dropped).
         return None
     return "/".join(part.lower() for part in parts)
 
