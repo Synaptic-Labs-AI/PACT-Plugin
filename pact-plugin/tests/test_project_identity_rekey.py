@@ -903,8 +903,9 @@ class TestRekeyCounterMeaning:
 class TestSubsetMove:
     def test_a_shared_file_row_is_copied_for_the_moved_memory_only(self, rekey_env):
         """m1 moves, m2 stays, and both link one file row that also has a file
-        relation. The moved memory links a copy under the target; the staying
-        memory keeps the original row and its relation; the dry run reports
+        relation. The moved memory links a copy under the target, which takes
+        the row's relation; the staying memory keeps the original row and its
+        relation; the dry run reports
         the copy apart from moved rows; a re-run copies nothing again. RED
         WHEN the staying memory loses its row or relation, the moved memory
         keeps the source row, or a re-run duplicates the copy."""
@@ -929,15 +930,19 @@ class TestSubsetMove:
             assert links == {
                 "m1:src/x.py": CANONICAL, "m2:src/x.py": LEGACY, "m2:src/y.py": LEGACY,
             }, links
-            assert [tuple(row) for row in conn.execute(
+            copy_id = conn.execute(
+                "SELECT id FROM files WHERE path = 'src/x.py' AND project_id = ?", (CANONICAL,)
+            ).fetchone()[0]
+            assert sorted(tuple(row) for row in conn.execute(
                 "SELECT source_file, target_file FROM file_relations"
-            ).fetchall()] == [("f-shared", "f-other")]
+            ).fetchall()) == sorted([("f-shared", "f-other"), (copy_id, "f-other")])
             assert dict(conn.execute("SELECT id, project_id FROM memories").fetchall()) == {
                 "m1": CANONICAL, "m2": LEGACY,
             }
             again = rekey_project(conn, LEGACY, CANONICAL, dry_run=False, memory_ids=["m1"])
             assert (again["memories"], again["files_copied"]) == (0, 0), again
             assert conn.execute("SELECT COUNT(*) FROM files WHERE path = 'src/x.py'").fetchone()[0] == 2
+            assert conn.execute("SELECT COUNT(*) FROM file_relations").fetchone()[0] == 2
             assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
 
     def test_a_subset_move_moves_only_its_memories_vectors(self, rekey_env, monkeypatch):

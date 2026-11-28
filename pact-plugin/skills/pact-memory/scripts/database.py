@@ -2634,7 +2634,8 @@ def _copy_shared_file_links(
 ) -> None:
     """Re-point the moved memories' links on a `from` file row that a staying
     memory also links to the target's row for the same path, created when
-    absent. The original row keeps its other links and its file relations.
+    absent, and give that row the original's file relations. The original
+    row keeps its other links and its file relations.
     A target link for the same pair keeps its own relationship (the whole
     move's keeper rule), counted in `links_conflicted`."""
     target = conn.execute(
@@ -2653,6 +2654,19 @@ def _copy_shared_file_links(
     else:
         target_id = target[0]
     counters["files_copied"] += 1
+    # The copy takes the row's file relations (imports, tests), so the moved
+    # memory's file keeps its edges; the original keeps them too. An edge
+    # already present is not added twice.
+    conn.execute(
+        "INSERT OR IGNORE INTO file_relations (source_file, target_file, relationship) "
+        "SELECT ?, target_file, relationship FROM file_relations WHERE source_file = ?",
+        (target_id, old_id),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO file_relations (source_file, target_file, relationship) "
+        "SELECT source_file, ?, relationship FROM file_relations WHERE target_file = ?",
+        (target_id, old_id),
+    )
     for memory_id, relationship in conn.execute(
         "SELECT memory_id, relationship FROM memory_files WHERE file_id = ?", (old_id,)
     ).fetchall():
