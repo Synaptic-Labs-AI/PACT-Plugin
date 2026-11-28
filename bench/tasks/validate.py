@@ -5,11 +5,12 @@ A task is valid only when:
   - the untouched fixture's seed tests pass;
   - hidden tests fail on the untouched fixture with pytest exit 1 (tests ran
     and failed; a collection error or an empty suite does not count);
-  - every task.json path resolves inside the task directory;
+  - every task.json path, and every symlink inside the fixture and hidden_tests,
+    resolves inside the task directory;
   - the gold patch leaves hidden_tests/ alone, applies, changes the tree, makes
-    at least one hidden test pass with none skipped, and keeps seed tests green
-    with no fewer passing and no more skipped than before (counted from pytest's
-    JUnit report). A patch that rewrites that report from a conftest can still
+    at least one hidden test pass with none skipped (an xfail is not a skip), and
+    keeps seed tests green with no fewer passing and no more skipped than before
+    (counted from pytest's JUnit report, which must be written). A patch that rewrites that report from a conftest can still
     fool it; the check targets accidental skips, not a hostile patch.
 
 Every task is validated and reported; the exit code is 1 if any task failed.
@@ -142,6 +143,9 @@ def validate_task(task_dir: Path, python: str) -> dict[str, Any]:
         if not path.exists():
             raise TaskInvalid(f"{task_id}: missing {label}: {path}")
         paths[label] = path
+    for label in ("fixture", "hidden_tests"):
+        if paths[label].is_dir() and (links := _outside_links(paths[label], task_dir)):
+            raise TaskInvalid(f"{task_id}: {label} has symlinks resolving outside the task directory: {links}")
     _check_in_temp(task_id, paths["fixture"], paths["hidden_tests"], paths["gold_patch"], python, timeout)
     return {
         "id": meta["id"],
@@ -166,6 +170,8 @@ def _check_in_temp(task_id: str, fixture: Path, hidden: Path, gold: Path, python
         # The report lives outside work/, so it never shows up in the git status check.
         report = Path(tmp) / f"{name}.xml"
         proc = pytest(f"--junitxml={report}", *extra)
+        if proc.returncode == 0 and not report.is_file():
+            raise TaskInvalid(f"{task_id}: pytest wrote no JUnit report for the {name} run (junitxml disabled?)")
         return proc, _junit_counts(report) if report.is_file() else {"passed": 0, "skipped": 0}
 
     with tempfile.TemporaryDirectory(prefix="pact-task-") as tmp:
@@ -223,13 +229,27 @@ def _check_in_temp(task_id: str, fixture: Path, hidden: Path, gold: Path, python
 
 
 def _junit_counts(report: Path) -> dict[str, int]:
-    root = ET.parse(report).getroot()
-    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
-    total = {key: sum(int(suite.get(key, 0)) for suite in suites) for key in ("tests", "failures", "errors", "skipped")}
-    return {
-        "passed": total["tests"] - total["failures"] - total["errors"] - total["skipped"],
-        "skipped": total["skipped"],
-    }
+    """Per-testcase outcome counts; an expected failure (xfail) is counted apart from a skip."""
+    counts = {"passed": 0, "failed": 0, "skipped": 0, "xfailed": 0}
+    for case in ET.parse(report).getroot().iter("testcase"):
+        if case.find("failure") is not None or case.find("error") is not None:
+            counts["failed"] += 1
+        elif (skip := case.find("skipped")) is not None:
+            counts["xfailed" if skip.get("type") == "pytest.xfail" else "skipped"] += 1
+        else:
+            counts["passed"] += 1
+    return counts
+
+
+def _outside_links(directory: Path, task_dir: Path) -> list[str]:
+    """Symlinks under directory that resolve outside the task (copytree would copy their targets in)."""
+    found = []
+    for root, dirs, files in os.walk(directory):
+        for name in (*dirs, *files):
+            path = Path(root) / name
+            if path.is_symlink() and not path.resolve().is_relative_to(task_dir):
+                found.append(str(path.relative_to(task_dir)))
+    return found
 
 
 def _task_id(task_dir: Path) -> str:

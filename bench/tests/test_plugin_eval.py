@@ -161,16 +161,33 @@ def test_run_null_layers_does_not_lose_later_records(tmp_path: Path) -> None:
 
 
 def _dead(pid: int) -> bool:
+    """True once pid is gone (or a zombie, where /proc shows it); works without /proc too."""
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
         try:
-            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
-        except FileNotFoundError:
+            os.kill(pid, 0)
+        except ProcessLookupError:
             return True
-        if state == "Z":
-            return True
+        stat = Path(f"/proc/{pid}/stat")
+        try:
+            if stat.read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                return True
+        except OSError:
+            pass  # no /proc (or the pid just vanished): os.kill decides on the next pass
         time.sleep(0.1)
     return False
+
+
+def test_dead_sees_a_live_process() -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        started = time.monotonic()
+        assert not _dead(proc.pid)
+        assert time.monotonic() - started >= 4
+    finally:
+        proc.kill()
+        proc.wait()
+    assert _dead(proc.pid)
 
 
 def test_timeout_kills_grandchildren(tmp_path: Path) -> None:
@@ -247,16 +264,37 @@ def test_run_sync_timeout_records_its_output(tmp_path: Path) -> None:
     assert "sync-marker" in sync["stderr_tail"]
 
 
-def test_unexpected_error_fails_only_its_command(tmp_path: Path) -> None:
-    long_name = "x" * 300  # its output file name exceeds NAME_MAX, so saving raises OSError
-    manifest, tool, uv, skills = _setup(tmp_path, [long_name, "good"])
+def test_unexpected_error_fails_only_its_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["broken", "good"])
+    real = plugin_eval._save
+
+    def save(out: Path, stem: str, stdout: str, stderr: str) -> None:
+        if stem.endswith("-broken"):
+            raise OSError("disk full")
+        real(out, stem, stdout, stderr)
+
+    monkeypatch.setattr(plugin_eval, "_save", save)
     assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 1
     summary = _result(manifest)
     records = {r["label"]: r for r in summary["results"]}
-    assert records[long_name]["exit_code"] is None
-    assert records[long_name]["error"].startswith("OSError")
+    assert records["broken"]["exit_code"] is None
+    assert records["broken"]["error"] == "OSError: disk full"
     assert records["good"]["exit_code"] == 0
     assert summary["complete"] is True
+
+
+def test_output_file_names_are_distinct_and_bounded(tmp_path: Path) -> None:
+    long_name = "y" * 300
+    manifest, tool, uv, skills = _setup(tmp_path, ["a.b", "a_b", long_name])
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
+    records = _result(manifest)["results"]
+    stems = [r["output_stem"] for r in records]
+    assert len(set(stems)) == 4
+    assert stems[0] == "00-pact-plugin"
+    for stem in stems:
+        assert len(stem) <= 63
+        out = manifest.parent / "plugin-eval"
+        assert (out / f"{stem}.stdout.json").is_file() and (out / f"{stem}.stderr.txt").is_file()
 
 
 HARNESS = """import sys

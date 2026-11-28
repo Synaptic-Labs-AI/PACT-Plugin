@@ -7,10 +7,10 @@ uv sync --frozen, then the whole-plugin quick score and the skill scores listed
 in plugin-eval-skills.txt (or --skills-file). Every uv command starts in a fresh
 cwd under --temp-root (refused by prepare.check_clean_root if that root is in the
 repo or below a Claude Code memory file), with the checkout passed as --project.
-Score commands get the provider token as ANTHROPIC_AUTH_TOKEN (with
-ANTHROPIC_BASE_URL); PluginEval's judge reaches the provider through
-claude-agent-sdk, which passes its inherited environment to the claude CLI.
-uv sync gets no token, and ANTHROPIC_API_KEY is never set.
+Score commands start with the provider token as ANTHROPIC_AUTH_TOKEN (with
+ANTHROPIC_BASE_URL); PluginEval's judge is expected to pass that environment to
+the claude CLI through claude-agent-sdk (not verified in this tree). uv sync
+gets no token, and ANTHROPIC_API_KEY is never set.
 Child output (in result.json's tails and parsed results, and the per-command
 .stdout.json/.stderr.txt and sync.*.txt files) can contain the token; stdout
 prints only the record's path.
@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import tempfile
@@ -97,11 +98,15 @@ def _exec(cmd: list[str], cwd: Path, env: dict[str, str], timeout: int) -> subpr
         raise SystemExit(f"cannot run {cmd[0]!r}: {exc}") from exc
 
 
+def output_stem(index: int, label: str) -> str:
+    """Collision-free, length-bounded file stem: the command's position plus a short slug."""
+    return f"{index:02d}-{re.sub(r'[^A-Za-z0-9_-]+', '_', Path(label).name)[:60]}"
+
+
 def _score_one(
-    label: str, cmd: list[str], cwd: Path, env: dict[str, str], timeout: int, out: Path
+    label: str, cmd: list[str], cwd: Path, env: dict[str, str], timeout: int, out: Path, stem: str
 ) -> dict[str, Any]:
-    record: dict[str, Any] = {"label": label, "command": cmd}
-    stem = label.replace("/", "_").replace(".", "_")
+    record: dict[str, Any] = {"label": label, "command": cmd, "output_stem": stem}
     try:
         proc = _exec(cmd, cwd, env, timeout)
     except subprocess.TimeoutExpired as exc:
@@ -201,13 +206,13 @@ def run(args: argparse.Namespace) -> int:
                 (out / "sync.stderr.txt").write_text(proc.stderr, encoding="utf-8")
                 if proc.returncode != 0:
                     raise SystemExit(f"uv sync failed: {proc.returncode}")
-            for label, cmd in commands:
+            for index, (label, cmd) in enumerate(commands):
                 current = {"label": label, "command": cmd}
                 not_run.remove(label)
                 # The per-command boundary: an unexpected error fails only this record. SystemExit
                 # (no uv binary, a signal) still aborts, because every later command would fail too.
                 try:
-                    results.append(_score_one(label, cmd, cwd, env, args.timeout, out))
+                    results.append(_score_one(label, cmd, cwd, env, args.timeout, out, output_stem(index, label)))
                 except Exception as exc:
                     results.append({**current, "exit_code": None, "error": f"{type(exc).__name__}: {exc}"})
             current = None

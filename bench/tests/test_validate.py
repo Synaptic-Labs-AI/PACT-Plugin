@@ -113,6 +113,27 @@ def _hook_config(tmp_path: Path) -> Path:
     return config
 
 
+def test_hidden_xfail_is_not_a_skip(tmp_path: Path) -> None:
+    hidden = HIDDEN_TEST + "\n\nimport pytest\n\n\n@pytest.mark.xfail(strict=True)\ndef test_known_bug():\n    assert False\n"
+    task = make_task(tmp_path, hidden={"test_hidden.py": hidden})
+    assert validate.validate_task(task, sys.executable)["status"] == "pass"
+
+
+@pytest.mark.parametrize("where", ["fixture", "hidden_tests"])
+def test_symlink_inside_a_copied_dir_pointing_out_is_rejected(tmp_path: Path, where: str) -> None:
+    task = make_task(tmp_path / "t")
+    _write(tmp_path / "outside.py", "X = 1\n")
+    (task / where / "linked.py").symlink_to(tmp_path / "outside.py")
+    with pytest.raises(validate.TaskInvalid, match=f"{where} has symlinks resolving outside"):
+        validate.validate_task(task, sys.executable)
+
+
+def test_symlink_inside_a_copied_dir_pointing_inside_is_kept(tmp_path: Path) -> None:
+    task = make_task(tmp_path / "t")
+    (task / "fixture" / "calc_link.py").symlink_to(task / "fixture" / "calc.py")
+    assert validate.validate_task(task, sys.executable)["status"] == "pass"
+
+
 def test_symlink_out_of_the_task_is_rejected(tmp_path: Path) -> None:
     task = make_task(tmp_path / "t", meta={"rubric": "rubric-link.md"})
     _write(tmp_path / "outside.md", "x\n")
@@ -229,6 +250,10 @@ BROKEN = {
     ),
     "fixture_path_escapes": ({"meta": {"fixture": "../elsewhere"}}, "resolves outside the task directory"),
     "absolute_gold_path": ({"meta": {"gold_patch": "/etc/hostname"}}, "resolves outside the task directory"),
+    "junit_report_disabled": (
+        {"files": {"pytest.ini": "[pytest]\naddopts = -p no:junitxml\n"}},
+        "pytest wrote no JUnit report for the seed run",
+    ),
     "hidden_collection_error": (
         {"hidden": {"test_hidden.py": "def test_fix(:\n"}},
         "pytest exit 2",
@@ -344,17 +369,37 @@ def test_timeout_kills_grandchildren(tmp_path: Path) -> None:
     # A surviving grandchild holds the output pipe open until its 30s sleep ends.
     assert time.monotonic() - started < 15
     pid = int(pid_file.read_text())
-    deadline = time.monotonic() + 5
-    alive = True
-    while alive and time.monotonic() < deadline:
-        try:
-            alive = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
-        except FileNotFoundError:
-            alive = False
-        time.sleep(0.1)
+    alive = not _dead(pid)
     if alive:
         os.kill(pid, 9)
     assert not alive
+
+
+def _dead(pid: int) -> bool:
+    """True once pid is gone (or a zombie, where /proc shows it); works without /proc too."""
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        try:
+            if Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                return True
+        except OSError:
+            pass  # no /proc (or the pid just vanished): os.kill decides on the next pass
+        time.sleep(0.1)
+    return False
+
+
+def test_dead_sees_a_live_process() -> None:
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        assert not _dead(proc.pid)
+    finally:
+        proc.kill()
+        proc.wait()
+    assert _dead(proc.pid)
 
 
 def test_main_single_task_passes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
