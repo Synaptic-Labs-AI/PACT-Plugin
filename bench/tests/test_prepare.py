@@ -263,7 +263,13 @@ def test_force_refuses_dangerous_targets(target: str, monkeypatch: pytest.Monkey
         "repo": prepare.REPO_ROOT,
         "repo_parent": prepare.REPO_ROOT.parent,
     }[target]
-    with pytest.raises(SystemExit, match="refusing --force"):
+    # Make the later "previous pact-bench output" check pass for this target, so only the
+    # /, $HOME and repo-ancestor guard can refuse it.
+    marker = (prepare.REPO_ROOT / "bench" / "README.md").relative_to(out) if target != "home" else Path("m")
+    if target == "home":
+        (tmp_path / "m").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(prepare, "OUT_MARKER", str(marker))
+    with pytest.raises(SystemExit, match=r"it is /, \$HOME, or the repo root"):
         prepare.check_force_target(out)
 
 
@@ -741,3 +747,141 @@ def test_clean_root_refuses_project_settings_in_parents(tmp_path: Path, name: st
     (tmp_path / name).write_text("{}", encoding="utf-8")
     with pytest.raises(SystemExit, match="memory files or project settings"):
         prepare.check_clean_root(tmp_path / "a")
+
+
+
+def test_leftovers_in_the_group_die_after_a_normal_exit(tmp_path: Path) -> None:
+    pid_file = tmp_path / "leftover.pid"
+    script = (
+        "import subprocess, sys\n"
+        "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], stdout=subprocess.DEVNULL)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(kid.pid))\n"
+    )
+    pid = None
+    try:
+        proc = prepare.run_process_group([sys.executable, "-c", script], 30, stdout=subprocess.PIPE, text=True)
+        assert proc.returncode == 0
+        pid = int(_wait_for(pid_file))
+        assert _dead(pid)
+    finally:
+        if pid is not None:
+            _kill(pid)
+
+
+def test_a_held_pipe_reports_the_childs_own_exit_code(tmp_path: Path) -> None:
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as exc:
+        prepare.run_process_group(["sh", "-c", "sleep 30 & echo hi; exit 0"], 2, stdout=subprocess.PIPE, text=True)
+    assert time.monotonic() - started < 15
+    assert exc.value.child_exit_code == 0
+    assert exc.value.stdout == "hi\n"
+
+
+def test_verify_timeout_records_the_child_exit_code(tmp_path: Path) -> None:
+    fake = tmp_path / "claude"
+    fake.write_text("#!/bin/sh\nsleep 30 &\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    out = _out(tmp_path)
+    with pytest.raises(SystemExit, match="did not answer"):
+        prepare.verify_provider(out, out, str(fake), dict(os.environ), timeout=2)
+    assert json.loads((out / "provider-check.json").read_text(encoding="utf-8"))["child_exit_code"] == 0
+
+
+@pytest.mark.parametrize("where", ["xdg_default", "home_default", "global_config"])
+def test_host_ignore_files_do_not_hide_untracked_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, where: str) -> None:
+    repo = _plugin_repo(tmp_path)
+    (repo / "pact-plugin" / "secret.local.py").write_text("x", encoding="utf-8")
+    home = tmp_path / "home"
+    ignore = home / ".config" / "git" / "ignore"
+    ignore.parent.mkdir(parents=True)
+    ignore.write_text("*.local.py\n", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    if where == "xdg_default":
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(home / ".config"))
+    else:
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    if where == "global_config":
+        ignore.unlink()
+        (home / "ignore-all").write_text("*\n", encoding="utf-8")
+        (home / ".gitconfig").write_text(f"[core]\n\texcludesFile = {home / 'ignore-all'}\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="dirty pact-plugin tree"):
+        prepare.check_source(repo, None, None, allow_dirty=False)
+    out = tmp_path / "out"
+    out.mkdir()
+    prov = prepare.check_source(repo, None, None, allow_dirty=True)
+    dest, _ = prepare.materialize_plugin(repo, out, None, None, prov)
+    assert (dest / "secret.local.py").is_file()
+
+
+def test_plugin_dir_link_outside_the_source_is_refused(tmp_path: Path) -> None:
+    src = tmp_path / "plugin"
+    (src / "hooks").mkdir(parents=True)
+    (src / "inside").symlink_to(src / "hooks")
+    secret = tmp_path / "secret"
+    secret.write_text("key", encoding="utf-8")
+    (src / "leak").symlink_to(secret)
+    with pytest.raises(SystemExit, match="points outside"):
+        prepare.copy_plugin_tree(src, tmp_path / "copy")
+    (src / "leak").unlink()
+    prepare.copy_plugin_tree(src, tmp_path / "copy")
+    assert (tmp_path / "copy" / "inside").is_symlink()
+
+
+def test_links_copy_the_same_way_from_worktree_and_ref(tmp_path: Path) -> None:
+    repo = _plugin_repo(tmp_path)
+    (repo / "pact-plugin" / "alias").symlink_to("hooks")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "alias", "--no-gpg-sign")
+    shapes = {}
+    for label, ref in (("worktree", None), ("ref", "HEAD")):
+        out = tmp_path / label
+        out.mkdir()
+        prov = prepare.check_source(repo, ref, None, allow_dirty=False)
+        dest, _ = prepare.materialize_plugin(repo, out, ref, None, prov)
+        assert (dest / "alias").is_symlink() and os.readlink(dest / "alias") == "hooks"
+        shapes[label] = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*"))
+    assert shapes["worktree"] == shapes["ref"]
+
+
+@pytest.mark.parametrize("ref", [None, "HEAD"], ids=["worktree", "ref"])
+def test_a_committed_link_out_of_the_plugin_is_refused(tmp_path: Path, ref: str | None) -> None:
+    repo = _plugin_repo(tmp_path)
+    (repo / "pact-plugin" / "leak").symlink_to("/etc/hostname")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "leak", "--no-gpg-sign")
+    out = tmp_path / "out"
+    out.mkdir()
+    prov = prepare.check_source(repo, ref, None, allow_dirty=False)
+    with pytest.raises(SystemExit, match="points outside|cannot be extracted safely"):
+        prepare.materialize_plugin(repo, out, ref, None, prov)
+    assert not (out / ".plugin-src").exists()
+
+
+def test_copy_drops_a_git_dir(tmp_path: Path) -> None:
+    src = tmp_path / "plugin"
+    (src / ".git").mkdir(parents=True)
+    (src / ".git" / "config").write_text("x", encoding="utf-8")
+    (src / "keep.txt").write_text("keep", encoding="utf-8")
+    prepare.copy_plugin_tree(src, tmp_path / "copy")
+    assert not (tmp_path / "copy" / ".git").exists() and (tmp_path / "copy" / "keep.txt").is_file()
+
+
+def test_live_env_outside_the_allowlist_or_with_url_credentials_is_dropped(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    live = {
+        "CLAUDE_CODE_EFFORT_LEVEL": "max",
+        "DISABLE_AUTO_COMPACT": "1",
+        "HTTPS_PROXY": "http://user:PROXYPASS@proxy:8080",
+        "DEEPSEEK_AUTH": "SECRET-AUTH",
+        "ANTHROPIC_CUSTOM_URL": "https://u:URLPASS@example.invalid",
+    }
+    args = _prepare_args(tmp_path, out)
+    (tmp_path / "live-settings.json").write_text(json.dumps({"env": live}), encoding="utf-8")
+    assert prepare.main(args) == 0
+    env = json.loads((out / "config" / "settings.json").read_text(encoding="utf-8"))["env"]
+    assert env["CLAUDE_CODE_EFFORT_LEVEL"] == "max" and env["DISABLE_AUTO_COMPACT"] == "1"
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["settings"]["dropped_env_keys"] == ["ANTHROPIC_CUSTOM_URL", "DEEPSEEK_AUTH", "HTTPS_PROXY"]
+    blob = b"".join(p.read_bytes() for p in out.rglob("*") if p.is_file())
+    for value in (b"PROXYPASS", b"SECRET-AUTH", b"URLPASS"):
+        assert value not in blob

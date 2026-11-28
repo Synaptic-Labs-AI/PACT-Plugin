@@ -405,3 +405,50 @@ def test_native_eval_names_a_partial_keep(tmp_path: Path, short_root: Path, monk
     monkeypatch.setattr(native_eval.shutil, "move", partial_move)
     assert native_eval.run(_args(manifest, cases, fake, short_root)) == 1
     assert "partial copy left at" in _result(manifest)["cleanup_error"]
+
+
+
+def test_native_eval_build_command_is_the_documented_command_line(tmp_path: Path) -> None:
+    args = native_eval.build_parser().parse_args(["--manifest", "m.json"])
+    plugin, out, runs = tmp_path / "plugin", tmp_path / "out", tmp_path / "out" / "runs" / "r1"
+    assert native_eval.build_command(args, "/bin/claude", plugin, out, "model-x", runs) == [
+        "/bin/claude", "plugin", "eval", str(plugin),
+        "--eval-dir", "evals",
+        "--ablation", "with-without",
+        "--runs", "3",
+        "--concurrency", "1",
+        "--trust-plugin",
+        "--no-publish",
+        "--threshold", "0",
+        "--scaffold",
+        "--json", str(out / "report.json"),
+        "--report", str(out / "report.html"),
+        "--output-dir", str(runs),
+        "--keep-temp",
+        "--allow-tools", "Bash", "Write", "Edit",
+        "--model", "model-x",
+        "--judge-model", "model-x",
+    ]
+
+
+def test_native_eval_uses_a_fresh_runs_dir_per_run(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    fake = _fake_claude(tmp_path)
+    dirs = []
+    for _ in range(2):
+        assert native_eval.run(_args(manifest, cases, fake, short_root)) == 0
+        record = _result(manifest)
+        command = record["command"]
+        assert command[command.index("--output-dir") + 1] == record["runs_dir"]
+        dirs.append(Path(record["runs_dir"]))
+    assert dirs[0] != dirs[1] and {d.parent for d in dirs} == {manifest.parent / "native-eval" / "runs"}
+
+
+def test_native_eval_fails_when_a_memory_file_appears_during_the_run(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    # CLAUDE.local.md stands in for every memory file name.
+    fake = _fake_claude(tmp_path, f"open({str(short_root / 'CLAUDE.local.md')!r}, 'w').write('late')\n")
+    assert native_eval.run(_args(manifest, cases, fake, short_root)) == 1
+    record = _result(manifest)
+    assert record["exit_code"] == 0
+    assert record["clean_root_changed"] == [str(short_root.resolve() / "CLAUDE.local.md")]

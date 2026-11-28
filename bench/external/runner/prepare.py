@@ -82,6 +82,9 @@ CREDENTIAL_KEY = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|HEADERS|CREDENTIAL", re.
 # Token-count tuning keys (e.g. CLAUDE_CODE_MAX_OUTPUT_TOKENS, MAX_THINKING_TOKENS)
 # match CREDENTIAL_KEY by name but hold numbers, so they are kept.
 NON_SECRET_KEY = re.compile(r"^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$")
+# Live settings env names copied at all (an allowlist); anything else is dropped and recorded.
+LIVE_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DISABLE_", "ENABLE_", "MAX_", "BASH_", "MCP_", "API_TIMEOUT_MS")
+URL_USERINFO = re.compile(r"://[^/s@]+@")
 # The only live-environment keys a child inherits; everything else comes from
 # the scratch settings env or is set explicitly below.
 INHERITED_ENV_KEYS = ("PATH", "LANG", "TERM")
@@ -114,9 +117,17 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+# core.excludesFile=/dev/null also turns off git's default per-user ignore file
+# ($XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore), which config isolation leaves on.
+GIT = ["git", "-c", f"core.excludesFile={os.devnull}"]
+
+
 def _git_env() -> dict[str, str]:
-    """The host environment minus inherited GIT_*, with no global or system git config,
-    so a host setting (e.g. status.showUntrackedFiles) cannot change what git reports."""
+    """The host environment minus inherited GIT_* (so GIT_DIR and friends cannot point
+    git at another repo), plus GIT_CONFIG_GLOBAL=/dev/null and GIT_CONFIG_NOSYSTEM=1
+    as defence in depth. The host settings known to change what git reports here are
+    neutralised explicitly instead: core.excludesFile by GIT's -c, and
+    status.showUntrackedFiles by status --untracked-files=all."""
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     return env
@@ -125,7 +136,7 @@ def _git_env() -> dict[str, str]:
 def _git(repo: Path, *args: str) -> str:
     try:
         proc = subprocess.run(
-            ["git", "-C", str(repo), *args],
+            [*GIT, "-C", str(repo), *args],
             check=True,
             capture_output=True,
             text=True,
@@ -195,14 +206,16 @@ def _drain_after_kill(proc: subprocess.Popen, text: bool) -> tuple[Any, Any, boo
 def run_process_group(
     cmd: list[str], timeout: int, **kwargs: Any
 ) -> subprocess.CompletedProcess[str]:
-    """subprocess.run, but the child leads its own session, and a timeout, a
-    SIGTERM/SIGHUP to this process or a KeyboardInterrupt kills the whole process
-    group, so grandchildren in that group cannot outlive it (one that starts its
-    own session escapes the kill).
+    """subprocess.run, but the child leads its own session and its whole process
+    group is killed when the call ends: after a normal exit (any leftover in the
+    group), on a timeout, on a SIGTERM/SIGHUP to this process, or on a
+    KeyboardInterrupt. A grandchild that starts its own session escapes the kill.
 
     On timeout it raises subprocess.TimeoutExpired carrying all the output
-    drained after the kill (stdout/stderr) and output_complete (False when the
-    bounded drain expired). A signal raises SignalExit after the kill.
+    drained after the kill (stdout/stderr), output_complete (False when the
+    bounded drain expired) and child_exit_code (the child's own exit code if it
+    had already exited, e.g. while a leftover process held its pipe; else None).
+    A signal raises SignalExit after the kill.
     """
     text = bool(kwargs.get("text") or kwargs.get("universal_newlines"))
     if text:
@@ -215,16 +228,23 @@ def run_process_group(
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except BaseException as exc:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            child_exit_code = proc.poll()  # set when only a leftover holds the pipe
+            _kill_group(proc.pid)
             drained_out, drained_err, complete = _drain_after_kill(proc, text)
             if isinstance(exc, subprocess.TimeoutExpired):
                 exc.stdout, exc.stderr = drained_out, drained_err
                 exc.output_complete = complete
+                exc.child_exit_code = child_exit_code
             raise
+        _kill_group(proc.pid)  # leftovers in the group must not outlive a normal exit
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def _kill_group(pgid: int) -> None:
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
 
 def _holds_files(directory: Path) -> bool:
@@ -277,6 +297,17 @@ def check_clean_root(root: Path) -> Path:
     return root
 
 
+def keeps_live_env(key: str, value: Any) -> bool:
+    """True when a live settings env entry is copied into scratch settings.json:
+    its name has a LIVE_ENV_PREFIXES prefix, is not credential-shaped
+    (is_scratch_env_key), and its value carries no URL userinfo (user:pass@)."""
+    return (
+        key.startswith(LIVE_ENV_PREFIXES)
+        and is_scratch_env_key(key)
+        and not URL_USERINFO.search(str(value))
+    )
+
+
 def is_scratch_env_key(key: str) -> bool:
     """True when a settings env key may be copied into scratch settings."""
     if key in LIVE_ONLY_KEYS:
@@ -295,7 +326,8 @@ def _allowed_paths(files: list[str]) -> set[str]:
 
 
 def copy_plugin_tree(src: Path, dest: Path, only: set[str] | None = None) -> None:
-    """Copy src to dest, dropping EXCLUDED_NAMES at every depth.
+    """Copy src to dest, dropping EXCLUDED_NAMES at every depth. Symlinks are
+    copied as links; one that resolves outside src is refused.
 
     When only is given, it lists the relative paths (files and their parent
     dirs) allowed into the copy; anything else is skipped.
@@ -310,9 +342,24 @@ def copy_plugin_tree(src: Path, dest: Path, only: set[str] | None = None) -> Non
             or (only is not None and (rel / name).as_posix() not in only)
         }
 
+    _refuse_outside_links(src, ignore)
     if dest.exists():
         shutil.rmtree(dest)
-    shutil.copytree(src, dest, ignore=ignore)
+    # Links are kept as links (same result for the worktree and the git-archive copy);
+    # _refuse_outside_links has already refused any that leave src.
+    shutil.copytree(src, dest, ignore=ignore, symlinks=True)
+
+
+def _refuse_outside_links(src: Path, ignore: Any) -> None:
+    """SystemExit if any symlink that will be copied resolves outside src."""
+    real = src.resolve()
+    for directory, dirs, files in os.walk(src):
+        skipped = ignore(directory, dirs + files)
+        dirs[:] = [name for name in dirs if name not in skipped]
+        for name in [*dirs, *files]:
+            path = Path(directory) / name
+            if name not in skipped and path.is_symlink() and not path.resolve().is_relative_to(real):
+                raise SystemExit(f"plugin source link {path} points outside {src}: {os.readlink(path)}")
 
 
 def plugin_version(repo: Path, sha: str | None, plugin_dir: Path | None) -> str:
@@ -403,7 +450,7 @@ def materialize_plugin(
             archive = staging / "plugin.tar"
             with archive.open("wb") as fh:
                 proc = subprocess.run(
-                    ["git", "-C", str(repo), "archive", "--format=tar", prov["sha"], "pact-plugin"],
+                    [*GIT, "-C", str(repo), "archive", "--format=tar", prov["sha"], "pact-plugin"],
                     stdout=fh,
                     stderr=subprocess.PIPE,
                     text=True,
@@ -411,8 +458,11 @@ def materialize_plugin(
                 )
             if proc.returncode != 0:
                 raise SystemExit(f"git archive {prov['sha']} pact-plugin failed in {repo}: {proc.stderr.strip()}")
-            with tarfile.open(archive) as tf:
-                tf.extractall(staging, filter="data")
+            try:
+                with tarfile.open(archive) as tf:
+                    tf.extractall(staging, filter="data")
+            except tarfile.TarError as exc:
+                raise SystemExit(f"plugin source at {prov['sha']} cannot be extracted safely: {exc}") from exc
             copy_plugin_tree(staging / "pact-plugin", dest)
         finally:
             shutil.rmtree(staging)
@@ -435,7 +485,7 @@ def build_scratch_settings(
     env = {
         key: value
         for key, value in (data.get("env") or {}).items()
-        if is_scratch_env_key(key)
+        if keeps_live_env(key, value)
     }
     for key in MODEL_ENV_KEYS:
         env[key] = model
@@ -547,6 +597,8 @@ def verify_provider(
         record["error"] = f"claude did not answer within {timeout}s"
         record.update(stdout_tail=(exc.stdout or "")[-2000:], stderr=(exc.stderr or "")[-2000:])
         record["output_complete"] = getattr(exc, "output_complete", True)
+        # Set when claude had already exited and only a leftover process held its pipe.
+        record["child_exit_code"] = getattr(exc, "child_exit_code", None)
         _write_check(out, record)
         raise SystemExit(f"provider verification failed: {record['error']}") from exc
     except BaseException as exc:
@@ -683,7 +735,9 @@ def prepare(args: argparse.Namespace) -> int:
             "teammate_mode": settings.get("teammateMode"),
             "env_keys": sorted(env),
             "dropped_env_keys": sorted(
-                key for key in (load_settings(settings_source).get("env") or {}) if not is_scratch_env_key(key)
+                key
+                for key, value in (load_settings(settings_source).get("env") or {}).items()
+                if not keeps_live_env(key, value)
             ),
             "model": env.get("ANTHROPIC_MODEL"),
         },

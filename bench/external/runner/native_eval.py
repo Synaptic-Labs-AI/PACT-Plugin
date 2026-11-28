@@ -9,9 +9,13 @@ its run directory is writable. A
 SIGTERM/SIGHUP is recorded only while the eval child runs; at any other moment
 it gets the default action. The eval runs from <temp-root>/pact-native-XXXXXXXX/work
 (the temp root's real path), outside the repo and with no Claude Code memory
-file above it, checked before the temp root is created. The model (CLI --model and
---judge-model) is the one fixed at prepare time, read from the manifest. A
-timeout kills the eval's whole process group.
+file above it, checked before the temp root is created and again after the eval
+(a file that appeared meanwhile is listed in clean_root_changed and fails the
+run). The model (CLI --model and --judge-model) is the one fixed at prepare
+time, read from the manifest. The eval's whole process group is killed when it
+ends, times out or is signalled. Its --output-dir is <run>/native-eval/runs/<run id>/.
+--threshold 0 is always passed, so the eval's pass/fail and exit code are not
+the measurement; the with/without delta in report.json is.
 
 Cleanup contract: the short TMPDIR/HOME root under --temp-root and the
 injected evals/ dir are removed on every exit path, even when keeping their
@@ -83,7 +87,9 @@ def _child_env(manifest: dict[str, Any], scratch: Path) -> dict[str, str]:
     )
 
 
-def build_command(args: argparse.Namespace, claude_bin: str, plugin: Path, out: Path, model: str) -> list[str]:
+def build_command(
+    args: argparse.Namespace, claude_bin: str, plugin: Path, out: Path, model: str, runs_dir: Path
+) -> list[str]:
     cmd = [
         claude_bin,
         "plugin",
@@ -99,6 +105,8 @@ def build_command(args: argparse.Namespace, claude_bin: str, plugin: Path, out: 
         str(args.concurrency),
         "--trust-plugin",
         "--no-publish",
+        # threshold 0: every completed case passes, so pass/fail and the exit code are
+        # not the signal; read the with/without delta in report.json.
         "--threshold",
         "0",
         "--scaffold",
@@ -107,7 +115,7 @@ def build_command(args: argparse.Namespace, claude_bin: str, plugin: Path, out: 
         "--report",
         str(out / "report.html"),
         "--output-dir",
-        str(out / "runs"),
+        str(runs_dir),
         "--keep-temp",
         # Variadic (<tools...>): the list ends at the next option.
         "--allow-tools",
@@ -212,6 +220,8 @@ def run(args: argparse.Namespace) -> int:
         "kept_temp": None,
         "plugin_evals_results": None,
         "cleanup_error": None,
+        "runs_dir": None,
+        "clean_root_changed": None,
         "report_json": None,
         "report_html": None,
     }
@@ -244,9 +254,15 @@ def run(args: argparse.Namespace) -> int:
             shutil.rmtree(injected)
         shutil.copytree(cases_dir, injected)
 
-        cmd = build_command(args, claude_bin, plugin, out, model)
+        runs_dir = out / "runs" / short_root.name  # per run, so earlier runs never mix in
+        record["runs_dir"] = str(runs_dir)
+        cmd = build_command(args, claude_bin, plugin, out, model, runs_dir)
         record["command"] = cmd
         record["exit_code"], record["timed_out"] = _launch(cmd, cwd, env, out, args.timeout)
+        # The clean-root check ran at start; a memory or settings file that appeared
+        # during the run (e.g. another user writing to a shared /tmp) is recorded.
+        changed = prepare.memory_files_above(temp_parent)
+        record["clean_root_changed"] = [str(path) for path in changed] or None
     except BaseException as exc:
         record["error"] = str(exc) if isinstance(exc, SystemExit) else f"{type(exc).__name__}: {exc}"
         raise
@@ -256,7 +272,12 @@ def run(args: argparse.Namespace) -> int:
             record[key] = str(out / name) if (out / name).is_file() else None
         (out / "result.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(record, indent=2))
-    ok = record["exit_code"] == 0 and not record["timed_out"] and not record["cleanup_error"]
+    ok = (
+        record["exit_code"] == 0
+        and not record["timed_out"]
+        and not record["cleanup_error"]
+        and not record["clean_root_changed"]
+    )
     return 0 if ok else 1
 
 
