@@ -3343,8 +3343,9 @@ class TestCliHelpOutput:
 
     def test_every_help_example_is_quoted_alike(self, capsys):
         """Every top-level example runs the script the same way, with its
-        path double-quoted, the rekey example included. RED WHEN one example
-        is quoted differently."""
+        path double-quoted, the rekey example included, and holds no `<` or
+        `>` outside quotes (a pasted bare `<memory-id>` is a shell
+        redirection). RED WHEN one example is quoted differently."""
         with pytest.raises(SystemExit):
             main(["--help"])
         text = capsys.readouterr().out
@@ -3353,6 +3354,9 @@ class TestCliHelpOutput:
         assert len(examples) >= 10, examples
         assert all(line.startswith(f'python3 "{prog}" ') for line in examples), examples
         assert f"python3 \"{prog}\" project-id rekey '--from=<id>' '--to=<canonical>'" in examples
+        unquoted = [re.sub(r"'[^']*'|\"[^\"]*\"", "", line) for line in examples]
+        assert not [line for line in unquoted if "<" in line or ">" in line], examples
+        assert sum("'<memory-id>'" in line for line in examples) == 3, examples
 
     @staticmethod
     def _example_lines():
@@ -3363,11 +3367,11 @@ class TestCliHelpOutput:
             "save": f'python3 "{prog}" save --stdin',
             "search": f'python3 "{prog}" search "query"',
             "list": f'python3 "{prog}" list',
-            "get": f'python3 "{prog}" get <memory-id>',
+            "get": f"python3 \"{prog}\" get '<memory-id>'",
             "status": f'python3 "{prog}" status',
             "setup": f'python3 "{prog}" setup',
-            "update": f'python3 "{prog}" update <memory-id> --stdin',
-            "delete": f'python3 "{prog}" delete <memory-id>',
+            "update": f"python3 \"{prog}\" update '<memory-id>' --stdin",
+            "delete": f"python3 \"{prog}\" delete '<memory-id>'",
             "sync": f'python3 "{prog}" sync',
         }
 

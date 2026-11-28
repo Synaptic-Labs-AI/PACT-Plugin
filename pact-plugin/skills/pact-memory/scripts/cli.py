@@ -2075,18 +2075,18 @@ def build_parser():
         "save": f'python3 "{prog}" save --stdin',
         "search": f'python3 "{prog}" search "query"',
         "list": f'python3 "{prog}" list',
-        "get": f'python3 "{prog}" get <memory-id>',
+        "get": f"python3 \"{prog}\" get '<memory-id>'",
         "status": f'python3 "{prog}" status',
         "setup": f'python3 "{prog}" setup',
-        "update": f'python3 "{prog}" update <memory-id> --stdin',
-        "delete": f'python3 "{prog}" delete <memory-id>',
+        "update": f"python3 \"{prog}\" update '<memory-id>' --stdin",
+        "delete": f"python3 \"{prog}\" delete '<memory-id>'",
         "sync": f'python3 "{prog}" sync',
         "project-file": f'python3 "{prog}" project-file',
         "project-id": f'python3 "{prog}" project-id show',
         # THE SHARED HELPER RENDERS IT, with the script path quoted as the
-        # other examples quote it (`example_prog`) and the placeholders
-        # shell-quoted (an unquoted `<id>` is a redirection); a dry run is
-        # the default, so it names no --dry-run.
+        # other examples quote it (`example_prog`). Every placeholder is
+        # shell-quoted, here and above: an unquoted `<id>` is a redirection.
+        # A dry run is the default, so it names no --dry-run.
         "project-id-rekey": render_rekey_command(
             "<id>", "<canonical>", prog=prog, example_prog=True
         ),
