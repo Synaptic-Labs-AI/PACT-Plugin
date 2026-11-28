@@ -737,14 +737,11 @@ def _ssh_path_as_git_sends_it(path: str) -> Optional[str]:
     the scp and https spellings of the same path."""
     if any("\ud800" <= char <= "\udfff" for char in path):
         return None
-    try:
-        return quote(
-            unquote(path, errors="surrogateescape"),
-            safe="/" + "".join(sorted(_SEGMENT_RAW_CHARS)),
-            errors="surrogateescape",
-        )
-    except UnicodeEncodeError:
-        return None
+    return quote(
+        unquote(path, errors="surrogateescape"),
+        safe="/" + "".join(sorted(_SEGMENT_RAW_CHARS)),
+        errors="surrogateescape",
+    )
 
 
 def _strip_path_suffixes(path: str) -> str:
