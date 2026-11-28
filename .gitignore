@@ -33,3 +33,7 @@ CLAUDE.md
 .full-run-record.json
 .full-collection-record.json
 .full-suite-results.xml
+
+# PACT benchmark scratch state and raw runs
+bench/.runs/
+bench/.venv/

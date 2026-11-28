@@ -2,7 +2,8 @@
 # lock generated from it: every distribution of the closure pinned with a
 # sha256 hash for each file the index serves at that version. CI installs the
 # lock with `python -m pip install --only-binary=:all: --require-hashes -r
-# constraints-ci.txt` (.github/workflows/tests.yml and fast-tests.yml);
+# constraints-ci.txt` (.github/workflows/tests.yml, fast-tests.yml and
+# bench-harness.yml);
 # .cursor/install.sh runs the same line without --only-binary, because
 # pysqlite3 has no aarch64 Linux or x86_64 macOS wheel, and a source build's
 # own build dependencies are then installed without hash checks.
@@ -32,6 +33,9 @@
 # A refresh keeps every version the lock already holds. To move a transitive,
 # add `--upgrade-package <name>`; to move everything, add `--upgrade`. Then run
 # the suite green under the new lock and commit the .in and lock diff together.
+# If a pin bench/constraints.txt shares moved, re-lock it with the command in its
+# header in the same change; bench/tests/test_workflow.py fails on a version or
+# hash difference between the two locks.
 # Measured 2026-11-12 with uv 0.13.6: a second compile of the same input is
 # byte-identical, and the lock is byte-identical for Python 3.12, 3.13 and 3.14
 # and for x86_64 and aarch64 Linux and both macOS targets. Every pinned
