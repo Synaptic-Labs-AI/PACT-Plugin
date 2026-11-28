@@ -387,6 +387,24 @@ def test_expect_commit_refuses_a_mismatch_a_dirty_dir_or_no_git(tmp_path: Path) 
         plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--expect-commit", head))
 
 
+def test_main_creates_outputs_private_and_restores_umask(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    args = _args(manifest, tool, uv, "--skills-file", str(skills))
+    argv = [
+        "--manifest", args.manifest, "--plugin-eval-dir", args.plugin_eval_dir, "--uv", args.uv,
+        "--skills-file", args.skills_file, "--temp-root", args.temp_root,
+    ]
+    previous = os.umask(0o022)
+    try:
+        assert plugin_eval.main(argv) == 0
+        assert os.umask(0o022) == 0o022  # the caller's umask is back
+    finally:
+        os.umask(previous)
+    out = manifest.parent / "plugin-eval"
+    for path in (out, out / "result.json", out / "00-pact-plugin.stdout.json"):
+        assert path.stat().st_mode & 0o077 == 0, path
+
+
 @pytest.mark.parametrize("flag", ["--timeout", "--sync-timeout"])
 @pytest.mark.parametrize("value", ["0", "-5"])
 def test_timeouts_must_be_positive(flag: str, value: str) -> None:

@@ -312,7 +312,9 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
 
 
 def main(argv: list[str] | None = None) -> int:
-    return run(build_parser().parse_args(argv))
+    # Outputs can hold child output, so they are created 0600/0700 (umask 077), restored after.
+    with prepare.private_umask():
+        return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":
