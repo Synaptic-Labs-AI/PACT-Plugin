@@ -68,7 +68,11 @@ CORPUS = [
     # A trailing newline is part of the stored value: git keeps it and reaches
     # no repository (measured, git 2.43), so the value declines.
     ("https://github.com/o/r\n", None),
-    ("https://github.com/a.b/c_d-e", ("a.b", "c_d-e")),
+    ("https://github.com/a-b/c_d-e", ("a-b", "c_d-e")),
+    # GitHub's owner rule: letters, digits and single inner hyphens, at most 39.
+    ("https://github.com/a.b/c_d-e", None),
+    ("https://github.com/-o/r", None),
+    ("https://github.com/o--x/r", None),
     # Refused for a security reason: backslash, more than one `@`.
     ("https://evil.com\\@github.com/o/n", None),
     ("git@github.com:owner\\repo", None),

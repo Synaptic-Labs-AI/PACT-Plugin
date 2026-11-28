@@ -1185,9 +1185,17 @@ def normalize_remote_url(url: object) -> Optional[str]:
 
 
 def is_github_name(name: object) -> bool:
-    """`database.is_github_name`, the one GitHub name rule, for callers that
-    load this module (the backlog's `_valid_slug`)."""
+    """`database.is_github_name`, the one GitHub repository name rule, for
+    callers that load this module (the backlog's `_valid_slug`)."""
     from .database import is_github_name as rule
+
+    return rule(name)
+
+
+def is_github_owner(name: object) -> bool:
+    """`database.is_github_owner`, the one GitHub owner name rule, for
+    callers that load this module (the backlog's `_valid_slug`)."""
+    from .database import is_github_owner as rule
 
     return rule(name)
 

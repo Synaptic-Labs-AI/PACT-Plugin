@@ -84,3 +84,24 @@ class TestNoRemoteDerivesAnInvalidHost:
     def test_control_a_local_pin_is_still_canonical(self):
         # A user-written pin in the reserved namespace stays a valid id.
         assert pi.is_canonical("local.invalid/0123456789ab/x")
+
+
+@pytest.mark.parametrize("owner, ok", [
+    ("acme", True), ("a-b", True), ("Acme-Widget9", True), ("a" * 39, True),
+    ("-o", False), ("o-", False), ("a--b", False), ("a.b", False), ("a_b", False), ("a" * 40, False),
+])
+def test_a_github_owner_follows_githubs_owner_rule(owner, ok):
+    """GitHub owner names hold only letters, digits and single inner hyphens,
+    at most 39 characters (GitHub docs, "Username considerations for external
+    authentication"). A remote naming another owner declines, a pin holding
+    it is refused and the backlog reads no slug, so the three agree. RED
+    WHEN `github.com/-o/r` or a 40-character owner gets an id."""
+    from shared import backlog
+    from scripts.database import pin_file_value
+
+    url = f"https://github.com/{owner}/r"
+    expected = f"github.com/{owner.lower()}/r" if ok else None
+    assert pi.normalize_remote_url(url) == expected
+    assert (backlog._slug_from_remote_url(url) is not None) is ok
+    assert pin_file_value(f"github.com/{owner}/r\n".encode())[0] == expected
+    assert pi.normalize_remote_url(f"https://gitlab.com/{owner}/r") is not None

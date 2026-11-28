@@ -1614,7 +1614,9 @@ def _project_identity():
 
 
 def _valid_slug(owner: Any, name: Any) -> bool:
-    """Both parts are GitHub names (`project_identity.is_github_name`: the
+    """The owner is a GitHub owner name (`project_identity.is_github_owner`:
+    letters, digits and single inner hyphens, at most 39) and the name a
+    GitHub repository name (`project_identity.is_github_name`: the
     characters a repository slug may contain, anchored at the true end of
     the string, never dots alone).
 
@@ -1623,8 +1625,8 @@ def _valid_slug(owner: Any, name: Any) -> bool:
     path traversal in a URL. The memory id applies the same rule, so a
     github.com id and its slug agree.
     """
-    is_github_name = _project_identity().is_github_name
-    return is_github_name(owner) and is_github_name(name)
+    identity = _project_identity()
+    return identity.is_github_owner(owner) and identity.is_github_name(name)
 
 
 def _gh_repo_view_slug(project_path: Optional[str] = None) -> Optional[Tuple[str, str]]:

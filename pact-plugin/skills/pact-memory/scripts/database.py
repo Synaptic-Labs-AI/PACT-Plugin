@@ -2000,8 +2000,21 @@ GITHUB_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\Z")
 
 
 def is_github_name(name: object) -> bool:
-    """Whether `name` is a valid GitHub owner or repository name."""
+    """Whether `name` is a valid GitHub repository name."""
     return isinstance(name, str) and bool(GITHUB_NAME_RE.match(name)) and set(name) != {"."}
+
+
+# A GitHub owner (user or organization) name: ASCII letters and digits with
+# single hyphens between them, never at either end, at most 39 characters
+# (GitHub docs, "Username considerations for external authentication": only
+# alphanumeric characters and dashes, no leading, trailing or consecutive
+# dash, at most 39 characters). `\Z` anchored.
+GITHUB_OWNER_RE = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}\Z")
+
+
+def is_github_owner(name: object) -> bool:
+    """Whether `name` is a valid GitHub owner name (`GITHUB_OWNER_RE`)."""
+    return isinstance(name, str) and len(name) <= 39 and bool(GITHUB_OWNER_RE.match(name))
 
 
 def github_repo_path(path: str) -> Optional[str]:
@@ -2011,7 +2024,7 @@ def github_repo_path(path: str) -> Optional[str]:
     any case. THE ONE STEP for a remote's id and a pin, so every escaped
     spelling of one repository gives one id."""
     parts = [unquote(part, errors="surrogateescape") for part in path.split("/")]
-    if len(parts) != 2 or not all(is_github_name(part) for part in parts):
+    if len(parts) != 2 or not is_github_owner(parts[0]) or not is_github_name(parts[1]):
         return None
     if parts[1].lower().endswith(".git"):
         # GitHub removes a trailing `.git` from a name when the repository is

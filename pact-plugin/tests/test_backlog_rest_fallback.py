@@ -642,8 +642,7 @@ def test_hostile_foreign_slugs_never_reach_a_rest_argv(monkeypatch):
     must pass `_valid_slug` before it is used. Traversal (`..`, `%2e%2e`,
     `b%2F..%2F..`), a template placeholder (`{owner}`) and a query tail
     carrying a gh flag (`--method=DELETE`) must never appear in any argv; an
-    owner with a leading `-` is a valid GitHub login character but must stay
-    INSIDE the path element, never become an argv element of its own.
+    owner with a leading `-` is no GitHub owner name and is refused too.
 
     Reproduces the security verify's probe (task #42) as an arm.
 
@@ -657,9 +656,8 @@ def test_hostile_foreign_slugs_never_reach_a_rest_argv(monkeypatch):
     refused = ["https://github.com/../x/issues/1", "https://github.com/%2e%2e/x/issues/2",
                "https://github.com/{owner}/x/issues/3", "https://github.com/a/../issues/5",
                "https://github.com/a/b%2F..%2F..%2Fuser/issues/6",
-               "https://github.com/.../x/issues/8"]
-    looked_up = {"https://github.com/-X/y/issues/4": "repos/-X/y/issues/4",
-                 "https://github.com/a/b/issues/12?per_page=100&x=--method=DELETE":
+               "https://github.com/.../x/issues/8", "https://github.com/-X/y/issues/4"]
+    looked_up = {"https://github.com/a/b/issues/12?per_page=100&x=--method=DELETE":
                      "repos/a/b/issues/12"}
     outcome = backlog.resolve_refs(refused + list(looked_up))
 
