@@ -14,7 +14,7 @@ bench/.runs/ (gitignored); no command generates them.
 | Area | Result |
 |---|---|
 | P1 internal suite at evaluated SHA | green: full-suite and release checks succeeded on the GitHub commit checks |
-| A1 isolated prepare + provider check | pass: plugin copy, scratch config, DeepSeek model resolved (deepseek-flash[1m]) |
+| A1 isolated prepare + provider check | provider check resolved the model (deepseek-flash[1m]); plugin copy and scratch config built |
 | A2 native eval | blocked: sandbox confinement (the bridge-socket init failure was fixed); probe produced no valid baseline case |
 | A3 PluginEval | complete: 3 selected skills scored; whole-plugin result exploratory only |
 | A4 eval-bench | deferred: 4 prompt/rubric entries committed, no judged run claimed |

@@ -22,6 +22,12 @@ REQUIRED_KEYS = (
 )
 
 
+# The exact BENCHMARKS.md native-eval cell for each recorded status.
+NATIVE_CELLS = {
+    "blocked_sandbox_confinement_no_valid_case": "blocked: sandbox confinement; bridge path fixed",
+}
+
+
 def _summaries() -> list[Path]:
     return sorted(RESULTS.glob("*/*/summary.json"))
 
@@ -84,6 +90,8 @@ def test_benchmarks_rows_match_summaries_one_to_one() -> None:
         assert row["Track A native eval"].startswith("blocked:") == native_blocked
         if "sandbox_confinement" in native_status:
             assert row["Track A native eval"].startswith("blocked: sandbox confinement")
+        if native_status in NATIVE_CELLS:
+            assert row["Track A native eval"] == NATIVE_CELLS[native_status]
 
         track_b = data["track_b"]
         if track_b["status"] == "authored_out_of_tree":
@@ -119,8 +127,44 @@ def test_reports_carry_their_summary_numbers() -> None:
         assert f"{smoke['tasks_created']} tasks created; {smoke['handoffs']} HANDOFFs" in report
         for task in data["track_b"].get("tasks", []):
             assert f"| {task['id']} | {task['class']} | {task['variety']} |" in report, task["id"]
+        flat = " ".join(report.split())
+        assert f"| P1 internal suite at evaluated SHA | {data['p1']['status']}:" in report
+        assert f"provider check resolved the model ({data['environment']['model']})" in report
+        assert f"| A7 orchestration smoke | {smoke['status']}: exit {smoke['exit_code']}," in report
+        assert f"{smoke['tasks_created']} tasks, {smoke['handoffs_valid']} valid HANDOFFs" in report
+        assert f"all {smoke['handoffs_valid']} passed" in report
+        assert f"commit {smoke['commit'][:7]}" in report
+        assert f"| A6 token snapshot | {tokens['samples']} spawn samples:" in report
+        assert f"provider probe used {tokens['provider_probe_input_tokens']:,} input tokens" in flat
+        itp = native.get("impact_triage_probe")
+        if itp:
+            assert f"({itp['with_score']:.1f} with and {itp['without_score']:.1f} without" in flat
+        for skill in data["track_a"]["plugin_eval"]["selected"]:
+            badge = "none" if skill["badge"] == "no_badge" else skill["badge"]
+            assert f"| {skill['skill']} | {skill['composite']:.2f} | {badge} |" in report, skill["skill"]
+        cmap = data.get("coverage_map", {}).get("version")
+        if cmap:
+            assert f"| P2 coverage map | version {cmap};" in report
+        if data["track_b"]["status"] == "authored_out_of_tree":
+            assert f"| Track B | {data['track_b']['tasks_authored']} tasks authored" in report
+
         plugin_eval_status = data["track_a"]["plugin_eval"]["status"]
         assert f"| A3 PluginEval | {plugin_eval_status}:" in report
+
+
+def test_summaries_are_self_consistent() -> None:
+    for path in _summaries():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        smoke = data["track_a"]["orchestration_smoke"]
+        assert smoke["handoffs_all_valid"] == (smoke["handoffs_valid"] == smoke["handoffs"])
+        probe = data["track_a"]["native_eval"].get("probe")
+        if probe:
+            cases = probe["cases"]
+            assert probe["cases_total"] == len(cases)
+            deltas = [case["with"] - case["without"] for case in cases]
+            assert abs(probe["mean_delta"] - sum(deltas) / len(deltas)) < 1e-9
+        tokens = data["track_a"]["token_snapshot"]
+        assert tokens["min"] <= tokens["median_spawn_total"] <= tokens["max"]
 
 
 # Token shapes and host paths that must never land in a committed result file.

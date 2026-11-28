@@ -9,12 +9,14 @@ plugin runtime behavior.
 - external/ - native claude plugin eval cases, PluginEval skill selection,
   eval-bench prompts, and the isolated prepare/run wrapper.
 - tests/ - hermetic harness tests: external tools are replaced by fakes, so
-  they make no model or provider calls.
+  they make no model or provider calls. Run them with
+  `bench/.venv/bin/python -m pytest -q bench/tests` and the CI lint with
+  `ruff check --select F401,F821 --target-version py312 bench/ bench/pact-bench`.
 - results/ - committed per-run summaries only, assembled by hand from the raw
   runs under .runs/; tests/test_results.py checks them against BENCHMARKS.md.
 - .runs/ - gitignored scratch homes, configs, plugin copies, transcripts.
-- tasks/ - Track B task spec and validator; the task fixtures land in a
-  follow-up PR.
+- tasks/ - Track B task spec and validator; the task fixtures are not
+  committed yet.
 
 ## Provider setup
 
@@ -24,8 +26,9 @@ CLAUDE_CODE_, DISABLE_, ENABLE_, MAX_, MCP_) or is one of four named timeouts
 and limits (API_TIMEOUT_MS and three BASH_* keys), is not credential-shaped
 (TOKEN, KEY, SECRET, PASSWORD, HEADERS or CREDENTIAL, except the token-count
 tuning keys matching ^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$), is not a live
-session id, and the value has no URL userinfo or credential-shaped URL query
-parameter; manifest.json lists the dropped key names
+session id, does not point at live host state (for example *_DIR, *_PATH or a
+PROXY or SHELL name), and the value is a string, number or boolean that is not
+a host path and has no URL userinfo or credential-shaped URL query parameter; manifest.json lists the dropped key names
 in settings.dropped_env_keys. It points
 CLAUDE_CONFIG_DIR at the scratch directory. It keeps the live teammateMode
 (in-process), sets permissions.additionalDirectories to the scratch teams,

@@ -66,7 +66,10 @@ Prerequisites: Python >= 3.12, `uv`, `git`, `claude` CLI (>= 2.1.332 for
 
 ```bash
 # 1. The bench venv: the runtime for pact-bench (native-eval needs its PyYAML)
-#    and for the hermetic tests. Run every pact-bench command with this venv.
+#    and for the hermetic tests. Run every pact-bench command with this venv,
+#    and run its tools as bench/.venv/bin/python -m <tool> (bootstrap builds the
+#    venv elsewhere and moves it, so bin/pytest and bin/pip keep a stale
+#    shebang). A failed bootstrap leaves the previous bench/.venv in place.
 ./bench/bootstrap.sh
 
 # 2. PluginEval (external tool; not vendored here, not cloned by the runner).
@@ -76,7 +79,8 @@ git checkout c96b5f6552dba32e4492307493ee613581430715
 uv sync --frozen --extra llm
 
 # 3. Prepare an isolated run: copies current pact-plugin/ (without tests/ and
-#    caches at any depth, and without git-ignored files) into scratch, builds a scratch Claude settings.json from the live
+#    caches at any depth, and without files the repository's own .gitignore
+#    excludes) into scratch, builds a scratch Claude settings.json from the live
 #    DeepSeek settings, runs a provider smoke check, writes manifest.json.
 bench/.venv/bin/python bench/pact-bench prepare --out bench/.runs/external/probe --verify
 
@@ -86,8 +90,10 @@ jq '{plugin, provider, settings: {model: .settings.model}}' \
 jq '{exit_code, model_keys, is_error, result}' \
   bench/.runs/external/probe/provider-check.json
 
-# 5. Harness self-tests (hermetic; run after every harness edit).
+# 5. Harness self-tests (hermetic; run after every harness edit), and the same
+#    import-hygiene lint the CI workflow runs (ruff from your own environment).
 ./bench/.venv/bin/python -m pytest -q bench/tests
+ruff check --select F401,F821 --target-version py312 bench/ bench/pact-bench
 ```
 
 The prepared copy is what external checks evaluate. Nothing under
@@ -128,6 +134,9 @@ starts inside its own scaffolds choose their own directories. `--force` replaces
 that holds a previous pact-bench output, and never `/`, `$HOME`, or the repo
 root or one of its ancestors.
 
+`prepare`, `native-eval` and `plugin-eval` create their outputs with umask 077
+(files 0600, directories 0700).
+
 **Keep `--out` under `bench/.runs/`.** The provider token is in every child
 process's environment, so any file that captures child output or session state
 can hold it if the model or a tool prints the environment. Under `<out>` that
@@ -149,9 +158,15 @@ one of the prefixes `ANTHROPIC_`, `CLAUDE_CODE_`, `DISABLE_`, `ENABLE_`, `MAX_`,
 `BASH_MAX_TIMEOUT_MS` or `BASH_MAX_OUTPUT_LENGTH` (so `BASH_ENV` and
 `BASH_FUNC_*` are dropped), does not match
 `TOKEN|KEY|SECRET|PASSWORD|HEADERS|CREDENTIAL` (case-insensitive), is not a live
-session id, and the value carries no URL userinfo (`://user:pass@`) and no
-credential-shaped URL query parameter (a name containing key, token, secret,
-sig, password or auth). The same filter is applied again when the child env is
+session id, does not point at live host state (a name containing `SHELL`,
+`PLUGIN`, `SETTINGS`, `PROXY`, `COMMAND`, `SCRIPT`, `CERT`, `CREDS`, `BASE_URL`
+or `DIRECTOR`, or ending `_DIR`, `_DIRS` or `_PATH`, or `TMPDIR`), and the value
+is not a host path (starting with `/` or `~`) and carries no URL userinfo
+(`://user:pass@`) and no credential-shaped URL query parameter (a parameter name
+whose words include key, apikey, token, secret, signature, password or auth).
+Values must be strings, numbers or booleans (anything else is refused before
+writing); numbers and booleans reach the child as JSON text. The same filter is
+applied again when the child env is
 built from the scratch `settings.json`, since a child can rewrite that file. The token-count tuning keys (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`,
 `MAX_THINKING_TOKENS`, `MAX_MCP_OUTPUT_TOKENS`, any key matching
 `^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$`) are kept, and `manifest.json` lists the names
@@ -218,7 +233,8 @@ bench/.venv/bin/python bench/pact-bench native-eval \
 ```
 
 The runner copies `bench/external/native-evals/evals/` into the scratch plugin as
-`evals/` and runs `claude plugin eval <scratch plugin> --eval-dir evals
+`evals/` (links stay links; an absolute link or one leaving the cases dir is
+refused) and runs `claude plugin eval <scratch plugin> --eval-dir evals
 --ablation with-without --runs 3 --concurrency 1 --trust-plugin --no-publish
 --threshold 0 --scaffold --json report.json --report report.html --output-dir
 runs/<run id> --keep-temp [--allow-tools <grants…>] --model <manifest model>
@@ -249,7 +265,8 @@ a timeout records exit code 124, and `error` is set for an exception; an
 unreadable or incomplete manifest, or one whose `paths.plugin` is not
 `<out>/pact-plugin`, fails with a message before anything is written), `report.json`, `report.html`, and
 `runs/<run id>/` (recorded as `runs_dir`). The clean-root check runs again after
-the eval; a memory or settings file that appeared meanwhile is listed in
+the eval from the eval's own cwd (covering `work/`, the run's temp root,
+`--temp-root` and its parents); a memory or settings file that appeared meanwhile is listed in
 `clean_root_changed`, and the run exits 1. The eval runs from `<temp-root>/pact-native-XXXXXXXX/work`, and the
 child's `HOME` and `TMPDIR` are `<temp-root>/pact-native-XXXXXXXX/{home,tmp}`
 (default `--temp-root` is `/tmp`); `TMPDIR` must be at most 51 characters, checked before the temp root
@@ -263,8 +280,8 @@ left there, and the run exits 1. When `--out` is on a different filesystem from
 `--temp-root` (for example the default `/tmp` on tmpfs), keeping scaffolds is a
 copy, which can fail on files such as Unix sockets, so such a run with
 `--keep-temp` output can end with `cleanup_error` and exit 1. A
-previous run's `report.json` and `report.html` are deleted at the start of each
-run, so `result.json` names only reports this run wrote. While the eval child
+previous run's `report.json`, `report.html`, `stdout.txt` and `stderr.txt` are
+deleted at the start of each run, so `result.json` names only reports this run wrote. While the eval child
 runs, a SIGTERM or SIGHUP kills its process group, is recorded as
 `terminated by SIGTERM` (or SIGHUP), and the runner still cleans up and exits
 143 (or 129); `provider-check.json` records a signal during the verify call the
@@ -302,8 +319,9 @@ afterwards. The record notes the git checkout that holds `--plugin-eval-dir`
 (`plugin_eval_repo`, its top-level path; for the documented layout, the agents
 clone with the dir at `plugins/plugin-eval`), that checkout's HEAD
 (`plugin_eval_commit`), and whether files under the PluginEval dir have changes
-(`plugin_eval_dirty`; edits elsewhere in the clone and git-ignored files do not
-count). All three are
+(`plugin_eval_dirty`; untracked files count even when the checkout sets
+`status.showUntrackedFiles=no`, while edits elsewhere in the clone and files the
+repository's own `.gitignore` excludes do not). All three are
 null only if the dir is in no git checkout. The pin is recorded, not enforced,
 unless you pass `--expect-commit <full SHA>`, which compares it with that
 checkout's HEAD and refuses the run (recorded in `result.json`, before any
@@ -346,11 +364,14 @@ each prompt headlessly in a prepared scratch environment, once with the PACT
 plugin present and once without (the with/without baseline arm), for 3 runs each,
 and grade blind to condition:
 
-1. Prepare one scratch run per arm (`prepare` with no `--plugin-ref`, which
-   copies the current worktree, vs. a no-plugin
-   scratch config that does not register PACT).
-2. For each prompt: `prompt.md` becomes the `claude -p --output-format json`
-   input, run with the same `env -i …` prefix as the token snapshot below; working directory is a scratch workspace copy; capture the full JSON.
+1. Prepare one scratch run (`prepare` with no `--plugin-ref` copies the current
+   worktree). A prepared config does not load PACT by itself: the PACT arm passes
+   `--plugin-dir <out>/pact-plugin` to `claude`, and the no-plugin arm is the
+   same prepared run without it. Before spending tokens, check that
+   `claude --plugin-dir <out>/pact-plugin plugin list`, under the same `env -i …`
+   prefix as the token snapshot below, shows `PACT@inline` loaded.
+2. For each entry: its `prompt` field in `prompts.yaml` becomes the
+   `claude -p --output-format json` input, run with that `env -i …` prefix; working directory is a scratch workspace copy; capture the full JSON.
 3. Grade each transcript against the rubric **without** the plugin name or arm
    label visible. Keep raw JSONL/transcripts under `bench/.runs/` and only
    summaries under `bench/results/`.
@@ -363,6 +384,9 @@ reasoning quality, not field names or CLI output shapes.
 
 ```bash
 snap="$PWD/bench/.runs/external/token-snapshot"
+# The committed smoke prompt (the 4.8.38 smoke used a prompt of this shape; its
+# exact text was not recorded). Run it in a scratch git repo holding hello.py.
+SMOKE_PROMPT="/PACT:orchestrate Add a one-line module docstring to hello.py that says what it does. Work autonomously; do not ask questions; commit on a feature branch; do not push, open a PR or merge."
 bench/.venv/bin/python bench/pact-bench prepare --out "$snap" --force
 # Run from a directory outside the repository and outside $HOME: claude can load
 # CLAUDE.md files from the working directory and its parents (on this layout
@@ -370,12 +394,16 @@ bench/.venv/bin/python bench/pact-bench prepare --out "$snap" --force
 # sample. env -i gives claude only the scratch HOME and config (whose
 # settings.json carries the scratch env) plus the provider variables.
 cd "$(mktemp -d -p /tmp)"
-# For each of 3 runs: run the standard smoke prompt headlessly and keep the JSON.
+# Check first that PACT loads: under the same env -i prefix,
+#   claude --plugin-dir "$snap/pact-plugin" plugin list
+# must show PACT@inline loaded.
+# For each of 3 runs: run the smoke prompt headlessly and keep the JSON.
 env -i PATH="$PATH" HOME="$snap/home" TMPDIR="$snap/tmp" \
   CLAUDE_CONFIG_DIR="$snap/config" \
   ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic \
   ANTHROPIC_AUTH_TOKEN="$(cat ~/.claude-keys/deepseek)" \
-  claude -p --output-format json --model 'deepseek-flash[1m]' "<smoke prompt>" \
+  claude --plugin-dir "$snap/pact-plugin" -p --output-format json \
+  --model 'deepseek-flash[1m]' "$SMOKE_PROMPT" \
   > "$snap/run-N.json"
 jq '{usage, modelUsage}' "$snap/run-N.json"
 ```
@@ -479,20 +507,21 @@ and `memory-save` (save then retrieve in one session).
 #### native/memory-save — keep (narrowed to save + retrieve)
 
 - **User-visible behavior:** an agent saves a project convention to PACT memory
-  through the skill/CLI, gets a success confirmation with an id, and a later
-  session retrieves it by search/query.
+  through the skill/CLI, gets a success confirmation with an id, and retrieves it
+  by search/query.
 - **Closest internal evidence:** `test_memory_cli.py`,
   `test_memory_skill_save_fields_match_schema.py` (docs↔CLI allowlist parity),
   `test_memory_database.py`, `test_memory_models.py`,
   `test_setup_memory.py`, `test_memory_store_scope.py`,
-  `test_embeddings_stale/unavailable/status-*.py`,
+  `test_embedding_status_*.py`,
+  `test_embedding_unavailable_still_saves_and_searches.py`,
   `test_harvest_skill_text_guards.py`. All integration tests drive the CLI/DB
   directly; none makes a model choose the skill and fields.
 - **Evidence kind:** unit/integration (real CLI subprocess and real SQLite; no model calls).
 - **External gap:** genuine for skill-use and field selection; persistence
   mechanics are fully proven internally.
-- **Decision:** keep — 1 case: save a stated convention, then a second headless
-  session searches and returns the stored value. Assert a real saved record
+- **Decision:** keep — 1 case: save a stated convention, then search and return
+  the stored value in the same session (cross-session retrieval remains a gap). Assert a real saved record
   (SQLite/project memory), retrieval content, and no exit-2 rejection. Do not
   assert schema shapes beyond what `validate` already tests.
 - **Rationale:** the documented-vs-allowed field divergence caught by the
@@ -656,8 +685,8 @@ and `memory-save` (save then retrieve in one session).
   `test_project_memory_line_instructions.py`, `test_memory_cli.py`.
 - **Evidence kind:** mocked.
 - **External gap:** none beyond `native/memory-save`, which is the stronger
-  black-box version (it actually persists across sessions rather than asking
-  the model to describe memory).
+  black-box version (it actually saves and retrieves a record, in one session,
+  rather than asking the model to describe memory).
 - **Decision:** drop; remove the prompt from `prompts.yaml` or keep it only as
   a free local sanity prompt, not Track A evidence.
 - **Rationale:** duplicate of a kept native case; two probes of the same gap
@@ -746,7 +775,7 @@ Track A run without a new gap analysis.
 |---|---|
 | `native/handoff-schema` (standalone case) | Canonical fields, required split, aliases, validator entrypoint, refusal shape, lossless fields all pinned in `test_handoff_schema.py` and `test_validate_handoff*.py`. Real-emission gap folded into `orchestration-smoke`. |
 | `plugin-eval/whole-plugin-static` as a gap check | Internal structural/static oracles + CI lint are stricter; whole-plugin score is static-only and not user-visible behavior. May appear only as a provenance-decorated A/B baseline. |
-| `evalbench/memory-use` | Duplicate of `native/memory-save`; the native case is the stronger cross-session black-box version. |
+| `evalbench/memory-use` | Duplicate of `native/memory-save`; the native case is the stronger black-box version (one session: save, then retrieve). |
 | PluginEval skill `pact-teachback` | Gate behavior (does teachback force understanding?) is asserted in the smoke; prose-quality judge adds cost without external evidence. |
 | PluginEval skill `pact-coding-standards` | Documentation/scripts skill; coding quality is a Track B outcome question, not a skill-prose judge question. |
 | Canonical-field presence assertions in `evalbench/handoff-contract` | Schema is already exhaustively pinned; retain only content-quality scoring. |

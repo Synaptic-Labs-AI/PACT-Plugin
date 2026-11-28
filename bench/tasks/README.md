@@ -3,9 +3,9 @@
 Each task is a small, deterministic Python 3.12 stdlib project. The design: the
 agent under test receives fixture/ as its workspace and prompt.md as the
 request, and is scored against hidden_tests/, which are kept out of its
-workspace. The runner that does this is not in this PR; only the validator is.
+workspace. The runner that does this is not committed yet; only the validator is.
 
-No task directories are committed yet; they land in a follow-up PR. Until then
+No task directories are committed yet. Until then
 `bench/.venv/bin/python bench/pact-bench tasks validate` exits with "no tasks found".
 
 ## Task directory layout
@@ -87,7 +87,8 @@ Record the test counts and any issues in the final report.
 
     bench/.venv/bin/python bench/pact-bench tasks validate [--root DIR] [--task DIR ...]
 
-With no `--task` it validates every task under `--root` (default bench/tasks)
+With no `--task` it validates every `<root>/*/task.json` (default root
+bench/tasks)
 and reports each one: a passing task carries `"status": "pass"`, a failing one
 `{"id", "path", "status": "fail", "error"}` (id from task.json, else the
 directory name). Any error in one task (an unreadable or non-UTF-8 task.json, a
