@@ -22,11 +22,12 @@ with open({calls!r}, "a") as calls:
     }}) + "\\n")
 if args[0] == "sync":
     open({log!r}, "w").write(json.dumps({{"token": "ANTHROPIC_AUTH_TOKEN" in os.environ}}))
-    if os.environ.get("FAKE_SYNC_SLEEP"):
+    # CLAUDE_CODE_* names pass prepare's settings-env allowlist, so the tests can steer the fake.
+    if os.environ.get("CLAUDE_CODE_FAKE_SYNC_SLEEP"):
         sys.stderr.write("sync-marker\\n")
         sys.stderr.flush()
         time.sleep(10)
-    sys.exit(int(os.environ.get("FAKE_SYNC_RC", "0")))
+    sys.exit(int(os.environ.get("CLAUDE_CODE_FAKE_SYNC_RC", "0")))
 name = os.path.basename(args[args.index("score") + 1])
 if name == "nullayers":
     print(json.dumps({{"composite": 1, "layers": None}}))
@@ -55,7 +56,10 @@ elif name == "scalar":
     print("42")
 elif name == "bad":
     print(json.dumps({{"composite": 0}}))
+    sys.stderr.write("bad-stderr\\n")
     sys.exit(3)
+elif name == "nocomposite":
+    print(json.dumps({{"error": "rate limited"}}))
 elif name == "slow":
     print("partial-out", flush=True)
     sys.stderr.write("late-marker\\n")
@@ -123,6 +127,7 @@ def test_build_commands_includes_plugin_and_each_skill(tmp_path: Path) -> None:
     assert "--frozen" in sync
     for cmd in (sync, *(cmd for _, cmd in commands)):
         assert cmd[cmd.index("--project") + 1] == str(project)
+        assert "--frozen" in cmd
     labels = [label for label, _ in commands]
     assert labels == [str(plugin), "alpha", "beta"]
     assert commands[0][1][0] == "/opt/uv"
@@ -215,7 +220,8 @@ def test_timeout_kills_grandchildren(tmp_path: Path) -> None:
     [
         ("nonjson", lambda r: r["exit_code"] == 0 and "parse_error" in r),
         ("scalar", lambda r: r["exit_code"] == 0 and "parse_error" in r),
-        ("bad", lambda r: r["exit_code"] == 3),
+        ("bad", lambda r: r["exit_code"] == 3 and "bad-stderr" in r["stderr_tail"]),
+        ("nocomposite", lambda r: r["exit_code"] == 0 and r["parse_error"] == "JSON object has no composite score"),
         (
             "slow",
             lambda r: r["exit_code"] == 124 and r["timed_out"] is True
@@ -247,7 +253,7 @@ def test_run_missing_uv_exits_clearly_and_writes_result(tmp_path: Path) -> None:
 def test_run_failed_sync_is_recorded(tmp_path: Path) -> None:
     manifest, tool, uv, skills = _setup(tmp_path, ["good"])
     settings = manifest.parent / "config" / "settings.json"
-    settings.write_text(json.dumps({"env": {"FAKE_SYNC_RC": "5"}}), encoding="utf-8")
+    settings.write_text(json.dumps({"env": {"CLAUDE_CODE_FAKE_SYNC_RC": "5"}}), encoding="utf-8")
     with pytest.raises(SystemExit, match="uv sync failed: 5"):
         plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills)))
     summary = _result(manifest)
@@ -261,7 +267,7 @@ def test_run_failed_sync_is_recorded(tmp_path: Path) -> None:
 def test_run_sync_timeout_records_its_output(tmp_path: Path) -> None:
     manifest, tool, uv, skills = _setup(tmp_path, ["good"])
     settings = manifest.parent / "config" / "settings.json"
-    settings.write_text(json.dumps({"env": {"FAKE_SYNC_SLEEP": "1"}}), encoding="utf-8")
+    settings.write_text(json.dumps({"env": {"CLAUDE_CODE_FAKE_SYNC_SLEEP": "1"}}), encoding="utf-8")
     with pytest.raises(SystemExit, match="uv sync timed out"):
         plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--sync-timeout", "1"))
     sync = _result(manifest)["sync"]
@@ -314,6 +320,11 @@ def test_record_names_the_plugin_eval_commit(tmp_path: Path) -> None:
     manifest, tool, uv, skills = _setup(tmp_path, ["good"])
     assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
     assert (_result(manifest)["plugin_eval_commit"], _result(manifest)["plugin_eval_dirty"]) == (None, None)
+    git_env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, env=git_env, check=True)
+    # A plain directory inside another repo must not report that repo's commit.
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
+    assert (_result(manifest)["plugin_eval_commit"], _result(manifest)["plugin_eval_dirty"]) == (None, None)
     env = {
         **os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid", "GIT_COMMITTER_NAME": "t",
@@ -327,6 +338,37 @@ def test_record_names_the_plugin_eval_commit(tmp_path: Path) -> None:
     (tool / "local-edit.py").write_text("x = 1\n", encoding="utf-8")
     assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
     assert _result(manifest)["plugin_eval_dirty"] is True
+
+
+def _pin(tool: Path) -> str:
+    env = {
+        **os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid", "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@e.invalid",
+    }
+    for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-gpg-sign", "-m", "pin"]):
+        subprocess.run(["git", *cmd], cwd=tool, env=env, check=True)
+    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=tool, env=env, capture_output=True, text=True).stdout.strip()
+
+
+def test_expect_commit_refuses_a_mismatch_or_a_dirty_checkout(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    head = _pin(tool)
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--expect-commit", head)) == 0
+    with pytest.raises(SystemExit, match="expected clean 0000"):
+        plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--expect-commit", "0" * 40))
+    assert _result(manifest)["results"] == [] and "expected clean" in _result(manifest)["error"]
+    (tool / "local-edit.py").write_text("x = 1\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="dirty=True"):
+        plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--expect-commit", head))
+
+
+@pytest.mark.parametrize("flag", ["--timeout", "--sync-timeout"])
+@pytest.mark.parametrize("value", ["0", "-5"])
+def test_timeouts_must_be_positive(flag: str, value: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        plugin_eval.build_parser().parse_args(["--manifest", "m", "--plugin-eval-dir", "d", flag, value])
+    assert exc.value.code == 2
 
 
 def test_output_file_names_are_distinct_and_bounded(tmp_path: Path) -> None:

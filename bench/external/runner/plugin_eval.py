@@ -7,8 +7,11 @@ uv sync --frozen, then the whole-plugin quick score and the skill scores listed
 in plugin-eval-skills.txt (or --skills-file). All uv commands of a run share one
 fresh cwd under --temp-root (refused by prepare.check_clean_root if that root is
 in the repo or below a Claude Code memory file), with the checkout passed as
---project. The record names the checkout's git commit and whether it was dirty
-(null when it is not a git checkout); the runner does not enforce a pin.
+--project; uv sync and uv run both use --frozen. The record names the checkout's
+git commit and whether it was dirty (null unless the directory is itself the top
+of a git checkout). The pin is enforced only with --expect-commit, which refuses
+a different commit or a dirty checkout before any command runs. A score whose
+JSON has no composite counts as a failed command.
 Output files a previous run left in plugin-eval/ are removed at the start.
 Score commands start with the provider token as ANTHROPIC_AUTH_TOKEN (with
 ANTHROPIC_BASE_URL); PluginEval's judge is expected to pass that environment to
@@ -57,8 +60,12 @@ def _parse_json(text: str) -> dict[str, Any]:
 
 
 def _checkout_state(directory: Path) -> tuple[str | None, bool | None]:
-    """(HEAD commit, dirty) of the PluginEval checkout, or (None, None) if it is not a git checkout."""
+    """(HEAD commit, dirty) of the PluginEval checkout, or (None, None) if the directory is
+    not itself the top of a git checkout (a plain dir inside another repo reads as None)."""
     try:
+        top = prepare._git(directory, "rev-parse", "--show-toplevel").strip()
+        if Path(top).resolve() != directory.resolve():
+            return None, None
         commit = prepare._git(directory, "rev-parse", "HEAD").strip()
         dirty = bool(prepare._git(directory, "status", "--porcelain").strip())
     except (SystemExit, OSError):
@@ -95,7 +102,7 @@ def build_commands(
 
     def score(target: Path, depth: str) -> list[str]:
         return [
-            uv, "run", "--project", str(project), "plugin-eval", "score", str(target),
+            uv, "run", "--frozen", "--project", str(project), "plugin-eval", "score", str(target),
             "--depth", depth, "--output", "json",
         ]
 
@@ -145,6 +152,8 @@ def _score_one(
         layers = parsed.get("layers")
         record["layers"] = [layer.get("layer") for layer in layers if isinstance(layer, dict)] if isinstance(layers, list) else []
         record["model_usage"] = parsed.get("model_usage")
+        if record["composite"] is None:
+            record["parse_error"] = "JSON object has no composite score"
     except ValueError as exc:
         record["parse_error"] = str(exc)
         record["stdout_tail"] = proc.stdout[-2000:]
@@ -201,6 +210,13 @@ def run(args: argparse.Namespace) -> int:
             if not (plugin_eval_dir / "pyproject.toml").is_file():
                 raise SystemExit(f"not a PluginEval checkout: {plugin_eval_dir}")
             summary["plugin_eval_commit"], summary["plugin_eval_dirty"] = _checkout_state(plugin_eval_dir)
+            if args.expect_commit and (
+                summary["plugin_eval_commit"] != args.expect_commit or summary["plugin_eval_dirty"] is not False
+            ):
+                raise SystemExit(
+                    f"PluginEval checkout is at {summary['plugin_eval_commit']} "
+                    f"(dirty={summary['plugin_eval_dirty']}), expected clean {args.expect_commit}"
+                )
             skills = load_skills(Path(args.skills_file).expanduser() if args.skills_file else DEFAULT_SKILLS_FILE)
             settings = json.loads((scratch / "config" / "settings.json").read_text(encoding="utf-8"))
             env = prepare.build_child_env(
@@ -259,6 +275,13 @@ def run(args: argparse.Namespace) -> int:
     return 0 if ok and "cleanup_error" not in summary else 1
 
 
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive integer, got {value}")
+    return value
+
+
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     parser = parser or argparse.ArgumentParser(description="Run PluginEval on a prepared PACT copy.")
     parser.add_argument("--manifest", required=True)
@@ -266,8 +289,13 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--skills-file", default=None, help="default bench/external/plugin-eval-skills.txt")
     parser.add_argument("--skip-sync", action="store_true")
     parser.add_argument("--uv", default="uv")
-    parser.add_argument("--timeout", type=int, default=600)
-    parser.add_argument("--sync-timeout", type=int, default=600)
+    parser.add_argument("--timeout", type=_positive_int, default=600)
+    parser.add_argument("--sync-timeout", type=_positive_int, default=600)
+    parser.add_argument(
+        "--expect-commit",
+        default=None,
+        help="refuse to run unless the PluginEval checkout is at this commit (full SHA) and clean",
+    )
     parser.add_argument(
         "--temp-root",
         default=str(prepare.DEFAULT_TEMP_ROOT),

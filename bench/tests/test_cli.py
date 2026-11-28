@@ -53,6 +53,19 @@ def test_cli_imports_the_validator_by_package_path() -> None:
     assert proc.returncode == 0, proc.stderr
 
 
+def test_cli_returns_the_subcommands_exit_code(tmp_path: Path) -> None:
+    (tmp_path / "no-task").mkdir()
+    assert _cli("tasks", "validate", "--task", str(tmp_path / "no-task")).returncode == 1
+    missing = str(tmp_path / "missing.json")
+    assert _cli("native-eval", "--manifest", missing).returncode != 0
+    assert _cli("plugin-eval", "--manifest", missing, "--plugin-eval-dir", str(tmp_path)).returncode != 0
+
+
+def test_cli_tasks_help_is_help() -> None:
+    proc = _cli("tasks", "--help")
+    assert (proc.returncode, proc.stdout.startswith("usage: pact-bench tasks validate")) == (0, True)
+
+
 @pytest.mark.parametrize("args", [("compare",), ("report",), ("bogus",), ("tasks",), ("tasks", "bogus")])
 def test_cli_unknown_command_exits_2(args: tuple[str, ...]) -> None:
     assert _cli(*args).returncode == 2

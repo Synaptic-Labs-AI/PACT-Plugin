@@ -104,6 +104,22 @@ def test_seed_after_ignores_hidden_tests(tmp_path: Path) -> None:
     assert validate.validate_task(task, sys.executable)["status"] == "pass"
 
 
+def test_pytest_runs_with_plugin_isolation_flags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[list[str]] = []
+    real = validate._run
+
+    def record(cmd: list[str], *args: Any) -> Any:
+        calls.append(cmd)
+        return real(cmd, *args)
+
+    monkeypatch.setattr(validate, "_run", record)
+    validate.validate_task(make_task(tmp_path), sys.executable)
+    pytest_calls = [cmd for cmd in calls if cmd[1:3] == ["-m", "pytest"]]
+    assert len(pytest_calls) == 4  # seed, hidden before, hidden after, seed after
+    for cmd in pytest_calls:
+        assert cmd[3:8] == ["-q", "-p", "no:randomly", "-p", "no:cacheprovider"]
+
+
 def test_hidden_xfail_is_not_a_skip(tmp_path: Path) -> None:
     hidden = HIDDEN_TEST + "\n\nimport pytest\n\n\n@pytest.mark.xfail(strict=True)\ndef test_known_bug():\n    assert False\n"
     task = make_task(tmp_path, hidden={"test_hidden.py": hidden})
@@ -309,6 +325,18 @@ BROKEN = {
     ),
     "patch_skips_seed_tests": (
         {"gold": GOLD + _add_patch("tests/conftest.py", SKIP_ALL)},
+        "the gold patch removed or skipped seed tests",
+    ),
+    "patch_adds_one_seed_test_and_skips_another": (
+        {
+            "files": {"tests/test_other.py": "def test_other():\n    assert True\n"},
+            "gold": GOLD + _add_patch("tests/test_new.py", "def test_new():\n    assert True\n") + _add_patch(
+                "tests/conftest.py",
+                "import pytest\n\n\ndef pytest_collection_modifyitems(items):\n"
+                "    for item in items:\n        if item.name == 'test_other':\n"
+                "            item.add_marker(pytest.mark.skip(reason='skip'))\n",
+            ),
+        },
         "the gold patch removed or skipped seed tests",
     ),
     "patch_deletes_a_seed_test": (

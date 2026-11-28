@@ -49,6 +49,9 @@ def main(argv: list[str] | None = None) -> int:
     if command == "tasks":
         if rest and rest[0] == "validate":
             return _run_as("pact-bench tasks validate", tasks_validate_main, rest[1:])
+        if rest and rest[0] in ("-h", "--help"):
+            print("usage: pact-bench tasks validate [args]")
+            return 0
         print("usage: pact-bench tasks validate [args]", file=sys.stderr)
         return 2
     print(f"unknown command: {command}", file=sys.stderr)
