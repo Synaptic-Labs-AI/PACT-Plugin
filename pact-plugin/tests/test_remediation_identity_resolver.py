@@ -4692,14 +4692,6 @@ _DESCRIBED_PRINTED_CLAUSES = {
     # The core.bare decline (BARE_UNREAD_DETAIL): no change to a `.git`.
     "git could not say whether this repository is bare (core.bare), which decides the "
     "folder name the repository is filed under": _OBSERVED,
-    # The .git pin disclosure (PIN_DOT_GIT_DETAIL): it names the pin file's
-    # value, never a change to a `.git` directory or file.
-    "a github.com pin whose repository name ends in .git names the id a remote spelled "
-    "with .GIT or .git.git gives, not the id a remote spelled with no suffix or one .git "
-    "gives": _OBSERVED,
-    "If this repository's remote is spelled the second way, write the pin without the "
-    "trailing .git to share its memories":
-        "names the pin's own text as the remedy, only for the remote spelling it fits",
     # The remote-helper disclosure (REMOTE_HELPER_DETAIL): no change to a `.git`.
     "A canonical id written to <git-common-dir>/pact-project-id gives it its own":
         "names the pin as the remedy, written by the user",

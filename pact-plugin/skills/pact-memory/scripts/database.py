@@ -2007,10 +2007,16 @@ def is_github_name(name: object) -> bool:
 def github_repo_path(path: str) -> Optional[str]:
     """The `owner/repo` a port-less github.com path names, as GitHub reads
     it: each part decoded and lower-cased, or None when the path is not
-    exactly two GitHub names. THE ONE STEP for a remote's id and a pin, so
-    every escaped spelling of one repository gives one id."""
+    exactly two GitHub names or the repository's name ends in `.git` in
+    any case. THE ONE STEP for a remote's id and a pin, so every escaped
+    spelling of one repository gives one id."""
     parts = [unquote(part, errors="surrogateescape") for part in path.split("/")]
     if len(parts) != 2 or not all(is_github_name(part) for part in parts):
+        return None
+    if parts[1].lower().endswith(".git"):
+        # GitHub removes a trailing `.git` from a name when the repository is
+        # created, so no repository there has one: `r.git.git`, `r.GIT` and
+        # `r%2Egit` reach nothing.
         return None
     return "/".join(part.lower() for part in parts)
 
@@ -2020,9 +2026,9 @@ def _github_folded_pin(candidate: str) -> Optional[str]:
     takes them (`project_identity._identifier`), or None when it names no
     GitHub repository. A port-less `www.github.com` becomes github.com; a
     `github.com` path, on any port, is lower-cased outside its escapes; and a
-    port-less github.com path is read as a remote's is (`github_repo_path`):
-    decoded and lower-cased, or None when it is not exactly owner/repo of
-    GitHub names. Every other host keeps its spelling, a ported
+    port-less github.com path loses one trailing `.git` in any case and is
+    read as a remote's is (`github_repo_path`): decoded and lower-cased, or
+    None when it is not exactly owner/repo of GitHub names. Every other host keeps its spelling, a ported
     `www.github.com` included, exactly as a remote naming it does."""
     hostport, _, path = candidate.partition("/")
     host, colon, port = hostport.partition(":")
@@ -2030,6 +2036,11 @@ def _github_folded_pin(candidate: str) -> Optional[str]:
     if host != "github.com":
         return candidate
     if not port:
+        # A pin pasted from a remote url keeps its `.git`: drop one, in any
+        # case, as the remote's own id does. No GitHub repository name ends in
+        # `.git` (`github_repo_path`), so this names no other repository.
+        if path.lower().endswith(".git"):
+            path = path[: -len(".git")]
         repo_path = github_repo_path(path)
         return None if repo_path is None else host + "/" + repo_path
     segments = path.split("/")
@@ -2051,10 +2062,11 @@ def pin_file_value(raw: bytes) -> Tuple[Optional[str], Optional[str]]:
     an encoding BOM is dropped, is the candidate; it must be a canonical id.
     Its host is lower-cased first, as a remote's is. A valid candidate then
     takes GitHub's spelling rules (`_github_folded_pin`):
-    the case and www folds a remote's id takes, checked again after the fold,
-    and a port-less one-segment github.com pin is "not_canonical". Nothing
-    else is rewritten: a trailing `.git` is kept, because `github.com/o/r.git`
-    is itself an id a remote derives (`https://github.com/o/r.git.git`).
+    the case and www folds a remote's id takes, and one trailing `.git` of a
+    port-less github.com pin dropped, checked again after the fold; a
+    port-less github.com pin that is not owner/repo, or whose repository
+    still ends in `.git`, is "not_canonical". On every other host a trailing
+    `.git` is kept, as a remote on it can give one.
     `reason` is None for a usable value, else "too_long" (over
     `PIN_FILE_MAX_BYTES` bytes, or a candidate over the id length cap),
     "not_utf8", "control_chars", "not_canonical" or "empty". Never raises.

@@ -94,10 +94,10 @@ def test_an_escape_a_segment_needs_survives_the_decode(url, expected):
         ("https://github.com/O/R%2Dx", "github.com/o/r-x"),
         ("https://h.example/O/Caf%c3%a9", "h.example/O/Caf%C3%A9"),
         # GitHub drops only a literal `.git` (measured: `repo.GIT`, `repo.Git`
-        # and `repo.git.git` reach nothing), so a `.GIT` spelling stays a
-        # lower-cased part of the name and never binds `repo`'s id.
-        ("https://github.com/O/R.GIT", "github.com/o/r.git"),
-        ("git@github.com:O/R.Git", "github.com/o/r.git"),
+        # and `repo.git.git` reach nothing), and no GitHub name ends in
+        # `.git`, so a `.GIT` spelling declines and never binds `repo`'s id.
+        ("https://github.com/O/R.GIT", None),
+        ("git@github.com:O/R.Git", None),
         ("https://h.example/o/r.GIT", "h.example/o/r.GIT"),
         ("https://h.example/o/r.git", "h.example/o/r"),
     ],
@@ -474,17 +474,18 @@ def test_control_show_has_no_identity_detail_for_a_canonical_origin(tmp_path, mo
 
 
 @pytest.mark.parametrize("url, expected", [
-    ("https://github.com/O/R.GIT", "github.com/o/r.git"),
-    ("git@github.com:O/R.Git", "github.com/o/r.git"),
+    ("https://github.com/O/R.GIT", None),
+    ("git@github.com:O/R.Git", None),
     ("https://github.com/O/R.git/", "github.com/o/r"),
 ])
 def test_the_backlog_strips_a_git_suffix_as_the_id_does(url, expected):
-    """A github.com path drops one literal `.git`; a `.GIT` spelling stays
-    in the name. The id and the backlog's slug agree on both."""
+    """A github.com path drops one literal `.git`; a `.GIT` spelling
+    declines. The id and the backlog's slug agree on both."""
     from shared import backlog
 
-    owner, name = backlog._slug_from_remote_url(url)
-    assert f"github.com/{owner}/{name}" == pi.normalize_remote_url(url) == expected
+    slug = backlog._slug_from_remote_url(url)
+    assert pi.normalize_remote_url(url) == expected
+    assert (None if slug is None else f"github.com/{slug[0]}/{slug[1]}") == expected
 
 
 @pytest.mark.parametrize("url", [

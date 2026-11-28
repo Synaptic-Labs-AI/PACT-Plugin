@@ -760,7 +760,8 @@ def _strip_path_suffixes(path: str) -> str:
     git's own lookup appends exactly `.git`: on a server `repo.GIT` is
     another directory. github.com too drops only a lower-case `.git`
     (measured: `repo.GIT` and `repo.Git` reach nothing there, as
-    `repo.git.git` does), so its lower-cased `repo.git` stays a segment.
+    `repo.git.git` does), and a github.com name still ending in `.git` then
+    declines (`database.github_repo_path`).
 
     The second slash strip exists only for the `repo/.git` form (a
     non-bare repository's git dir, which a plain sshd serves): once `.git`
@@ -873,7 +874,8 @@ def _identifier(
     if host in _CASE_INSENSITIVE_PATH_HOSTS:
         # Lower-cased OUTSIDE its percent escapes (`github_folded_segment`).
         # A `.GIT` spelling is kept, lower-cased: GitHub does not serve
-        # `repo.GIT` as `repo` (measured), so it must not bind repo's id.
+        # `repo.GIT` as `repo` (measured), so it must not bind repo's id; a
+        # port-less github.com one then declines (`github_repo_path`).
         segments = [github_folded_segment(segment) for segment in segments]
     return f"{host}:{port}/{'/'.join(segments)}" if port else f"{host}/{'/'.join(segments)}"
 
@@ -1266,31 +1268,6 @@ REMOTE_HELPER_DETAIL = (
     "name. A canonical id written to <git-common-dir>/pact-project-id gives it "
     "its own"
 )
-
-
-# The `detail` for a port-less github.com pin whose repository ends in
-# `.git` (`pin_remote_spelling`): the pin is its own id, not its remote's.
-PIN_DOT_GIT_DETAIL = (
-    "a github.com pin whose repository name ends in .git names the id a "
-    "remote spelled with .GIT or .git.git gives, not the id a remote spelled "
-    "with no suffix or one .git gives. If this repository's remote is "
-    "spelled the second way, write the pin without the trailing .git to "
-    "share its memories"
-)
-
-
-def pin_remote_spelling(pin: object) -> Optional[str]:
-    """The id a github.com remote gives for the repository a port-less
-    github.com pin ending in `.git` names (`github.com/acme/widget.git` ->
-    `github.com/acme/widget`), or None for every other pin. The pin keeps
-    its spelling (`r.git` is a valid repository id: a remote ending
-    `r.git.git` gives it); this only names the spelling it differs from."""
-    if not isinstance(pin, str) or not pin.startswith("github.com/") or not pin.endswith(".git"):
-        return None
-    remote = pin[: -len(".git")]
-    # `github.com/o/.git`: no remote gives `github.com/o/`, so there is no
-    # spelling to name.
-    return None if remote.endswith("/") else remote
 
 
 def _is_remote_helper(url: str) -> bool:
@@ -2657,8 +2634,7 @@ def detect_id_for_root(
     if override.value is not None:
         # `read_override` returns only a canonical value.
         return RootIdentity(
-            override.value, "canonical", "override file", None, None,
-            PIN_DOT_GIT_DETAIL if pin_remote_spelling(override.value) else None,
+            override.value, "canonical", "override file", None, None, None,
         )
     if override.reason is not None and override.path is not None:
         override_ignored = {"path": str(override.path), "reason": override.reason}

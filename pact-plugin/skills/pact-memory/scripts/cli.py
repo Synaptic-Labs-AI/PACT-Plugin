@@ -82,10 +82,8 @@ from scripts.memory_api import (
     render_rekey_command,
 )
 from scripts.project_identity import (
-    PIN_DOT_GIT_DETAIL,
     REMOTE_HELPER_DETAIL,
     is_canonical,
-    pin_remote_spelling,
 )
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
@@ -1136,9 +1134,6 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
                 "identity_detail": (
                     REMOTE_HELPER_DETAIL
                     if memory._project_id_source == "remote helper"
-                    else PIN_DOT_GIT_DETAIL
-                    if memory._project_id_source == "override file"
-                    and pin_remote_spelling(memory.project_id)
                     else None
                 ),
                 # STRUCTURED DECLINE REASON, not just the warning. A repository

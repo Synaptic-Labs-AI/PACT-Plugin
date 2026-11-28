@@ -1460,17 +1460,18 @@ def test_a_github_payload_id_keeps_its_port(canonical_session, port):
     assert filed == {f"github.com:{port}/acme/widget"}, filed
 
 
-def test_a_github_payload_id_keeps_its_git_suffix_as_a_pin_does(canonical_session):
-    """A payload `github.com/Acme/Widget.git` is folded as a pin is: lower-
-    cased, its `.git` kept, because `github.com/acme/widget.git` is the id
-    of the remote `https://github.com/acme/widget.git.git`, a repository of
-    its own. RED WHEN the suffix is dropped, filing it in this repository."""
+@pytest.mark.parametrize("payload", ["github.com/Acme/Widget.git", "github.com/acme/widget.GIT"])
+def test_a_github_payload_id_drops_its_git_suffix(canonical_session, payload):
+    """A payload pasted from a remote url (`github.com/Acme/Widget.git`) files
+    under the repository's id: GitHub removes a trailing `.git` from a
+    repository's name, so no repository there is named `widget.git`. RED
+    WHEN the suffix is kept, filing the row in a bucket no session reads."""
     repo, store = canonical_session
     memory = PACTMemory(session_id="s", db_path=store)
-    memory.save({"context": "a repository named widget.git", "project_id": "github.com/Acme/Widget.git"})
+    memory.save({"context": "pasted from the url", "project_id": payload})
     with sqlite3.connect(str(store)) as conn:
         filed = {row[0] for row in conn.execute("SELECT project_id FROM memories")}
-    assert filed == {CANONICAL + ".git"}, filed
+    assert filed == {CANONICAL}, filed
 
 
 def test_a_moved_store_re_decides_the_verdict(canonical_session, monkeypatch):

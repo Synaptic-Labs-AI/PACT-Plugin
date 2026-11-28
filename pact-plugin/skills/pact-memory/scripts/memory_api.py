@@ -235,8 +235,6 @@ _REMOTE_HELPER_WARNED: set = set()
 # and root (`PACTMemory._earlier_canonical_buckets`), and the ones named.
 _EARLIER_CANONICAL: Dict[tuple, Dict[str, Optional[str]]] = {}
 _EARLIER_CANONICAL_WARNED: set = set()
-# Roots whose github.com pin ending in .git was disclosed, once per process.
-_PIN_DOT_GIT_WARNED: set = set()
 
 # Set while a command reads the scope only to act on the bucket it names
 # (`legacy_notices_quiet`): the legacy notices advise a move, and printing
@@ -3661,21 +3659,6 @@ class PACTMemory:
             logger.warning(
                 "project_id for %r is its folder-name id %r: %s.",
                 str(root), identity.project_id, identity.detail,
-                extra=_IDENTITY_RECORD,
-            )
-        if (
-            identity.detail == project_identity.PIN_DOT_GIT_DETAIL
-            and str(root) not in _PIN_DOT_GIT_WARNED
-        ):
-            # ONCE PER ROOT: the pin is honoured as written, and this names
-            # the remote spelling it differs from.
-            _PIN_DOT_GIT_WARNED.add(str(root))
-            logger.warning(
-                "project_id for %r is its pin %r, not %r, the id a github.com "
-                "remote spelled with no suffix or one .git gives: %s.",
-                str(root), identity.project_id,
-                project_identity.pin_remote_spelling(identity.project_id),
-                identity.detail,
                 extra=_IDENTITY_RECORD,
             )
         if identity.project_id is not None:

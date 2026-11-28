@@ -39,29 +39,28 @@ class TestOneGitSuffixPerRemote:
             "git@github.com:o/foo.git.git",
         ],
     )
-    def test_github_drops_one_git_as_other_hosts_do(self, url):
-        """GitHub does not serve `repo.git.git` as `repo`: measured with
-        `git ls-remote <url> HEAD` (git 2.43), https://github.com/cli/cli
-        answers its HEAD while https://github.com/cli/cli.git.git answers
-        "could not read Username", GitHub's reply for a repository it does
-        not serve. So only one `.git` is dropped. RED WHEN a repeated
-        `.git` is stripped on github.com."""
+    def test_github_declines_a_name_still_ending_in_git(self, url):
+        """GitHub does not serve `repo.git.git` as `repo` (measured with
+        `git ls-remote <url> HEAD`, git 2.43: https://github.com/git/git
+        answers its HEAD, https://github.com/git/git.git.git answers "could
+        not read Username", GitHub's reply for a repository it does not
+        serve), and no GitHub repository name ends in `.git`, so it reaches
+        nothing and declines. Other hosts drop one `.git`. RED WHEN a
+        github.com name ending in `.git` binds an id."""
         github = pi.normalize_remote_url(url)
         gitlab = pi.normalize_remote_url(url.replace("github.com", "gitlab.com"))
-        assert github == "github.com/o/foo.git"
+        assert github is None
         assert gitlab == "gitlab.com/o/foo.git"
 
     def test_control_a_literal_suffix_is_dropped_on_github(self):
         assert pi.normalize_remote_url("https://github.com/o/foo.git") == "github.com/o/foo"
 
-    def test_a_capitalised_suffix_stays_in_the_name_on_github(self):
-        """GitHub does not serve `repo.GIT` as `repo`, so it keeps its own
-        lower-cased id. Measured with `git ls-remote <url> HEAD` (git 2.43):
-        https://github.com/cli/cli.git and https://github.com/cli/cli both
-        answer the same HEAD, while https://github.com/cli/cli.GIT answers
-        "could not read Username", GitHub's reply for a repository it does
-        not serve. RED WHEN `.GIT` binds `repo`'s id."""
-        assert pi.normalize_remote_url("https://github.com/o/Foo.GIT") == "github.com/o/foo.git"
+    def test_a_capitalised_suffix_declines_on_github(self):
+        """GitHub does not serve `repo.GIT` as `repo` (measured with `git
+        ls-remote <url> HEAD`, git 2.43: https://github.com/git/git.GIT
+        answers "could not read Username"), and no repository there is named
+        `repo.git`, so it declines. RED WHEN `.GIT` binds an id."""
+        assert pi.normalize_remote_url("https://github.com/o/Foo.GIT") is None
 
 
 class TestNoRemoteDerivesAnInvalidHost:

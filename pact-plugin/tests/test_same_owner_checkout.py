@@ -301,19 +301,26 @@ def test_a_mixed_case_pin_and_its_lower_case_origin_are_one_owner(tmp_path):
 
 
 @pytest.mark.parametrize("pin, expected", [
-    ("github.com/acme/widget.git", "github.com/acme/widget"),
-    ("github.com/acme/.git", None),
-    ("github.com/acme/widget", None),
-    ("github.com:443/acme/widget.git", None),
+    ("github.com/Acme/Widget.git", ("github.com/acme/widget", None)),
+    ("github.com/acme/widget.GIT", ("github.com/acme/widget", None)),
+    ("github.com/acme/widget.git.git", (None, "not_canonical")),
+    ("github.com/acme/.git", (None, "not_canonical")),
+    ("github.com:8443/acme/widget.git", ("github.com:8443/acme/widget.git", None)),
+    ("gitlab.com/acme/widget.git", ("gitlab.com/acme/widget.git", None)),
 ])
-def test_the_remote_spelling_a_dot_git_pin_differs_from(pin, expected):
-    """Only a port-less github.com pin whose repository ends in .git has a
-    remote spelling to name, and a repository named only '.git' has none
-    (no remote gives github.com/acme/). RED WHEN github.com/acme/.git
-    names the non-id 'github.com/acme/'."""
+def test_a_github_pin_pasted_with_its_dot_git_names_the_remotes_id(pin, expected):
+    """GitHub removes a trailing .git from a repository's name when it is
+    created, so no port-less github.com repository ends in .git: a pin pasted
+    from the remote url drops one .git, in any case, and names the id the
+    remote gives; one that still ends in .git names nothing. A ported
+    github.com pin and other hosts keep it. RED WHEN the pasted pin keeps the
+    suffix and splits its checkout from every clone."""
     from scripts import project_identity as pi
+    from scripts.database import pin_file_value
 
-    assert pi.pin_remote_spelling(pin) == expected
+    assert pin_file_value((pin + "\n").encode()) == expected
+    if expected[0] == "github.com/acme/widget":
+        assert pi.normalize_remote_url("https://github.com/acme/widget.git") == expected[0]
 
 
 @pytest.mark.parametrize("raw", [
@@ -351,65 +358,40 @@ def test_a_pin_keeps_refusing_a_lower_case_escape_of_any_other_byte(pin):
     assert pin_file_value((pin + "\n").encode()) == (None, "not_canonical")
 
 
-def test_the_dot_git_pin_hint_is_true_for_both_remote_spellings():
-    """The pin github.com/acme/widget.git is the id of a remote spelled
-    widget.GIT or widget.git.git, and not of one spelled widget or
-    widget.git. The detail names both, so it does not tell the owner of a
-    widget.GIT remote to drop a .git their remote needs. RED WHEN the detail
-    says only that a remote gives the id without the .git suffix."""
+@pytest.mark.parametrize("spelling", ["widget.GIT", "widget.Git", "widget.git.git", "widget%2Egit"])
+def test_a_github_remote_whose_name_still_ends_in_dot_git_declines(spelling):
+    """No GitHub repository name ends in .git, so a github.com remote whose
+    name still does after its one .git is dropped reaches nothing and
+    declines, in the memory id and the backlog. RED WHEN it binds an id."""
     from scripts import project_identity as pi
 
-    pin = "github.com/acme/widget.git"
-    for spelling in ("widget.GIT", "widget.git.git"):
-        assert pi.normalize_remote_url(f"https://github.com/acme/{spelling}") == pin
-    for spelling in ("widget", "widget.git"):
-        assert pi.normalize_remote_url(f"https://github.com/acme/{spelling}") == pi.pin_remote_spelling(pin)
-    detail = " ".join(pi.PIN_DOT_GIT_DETAIL.split())
-    assert "a remote spelled with .GIT or .git.git gives" in detail, detail
-    assert "If this repository's remote is spelled the second way" in detail, detail
+    assert pi.normalize_remote_url(f"https://github.com/acme/{spelling}") is None
+    assert pi.normalize_remote_url(f"git@github.com:acme/{spelling}") is None
+    assert pi.normalize_remote_url("https://github.com/acme/widget.git") == "github.com/acme/widget"
 
 
-@pytest.mark.parametrize("pin, expected_detail", [
-    ("github.com/Acme/Widget.git", True),
-    ("github.com/acme/widget", False),
-    ("github.com:8443/acme/widget.git", False),
-])
-def test_a_github_pin_ending_in_dot_git_is_disclosed(tmp_path, monkeypatch, capsys, caplog, pin, expected_detail):
-    """A port-less github.com pin ending in .git keeps its own id (a remote
-    ending r.git.git derives it), but it is not the id its remote gives, so
-    `project-id show` names that in identity_detail and the resolver warns
-    once, naming the remote's spelling. A pin without .git, and a ported
-    pin, get neither. RED WHEN the .git pin binds silently."""
+def test_a_pasted_dot_git_pin_is_the_checkouts_id_with_no_detail(tmp_path, monkeypatch, capsys):
+    """`project-id show` reports the pasted pin as the remote's id, with no
+    identity_detail. RED WHEN the pin's .git reaches the id."""
     import json
-    import logging
 
-    from scripts import memory_api
     from scripts.cli import main
-    from scripts.project_identity import PIN_DOT_GIT_DETAIL
+    from scripts.database import db_connection, ensure_initialized
 
     assert_outside_repository(tmp_path)
     repo = make_repo(tmp_path / "widget", remote="https://github.com/acme/widget.git")
-    (repo / ".git" / "pact-project-id").write_text(pin + "\n", encoding="utf-8")
+    (repo / ".git" / "pact-project-id").write_text("github.com/Acme/Widget.git\n", encoding="utf-8")
     monkeypatch.chdir(repo)
     monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
-    monkeypatch.setattr(memory_api, "_PIN_DOT_GIT_WARNED", set())
-    from scripts.database import db_connection, ensure_initialized
-
     with db_connection(tmp_path / "store.db") as conn:
         ensure_initialized(conn)
-    with caplog.at_level(logging.WARNING), pytest.raises(SystemExit) as exit_info:
+    with pytest.raises(SystemExit) as exit_info:
         main(["project-id", "show", "--db-path", str(tmp_path / "store.db")])
     assert exit_info.value.code == 0
     shown = json.loads(capsys.readouterr().out)["result"]
     assert shown["source"] == "override file", shown
-    notes = [r.getMessage() for r in caplog.records if "remote spelled with no suffix or one .git gives" in r.getMessage()]
-    if expected_detail:
-        assert shown["project_id"] == "github.com/acme/widget.git", shown
-        assert shown["identity_detail"] == PIN_DOT_GIT_DETAIL, shown
-        assert len(notes) == 1 and "'github.com/acme/widget'" in notes[0], notes
-    else:
-        assert shown["identity_detail"] is None, shown
-        assert notes == [], notes
+    assert shown["project_id"] == "github.com/acme/widget", shown
+    assert shown["identity_detail"] is None, shown
 
 
 @pytest.mark.parametrize("url, pin", [

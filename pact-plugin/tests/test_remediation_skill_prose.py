@@ -1607,8 +1607,7 @@ class TestNullOverridePathIsMeasured:
     def test_the_show_row_names_the_remote_helper_source(self):
         assert (
             "identity_detail names the remedy when source is remote helper (a "
-            "folder-name id from a remote-helper origin) or a github.com pin ends "
-            "in .git, else null."
+            "folder-name id from a remote-helper origin), else null."
         ) in _table_row(SKILL, "project-id show")
 
     def test_the_show_row_says_process_repo_root_is_the_main_checkout(self):
@@ -7233,13 +7232,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<name imported from a project module memory_api: project_identity.REMOTE_HELPER_DETAIL>"): (
             "the identity layer's fixed remote-helper sentence, compared to a detected detail to "
             "disclose the source and warn once"
-        ),
-        ("call", "<name imported from a project module cli: PIN_DOT_GIT_DETAIL>"): (
-            "the identity layer's fixed .git-pin sentence, which project-id show reports for an "
-            "'override file' source whose github.com pin ends in .git"
-        ),
-        ("call", "<name imported from a project module memory_api: project_identity.PIN_DOT_GIT_DETAIL>"): (
-            "the identity layer's fixed .git-pin sentence, compared to a detected detail to warn once"
         ),
         ("call", "<call to no function memory_api: _LEGACY_NOTICES_QUIET.get>"): (
             "the legacy read notices check whether a rekey --apply read asked for quiet; it "
