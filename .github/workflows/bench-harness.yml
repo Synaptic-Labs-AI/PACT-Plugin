@@ -3,11 +3,10 @@
 # ADVISORY. Never make `hermetic` a required status check: the workflow-level
 # `paths:` filter means a PR touching none of these paths gets no check run at
 # all, and a required check that never reports stalls the merge queue forever.
-# bench/tests runs in no other lane (fast-suite and full-suite collect from
-# pact-plugin/ only), so this workflow is its only CI.
 #
-# The paths are bench/ plus every file outside it that the job or a bench test
-# reads (pyproject.toml is pytest's config file for the run).
+# The paths are bench/ plus the files outside it that the job reads and the
+# files outside it that bench tests name as ROOT / "..." paths (pyproject.toml
+# is pytest's config file for the run).
 # bench/tests/test_workflow.py pins this file's structure: triggers and paths,
 # step order, SHA pins, the hashed install line and the verify bracketing.
 name: bench-harness

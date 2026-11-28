@@ -112,6 +112,7 @@ def test_run_hermetic_runs_only_bench_tests_from_repo_root() -> None:
     text = RUN_HERMETIC.read_text(encoding="utf-8")
     assert 'cd "$(dirname "$0")/.."' in text
     assert re.search(r'^exec "\$py" -m pytest bench/tests -q$', text, re.M)
+    assert re.search(r'^command -v "\$py" >/dev/null 2>&1 \|\| py=python3$', text, re.M)
 
 
 def test_bootstrap_installs_the_hashed_bench_lock() -> None:
