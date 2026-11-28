@@ -1681,6 +1681,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             )
         placed_split = _placed_split(memory, store, from_id)
     foreign_source = None
+    canonical_foreign = False
     undetected_earlier = ""
     try:
         # An older spelling of this checkout's own id (`github.com/Acme/Widget`,
@@ -1693,7 +1694,6 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         to_id == own_id
         and not noop
         and not args.from_another_repository
-        and not args.only_placed_here
         and from_as_id != own_id
     ):
         candidate = state.get("candidate")
@@ -1737,6 +1737,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         elif is_canonical(from_id) and from_id not in (
             getattr(memory, "_earlier_canonical", None) or {}
         ):
+            canonical_foreign = True
             roots, common = (
                 memory._legacy_gate_roots(memory._project_identity_root)
                 if memory._project_identity_root is not None and store.exists()
@@ -1766,10 +1767,28 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                     else "repository that has no file row here."
                 )
             )
+    if foreign_source is not None and args.only_placed_here and not canonical_foreign:
+        # A LEGACY FOLDER-NAME BUCKET'S PLACED MEMORIES ARE THIS CHECKOUT'S by
+        # the gate's own rule, so the partial move needs no flag. Another
+        # repository's canonical bucket still does: its id names that owner.
+        foreign_source = None
     if foreign_source is not None:
         # A MOVE INTO THIS CHECKOUT'S ID OF A BUCKET THE READ RULES SAY IS NOT
         # ITS OWN merges another repository's rows into this one and cannot be
         # undone, so the dry run refuses too rather than report a clean plan.
+        partial = (
+            " To move only the memories whose every file row lies in this "
+            "checkout, pass --only-placed-here together with "
+            "--from-another-repository, only with that approval."
+            if canonical_foreign
+            else " To move only the memories whose every file row lies in this "
+            "checkout, run the same command with --only-placed-here."
+        )
+        if args.only_placed_here:
+            partial = (
+                " With --only-placed-here, add --from-another-repository, only "
+                "with that approval: only the memories placed here then move."
+            )
         _error(
             "REKEY_REFUSED",
             escape_for_envelope(
@@ -1778,9 +1797,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 "rows here, and a rekey cannot be undone. Pass "
                 "--from-another-repository only with the user's explicit "
                 "approval that these rows belong to this repository."
-                f"{undetected_earlier} To move only the memories whose every "
-                "file row lies in this checkout, run the same command with "
-                "--only-placed-here. Nothing was moved."
+                f"{undetected_earlier}{partial} Nothing was moved."
             ),
         )
     if (

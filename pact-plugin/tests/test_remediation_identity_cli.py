@@ -3029,3 +3029,35 @@ def test_containment_is_separator_aware(path, inside):
     from scripts.database import _contained_by_root
 
     assert _contained_by_root(path, "/a/app", {}, None) is inside
+
+
+def test_only_placed_here_from_another_repositorys_canonical_id_needs_the_flag(
+    identity_env, store, monkeypatch, capfd
+):
+    """From x/app, github.com/b/app is another repository's canonical id: a
+    move of only its placed memories into this checkout's id is still
+    refused unless --from-another-repository is passed too, and then only the
+    placed memory moves. The whole-bucket refusal suggests the combination.
+    A legacy folder-name bucket keeps working with --only-placed-here alone
+    (test_only_placed_here_moves_only_this_checkouts_memories). RED WHEN
+    --only-placed-here alone moves another repository's canonical bucket."""
+    from scripts import memory_api
+
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    x = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    (x / "f.py").write_text("x\n")
+    _seed_linked(store, "github.com/b/app", "placed001", [str(x / "f.py")])
+    _seed_linked(store, "github.com/b/app", "away00001", [str(identity_env / "away.py")])
+    monkeypatch.chdir(x)
+    base = ["project-id", "rekey", "--from=github.com/b/app", "--to=github.com/a/app", "--db-path", str(store)]
+    before = _snapshot(store)
+    code, whole = _cli(base, capfd)
+    assert code == 1 and "pass --only-placed-here together with --from-another-repository" in whole["message"], whole
+    for apply in ([], ["--apply"]):
+        code, envelope = _cli([*base, "--only-placed-here", *apply], capfd)
+        assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
+        assert "With --only-placed-here, add --from-another-repository" in envelope["message"], envelope
+    assert _snapshot(store) == before
+    code, applied = _cli([*base, "--only-placed-here", "--from-another-repository", "--apply"], capfd)
+    assert code == 0 and applied["result"]["memories"] == 1, applied
+    assert _placed_rows(store)["memories"] == {"placed001": "github.com/a/app", "away00001": "github.com/b/app"}
