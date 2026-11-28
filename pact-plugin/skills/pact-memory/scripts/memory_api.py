@@ -1102,10 +1102,9 @@ def _warn_legacy_unproven(
         cause,
         (
             " Its rows include another checkout's, and a move takes the whole "
-            "bucket, so after one that checkout no longer reads its rows: move "
-            "it only with the user's approval that every row is this "
-            "repository's, passing --from-another-repository to "
-            "`project-id rekey`."
+            "bucket, that checkout's rows with it: move it only with the "
+            "user's approval that every row is this repository's, passing "
+            "--from-another-repository to `project-id rekey`."
             if shared
             else _preview_clause(
                 "If they are, preview the move with:", candidate, target,

@@ -2705,6 +2705,7 @@ def test_a_bucket_shared_with_another_checkout_offers_no_move_and_refuses_one(
     assert rows["app"]["rekey"] is None, rows
     warned = " ".join(record.getMessage() for record in caplog.records)
     assert "--from=app" not in warned and "--from-another-repository" in warned, warned
+    assert "that checkout's rows with it" in warned and "no longer reads" not in warned, warned
     before = _snapshot(store)
     argv = ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--db-path", str(store)]
     for apply in ([], ["--apply"]):
@@ -2712,6 +2713,8 @@ def test_a_bucket_shared_with_another_checkout_offers_no_move_and_refuses_one(
         assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
         assert "holds rows placed in another checkout too" in envelope["message"], envelope
         assert "1 of its file rows lie in another checkout" in envelope["message"], envelope
+        assert "that checkout's rows with it" in envelope["message"], envelope
+        assert "no longer read" not in envelope["message"] and envelope["message"].count(", so ") == 1, envelope
         assert _snapshot(store) == before
     code, envelope = _cli([*argv, "--apply", "--from-another-repository"], capfd)
     assert code == 0 and envelope["result"]["memories"] == 2, envelope

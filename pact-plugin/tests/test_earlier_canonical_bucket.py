@@ -159,7 +159,7 @@ def test_the_earlier_id_moves_into_this_checkouts_id_with_no_override(renamed, c
 
 
 @pytest.mark.parametrize("source, reason", [
-    (SHARED, "its 1 file row here belong to memories saved before this clone"),
+    (SHARED, "(its 1 file row here comes only from memories saved before this clone and does not show"),
     (ELSEWHERE, "(no file row here places it)"),
 ])
 def test_the_refusal_says_why_a_canonical_bucket_is_no_detected_earlier_id(renamed, capfd, source, reason):
@@ -178,6 +178,9 @@ def test_the_refusal_says_why_a_canonical_bucket_is_no_detected_earlier_id(renam
     assert reason in envelope["message"], envelope
     assert "--from-another-repository" in envelope["message"], envelope
     assert "earlier id of this repository that could not be detected" in envelope["message"], envelope
+    hint = "cloned again, whose rows here predate this clone" if source == SHARED else "that has no file row here"
+    assert hint in envelope["message"], envelope
+    assert envelope["message"].count(", so ") <= 1, envelope
 
 
 @pytest.mark.parametrize("verb", [["list"], ["search", "c"]])

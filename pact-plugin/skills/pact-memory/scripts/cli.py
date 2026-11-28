@@ -1662,14 +1662,14 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         candidate = state.get("candidate")
         if legacy_verdict == "unproven" and state.get("unproven_reason") in SHARED_BUCKET_REASONS:
             foreign_source = (
-                "holds rows placed in another checkout too: "
+                "holds rows placed in another checkout too ("
                 + _unproven_cause(
                     state["unproven_reason"],
                     {**(state.get("sessions") or {}), **(state.get("detail") or {})},
                     from_id,
                 )
-                + ". A rekey moves the whole bucket, so that checkout would no "
-                "longer read its rows"
+                + "), and a rekey moves the whole bucket, that checkout's rows "
+                "with it"
             )
         elif legacy_verdict == "excluded":
             foreign_source = (
@@ -1710,17 +1710,24 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 "is a canonical id that is neither this checkout's nor a "
                 "detected earlier id of it "
                 + (
-                    f"(its {rows_here} file row{'' if rows_here == 1 else 's'} "
-                    "here belong to memories saved before this clone, which do "
-                    "not show the rows are this repository's)"
+                    "(its 1 file row here comes only from memories saved before "
+                    "this clone and does not show the rows are this repository's)"
+                    if rows_here == 1
+                    else f"(its {rows_here} file rows here come only from memories "
+                    "saved before this clone and do not show the rows are this "
+                    "repository's)"
                     if rows_here
                     else "(no file row here places it)"
                 )
             )
             undetected_earlier = (
                 " It is also how to move an earlier id of this repository that "
-                "could not be detected, such as the bucket of a rename that has "
-                "no file row here."
+                "could not be detected, such as the bucket of a renamed "
+                + (
+                    "repository cloned again, whose rows here predate this clone."
+                    if rows_here
+                    else "repository that has no file row here."
+                )
             )
     if foreign_source is not None:
         # A MOVE INTO THIS CHECKOUT'S ID OF A BUCKET THE READ RULES SAY IS NOT
