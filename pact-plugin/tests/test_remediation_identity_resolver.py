@@ -4704,6 +4704,21 @@ def _union_admits_str(annotation) -> bool:
 _OBSERVED = "reports what was observed"
 _DETAIL = "part of a rung detail: the rung and the path it read"
 _DESCRIBED_PRINTED_CLAUSES = {
+    # Why an origin declined as unrepresentable (unrepresentable_detail): no change to a `.git`.
+    "GitHub serves no repository at its path": _OBSERVED,
+    "a github.com id is exactly owner/repo of GitHub names, with no home-relative or /.git path and no repository name ending in .git": _OBSERVED,
+    "it names no portable repository": _OBSERVED,
+    "its host is an IPv6 literal that names no portable server (this machine, an IPv4-mapped address or a zone index)": _OBSERVED,
+    "its host is in the reserved .invalid namespace": _OBSERVED,
+    "its host is not a valid host name": _OBSERVED,
+    "its host is this machine (a loopback or unspecified address)": _OBSERVED,
+    "its path is empty or holds a segment an id cannot hold": _OBSERVED,
+    "its port is not a valid port number (1-65535, no leading zero)": _OBSERVED,
+    "its scheme is not one an id is read from (https, http, ssh, git, git+ssh, ssh+git)": _OBSERVED,
+    "the origin url carries a query or fragment ('?' or '#'), which names no repository": _OBSERVED,
+    "the origin url holds a backslash or more than one '@'": _OBSERVED,
+    "the origin url holds a control character": _OBSERVED,
+    "the origin url starts with a byte-order mark or whitespace": _OBSERVED,
     # The core.bare decline (BARE_UNREAD_DETAIL): no change to a `.git`.
     "git could not say whether this repository is bare (core.bare), which decides the "
     "folder name the repository is filed under": _OBSERVED,

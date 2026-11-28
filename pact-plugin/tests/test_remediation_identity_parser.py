@@ -184,14 +184,14 @@ class TestTheOriginIsTheUrlGitFetches:
         assert identity.detail != pi.EMPTY_URL_ENTRY_DETAIL
         assert identity.decline_reason is None
 
-    def test_an_unrepresentable_origin_decline_carries_no_detail(self, tmp_path):
+    def test_an_unrepresentable_origin_decline_names_its_reason(self, tmp_path):
         assert_outside_repository(tmp_path)
         repo = make_repo(tmp_path / "repo", remote="https://host/owner/re po")
 
         identity = pi.detect_id_for_root(repo, common_dir(repo))
 
         assert identity.decline_reason["reason"] == "origin_unrepresentable"
-        assert identity.detail is None
+        assert identity.detail == "its path is empty or holds a segment an id cannot hold"
 
     def test_a_value_holding_a_newline_is_read_as_one_value(self, tmp_path):
         """A line-oriented reader would take the text before the newline as a

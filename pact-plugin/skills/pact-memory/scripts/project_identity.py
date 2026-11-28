@@ -1307,6 +1307,68 @@ def _is_remote_helper(url: str) -> bool:
     return scheme is not None and scheme.group("scheme").lower() in _REMOTE_HELPER_SCHEMES
 
 
+def unrepresentable_detail(url: Optional[str]) -> Optional[str]:
+    """Why a network origin declined (`classify_remote_origin`), in words that
+    name the rule it broke and never echo the url (a url can carry a token),
+    or None when no more specific reason is found. For the
+    `origin_unrepresentable` cause; diagnostic only, never a verdict."""
+    if not isinstance(url, str):
+        return None
+    value = _strip_one_terminator(url)
+    if _has_control_character(value):
+        return "the origin url holds a control character"
+    if value[:1] in ("\ufeff", " ", "\t"):
+        return "the origin url starts with a byte-order mark or whitespace"
+    if "\\" in value or value.count("@") > 1:
+        return "the origin url holds a backslash or more than one '@'"
+    scheme_match = _SCHEME_PREFIX_RE.match(value)
+    if scheme_match is not None:
+        if scheme_match.group("scheme").lower() not in _ACCEPTED_SCHEMES:
+            return (
+                "its scheme is not one an id is read from (https, http, ssh, git, "
+                "git+ssh, ssh+git)"
+            )
+        authority = value[scheme_match.end():].partition("/")[0]
+    else:
+        scp_match = _scp_match(value)
+        if scp_match is None:
+            return None
+        authority = scp_match.group("host")
+    if "?" in value or "#" in value:
+        return "the origin url carries a query or fragment ('?' or '#'), which names no repository"
+    authority = authority.rpartition("@")[2]
+    if authority.startswith("["):
+        host, _, rest = authority.partition("]")
+        host, port = host + "]", rest[1:] if rest.startswith(":") else ""
+    elif scheme_match is not None:
+        host, _, port = authority.partition(":")
+    else:
+        host, port = authority, ""
+    if port and not _valid_port(port):
+        return "its port is not a valid port number (1-65535, no leading zero)"
+    host = host.lower()
+    if host.startswith("["):
+        if _ipv6_host(host) is None:
+            return (
+                "its host is an IPv6 literal that names no portable server (this "
+                "machine, an IPv4-mapped address or a zone index)"
+            )
+        return None
+    if _reserved_host(host):
+        if host == "invalid" or host.endswith(".invalid"):
+            return "its host is in the reserved .invalid namespace"
+        return "its host is this machine (a loopback or unspecified address), so it names no portable repository"
+    if not _valid_host(host):
+        return "its host is not a valid host name"
+    if host in ("github.com", "www.github.com", _GITHUB_SSH_443_HOST):
+        return (
+            "GitHub serves no repository at its path: a github.com id is exactly "
+            "owner/repo of GitHub names, with no home-relative or /.git path and "
+            "no repository name ending in .git"
+        )
+    return "its path is empty or holds a segment an id cannot hold"
+
+
 def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
     """Classify an origin value into one of the three ruled outcomes.
 
@@ -2749,13 +2811,16 @@ def detect_id_for_root(
     if outcome == OUTCOME_CANONICAL:
         return RootIdentity(identifier, "canonical", "origin remote", override_ignored)
     if outcome == OUTCOME_DECLINE:
+        why = unrepresentable_detail(origin.value)
         return RootIdentity(
             None,
             None,
             "declined",
             override_ignored,
             decline_record("origin_unrepresentable", override_path),
-            external_detail,
+            why if external_detail is None else (
+                external_detail if why is None else f"{why}; {external_detail}"
+            ),
         )
     if submodule_controlled:
         return _refuse_submodule_basename(root, common_dir, override_ignored)

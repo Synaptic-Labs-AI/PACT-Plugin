@@ -7150,6 +7150,34 @@ class TestEveryRouteEntryConditionIsARoute:
             "a method on a local the census cannot type; every project object built on "
             "the path is a named build"
         ),
+        ("call", "<call to no function project_identity: authority.partition>"): (
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
+        ),
+        ("call", "<call to no function project_identity: authority.rpartition>"): (
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
+        ),
+        ("call", "<call to no function project_identity: authority.startswith>"): (
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
+        ),
+        ("call", "<call to no function project_identity: rest.startswith>"): (
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
+        ),
+        ("call", "<call to no function project_identity: host.lower>"): (
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
+        ),
+        ("call", "<call to no function project_identity: host.startswith>"): (
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
+        ),
+        ("call", "<call to no function project_identity: host.endswith>"): (
+            "a method on a local the census cannot type; every project object built on "
+            "the path is a named build"
+        ),
         ("call", "store_scope"): (
             "the _with_store_scope decorator runs each PACTMemory method inside "
             "store_scope(self._db_path), which binds the store file; get_user_memory_dir, "

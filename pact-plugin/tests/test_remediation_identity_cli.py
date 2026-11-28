@@ -2493,3 +2493,39 @@ def test_the_legacy_write_refusal_says_the_printed_rekey_is_a_preview(identity_e
     text = " ".join(str(refusal.value).replace("`", "").split())
     assert "preview the move with project-id rekey --from=FOLDER_NAME --to=host/owner/repo" in text, text
     assert "add --apply, with the user's approval, to perform it" in text, text
+
+
+@pytest.mark.parametrize("url, reason", [
+    ("https://localhost/o/r", "its host is this machine (a loopback or unspecified address)"),
+    ("https://127.0.0.1/o/r", "its host is this machine (a loopback or unspecified address)"),
+    ("https://h.invalid/o/r", "its host is in the reserved .invalid namespace"),
+    ("ftp://h.example/o/r", "its scheme is not one an id is read from"),
+    ("https://h.example/o/r?x=1", "carries a query or fragment"),
+    ("https://github.com/o/r.git.git", "GitHub serves no repository at its path"),
+    ("git@github.com:~/o/r", "GitHub serves no repository at its path"),
+    ("https://h.example:0/o/r", "its port is not a valid port number"),
+])
+def test_a_declined_origin_names_its_reason_and_the_pin(tmp_path, monkeypatch, capfd, url, reason):
+    """save from a repository whose origin declines says why and keeps the
+    pin remedy, without echoing the url. RED WHEN the cause is only 'no
+    single project id can be read from the repository's origin'."""
+    from fixtures.identity_git import assert_outside_repository, make_repo
+    from scripts.cli import main
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "r", remote=url)
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    from scripts.database import db_connection, ensure_initialized
+
+    with db_connection(tmp_path / "store.db") as conn:
+        ensure_initialized(conn)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["save", json.dumps({"context": "c"}), "--db-path", str(tmp_path / "store.db")])
+    envelope = json.loads(capfd.readouterr().err)
+    assert exit_info.value.code == 1 and envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED", envelope
+    message = envelope["message"]
+    assert reason in message, message
+    assert "no single project id can be read from the repository's origin" in message, message
+    assert "pact-project-id" in message, message
+    assert url not in message, message
