@@ -397,17 +397,50 @@ class TestTheRekeyRefusalContract:
         self, excluded_rig, store, capfd
     ):
         """A repository rename: the checkout's origin already names the new id
-        (github.com/o/one) and the old canonical bucket moves into it with no
-        override flag. RED WHEN the guard refuses a move into this checkout's
-        own id."""
+        (github.com/o/one). An old canonical bucket no file row here places is
+        not detected as an earlier id, so it moves into it only with
+        --from-another-repository, and needs no --into-another-repository.
+        RED WHEN the guard refuses a move into this checkout's own id that
+        the user approved."""
         _seed(store, "github.com/o/old-name", memory_id="renamed01", path="r.py")
         code, envelope = _cli(
             ["project-id", "rekey", "--from=github.com/o/old-name",
-             "--to=github.com/o/one", "--apply", "--db-path", str(store)],
+             "--to=github.com/o/one", "--apply", "--from-another-repository",
+             "--db-path", str(store)],
             capfd,
         )
         assert code == 0, envelope
         assert envelope["result"]["memories"] == 1, envelope
+
+    @pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+    @pytest.mark.parametrize(
+        ("source", "reason"),
+        [("proj", "was excluded for this checkout"),
+         ("github.com/o/two", "neither this checkout's nor an earlier id")],
+        ids=["excluded bucket", "another repository's id"],
+    )
+    def test_a_foreign_bucket_into_this_checkouts_own_id_is_refused(
+        self, excluded_rig, store, capfd, apply, source, reason
+    ):
+        """A bucket the read rules say is not this checkout's (the excluded
+        legacy bucket, whose rows are in two/proj, or another repository's
+        canonical id) is not merged into this checkout's id: the dry run and
+        the apply both refuse, and only --from-another-repository moves it.
+        RED WHEN the move runs, or the dry run reports a clean plan."""
+        if source.startswith("github.com/"):
+            _seed(store, source, memory_id="theirs001", path="t.py")
+        before = _snapshot(store)
+        argv = ["project-id", "rekey", f"--from={source}", "--to=github.com/o/one",
+                "--db-path", str(store), *(["--apply"] if apply else [])]
+        code, envelope = _cli(argv, capfd)
+        assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
+        assert reason in envelope["message"], envelope
+        assert "--from-another-repository" in envelope["message"], envelope
+        assert _snapshot(store) == before
+        code, envelope = _cli([*argv, "--from-another-repository"], capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1, envelope
+        assert (_snapshot(store) == before) is not apply
 
     def test_a_canonical_source_with_a_defaulted_target_is_refused(
         self, excluded_rig, store, capfd

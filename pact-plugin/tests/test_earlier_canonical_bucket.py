@@ -139,6 +139,25 @@ def test_project_id_show_gives_the_earlier_id_a_rekey_command(renamed, capsys):
         assert (rows[other]["relation"], rows[other]["rekey"]) == ("other", None), rows
 
 
+@pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+def test_the_earlier_id_moves_into_this_checkouts_id_with_no_override(renamed, capfd, apply):
+    """An earlier id is this repository's own bucket, so its printed move runs
+    with no --from-another-repository, while another repository's canonical
+    bucket into the same id is refused. RED WHEN the earlier id is refused, or
+    the foreign one is not."""
+    from scripts.cli import main
+
+    _repo, store = renamed
+    for source, expected in ((ELSEWHERE, 1), (OLD, 0)):
+        with pytest.raises(SystemExit) as exit_info:
+            main(["project-id", "rekey", f"--from={source}", f"--to={NEW}",
+                  "--db-path", str(store), *(["--apply"] if apply else [])])
+        captured = capfd.readouterr()
+        envelope = json.loads(captured.out or captured.err)
+        assert exit_info.value.code == expected, envelope
+    assert envelope["result"]["memories"] == 2, envelope
+
+
 @pytest.mark.parametrize("verb", [["list"], ["search", "c"]])
 def test_list_and_search_name_the_earlier_id_on_stdout(renamed, capfd, verb):
     """The earlier id's bucket is left out of the read, so list and search

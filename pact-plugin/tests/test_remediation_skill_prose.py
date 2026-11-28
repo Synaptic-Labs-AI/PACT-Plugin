@@ -828,15 +828,24 @@ class TestRekeyRemediesNameTheirTarget:
         ) in _body(SKILL)
 
     def test_a_named_absent_store_is_refused_not_reported_absent(self):
-        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository], or project-id rekey --candidates alone")
+        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository], or project-id rekey --candidates alone")
         assert (
             "DB_PATH_NOT_FOUND when --db-path names a store that is not "
             "present, and nothing is created"
         ) in row
         assert "A store path that does not exist answers store_absent" not in row
 
+    def test_the_row_names_the_foreign_source_refusal(self):
+        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository], or project-id rekey --candidates alone")
+        assert (
+            "A move into this checkout's own id from a bucket excluded here, or "
+            "from a canonical id that is neither this checkout's nor an earlier "
+            "id of it, is refused with REKEY_REFUSED, the dry run included, "
+            "unless --from-another-repository is passed."
+        ) in row
+
     def test_the_envelope_field_sentences_are_present(self):
-        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository], or project-id rekey --candidates alone")
+        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository], or project-id rekey --candidates alone")
         assert (
             "When the default store does not exist yet, the command answers "
             "store_absent: true and creates nothing; a --from bucket with no rows answers "

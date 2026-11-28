@@ -1618,6 +1618,35 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             )
 
     own_id = memory.project_id
+    foreign_source = None
+    if to_id == own_id and not noop and not args.from_another_repository:
+        if legacy_verdict == "excluded":
+            foreign_source = (
+                "was excluded for this checkout: its file rows place it in "
+                "another repository"
+            )
+        elif is_canonical(from_id) and from_id not in (
+            getattr(memory, "_earlier_canonical", None) or {}
+        ):
+            foreign_source = (
+                "is a canonical id that is neither this checkout's nor an "
+                "earlier id of it (no file row here places it)"
+            )
+    if foreign_source is not None:
+        # A MOVE INTO THIS CHECKOUT'S ID OF A BUCKET THE READ RULES SAY IS NOT
+        # ITS OWN merges another repository's rows into this one and cannot be
+        # undone, so the dry run refuses too rather than report a clean plan.
+        _error(
+            "REKEY_REFUSED",
+            escape_for_envelope(
+                f"--from={from_id!r} {foreign_source}, so moving it into this "
+                f"checkout's id ({own_id!r}) would merge another repository's "
+                "rows here, and a rekey cannot be undone. Pass "
+                "--from-another-repository only with the user's explicit "
+                "approval that these rows belong to this repository. Nothing "
+                "was moved."
+            ),
+        )
     if (
         args.apply
         and not noop
@@ -2174,7 +2203,9 @@ def build_parser():
             "bucket and it is verified (a file row places it here). Run --apply only "
             "with the user's "
             "explicit approval, and never for an excluded bucket or another "
-            "repository's id: the move merges rows and cannot be undone. Exit "
+            "repository's id: the move merges rows and cannot be undone. A "
+            "move into this checkout's own id from either is refused, the dry "
+            "run included, unless --from-another-repository is passed. Exit "
             "codes: 0 for a clean plan or an applied move, 1 for a refusal, 2 "
             "for bad input, 3 for an operational failure (nothing moved)."
         ),
@@ -2215,6 +2246,17 @@ def build_parser():
         help=(
             "Allow --apply into a canonical --to that is not this checkout's "
             "own id; only with the user's explicit approval."
+        ),
+    )
+    project_id_rekey_parser.add_argument(
+        "--from-another-repository",
+        dest="from_another_repository",
+        action="store_true",
+        help=(
+            "Allow a move into this checkout's own id from a bucket that is "
+            "excluded here or is a canonical id that is neither this "
+            "checkout's nor an earlier id of it; only with the user's "
+            "explicit approval."
         ),
     )
     project_id_rekey_parser.add_argument(
