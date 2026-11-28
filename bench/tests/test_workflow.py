@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import fnmatch
 import re
 from pathlib import Path
 
@@ -68,8 +67,28 @@ def test_workflow_triggers_and_paths() -> None:
     assert "github.ref" in doc["concurrency"]["group"]
 
 
-def _covered(rel: str) -> bool:
-    return any(fnmatch.fnmatchcase(rel, pattern) for pattern in PATHS)
+def _glob(pattern: str) -> re.Pattern[str]:
+    """GitHub's paths-filter glob for the subset PATHS may use: `**` crosses `/`,
+    `*` and `?` do not. Other glob syntax ([], !, +) is refused, not guessed."""
+    assert not set(pattern) & set("[]!+"), f"unsupported glob syntax in {pattern!r}"
+    parts = re.split(r"(\*\*|\*|\?)", pattern)
+    table = {"**": ".*", "*": "[^/]*", "?": "[^/]"}
+    return re.compile("".join(table.get(part, re.escape(part)) for part in parts))
+
+
+def _covered(rel: str, patterns: list[str] = PATHS) -> bool:
+    return any(_glob(pattern).fullmatch(rel) for pattern in patterns)
+
+
+def test_glob_matches_github_semantics() -> None:
+    assert _covered("bench/tests/x.py", ["bench/**"])
+    assert not _covered("bench/tests/x.py", ["bench/*"])
+    assert _covered("bench/x.py", ["bench/*"])
+    assert not _covered("a/b.md", ["*.md"])
+    assert not _covered("a/b", ["a?b"])
+    assert not _covered("BENCHMARKSxmd", ["BENCHMARKS.md"])
+    with pytest.raises(AssertionError, match="unsupported"):
+        _covered("x", ["[ab]"])
 
 
 def test_path_filter_covers_every_file_the_bench_tests_read(pytestconfig: pytest.Config) -> None:
@@ -83,7 +102,13 @@ def test_path_filter_covers_every_file_the_bench_tests_read(pytestconfig: pytest
     if inipath is not None and inipath.is_relative_to(ROOT):
         read.add(inipath.relative_to(ROOT).as_posix())
     assert "pyproject.toml" in read  # control: the run's config file was seen
-    missing = sorted(rel for rel in read if not _covered(rel))
+    # GitHub filters changed FILES, so a directory read is covered only if every file under it is.
+    files = set()
+    for rel in read:
+        path = ROOT / rel
+        files |= ({p.relative_to(ROOT).as_posix() for p in path.rglob("*") if p.is_file()}
+                  if path.is_dir() else {rel})
+    missing = sorted(rel for rel in files if not _covered(rel))
     assert not missing, f"read by bench tests but outside the workflow path filter: {missing}"
 
 
