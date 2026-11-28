@@ -41,6 +41,11 @@ elif name == "hang":
     open({kid_pid!r}, "w").write(str(kid.pid))
     open({kid_pid!r} + ".started", "w").write("1")
     time.sleep(30)
+elif name == "leftover":
+    import subprocess
+    subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])  # inherits and holds the pipes
+    print("done", flush=True)
+    sys.exit(0)
 elif name == "badbytes":
     sys.stdout.buffer.write(b"\\xff\\xfe not utf-8\\n")
     print(json.dumps({{"composite": 7}}))
@@ -281,6 +286,15 @@ def test_unexpected_error_fails_only_its_command(tmp_path: Path, monkeypatch: py
     assert records["broken"]["error"] == "OSError: disk full"
     assert records["good"]["exit_code"] == 0
     assert summary["complete"] is True
+
+
+def test_timeout_records_the_childs_own_exit_code(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["leftover", "slow"])
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--skip-sync")) == 1
+    records = {r["label"]: r for r in _result(manifest)["results"]}
+    # Exited 0 at once, but a leftover held the pipe past --timeout.
+    assert (records["leftover"]["timed_out"], records["leftover"]["child_exit_code"]) == (True, 0)
+    assert (records["slow"]["timed_out"], records["slow"]["child_exit_code"]) == (True, None)
 
 
 def test_previous_run_outputs_are_removed(tmp_path: Path) -> None:

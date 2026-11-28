@@ -126,7 +126,11 @@ def _score_one(
         proc = _exec(cmd, cwd, env, timeout)
     except subprocess.TimeoutExpired as exc:
         # output_complete is False when the bounded drain after the kill expired.
-        record.update(exit_code=TIMEOUT_EXIT_CODE, timed_out=True, output_complete=getattr(exc, "output_complete", True))
+        # child_exit_code: the child's own code when it had exited and only a leftover held the pipe.
+        record.update(
+            exit_code=TIMEOUT_EXIT_CODE, timed_out=True, output_complete=getattr(exc, "output_complete", True),
+            child_exit_code=getattr(exc, "child_exit_code", None),
+        )
         stdout, stderr = _text(exc.output), _text(exc.stderr)
         record.update(stderr_tail=stderr[-2000:], stdout_tail=stdout[-2000:])
         _save(out, stem, stdout, stderr)
