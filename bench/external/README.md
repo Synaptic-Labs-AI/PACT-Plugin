@@ -96,11 +96,17 @@ native-eval results land under `<out>/native-eval/`. All three plugin sources
 (the worktree, `--plugin-ref`, `--plugin-dir`) drop `tests/`, `__pycache__`,
 `.git` and `.pytest_cache` at every depth.
 
-`prepare` checks its inputs (settings and token files, a non-empty token,
-`--plugin-dir`, a clean source unless `--allow-dirty`, and the `claude` binary
-with `--verify`) before it creates `<out>`. `--force` replaces only an `<out>`
+`prepare` checks its inputs (a settings file holding a JSON object with an
+object `env`, a non-empty token file, `--plugin-dir`, a clean source unless
+`--allow-dirty`, and the `claude` binary with `--verify`) before it creates
+`<out>`; `--plugin-ref` and `--plugin-dir` cannot be combined. `--force` replaces only an `<out>`
 that holds a previous pact-bench output, and never `/`, `$HOME`, or the repo
 root or one of its ancestors.
+
+**Keep `--out` under `bench/.runs/`.** Run outputs (kept transcripts and
+scaffolds, `runs/`, captured stdout and stderr) can hold the provider token, and
+only `bench/.runs/` is gitignored. `prepare` warns on stderr when `--out` is
+inside the repository but outside `bench/.runs/`; it does not refuse.
 
 ## Provider configuration (DeepSeek)
 
@@ -110,7 +116,9 @@ into a scratch config, minus every key whose name matches
 session ids, and overrides the session plumbing; the live config is never read
 during a run.
 
-- **Endpoint:** `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`.
+- **Endpoint:** `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`, or
+  `--base-url`. `prepare` writes it into the scratch settings env (replacing any
+  live value), so the settings env and the child env agree.
 - **Credential:** `ANTHROPIC_AUTH_TOKEN` read from `~/.claude-keys/deepseek`
   (path overridable with `--token-file`); never written to disk, and the
   manifest records only the file path.
@@ -122,8 +130,9 @@ during a run.
   `ANTHROPIC_API_KEY`). `plugin-eval` uses the same child environment.
 - **Model:** `deepseek-flash[1m]` via `ANTHROPIC_MODEL` and the
   `ANTHROPIC_DEFAULT_*/CLAUDE_CODE_SUBAGENT_MODEL` aliases, all mapped to the
-  same DeepSeek alias. Override with `--model` on `prepare` or `native-eval`;
-  either sets all five keys. `prepare --verify` checks the requested model
+  same DeepSeek alias. The model is fixed at prepare time: `prepare --model`
+  sets all five keys, and `native-eval` takes no `--model` or `--judge-model`;
+  it passes the manifest's model as both. `prepare --verify` checks the requested model
   (any `[..]` suffix stripped) against the reported usage keys.
 - **Scratch settings and env override:** `CLAUDE_CONFIG_DIR`, `HOME`, `TMPDIR`
   and the team/task/session dirs point inside the scratch `<out>/`, and
@@ -156,16 +165,21 @@ during a run.
 The runner copies `bench/external/native-evals/evals/` into the scratch plugin as
 `evals/` and runs `claude plugin eval <scratch plugin> --eval-dir evals
 --ablation with-without --trust-plugin --no-publish --scaffold --runs 3
---json report.json --report report.html --output-dir runs --model ...`.
+--json report.json --report report.html --output-dir runs --model <manifest
+model> --judge-model <manifest model>`.
 Case layout is the CLI's native format: `<eval dir>/**/case.yaml`, or
 `prompt.md` + `graders/*.md`. Results: `<out>/native-eval/result.json` (written
 on every exit once the manifest loads; a timeout records exit code 124),
 `report.json`, `report.html`, and `runs/`. The child's `HOME` and `TMPDIR` are
 `<temp-root>/pact-native-XXXXXXXX/{home,tmp}` (default `--temp-root` is
 `$HOME`); `TMPDIR` must be at most 51 characters, checked before anything is
-created. `--keep-temp` scaffolds are moved to `<out>/native-eval/kept-temp/`,
-any `evals/results/` the tool wrote to `<out>/native-eval/plugin-evals-results/`,
-and the rest of the temp root is deleted.
+created. `--keep-temp` scaffolds are moved to
+`<out>/native-eval/kept-temp/<run id>/`, any `evals/results/` the tool wrote to
+`<out>/native-eval/plugin-evals-results/<run id>/` (the run id is the
+`pact-native-XXXXXXXX` name), and the rest of the temp root is deleted. A
+previous run's `report.json` and `report.html` are deleted at the start of each
+run, so `result.json` names only reports this run wrote. A timeout kills the
+eval's whole process group.
 
 The cases directory must be non-empty; the runner refuses an empty suite. The
 authored cases and the inventory they must meet are in

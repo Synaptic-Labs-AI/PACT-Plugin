@@ -109,7 +109,7 @@
       "sandbox_diagnosis": {
         "root_cause": "eval-child TMPDIR made the sandbox bridge AF_UNIX socket path exceed socat's 108-character limit; this is a host path-length bug, not a PACT bug",
         "boundary": "parent TMPDIR <= 51 chars; 50/51 pass, 52 fails (socket 107/108 pass, 109 fails)",
-        "fix": "native_eval.py now creates a short TMPDIR/HOME outside /tmp (default under HOME), asserts TMPDIR <= 51 chars, and records temp_root; minimal sandboxed-Bash marker case scores 1.0",
+        "fix": "at measurement time native_eval.py created a short TMPDIR/HOME outside /tmp (default under HOME), asserted TMPDIR <= 51 chars, and recorded temp_root; a minimal sandboxed-Bash marker case then scored 1.0. The current harness accepts any --temp-root short enough for the limit, /tmp included",
         "remaining": "the eval sandbox still denies reading/executing the plugin-under-test scripts and denies writes to config/out, so bootstrap and memory-save cannot be valid PACT cases; native eval remains blocked for baseline purposes",
         "step3_evidence": "unpublished raw note under the gitignored bench/.runs/"
       },
@@ -202,7 +202,7 @@
         "source": "live settings and scratch config; both included in the prepare manifest env_keys"
       },
       "task_tool_evidence": "ToolSearch for TaskCreate,TaskUpdate,TaskList,TaskGet returned No matching deferred tools found; no TodoWrite/TodoRead calls were observed in the subagent transcripts. Agent Teams was active (teammates spawned), so the missing task tools are not caused by an unset agent-teams env var.",
-      "root_cause_hypothesis": "Hypothesis, not isolated by a probe: claude Code 2.1.332 does not initialize the session team under claude -p; named spawns become ordinary background subagents, and TaskCreate/TaskUpdate/TaskList/TaskGet are reserved for true teammates. Agent Teams is enabled, but -p is not a valid teammate-creation environment (PACT README recovery branch C/D documents this).",
+      "root_cause_hypothesis": "Hypothesis, not isolated by a probe: Claude Code 2.1.332 does not initialize the session team under claude -p; named spawns become ordinary background subagents, and TaskCreate/TaskUpdate/TaskList/TaskGet are reserved for true teammates. Agent Teams is enabled, but -p is not a valid teammate-creation environment (PACT README recovery branch C/D documents this).",
       "workaround": "run_in_background:false foreground spawns receive the four Task tools; PACT documents this only as a legacy non-TTY compatibility note. Interactive PTY is the correct path for true Agent Teams.",
       "todo_tools": "TodoWrite/TodoRead do not exist in Claude Code 2.1.332, so CLAUDE_CODE_ENABLE_TODO_TOOLS does not explain the missing Task tools."
     }

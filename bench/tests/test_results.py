@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +28,7 @@ def _summaries() -> list[Path]:
 
 def _rows() -> list[dict[str, str]]:
     lines = [line for line in BENCHMARKS.read_text(encoding="utf-8").splitlines() if line.startswith("|")]
+    assert len(lines) >= 2, "BENCHMARKS.md has no results table (header and separator rows)"
     header = [cell.strip() for cell in lines[0].strip("|").split("|")]
     rows = []
     for line in lines[2:]:
@@ -79,3 +81,17 @@ def test_benchmarks_rows_match_summaries_one_to_one() -> None:
         track_b = data["track_b"]
         if track_b["status"] == "authored_out_of_tree":
             assert row["Track B"].startswith(f"{track_b['tasks_authored']} tasks validated out of tree")
+
+
+def test_reports_carry_their_summary_numbers() -> None:
+    for path in _summaries():
+        data = json.loads(path.read_text(encoding="utf-8"))
+        report = (path.parent / "report.md").read_text(encoding="utf-8")
+        assert f"Plugin SHA: {data['plugin']['sha']}" in report
+        assert f"Run: {data['run_id']}" in report
+        tokens = data["track_a"]["token_snapshot"]
+        medians = re.findall(r"median ([0-9][0-9,]*)", report)
+        assert medians, "report.md states no spawn-token median"
+        assert set(medians) == {f"{tokens['median_spawn_total']:,}"}, medians
+        for skill in data["track_a"]["plugin_eval"]["selected"]:
+            assert f"| {skill['skill']} | {skill['composite']:.2f} |" in report, skill["skill"]

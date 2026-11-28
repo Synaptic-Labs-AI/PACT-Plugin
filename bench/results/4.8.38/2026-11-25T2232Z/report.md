@@ -49,9 +49,11 @@ the child TMPDIR was 130 and the socket 164. The measured boundary is parent
 TMPDIR <= 51 chars (50/51 pass, 52 fails). This is a host path-length bug, not
 a PACT bug.
 
-The harness now creates a short TMPDIR/HOME outside /tmp (default under HOME),
-asserts TMPDIR <= 51 chars and records temp_root. A minimal sandboxed-Bash
-marker case now scores 1.0. Native eval is still not valid PACT baseline
+At measurement time the harness created a short TMPDIR/HOME outside /tmp
+(default under HOME), asserted TMPDIR <= 51 chars and recorded temp_root; a
+minimal sandboxed-Bash marker case then scored 1.0. The current harness accepts
+any --temp-root short enough for the 51-character limit, /tmp included (see
+bench/external/README.md). Native eval is still not valid PACT baseline
 evidence: the eval sandbox denies reading/executing the plugin-under-test
 scripts and denies writes to config/out, so bootstrap and memory-save remain
 deferred. Attempt-based Bash graders can also pass on a failed sandbox call;
