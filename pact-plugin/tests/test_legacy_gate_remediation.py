@@ -10,7 +10,6 @@ import fcntl
 import json
 import logging
 import os
-import sqlite3
 import threading
 import time
 from contextlib import closing
@@ -24,7 +23,12 @@ from fixtures.identity_git import (
     run_git,
     seed_session_evidence,
 )
-from scripts.database import db_connection, ensure_initialized
+# THE STORE'S OWN SQLITE, never the standard library's: where pysqlite3 is a
+# statically linked wheel (CI's manylinux build), it is a second copy of
+# SQLite in the process, and two copies' POSIX locks on one file do not see
+# each other, so a stdlib connection held open beside the store's corrupts
+# its WAL ("database disk image is malformed").
+from scripts.database import db_connection, ensure_initialized, sqlite3
 from scripts.memory_api import PACTMemory
 from shared import pact_context
 
@@ -1558,7 +1562,12 @@ def _store_capture(store, error):
     import shutil
     import struct
 
-    lines = [f"read failed: {error!r}", f"sqlite {sqlite3.sqlite_version}"]
+    import sqlite3 as stdlib_sqlite3
+
+    lines = [
+        f"read failed: {error!r}",
+        f"store sqlite {sqlite3.sqlite_version} ({sqlite3.__name__}), stdlib sqlite {stdlib_sqlite3.sqlite_version}",
+    ]
     copies = store.parent / "store-capture"
     copies.mkdir(exist_ok=True)
     for path in sorted(store.parent.glob(store.name + "*")):
@@ -1600,6 +1609,14 @@ def _store_capture(store, error):
             lines.append(f"{label}: {exc!r}")
     lines.append(f"copies in {copies}")
     return "\n".join(lines)
+
+
+def test_this_module_reads_the_store_with_the_stores_own_sqlite():
+    """RED WHEN the module goes back to the standard library's sqlite3, a
+    second SQLite copy wherever pysqlite3 is statically linked."""
+    from scripts import database
+
+    assert sqlite3 is database.sqlite3
 
 
 def test_the_store_capture_reports_a_damaged_store(tmp_path):
