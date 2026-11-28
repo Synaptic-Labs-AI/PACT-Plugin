@@ -53,6 +53,7 @@ COUNTER_KEYS = {
     "relations_repointed",
     "vectors_moved",
     "vectors_pending",
+    "files_copied",
     "null_project_memories",
     "null_project_files",
     "from_bucket_empty",

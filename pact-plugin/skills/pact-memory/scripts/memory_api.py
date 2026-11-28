@@ -1079,6 +1079,7 @@ def _warn_legacy_unproven(
     file_paths: int,
     cause: str,
     shared: bool = False,
+    placed_command: Optional[str] = None,
 ) -> None:
     """Disclose an UNPROVEN legacy bucket, once per process per bucket, with
     the reason it was not read (`_unproven_cause`). A `shared` bucket
@@ -1105,6 +1106,15 @@ def _warn_legacy_unproven(
             "bucket, that checkout's rows with it: move it only with the "
             "user's approval that every row is this repository's, passing "
             "--from-another-repository to `project-id rekey`."
+            + (
+                _preview_clause(
+                    "To move only the memories whose every file row lies in this "
+                    "checkout, preview it with:",
+                    candidate, target, placed_command,
+                )
+                if placed_command
+                else ""
+            )
             if shared
             else _preview_clause(
                 "If they are, preview the move with:", candidate, target,
@@ -1825,7 +1835,7 @@ def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
 
 
 def runnable_rekey_command(
-    from_id: str, to_id: str, db_path: Any = None
+    from_id: str, to_id: str, db_path: Any = None, only_placed: bool = False
 ) -> Optional[str]:
     """`render_rekey_command`, or None when rekey would refuse `from_id`.
 
@@ -1838,11 +1848,12 @@ def runnable_rekey_command(
         validate_identifier_for_write(from_id)
     except ValueError:
         return None
-    return render_rekey_command(from_id, to_id, db_path=db_path)
+    return render_rekey_command(from_id, to_id, db_path=db_path, only_placed=only_placed)
 
 
 def render_rekey_command(
-    from_id: str, to_id: str, db_path: Any = None, prog: Any = None
+    from_id: str, to_id: str, db_path: Any = None, prog: Any = None,
+    only_placed: bool = False,
 ) -> str:
     """The literal, SHELL-QUOTED AND RUNNABLE rekey command for one bucket.
 
@@ -1877,6 +1888,11 @@ def render_rekey_command(
         "--from=" + from_id,
         "--to=" + to_id,
     ]
+    if only_placed:
+        # The move of only the memories placed in this checkout
+        # (`database.placed_memory_split`), for a bucket whose whole move
+        # would take another checkout's rows.
+        argv.append("--only-placed-here")
     if db_path is not None:
         argv.append("--db-path=" + str(db_path))
     return shlex.join(argv)
@@ -4728,6 +4744,24 @@ class PACTMemory:
                 # must never escape a read.
                 verdict = self._bucket_verdict(connection, store, candidate)
                 self._legacy_verdict = verdict
+                # A BUCKET HOLDING ANOTHER CHECKOUT'S ROWS (excluded, or shared)
+                # gets no whole-bucket move; its remedy is the move of only the
+                # memories placed here, when there is one.
+                foreign_held = verdict.state == "excluded" or (
+                    verdict.state == "unproven" and verdict.reason in SHARED_BUCKET_REASONS
+                )
+                placed_command = None
+                if foreign_held:
+                    from .database import placed_memory_split
+
+                    placed = placed_memory_split(
+                        connection, candidate, self._legacy_gate_roots(repo_root)[0]
+                    )["placed"]
+                    placed_command = (
+                        runnable_rekey_command(candidate, scope, db_path=store, only_placed=True)
+                        if placed
+                        else None
+                    )
                 included = verdict.read
                 state_name = verdict.state
                 memory_count = buckets.get(candidate, 0)
@@ -4741,9 +4775,8 @@ class PACTMemory:
                     # An EXCLUDED bucket has another owner, so it gets no
                     # runnable command anywhere.
                     rekey=(
-                        None
-                        if state_name == "excluded"
-                        or (state_name == "unproven" and verdict.reason in SHARED_BUCKET_REASONS)
+                        placed_command
+                        if foreign_held
                         else runnable_rekey_command(candidate, scope, db_path=store)
                     ),
                     included=included,
@@ -4773,6 +4806,7 @@ class PACTMemory:
                         store, candidate, scope, memory_count, file_paths or 0,
                         _unproven_cause(verdict.reason, verdict.counts, candidate),
                         shared=verdict.reason in SHARED_BUCKET_REASONS,
+                        placed_command=placed_command,
                     )
                 elif state_name == "included_unverified" and verdict.counts["unattributed"]:
                     _warn_legacy_unattributed(store, candidate, scope, verdict.counts)

@@ -828,7 +828,7 @@ class TestRekeyRemediesNameTheirTarget:
         ) in _body(SKILL)
 
     def test_a_named_absent_store_is_refused_not_reported_absent(self):
-        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository], or project-id rekey --candidates alone")
+        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository] [--only-placed-here], or project-id rekey --candidates alone")
         assert (
             "DB_PATH_NOT_FOUND when --db-path names a store that is not "
             "present, and nothing is created"
@@ -836,7 +836,7 @@ class TestRekeyRemediesNameTheirTarget:
         assert "A store path that does not exist answers store_absent" not in row
 
     def test_the_row_names_the_foreign_source_refusal(self):
-        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository], or project-id rekey --candidates alone")
+        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository] [--only-placed-here], or project-id rekey --candidates alone")
         assert (
             "A move into this checkout's own id from a bucket excluded here, or "
             "from a canonical id that is neither this checkout's nor an earlier "
@@ -845,7 +845,7 @@ class TestRekeyRemediesNameTheirTarget:
         ) in row
 
     def test_the_envelope_field_sentences_are_present(self):
-        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository], or project-id rekey --candidates alone")
+        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository] [--only-placed-here], or project-id rekey --candidates alone")
         assert (
             "When the default store does not exist yet, the command answers "
             "store_absent: true and creates nothing; a --from bucket with no rows answers "
@@ -7228,6 +7228,11 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "github_repo_path"): (
             "database's one copy of GitHub's owner/repo name rule and fold, applied to an id "
             "path the remote grammar already built; pure, it asks git nothing"
+        ),
+        ("call", "placed_memory_split"): (
+            "database's read of which memories of a hidden legacy bucket lie wholly in this "
+            "checkout, from the gate roots the verdict already used; it renders a rekey "
+            "remedy and changes no read"
         ),
         ("call", "github_default_port"): (
             "database's one port rule for a GitHub host (a port some scheme takes as its "

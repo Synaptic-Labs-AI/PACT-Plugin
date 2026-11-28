@@ -2799,3 +2799,149 @@ def test_writing_the_pin_brings_the_folder_name_bucket_back_as_the_warning_says(
     assert [row["id"] for row in envelope["result"]] == (["old000001"] if placed else []), envelope
     if not placed:
         assert "--from=repoL --to=local.invalid/o/repoL" in caplog.text, caplog.text
+
+
+def _seed_linked(store, bucket, memory_id, paths):
+    """A memory in `bucket` linked to a file row for each path (one row per
+    (path, bucket), shared when it already exists)."""
+    conn = sqlite3.connect(str(store))
+    conn.execute(
+        "INSERT INTO memories (id, context, project_id, session_id, created_at, updated_at) "
+        "VALUES (?, 'row', ?, 'legacy-session', ?, ?)",
+        (memory_id, bucket, CREATED_AT, CREATED_AT),
+    )
+    for path in paths:
+        row = conn.execute(
+            "SELECT id FROM files WHERE path = ? AND project_id = ?", (path, bucket)
+        ).fetchone()
+        file_id = row[0] if row else "f-" + memory_id + "-" + str(abs(hash(path)))
+        if row is None:
+            conn.execute("INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)", (file_id, path, bucket))
+        conn.execute(
+            "INSERT INTO memory_files (memory_id, file_id, relationship) VALUES (?, ?, 'modified')",
+            (memory_id, file_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _placed_rows(store):
+    conn = sqlite3.connect(str(store))
+    try:
+        return {
+            "memories": dict(conn.execute("SELECT id, project_id FROM memories").fetchall()),
+            "links": sorted(conn.execute(
+                "SELECT mf.memory_id, f.path, f.project_id FROM memory_files mf JOIN files f ON f.id = mf.file_id"
+            ).fetchall()),
+        }
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def shared_app(identity_env, store, monkeypatch):
+    """x/app (origin a/app) and y/app (origin b/app) both wrote into 'app':
+    x's memory links only x's file; y's only y's; 'both' links one of each;
+    'bare' links none; 'paired' links x's file and y's (so it stays and
+    shares x's file row with 'mine')."""
+    from scripts import memory_api
+
+    for memo in (memory_api._LEGACY_SCOPE_CACHE, memory_api._UNPROVEN_WARNED):
+        memo.clear()
+    x = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    y = make_repo(identity_env / "y" / "app", remote="https://github.com/b/app.git")
+    (x / "f.py").write_text("x\n")
+    (y / "g.py").write_text("y\n")
+    _seed_linked(store, "app", "mine00001", [str(x / "f.py")])
+    _seed_linked(store, "app", "theirs001", [str(y / "g.py")])
+    _seed_linked(store, "app", "both00001", [str(x / "f.py"), str(y / "g.py")])
+    _seed_linked(store, "app", "bare00001", [])
+    monkeypatch.chdir(x)
+    return x, y
+
+
+def test_only_placed_here_moves_only_this_checkouts_memories(shared_app, store, capfd, caplog):
+    """From x/app, --only-placed-here moves only the memory whose every file
+    row lies in x/app; y's memory, the one with files in both checkouts and
+    the one with no files stay in 'app'. The shared file row stays for the
+    memory that keeps it, and its moved copy carries the moved memory's link.
+    The dry run is the default and leaves the store byte-identical; a re-run
+    moves nothing. Show and the warning name this command for the shared
+    bucket, and the whole-bucket refusal names it as the alternative. RED
+    WHEN a foreign or unplaced memory moves, a link is lost, or the dry run
+    writes."""
+    import hashlib
+    import logging
+
+    x, y = shared_app
+    with caplog.at_level(logging.WARNING):
+        code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    rows = {row["id"]: row for row in shown["result"]["candidates"]}
+    assert rows["app"]["rekey"] and "--only-placed-here" in rows["app"]["rekey"], rows
+    assert "--only-placed-here" in caplog.text, caplog.text
+    code, refused = _cli(
+        ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--db-path", str(store)], capfd,
+    )
+    assert code == 1 and "--only-placed-here" in refused["message"], refused
+    argv = ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--only-placed-here",
+            "--db-path", str(store)]
+    digest = hashlib.sha256(store.read_bytes()).hexdigest()
+    code, plan = _cli(argv, capfd)
+    assert code == 0, plan
+    result = plan["result"]
+    assert (result["dry_run"], result["memories"], result["left_files_elsewhere"], result["left_no_files"]) == (
+        True, 1, 2, 1), result
+    assert result["files_copied"] == 1, result
+    assert hashlib.sha256(store.read_bytes()).hexdigest() == digest
+    code, applied = _cli([*argv, "--apply"], capfd)
+    assert code == 0 and applied["result"]["memories"] == 1, applied
+    after = _placed_rows(store)
+    assert after["memories"] == {
+        "mine00001": "github.com/a/app", "theirs001": "app", "both00001": "app", "bare00001": "app",
+    }, after
+    assert ("mine00001", str(x / "f.py"), "github.com/a/app") in after["links"], after
+    assert ("both00001", str(x / "f.py"), "app") in after["links"], after
+    assert ("both00001", str(y / "g.py"), "app") in after["links"], after
+    assert ("theirs001", str(y / "g.py"), "app") in after["links"], after
+    code, again = _cli([*argv, "--apply"], capfd)
+    assert code == 0 and again["result"]["memories"] == 0, again
+    assert _placed_rows(store) == after
+
+
+def test_only_placed_here_is_refused_for_another_target(shared_app, store, capfd):
+    """Only this checkout's own id takes the partial move. RED WHEN it moves
+    rows into another repository's id."""
+    before = _snapshot(store)
+    for argv in (["--to=github.com/b/app"], []):
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=app", *argv, "--only-placed-here", "--apply",
+             "--db-path", str(store)], capfd,
+        )
+        assert (code, envelope.get("error")) == (2, "INVALID_INPUT"), envelope
+    assert _snapshot(store) == before
+
+
+def test_only_placed_here_moves_a_placed_row_of_an_excluded_bucket(identity_env, store, monkeypatch, capfd):
+    """'app' is excluded here: y/app holds its only existing file row, and x's
+    memory's file is gone (a vanished row is no evidence). That memory is
+    still placed by its path, so --only-placed-here moves it, and show names
+    the command. RED WHEN an excluded bucket's placed memory cannot move."""
+    from scripts import memory_api
+
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    x = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    y = make_repo(identity_env / "y" / "app", remote="https://github.com/b/app.git")
+    (y / "g.py").write_text("y\n")
+    _seed_linked(store, "app", "mine00001", [str(x / "gone.py")])
+    _seed_linked(store, "app", "theirs001", [str(y / "g.py")])
+    monkeypatch.chdir(x)
+    code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    assert shown["result"]["legacy_scope"]["excluded"] is True, shown
+    rows = {row["id"]: row for row in shown["result"]["candidates"]}
+    assert "--only-placed-here" in (rows["app"]["rekey"] or ""), rows
+    code, applied = _cli(
+        ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--only-placed-here", "--apply",
+         "--db-path", str(store)], capfd,
+    )
+    assert code == 0 and applied["result"]["memories"] == 1, applied
+    assert _placed_rows(store)["memories"] == {"mine00001": "github.com/a/app", "theirs001": "app"}

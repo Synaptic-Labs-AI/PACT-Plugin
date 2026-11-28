@@ -1196,7 +1196,7 @@ def _origin_url_of(memory: "PACTMemory") -> str | None:
 _REKEY_ZERO_COUNTERS = (
     "memories", "files_in_place", "files_conflicted", "links_repointed",
     "links_conflicted", "relations_repointed", "vectors_moved",
-    "vectors_pending", "null_project_memories", "null_project_files",
+    "vectors_pending", "files_copied", "null_project_memories", "null_project_files",
 )
 
 
@@ -1230,7 +1230,9 @@ _COPY_FAULT_MESSAGES = (
 )
 
 
-def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: bool) -> dict:
+def _rekey_on_copy(
+    store, from_id: str, to_id: str, dry_run: bool, own_target: bool, memory_ids=None
+) -> dict:
     """`rekey_project`'s counters, computed on a COPY of `store` in a private
     temporary folder, removed afterwards.
 
@@ -1264,7 +1266,7 @@ def _rekey_on_copy(store, from_id: str, to_id: str, dry_run: bool, own_target: b
                 copy.execute("PRAGMA foreign_keys=ON")
                 return rekey_project(
                     copy, from_id, to_id, dry_run=dry_run,
-                    own_folder_name_target=own_target,
+                    own_folder_name_target=own_target, memory_ids=memory_ids,
                 )
             finally:
                 copy.close()
@@ -1338,6 +1340,28 @@ def _bucket_file_rows(store: Path, bucket: str) -> int:
             conn.close()
 
     return _stable_read_only(str(store), count)
+
+
+def _placed_split(memory, store: Path, bucket: str) -> dict:
+    """`database.placed_memory_split` of `bucket` for this checkout's roots,
+    read without writing; every memory is left (`left_files_elsewhere` or
+    `left_no_files`) when the checkout has no identity root or the store is
+    absent."""
+    from scripts.database import placed_memory_split
+
+    root = memory._project_identity_root
+    roots = memory._legacy_gate_roots(root)[0] if root is not None else []
+    if not store.exists():
+        return {"placed": [], "left_no_files": 0, "left_files_elsewhere": 0}
+
+    def split() -> dict:
+        conn = _read_only_connection(str(store))
+        try:
+            return placed_memory_split(conn, bucket, roots)
+        finally:
+            conn.close()
+
+    return _stable_read_only(str(store), split)
 
 
 def _bucket_rows_under(store: Path, bucket: str, roots: list) -> int:
@@ -1446,6 +1470,13 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             exit_code=2,
         )
 
+    if args.only_placed_here and not args.to_id:
+        _error(
+            "INVALID_INPUT",
+            "--only-placed-here needs --to naming this checkout's own id. "
+            "Nothing was moved.",
+            exit_code=2,
+        )
     if args.to_id:
         # A github.com target is folded as a save or update payload's
         # project_id is, so a case or www spelling names the bucket this
@@ -1644,6 +1675,19 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             )
 
     own_id = memory.project_id
+    placed_split = None
+    if args.only_placed_here:
+        if own_id is None or to_id != own_id:
+            _error(
+                "INVALID_INPUT",
+                escape_for_envelope(
+                    f"--only-placed-here moves memories into this checkout's own "
+                    f"id only, and --to {to_id!r} is not it ({own_id!r}). Nothing "
+                    "was moved."
+                ),
+                exit_code=2,
+            )
+        placed_split = _placed_split(memory, store, from_id)
     foreign_source = None
     undetected_earlier = ""
     try:
@@ -1657,6 +1701,7 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         to_id == own_id
         and not noop
         and not args.from_another_repository
+        and not args.only_placed_here
         and from_as_id != own_id
     ):
         candidate = state.get("candidate")
@@ -1741,7 +1786,9 @@ def _project_id_rekey(args, db_path) -> NoReturn:
                 "rows here, and a rekey cannot be undone. Pass "
                 "--from-another-repository only with the user's explicit "
                 "approval that these rows belong to this repository."
-                f"{undetected_earlier} Nothing was moved."
+                f"{undetected_earlier} To move only the memories whose every "
+                "file row lies in this checkout, run the same command with "
+                "--only-placed-here. Nothing was moved."
             ),
         )
     if (
@@ -1795,18 +1842,19 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     # A non-canonical target reaching here is an explicit --to that passed
     # `_own_folder_name_target` above; a defaulted one is refused.
     own_target = not is_canonical(to_id)
+    subset = placed_split["placed"] if placed_split is not None else None
     try:
         if args.apply and not noop:
             with db_connection() as conn:
                 counters = rekey_project(
                     conn, from_id, to_id, dry_run=False,
-                    own_folder_name_target=own_target,
+                    own_folder_name_target=own_target, memory_ids=subset,
                 )
         else:
             counters = _stable_read_only(
                 str(store),
                 lambda: _rekey_on_copy(
-                    store, from_id, to_id, not args.apply, own_target
+                    store, from_id, to_id, not args.apply, own_target, subset
                 ),
             )
     except ValueError as exc:
@@ -1884,11 +1932,29 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             ),
             file=_envelope_stream(),
         )
+    if placed_split is not None:
+        _best_effort_report(
+            print,
+            "note: --only-placed-here moves only the memories whose every file "
+            "row lies in this checkout, with their vectors; memories keep their "
+            "ids, so no link to a memory is lost, and a file row a staying "
+            "memory also links is copied to the target and kept for it.",
+            file=_envelope_stream(),
+        )
     _success({
         **counters,
         **({"noop": True} if noop else {}),
         "target_defaulted": target_defaulted,
         "legacy_verdict": legacy_verdict,
+        **(
+            {
+                "only_placed_here": True,
+                "left_no_files": placed_split["left_no_files"],
+                "left_files_elsewhere": placed_split["left_files_elsewhere"],
+            }
+            if placed_split is not None
+            else {}
+        ),
     })
 
 
@@ -2354,6 +2420,16 @@ def build_parser():
             "excluded here or is a canonical id that is neither this "
             "checkout's nor an earlier id of it; only with the user's "
             "explicit approval."
+        ),
+    )
+    project_id_rekey_parser.add_argument(
+        "--only-placed-here",
+        dest="only_placed_here",
+        action="store_true",
+        help=(
+            "Move only the memories of --from whose every file row lies in this "
+            "checkout, into this checkout's own --to; the rest stay. Needs no "
+            "--from-another-repository."
         ),
     )
     project_id_rekey_parser.add_argument(

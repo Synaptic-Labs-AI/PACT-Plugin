@@ -2543,6 +2543,97 @@ def bucket_evidence(
     return counts
 
 
+def placed_memory_split(
+    conn: sqlite3.Connection, bucket: str, roots: Sequence[Any]
+) -> Dict[str, Any]:
+    """Which of `bucket`'s memories are PLACED in a checkout whose roots are
+    `roots` (its identity root and linked worktrees): a memory is placed when
+    it links at least one file row and every file row it links has an
+    absolute path under one of the roots, whether or not the file exists. A
+    relative path is not placed. Returns `{placed: [ids], left_no_files: N,
+    left_files_elsewhere: N}`. Read only."""
+    prefixes = [os.path.join(os.fspath(root), "") for root in roots]
+
+    def inside(path: Any) -> bool:
+        if not isinstance(path, str) or not os.path.isabs(path):
+            return False
+        return any(path == prefix[:-1] or path.startswith(prefix) for prefix in prefixes)
+
+    paths: Dict[str, List[Any]] = {
+        row[0]: [] for row in conn.execute(
+            "SELECT id FROM memories WHERE project_id = ?", (bucket,)
+        ).fetchall()
+    }
+    for memory_id, path in conn.execute(
+        "SELECT mf.memory_id, f.path FROM memory_files mf "
+        "JOIN files f ON f.id = mf.file_id "
+        "JOIN memories m ON m.id = mf.memory_id WHERE m.project_id = ?",
+        (bucket,),
+    ).fetchall():
+        paths[memory_id].append(path)
+    split: Dict[str, Any] = {"placed": [], "left_no_files": 0, "left_files_elsewhere": 0}
+    for memory_id in sorted(paths):
+        linked = paths[memory_id]
+        if not linked:
+            split["left_no_files"] += 1
+        elif all(inside(path) for path in linked):
+            split["placed"].append(memory_id)
+        else:
+            split["left_files_elsewhere"] += 1
+    return split
+
+
+def _copy_shared_file_links(
+    conn: sqlite3.Connection,
+    old_id: str,
+    old_path: str,
+    to_id: str,
+    moved: set,
+    counters: Dict[str, Any],
+) -> None:
+    """Re-point the moved memories' links on a `from` file row that a staying
+    memory also links to the target's row for the same path, created when
+    absent. The original row keeps its other links and its file relations.
+    A target link for the same pair keeps its own relationship (the whole
+    move's keeper rule), counted in `links_conflicted`."""
+    target = conn.execute(
+        "SELECT id FROM files WHERE path = ? AND project_id = ?", (old_path, to_id)
+    ).fetchone()
+    if target is None:
+        last_modified = conn.execute(
+            "SELECT last_modified FROM files WHERE id = ?", (old_id,)
+        ).fetchone()[0]
+        # The id is given (`generate_id`), as `graph.track_file` gives it.
+        target_id = generate_id()
+        conn.execute(
+            "INSERT INTO files (id, path, project_id, last_modified) VALUES (?, ?, ?, ?)",
+            (target_id, old_path, to_id, last_modified),
+        )
+    else:
+        target_id = target[0]
+    counters["files_copied"] += 1
+    for memory_id, relationship in conn.execute(
+        "SELECT memory_id, relationship FROM memory_files WHERE file_id = ?", (old_id,)
+    ).fetchall():
+        if memory_id not in moved:
+            continue
+        counters["links_repointed"] += 1
+        existing = conn.execute(
+            "SELECT relationship FROM memory_files WHERE memory_id = ? AND file_id = ?",
+            (memory_id, target_id),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                "INSERT INTO memory_files (memory_id, file_id, relationship) VALUES (?, ?, ?)",
+                (memory_id, target_id, relationship),
+            )
+        elif existing[0] != relationship:
+            counters["links_conflicted"] += 1
+        conn.execute(
+            "DELETE FROM memory_files WHERE memory_id = ? AND file_id = ?", (memory_id, old_id)
+        )
+
+
 def rekey_project(
     conn: sqlite3.Connection,
     from_id: str,
@@ -2550,8 +2641,10 @@ def rekey_project(
     dry_run: bool = True,
     *,
     own_folder_name_target: bool = False,
+    memory_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
-    """Move an ENTIRE project bucket from `from_id` to `to_id`, atomically.
+    """Move an ENTIRE project bucket from `from_id` to `to_id`, atomically,
+    or, given `memory_ids`, only those of its memories.
 
     This is the only path that rewrites rows. The read union never moves
     anything, and a save binds the canonical id, so a rekey is an explicit
@@ -2605,6 +2698,15 @@ def rekey_project(
 
     `from_bucket_empty` is True when no memory and no file row was filed
     under `from_id` at the start: a typo, or a bucket already moved.
+
+    A SUBSET MOVE (`memory_ids`) moves only the listed memories still filed
+    under `from_id` (a re-run finds none and moves nothing), their vectors,
+    and the `from` file rows they link. A file row linked only by moved
+    memories moves or merges as in a whole move. A file row also linked by a
+    memory that stays is COPIED: the moved memories' links go to the target's
+    row for that path (created when absent), counted in `files_copied`, and
+    the original row, its file relations and the staying memory's link stay.
+    Memory ids never change, so no link to a memory is lost.
 
     A FAILURE ALWAYS PROPAGATES AS ITSELF. Cleanup runs only while SQLite
     still reports an open transaction, so a statement that made SQLite roll
@@ -2665,6 +2767,7 @@ def rekey_project(
         "relations_repointed": 0,
         "vectors_moved": 0,
         "vectors_pending": 0,
+        "files_copied": 0,
         "null_project_memories": 0,
         "null_project_files": 0,
         "from_bucket_empty": True,
@@ -2716,36 +2819,65 @@ def rekey_project(
     try:
         # Collect the moved memories BEFORE the UPDATE: afterwards they share
         # the target id with rows that were never in `from`.
-        moved_ids = [
+        bucket_ids = [
             row[0]
             for row in conn.execute(
                 "SELECT id FROM memories WHERE project_id = ?", (from_id,)
             ).fetchall()
         ]
+        if memory_ids is None:
+            moved_ids = bucket_ids
+        else:
+            wanted = set(memory_ids)
+            moved_ids = [memory_id for memory_id in bucket_ids if memory_id in wanted]
+        moved = set(moved_ids)
         counters["memories"] = len(moved_ids)
-
-        conn.execute(
-            "UPDATE memories SET project_id = ? WHERE project_id = ?",
-            (to_id, from_id),
-        )
 
         old_files = conn.execute(
             "SELECT id, path FROM files WHERE project_id = ? ORDER BY path",
             (from_id,),
         ).fetchall()
+        if memory_ids is None:
+            conn.execute(
+                "UPDATE memories SET project_id = ? WHERE project_id = ?",
+                (to_id, from_id),
+            )
+        else:
+            conn.executemany(
+                "UPDATE memories SET project_id = ? WHERE id = ?",
+                [(to_id, memory_id) for memory_id in moved_ids],
+            )
+            exclusive, shared = [], []
+            for old_id, old_path in old_files:
+                linkers = {
+                    row[0] for row in conn.execute(
+                        "SELECT memory_id FROM memory_files WHERE file_id = ?", (old_id,)
+                    ).fetchall()
+                }
+                if not linkers & moved:
+                    continue
+                (exclusive if linkers <= moved else shared).append((old_id, old_path))
+            for old_id, old_path in shared:
+                _copy_shared_file_links(conn, old_id, old_path, to_id, moved, counters)
+            old_files = exclusive
 
         # EACH EDGE COUNTS ONCE, so the count is taken once, BEFORE any row
         # moves: every relation with at least one end on a `from` row that
         # merges into an existing target row. Counting per merged row instead
         # counted an edge twice when both of its ends merged.
-        counters["relations_repointed"] = conn.execute(
-            "SELECT COUNT(*) FROM file_relations r WHERE EXISTS ("
-            "SELECT 1 FROM files o JOIN files t "
-            "ON t.path = o.path AND t.project_id = ? "
-            "WHERE o.project_id = ? "
-            "AND o.id IN (r.source_file, r.target_file))",
-            (to_id, from_id),
-        ).fetchone()[0]
+        merging = {
+            row[0] for row in conn.execute(
+                "SELECT o.id FROM files o JOIN files t "
+                "ON t.path = o.path AND t.project_id = ? WHERE o.project_id = ?",
+                (to_id, from_id),
+            ).fetchall()
+        } & {old_id for old_id, _path in old_files}
+        counters["relations_repointed"] = sum(
+            1 for source_file, target_file in conn.execute(
+                "SELECT source_file, target_file FROM file_relations"
+            ).fetchall()
+            if source_file in merging or target_file in merging
+        ) if merging else 0
 
         for old_id, old_path in old_files:
             target = conn.execute(
