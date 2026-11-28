@@ -894,3 +894,78 @@ class TestRekeyCounterMeaning:
             "the two edges did not collapse to the single documented self-"
             f"loop: {rows!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# A subset move (`memory_ids`, the CLI's --only-placed-here)
+# ---------------------------------------------------------------------------
+
+class TestSubsetMove:
+    def test_a_shared_file_row_is_copied_for_the_moved_memory_only(self, rekey_env):
+        """m1 moves, m2 stays, and both link one file row that also has a file
+        relation. The moved memory links a copy under the target; the staying
+        memory keeps the original row and its relation; the dry run reports
+        the copy apart from moved rows; a re-run copies nothing again. RED
+        WHEN the staying memory loses its row or relation, the moved memory
+        keeps the source row, or a re-run duplicates the copy."""
+        _seed(
+            rekey_env,
+            [("m1", LEGACY), ("m2", LEGACY)],
+            files=[("f-shared", "src/x.py", LEGACY), ("f-other", "src/y.py", LEGACY)],
+            links=[("m1", "f-shared"), ("m2", "f-shared"), ("m2", "f-other")],
+            relations=[("f-shared", "f-other")],
+        )
+        with db_connection(rekey_env.store) as conn:
+            plan = rekey_project(conn, LEGACY, CANONICAL, dry_run=True, memory_ids=["m1"])
+            assert (plan["memories"], plan["files_copied"], plan["files_in_place"], plan["files_conflicted"]) == (
+                1, 1, 0, 0), plan
+            assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2
+            applied = rekey_project(conn, LEGACY, CANONICAL, dry_run=False, memory_ids=["m1"])
+            assert applied["files_copied"] == 1, applied
+            links = dict(conn.execute(
+                "SELECT mf.memory_id || ':' || f.path, f.project_id FROM memory_files mf "
+                "JOIN files f ON f.id = mf.file_id"
+            ).fetchall())
+            assert links == {
+                "m1:src/x.py": CANONICAL, "m2:src/x.py": LEGACY, "m2:src/y.py": LEGACY,
+            }, links
+            assert [tuple(row) for row in conn.execute(
+                "SELECT source_file, target_file FROM file_relations"
+            ).fetchall()] == [("f-shared", "f-other")]
+            assert dict(conn.execute("SELECT id, project_id FROM memories").fetchall()) == {
+                "m1": CANONICAL, "m2": LEGACY,
+            }
+            again = rekey_project(conn, LEGACY, CANONICAL, dry_run=False, memory_ids=["m1"])
+            assert (again["memories"], again["files_copied"]) == (0, 0), again
+            assert conn.execute("SELECT COUNT(*) FROM files WHERE path = 'src/x.py'").fetchone()[0] == 2
+            assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+
+    def test_a_subset_move_moves_only_its_memories_vectors(self, rekey_env, monkeypatch):
+        """With the vector extension loaded, only the moved memory's vector
+        changes partition, with the same blob; the staying memory's vector
+        stays. RED WHEN the subset move moves every vector of the bucket, or
+        none."""
+        pytest.importorskip("sqlite_vec", reason="the sqlite-vec extension is not installed here")
+        conn, blob = _vec_store(rekey_env)
+        monkeypatch.setattr(db, "_init_vector_table", lambda connection: True)
+        try:
+            conn.execute(
+                "INSERT INTO memories (id, context, project_id, session_id, created_at, updated_at) "
+                "VALUES ('m2', 'ctx', ?, 's', '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')",
+                (LEGACY,),
+            )
+            other = struct.pack("3f", 0.4, 0.5, 0.6)
+            conn.execute(
+                "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
+                ("m2", LEGACY, other),
+            )
+            conn.commit()
+            counters = rekey_project(conn, LEGACY, CANONICAL, dry_run=False, memory_ids=["m1"])
+            assert (counters["memories"], counters["vectors_moved"], counters["vectors_pending"]) == (1, 1, 0)
+            rows = {
+                row["memory_id"]: (row["project_id"], bytes(row["embedding"]))
+                for row in conn.execute("SELECT memory_id, project_id, embedding FROM vec_memories")
+            }
+            assert rows == {"m1": (CANONICAL, blob), "m2": (LEGACY, other)}, rows
+        finally:
+            conn.close()

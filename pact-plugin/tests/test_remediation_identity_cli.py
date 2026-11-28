@@ -2945,3 +2945,27 @@ def test_only_placed_here_moves_a_placed_row_of_an_excluded_bucket(identity_env,
     )
     assert code == 0 and applied["result"]["memories"] == 1, applied
     assert _placed_rows(store)["memories"] == {"mine00001": "github.com/a/app", "theirs001": "app"}
+
+
+def test_only_placed_here_moves_a_memory_placed_in_a_linked_worktree(identity_env, store, monkeypatch, capfd):
+    """A linked worktree of this repository is part of this checkout: a
+    memory whose every file row lies under it is placed and moves, run from
+    the main checkout. RED WHEN only the main checkout's root counts."""
+    from fixtures.identity_git import run_git
+    from scripts import memory_api
+
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    main = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    worktree = identity_env / "wt" / "app-feature"
+    run_git("worktree", "add", "-q", "-b", "feature", str(worktree), cwd=main)
+    (worktree / "w.py").write_text("w\n")
+    _seed_linked(store, "app", "wtmem0001", [str(worktree / "w.py")])
+    _seed_linked(store, "app", "away00001", [str(identity_env / "elsewhere.py")])
+    monkeypatch.chdir(main)
+    code, applied = _cli(
+        ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--only-placed-here", "--apply",
+         "--db-path", str(store)], capfd,
+    )
+    assert code == 0, applied
+    assert (applied["result"]["memories"], applied["result"]["left_files_elsewhere"]) == (1, 1), applied
+    assert _placed_rows(store)["memories"] == {"wtmem0001": "github.com/a/app", "away00001": "app"}
