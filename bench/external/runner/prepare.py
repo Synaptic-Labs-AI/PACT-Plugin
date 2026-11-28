@@ -38,6 +38,10 @@ import signal
 import subprocess
 import sys
 import tarfile
+import tempfile
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -49,12 +53,20 @@ DEFAULT_BASE_URL = "https://api.deepseek.com/anthropic"
 DEFAULT_MODEL = "deepseek-flash[1m]"
 MANIFEST_SCHEMA = "pact-bench/prepare/1"
 OUT_MARKER = ".pact-bench-out"
+# Every env key Claude Code reads as a model id (from the 2.1.x binary's
+# strings); all are pinned to the prepared model so no role falls back to a live value.
 MODEL_ENV_KEYS = (
     "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_MODEL",
     "ANTHROPIC_DEFAULT_HAIKU_MODEL",
     "ANTHROPIC_DEFAULT_SONNET_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
     "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL",
+    "CLAUDE_CODE_AUTO_MODE_MODEL",
+    "CLAUDE_CODE_BG_CLASSIFIER_MODEL",
 )
 # Live-session handles that are not credential-shaped but must never reach a child.
 LIVE_ONLY_KEYS = (
@@ -63,6 +75,9 @@ LIVE_ONLY_KEYS = (
     "CLAUDE_CODE_SYNC_SESSION_REFS",
 )
 CREDENTIAL_KEY = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|HEADERS|CREDENTIAL", re.IGNORECASE)
+# Token-count tuning keys (e.g. CLAUDE_CODE_MAX_OUTPUT_TOKENS, MAX_THINKING_TOKENS)
+# match CREDENTIAL_KEY by name but hold numbers, so they are kept.
+NON_SECRET_KEY = re.compile(r"^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$")
 # The only live-environment keys a child inherits; everything else comes from
 # the scratch settings env or is set explicitly below.
 INHERITED_ENV_KEYS = ("PATH", "LANG", "TERM")
@@ -70,6 +85,11 @@ INHERITED_ENV_PREFIXES = ("LC_",)
 EXCLUDED_NAMES = {"tests", "__pycache__", ".git", ".pytest_cache"}
 SCRATCH_DIRS = ("config", "home", "tmp", "teams", "tasks", "pact-sessions")
 RUNS_DIR = REPO_ROOT / "bench" / ".runs"
+# Child claude processes run under this root; it must hold no memory file in it or its parents.
+DEFAULT_TEMP_ROOT = Path("/tmp")
+MEMORY_FILE_NAMES = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
+FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
+KILL_DRAIN_SECONDS = 10
 
 
 def utc_now() -> str:
@@ -97,29 +117,121 @@ def _git(repo: Path, *args: str) -> str:
     return proc.stdout
 
 
+class SignalExit(SystemExit):
+    """SIGTERM/SIGHUP received while a child ran; exit status 128+signum."""
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(128 + signum)
+        self.signum = signum
+
+    def __str__(self) -> str:
+        return f"terminated by {signal.Signals(self.signum).name}"
+
+
+def _raise_signal_exit(signum: int, _frame: Any) -> None:
+    raise SignalExit(signum)
+
+
+@contextmanager
+def _signals_kill_child() -> Iterator[None]:
+    """Route SIGTERM/SIGHUP into an exception for the child's lifetime, so the
+    group-kill path runs; the previous handlers are restored afterwards."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    previous = {signum: signal.signal(signum, _raise_signal_exit) for signum in FORWARDED_SIGNALS}
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+
+
+def _as_text(data: Any, text: bool) -> Any:
+    return data.decode(errors="replace") if text and isinstance(data, bytes) else data
+
+
+def _drain_after_kill(proc: subprocess.Popen, text: bool) -> tuple[Any, Any, bool]:
+    """Collect the killed child's remaining output, waiting at most KILL_DRAIN_SECONDS.
+
+    A process that left the group can hold the pipes open; then the pipes are
+    closed, the output is partial and complete is False.
+    """
+    try:
+        stdout, stderr = proc.communicate(timeout=KILL_DRAIN_SECONDS)
+        return stdout, stderr, True
+    except subprocess.TimeoutExpired as exc:
+        for pipe in (proc.stdout, proc.stderr):
+            if pipe is not None:
+                pipe.close()
+        proc.wait()
+        print(
+            f"warning: {proc.args[0]} was killed but its output pipes stayed open for "
+            f"{KILL_DRAIN_SECONDS}s (a process outside its group holds them); output is incomplete",
+            file=sys.stderr,
+        )
+        return _as_text(exc.stdout, text), _as_text(exc.stderr, text), False
+
+
 def run_process_group(
     cmd: list[str], timeout: int, **kwargs: Any
 ) -> subprocess.CompletedProcess[str]:
-    """subprocess.run, but the child leads its own session and a timeout (or any
-    interruption) kills the whole process group, so grandchildren cannot outlive it.
-    Raises subprocess.TimeoutExpired after the group is killed.
+    """subprocess.run, but the child leads its own session, and a timeout, a
+    SIGTERM/SIGHUP to this process or any other interruption kills the whole
+    process group, so grandchildren cannot outlive it.
+
+    On timeout it raises subprocess.TimeoutExpired carrying all the output
+    drained after the kill (stdout/stderr) and output_complete (False when the
+    bounded drain expired). A signal raises SignalExit after the kill.
     """
-    proc = subprocess.Popen(cmd, start_new_session=True, **kwargs)
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except BaseException:
+    text = bool(kwargs.get("text") or kwargs.get("universal_newlines"))
+    with _signals_kill_child():
+        # shortcut: a signal landing inside Popen itself, before proc exists,
+        # skips the group kill; blocking signals around Popen would leak the mask into the child.
+        proc = subprocess.Popen(cmd, start_new_session=True, **kwargs)
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.communicate()
-        raise
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except BaseException as exc:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            drained_out, drained_err, complete = _drain_after_kill(proc, text)
+            if isinstance(exc, subprocess.TimeoutExpired):
+                exc.stdout, exc.stderr = drained_out, drained_err
+                exc.output_complete = complete
+            raise
     return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+
+
+def memory_files_above(path: Path) -> list[Path]:
+    """Claude Code memory files in path or any of its ancestors (each would load as project memory)."""
+    return [
+        directory / name
+        for directory in (path, *path.parents)
+        for name in MEMORY_FILE_NAMES
+        if (directory / name).is_file()
+    ]
+
+
+def check_clean_root(root: Path) -> None:
+    """Refuse a child cwd root inside the repo or below any Claude Code memory file."""
+    root = root.expanduser().absolute()
+    if root.is_relative_to(REPO_ROOT):
+        raise SystemExit(f"--temp-root {root} is inside the repository; choose one outside it, e.g. /tmp")
+    found = memory_files_above(root)
+    if found:
+        raise SystemExit(
+            f"--temp-root {root} has Claude Code memory files in it or its parents, which every "
+            f"child session would load: {[str(path) for path in found]}; choose a --temp-root without them"
+        )
 
 
 def is_scratch_env_key(key: str) -> bool:
     """True when a settings env key may be copied into scratch settings."""
-    return key not in LIVE_ONLY_KEYS and not CREDENTIAL_KEY.search(key)
+    if key in LIVE_ONLY_KEYS:
+        return False
+    return bool(NON_SECRET_KEY.match(key)) or not CREDENTIAL_KEY.search(key)
 
 
 def _allowed_paths(files: list[str]) -> set[str]:
@@ -354,27 +466,42 @@ def verify_provider(
     env: dict[str, str],
     timeout: int = 120,
     model: str = DEFAULT_MODEL,
+    temp_root: Path = DEFAULT_TEMP_ROOT,
 ) -> dict[str, Any]:
-    """Run a trivial headless call; write provider-check.json on every outcome."""
-    record: dict[str, Any] = {"checked_at": utc_now(), "requested_model": model}
+    """Run a trivial headless call from a fresh cwd under temp_root (outside the
+    repo, with no memory files above it); write provider-check.json on every outcome."""
+    record: dict[str, Any] = {"checked_at": utc_now(), "requested_model": model, "cwd": None}
     try:
-        proc = run_process_group(
-            [claude_bin, "-p", "Reply with exactly OK", "--output-format", "json", "--max-turns", "1"],
-            timeout,
-            cwd=str(out),
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        check_clean_root(temp_root)
+        temp_root.mkdir(parents=True, exist_ok=True)
+        cwd = Path(tempfile.mkdtemp(prefix="pact-verify-", dir=str(temp_root)))
+        record["cwd"] = str(cwd)
+        try:
+            proc = run_process_group(
+                [claude_bin, "-p", "Reply with exactly OK", "--output-format", "json", "--max-turns", "1"],
+                timeout,
+                cwd=str(cwd),
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        finally:
+            shutil.rmtree(cwd, ignore_errors=True)
     except FileNotFoundError as exc:
         record["error"] = f"claude binary not found: {claude_bin}"
         _write_check(out, record)
         raise SystemExit(f"provider verification failed: {record['error']}") from exc
     except subprocess.TimeoutExpired as exc:
         record["error"] = f"claude did not answer within {timeout}s"
+        record.update(stdout_tail=(exc.stdout or "")[-2000:], stderr=(exc.stderr or "")[-2000:])
+        record["output_complete"] = getattr(exc, "output_complete", True)
         _write_check(out, record)
         raise SystemExit(f"provider verification failed: {record['error']}") from exc
+    except BaseException as exc:
+        record["error"] = str(exc) if isinstance(exc, SystemExit) else f"{type(exc).__name__}: {exc}"
+        _write_check(out, record)
+        raise
     record.update(
         exit_code=proc.returncode,
         stderr=proc.stderr[-2000:],
@@ -472,6 +599,9 @@ def prepare(args: argparse.Namespace) -> int:
     check_inputs(settings_source, token_file)
     prov = check_source(REPO_ROOT, args.plugin_ref, plugin_dir, args.allow_dirty)
     claude_bin = resolve_claude_bin(args.claude_bin) if args.verify else None
+    temp_root = Path(args.temp_root).expanduser().absolute()
+    if claude_bin is not None:
+        check_clean_root(temp_root)
 
     if replace:
         shutil.rmtree(out)
@@ -493,6 +623,9 @@ def prepare(args: argparse.Namespace) -> int:
             "path": str(out / "config" / "settings.json"),
             "teammate_mode": settings.get("teammateMode"),
             "env_keys": sorted(env),
+            "dropped_env_keys": sorted(
+                key for key in (load_settings(settings_source).get("env") or {}) if not is_scratch_env_key(key)
+            ),
             "model": env.get("ANTHROPIC_MODEL"),
         },
         "provider": {
@@ -507,7 +640,9 @@ def prepare(args: argparse.Namespace) -> int:
         },
     }
     if claude_bin is not None:
-        manifest["provider"]["check"] = verify_provider(out, out, claude_bin, child_env, model=args.model)
+        manifest["provider"]["check"] = verify_provider(
+            out, out, claude_bin, child_env, model=args.model, temp_root=temp_root
+        )
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(manifest, indent=2))
     return 0
@@ -530,6 +665,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--allow-dirty", action="store_true", help="allow a dirty pact-plugin tree")
     parser.add_argument("--verify", action="store_true", help="run a trivial headless provider check")
     parser.add_argument("--claude-bin", default=None, help="claude binary (default: PATH)")
+    parser.add_argument(
+        "--temp-root",
+        default=str(DEFAULT_TEMP_ROOT),
+        help="parent of the --verify call's cwd; must be outside the repo with no CLAUDE.md in it or its parents",
+    )
     parser.add_argument(
         "--force",
         action="store_true",

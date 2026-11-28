@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -381,3 +384,171 @@ def test_verify_provider_missing_binary_is_a_clear_failure(tmp_path: Path) -> No
     with pytest.raises(SystemExit, match="claude binary not found"):
         prepare.verify_provider(out, out, str(tmp_path / "nope"), dict(os.environ))
     assert "error" in json.loads((out / "provider-check.json").read_text(encoding="utf-8"))
+
+
+
+def _dead(pid: int, wait: float = 5.0) -> bool:
+    """True once pid is gone or a zombie (reaped by nobody yet but no longer running)."""
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except FileNotFoundError:
+            return True
+        if state == "Z":
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _kill(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _wait_for(path: Path, wait: float = 10.0) -> str:
+    deadline = time.monotonic() + wait
+    while not (path.is_file() and path.read_text(encoding="utf-8").strip()):
+        assert time.monotonic() < deadline, f"{path} never appeared"
+        time.sleep(0.05)
+    return path.read_text(encoding="utf-8").strip()
+
+
+def test_token_count_tuning_keys_are_kept_and_dropped_keys_are_recorded(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    args = _prepare_args(tmp_path, out)
+    live_env = {
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "64000",
+        "MAX_THINKING_TOKENS": "32000",
+        "MAX_MCP_OUTPUT_TOKENS": "25000",
+        "ANTHROPIC_AUTH_TOKEN": "secret",
+        "MY_API_KEY": "secret",
+    }
+    (tmp_path / "live-settings.json").write_text(json.dumps({"env": live_env}), encoding="utf-8")
+    assert prepare.main(args) == 0
+    settings_env = json.loads((out / "config" / "settings.json").read_text(encoding="utf-8"))["env"]
+    for key in ("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "MAX_THINKING_TOKENS", "MAX_MCP_OUTPUT_TOKENS"):
+        assert settings_env[key] == live_env[key]
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["settings"]["dropped_env_keys"] == ["ANTHROPIC_AUTH_TOKEN", "MY_API_KEY"]
+    assert "secret" not in (out / "manifest.json").read_text(encoding="utf-8")
+
+
+def test_every_model_key_is_pinned_including_small_fast(tmp_path: Path) -> None:
+    assert "ANTHROPIC_SMALL_FAST_MODEL" in prepare.MODEL_ENV_KEYS
+    source = tmp_path / "settings.json"
+    source.write_text(json.dumps({"env": {key: "live-model" for key in prepare.MODEL_ENV_KEYS}}), encoding="utf-8")
+    _settings, env = prepare.build_scratch_settings(source, tmp_path / "config", tmp_path, "deepseek-pro")
+    assert {key: env[key] for key in prepare.MODEL_ENV_KEYS} == dict.fromkeys(prepare.MODEL_ENV_KEYS, "deepseek-pro")
+
+
+def test_memory_file_names_cover_every_load_location() -> None:
+    assert set(prepare.MEMORY_FILE_NAMES) == {"CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md"}
+
+
+def test_clean_root_refuses_memory_files_in_parents(tmp_path: Path) -> None:
+    # CLAUDE.local.md stands in for every memory file name; the test never writes a CLAUDE.md.
+    (tmp_path / "CLAUDE.local.md").write_text("memory", encoding="utf-8")
+    root = tmp_path / "a" / "b"
+    with pytest.raises(SystemExit, match="memory files"):
+        prepare.check_clean_root(root)
+    assert prepare.memory_files_above(root) == [tmp_path / "CLAUDE.local.md"]
+
+
+def test_clean_root_refuses_the_repo() -> None:
+    with pytest.raises(SystemExit, match="inside the repository"):
+        prepare.check_clean_root(prepare.RUNS_DIR / "x")
+
+
+def test_verify_runs_from_a_clean_cwd_outside_the_repo(tmp_path: Path) -> None:
+    seen = tmp_path / "cwd.txt"
+    fake = _fake_claude(
+        tmp_path / "claude",
+        f"import os\nopen({str(seen)!r}, 'w').write(os.getcwd())\n"
+        "print(json.dumps({'is_error': False, 'modelUsage': {'deepseek-flash': {}}}))\n",
+    )
+    out = _out(tmp_path)
+    record = prepare.verify_provider(out, out, str(fake), dict(os.environ))
+    cwd = Path(seen.read_text(encoding="utf-8"))
+    assert str(cwd) == record["cwd"]
+    assert not cwd.is_relative_to(prepare.REPO_ROOT)
+    assert prepare.memory_files_above(cwd) == []
+    assert not cwd.exists()
+    assert json.loads((out / "provider-check.json").read_text(encoding="utf-8"))["cwd"] == str(cwd)
+
+
+def test_verify_refuses_a_dirty_temp_root_before_writing(tmp_path: Path) -> None:
+    dirty = tmp_path / "dirty"
+    dirty.mkdir()
+    (dirty / "CLAUDE.local.md").write_text("memory", encoding="utf-8")
+    out = tmp_path / "out"
+    args = _prepare_args(tmp_path, out, "--verify", "--claude-bin", sys.executable, "--temp-root", str(dirty))
+    with pytest.raises(SystemExit, match="memory files"):
+        prepare.main(args)
+    assert not out.exists()
+
+
+def test_timeout_carries_the_drained_output(tmp_path: Path) -> None:
+    child = [sys.executable, "-c", "import sys, time; print('before'); sys.stdout.flush(); time.sleep(30)"]
+    started = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired) as exc:
+        prepare.run_process_group(child, 1, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert time.monotonic() - started < 15
+    assert exc.value.stdout == "before\n"
+    assert exc.value.output_complete is True
+
+
+def test_post_kill_drain_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(prepare, "KILL_DRAIN_SECONDS", 1)
+    pid_file = tmp_path / "escaped.pid"
+    script = (
+        "import os, subprocess, sys, time\n"
+        "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], start_new_session=True)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(kid.pid))\n"
+        "time.sleep(60)\n"
+    )
+    started = time.monotonic()
+    try:
+        with pytest.raises(subprocess.TimeoutExpired) as exc:
+            prepare.run_process_group([sys.executable, "-c", script], 1, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        assert time.monotonic() - started < 15
+        assert exc.value.output_complete is False
+    finally:
+        _kill(int(_wait_for(pid_file)))
+
+
+def test_sigterm_to_the_harness_kills_the_child_group(tmp_path: Path) -> None:
+    pid_file = tmp_path / "grandchild.pid"
+    child = (
+        "import subprocess, sys, time\n"
+        "kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(kid.pid))\n"
+        "time.sleep(60)\n"
+    )
+    harness = (
+        "import subprocess, sys\n"
+        f"sys.path.insert(0, {str(Path(prepare.__file__).resolve().parents[2])!r})\n"
+        "from external.runner import prepare\n"
+        f"prepare.run_process_group([sys.executable, '-c', {child!r}], 60)\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", harness], stderr=subprocess.PIPE, text=True)
+    grandchild = int(_wait_for(pid_file))
+    try:
+        started = time.monotonic()
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=15) == 128 + signal.SIGTERM
+        assert time.monotonic() - started < 15
+        assert _dead(grandchild)
+    finally:
+        proc.kill()
+        proc.wait()
+        _kill(grandchild)
+
+
+def test_signal_handlers_are_restored(tmp_path: Path) -> None:
+    before = {signum: signal.getsignal(signum) for signum in prepare.FORWARDED_SIGNALS}
+    prepare.run_process_group([sys.executable, "-c", "pass"], 10)
+    assert {signum: signal.getsignal(signum) for signum in prepare.FORWARDED_SIGNALS} == before

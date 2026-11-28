@@ -4,7 +4,9 @@
 Reads the prepare manifest, injects bench/external/native-evals/evals into the
 scratch plugin copy, runs claude plugin eval headlessly with the scratch
 DeepSeek environment, and records the command/result/exit code in
-<run>/native-eval/result.json on every exit path. The model (CLI --model and
+<run>/native-eval/result.json on every exit path, including a SIGTERM/SIGHUP
+to this process. The eval runs from <temp-root>/pact-native-XXXXXXXX/work, outside
+the repo and with no Claude Code memory file above it (checked up front). The model (CLI --model and
 --judge-model) is the one fixed at prepare time, read from the manifest. A
 timeout kills the eval's whole process group.
 
@@ -165,11 +167,20 @@ def _cleanup(short_root: Path | None, injected: Path | None, out: Path, record: 
         print(f"native eval cleanup failed: {record['cleanup_error']}", file=sys.stderr)
 
 
+def _load_manifest(path: Path) -> tuple[dict[str, Any], Path, Path, str]:
+    """Read the prepare manifest; SystemExit naming what is wrong, before anything is written."""
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        return manifest, Path(manifest["paths"]["out"]), Path(manifest["paths"]["plugin"]), str(
+            manifest["provider"]["model"]
+        )
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit(f"cannot read prepare manifest {path}: {type(exc).__name__}: {exc}") from exc
+
+
 def run(args: argparse.Namespace) -> int:
     manifest_path = Path(args.manifest).expanduser().resolve()
-    manifest: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
-    scratch = Path(manifest["paths"]["out"])
-    plugin = Path(manifest["paths"]["plugin"])
+    manifest, scratch, plugin, model = _load_manifest(manifest_path)
     cases_dir = Path(args.cases_dir).expanduser().resolve() if args.cases_dir else _default_cases()
     temp_parent = Path(args.temp_root).expanduser().absolute()
     out = scratch / "native-eval"
@@ -177,12 +188,12 @@ def run(args: argparse.Namespace) -> int:
     # The reports are rewritten each run; a stale one must not be recorded as this run's.
     for name in REPORT_FILES.values():
         (out / name).unlink(missing_ok=True)
-    model = manifest["provider"]["model"]
     record: dict[str, Any] = {
         "schema": "pact-bench/native-eval/1",
         "command": None,
         "cases_dir": str(cases_dir),
         "temp_root": None,
+        "cwd": None,
         "exit_code": None,
         "timed_out": False,
         "error": None,
@@ -203,12 +214,16 @@ def run(args: argparse.Namespace) -> int:
                 f"{predicted_tmpdir_length(temp_parent)} chars (max {MAX_TMPDIR_CHARS}); "
                 "choose a shorter --temp-root"
             )
+        prepare.check_clean_root(temp_parent)
         env = _child_env(manifest, scratch)
         temp_parent.mkdir(parents=True, exist_ok=True)
         short_root = Path(tempfile.mkdtemp(prefix=TEMP_PREFIX, dir=str(temp_parent)))
         record["temp_root"] = str(short_root)
-        for name in ("tmp", "home"):
+        for name in ("tmp", "home", "work"):
             (short_root / name).mkdir()
+        # The eval runs from a clean cwd under the temp root, so no repo CLAUDE.md loads.
+        cwd = short_root / "work"
+        record["cwd"] = str(cwd)
         env["TMPDIR"] = str(short_root / "tmp")
         env["HOME"] = str(short_root / "home")
 
@@ -219,9 +234,9 @@ def run(args: argparse.Namespace) -> int:
 
         cmd = build_command(args, claude_bin, plugin, out, model)
         record["command"] = cmd
-        record["exit_code"], record["timed_out"] = _launch(cmd, scratch, env, out, args.timeout)
-    except SystemExit as exc:
-        record["error"] = str(exc)
+        record["exit_code"], record["timed_out"] = _launch(cmd, cwd, env, out, args.timeout)
+    except BaseException as exc:
+        record["error"] = str(exc) if isinstance(exc, SystemExit) else f"{type(exc).__name__}: {exc}"
         raise
     finally:
         _cleanup(short_root, injected, out, record)
@@ -239,9 +254,10 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--cases-dir", default=None, help="native eval cases directory")
     parser.add_argument(
         "--temp-root",
-        default=str(Path.home()),
-        help="short writable parent for TMPDIR/HOME; TMPDIR must stay within "
-        f"{MAX_TMPDIR_CHARS} chars to keep sandbox bridge sockets under the Unix socket path limit",
+        default=str(prepare.DEFAULT_TEMP_ROOT),
+        help="short writable parent for the eval's cwd, TMPDIR and HOME: outside the repo, with no "
+        f"CLAUDE.md in it or its parents, and TMPDIR within {MAX_TMPDIR_CHARS} chars (sandbox bridge "
+        "sockets must stay under the Unix socket path limit)",
     )
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--concurrency", type=int, default=1)

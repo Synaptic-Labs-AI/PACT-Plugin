@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
+import subprocess
+import sys
 import tempfile
 import time
 from collections.abc import Iterator
@@ -10,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from external.runner import native_eval
+from external.runner import native_eval, prepare
 
 
 @pytest.fixture
@@ -134,12 +137,34 @@ def test_native_eval_has_no_model_overrides(flag: str, tmp_path: Path, short_roo
     assert exc.value.code == 2
 
 
-def _alive(pid: int) -> bool:
+def _dead(pid: int, wait: float = 5.0) -> bool:
+    """True once pid is gone or a zombie (no longer running)."""
+    deadline = time.monotonic() + wait
+    while True:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except FileNotFoundError:
+            return True
+        if state == "Z":
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+
+
+def _kill(pid: int) -> None:
     try:
-        os.kill(pid, 0)
+        os.kill(pid, signal.SIGKILL)
     except ProcessLookupError:
-        return False
-    return True
+        pass
+
+
+def _wait_for(path: Path, wait: float = 10.0) -> str:
+    deadline = time.monotonic() + wait
+    while not (path.is_file() and path.read_text(encoding="utf-8").strip()):
+        assert time.monotonic() < deadline, f"{path} never appeared"
+        time.sleep(0.05)
+    return path.read_text(encoding="utf-8").strip()
 
 
 def test_native_eval_timeout_kills_grandchildren(tmp_path: Path, short_root: Path) -> None:
@@ -152,13 +177,80 @@ def test_native_eval_timeout_kills_grandchildren(tmp_path: Path, short_root: Pat
         "time.sleep(60)\n"
     )
     fake = _fake_claude(tmp_path, body)
-    assert native_eval.run(_args(manifest, cases, fake, short_root, "--timeout", "2")) == 1
-    assert _result(manifest)["timed_out"] is True
-    grandchild = int(pid_file.read_text(encoding="utf-8"))
-    deadline = time.monotonic() + 5
-    while _alive(grandchild) and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert not _alive(grandchild)
+    started = time.monotonic()
+    try:
+        assert native_eval.run(_args(manifest, cases, fake, short_root, "--timeout", "2")) == 1
+        assert time.monotonic() - started < 15
+        assert _result(manifest)["timed_out"] is True
+        assert _dead(int(_wait_for(pid_file)))
+    finally:
+        if pid_file.is_file():
+            _kill(int(pid_file.read_text(encoding="utf-8")))
+
+
+def test_native_eval_runs_from_a_clean_cwd_outside_the_repo(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    seen = tmp_path / "cwd.txt"
+    fake = _fake_claude(tmp_path, f"open({str(seen)!r}, 'w').write(os.getcwd())\n")
+    assert native_eval.run(_args(manifest, cases, fake, short_root)) == 0
+    cwd = Path(seen.read_text(encoding="utf-8"))
+    assert str(cwd) == _result(manifest)["cwd"]
+    assert cwd.parent.parent == short_root and cwd.name == "work"
+    assert not cwd.is_relative_to(prepare.REPO_ROOT)
+    assert prepare.memory_files_above(cwd) == []
+
+
+def test_native_eval_refuses_a_temp_root_below_memory_files(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    # CLAUDE.local.md stands in for every memory file name; the test never writes a CLAUDE.md.
+    (short_root / "CLAUDE.local.md").write_text("memory", encoding="utf-8")
+    nested = short_root / "r"
+    with pytest.raises(SystemExit, match="memory files"):
+        native_eval.run(_args(manifest, cases, _fake_claude(tmp_path), nested))
+    assert "memory files" in _result(manifest)["error"]
+    assert not nested.exists()
+
+
+def test_native_eval_records_a_sigterm_and_cleans_up(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, plugin = _prepared(tmp_path)
+    pid_file = tmp_path / "claude.pid"
+    fake = _fake_claude(tmp_path, f"open({str(pid_file)!r}, 'w').write(str(os.getpid()))\ntime.sleep(60)\n")
+    harness = (
+        "import sys\n"
+        f"sys.path.insert(0, {str(Path(native_eval.__file__).resolve().parents[2])!r})\n"
+        "from external.runner import native_eval\n"
+        f"sys.exit(native_eval.main({['--manifest', str(manifest), '--cases-dir', str(cases), '--claude-bin', str(fake), '--runs', '1', '--temp-root', str(short_root)]!r}))\n"
+    )
+    proc = subprocess.Popen([sys.executable, "-c", harness], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    claude = int(_wait_for(pid_file))
+    try:
+        proc.send_signal(signal.SIGTERM)
+        assert proc.wait(timeout=15) == 128 + signal.SIGTERM
+        assert _dead(claude)
+        record = _result(manifest)
+        assert record["error"] == "terminated by SIGTERM"
+        assert _leftovers(short_root) == []
+        assert not (plugin / "evals").exists()
+    finally:
+        proc.kill()
+        proc.wait()
+        _kill(claude)
+
+
+def test_native_eval_unreadable_manifest_is_clear(tmp_path: Path) -> None:
+    bad = tmp_path / "manifest.json"
+    bad.write_text(json.dumps({"paths": {}}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="cannot read prepare manifest"):
+        native_eval.main(["--manifest", str(bad)])
+
+
+def test_native_eval_records_a_non_exit_error(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    (manifest.parent / "config" / "settings.json").unlink()
+    with pytest.raises(FileNotFoundError):
+        native_eval.run(_args(manifest, cases, _fake_claude(tmp_path), short_root))
+    assert _result(manifest)["error"].startswith("FileNotFoundError")
+    assert _leftovers(short_root) == []
 
 
 def test_native_eval_does_not_record_a_stale_report(tmp_path: Path, short_root: Path) -> None:
