@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import fnmatch
 import re
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -17,6 +19,8 @@ PATHS = [
     ".github/workflows/bench-harness.yml",
     "constraints-ci.txt",
     "scripts/verify_ci_environment.py",
+    "BENCHMARKS.md",
+    "pyproject.toml",
 ]
 HASHED_INSTALL = "--only-binary=:all: --require-hashes -r"
 VERIFY = "python scripts/verify_ci_environment.py"
@@ -62,6 +66,25 @@ def test_workflow_triggers_and_paths() -> None:
     }
     assert doc["permissions"] == {"contents": "read"}
     assert "github.ref" in doc["concurrency"]["group"]
+
+
+def _covered(rel: str) -> bool:
+    return any(fnmatch.fnmatchcase(rel, pattern) for pattern in PATHS)
+
+
+def test_path_filter_covers_every_file_the_bench_tests_read(pytestconfig: pytest.Config) -> None:
+    # Every ROOT-relative path chain in a bench test module, plus pytest's own config file.
+    read = set()
+    for module in (ROOT / "bench" / "tests").glob("*.py"):
+        for chain in re.findall(r'\bROOT((?:\s*/\s*"[^"]+")+)', module.read_text(encoding="utf-8")):
+            read.add("/".join(re.findall(r'"([^"]+)"', chain)))
+    assert {"BENCHMARKS.md", "constraints-ci.txt", "bench/results"} <= read  # control: the scan sees known reads
+    inipath = pytestconfig.inipath
+    if inipath is not None and inipath.is_relative_to(ROOT):
+        read.add(inipath.relative_to(ROOT).as_posix())
+    assert "pyproject.toml" in read  # control: the run's config file was seen
+    missing = sorted(rel for rel in read if not _covered(rel))
+    assert not missing, f"read by bench tests but outside the workflow path filter: {missing}"
 
 
 def test_workflow_steps_are_pinned_and_bracketed() -> None:
