@@ -12,7 +12,9 @@ WHAT THIS OWNS
   - Build the child environment from an allowlist (see build_child_env).
   - Verify the provider with a trivial headless claude -p call and record the
     resolved model.
-  - Write a manifest with provenance. Never write the provider token to disk.
+  - Write a manifest with provenance. Never write the provider token to disk;
+    run transcripts kept under --out can still hold it, so keep --out under
+    bench/.runs (gitignored) when it is inside the repo (a warning says so).
 
 WHY
   The evaluation must not read or write the live ~/.claude-deepseek state, and
@@ -32,7 +34,9 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
+import sys
 import tarfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +69,7 @@ INHERITED_ENV_KEYS = ("PATH", "LANG", "TERM")
 INHERITED_ENV_PREFIXES = ("LC_",)
 EXCLUDED_NAMES = {"tests", "__pycache__", ".git", ".pytest_cache"}
 SCRATCH_DIRS = ("config", "home", "tmp", "teams", "tasks", "pact-sessions")
+RUNS_DIR = REPO_ROOT / "bench" / ".runs"
 
 
 def utc_now() -> str:
@@ -90,6 +95,26 @@ def _git(repo: Path, *args: str) -> str:
     except subprocess.CalledProcessError as exc:
         raise SystemExit(f"git {' '.join(args)} failed in {repo}: {exc.stderr.strip()}") from exc
     return proc.stdout
+
+
+def run_process_group(
+    cmd: list[str], timeout: int, **kwargs: Any
+) -> subprocess.CompletedProcess[str]:
+    """subprocess.run, but the child leads its own session and a timeout (or any
+    interruption) kills the whole process group, so grandchildren cannot outlive it.
+    Raises subprocess.TimeoutExpired after the group is killed.
+    """
+    proc = subprocess.Popen(cmd, start_new_session=True, **kwargs)
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except BaseException:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
+        raise
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
 
 
 def is_scratch_env_key(key: str) -> bool:
@@ -215,11 +240,14 @@ def materialize_plugin(
         try:
             archive = staging / "plugin.tar"
             with archive.open("wb") as fh:
-                subprocess.run(
+                proc = subprocess.run(
                     ["git", "-C", str(repo), "archive", "--format=tar", prov["sha"], "pact-plugin"],
-                    check=True,
                     stdout=fh,
+                    stderr=subprocess.PIPE,
+                    text=True,
                 )
+            if proc.returncode != 0:
+                raise SystemExit(f"git archive {prov['sha']} pact-plugin failed in {repo}: {proc.stderr.strip()}")
             with tarfile.open(archive) as tf:
                 tf.extractall(staging, filter="data")
             copy_plugin_tree(staging / "pact-plugin", dest)
@@ -234,8 +262,13 @@ def build_scratch_settings(
     config_dir: Path,
     scratch: Path,
     model: str = DEFAULT_MODEL,
+    base_url: str = DEFAULT_BASE_URL,
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    data = json.loads(source.read_text(encoding="utf-8"))
+    """Write scratch settings.json. The model keys and ANTHROPIC_BASE_URL are
+    written into its env too, so they agree with the child env (settings env
+    can take precedence over the process env inside claude).
+    """
+    data = load_settings(source)
     env = {
         key: value
         for key, value in (data.get("env") or {}).items()
@@ -243,6 +276,7 @@ def build_scratch_settings(
     }
     for key in MODEL_ENV_KEYS:
         env[key] = model
+    env["ANTHROPIC_BASE_URL"] = base_url
     env["CLAUDE_CONFIG_DIR"] = str(config_dir)
     settings = {
         "env": env,
@@ -324,13 +358,14 @@ def verify_provider(
     """Run a trivial headless call; write provider-check.json on every outcome."""
     record: dict[str, Any] = {"checked_at": utc_now(), "requested_model": model}
     try:
-        proc = subprocess.run(
+        proc = run_process_group(
             [claude_bin, "-p", "Reply with exactly OK", "--output-format", "json", "--max-turns", "1"],
+            timeout,
             cwd=str(out),
             env=env,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
         )
     except FileNotFoundError as exc:
         record["error"] = f"claude binary not found: {claude_bin}"
@@ -389,9 +424,32 @@ def resolve_claude_bin(claude_bin: str | None) -> str:
     return resolved
 
 
+def load_settings(source: Path) -> dict[str, Any]:
+    """Parse the live settings; SystemExit unless it is a JSON object whose env is an object."""
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"--settings-source is not readable JSON: {source}: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("env", {}), (dict, type(None))):
+        raise SystemExit(f"--settings-source must be a JSON object with an object env: {source}")
+    return data
+
+
+def out_location_warning(out: Path) -> str | None:
+    """A warning when out is inside the repo but outside bench/.runs, where kept
+    transcripts (which can hold the provider token) could be committed."""
+    if out.is_relative_to(REPO_ROOT) and not out.is_relative_to(RUNS_DIR):
+        return (
+            f"warning: --out {out} is inside the repository but outside {RUNS_DIR}; "
+            "run transcripts kept there can hold the provider token and are not gitignored"
+        )
+    return None
+
+
 def check_inputs(settings_source: Path, token_file: Path) -> None:
     if not settings_source.is_file():
         raise SystemExit(f"--settings-source is not a file: {settings_source}")
+    load_settings(settings_source)
     if not token_file.is_file():
         raise SystemExit(f"--token-file is not a file: {token_file}")
     if not token_file.read_text(encoding="utf-8").strip():
@@ -400,6 +458,9 @@ def check_inputs(settings_source: Path, token_file: Path) -> None:
 
 def prepare(args: argparse.Namespace) -> int:
     out = Path(args.out).expanduser().resolve()
+    warning = out_location_warning(out)
+    if warning:
+        print(warning, file=sys.stderr)
     replace = out.exists() and any(out.iterdir())
     if replace and not args.force:
         raise SystemExit(f"output directory is not empty: {out}; pass --force to replace")
@@ -420,7 +481,7 @@ def prepare(args: argparse.Namespace) -> int:
         (out / name).mkdir(parents=True, exist_ok=True)
 
     plugin_path, prov = materialize_plugin(REPO_ROOT, out, args.plugin_ref, plugin_dir, prov)
-    settings, env = build_scratch_settings(settings_source, out / "config", out, args.model)
+    settings, env = build_scratch_settings(settings_source, out / "config", out, args.model, args.base_url)
     child_env = build_child_env(env, out, token_file, args.base_url)
     manifest: dict[str, Any] = {
         "schema": MANIFEST_SCHEMA,
@@ -454,9 +515,14 @@ def prepare(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Prepare an isolated PACT evaluation run.")
-    parser.add_argument("--out", required=True, help="scratch output directory")
-    parser.add_argument("--plugin-ref", default=None, help="git tag/SHA to evaluate; default current worktree")
-    parser.add_argument("--plugin-dir", default=None, help="explicit plugin directory to copy")
+    parser.add_argument(
+        "--out",
+        required=True,
+        help="scratch output directory; inside the repo, keep it under bench/.runs (gitignored)",
+    )
+    source = parser.add_mutually_exclusive_group()
+    source.add_argument("--plugin-ref", default=None, help="git tag/SHA to evaluate; default current worktree")
+    source.add_argument("--plugin-dir", default=None, help="explicit plugin directory to copy")
     parser.add_argument("--settings-source", default=str(DEFAULT_SETTINGS), help="live DeepSeek settings.json")
     parser.add_argument("--token-file", default=str(DEFAULT_TOKEN), help="DeepSeek token file")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="DeepSeek Anthropic-compatible endpoint")

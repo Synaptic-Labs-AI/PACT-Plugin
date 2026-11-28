@@ -52,6 +52,7 @@ def test_scratch_settings_preserve_env_and_override_config(tmp_path: Path) -> No
     assert settings["teammateMode"] == "in-process"
     assert "enabledPlugins" not in settings
     assert "agent" not in settings
+    assert env["ANTHROPIC_BASE_URL"] == prepare.DEFAULT_BASE_URL
     dirs = settings["permissions"]["additionalDirectories"]
     assert dirs == [str(scratch / "teams"), str(scratch / "tasks"), str(scratch / "pact-sessions")]
     assert "/tmp" not in dirs
@@ -119,6 +120,28 @@ def test_child_env_is_an_allowlist(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert env == expected
 
 
+def test_scratch_settings_carry_the_chosen_base_url(tmp_path: Path) -> None:
+    source = tmp_path / "settings.json"
+    source.write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "https://live.invalid"}}), encoding="utf-8")
+    settings, env = prepare.build_scratch_settings(
+        source, tmp_path / "config", tmp_path, "m", "https://chosen.invalid"
+    )
+    written = json.loads((tmp_path / "config" / "settings.json").read_text(encoding="utf-8"))
+    assert written["env"]["ANTHROPIC_BASE_URL"] == "https://chosen.invalid"
+    token = tmp_path / "token"
+    token.write_text("t", encoding="utf-8")
+    child = prepare.build_child_env(env, tmp_path, token, "https://chosen.invalid")
+    assert child["ANTHROPIC_BASE_URL"] == written["env"]["ANTHROPIC_BASE_URL"]
+
+
+@pytest.mark.parametrize("content", ["", "  \n"])
+def test_child_env_rejects_an_empty_token(content: str, tmp_path: Path) -> None:
+    token = tmp_path / "token"
+    token.write_text(content, encoding="utf-8")
+    with pytest.raises(SystemExit, match="empty provider token"):
+        prepare.build_child_env({}, tmp_path, token, "https://example.invalid")
+
+
 def test_copy_plugin_tree_excludes_tests_and_caches(tmp_path: Path) -> None:
     src = tmp_path / "plugin"
     (src / "tests").mkdir(parents=True)
@@ -174,6 +197,15 @@ def test_every_plugin_source_prunes_the_same_way(tmp_path: Path) -> None:
         shapes[label] = _tree(dest)
         assert not (out / ".plugin-src").exists()
     assert shapes["worktree"] == shapes["ref"] == ["hooks/a.py", "keep.txt", "skills/s/SKILL.md"]
+
+
+def test_failed_git_archive_is_a_clear_failure(tmp_path: Path) -> None:
+    repo = _plugin_repo(tmp_path)
+    out = tmp_path / "out"
+    out.mkdir()
+    with pytest.raises(SystemExit, match="git archive"):
+        prepare.materialize_plugin(repo, out, "HEAD", None, {"sha": "0" * 40})
+    assert not (out / ".plugin-src").exists()
 
 
 def test_dirty_tree_is_refused_before_any_write(tmp_path: Path) -> None:
@@ -251,6 +283,45 @@ def test_prepare_checks_inputs_before_writing(missing: str, tmp_path: Path) -> N
     with pytest.raises(SystemExit):
         prepare.main(args)
     assert not out.exists()
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]", '{"env": []}', '{"env": "x"}'])
+def test_prepare_rejects_bad_settings_before_writing(content: str, tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    args = _prepare_args(tmp_path, out)
+    (tmp_path / "live-settings.json").write_text(content, encoding="utf-8")
+    with pytest.raises(SystemExit, match="--settings-source"):
+        prepare.main(args)
+    assert not out.exists()
+
+
+def test_plugin_dir_and_plugin_ref_are_exclusive(tmp_path: Path) -> None:
+    with pytest.raises(SystemExit) as exc:
+        prepare.main(_prepare_args(tmp_path, tmp_path / "out", "--plugin-ref", "HEAD"))
+    assert exc.value.code == 2
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize(
+    ("location", "warns"),
+    [("repo_root_child", True), ("bench_runs", False), ("outside_repo", False)],
+)
+def test_out_location_warning(location: str, warns: bool, tmp_path: Path) -> None:
+    out = {
+        "repo_root_child": prepare.REPO_ROOT / "eval-out",
+        "bench_runs": prepare.RUNS_DIR / "eval-out",
+        "outside_repo": tmp_path / "eval-out",
+    }[location]
+    warning = prepare.out_location_warning(out)
+    assert (warning is not None) == warns
+    if warns:
+        assert "bench/.runs" in warning and "token" in warning
+
+
+def test_prepare_prints_the_out_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.setattr(prepare, "out_location_warning", lambda out: "warning: test-marker")
+    assert prepare.main(_prepare_args(tmp_path, tmp_path / "out")) == 0
+    assert "warning: test-marker" in capsys.readouterr().err
 
 
 def test_prepare_rejects_empty_token_before_writing(tmp_path: Path) -> None:

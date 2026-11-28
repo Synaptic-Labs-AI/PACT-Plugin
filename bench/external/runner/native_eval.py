@@ -4,13 +4,15 @@
 Reads the prepare manifest, injects bench/external/native-evals/evals into the
 scratch plugin copy, runs claude plugin eval headlessly with the scratch
 DeepSeek environment, and records the command/result/exit code in
-<run>/native-eval/result.json on every exit path.
+<run>/native-eval/result.json on every exit path. The model (CLI --model and
+--judge-model) is the one fixed at prepare time, read from the manifest. A
+timeout kills the eval's whole process group.
 
 Cleanup contract: the short TMPDIR/HOME root under --temp-root and the
 injected evals/ dir are removed on every exit path (an evals/results/ dir the
-tool wrote is moved to <run>/native-eval/plugin-evals-results/ first). The scaffold dirs that
---keep-temp leaves under TMPDIR are moved to <run>/native-eval/kept-temp/
-first (the eval tool makes some of them read-only, so they are made writable
+tool wrote is moved to <run>/native-eval/plugin-evals-results/<run id>/ first).
+The scaffold dirs that --keep-temp leaves under TMPDIR are moved to
+<run>/native-eval/kept-temp/<run id>/ first (the eval tool makes some of them read-only, so they are made writable
 before the move). A cleanup failure is recorded and makes the run exit 1.
 """
 from __future__ import annotations
@@ -34,6 +36,7 @@ TEMP_PREFIX = "pact-native-"
 # tempfile.mkdtemp appends 8 random characters to the prefix.
 TEMP_SUFFIX_CHARS = 8
 TIMEOUT_EXIT_CODE = 124
+REPORT_FILES = {"report_json": "report.json", "report_html": "report.html"}
 
 
 def _default_cases() -> Path:
@@ -63,18 +66,14 @@ def _check_cases(cases_dir: Path) -> None:
         raise SystemExit(f"native eval cases directory is empty: {cases_dir}")
 
 
-def _child_env(manifest: dict[str, Any], scratch: Path, model: str | None) -> dict[str, str]:
+def _child_env(manifest: dict[str, Any], scratch: Path) -> dict[str, str]:
     settings = json.loads((scratch / "config" / "settings.json").read_text(encoding="utf-8"))
-    env = prepare.build_child_env(
+    return prepare.build_child_env(
         dict(settings.get("env") or {}),
         scratch,
         Path(manifest["provider"]["token_file"]),
         str(manifest["provider"]["base_url"]),
     )
-    if model:
-        for key in prepare.MODEL_ENV_KEYS:
-            env[key] = model
-    return env
 
 
 def build_command(args: argparse.Namespace, claude_bin: str, plugin: Path, out: Path, model: str) -> list[str]:
@@ -111,7 +110,7 @@ def build_command(args: argparse.Namespace, claude_bin: str, plugin: Path, out: 
         "--model",
         model,
         "--judge-model",
-        args.judge_model or model,
+        model,
     ]
     if args.max_cost_usd is not None:
         cmd.extend(["--max-cost-usd", str(args.max_cost_usd)])
@@ -123,7 +122,7 @@ def _launch(cmd: list[str], cwd: Path, env: dict[str, str], out: Path, timeout: 
         "w", encoding="utf-8"
     ) as stderr:
         try:
-            proc = subprocess.run(cmd, cwd=str(cwd), env=env, stdout=stdout, stderr=stderr, timeout=timeout)
+            proc = prepare.run_process_group(cmd, timeout, cwd=str(cwd), env=env, stdout=stdout, stderr=stderr)
         except subprocess.TimeoutExpired:
             return TIMEOUT_EXIT_CODE, True
         except OSError as exc:
@@ -132,14 +131,17 @@ def _launch(cmd: list[str], cwd: Path, env: dict[str, str], out: Path, timeout: 
 
 
 def _cleanup(short_root: Path | None, injected: Path | None, out: Path, record: dict[str, Any]) -> None:
-    """Keep the --keep-temp scaffolds, then remove the short root and the injected evals."""
+    """Keep the --keep-temp scaffolds and the evals results under this run's id
+    (the short root's name), then remove the short root and the injected evals.
+    injected is only ever set after short_root exists."""
     errors: list[str] = []
+    run_id = short_root.name if short_root is not None else "unknown-run"
     if short_root is not None and short_root.exists():
         try:
             make_writable(short_root)
             kept = short_root / "tmp"
             if kept.is_dir() and any(kept.iterdir()):
-                target = out / "kept-temp" / short_root.name
+                target = out / "kept-temp" / run_id
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(kept), str(target))
                 record["kept_temp"] = str(target)
@@ -151,8 +153,10 @@ def _cleanup(short_root: Path | None, injected: Path | None, out: Path, record: 
             make_writable(injected)
             results = injected / "results"
             if results.is_dir():
-                shutil.move(str(results), str(out / "plugin-evals-results"))
-                record["plugin_evals_results"] = str(out / "plugin-evals-results")
+                target = out / "plugin-evals-results" / run_id
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(results), str(target))
+                record["plugin_evals_results"] = str(target)
             shutil.rmtree(injected)
         except OSError as exc:
             errors.append(f"injected evals {injected}: {exc}")
@@ -170,7 +174,10 @@ def run(args: argparse.Namespace) -> int:
     temp_parent = Path(args.temp_root).expanduser().absolute()
     out = scratch / "native-eval"
     out.mkdir(parents=True, exist_ok=True)
-    model = args.model or manifest["provider"]["model"]
+    # The reports are rewritten each run; a stale one must not be recorded as this run's.
+    for name in REPORT_FILES.values():
+        (out / name).unlink(missing_ok=True)
+    model = manifest["provider"]["model"]
     record: dict[str, Any] = {
         "schema": "pact-bench/native-eval/1",
         "command": None,
@@ -196,7 +203,7 @@ def run(args: argparse.Namespace) -> int:
                 f"{predicted_tmpdir_length(temp_parent)} chars (max {MAX_TMPDIR_CHARS}); "
                 "choose a shorter --temp-root"
             )
-        env = _child_env(manifest, scratch, args.model)
+        env = _child_env(manifest, scratch)
         temp_parent.mkdir(parents=True, exist_ok=True)
         short_root = Path(tempfile.mkdtemp(prefix=TEMP_PREFIX, dir=str(temp_parent)))
         record["temp_root"] = str(short_root)
@@ -218,7 +225,7 @@ def run(args: argparse.Namespace) -> int:
         raise
     finally:
         _cleanup(short_root, injected, out, record)
-        for key, name in (("report_json", "report.json"), ("report_html", "report.html")):
+        for key, name in REPORT_FILES.items():
             record[key] = str(out / name) if (out / name).is_file() else None
         (out / "result.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(record, indent=2))
@@ -238,8 +245,6 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     )
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--concurrency", type=int, default=1)
-    parser.add_argument("--model", default=None, help="override the prepared model for lead, subagents and CLI")
-    parser.add_argument("--judge-model", default=None)
     parser.add_argument("--max-cost-usd", type=float, default=None)
     parser.add_argument("--timeout", type=int, default=3600)
     parser.add_argument("--claude-bin", default=None)

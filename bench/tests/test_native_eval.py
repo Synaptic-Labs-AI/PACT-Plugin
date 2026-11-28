@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import tempfile
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -113,15 +115,82 @@ def test_native_eval_injects_cases_and_records_command(tmp_path: Path, short_roo
     assert _leftovers(short_root) == []
 
 
-def test_native_eval_model_override_reaches_child_env(tmp_path: Path, short_root: Path) -> None:
+def test_native_eval_uses_the_prepared_model(tmp_path: Path, short_root: Path) -> None:
     manifest, cases, _plugin = _prepared(tmp_path)
     fake = _fake_claude(tmp_path)
-    assert native_eval.run(_args(manifest, cases, fake, short_root, "--model", "other")) == 0
-    child = json.loads((tmp_path / "env.json").read_text(encoding="utf-8"))
-    assert child["ANTHROPIC_MODEL"] == "other"
-    assert child["CLAUDE_CODE_SUBAGENT_MODEL"] == "other"
+    assert native_eval.run(_args(manifest, cases, fake, short_root)) == 0
     command = _result(manifest)["command"]
-    assert command[command.index("--model") + 1] == "other"
+    assert command[command.index("--model") + 1] == "deepseek-flash[1m]"
+    assert command[command.index("--judge-model") + 1] == "deepseek-flash[1m]"
+    child = json.loads((tmp_path / "env.json").read_text(encoding="utf-8"))
+    assert child["CLAUDE_CODE_SUBAGENT_MODEL"] == "deepseek-flash[1m]"
+
+
+@pytest.mark.parametrize("flag", ["--model", "--judge-model"])
+def test_native_eval_has_no_model_overrides(flag: str, tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    with pytest.raises(SystemExit) as exc:
+        _args(manifest, cases, _fake_claude(tmp_path), short_root, flag, "other")
+    assert exc.value.code == 2
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def test_native_eval_timeout_kills_grandchildren(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    pid_file = tmp_path / "grandchild.pid"
+    body = (
+        "import subprocess\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(60)\n"
+    )
+    fake = _fake_claude(tmp_path, body)
+    assert native_eval.run(_args(manifest, cases, fake, short_root, "--timeout", "2")) == 1
+    assert _result(manifest)["timed_out"] is True
+    grandchild = int(pid_file.read_text(encoding="utf-8"))
+    deadline = time.monotonic() + 5
+    while _alive(grandchild) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not _alive(grandchild)
+
+
+def test_native_eval_does_not_record_a_stale_report(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    out = manifest.parent / "native-eval"
+    out.mkdir()
+    (out / "report.json").write_text("{}", encoding="utf-8")
+    (out / "report.html").write_text("<html></html>", encoding="utf-8")
+    silent = tmp_path / "silent-claude"
+    silent.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    silent.chmod(0o755)
+    assert native_eval.run(_args(manifest, cases, silent, short_root)) == 0
+    record = _result(manifest)
+    assert record["report_json"] is None and record["report_html"] is None
+
+
+def test_native_eval_keeps_each_runs_eval_results_separately(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, plugin = _prepared(tmp_path)
+    body = (
+        f"results = os.path.join({str(plugin / 'evals')!r}, 'results')\n"
+        "os.makedirs(results)\n"
+        "open(os.path.join(results, 'aggregate.json'), 'w').write('{}')\n"
+    )
+    fake = _fake_claude(tmp_path, body)
+    kept = []
+    for _ in range(2):
+        assert native_eval.run(_args(manifest, cases, fake, short_root)) == 0
+        kept.append(Path(_result(manifest)["plugin_evals_results"]))
+    assert kept[0] != kept[1]
+    for path in kept:
+        assert path.parent == manifest.parent / "native-eval" / "plugin-evals-results"
+        assert sorted(p.name for p in path.iterdir()) == ["aggregate.json"]
 
 
 def test_native_eval_nonzero_exit_fails_the_run(tmp_path: Path, short_root: Path) -> None:
