@@ -7537,6 +7537,10 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function shared.project_scope: located.absolute>"): (
             "a method of a located document path, which the census cannot type"
         ),
+        ("call", "<name imported from a project module cli: SHARED_BUCKET_REASONS>"): (
+            "the identity layer's fixed set of unproven reasons that place rows in another "
+            "checkout, which the rekey refusal reads to refuse a shared bucket"
+        ),
         ("call", "<name imported from a project module cli: AmbiguousPrefixError>"): (
             "database's error class, caught by a command"
         ),

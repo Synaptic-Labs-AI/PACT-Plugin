@@ -2674,3 +2674,44 @@ def test_a_submodules_suppressed_bucket_into_its_id_is_refused(identity_env, sto
         ["project-id", "rekey", "--from=modules", "--to=github.com/acme/lib", "--db-path", str(store)],
         store, capfd, "this submodule's pre-upgrade bucket",
     )
+
+
+def test_a_bucket_shared_with_another_checkout_offers_no_move_and_refuses_one(
+    identity_env, store, monkeypatch, capfd, caplog
+):
+    """x/app (origin a/app) and y/app (origin b/app) both saved files into the
+    old 'app' bucket, so from x/app it is unproven and shared. No surface
+    prints a runnable move for it, and the move into this checkout's id is
+    refused (dry run too) naming the other checkout's rows; only
+    --from-another-repository moves it. RED WHEN the shared bucket's rows can
+    be moved out of y/app's reads unflagged, or a command is printed."""
+    import logging
+
+    from scripts import memory_api
+
+    for memo in (memory_api._LEGACY_SCOPE_CACHE, memory_api._UNPROVEN_WARNED):
+        memo.clear()
+    mine = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    theirs = make_repo(identity_env / "y" / "app", remote="https://github.com/b/app.git")
+    (mine / "f.py").write_text("x\n")
+    (theirs / "g.py").write_text("y\n")
+    _seed(store, "app", memory_id="mine00001", path=str(mine / "f.py"))
+    _seed(store, "app", memory_id="theirs001", path=str(theirs / "g.py"))
+    monkeypatch.chdir(mine)
+    with caplog.at_level(logging.WARNING):
+        code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    assert code == 0 and shown["result"]["legacy_scope"]["unproven"] is True, shown
+    rows = {row["id"]: row for row in shown["result"]["candidates"]}
+    assert rows["app"]["rekey"] is None, rows
+    warned = " ".join(record.getMessage() for record in caplog.records)
+    assert "--from=app" not in warned and "--from-another-repository" in warned, warned
+    before = _snapshot(store)
+    argv = ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--db-path", str(store)]
+    for apply in ([], ["--apply"]):
+        code, envelope = _cli([*argv, *apply], capfd)
+        assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
+        assert "holds rows placed in another checkout too" in envelope["message"], envelope
+        assert "1 of its file rows lie in another checkout" in envelope["message"], envelope
+        assert _snapshot(store) == before
+    code, envelope = _cli([*argv, "--apply", "--from-another-repository"], capfd)
+    assert code == 0 and envelope["result"]["memories"] == 2, envelope

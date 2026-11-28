@@ -67,6 +67,7 @@ from scripts.memory_api import (
     PACTMemory,
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
+    SHARED_BUCKET_REASONS,
     _UNPROVEN_WARNED,
     _invalidate_legacy_scope_cache,
     _read_only_connection,
@@ -1658,7 +1659,18 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         and from_as_id != own_id
     ):
         candidate = state.get("candidate")
-        if legacy_verdict == "excluded":
+        if legacy_verdict == "unproven" and state.get("unproven_reason") in SHARED_BUCKET_REASONS:
+            foreign_source = (
+                "holds rows placed in another checkout too: "
+                + _unproven_cause(
+                    state["unproven_reason"],
+                    {**(state.get("sessions") or {}), **(state.get("detail") or {})},
+                    from_id,
+                )
+                + ". A rekey moves the whole bucket, so that checkout would no "
+                "longer read its rows"
+            )
+        elif legacy_verdict == "excluded":
             foreign_source = (
                 "was excluded for this checkout: its file rows place it in "
                 "another repository"

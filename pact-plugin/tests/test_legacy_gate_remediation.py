@@ -459,11 +459,22 @@ def test_a_defaulted_rekey_refuses_the_shared_bucket(shared_bucket, monkeypatch,
     assert exit_info.value.code == 1, envelope
     assert envelope["error"] == "REKEY_REFUSED"
     assert "1 of its file rows lie in another checkout" in envelope["message"]
+    # An explicit --to into this checkout's id is refused too, dry run
+    # included: the move would take the other checkout's rows with it.
     memory_api._LEGACY_SCOPE_CACHE.clear()
     with pytest.raises(SystemExit) as exit_info:
         main([
             "project-id", "rekey", f"--from={NAME}", f"--to={CANONICAL}",
             "--db-path", str(store),
+        ])
+    envelope = json.loads(capfd.readouterr().err)
+    assert exit_info.value.code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
+    assert "holds rows placed in another checkout too" in envelope["message"], envelope
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    with pytest.raises(SystemExit) as exit_info:
+        main([
+            "project-id", "rekey", f"--from={NAME}", f"--to={CANONICAL}",
+            "--from-another-repository", "--db-path", str(store),
         ])
     assert exit_info.value.code == 0, capfd.readouterr()
 

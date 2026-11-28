@@ -1064,6 +1064,11 @@ def _evidence_part(verdict: BucketVerdict) -> Dict[str, int]:
     return {key: verdict.counts[key] for key in BUCKET_EVIDENCE_KEYS}
 
 
+# The unproven reasons whose evidence places rows in another checkout too:
+# such a bucket is shared, so no surface offers a whole-bucket move.
+SHARED_BUCKET_REASONS = frozenset({"foreign_rows", "recorded_elsewhere"})
+
+
 def _warn_legacy_unproven(
     store: str,
     candidate: str,
@@ -1071,9 +1076,12 @@ def _warn_legacy_unproven(
     memories: int,
     file_paths: int,
     cause: str,
+    shared: bool = False,
 ) -> None:
     """Disclose an UNPROVEN legacy bucket, once per process per bucket, with
-    the reason it was not read (`_unproven_cause`)."""
+    the reason it was not read (`_unproven_cause`). A `shared` bucket
+    (`SHARED_BUCKET_REASONS`) gets no runnable command: a move takes every
+    row, the other checkout's too."""
     if _LEGACY_NOTICES_QUIET.get():
         return
     key = (store, candidate)
@@ -1090,9 +1098,17 @@ def _warn_legacy_unproven(
         file_paths,
         "" if file_paths == 1 else "s",
         cause,
-        _preview_clause(
-            "If they are, preview the move with:", candidate, target,
-            runnable_rekey_command(candidate, target, db_path=store),
+        (
+            " Its rows include another checkout's, and a move takes the whole "
+            "bucket, so after one that checkout no longer reads its rows: move "
+            "it only with the user's approval that every row is this "
+            "repository's, passing --from-another-repository to "
+            "`project-id rekey`."
+            if shared
+            else _preview_clause(
+                "If they are, preview the move with:", candidate, target,
+                runnable_rekey_command(candidate, target, db_path=store),
+            )
         ),
     )
 
@@ -4687,6 +4703,7 @@ class PACTMemory:
                     rekey=(
                         None
                         if state_name == "excluded"
+                        or (state_name == "unproven" and verdict.reason in SHARED_BUCKET_REASONS)
                         else runnable_rekey_command(candidate, scope, db_path=store)
                     ),
                     included=included,
@@ -4715,6 +4732,7 @@ class PACTMemory:
                     _warn_legacy_unproven(
                         store, candidate, scope, memory_count, file_paths or 0,
                         _unproven_cause(verdict.reason, verdict.counts, candidate),
+                        shared=verdict.reason in SHARED_BUCKET_REASONS,
                     )
                 elif state_name == "included_unverified" and verdict.counts["unattributed"]:
                     _warn_legacy_unattributed(store, candidate, scope, verdict.counts)
