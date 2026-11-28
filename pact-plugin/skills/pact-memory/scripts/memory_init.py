@@ -360,8 +360,11 @@ def _store_key() -> str:
 # worst case is that a sweep runs more than once.
 _PROCESS_MARKER_TOKEN = f"process-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
-# Where the session markers live.
-_MARKER_DIR = Path("/tmp")
+# Where the session markers live. A test harness relocates them with this
+# variable, read once at import, as it relocates the store
+# (`config.MEMORY_DIR_ENV`); production leaves it unset.
+MARKER_DIR_ENV = "PACT_TEST_MARKER_DIR"
+_MARKER_DIR = Path(os.environ.get(MARKER_DIR_ENV) or "/tmp")
 
 # Upper bound for the session-derived part of the /tmp marker filename. 64
 # keeps the whole name far below NAME_MAX (255 on the usual filesystems) while

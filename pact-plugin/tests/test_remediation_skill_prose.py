@@ -6999,6 +6999,10 @@ class TestEveryRouteEntryConditionIsARoute:
             "session-record and worktree identity record routes replace those readers"
         ),
         ("env", "PYTEST_CURRENT_TEST"): "the session-record readers' test-process guard",
+        ("env", "PACT_TEST_MARKER_DIR"): (
+            "the test harness's relocation of memory_init's embedding markers, read once at import; "
+            "it chooses where a marker file is written, not which repository is resolved"
+        ),
         ("env", "PACT_TEST_MEMORY_DIR"): (
             "read inside get_user_memory_dir, which the user-setting route replaces"
         ),

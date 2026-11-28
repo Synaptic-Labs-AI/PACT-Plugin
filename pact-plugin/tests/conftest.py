@@ -221,6 +221,12 @@ _MEMORY_DIR_ENV = "PACT_TEST_MEMORY_DIR"
 # Session-wide fallback store, created once and reused. See pytest_configure.
 _SESSION_MEMORY_DIR = os.path.join(_process_temp_dir("pact-memory-suite-"), "pact-memory")
 
+# The variable that relocates memory_init's embedding markers, duplicated from
+# `scripts.memory_init.MARKER_DIR_ENV` for the reason above, and the
+# session-wide directory it names. See pytest_configure.
+_MARKER_DIR_ENV = "PACT_TEST_MARKER_DIR"
+_SESSION_MARKER_DIR = _process_temp_dir("pact-markers-suite-")
+
 
 def pytest_configure(config):
     """Register markers that DECLARE an external dependency.
@@ -287,6 +293,9 @@ def pytest_configure(config):
     # would point the whole suite at the very store this exists to protect. The
     # fail direction of `setdefault` here is ALLOW, and it is silent.
     os.environ[_MEMORY_DIR_ENV] = _SESSION_MEMORY_DIR
+    # The embedding markers likewise, for the same two reasons: an import at
+    # collection and a spawned child both read it before any fixture runs.
+    os.environ[_MARKER_DIR_ENV] = _SESSION_MARKER_DIR
 
     # UNLIKE `requires_embedding_backend` AND `claude_md_ambient` ABOVE, THIS
     # MARKER SKIPS THE TEST. The first is left for the operator to deselect, and
@@ -992,6 +1001,31 @@ def _scrub_session_id_from_test_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _confine_embedding_markers(tmp_path_factory, monkeypatch):
+    """Point memory_init's marker directory at a directory of this test's own.
+    Runs for EVERY test (autouse).
+
+    `memory_init` writes its embedding markers in `_MARKER_DIR` (`/tmp` in
+    production), and a session's marker outlives its process by design, so
+    without this a run leaves markers in the real /tmp. The variable carries
+    the directory to a child the test spawns; the session-wide one set in
+    pytest_configure covers what runs outside a test, and the bare
+    `memory_init` module some tests import. A test that sets `_MARKER_DIR`
+    itself replaces this one for that test.
+    """
+    try:
+        from scripts import memory_init
+    except Exception:  # noqa: BLE001 — a broken import fails its own tests
+        yield
+        return
+    markers = tmp_path_factory.mktemp("markers")
+    # A child spawned by the test reads the variable at import.
+    monkeypatch.setenv(_MARKER_DIR_ENV, str(markers))
+    monkeypatch.setattr(memory_init, "_MARKER_DIR", markers)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _refuse_a_marker_under_an_importer_session_id():
     """Fail a test after which an importer session id's embedding marker exists.
 
@@ -1025,9 +1059,10 @@ def _reset_memory_init_state():
 
     WHAT THIS DOES NOT CLOSE, stated here so the reset is not read as more than
     it is. `maybe_embed_pending()` has a SECOND, INDEPENDENT guard: a marker
-    file at `/tmp/pact_embedding_attempted_<session>`, which is session-scoped
-    and shared, not per-database, and which this fixture deliberately does not
-    remove -- the marker belongs to any real session on the same machine, and
+    file `pact_embedding_attempted_<session>` (in a per-test directory, see
+    `_confine_embedding_markers`), which is session-scoped, not per-database,
+    and which this fixture deliberately does not remove -- outside the suite
+    the marker belongs to the session, and
     `memory_init` separates `clear_embedding_marker()` from
     `reset_initialization()` for exactly that reason. So a second store still
     gets "Already attempted this session" for the catch-up. This fixture

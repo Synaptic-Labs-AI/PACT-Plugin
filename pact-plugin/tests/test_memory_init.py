@@ -3659,7 +3659,7 @@ class TestTheEmbeddingAttemptMarkerPathIsSanitised:
         )
         marker = memory_init._get_embedding_attempted_path()
 
-        assert marker.parent == Path("/tmp"), marker
+        assert marker.parent == memory_init._MARKER_DIR, marker
         assert "\x00" not in marker.name, marker.name
         assert "/" not in marker.name, marker.name
         assert ".." not in marker.name, marker.name
@@ -3674,9 +3674,29 @@ class TestTheEmbeddingAttemptMarkerPathIsSanitised:
         monkeypatch.setattr(
             memory_init, "get_session_id_from_context_file", lambda: "abc-123_XY"
         )
-        assert memory_init._get_embedding_attempted_path() == Path(
-            "/tmp/pact_embedding_attempted_abc-123_XY"
+        assert memory_init._get_embedding_attempted_path() == (
+            memory_init._MARKER_DIR / "pact_embedding_attempted_abc-123_XY"
         )
+
+
+def test_the_marker_directory_is_tmp_unless_the_test_variable_names_one(tmp_path):
+    """Production composes markers in /tmp; PACT_TEST_MARKER_DIR, read at
+    import, relocates them. RED WHEN the default moves or the variable is not
+    read."""
+    import os
+    import subprocess
+    import sys
+
+    scripts = Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "scripts"
+    probe = "import memory_init; print(memory_init._MARKER_DIR)"
+    base = {k: v for k, v in os.environ.items() if k != "PACT_TEST_MARKER_DIR"}
+    unset = subprocess.run([sys.executable, "-c", probe], cwd=scripts, env=base,
+                           capture_output=True, text=True, timeout=60)
+    named = subprocess.run([sys.executable, "-c", probe], cwd=scripts,
+                           env={**base, "PACT_TEST_MARKER_DIR": str(tmp_path)},
+                           capture_output=True, text=True, timeout=60)
+    assert unset.stdout.strip() == "/tmp", unset.stderr
+    assert named.stdout.strip() == str(tmp_path), named.stderr
 
 
 class TestTheEmbeddingAttemptMarkerPathIsLengthBounded:

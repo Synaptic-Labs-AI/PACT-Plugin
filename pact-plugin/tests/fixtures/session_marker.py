@@ -1,6 +1,7 @@
 """Per-test session ids for tests whose memory saves reach the embedding marker.
 
-memory_init.maybe_embed_pending() touches /tmp/pact_embedding_attempted_<sid>
+memory_init.maybe_embed_pending() touches pact_embedding_attempted_<sid> in its
+marker directory (a per-test directory under the suite's conftest)
 once per session id and skips the catch-up whenever that file exists. A test
 module that keeps one fixed session id therefore leaves a marker that makes
 every later run, and every other worker, skip the sweep. fresh_session_id gives
@@ -14,21 +15,19 @@ fails any test after which one of these markers exists.
 
 import contextlib
 import uuid
-from pathlib import Path
-
-# The directory memory_init composes the marker in; tests/test_session_marker.py
-# pins that embedding_marker() equals memory_init's path. The ids built by
-# callers use only [0-9a-z-], which its slug sanitiser keeps, and stay under its
-# 64-char cap.
-_MARKER_DIR = Path("/tmp")
 
 # Every id importer_session_id has handed out in this process.
 _IMPORTER_SESSION_IDS: set[str] = set()
 
 
 def embedding_marker(session_id):
-    """The marker path memory_init uses for a session id of safe characters."""
-    return _MARKER_DIR / f"pact_embedding_attempted_{session_id}"
+    """The marker path memory_init uses for a session id of safe characters,
+    in its current marker directory; tests/test_session_marker.py pins that it
+    equals memory_init's path. The ids built by callers use only [0-9a-z-],
+    which its slug sanitiser keeps, and stay under its 64-char cap."""
+    from scripts import memory_init
+
+    return memory_init._MARKER_DIR / f"pact_embedding_attempted_{session_id}"
 
 
 def importer_session_id():
@@ -74,4 +73,7 @@ def fresh_session_id(monkeypatch, module, name, make_id, seen):
     try:
         yield session_id
     finally:
-        embedding_marker(session_id).unlink(missing_ok=True)
+        from scripts import memory_init
+
+        # The read-attempt markers beside it too (`memory_init._unlink_marker`).
+        memory_init._unlink_marker(embedding_marker(session_id))

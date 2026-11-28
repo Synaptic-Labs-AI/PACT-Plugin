@@ -162,6 +162,7 @@ def child_env(
       default), which is the point of most rows
     - PACT_TEST_MEMORY_DIR=memory_dir when given (the store redirect; the
       child must not open the operator's real memory store)
+    - PACT_TEST_MARKER_DIR as the suite set it (the embedding-marker redirect)
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -187,6 +188,10 @@ def child_env(
         env["CLAUDE_PROJECT_DIR"] = str(project_dir)
     if memory_dir is not None:
         env["PACT_TEST_MEMORY_DIR"] = str(memory_dir)
+    # The embedding-marker redirect the suite's conftest sets, so the child's
+    # markers land in the test's directory, not the real /tmp.
+    if os.environ.get("PACT_TEST_MARKER_DIR"):
+        env["PACT_TEST_MARKER_DIR"] = os.environ["PACT_TEST_MARKER_DIR"]
     return env
 
 
