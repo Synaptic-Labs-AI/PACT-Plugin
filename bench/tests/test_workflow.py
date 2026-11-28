@@ -3,22 +3,101 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github" / "workflows" / "bench-harness.yml"
+RUN_HERMETIC = ROOT / "bench" / "run_hermetic.sh"
+BOOTSTRAP = ROOT / "bench" / "bootstrap.sh"
+BENCH_LOCK = ROOT / "bench" / "constraints.txt"
+CI_LOCK = ROOT / "constraints-ci.txt"
+
+PATHS = [
+    "bench/**",
+    ".github/workflows/bench-harness.yml",
+    "constraints-ci.txt",
+    "scripts/verify_ci_environment.py",
+]
+HASHED_INSTALL = "--only-binary=:all: --require-hashes -r"
+VERIFY = "python scripts/verify_ci_environment.py"
+STEPS = [
+    ("uses", "actions/checkout"),
+    ("uses", "actions/setup-python"),
+    ("run", f"python -m pip install {HASHED_INSTALL} constraints-ci.txt"),
+    ("run", VERIFY),
+    ("run", "bash bench/run_hermetic.sh"),
+    ("run", VERIFY),
+]
 
 
-def test_workflow_is_read_only_and_hermetic() -> None:
+def _workflow() -> dict:
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def _steps() -> list[dict]:
+    jobs = _workflow()["jobs"]
+    assert list(jobs) == ["hermetic"]
+    return jobs["hermetic"]["steps"]
+
+
+def _lock(path: Path) -> dict[str, str]:
+    """Name -> version for every pin; asserts each pin carries a hash line."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    pins: dict[str, str] = {}
+    for n, line in enumerate(lines):
+        m = re.match(r"^([A-Za-z0-9._-]+)==([^\s;]+)", line)
+        if m:
+            assert line.rstrip().endswith("\\"), f"{path.name}: {m.group(1)} has no hash"
+            assert lines[n + 1].strip().startswith("--hash=sha256:"), m.group(1)
+            pins[m.group(1).lower()] = m.group(2)
+    return pins
+
+
+def test_workflow_triggers_and_paths() -> None:
+    doc = _workflow()
+    on = doc.get("on", doc.get(True))  # PyYAML reads a bare `on` key as True
+    assert on == {
+        "pull_request": {"paths": PATHS},
+        "push": {"branches": ["main"], "paths": PATHS},
+    }
+    assert doc["permissions"] == {"contents": "read"}
+    assert "github.ref" in doc["concurrency"]["group"]
+
+
+def test_workflow_steps_are_pinned_and_bracketed() -> None:
+    steps = _steps()
+    shape = [("uses", s["uses"].split("@")[0]) if "uses" in s else ("run", s["run"].strip())
+             for s in steps]
+    assert shape == STEPS
+    for step in steps:
+        if "uses" in step:
+            assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", step["uses"]), step["uses"]
+        else:
+            assert not {"env", "shell", "continue-on-error", "working-directory"} & set(step), step
+    assert steps[0]["with"]["persist-credentials"] is False
+    assert steps[-1].get("if") == "always()"
+    assert all("if" not in s for s in steps[:-1])
+    assert _workflow()["jobs"]["hermetic"]["timeout-minutes"] == 10
+
+
+def test_workflow_uses_no_secrets_or_model_calls() -> None:
     text = WORKFLOW.read_text(encoding="utf-8")
-    assert "permissions:\n  contents: read" in text
-    assert "bash bench/run_hermetic.sh" in text
-    assert text.count("python scripts/verify_ci_environment.py") == 2
-    assert "if: always()" in text
     assert not re.search(r"secrets\.|ANTHROPIC|OPENAI|claude\s+-p|claude plugin eval", text)
-    uses = re.findall(r"uses: [^@\s]+@([0-9a-f]{40})", text)
-    assert len(uses) == 2
 
 
-def test_workflow_is_path_triggered() -> None:
-    text = WORKFLOW.read_text(encoding="utf-8")
-    assert '"bench/**"' in text
-    assert "pull_request:" in text
+def test_run_hermetic_runs_only_bench_tests_from_repo_root() -> None:
+    text = RUN_HERMETIC.read_text(encoding="utf-8")
+    assert 'cd "$(dirname "$0")/.."' in text
+    assert re.search(r'^exec "\$py" -m pytest bench/tests -q$', text, re.M)
+
+
+def test_bootstrap_installs_the_hashed_bench_lock() -> None:
+    text = BOOTSTRAP.read_text(encoding="utf-8")
+    assert f'-m pip install {HASHED_INSTALL} "$here/constraints.txt"' in text
+    assert "sys.version_info < (3, 12)" in text
+    assert "--upgrade" not in text
+    bench = _lock(BENCH_LOCK)
+    assert {"pip", "pytest", "pyyaml"} <= set(bench)
+    ci = _lock(CI_LOCK)
+    drift = {n: (v, ci[n]) for n, v in bench.items() if n in ci and ci[n] != v}
+    assert not drift, f"bench/constraints.txt drifted from constraints-ci.txt: {drift}"
