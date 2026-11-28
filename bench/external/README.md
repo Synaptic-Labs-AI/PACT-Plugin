@@ -192,8 +192,9 @@ model> --judge-model <manifest model>`.
 Case layout is the CLI's native format: `<eval dir>/**/case.yaml`, or
 `prompt.md` + `graders/*.md`. Results: `<out>/native-eval/result.json` (written
 on every exit once the manifest loads; a timeout records exit code 124, and
-`error` is set for any exception or signal), `report.json`, `report.html`, and
-`runs/`. The eval runs from `<temp-root>/pact-native-XXXXXXXX/work`, and the
+`error` is set for any exception or signal; an unreadable or incomplete prepare
+manifest fails with `cannot read prepare manifest …` before anything is
+written), `report.json`, `report.html`, and `runs/`. The eval runs from `<temp-root>/pact-native-XXXXXXXX/work`, and the
 child's `HOME` and `TMPDIR` are `<temp-root>/pact-native-XXXXXXXX/{home,tmp}`
 (default `--temp-root` is `/tmp`); `TMPDIR` must be at most 51 characters, checked before anything is
 created. `--keep-temp` scaffolds are moved to
@@ -203,7 +204,9 @@ created. `--keep-temp` scaffolds are moved to
 previous run's `report.json` and `report.html` are deleted at the start of each
 run, so `result.json` names only reports this run wrote. A SIGTERM or SIGHUP
 kills the eval's process group, records `terminated by SIGTERM` (or SIGHUP),
-still cleans up, and exits 143 (or 129). A timeout kills the
+still cleans up, and exits 143 (or 129); `provider-check.json` records a signal
+the same way. A Ctrl-C (SIGINT) also kills the group and is recorded as
+`KeyboardInterrupt`. A timeout kills the
 eval's whole process group.
 
 The cases directory must be non-empty; the runner refuses an empty suite. The
