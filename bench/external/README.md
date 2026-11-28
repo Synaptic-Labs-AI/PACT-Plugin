@@ -210,9 +210,20 @@ during a run.
 
 The runner copies `bench/external/native-evals/evals/` into the scratch plugin as
 `evals/` and runs `claude plugin eval <scratch plugin> --eval-dir evals
---ablation with-without --trust-plugin --no-publish --scaffold --runs 3
---json report.json --report report.html --output-dir runs --model <manifest
-model> --judge-model <manifest model>`.
+--ablation with-without --runs 3 --concurrency 1 --trust-plugin --no-publish
+--threshold 0 --scaffold --json report.json --report report.html --output-dir
+runs/<run id> --keep-temp [--allow-tools <grants…>] --model <manifest model>
+--judge-model <manifest model>`.
+`--allow-tools` carries exactly the gated tools (Bash, Write, Edit, WebFetch,
+`mcp__*`, including `Tool(pattern)` forms) that at least one case lists in its
+own `allowed_tools`, in first-seen order, and is omitted when no case lists one;
+`result.json` records the list as `tool_grants` (`[Bash, Write, Edit]` for the
+shipped cases). Per the claude 2.1.332 CLI's own messages (not verified with a
+live run), a gated tool is usable in a case only if that case lists it and it is
+granted, so the run-wide grant does not widen any case: `impact-triage`, which
+lists no gated tool, gets none. Ungated tools follow each case's `allowed_tools`
+alone. A case whose `allowed_tools` is not an inline `[...]` list is refused
+before the run.
 The runner always passes `--threshold 0`, so a case's pass or fail and the
 runner's exit code are not the signal; read the with/without delta.
 Case layout is the CLI's native format: `<eval dir>/**/case.yaml`, or
