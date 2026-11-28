@@ -2081,8 +2081,11 @@ def folded_github_id(value: Any, what: str) -> Any:
     `www.` host dropped and one trailing `.git` dropped, so
     `GitHub.com/Acme/Widget` names the bucket `github.com/acme/widget` that
     repository's sessions read. A port is kept (an id holds no scheme). Any
-    other host's value, and a non-string, is returned unchanged. THE ONE FOLD
-    for a save or update payload and a rekey target.
+    other host's value is returned unchanged except that, as for every
+    value, leading and trailing spaces are stripped first, as a pin's are (a
+    tab is a control character, refused before the fold); a non-string is
+    returned unchanged. THE ONE FOLD for a save or
+    update payload and a rekey target.
 
     Raises ValueError naming `what` and `GITHUB_ID_RULE` for a port-less
     github.com value no pin may hold (`github.com/Acme`,
@@ -2090,6 +2093,7 @@ def folded_github_id(value: Any, what: str) -> Any:
     filed under it are rows no session reads."""
     if not isinstance(value, str):
         return value
+    value = value.strip(" ")
     hostport = value.partition("/")[0]
     host = hostport.partition(":")[0].lower()
     if host not in ("github.com", "www.github.com"):

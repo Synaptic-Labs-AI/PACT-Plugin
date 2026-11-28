@@ -1448,6 +1448,35 @@ def test_a_github_payload_id_is_folded_into_the_detected_bucket(canonical_sessio
         assert {row[0] for row in conn.execute("SELECT project_id FROM memories")} == {CANONICAL}
 
 
+@pytest.mark.parametrize(
+    ("payload", "filed"),
+    [
+        (" github.com/Acme/Widget", CANONICAL),
+        ("  github.com/Acme/Widget ", CANONICAL),
+        (" gitlab.example/o/r ", "gitlab.example/o/r"),
+    ],
+)
+def test_a_payload_id_loses_surrounding_blanks(canonical_session, capfd, payload, filed):
+    """Leading and trailing spaces are stripped from a payload id and a
+    rekey --to, as from a pin, so a pasted id files where a read looks.
+    RED WHEN a leading blank keeps the id as typed, in a bucket nothing
+    reads."""
+    repo, store = canonical_session
+    memory = PACTMemory(session_id="s", db_path=store)
+    saved = memory.save({"context": "pasted with a blank", "project_id": payload})
+    other = memory.save({"context": "moved by update"})
+    memory.update(other, {"project_id": payload})
+    with sqlite3.connect(str(store)) as conn:
+        rows = dict(conn.execute("SELECT id, project_id FROM memories"))
+    assert (rows[saved], rows[other]) == (filed, filed), rows
+    _seed(store, "oldbucket")
+    code, envelope = _rekey_cli(
+        ["project-id", "rekey", "--from=oldbucket", f"--to={payload}", "--db-path", str(store)],
+        capfd,
+    )
+    assert (code, envelope.get("result", {}).get("to")) == (0, filed), envelope
+
+
 @pytest.mark.parametrize("port", ["443", "8443"])
 def test_a_github_payload_id_keeps_its_port(canonical_session, port):
     """A port is kept, as a pin keeps it: an id holds no scheme, so
