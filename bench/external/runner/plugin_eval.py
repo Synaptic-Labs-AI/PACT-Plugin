@@ -4,8 +4,13 @@
 The tool is pinned by the caller via --plugin-eval-dir. This runner does not
 clone it; bench/external/README.md records the pinned commit and setup. It runs
 uv sync --frozen, then the whole-plugin quick score and the skill scores listed
-in plugin-eval-skills.txt (or --skills-file). Every command is recorded in
-plugin-eval/result.json, even when one times out or the run aborts.
+in plugin-eval-skills.txt (or --skills-file). Every uv command starts in a fresh
+cwd under --temp-root (refused by prepare.check_clean_root if that root is in the
+repo or below a Claude Code memory file), with the checkout passed as --project.
+Once the manifest is read, plugin-eval/result.json is written when the run ends,
+fails a check, times out, aborts or gets SIGTERM/SIGHUP. An unreadable manifest
+exits with a message and no record (the record lives under the manifest's out
+directory); SIGKILL leaves no record.
 Tokens are real; PluginEval's model labels and USD are Anthropic-oriented and
 must not be reported as DeepSeek billing.
 """
@@ -13,7 +18,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -46,18 +53,28 @@ def load_skills(skills_file: Path) -> list[str]:
     ]
     if not skills:
         raise SystemExit(f"skills file lists no skills: {skills_file}")
+    bad = [skill for skill in skills if "/" in skill or skill.startswith(".")]
+    if bad:
+        raise SystemExit(f"skills file entries must be plain skill directory names: {bad}")
+    duplicates = sorted({skill for skill in skills if skills.count(skill) > 1})
+    if duplicates:
+        raise SystemExit(f"skills file lists a skill twice: {duplicates}")
     return skills
 
 
 def build_commands(
     uv: str,
+    project: Path,
     plugin: Path,
     skills: list[str],
 ) -> tuple[list[str], list[tuple[str, list[str]]]]:
-    sync = [uv, "sync", "--frozen", "--extra", "llm"]
+    sync = [uv, "sync", "--project", str(project), "--frozen", "--extra", "llm"]
 
     def score(target: Path, depth: str) -> list[str]:
-        return [uv, "run", "plugin-eval", "score", str(target), "--depth", depth, "--output", "json"]
+        return [
+            uv, "run", "--project", str(project), "plugin-eval", "score", str(target),
+            "--depth", depth, "--output", "json",
+        ]
 
     skill_cmds = [(skill, score(plugin / "skills" / skill, "standard")) for skill in skills]
     return sync, [(str(plugin), score(plugin, "quick")), *skill_cmds]
@@ -66,7 +83,8 @@ def build_commands(
 def _exec(cmd: list[str], cwd: Path, env: dict[str, str], timeout: int) -> subprocess.CompletedProcess[str]:
     try:
         return prepare.run_process_group(
-            cmd, timeout, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            cmd, timeout, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
         )
     except FileNotFoundError as exc:
         raise SystemExit(f"cannot run {cmd[0]!r}: {exc}") from exc
@@ -88,7 +106,6 @@ def _score_one(
         return record
     record["exit_code"] = proc.returncode
     record["stderr_tail"] = proc.stderr[-2000:]
-    # Raw output is saved before parsing, so a later error cannot lose it.
     _save(out, stem, proc.stdout, proc.stderr)
     try:
         parsed = _parse_json(proc.stdout)
@@ -113,32 +130,24 @@ def _save(out: Path, stem: str, stdout: str, stderr: str) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    manifest = json.loads(Path(args.manifest).expanduser().read_text(encoding="utf-8"))
-    scratch = Path(manifest["paths"]["out"])
-    plugin = Path(manifest["paths"]["plugin"])
-    plugin_eval_dir = Path(args.plugin_eval_dir).expanduser().resolve()
-    if not (plugin_eval_dir / "pyproject.toml").is_file():
-        raise SystemExit(f"not a PluginEval checkout: {plugin_eval_dir}")
-    skills = load_skills(Path(args.skills_file).expanduser() if args.skills_file else DEFAULT_SKILLS_FILE)
-    settings = json.loads((scratch / "config" / "settings.json").read_text(encoding="utf-8"))
-    env = prepare.build_child_env(
-        dict(settings.get("env") or {}),
-        scratch,
-        Path(manifest["provider"]["token_file"]),
-        str(manifest["provider"]["base_url"]),
-    )
-    # uv sync only installs packages; it never needs the provider token.
-    sync_env = {key: value for key, value in env.items() if key != "ANTHROPIC_AUTH_TOKEN"}
+    manifest_path = Path(args.manifest).expanduser()
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        scratch = Path(manifest["paths"]["out"])
+        plugin = Path(manifest["paths"]["plugin"])
+        provider = manifest["provider"]
+        out = scratch / "plugin-eval"
+        out.mkdir(parents=True, exist_ok=True)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise SystemExit(f"cannot read prepare manifest {manifest_path}: {exc}") from exc
 
-    out = scratch / "plugin-eval"
-    out.mkdir(parents=True, exist_ok=True)
-    sync, commands = build_commands(args.uv, plugin, skills)
     results: list[dict[str, Any]] = []
-    not_run = [label for label, _ in commands]
-    # complete stays false, with error/aborted_command/not_run set, unless every command was attempted.
+    not_run: list[str] = []
+    # complete stays false, with error/aborted_command set, unless every command was attempted.
+    # not_run lists planned commands never started; it is empty if the run failed before planning.
     summary: dict[str, Any] = {
         "schema": "pact-bench/plugin-eval/1",
-        "plugin_eval_dir": str(plugin_eval_dir),
+        "plugin_eval_dir": None,
         "complete": False,
         "error": None,
         "aborted_command": None,
@@ -147,40 +156,68 @@ def run(args: argparse.Namespace) -> int:
         "not_run": not_run,
     }
     current: dict[str, Any] | None = None
+    cwd: Path | None = None
     try:
-        if not args.skip_sync:
-            current = {"label": "sync", "command": sync}
-            summary["sync"] = dict(current)
-            try:
-                proc = _exec(sync, plugin_eval_dir, sync_env, args.sync_timeout)
-            except subprocess.TimeoutExpired as exc:
-                summary["sync"].update(timed_out=True, stderr_tail=_text(exc.stderr)[-2000:])
-                raise SystemExit(f"uv sync timed out after {args.sync_timeout}s") from exc
-            summary["sync"].update(exit_code=proc.returncode, stderr_tail=proc.stderr[-2000:])
-            (out / "sync.stdout.txt").write_text(proc.stdout, encoding="utf-8")
-            (out / "sync.stderr.txt").write_text(proc.stderr, encoding="utf-8")
-            if proc.returncode != 0:
-                raise SystemExit(f"uv sync failed: {proc.returncode}")
-        for label, cmd in commands:
-            current = {"label": label, "command": cmd}
-            not_run.remove(label)
-            # The per-command boundary: an unexpected error fails only this record. SystemExit
-            # (no uv binary) still aborts, because every later command would fail the same way.
-            try:
-                results.append(_score_one(label, cmd, plugin_eval_dir, env, args.timeout, out))
-            except Exception as exc:
-                results.append({**current, "exit_code": None, "error": f"{type(exc).__name__}: {exc}"})
-        current = None
-        summary["complete"] = True
+        with prepare._signals_kill_child():
+            plugin_eval_dir = Path(args.plugin_eval_dir).expanduser().resolve()
+            summary["plugin_eval_dir"] = str(plugin_eval_dir)
+            if not (plugin_eval_dir / "pyproject.toml").is_file():
+                raise SystemExit(f"not a PluginEval checkout: {plugin_eval_dir}")
+            skills = load_skills(Path(args.skills_file).expanduser() if args.skills_file else DEFAULT_SKILLS_FILE)
+            settings = json.loads((scratch / "config" / "settings.json").read_text(encoding="utf-8"))
+            env = prepare.build_child_env(
+                dict(settings.get("env") or {}),
+                scratch,
+                Path(provider["token_file"]),
+                str(provider["base_url"]),
+            )
+            # uv sync only installs packages; it never needs the provider token.
+            sync_env = {key: value for key, value in env.items() if key != "ANTHROPIC_AUTH_TOKEN"}
+            temp_root = Path(args.temp_root).expanduser().absolute()
+            prepare.check_clean_root(temp_root)
+            temp_root.mkdir(parents=True, exist_ok=True)
+            cwd = Path(tempfile.mkdtemp(prefix="pact-plugin-eval-", dir=str(temp_root)))
+            sync, commands = build_commands(args.uv, plugin_eval_dir, plugin, skills)
+            not_run.extend(label for label, _ in commands)
+
+            if not args.skip_sync:
+                current = {"label": "sync", "command": sync}
+                summary["sync"] = dict(current)
+                try:
+                    proc = _exec(sync, cwd, sync_env, args.sync_timeout)
+                except subprocess.TimeoutExpired as exc:
+                    summary["sync"].update(timed_out=True, stderr_tail=_text(exc.stderr)[-2000:])
+                    raise SystemExit(f"uv sync timed out after {args.sync_timeout}s") from exc
+                summary["sync"].update(exit_code=proc.returncode, stderr_tail=proc.stderr[-2000:])
+                (out / "sync.stdout.txt").write_text(proc.stdout, encoding="utf-8")
+                (out / "sync.stderr.txt").write_text(proc.stderr, encoding="utf-8")
+                if proc.returncode != 0:
+                    raise SystemExit(f"uv sync failed: {proc.returncode}")
+            for label, cmd in commands:
+                current = {"label": label, "command": cmd}
+                not_run.remove(label)
+                # The per-command boundary: an unexpected error fails only this record. SystemExit
+                # (no uv binary, a signal) still aborts, because every later command would fail too.
+                try:
+                    results.append(_score_one(label, cmd, cwd, env, args.timeout, out))
+                except Exception as exc:
+                    results.append({**current, "exit_code": None, "error": f"{type(exc).__name__}: {exc}"})
+            current = None
+            summary["complete"] = True
     except BaseException as exc:
         summary["error"] = str(exc) if isinstance(exc, SystemExit) else f"{type(exc).__name__}: {exc}"
         summary["aborted_command"] = current
         raise
     finally:
+        if cwd is not None:
+            try:
+                shutil.rmtree(cwd)
+            except OSError as exc:
+                summary["cleanup_error"] = f"{cwd}: {exc}"
         (out / "result.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2))
     ok = all(item.get("exit_code") == 0 and "parse_error" not in item for item in results)
-    return 0 if ok else 1
+    return 0 if ok and "cleanup_error" not in summary else 1
 
 
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
@@ -192,6 +229,11 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--timeout", type=int, default=600)
     parser.add_argument("--sync-timeout", type=int, default=600)
+    parser.add_argument(
+        "--temp-root",
+        default=str(prepare.DEFAULT_TEMP_ROOT),
+        help="parent of the fresh cwd the uv commands run from (outside the repo, no CLAUDE.md above it)",
+    )
     return parser
 
 

@@ -87,7 +87,8 @@ def test_validator_accepts_non_vacuous_task(tmp_path: Path) -> None:
 def test_validator_accepts_add_only_patch(tmp_path: Path) -> None:
     task = make_task(
         tmp_path,
-        hidden={"test_hidden.py": "from extra import X\n\ndef test_fix():\n    assert X == 2\n"},
+        # Imported inside the test, so before the patch the test fails (exit 1) rather than erroring at collection.
+        hidden={"test_hidden.py": "def test_fix():\n    from extra import X\n\n    assert X == 2\n"},
         gold=_add_patch("extra.py", "X = 2\n"),
     )
     assert validate.validate_task(task, sys.executable)["status"] == "pass"
@@ -194,6 +195,11 @@ BROKEN = {
         },
         "timed out after 1s",
     ),
+    "hidden_collection_error": (
+        {"hidden": {"test_hidden.py": "def test_fix(:\n"}},
+        "pytest exit 2",
+    ),
+    "hidden_has_no_tests": ({"hidden": {"test_hidden.py": "VALUE = 1\n"}}, "pytest exit 5"),
     "timeout_not_a_number": ({"meta": {"timeout_seconds": "60"}}, "timeout_seconds must be a positive integer"),
     "timeout_zero": ({"meta": {"timeout_seconds": 0}}, "timeout_seconds must be a positive integer"),
     "timeout_bool": ({"meta": {"timeout_seconds": True}}, "timeout_seconds must be a positive integer"),
@@ -243,6 +249,8 @@ BAD_INPUTS = {
     "unparseable_task_json": ({}, _raw(b"{"), "a_bad", "JSONDecodeError"),
     "task_json_not_an_object": ({}, _raw(b"7"), "a_bad", "TypeError"),
     "non_string_path_field": ({"meta": {"id": "bad-id", "fixture": 5}}, None, "bad-id", "TypeError"),
+    "deeply_nested_task_json": ({}, _raw(b"[" * 200000 + b"]" * 200000), "a_bad", "RecursionError"),
+    "id_with_a_slash": ({"meta": {"id": "bad/id"}, "gold": ""}, None, "bad/id", "did not apply"),
     "unexpected_exception": ({"meta": {"id": "bad-id"}}, "check", "bad-id", "LookupError: unexpected"),
 }
 

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -13,6 +15,8 @@ from external.runner import plugin_eval
 FAKE_UV = """#!{python}
 import json, os, sys, time
 args = sys.argv[1:]
+with open({calls!r}, "a") as calls:
+    calls.write(json.dumps({{"cwd": os.getcwd(), "project": args[args.index("--project") + 1]}}) + "\\n")
 if args[0] == "sync":
     open({log!r}, "w").write(json.dumps({{"token": "ANTHROPIC_AUTH_TOKEN" in os.environ}}))
     if os.environ.get("FAKE_SYNC_SLEEP"):
@@ -20,7 +24,7 @@ if args[0] == "sync":
         sys.stderr.flush()
         time.sleep(10)
     sys.exit(int(os.environ.get("FAKE_SYNC_RC", "0")))
-name = os.path.basename(args[3])
+name = os.path.basename(args[args.index("score") + 1])
 if name == "nullayers":
     print(json.dumps({{"composite": 1, "layers": None}}))
 elif name == "slowkid":
@@ -28,6 +32,15 @@ elif name == "slowkid":
     kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     open({kid_pid!r}, "w").write(str(kid.pid))
     time.sleep(30)
+elif name == "hang":
+    import subprocess
+    kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    open({kid_pid!r}, "w").write(str(kid.pid))
+    open({kid_pid!r} + ".started", "w").write("1")
+    time.sleep(30)
+elif name == "badbytes":
+    sys.stdout.buffer.write(b"\\xff\\xfe not utf-8\\n")
+    print(json.dumps({{"composite": 7}}))
 elif name == "nonjson":
     print("score finished")
 elif name == "scalar":
@@ -70,7 +83,9 @@ def _setup(tmp_path: Path, skills: list[str] | None) -> tuple[Path, Path, Path, 
     log = tmp_path / "sync.json"
     uv = tmp_path / "uv"
     uv.write_text(
-        FAKE_UV.format(python=sys.executable, log=str(log), kid_pid=str(tmp_path / "kid.pid")), encoding="utf-8"
+        FAKE_UV.format(
+            python=sys.executable, log=str(log), kid_pid=str(tmp_path / "kid.pid"), calls=str(tmp_path / "calls.jsonl")
+        ), encoding="utf-8"
     )
     uv.chmod(0o755)
     skills_file = tmp_path / "skills.txt"
@@ -81,7 +96,10 @@ def _setup(tmp_path: Path, skills: list[str] | None) -> tuple[Path, Path, Path, 
 
 def _args(manifest: Path, tool: Path, uv: Path, *extra: str):
     return plugin_eval.build_parser().parse_args(
-        ["--manifest", str(manifest), "--plugin-eval-dir", str(tool), "--uv", str(uv), "--timeout", "1", *extra]
+        [
+            "--manifest", str(manifest), "--plugin-eval-dir", str(tool), "--uv", str(uv), "--timeout", "1",
+            "--temp-root", str(manifest.parent.parent / "temp-root"), *extra,
+        ]
     )
 
 
@@ -91,9 +109,12 @@ def _result(manifest: Path) -> dict:
 
 def test_build_commands_includes_plugin_and_each_skill(tmp_path: Path) -> None:
     plugin = tmp_path / "pact-plugin"
-    sync, commands = plugin_eval.build_commands("/opt/uv", plugin, ["alpha", "beta"])
+    project = tmp_path / "plugin-eval"
+    sync, commands = plugin_eval.build_commands("/opt/uv", project, plugin, ["alpha", "beta"])
     assert sync[:2] == ["/opt/uv", "sync"]
     assert "--frozen" in sync
+    for cmd in (sync, *(cmd for _, cmd in commands)):
+        assert cmd[cmd.index("--project") + 1] == str(project)
     labels = [label for label, _ in commands]
     assert labels == [str(plugin), "alpha", "beta"]
     assert commands[0][1][0] == "/opt/uv"
@@ -235,20 +256,109 @@ def test_unexpected_error_fails_only_its_command(tmp_path: Path) -> None:
     assert summary["complete"] is True
 
 
-def test_signal_aborts_the_run_and_is_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+HARNESS = """import sys
+sys.path.insert(0, {bench!r})
+from external.runner import plugin_eval
+raise SystemExit(plugin_eval.main({argv!r}))
+"""
 
-    def terminated(*_args: object) -> None:
-        raise plugin_eval.prepare.SignalExit(15)
 
-    monkeypatch.setattr(plugin_eval, "_exec", terminated)
-    with pytest.raises(SystemExit) as exc:
-        plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--skip-sync"))
-    assert exc.value.code == 143
+def test_sigterm_during_a_command_kills_the_group_and_is_recorded(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["hang"])
+    args = _args(manifest, tool, uv, "--skills-file", str(skills), "--skip-sync", "--timeout", "60")
+    argv = [
+        "--manifest", args.manifest, "--plugin-eval-dir", args.plugin_eval_dir, "--uv", args.uv,
+        "--skills-file", args.skills_file, "--skip-sync", "--timeout", "60", "--temp-root", args.temp_root,
+    ]
+    bench = str(Path(__file__).resolve().parents[1])
+    started = time.monotonic()
+    harness = subprocess.Popen(
+        [sys.executable, "-c", HARNESS.format(bench=bench, argv=argv)], stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
+    marker = tmp_path / "kid.pid.started"
+    while not marker.exists():
+        assert time.monotonic() - started < 15 and harness.poll() is None, harness.communicate()
+        time.sleep(0.05)
+    harness.send_signal(signal.SIGTERM)
+    harness.communicate(timeout=15)
+    assert harness.returncode == 128 + signal.SIGTERM
+    assert time.monotonic() - started < 15
     summary = _result(manifest)
     assert summary["error"] == "terminated by SIGTERM"
     assert summary["complete"] is False
+    assert summary["aborted_command"]["label"] == "hang"
+    pid = int((tmp_path / "kid.pid").read_text())
+    assert _dead(pid)
+
+
+def test_sigterm_between_commands_is_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    real = plugin_eval._score_one
+
+    def score_then_signal(*args: object, **kwargs: object) -> dict:
+        record = real(*args, **kwargs)
+        os.kill(os.getpid(), signal.SIGTERM)  # arrives while no child runs
+        return record
+
+    monkeypatch.setattr(plugin_eval, "_score_one", score_then_signal)
+    with pytest.raises(SystemExit) as exc:
+        plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--skip-sync"))
+    assert exc.value.code == 128 + signal.SIGTERM
+    summary = _result(manifest)
+    assert summary["error"] == "terminated by SIGTERM"
+    # The signal landed inside the first command's step, so that command is the aborted one.
     assert summary["aborted_command"]["label"] == str(manifest.parent / "pact-plugin")
+    assert summary["not_run"] == ["good"]
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+
+
+def test_commands_run_from_a_clean_cwd_with_the_checkout_as_project(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert len(calls) == 3  # sync, the whole plugin, one skill
+    temp_root = tmp_path / "temp-root"
+    for call in calls:
+        assert Path(call["cwd"]).parent == temp_root
+        assert Path(call["cwd"]).name.startswith("pact-plugin-eval-")
+        assert call["project"] == str(tool)
+    assert not Path(calls[0]["cwd"]).exists()
+
+
+def test_temp_root_below_a_memory_file_is_refused_and_recorded(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    dirty = tmp_path / "dirty"
+    (dirty / "root").mkdir(parents=True)
+    (dirty / "CLAUDE.md").write_text("memory\n", encoding="utf-8")
+    args = _args(manifest, tool, uv, "--skills-file", str(skills), "--temp-root", str(dirty / "root"))
+    with pytest.raises(SystemExit, match="memory files"):
+        plugin_eval.run(args)
+    summary = _result(manifest)
+    assert "memory files" in summary["error"]
+    assert summary["results"] == [] and not (tmp_path / "calls.jsonl").exists()
+
+
+def test_non_utf8_output_keeps_its_score(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["badbytes"])
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
+    record = {r["label"]: r for r in _result(manifest)["results"]}["badbytes"]
+    assert record["composite"] == 7
+
+
+def test_missing_checkout_is_recorded(tmp_path: Path) -> None:
+    manifest, _, uv, skills = _setup(tmp_path, ["good"])
+    with pytest.raises(SystemExit, match="not a PluginEval checkout"):
+        plugin_eval.run(_args(manifest, tmp_path / "nowhere", uv, "--skills-file", str(skills)))
+    summary = _result(manifest)
+    assert summary["complete"] is False and "not a PluginEval checkout" in summary["error"]
+
+
+@pytest.mark.parametrize("manifest_text", ["{", '{"paths": {}}', "[]"])
+def test_unreadable_manifest_exits_with_a_message(tmp_path: Path, manifest_text: str) -> None:
+    manifest, tool, uv, _ = _setup(tmp_path, ["good"])
+    manifest.write_text(manifest_text, encoding="utf-8")
+    with pytest.raises(SystemExit, match="cannot read prepare manifest"):
+        plugin_eval.run(_args(manifest, tool, uv))
 
 
 def test_skills_file_expands_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -257,13 +367,16 @@ def test_skills_file_expands_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", "~/" + skills.name)) == 0
 
 
-@pytest.mark.parametrize("content", [None, ""])
-def test_run_rejects_missing_or_empty_skills_file(tmp_path: Path, content: str | None) -> None:
+@pytest.mark.parametrize("content", [None, "", "../escape\n", "a\nb\na\n"])
+def test_run_rejects_a_bad_skills_file_and_records_it(tmp_path: Path, content: str | None) -> None:
     manifest, tool, uv, skills = _setup(tmp_path, None)
     if content is not None:
         skills.write_text(content, encoding="utf-8")
     with pytest.raises(SystemExit, match="skills file"):
         plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills)))
+    summary = _result(manifest)
+    assert summary["complete"] is False and "skills file" in summary["error"]
+    assert not (tmp_path / "calls.jsonl").exists()
 
 
 def test_default_selection_is_the_data_file(tmp_path: Path) -> None:

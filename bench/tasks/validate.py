@@ -3,14 +3,16 @@
 
 A task is valid only when:
   - the untouched fixture's seed tests pass;
-  - hidden tests are non-vacuous and fail on the untouched fixture;
+  - hidden tests fail on the untouched fixture with pytest exit 1 (tests ran
+    and failed; a collection error or an empty suite does not count);
   - the gold patch leaves hidden_tests/ alone, applies, changes the tree, makes
     hidden tests pass, and keeps seed tests green.
 
 Every task is validated and reported; the exit code is 1 if any task failed.
+Any Exception inside one task becomes that task's fail row.
 Git runs hermetically (no global/system config, no hooks, no inherited GIT_*),
 and child pytest gets no PYTEST_* or PYTHONPATH, so host settings cannot change
-the result. Any error in one task becomes that task's fail row.
+the result.
 """
 from __future__ import annotations
 
@@ -78,7 +80,8 @@ def _run(cmd: list[str], cwd: Path, task_id: str, timeout: int) -> subprocess.Co
     """Run cmd in its own process group; a timeout or signal kills its grandchildren too."""
     try:
         return prepare.run_process_group(
-            cmd, timeout, cwd=str(cwd), env=_child_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            cmd, timeout, cwd=str(cwd), env=_child_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True,
         )
     except OSError as exc:
         raise TaskInvalid(f"{task_id}: cannot run {cmd[0]!r}: {exc}") from exc
@@ -150,7 +153,7 @@ def _check_in_temp(task_id: str, fixture: Path, hidden: Path, gold: Path, python
     def pytest(*extra: str) -> subprocess.CompletedProcess[str]:
         return _run([*pytest_cmd, *extra], work, task_id, timeout)
 
-    with tempfile.TemporaryDirectory(prefix=f"pact-task-{task_id}-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="pact-task-") as tmp:
         work = Path(tmp) / "work"
         shutil.copytree(fixture, work)
         _git(["init", "-q", "-b", "main"], work, task_id, timeout)
@@ -165,6 +168,11 @@ def _check_in_temp(task_id: str, fixture: Path, hidden: Path, gold: Path, python
         before = pytest(HIDDEN_DIR)
         if before.returncode == 0:
             raise TaskInvalid(f"{task_id}: hidden tests passed on the untouched fixture (vacuous)")
+        if before.returncode != 1:
+            raise TaskInvalid(
+                f"{task_id}: hidden tests did not run and fail on the untouched fixture "
+                f"(pytest exit {before.returncode}; 1 = tests failed):\n{before.stdout[-4000:]}"
+            )
 
         hidden_before = _snapshot(work / HIDDEN_DIR)
         applied = _run([*GIT, "apply", "--whitespace=nowarn", str(gold.resolve())], work, task_id, timeout)
@@ -191,10 +199,10 @@ def _check_in_temp(task_id: str, fixture: Path, hidden: Path, gold: Path, python
 
 
 def _task_id(task_dir: Path) -> str:
-    """Best-effort id for a failure row: task.json's id, else the directory name."""
+    """Best-effort id for a failure row: task.json's id, else the directory name, whatever task.json holds."""
     try:
         return str(json.loads((task_dir / "task.json").read_text(encoding="utf-8"))["id"])
-    except (OSError, ValueError, KeyError, TypeError):
+    except Exception:
         return task_dir.name
 
 
