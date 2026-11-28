@@ -83,7 +83,12 @@ CREDENTIAL_KEY = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|HEADERS|CREDENTIAL", re.
 # match CREDENTIAL_KEY by name but hold numbers, so they are kept.
 NON_SECRET_KEY = re.compile(r"^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$")
 # Live settings env names copied at all (an allowlist); anything else is dropped and recorded.
-LIVE_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DISABLE_", "ENABLE_", "MAX_", "BASH_", "MCP_", "API_TIMEOUT_MS")
+LIVE_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DISABLE_", "ENABLE_", "MAX_", "MCP_")
+# Exact names, not a BASH_ prefix: BASH_ENV and BASH_FUNC_* would make every child bash
+# source a live file.
+LIVE_ENV_NAMES = ("API_TIMEOUT_MS", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "BASH_MAX_OUTPUT_LENGTH")
+# A credential-shaped URL query parameter (?api_key=, &token=, &sig=, ...).
+URL_QUERY_CREDENTIAL = re.compile(r"[?&][^=&#\s]*(key|token|secret|sig|password|auth)[^=&#\s]*=", re.IGNORECASE)
 URL_USERINFO = re.compile(r"://[^/\s@]+@")
 # The only live-environment keys a child inherits; everything else comes from
 # the scratch settings env or is set explicitly below.
@@ -298,13 +303,16 @@ def check_clean_root(root: Path) -> Path:
 
 
 def keeps_live_env(key: str, value: Any) -> bool:
-    """True when a live settings env entry is copied into scratch settings.json:
-    its name has a LIVE_ENV_PREFIXES prefix, is not credential-shaped
-    (is_scratch_env_key), and its value carries no URL userinfo (user:pass@)."""
+    """True when a settings env entry may reach scratch settings.json or a child: its
+    name is in LIVE_ENV_NAMES or has a LIVE_ENV_PREFIXES prefix, is not
+    credential-shaped (is_scratch_env_key), and its value carries no URL userinfo
+    (user:pass@) and no credential-shaped URL query parameter."""
+    text = str(value)
     return (
-        key.startswith(LIVE_ENV_PREFIXES)
+        (key in LIVE_ENV_NAMES or key.startswith(LIVE_ENV_PREFIXES))
         and is_scratch_env_key(key)
-        and not URL_USERINFO.search(str(value))
+        and not URL_USERINFO.search(text)
+        and not URL_QUERY_CREDENTIAL.search(text)
     )
 
 
@@ -345,21 +353,27 @@ def copy_plugin_tree(src: Path, dest: Path, only: set[str] | None = None) -> Non
     _refuse_outside_links(src, ignore)
     if dest.exists():
         shutil.rmtree(dest)
-    # Links are kept as links (same result for the worktree and the git-archive copy);
-    # _refuse_outside_links has already refused any that leave src.
+    # Links are kept as links. Only relative in-tree links get here, which is also what the
+    # git-archive copy's tarfile 'data' filter allows, so both copy paths agree.
     shutil.copytree(src, dest, ignore=ignore, symlinks=True)
 
 
 def _refuse_outside_links(src: Path, ignore: Any) -> None:
-    """SystemExit if any symlink that will be copied resolves outside src."""
+    """SystemExit if any symlink that will be copied is absolute (in the copy it would
+    point back at the source) or resolves outside src."""
     real = src.resolve()
     for directory, dirs, files in os.walk(src):
         skipped = ignore(directory, dirs + files)
         dirs[:] = [name for name in dirs if name not in skipped]
         for name in [*dirs, *files]:
             path = Path(directory) / name
-            if name not in skipped and path.is_symlink() and not path.resolve().is_relative_to(real):
-                raise SystemExit(f"plugin source link {path} points outside {src}: {os.readlink(path)}")
+            if name in skipped or not path.is_symlink():
+                continue
+            target = os.readlink(path)
+            if os.path.isabs(target):
+                raise SystemExit(f"plugin source link {path} is absolute ({target}); use a relative link")
+            if not path.resolve().is_relative_to(real):
+                raise SystemExit(f"plugin source link {path} points outside {src}: {target}")
 
 
 def plugin_version(repo: Path, sha: str | None, plugin_dir: Path | None) -> str:
@@ -513,9 +527,12 @@ def build_child_env(
     token_file: Path,
     base_url: str,
 ) -> dict[str, str]:
-    """Child environment: an allowlist of live keys, the scratch settings env,
+    """Child environment: an allowlist of live keys, the scratch settings env (filtered
+    again with keeps_live_env, since the child can rewrite its own settings.json),
     scratch HOME/TMPDIR/CLAUDE_CONFIG_DIR and the provider token. Nothing else
     from the live environment (CLAUDE*, GH_TOKEN, SSH_*, XDG_*, AWS_*, ...) passes.
+    The isolation is environment-only: a child's file tools can still open
+    absolute host paths.
     """
     token = token_file.read_text(encoding="utf-8").strip()
     if not token:
@@ -525,7 +542,7 @@ def build_child_env(
         for key, value in os.environ.items()
         if key in INHERITED_ENV_KEYS or key.startswith(INHERITED_ENV_PREFIXES)
     }
-    env.update({key: value for key, value in settings_env.items() if is_scratch_env_key(key)})
+    env.update({key: value for key, value in settings_env.items() if keeps_live_env(key, value)})
     env["CLAUDE_CONFIG_DIR"] = str(scratch / "config")
     env["HOME"] = str(scratch / "home")
     env["TMPDIR"] = str(scratch / "tmp")
@@ -590,7 +607,10 @@ def verify_provider(
         finally:
             shutil.rmtree(cwd, ignore_errors=True)
     except FileNotFoundError as exc:
-        record["error"] = f"claude binary not found: {claude_bin}"
+        missing = exc.filename if exc.filename is not None else claude_bin
+        record["error"] = (
+            f"claude binary not found: {claude_bin}" if str(missing) == str(claude_bin) else f"file not found: {missing}"
+        )
         _write_check(out, record)
         raise SystemExit(f"provider verification failed: {record['error']}") from exc
     except subprocess.TimeoutExpired as exc:
@@ -630,7 +650,8 @@ def verify_provider(
             f"see {out / 'provider-check.json'}"
         )
     wanted = model_base(model)
-    record["resolved_model"] = any(wanted in str(key) for key in usage)
+    # The base names must match exactly: deepseek-flash-pro is not deepseek-flash.
+    record["resolved_model"] = any(model_base(str(key)) == wanted for key in usage)
     _write_check(out, record)
     if not record["resolved_model"]:
         raise SystemExit(f"provider verification did not resolve {wanted}; see {out / 'provider-check.json'}")
@@ -763,6 +784,17 @@ def prepare(args: argparse.Namespace) -> int:
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(manifest, indent=2))
     return 0
+
+
+def positive_int(text: str) -> int:
+    """argparse type: an integer >= 1."""
+    try:
+        value = int(text)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"not an integer: {text!r}") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be at least 1, got {value}")
+    return value
 
 
 def build_parser() -> argparse.ArgumentParser:

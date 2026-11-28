@@ -15,7 +15,9 @@ run). The model (CLI --model and --judge-model) is the one fixed at prepare
 time, read from the manifest. The eval's whole process group is killed when it
 ends, times out or is signalled. Its --output-dir is <run>/native-eval/runs/<run id>/.
 --threshold 0 is always passed, so the eval's pass/fail and exit code are not
-the measurement; the with/without delta in report.json is. --allow-tools grants
+the measurement; the with/without delta in report.json is. native-eval exits 0
+only if the eval exited 0, wrote report.json, and cleanup and the clean-root
+re-check passed. --allow-tools grants
 only the gated tools some case's own allowed_tools lists (recorded as
 tool_grants). Per the claude 2.1.332 CLI's own messages, a gated tool also has
 to be in the case's allowed_tools, so the grant does not widen a case (not
@@ -368,6 +370,7 @@ def run(args: argparse.Namespace) -> int:
         and not record["timed_out"]
         and not record["cleanup_error"]
         and not record["clean_root_changed"]
+        and record["report_json"]  # a run that wrote no report measured nothing
     )
     return 0 if ok else 1
 
@@ -385,10 +388,10 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         f"{MAX_TMPDIR_CHARS} chars (sandbox bridge "
         "sockets must stay under the Unix socket path limit)",
     )
-    parser.add_argument("--runs", type=int, default=3)
-    parser.add_argument("--concurrency", type=int, default=1)
+    parser.add_argument("--runs", type=prepare.positive_int, default=3)
+    parser.add_argument("--concurrency", type=prepare.positive_int, default=1)
     parser.add_argument("--max-cost-usd", type=float, default=None)
-    parser.add_argument("--timeout", type=int, default=3600)
+    parser.add_argument("--timeout", type=prepare.positive_int, default=3600)
     parser.add_argument("--claude-bin", default=None)
     return parser
 

@@ -449,8 +449,28 @@ def test_token_count_tuning_keys_are_kept_and_dropped_keys_are_recorded(tmp_path
     assert "secret" not in (out / "manifest.json").read_text(encoding="utf-8")
 
 
+# Literal names, not prepare.MODEL_ENV_KEYS: dropping a key from the constant must fail.
+PINNED_MODEL_KEYS = (
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_SUBAGENT_MODEL",
+    "CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL",
+    "CLAUDE_CODE_AUTO_MODE_MODEL",
+    "CLAUDE_CODE_BG_CLASSIFIER_MODEL",
+)
+
+
 def test_every_model_key_is_pinned_including_small_fast(tmp_path: Path) -> None:
-    assert "ANTHROPIC_SMALL_FAST_MODEL" in prepare.MODEL_ENV_KEYS
+    assert set(prepare.MODEL_ENV_KEYS) == set(PINNED_MODEL_KEYS)
+    source = tmp_path / "settings-literal.json"
+    source.write_text(json.dumps({"env": dict.fromkeys(PINNED_MODEL_KEYS, "live-model")}), encoding="utf-8")
+    _settings, env = prepare.build_scratch_settings(source, tmp_path / "config2", tmp_path, "deepseek-pro")
+    assert {key: env[key] for key in PINNED_MODEL_KEYS} == dict.fromkeys(PINNED_MODEL_KEYS, "deepseek-pro")
     source = tmp_path / "settings.json"
     source.write_text(json.dumps({"env": {key: "live-model" for key in prepare.MODEL_ENV_KEYS}}), encoding="utf-8")
     _settings, env = prepare.build_scratch_settings(source, tmp_path / "config", tmp_path, "deepseek-pro")
@@ -816,15 +836,26 @@ def test_host_ignore_files_do_not_hide_untracked_files(tmp_path: Path, monkeypat
 def test_plugin_dir_link_outside_the_source_is_refused(tmp_path: Path) -> None:
     src = tmp_path / "plugin"
     (src / "hooks").mkdir(parents=True)
-    (src / "inside").symlink_to(src / "hooks")
+    (src / "inside").symlink_to("hooks")
     secret = tmp_path / "secret"
     secret.write_text("key", encoding="utf-8")
-    (src / "leak").symlink_to(secret)
+    (src / "leak").symlink_to("../secret")
     with pytest.raises(SystemExit, match="points outside"):
         prepare.copy_plugin_tree(src, tmp_path / "copy")
     (src / "leak").unlink()
     prepare.copy_plugin_tree(src, tmp_path / "copy")
-    assert (tmp_path / "copy" / "inside").is_symlink()
+    copy = tmp_path / "copy"
+    assert (copy / "inside").is_symlink() and (copy / "inside").resolve().is_relative_to(copy.resolve())
+
+
+def test_an_absolute_link_inside_the_source_is_refused(tmp_path: Path) -> None:
+    # In the copy an absolute link would still point at the live source.
+    src = tmp_path / "plugin"
+    (src / "hooks").mkdir(parents=True)
+    (src / "abs").symlink_to(src / "hooks")
+    with pytest.raises(SystemExit, match="is absolute"):
+        prepare.copy_plugin_tree(src, tmp_path / "copy")
+    assert not (tmp_path / "copy").exists()
 
 
 def test_links_copy_the_same_way_from_worktree_and_ref(tmp_path: Path) -> None:
@@ -852,7 +883,7 @@ def test_a_committed_link_out_of_the_plugin_is_refused(tmp_path: Path, ref: str 
     out = tmp_path / "out"
     out.mkdir()
     prov = prepare.check_source(repo, ref, None, allow_dirty=False)
-    with pytest.raises(SystemExit, match="points outside|cannot be extracted safely"):
+    with pytest.raises(SystemExit, match="is absolute|points outside|cannot be extracted safely"):
         prepare.materialize_plugin(repo, out, ref, None, prov)
     assert not (out / ".plugin-src").exists()
 
@@ -901,3 +932,94 @@ def test_live_env_outside_the_allowlist_or_with_url_credentials_is_dropped(tmp_p
 )
 def test_url_userinfo_values_are_not_kept(value: str, kept: bool) -> None:
     assert prepare.keeps_live_env("ANTHROPIC_CUSTOM_URL", value) is kept
+
+
+
+PREFIXED_SECRETS = {
+    # Allowlisted prefixes, so only the credential-name filter can drop them.
+    "ANTHROPIC_CLIENT_SECRET": "pref-secret-1",
+    "CLAUDE_CODE_PROXY_PASSWORD": "pref-secret-2",
+    "ANTHROPIC_CREDENTIALS_FILE": "pref-secret-3",
+    "ANTHROPIC_Api_Key": "pref-secret-4",  # mixed case: the filter ignores case
+    "CLAUDE_CODE_MAX_TOKENS_API_KEY": "pref-secret-5",  # MAX_*TOKENS exemption is anchored at the end
+}
+
+
+def test_prefixed_credential_names_are_dropped_everywhere(tmp_path: Path) -> None:
+    source = tmp_path / "settings.json"
+    source.write_text(json.dumps({"env": PREFIXED_SECRETS}), encoding="utf-8")
+    _settings, env = prepare.build_scratch_settings(source, tmp_path / "config", tmp_path, "m")
+    written = (tmp_path / "config" / "settings.json").read_text(encoding="utf-8")
+    token = tmp_path / "token"
+    token.write_text("t", encoding="utf-8")
+    child = prepare.build_child_env(PREFIXED_SECRETS, tmp_path, token, "https://example.invalid")
+    for key, value in PREFIXED_SECRETS.items():
+        assert key not in env and value not in written and key not in child
+
+
+def test_child_env_refilters_a_rewritten_settings_env(tmp_path: Path) -> None:
+    token = tmp_path / "token"
+    token.write_text("t", encoding="utf-8")
+    rewritten = {
+        "LD_PRELOAD": "/x.so",
+        "NODE_OPTIONS": "--require /x.js",
+        "PYTHONPATH": "/x",
+        "BASH_ENV": "/home/u/.bashrc",
+        "CLAUDE_CODE_EFFORT_LEVEL": "max",
+    }
+    child = prepare.build_child_env(rewritten, tmp_path, token, "https://example.invalid")
+    assert child["CLAUDE_CODE_EFFORT_LEVEL"] == "max"
+    for key in ("LD_PRELOAD", "NODE_OPTIONS", "PYTHONPATH", "BASH_ENV"):
+        assert key not in child
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "kept"),
+    [
+        ("BASH_ENV", "/home/u/.bashrc", False),
+        ("BASH_FUNC_x%%", "() { :; }", False),
+        ("BASH_DEFAULT_TIMEOUT_MS", "120000", True),
+        ("BASH_MAX_TIMEOUT_MS", "600000", True),
+        ("BASH_MAX_OUTPUT_LENGTH", "30000", True),
+        ("API_TIMEOUT_MS", "600000", True),
+        ("ANTHROPIC_BEDROCK_BASE_URL", "https://x/?api_key=sk-live", False),
+        ("ANTHROPIC_BEDROCK_BASE_URL", "https://x/path?region=us&Signature=abc", False),
+        ("ANTHROPIC_BEDROCK_BASE_URL", "https://x/path?region=us", True),
+    ],
+)
+def test_live_env_names_and_values(key: str, value: str, kept: bool) -> None:
+    assert prepare.keeps_live_env(key, value) is kept
+
+
+def test_verify_requires_the_exact_model_base(tmp_path: Path) -> None:
+    fake = _json_claude(tmp_path / "claude", {"is_error": False, "modelUsage": {"deepseek-flash-pro": {}}})
+    out = _out(tmp_path)
+    with pytest.raises(SystemExit, match="did not resolve deepseek-flash"):
+        prepare.verify_provider(out, out, str(fake), dict(os.environ))
+
+
+def test_a_missing_non_binary_file_is_not_called_the_claude_binary(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def no_dir(*_args: object, **_kwargs: object) -> str:
+        raise FileNotFoundError(2, "No such file or directory", "/nonexistent/tmpdir")
+
+    monkeypatch.setattr(prepare.tempfile, "mkdtemp", no_dir)
+    out = _out(tmp_path)
+    with pytest.raises(SystemExit, match="file not found: /nonexistent/tmpdir"):
+        prepare.verify_provider(out, out, sys.executable, dict(os.environ))
+
+
+def test_manifest_is_error_is_false_when_claude_reports_null(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    fake = _json_claude(tmp_path / "claude", {"is_error": None, "modelUsage": {"deepseek-flash": {}}})
+    assert prepare.main(_prepare_args(tmp_path, out, "--verify", "--claude-bin", str(fake))) == 0
+    assert json.loads((out / "manifest.json").read_text(encoding="utf-8"))["provider"]["check"]["is_error"] is False
+
+
+@pytest.mark.parametrize("text", ["0", "-5", "x"])
+def test_positive_int_refuses_non_positive(text: str) -> None:
+    import argparse
+
+    with pytest.raises(argparse.ArgumentTypeError):
+        prepare.positive_int(text)

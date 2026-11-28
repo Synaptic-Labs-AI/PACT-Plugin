@@ -264,7 +264,8 @@ def test_native_eval_does_not_record_a_stale_report(tmp_path: Path, short_root: 
     silent = tmp_path / "silent-claude"
     silent.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     silent.chmod(0o755)
-    assert native_eval.run(_args(manifest, cases, silent, short_root)) == 0
+    # No report written by this run: nothing was measured, so the run fails.
+    assert native_eval.run(_args(manifest, cases, silent, short_root)) == 1
     record = _result(manifest)
     assert record["report_json"] is None and record["report_html"] is None
 
@@ -504,8 +505,14 @@ def test_nested_case_dirs_and_case_yaml_are_read(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "frontmatter",
-    ["allowed_tools: {Bash: true}\n", "allowed_tools: 7\n", "allowed_tools: [Bash, 3]\n", "allowed_tools: [unclosed\n"],
-    ids=["mapping", "number", "non_string_entry", "invalid_yaml"],
+    [
+        "allowed_tools: {Bash: true}\n",
+        "allowed_tools: 7\n",
+        "allowed_tools: [Bash, 3]\n",
+        "allowed_tools: [unclosed\n",
+        "- Bash\n",
+    ],
+    ids=["mapping", "number", "non_string_entry", "invalid_yaml", "front_matter_not_a_mapping"],
 )
 def test_an_invalid_allowed_tools_is_refused_and_recorded(
     tmp_path: Path, short_root: Path, frontmatter: str
@@ -513,7 +520,7 @@ def test_an_invalid_allowed_tools_is_refused_and_recorded(
     manifest, _cases, _plugin = _prepared(tmp_path)
     cases = tmp_path / "bad-cases"
     _case(cases, "c", frontmatter)
-    with pytest.raises(SystemExit, match="allowed_tools must be|cannot read its YAML"):
+    with pytest.raises(SystemExit, match="allowed_tools must be|cannot read its YAML|expected a YAML mapping"):
         native_eval.run(_args(manifest, cases, _fake_claude(tmp_path), short_root))
     assert _result(manifest)["error"]
     assert _leftovers(short_root) == []
@@ -531,3 +538,23 @@ def test_a_missing_yaml_library_is_a_clear_failure(tmp_path: Path, monkeypatch: 
     monkeypatch.setitem(sys.modules, "yaml", None)  # makes "import yaml" raise ImportError
     with pytest.raises(SystemExit, match="needs PyYAML"):
         native_eval.case_tool_grants(tmp_path)
+
+
+
+@pytest.mark.parametrize("flag", ["--timeout", "--runs", "--concurrency"])
+def test_numeric_options_must_be_positive(flag: str) -> None:
+    with pytest.raises(SystemExit) as exc:
+        native_eval.build_parser().parse_args(["--manifest", "m.json", flag, "0"])
+    assert exc.value.code == 2
+
+
+def test_native_eval_replaces_leftover_evals(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, plugin = _prepared(tmp_path)
+    stale = plugin / "evals" / "stale"
+    stale.mkdir(parents=True)
+    (stale / "prompt.md").write_text("stale case", encoding="utf-8")
+    seen = tmp_path / "seen"
+    fake = _fake_claude(tmp_path, f"import shutil; shutil.copytree({str(plugin / 'evals')!r}, {str(seen)!r})\n")
+    assert native_eval.run(_args(manifest, cases, fake, short_root)) == 0
+    assert sorted(path.name for path in seen.iterdir()) == ["probe"]
+    assert not (plugin / "evals").exists()
