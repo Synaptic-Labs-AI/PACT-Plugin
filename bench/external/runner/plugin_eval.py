@@ -3,7 +3,9 @@
 
 The tool is pinned by the caller via --plugin-eval-dir. This runner does not
 clone it; bench/external/README.md records the pinned commit and setup. It runs
-uv sync --frozen, then the whole-plugin quick score and selected skill scores.
+uv sync --frozen, then the whole-plugin quick score and the skill scores listed
+in plugin-eval-skills.txt (or --skills-file). Every command is recorded in
+plugin-eval/result.json, even when one times out or the run aborts.
 Tokens are real; PluginEval's model labels and USD are Anthropic-oriented and
 must not be reported as DeepSeek billing.
 """
@@ -11,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -19,61 +20,82 @@ from typing import Any
 from . import prepare
 
 
-DEFAULT_SKILLS = (
-    "pact-agent-teams",
-    "pact-handoff-harvest",
-    "pact-memory",
-)
 DEFAULT_SKILLS_FILE = prepare.REPO_ROOT / "bench" / "external" / "plugin-eval-skills.txt"
+TIMEOUT_EXIT_CODE = 124
 
 
 def _parse_json(text: str) -> dict[str, Any]:
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        for line in reversed(text.splitlines()):
-            try:
-                return json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    """Return the whole output, or the last line, that parses as a JSON object."""
+    for candidate in (text, *reversed(text.splitlines())):
+        try:
+            parsed = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            return parsed
     raise ValueError("no JSON object in output")
 
 
+def load_skills(skills_file: Path) -> list[str]:
+    if not skills_file.is_file():
+        raise SystemExit(f"skills file not found: {skills_file}")
+    skills = [
+        line.strip()
+        for line in skills_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if not skills:
+        raise SystemExit(f"skills file lists no skills: {skills_file}")
+    return skills
+
+
 def build_commands(
-    plugin_eval_dir: Path,
+    uv: str,
     plugin: Path,
     skills: list[str],
 ) -> tuple[list[str], list[tuple[str, list[str]]]]:
-    sync = ["uv", "sync", "--frozen", "--extra", "llm"]
-    plugin_cmd = [
-        "uv",
-        "run",
-        "plugin-eval",
-        "score",
-        str(plugin),
-        "--depth",
-        "quick",
-        "--output",
-        "json",
-    ]
-    skill_cmds = [
-        (
-            skill,
-            [
-                "uv",
-                "run",
-                "plugin-eval",
-                "score",
-                str(plugin / "skills" / skill),
-                "--depth",
-                "standard",
-                "--output",
-                "json",
-            ],
-        )
-        for skill in skills
-    ]
-    return sync, [(str(plugin), plugin_cmd), *skill_cmds]
+    sync = [uv, "sync", "--frozen", "--extra", "llm"]
+
+    def score(target: Path, depth: str) -> list[str]:
+        return [uv, "run", "plugin-eval", "score", str(target), "--depth", depth, "--output", "json"]
+
+    skill_cmds = [(skill, score(plugin / "skills" / skill, "standard")) for skill in skills]
+    return sync, [(str(plugin), score(plugin, "quick")), *skill_cmds]
+
+
+def _exec(cmd: list[str], cwd: Path, env: dict[str, str], timeout: int) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError as exc:
+        raise SystemExit(f"cannot run {cmd[0]!r}: {exc}") from exc
+
+
+def _score_one(
+    label: str, cmd: list[str], cwd: Path, env: dict[str, str], timeout: int, out: Path
+) -> dict[str, Any]:
+    record: dict[str, Any] = {"label": label, "command": cmd}
+    try:
+        proc = _exec(cmd, cwd, env, timeout)
+    except subprocess.TimeoutExpired as exc:
+        record.update(exit_code=TIMEOUT_EXIT_CODE, timed_out=True)
+        stderr = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        record["stderr_tail"] = stderr[-2000:]
+        return record
+    record["exit_code"] = proc.returncode
+    record["stderr_tail"] = proc.stderr[-2000:]
+    try:
+        parsed = _parse_json(proc.stdout)
+        record["result"] = parsed
+        record["composite"] = parsed.get("composite")
+        record["layers"] = [layer.get("layer") for layer in parsed.get("layers", []) if isinstance(layer, dict)]
+        record["model_usage"] = parsed.get("model_usage")
+    except ValueError as exc:
+        record["parse_error"] = str(exc)
+        record["stdout_tail"] = proc.stdout[-2000:]
+    stem = label.replace("/", "_").replace(".", "_")
+    (out / f"{stem}.stdout.json").write_text(proc.stdout, encoding="utf-8")
+    (out / f"{stem}.stderr.txt").write_text(proc.stderr, encoding="utf-8")
+    return record
 
 
 def run(args: argparse.Namespace) -> int:
@@ -83,6 +105,7 @@ def run(args: argparse.Namespace) -> int:
     plugin_eval_dir = Path(args.plugin_eval_dir).expanduser().resolve()
     if not (plugin_eval_dir / "pyproject.toml").is_file():
         raise SystemExit(f"not a PluginEval checkout: {plugin_eval_dir}")
+    skills = load_skills(Path(args.skills_file) if args.skills_file else DEFAULT_SKILLS_FILE)
     settings = json.loads((scratch / "config" / "settings.json").read_text(encoding="utf-8"))
     env = prepare.build_child_env(
         dict(settings.get("env") or {}),
@@ -90,76 +113,42 @@ def run(args: argparse.Namespace) -> int:
         Path(manifest["provider"]["token_file"]),
         str(manifest["provider"]["base_url"]),
     )
-    skills_file = Path(args.skills_file) if args.skills_file else DEFAULT_SKILLS_FILE
-    if skills_file.is_file():
-        skills = [
-            line.strip()
-            for line in skills_file.read_text(encoding="utf-8").splitlines()
-            if line.strip()
-        ]
-    else:
-        skills = list(DEFAULT_SKILLS)
+    # uv sync only installs packages; it never needs the provider token.
+    sync_env = {key: value for key, value in env.items() if key != "ANTHROPIC_AUTH_TOKEN"}
 
     out = scratch / "plugin-eval"
     out.mkdir(parents=True, exist_ok=True)
-    sync, commands = build_commands(plugin_eval_dir, plugin, skills)
+    sync, commands = build_commands(args.uv, plugin, skills)
     results: list[dict[str, Any]] = []
-    if not args.skip_sync:
-        proc = subprocess.run(
-            [args.uv, *sync[1:]],
-            cwd=str(plugin_eval_dir),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=args.sync_timeout,
-        )
-        (out / "sync.stdout.txt").write_text(proc.stdout, encoding="utf-8")
-        (out / "sync.stderr.txt").write_text(proc.stderr, encoding="utf-8")
-        if proc.returncode != 0:
-            raise SystemExit(f"uv sync failed: {proc.returncode}")
-    for label, cmd in commands:
-        full = [args.uv, *cmd[1:]]
-        proc = subprocess.run(
-            full,
-            cwd=str(plugin_eval_dir),
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=args.timeout,
-        )
-        record: dict[str, Any] = {
-            "label": label,
-            "command": full,
-            "exit_code": proc.returncode,
-            "stderr_tail": proc.stderr[-2000:],
-        }
-        try:
-            parsed = _parse_json(proc.stdout)
-            record["result"] = parsed
-            record["composite"] = parsed.get("composite")
-            record["layers"] = [layer.get("layer") for layer in parsed.get("layers", [])]
-            record["model_usage"] = parsed.get("model_usage")
-        except ValueError as exc:
-            record["parse_error"] = str(exc)
-            record["stdout_tail"] = proc.stdout[-2000:]
-        results.append(record)
-        (out / (label.replace("/", "_").replace(".", "_") + ".stdout.json")).write_text(
-            proc.stdout, encoding="utf-8"
-        )
-        (out / (label.replace("/", "_").replace(".", "_") + ".stderr.txt")).write_text(
-            proc.stderr, encoding="utf-8"
-        )
-    summary = {"schema": "pact-bench/plugin-eval/1", "plugin_eval_dir": str(plugin_eval_dir), "results": results}
-    (out / "result.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    summary: dict[str, Any] = {
+        "schema": "pact-bench/plugin-eval/1",
+        "plugin_eval_dir": str(plugin_eval_dir),
+        "results": results,
+    }
+    try:
+        if not args.skip_sync:
+            try:
+                proc = _exec(sync, plugin_eval_dir, sync_env, args.sync_timeout)
+            except subprocess.TimeoutExpired as exc:
+                raise SystemExit(f"uv sync timed out after {args.sync_timeout}s") from exc
+            (out / "sync.stdout.txt").write_text(proc.stdout, encoding="utf-8")
+            (out / "sync.stderr.txt").write_text(proc.stderr, encoding="utf-8")
+            if proc.returncode != 0:
+                raise SystemExit(f"uv sync failed: {proc.returncode}")
+        for label, cmd in commands:
+            results.append(_score_one(label, cmd, plugin_eval_dir, env, args.timeout, out))
+    finally:
+        (out / "result.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2))
-    return 0 if all(item.get("exit_code") == 0 for item in results) else 1
+    ok = all(item.get("exit_code") == 0 and "parse_error" not in item for item in results)
+    return 0 if ok else 1
 
 
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
     parser = parser or argparse.ArgumentParser(description="Run PluginEval on a prepared PACT copy.")
     parser.add_argument("--manifest", required=True)
     parser.add_argument("--plugin-eval-dir", required=True)
-    parser.add_argument("--skills-file", default=None)
+    parser.add_argument("--skills-file", default=None, help="default bench/external/plugin-eval-skills.txt")
     parser.add_argument("--skip-sync", action="store_true")
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--timeout", type=int, default=600)
