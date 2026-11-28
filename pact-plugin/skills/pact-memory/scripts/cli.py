@@ -1364,31 +1364,23 @@ def _placed_split(memory, store: Path, bucket: str) -> dict:
     return _stable_read_only(str(store), split)
 
 
-def _bucket_rows_under(store: Path, bucket: str, roots: list) -> int:
-    """How many of `bucket`'s file rows lie under any of `roots` (this
-    checkout and its worktrees), read without writing. 0 for a store with no
-    files table yet."""
+def _bucket_rows_under(store: Path, bucket: str, roots: list, common=None) -> int:
+    """How many of `bucket`'s file rows lie in this checkout by the legacy
+    gate's own row rule (`database.bucket_rows_here`), read without writing.
+    0 for a store with no files table yet."""
+    from scripts.database import bucket_rows_here
     from scripts.database import sqlite3 as db_sqlite3
 
     def count() -> int:
         conn = _read_only_connection(str(store))
         try:
-            total = 0
-            for root in roots:
-                prefix = str(root).rstrip("/") + "/"
-                total += conn.execute(
-                    "SELECT COUNT(*) FROM files WHERE project_id = ? AND "
-                    "(path = ? OR substr(path, 1, ?) = ?)",
-                    (bucket, str(root), len(prefix), prefix),
-                ).fetchone()[0]
-            return total
+            return bucket_rows_here(conn, bucket, roots, common)
         except db_sqlite3.OperationalError:
             return 0
         finally:
             conn.close()
 
     return _stable_read_only(str(store), count)
-
 
 def _own_folder_name_target(memory, from_id: str, to_id: str) -> bool:
     """Whether `to_id` is this session's OWN folder-name id and `from_id` its
@@ -1745,12 +1737,12 @@ def _project_id_rekey(args, db_path) -> NoReturn:
         elif is_canonical(from_id) and from_id not in (
             getattr(memory, "_earlier_canonical", None) or {}
         ):
-            roots = (
-                memory._legacy_gate_roots(memory._project_identity_root)[0]
+            roots, common = (
+                memory._legacy_gate_roots(memory._project_identity_root)
                 if memory._project_identity_root is not None and store.exists()
-                else []
+                else ([], None)
             )
-            rows_here = _bucket_rows_under(store, from_id, roots) if roots else 0
+            rows_here = _bucket_rows_under(store, from_id, roots, common) if roots else 0
             foreign_source = (
                 "is a canonical id that is neither this checkout's nor a "
                 "detected earlier id of it "

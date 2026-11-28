@@ -2912,12 +2912,15 @@ def test_only_placed_here_is_refused_for_another_target(shared_app, store, capfd
     """Only this checkout's own id takes the partial move. RED WHEN it moves
     rows into another repository's id."""
     before = _snapshot(store)
-    for argv in (["--to=github.com/b/app"], []):
+    # The dry run too: an apply into another id is also refused by the
+    # into-another-repository rule, so only a dry run shows this check.
+    for argv in (["--to=github.com/b/app"], ["--to=github.com/b/app", "--apply"], ["--apply"]):
         code, envelope = _cli(
-            ["project-id", "rekey", "--from=app", *argv, "--only-placed-here", "--apply",
+            ["project-id", "rekey", "--from=app", *argv, "--only-placed-here",
              "--db-path", str(store)], capfd,
         )
         assert (code, envelope.get("error")) == (2, "INVALID_INPUT"), envelope
+        assert "--only-placed-here" in envelope["message"], envelope
     assert _snapshot(store) == before
 
 
@@ -2950,9 +2953,11 @@ def test_only_placed_here_moves_nothing_of_an_excluded_bucket(identity_env, stor
 
 def test_only_placed_here_places_a_row_as_the_gate_does(identity_env, store, monkeypatch, capfd):
     """Placement is the gate's own row classification. A path that climbs out
-    of x/app with '..' into y/app's file is y's row, not placed; a row reached
-    through a symlink into x/app is here, placed; a sibling x/app2 is not
-    inside x/app. RED WHEN placement compares the stored string instead of
+    of x/app with '..' into y/app's file is y's row, not placed; so is
+    x/app/../app2/f.py; a row reached through a symlink into x/app is here,
+    placed; a sibling x/app2 is not inside x/app; and a separate repository
+    nested in x/app (origin b/app) owns its rows, as the bucket check counts
+    them. RED WHEN placement compares the stored string instead of
     the gate's resolved containment."""
     from scripts import memory_api
 
@@ -2964,11 +2969,16 @@ def test_only_placed_here_places_a_row_as_the_gate_does(identity_env, store, mon
     sibling = identity_env / "x" / "app2"
     sibling.mkdir()
     (sibling / "s.py").write_text("s\n")
+    (sibling / "f.py").write_text("s\n")
     link = identity_env / "via"
     link.symlink_to(x)
+    nested = make_repo(x / "nested" / "app", remote="https://github.com/b/app.git")
+    (nested / "n.py").write_text("n\n")
     _seed_linked(store, "app", "climb0001", [str(x) + "/../../y/app/f.py"])
     _seed_linked(store, "app", "link00001", [str(link / "f.py")])
     _seed_linked(store, "app", "sibling01", [str(sibling / "s.py")])
+    _seed_linked(store, "app", "updown001", [str(x) + "/../app2/f.py"])
+    _seed_linked(store, "app", "nested001", [str(nested / "n.py")])
     monkeypatch.chdir(x)
     code, applied = _cli(
         ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--only-placed-here", "--apply",
@@ -2977,6 +2987,7 @@ def test_only_placed_here_places_a_row_as_the_gate_does(identity_env, store, mon
     assert code == 0, applied
     assert _placed_rows(store)["memories"] == {
         "climb0001": "app", "link00001": "github.com/a/app", "sibling01": "app",
+        "updown001": "app", "nested001": "app",
     }, applied
 
 
@@ -3003,3 +3014,18 @@ def test_only_placed_here_moves_a_memory_placed_in_a_linked_worktree(identity_en
     assert code == 0, applied
     assert (applied["result"]["memories"], applied["result"]["left_files_elsewhere"]) == (1, 1), applied
     assert _placed_rows(store)["memories"] == {"wtmem0001": "github.com/a/app", "away00001": "app"}
+
+
+@pytest.mark.parametrize(("path", "inside"), [
+    ("/a/app/f.py", True),
+    ("/a/app", True),
+    ("/a/app2/f.py", False),
+    ("/a/app-old/f.py", False),
+    ("/a/ap", False),
+])
+def test_containment_is_separator_aware(path, inside):
+    """/a/app2 shares a string prefix with /a/app but is not inside it. RED
+    WHEN containment is a plain string startswith."""
+    from scripts.database import _contained_by_root
+
+    assert _contained_by_root(path, "/a/app", {}, None) is inside

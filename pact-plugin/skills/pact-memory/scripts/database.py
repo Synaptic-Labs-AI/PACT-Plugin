@@ -2624,6 +2624,38 @@ def placed_memory_split(
     return split
 
 
+def bucket_rows_here(
+    conn: sqlite3.Connection,
+    bucket: str,
+    roots: Sequence[Any],
+    root_common: Optional[Union[Path, str]] = None,
+) -> int:
+    """How many of `bucket`'s file rows lie in the checkout whose gate roots
+    are `roots`, by the gate's own row rule (`_row_place`): contained, its
+    file present, dated or not (`contained_rows` or `vanished`). Read
+    only."""
+    root_paths = _gate_root_paths(roots)
+    verified_common: Optional[str] = None
+    if root_common:
+        try:
+            verified_common = os.path.realpath(str(root_common))
+        except (OSError, ValueError):
+            verified_common = None
+    nested: Dict[tuple, bool] = {}
+    strict: Dict[tuple, bool] = {}
+    real_dirs: Dict[str, str] = {}
+    return sum(
+        1
+        for file_id, path in conn.execute(
+            "SELECT id, path FROM files WHERE project_id = ?", (bucket,)
+        ).fetchall()
+        if _row_place(
+            conn, file_id, path, bucket, root_paths, nested, verified_common,
+            real_dirs, strict, False,
+        )[0] in ("contained_rows", "vanished")
+    )
+
+
 def _copy_shared_file_links(
     conn: sqlite3.Connection,
     old_id: str,

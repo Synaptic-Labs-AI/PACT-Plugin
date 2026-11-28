@@ -533,3 +533,29 @@ def test_a_bucket_with_no_memories_is_not_named(caplog):
     with caplog.at_level(logging.WARNING):
         memory_api._note_earlier_canonical("s.db", OLD, NEW, 0, 0, "cmd")
     assert not caplog.records
+
+
+def test_a_row_that_climbs_out_of_the_checkout_is_no_row_here(renamed, capfd):
+    """The refusal's "file rows here" count is the gate's own row rule: a
+    stored path that climbs out of this checkout with '..' is not here, even
+    though its string starts with the checkout's path. RED WHEN the count
+    compares the stored string."""
+    from scripts.cli import main
+
+    repo, store = renamed
+    other = repo.parent / "other" / "b.py"
+    with db_connection(store) as conn:
+        _memory(conn, "m9", "github.com/z/climb", _later())
+        conn.execute(
+            "INSERT INTO files (id, path, project_id) VALUES ('f-climb', ?, 'github.com/z/climb')",
+            (str(repo) + "/../other/b.py",),
+        )
+        conn.execute("INSERT INTO memory_files (memory_id, file_id) VALUES ('m9', 'f-climb')")
+        conn.commit()
+    assert other.exists()
+    with pytest.raises(SystemExit) as exit_info:
+        main(["project-id", "rekey", "--from=github.com/z/climb", f"--to={NEW}", "--db-path", str(store)])
+    captured = capfd.readouterr()
+    envelope = json.loads(captured.out or captured.err)
+    assert exit_info.value.code == 1, envelope
+    assert "(no file row here places it)" in envelope["message"], envelope
