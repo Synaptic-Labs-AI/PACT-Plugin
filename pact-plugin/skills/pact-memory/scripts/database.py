@@ -2631,9 +2631,9 @@ def bucket_rows_here(
     root_common: Optional[Union[Path, str]] = None,
 ) -> int:
     """How many of `bucket`'s file rows lie in the checkout whose gate roots
-    are `roots`, by the gate's own row rule (`_row_place`): contained, its
-    file present, dated or not (`contained_rows` or `vanished`). Read
-    only."""
+    are `roots`, by the gate's own row rule (`_row_place`): every contained
+    row, whether or not its file exists or a memory dates it
+    (`contained_rows` or `vanished`). Read only."""
     root_paths = _gate_root_paths(roots)
     verified_common: Optional[str] = None
     if root_common:

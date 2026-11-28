@@ -184,6 +184,34 @@ def test_rows_in_one_folder_resolve_that_folder_once(tmp_path, monkeypatch):
     assert len(calls) < 10, len(calls)
 
 
+def test_rows_here_counts_every_contained_row_vanished_or_not(tmp_path):
+    """bucket_rows_here counts a contained row whether its file exists, is
+    gone but dated, or is gone and undated (vanished), and not a row
+    outside: `_row_place`'s contained_rows plus vanished. RED WHEN it counts
+    only contained_rows and drops the vanished row."""
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "foo", remote="https://github.com/acme/foo.git")
+    (repo / "kept.py").write_text("x\n", encoding="utf-8")
+    store = tmp_path / "m.db"
+    _seed_rows(store, [repo / "kept.py", repo / "gone.py", tmp_path / "elsewhere.py"], OLD)
+    later = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat()
+    with db_connection(store) as conn:
+        conn.execute(
+            "INSERT INTO memories (id, context, project_id, created_at, updated_at) "
+            "VALUES ('m9', 'c', 'foo', ?, ?)",
+            (later, later),
+        )
+        conn.execute("INSERT INTO files (id, path, project_id) VALUES ('f9', ?, 'foo')",
+                     (str(repo / "dated_gone.py"),))
+        conn.execute("INSERT INTO memory_files (memory_id, file_id) VALUES ('m9', 'f9')")
+        conn.commit()
+    conn = sqlite3.connect(str(store))
+    try:
+        assert database.bucket_rows_here(conn, "foo", [repo], repo / ".git") == 3
+    finally:
+        conn.close()
+
+
 @pytest.mark.parametrize("shape", ["plain", "missing_dir", "file_link", "dir_link", "dotdot"])
 def test_folder_resolution_matches_realpath(tmp_path, shape):
     (tmp_path / "real").mkdir()
