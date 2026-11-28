@@ -2529,3 +2529,33 @@ def test_a_declined_origin_names_its_reason_and_the_pin(tmp_path, monkeypatch, c
     assert "no single project id can be read from the repository's origin" in message, message
     assert "pact-project-id" in message, message
     assert url not in message, message
+
+
+@pytest.mark.parametrize("remote, noted", [
+    ("git@github.com-work:Owner/Repo.git", True),
+    ("git@gh_work:Owner/Repo.git", True),
+    ("ssh://git@githubwork/Owner/Repo", True),
+    ("git@github.com:Owner/Repo.git", False),
+    ("git@gitlab.example.com:Owner/Repo.git", False),
+    ("https://github.com/Owner/Repo", False),
+])
+def test_show_notes_an_ssh_host_alias_origin(tmp_path, monkeypatch, capfd, remote, noted):
+    """An ssh or scp origin whose host looks like an ssh alias gets the alias's
+    id, so project-id show points to the pin that joins it to the github.com
+    clones. RED WHEN the note is missing, or given for a real host."""
+    from fixtures.identity_git import assert_outside_repository, make_repo
+    from scripts.cli import main
+    from scripts.database import db_connection, ensure_initialized
+    from scripts.project_identity import SSH_ALIAS_DETAIL
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "r", remote=remote)
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    with db_connection(tmp_path / "store.db") as conn:
+        ensure_initialized(conn)
+    with pytest.raises(SystemExit):
+        main(["project-id", "show", "--db-path", str(tmp_path / "store.db")])
+    shown = json.loads(capfd.readouterr().out)["result"]
+    assert shown["identity_detail"] == (SSH_ALIAS_DETAIL if noted else None), shown
+    assert "pact-project-id" in SSH_ALIAS_DETAIL

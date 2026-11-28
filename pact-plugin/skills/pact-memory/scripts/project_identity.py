@@ -1369,6 +1369,42 @@ def unrepresentable_detail(url: Optional[str]) -> Optional[str]:
     return "its path is empty or holds a segment an id cannot hold"
 
 
+# The `identity_detail` `project-id show` gives an ssh or scp origin whose host
+# looks like an ssh host alias (`ssh_alias_origin`).
+SSH_ALIAS_DETAIL = (
+    "its origin's host looks like an ssh host alias (a name from an ssh config, "
+    "not a full host name or github.com itself), so the id is that alias's, and "
+    "clones of the same repository through the real host get another id. A "
+    "canonical id written to <git-common-dir>/pact-project-id (for a GitHub "
+    "repository, github.com/owner/repo) gives this clone the same id as theirs; "
+    "only the user writes it"
+)
+
+
+def ssh_alias_origin(url: Optional[str]) -> bool:
+    """Whether `url` is an ssh or scp origin whose host looks like an ssh host
+    alias: a name with no dot (not a fully qualified host name), or one that
+    mentions github without being github.com, www.github.com or
+    ssh.github.com (`git@github.com-work:o/r`)."""
+    if not isinstance(url, str):
+        return False
+    value = _strip_one_terminator(url)
+    scheme_match = _SCHEME_PREFIX_RE.match(value)
+    if scheme_match is not None:
+        if scheme_match.group("scheme").lower() not in _HOME_RELATIVE_SCHEMES:
+            return False
+        host = value[scheme_match.end():].partition("/")[0].rpartition("@")[2].partition(":")[0]
+    else:
+        scp_match = _scp_match(value)
+        if scp_match is None:
+            return False
+        host = scp_match.group("host")
+    host = host.lower()
+    if not host or host.startswith("[") or host in ("github.com", "www.github.com", _GITHUB_SSH_443_HOST):
+        return False
+    return "." not in host or "github" in host
+
+
 def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
     """Classify an origin value into one of the three ruled outcomes.
 

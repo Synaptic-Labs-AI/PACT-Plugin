@@ -59,6 +59,7 @@ from scripts.database import (
     PrefixTooShortError,
     escape_for_envelope,
     folded_github_id,
+    origin_url_in_config,
 )
 from scripts.memory_api import (
     GitHubPayloadIdRefusedError,
@@ -85,7 +86,9 @@ from scripts.memory_api import (
 )
 from scripts.project_identity import (
     REMOTE_HELPER_DETAIL,
+    SSH_ALIAS_DETAIL,
     is_canonical,
+    ssh_alias_origin,
 )
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
@@ -1146,6 +1149,9 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
                 "identity_detail": (
                     REMOTE_HELPER_DETAIL
                     if memory._project_id_source == "remote helper"
+                    else SSH_ALIAS_DETAIL
+                    if memory._project_id_source == "origin remote"
+                    and ssh_alias_origin(_origin_url_of(memory))
                     else None
                 ),
                 # STRUCTURED DECLINE REASON, not just the warning. A repository
@@ -1173,6 +1179,18 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
         "project-id requires an action: show or rekey",
         exit_code=2,
     )
+
+
+def _origin_url_of(memory: "PACTMemory") -> str | None:
+    """The first origin url of the identity root's repository config, or None
+    (for `project-id show`'s ssh-alias note; never printed)."""
+    root = memory._project_identity_root
+    if root is None:
+        return None
+    common = memory._legacy_gate_roots(root)[1]
+    if common is None:
+        return None
+    return origin_url_in_config(Path(common) / "config")
 
 
 _REKEY_ZERO_COUNTERS = (
