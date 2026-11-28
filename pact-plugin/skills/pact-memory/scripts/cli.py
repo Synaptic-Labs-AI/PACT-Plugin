@@ -1619,10 +1619,32 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     foreign_source = None
     undetected_earlier = ""
     if to_id == own_id and not noop and not args.from_another_repository:
+        candidate = state.get("candidate")
         if legacy_verdict == "excluded":
             foreign_source = (
                 "was excluded for this checkout: its file rows place it in "
                 "another repository"
+            )
+        elif (
+            candidate is not None
+            and state.get("excluded")
+            and from_id.casefold() == candidate.casefold()
+        ):
+            foreign_source = (
+                f"differs only by case from the legacy bucket {candidate!r}, "
+                "which was excluded for this checkout: its file rows place it "
+                "in another repository"
+            )
+        elif from_id in (state.get("ambiguous") or []):
+            foreign_source = (
+                "is one of several buckets that match this checkout's folder "
+                "name only by case, so no read here can tell which, if any, "
+                "is this checkout's"
+            )
+        elif from_id == state.get("suppressed_candidate"):
+            foreign_source = (
+                "is this submodule's pre-upgrade bucket, whose name its "
+                "superproject chooses, so it is not read here"
             )
         elif is_canonical(from_id) and from_id not in (
             getattr(memory, "_earlier_canonical", None) or {}

@@ -393,6 +393,26 @@ class TestTheRekeyRefusalContract:
         )
         assert code == 0 and envelope["result"]["dry_run"] is True, envelope
 
+    @pytest.mark.parametrize("variant", ["Proj", "PROJ"])
+    def test_a_case_variant_of_an_excluded_bucket_into_this_checkouts_id_is_refused(
+        self, excluded_rig, store, capfd, variant
+    ):
+        """'proj' is excluded here (its rows are in two/proj), so a bucket that
+        differs from it only by case is not this checkout's to claim either:
+        the dry run and the apply refuse, and only --from-another-repository
+        moves it. RED WHEN the case variant moves without the flag."""
+        _seed(store, variant, memory_id="variant01", path="v.py")
+        before = _snapshot(store)
+        argv = ["project-id", "rekey", f"--from={variant}", "--to=github.com/o/one",
+                "--db-path", str(store)]
+        for apply in ([], ["--apply"]):
+            code, envelope = _cli([*argv, *apply], capfd)
+            assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
+            assert "differs only by case from the legacy bucket 'proj'" in envelope["message"], envelope
+            assert _snapshot(store) == before
+        code, envelope = _cli([*argv, "--apply", "--from-another-repository"], capfd)
+        assert code == 0 and envelope["result"]["memories"] == 1, envelope
+
     def test_a_rename_into_this_checkouts_own_id_applies(
         self, excluded_rig, store, capfd
     ):
@@ -2604,3 +2624,52 @@ def test_show_notes_an_ssh_host_alias_origin(tmp_path, monkeypatch, capfd, remot
     assert shown["identity_detail"] == expected, shown
     assert "pact-project-id" in SSH_ALIAS_DETAIL and "github.com" not in SSH_ALIAS_DETAIL
     assert "github.com/owner/repo" in SSH_ALIAS_GITHUB_DETAIL
+
+
+def _rekey_refused(argv, store, capfd, reason):
+    before = _snapshot(store)
+    for apply in ([], ["--apply"]):
+        code, envelope = _cli([*argv, *apply], capfd)
+        assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
+        assert reason in envelope["message"] and "--from-another-repository" in envelope["message"], envelope
+        assert _snapshot(store) == before
+    code, envelope = _cli([*argv, "--apply", "--from-another-repository"], capfd)
+    assert code == 0 and envelope["result"]["memories"] == 1, envelope
+
+
+def test_an_ambiguous_folded_bucket_into_this_checkouts_id_is_refused(identity_env, store, monkeypatch, capfd):
+    """On a filesystem that folds case, 'Proj' and 'PROJ' both match folder
+    'proj', so neither is read: moving one into this checkout's id is refused
+    unless --from-another-repository is passed. RED WHEN it moves without
+    the flag."""
+    from scripts import project_identity
+
+    monkeypatch.setattr(project_identity, "filesystem_case_insensitive", lambda root: True)
+    where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+    monkeypatch.chdir(where)
+    _seed(store, "Proj", memory_id="row000001", path="a.py")
+    _seed(store, "PROJ", memory_id="row000002", path="b.py")
+    _rekey_refused(
+        ["project-id", "rekey", "--from=Proj", "--to=github.com/o/proj", "--db-path", str(store)],
+        store, capfd, "one of several buckets that match this checkout's folder name only by case",
+    )
+
+
+def test_a_submodules_suppressed_bucket_into_its_id_is_refused(identity_env, store, monkeypatch, capfd):
+    """A submodule's pre-upgrade bucket ('modules') is named by its
+    superproject, so it is not read here and moving it into the submodule's
+    id needs --from-another-repository. RED WHEN it moves without the
+    flag."""
+    from fixtures.identity_git import run_git
+
+    upstream = make_repo(identity_env / "libup", remote="https://github.com/acme/lib.git")
+    sup = make_repo(identity_env / "super", remote="https://github.com/acme/super.git")
+    run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(upstream), "lib", cwd=sup)
+    lib = sup / "lib"
+    run_git("remote", "set-url", "origin", "https://github.com/acme/lib.git", cwd=lib)
+    monkeypatch.chdir(lib)
+    _seed(store, "modules", memory_id="row000001", path="a.py")
+    _rekey_refused(
+        ["project-id", "rekey", "--from=modules", "--to=github.com/acme/lib", "--db-path", str(store)],
+        store, capfd, "this submodule's pre-upgrade bucket",
+    )

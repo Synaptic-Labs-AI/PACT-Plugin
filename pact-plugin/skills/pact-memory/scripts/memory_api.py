@@ -387,7 +387,8 @@ def _suppressed_bucket_rows(store: str, bucket: Optional[str]) -> int:
             "through its tracked .gitmodules, so reading it would let a "
             "repository read another project's memories. If those rows belong "
             "to this checkout, list them with `project-id show` and move them "
-            "with `project-id rekey`.",
+            "with `project-id rekey` and --from-another-repository, only with "
+            "the user's approval.",
             bucket,
             count,
         )

@@ -7341,6 +7341,10 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<call to no function memory_api: _REKEY_PREVIEW.reset>"): (
             "rekey_preview unmarks the scope read when its block ends"
         ),
+        ("call", "<call to no function cli: candidate.casefold>"): (
+            "a rekey compares --from with an excluded legacy candidate only to refuse moving "
+            "a case variant of it into this checkout's id; it changes no read"
+        ),
         ("call", "<call to no function cli: legacy_name.casefold>"): (
             "a rekey dry run compares --from with this checkout's folder name only to decide "
             "whether its scope read prints the legacy notices; it changes no answer"
