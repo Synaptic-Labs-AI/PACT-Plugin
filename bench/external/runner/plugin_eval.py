@@ -68,8 +68,9 @@ def _checkout_state(directory: Path) -> tuple[str | None, str | None, bool | Non
     try:
         top = prepare._git(directory, "rev-parse", "--show-toplevel").strip()
         commit = prepare._git(directory, "rev-parse", "HEAD").strip()
-        # git -C <dir> status -- . scopes the check to the PluginEval dir.
-        dirty = bool(prepare._git(directory, "status", "--porcelain", "--", ".").strip())
+        # git -C <dir> status -- . scopes the check to the PluginEval dir; --untracked-files=all
+        # overrides a checkout's own status.showUntrackedFiles=no.
+        dirty = bool(prepare._git(directory, "status", "--porcelain", "--untracked-files=all", "--", ".").strip())
     except (SystemExit, OSError):
         return None, None, None
     return top, commit, dirty

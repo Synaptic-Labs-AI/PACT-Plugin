@@ -233,7 +233,14 @@ def test_host_per_user_git_ignore_does_not_apply(tmp_path: Path, monkeypatch: py
 
 def test_host_secrets_do_not_reach_task_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GH_TOKEN", "host-secret")
-    seed = "import os\n\ndef test_seed():\n    assert 'GH_TOKEN' not in os.environ\n"
+    # HOME and the temp dir must point into the task's own temp dir (<tmp>/work's parent).
+    seed = (
+        "import os, tempfile\nfrom pathlib import Path\n\ndef test_seed():\n"
+        "    assert 'GH_TOKEN' not in os.environ\n"
+        "    task_tmp = Path.cwd().parent.resolve()\n"
+        "    assert Path(os.environ['HOME']).resolve() == task_tmp\n"
+        "    assert Path(tempfile.gettempdir()).resolve() == task_tmp\n"
+    )
     task = make_task(tmp_path, files={"tests/test_calc.py": seed})
     assert validate.validate_task(task, sys.executable)["status"] == "pass"
 

@@ -277,7 +277,7 @@ def discover(root: Path) -> list[Path]:
     return sorted(
         path.parent
         for path in root.glob("*/task.json")
-        if path.is_file() and path.parent.name not in {"tasks", "fixtures"}
+        if path.is_file()
     )
 
 

@@ -357,6 +357,16 @@ def test_record_names_the_checkout_holding_the_plugin_eval_dir(tmp_path: Path) -
     assert _state(manifest)[2] is True
 
 
+def test_untracked_file_under_the_dir_is_dirty_whatever_the_repo_config(tmp_path: Path) -> None:
+    manifest, _, uv, skills = _setup(tmp_path, ["good"])
+    agents, tool, head = _nested_checkout(tmp_path)
+    env = {**os.environ, **GIT_TEST_ENV}
+    subprocess.run(["git", "config", "status.showUntrackedFiles", "no"], cwd=agents, env=env, check=True)
+    (tool / "injected.py").write_text("x = 1\n", encoding="utf-8")
+    with pytest.raises(SystemExit, match="dirty=True"):
+        plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--expect-commit", head))
+
+
 def test_expect_commit_passes_for_a_nested_dir_at_the_pin(tmp_path: Path) -> None:
     manifest, _, uv, skills = _setup(tmp_path, ["good"])
     agents, tool, head = _nested_checkout(tmp_path)
