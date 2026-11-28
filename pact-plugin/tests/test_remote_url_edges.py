@@ -281,9 +281,44 @@ def test_an_ssh_alias_with_an_underscore_is_a_host(url, expected):
     assert pi.is_canonical(expected)
 
 
-@pytest.mark.parametrize("url", ["https://gh_work/o/r", "git@_gh:o/r", "git@gh_:o/r"])
-def test_an_underscore_host_declines_outside_ssh_or_at_an_end(url):
+@pytest.mark.parametrize("url", ["https://_gh/o/r", "git@_gh:o/r", "git@gh_:o/r"])
+def test_an_underscore_host_declines_at_an_end(url):
     assert pi.normalize_remote_url(url) is None
+
+
+@pytest.mark.parametrize("url, expected", [
+    ("http://gitea_server:3000/o/r.git", "gitea_server:3000/o/r"),
+    ("https://gitea_server/o/r", "gitea_server/o/r"),
+    ("git://gitea_server/o/r", "gitea_server/o/r"),
+])
+def test_an_http_or_git_host_with_an_underscore_is_a_host(url, expected):
+    """git over http(s) and git:// hands the host to the resolver (measured,
+    git 2.43: `http://gitea_server.invalid:3000/o/r.git` fails with "Could
+    not resolve host", not a url error), so a docker-compose service name is
+    a host. RED WHEN such a remote declines and its saves fail."""
+    assert pi.normalize_remote_url(url) == expected
+    assert pi.classify_remote_origin(url)[0] == pi.OUTCOME_CANONICAL
+
+
+def test_a_repository_on_an_underscore_http_host_saves_under_its_id(tmp_path, monkeypatch):
+    """Parity with the merge base, which saved such a repository under its
+    folder name: a save succeeds and files under the remote's id. RED WHEN
+    the save fails with PROJECT_IDENTITY_UNRESOLVED."""
+    import sqlite3
+
+    from fixtures.identity_git import assert_outside_repository, make_repo
+    from scripts.memory_api import PACTMemory
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "r", remote="http://gitea_server:3000/o/r.git")
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    store = tmp_path / "store.db"
+    memory = PACTMemory(session_id="s", db_path=store)
+    assert memory.project_id == "gitea_server:3000/o/r"
+    memory.save({"context": "c"})
+    with sqlite3.connect(str(store)) as conn:
+        assert [row[0] for row in conn.execute("SELECT project_id FROM memories")] == ["gitea_server:3000/o/r"]
 
 
 @pytest.mark.parametrize("url", [

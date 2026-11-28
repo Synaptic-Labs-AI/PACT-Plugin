@@ -581,20 +581,21 @@ def is_canonical(value: object) -> bool:
     return is_canonical_id(value)
 
 
-def _valid_host(host: str, ssh: bool = False) -> bool:
+def _valid_host(host: str) -> bool:
     """Whether a lowercased host is well formed.
 
-    Alphanumeric at both ends, and only `[a-z0-9.-]` between, with no empty
+    Alphanumeric at both ends, and only `[a-z0-9._-]` between, with no empty
     label (`a..b`): a trailing dot and a leading hyphen name something git
-    would not contact the same way. An `_` inside the host is accepted for
-    an ssh or scp remote (`ssh`), where it names an ssh_config alias
-    (`Host gh_work`) that ssh resolves, as it resolves a hyphenated one;
-    no other transport takes it.
+    would not contact the same way. An `_` inside the host is accepted on
+    every transport: ssh resolves an ssh_config alias (`Host gh_work`), and
+    git over http(s) and git:// hands the name to the resolver (measured, git
+    2.43: `http://gitea_server.invalid:3000/o/r.git` fails with "Could not
+    resolve host", not a url error), so a docker-compose service name such as
+    `gitea_server` is a host.
     """
     if not host or not host[0].isalnum() or not host[-1].isalnum() or ".." in host:
         return False
-    allowed = _HOST_CHARS | {"_"} if ssh else _HOST_CHARS
-    return all(char in allowed for char in host)
+    return all(char in _HOST_CHARS or char == "_" for char in host)
 
 
 def _ipv6_host(host: str) -> Optional[str]:
@@ -621,7 +622,7 @@ def _ipv6_host(host: str) -> Optional[str]:
     return "[" + address.compressed + "]"
 
 
-def _url_host(host: str, ssh: bool = False) -> Optional[str]:
+def _url_host(host: str) -> Optional[str]:
     """The host as it goes into an id: a bracketed IPv6 literal compressed,
     a name lower-cased and checked; None for anything else (including a host
     in the reserved `.invalid` namespace and a loopback host,
@@ -629,7 +630,7 @@ def _url_host(host: str, ssh: bool = False) -> Optional[str]:
     if host.startswith("["):
         return _ipv6_host(host)
     host = host.lower()
-    if not _valid_host(host, ssh) or _reserved_host(host):
+    if not _valid_host(host) or _reserved_host(host):
         return None
     return host
 
@@ -1073,7 +1074,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         if port and _DEFAULT_PORTS.get(scheme) == int(port):
             port = ""
         ssh = scheme in _HOME_RELATIVE_SCHEMES
-        host = _url_host(host, ssh)
+        host = _url_host(host)
         if host is None:
             return None
         # git percent-decodes an ssh url's WHOLE path before sending it
@@ -1103,7 +1104,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
             # Neither a URL nor scp syntax: indistinguishable from a relative
             # local path, which is NO PORTABLE ORIGIN.
             return None
-        host = _url_host(scp_match.group("host"), True)
+        host = _url_host(scp_match.group("host"))
         if host is None:
             return None
         # RELATIVE AND ABSOLUTE SCP PATHS ARE DELIBERATELY ONE ID.

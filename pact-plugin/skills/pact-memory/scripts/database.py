@@ -1185,7 +1185,7 @@ def _unusable_identifier(value: object) -> bool:
 CANONICAL_ID_MAX_LENGTH = 255
 
 # Host: lowercase, alnum at BOTH ends, dots, hyphens and underscores (an ssh
-# alias) only inside, and no two dots together (an empty label names no
+# alias, or a resolvable name such as a docker-compose service) only inside, and no two dots together (an empty label names no
 # host). The
 # optional port sits in the HOST position and nowhere else; a colon anywhere
 # else is refused by the segment class. `[1-9]` rejects a leading zero (and
