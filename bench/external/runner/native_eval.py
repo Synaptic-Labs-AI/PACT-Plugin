@@ -15,7 +15,11 @@ run). The model (CLI --model and --judge-model) is the one fixed at prepare
 time, read from the manifest. The eval's whole process group is killed when it
 ends, times out or is signalled. Its --output-dir is <run>/native-eval/runs/<run id>/.
 --threshold 0 is always passed, so the eval's pass/fail and exit code are not
-the measurement; the with/without delta in report.json is.
+the measurement; the with/without delta in report.json is. --allow-tools grants
+only the gated tools some case's own allowed_tools lists (recorded as
+tool_grants). Per the claude 2.1.332 CLI's own messages, a gated tool also has
+to be in the case's allowed_tools, so the grant does not widen a case (not
+verified with a live run).
 
 Cleanup contract: the short TMPDIR/HOME root under --temp-root and the
 injected evals/ dir are removed on every exit path, even when keeping their
@@ -31,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -48,6 +53,10 @@ TEMP_PREFIX = "pact-native-"
 TEMP_SUFFIX_CHARS = 8
 TIMEOUT_EXIT_CODE = 124
 REPORT_FILES = {"report_json": "report.json", "report_html": "report.html"}
+# Tools claude plugin eval treats as gated (its --help); mcp__* tools are gated too.
+GATED_TOOLS = ("Bash", "Write", "Edit", "WebFetch")
+CASE_FILES = ("prompt.md", "case.yaml")
+ALLOWED_TOOLS_LINE = re.compile(r"^allowed_tools:\s*\[(.*)\]\s*$", re.MULTILINE)
 
 
 def _default_cases() -> Path:
@@ -87,8 +96,39 @@ def _child_env(manifest: dict[str, Any], scratch: Path) -> dict[str, str]:
     )
 
 
+def case_tool_grants(cases_dir: Path) -> list[str]:
+    """The gated tools (GATED_TOOLS, mcp__*, and their Tool(pattern) forms) that some
+    case's own allowed_tools lists, in first-seen order.
+
+    In claude plugin eval a gated tool is usable only when it is in the case's
+    allowed_tools AND granted with --allow-tools, so granting this union adds no
+    tool to a case that does not list it, and a run whose cases list none grants nothing.
+    """
+    grants: list[str] = []
+    for case in sorted(path for path in cases_dir.iterdir() if path.is_dir()):
+        for name in CASE_FILES:
+            source = case / name
+            if not source.is_file():
+                continue
+            text = source.read_text(encoding="utf-8")
+            if re.search(r"^allowed_tools:\s*$", text, re.MULTILINE):
+                raise SystemExit(f"{source}: allowed_tools must be an inline [..] list for native-eval to read it")
+            for match in ALLOWED_TOOLS_LINE.finditer(text):
+                for entry in (item.strip().strip("'\"") for item in match.group(1).split(",")):
+                    base = entry.split("(", 1)[0]
+                    if entry and (base in GATED_TOOLS or base.startswith("mcp__")) and entry not in grants:
+                        grants.append(entry)
+    return grants
+
+
 def build_command(
-    args: argparse.Namespace, claude_bin: str, plugin: Path, out: Path, model: str, runs_dir: Path
+    args: argparse.Namespace,
+    claude_bin: str,
+    plugin: Path,
+    out: Path,
+    model: str,
+    runs_dir: Path,
+    grants: list[str],
 ) -> list[str]:
     cmd = [
         claude_bin,
@@ -117,11 +157,9 @@ def build_command(
         "--output-dir",
         str(runs_dir),
         "--keep-temp",
-        # Variadic (<tools...>): the list ends at the next option.
-        "--allow-tools",
-        "Bash",
-        "Write",
-        "Edit",
+        # Variadic (<tools...>): the list ends at the next option. Only the gated tools
+        # the cases themselves list (case_tool_grants); none when they list none.
+        *(["--allow-tools", *grants] if grants else []),
         "--model",
         model,
         "--judge-model",
@@ -221,6 +259,7 @@ def run(args: argparse.Namespace) -> int:
         "plugin_evals_results": None,
         "cleanup_error": None,
         "runs_dir": None,
+        "tool_grants": None,
         "clean_root_changed": None,
         "report_json": None,
         "report_html": None,
@@ -256,7 +295,8 @@ def run(args: argparse.Namespace) -> int:
 
         runs_dir = out / "runs" / short_root.name  # per run, so earlier runs never mix in
         record["runs_dir"] = str(runs_dir)
-        cmd = build_command(args, claude_bin, plugin, out, model, runs_dir)
+        record["tool_grants"] = case_tool_grants(cases_dir)
+        cmd = build_command(args, claude_bin, plugin, out, model, runs_dir, record["tool_grants"])
         record["command"] = cmd
         record["exit_code"], record["timed_out"] = _launch(cmd, cwd, env, out, args.timeout)
         # The clean-root check ran at start; a memory or settings file that appeared

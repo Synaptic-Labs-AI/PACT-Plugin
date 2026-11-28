@@ -112,8 +112,8 @@ def test_native_eval_injects_cases_and_records_command(tmp_path: Path, short_roo
     assert record["error"] is None and record["cleanup_error"] is None
     assert record["report_json"].endswith("report.json")
     assert any(str(plugin) in str(part) for part in record["command"])
-    tools = record["command"][record["command"].index("--allow-tools") + 1:][:4]
-    assert tools == ["Bash", "Write", "Edit", "--model"]
+    # The probe case lists no allowed_tools, so nothing is granted.
+    assert "--allow-tools" not in record["command"] and record["tool_grants"] == []
     assert not (plugin / "evals").exists()
     assert _leftovers(short_root) == []
 
@@ -411,7 +411,7 @@ def test_native_eval_names_a_partial_keep(tmp_path: Path, short_root: Path, monk
 def test_native_eval_build_command_is_the_documented_command_line(tmp_path: Path) -> None:
     args = native_eval.build_parser().parse_args(["--manifest", "m.json"])
     plugin, out, runs = tmp_path / "plugin", tmp_path / "out", tmp_path / "out" / "runs" / "r1"
-    assert native_eval.build_command(args, "/bin/claude", plugin, out, "model-x", runs) == [
+    assert native_eval.build_command(args, "/bin/claude", plugin, out, "model-x", runs, ["Bash", "Write", "Edit"]) == [
         "/bin/claude", "plugin", "eval", str(plugin),
         "--eval-dir", "evals",
         "--ablation", "with-without",
@@ -452,3 +452,36 @@ def test_native_eval_fails_when_a_memory_file_appears_during_the_run(tmp_path: P
     record = _result(manifest)
     assert record["exit_code"] == 0
     assert record["clean_root_changed"] == [str(short_root.resolve() / "CLAUDE.local.md")]
+
+
+
+def _case(root: Path, name: str, frontmatter: str) -> None:
+    (root / name).mkdir(parents=True)
+    (root / name / "prompt.md").write_text(f"---\nname: {name}\n{frontmatter}---\nDo it.\n", encoding="utf-8")
+
+
+def test_shipped_cases_grant_only_what_they_list() -> None:
+    assert native_eval.case_tool_grants(native_eval._default_cases()) == ["Bash", "Write", "Edit"]
+
+
+def test_a_case_set_listing_no_gated_tool_gets_no_grant(tmp_path: Path) -> None:
+    _case(tmp_path, "triage", "allowed_tools: [Read, Glob, Grep, Skill]\n")
+    assert native_eval.case_tool_grants(tmp_path) == []
+    args = native_eval.build_parser().parse_args(["--manifest", "m.json"])
+    command = native_eval.build_command(args, "claude", tmp_path, tmp_path, "m", tmp_path / "runs", [])
+    assert "--allow-tools" not in command
+
+
+def test_grants_keep_patterns_and_mcp_tools_and_skip_ungated(tmp_path: Path) -> None:
+    _case(tmp_path, "a", "allowed_tools: [Read, 'Bash(npm test)', mcp__srv__tool]\n")
+    _case(tmp_path, "b", 'allowed_tools: ["WebFetch", Read, Bash(npm test)]\n')
+    assert native_eval.case_tool_grants(tmp_path) == ["Bash(npm test)", "mcp__srv__tool", "WebFetch"]
+
+
+def test_a_block_list_allowed_tools_is_refused(tmp_path: Path, short_root: Path) -> None:
+    manifest, _cases, _plugin = _prepared(tmp_path)
+    cases = tmp_path / "block-cases"
+    _case(cases, "c", "allowed_tools:\n  - Bash\n")
+    with pytest.raises(SystemExit, match="inline"):
+        native_eval.run(_args(manifest, cases, _fake_claude(tmp_path), short_root))
+    assert "inline" in _result(manifest)["error"]
