@@ -62,9 +62,8 @@
         "cost_usd": 3.503587,
         "cases_total": 4,
         "threshold": 0,
-        "pass_note": "run at --threshold 0, so every case passes by construction; the pass rate and any pass count are not evidence of plugin behavior",
+        "pass_note": "run at --threshold 0, so pass/fail is not the signal; the recorded pass rate (dropped here because it contradicted this note and the raw runs are not in the tree) and any pass count are not evidence of plugin behavior",
         "overall_score": 0.625,
-        "overall_pass_rate": 0.5,
         "mean_delta": 0,
         "cases": [
           {

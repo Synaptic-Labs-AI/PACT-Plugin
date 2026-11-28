@@ -95,9 +95,15 @@ wrong field type, a copy error, anything unexpected) becomes that task's fail
 row and the run continues; an unexpected error reads
 `<id>: <ExceptionType>: <message>`. The run exits 1 if any task failed. `timeout_seconds` must be a positive
 integer and bounds each command; a command that times out has its process
-group killed (a grandchild that starts its own session is not killed). Git runs without the
-global or system config, with hooks off and with no inherited `GIT_*` variables;
-the child pytest gets no inherited `PYTEST_*` or `PYTHONPATH`. The hidden tests are snapshotted
+group killed (a grandchild that starts its own session is not killed). Git and pytest run with an
+allowlisted environment: only `PATH`, `LANG`, `TERM` and `LC_*` from the host, a
+fixed git identity and config (no global or system config, hooks off, also for a
+fixture that ships its own `.git`), and `HOME`/`TMPDIR` set to the task's temp
+dir, so host secrets, `GIT_*`, `PYTEST_*`, `PYTHONPATH` and the per-user git
+ignore do not reach them. pytest's ini search still walks up from the temp dir,
+so a stray ini file at or above it (for example `/tmp/pytest.ini`) applies when
+the fixture has none. `--python` runs with that environment, so an interpreter
+shim that needs `HOME` may not start. The hidden tests are snapshotted
 before the gold patch is applied, and any change to them (an edit, a deletion,
 a rename in or out, non-ASCII names included) rejects the task. A gold patch
 that only adds files is accepted, and the seed tests after the patch run with
@@ -108,4 +114,5 @@ pytest's JUnit report; a pytest run that writes no JUnit report fails the task; 
 rewrites that report can still fool the check, which targets accidental skips.
 Every path in task.json must be a string that resolves inside the task directory
 (`../`, absolute paths and symlinks pointing out fail the task), and every
-symlink inside fixture/ or hidden_tests/ must resolve inside the task directory.
+symlink inside fixture/ or hidden_tests/, including one reached through a
+directory link, must resolve inside the task directory.

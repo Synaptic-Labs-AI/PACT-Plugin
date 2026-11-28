@@ -78,6 +78,9 @@ def test_benchmarks_rows_match_summaries_one_to_one() -> None:
         assert row["Orchestration smoke"].startswith(smoke["status"])
         assert f"{smoke['handoffs_valid']}/{smoke['handoffs']} HANDOFFs valid" in row["Orchestration smoke"]
 
+        native_blocked = data["track_a"]["native_eval"]["status"].startswith("blocked")
+        assert row["Track A native eval"].startswith("blocked:") == native_blocked
+
         track_b = data["track_b"]
         if track_b["status"] == "authored_out_of_tree":
             assert row["Track B"].startswith(f"{track_b['tasks_authored']} tasks validated out of tree")
@@ -95,3 +98,7 @@ def test_reports_carry_their_summary_numbers() -> None:
         assert set(medians) == {f"{tokens['median_spawn_total']:,}"}, medians
         for skill in data["track_a"]["plugin_eval"]["selected"]:
             assert f"| {skill['skill']} | {skill['composite']:.2f} |" in report, skill["skill"]
+        native_blocked = data["track_a"]["native_eval"]["status"].startswith("blocked")
+        assert ("| A2 native eval | blocked:" in report) == native_blocked
+        plugin_eval_status = data["track_a"]["plugin_eval"]["status"]
+        assert f"| A3 PluginEval | {plugin_eval_status}:" in report

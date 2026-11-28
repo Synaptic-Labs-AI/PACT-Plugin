@@ -124,7 +124,7 @@ PTY is the correct path for true Agent Teams.
 ## Token snapshot
 
 Two subagent first-request samples: 52,112 and 86,606 tokens; median 69,359.
-A trivial provider probe used 19,235 input and 60 output tokens. The sample is
+A trivial provider probe used 19,235 input tokens. The sample is
 small and reports tokens, not USD. The fixed teammate payload is a material
 share of spawn cost and should be audited before adding more agents.
 
@@ -161,10 +161,13 @@ full PACT-vs-solo matrix with the scorecard; no coding-outcome claim is made.
    subagent is high for small tasks.
 5. Run the Track B pilot and full matrix before making any outcome claim.
 
-## Reproduce
+## Re-run with the current harness
 
-These commands produce the native-eval and PluginEval raw runs under
-bench/.runs/; summary.json and this report are then written by hand from them.
+These commands run the current harness; they do not reproduce the recorded
+probe, which ran --runs 1 over an earlier case set (bootstrap, handoff-schema,
+impact-edit, memory-save) from the current worktree with a temp root under HOME.
+They produce native-eval and PluginEval raw runs under bench/.runs/; summary.json
+and this report were written by hand from the recorded runs.
 `--plugin-ref` pins the evaluated plugin to this baseline's SHA; without it,
 prepare copies the current worktree.
 
@@ -173,8 +176,11 @@ prepare copies the current worktree.
     bench/pact-bench native-eval --manifest bench/.runs/external/probe/manifest.json --runs 3
     bench/pact-bench plugin-eval --manifest bench/.runs/external/probe/manifest.json --plugin-eval-dir <pinned-plugin-eval>
 
-The other results came from manual steps, not commands. The token snapshot
-follows the recipe in bench/external/README.md ("Token snapshot"). The
+The other results came from manual steps, not commands. The token snapshot did
+not use the committed recipe: its two samples are the per-subagent first-request
+usage read from the orchestration smoke's agent-*.jsonl transcripts. The recipe
+in bench/external/README.md ("Token snapshot") measures per-run claude -p totals
+over 3 runs, so its numbers are not comparable with these. The
 orchestration smoke has no committed recipe; what it checks is described in the
 coverage map's orchestration-smoke entry in bench/external/README.md. The P1
 status was read from the GitHub check runs named in summary.json.

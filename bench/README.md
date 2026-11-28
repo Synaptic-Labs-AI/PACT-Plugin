@@ -19,10 +19,12 @@ plugin runtime behavior.
 
 ## Provider setup
 
-The harness copies the env block from ~/.claude-deepseek/settings.json into a
-scratch config, minus every key whose name matches TOKEN, KEY, SECRET,
-PASSWORD, HEADERS or CREDENTIAL (except the token-count tuning keys matching
-^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$, which are kept) and the live session ids; manifest.json lists the dropped key names
+The harness copies keys from the env block of ~/.claude-deepseek/settings.json
+into a scratch config only when the name has an allowed prefix (ANTHROPIC_,
+CLAUDE_CODE_, DISABLE_, ENABLE_, MAX_, BASH_, MCP_, or API_TIMEOUT_MS), is not
+credential-shaped (TOKEN, KEY, SECRET, PASSWORD, HEADERS or CREDENTIAL, except
+the token-count tuning keys matching ^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$), is
+not a live session id, and the value has no URL userinfo; manifest.json lists the dropped key names
 in settings.dropped_env_keys. It points
 CLAUDE_CONFIG_DIR at the scratch directory. It keeps the live teammateMode
 (in-process), sets permissions.additionalDirectories to the scratch teams,
@@ -91,8 +93,8 @@ and review.
 
 bench/tests/test_results.py requires these keys and checks that the
 BENCHMARKS.md row and report.md carry the summary's numbers: SHA, run id, date,
-P1 status, the PluginEval composites, the spawn-token median and the smoke
-result; it checks the Track B column only when track_b.status is
+P1 status, the native-eval blocked/pass verdict, the PluginEval status and
+composites, the spawn-token median and the smoke result; it checks the Track B column only when track_b.status is
 "authored_out_of_tree".
 
 ## Limits

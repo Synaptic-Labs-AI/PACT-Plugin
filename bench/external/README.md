@@ -46,7 +46,7 @@ wrong tree.
 
 ```
 bench/
-  bootstrap.sh                  # build bench/.venv (Python >= 3.12; hashed lock: pytest 9.2.0, pyyaml 6.0.3)
+  bootstrap.sh                  # rebuild bench/.venv from scratch (Python >= 3.12; hashed lock: pytest 9.2.0, pyyaml 6.0.3)
   pact-bench                    # CLI: prepare | native-eval | plugin-eval | tasks validate
   external/
     README.md                   # this file
@@ -101,11 +101,14 @@ object `env`, a non-empty token file, `--plugin-dir`, a clean source unless
 `--allow-dirty`, and the `claude` binary with `--verify`) before it creates
 `<out>` (an `--out` that exists and is not a directory is refused first); `--plugin-ref` and `--plugin-dir` cannot be combined.
 The clean-source check counts every untracked file under `pact-plugin/`, and
-prepare's git commands ignore inherited `GIT_*` variables and the global and
-system git config, so a file that only your global `excludesFile` ignores counts
-as dirty (use `--allow-dirty` or a repository `.gitignore` entry), and a
+prepare's git commands ignore inherited `GIT_*` variables, the global and
+system git config, and every per-user ignore file (`core.excludesFile`,
+`~/.config/git/ignore`, `$XDG_CONFIG_HOME/git/ignore`), so an untracked file
+that only the repository's own `.gitignore` does not exclude counts as dirty (use `--allow-dirty` or a repository `.gitignore` entry), and a
 repository trusted only through a global `safe.directory` entry fails with a git
-error.
+error. Symlinks in the plugin are copied as links in every source mode; a link
+that resolves outside the plugin source, or an unsafe entry in a `git archive`,
+is refused.
 
 **The harness starts each `claude` child from a clean directory.** Claude Code
 can load `CLAUDE.md` files from the working directory and its parents, so
@@ -138,10 +141,12 @@ inside the repository but outside `bench/.runs/`; it does not refuse.
 
 ## Provider configuration (DeepSeek)
 
-`prepare.py` copies the `env` block from `~/.claude-deepseek/settings.json`
-into a scratch config, minus every key whose name matches
-`TOKEN|KEY|SECRET|PASSWORD|HEADERS|CREDENTIAL` (case-insensitive) and the live
-session ids. The token-count tuning keys (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`,
+`prepare.py` copies keys from the `env` block of
+`~/.claude-deepseek/settings.json` into a scratch config only when the name has
+one of the prefixes `ANTHROPIC_`, `CLAUDE_CODE_`, `DISABLE_`, `ENABLE_`, `MAX_`,
+`BASH_`, `MCP_` or is `API_TIMEOUT_MS`, does not match
+`TOKEN|KEY|SECRET|PASSWORD|HEADERS|CREDENTIAL` (case-insensitive), is not a live
+session id, and the value carries no URL userinfo (`://user:pass@`). The token-count tuning keys (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`,
 `MAX_THINKING_TOKENS`, `MAX_MCP_OUTPUT_TOKENS`, any key matching
 `^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$`) are kept, and `manifest.json` lists the names
 (never the values) of every dropped key in `settings.dropped_env_keys`. It overrides the session plumbing; the live config is never read
@@ -183,7 +188,9 @@ during a run.
   the failure, not that line. `<out>/provider-check.json` is written on every
   outcome, including a missing binary and a timeout. After a timeout kill the
   remaining output is drained for at most 10 s; if a process outside the group
-  still holds the pipes, `output_complete` is false and a warning is printed.
+  still holds the pipes, `output_complete` is false and a warning is printed;
+  on a timeout `child_exit_code` records claude's own exit code if it had
+  already exited, else null.
 - **Costs:** `total_cost_usd`/`costUSD` are Anthropic list-price estimates over
   a DeepSeek connection (`costBasis: unknown`). Report **tokens**, never USD.
 - **Unattended caveat:** in-process teammate mode can stall when the lead waits
@@ -206,12 +213,17 @@ The runner copies `bench/external/native-evals/evals/` into the scratch plugin a
 --ablation with-without --trust-plugin --no-publish --scaffold --runs 3
 --json report.json --report report.html --output-dir runs --model <manifest
 model> --judge-model <manifest model>`.
+The runner always passes `--threshold 0`, so a case's pass or fail and the
+runner's exit code are not the signal; read the with/without delta.
 Case layout is the CLI's native format: `<eval dir>/**/case.yaml`, or
 `prompt.md` + `graders/*.md`. Results: `<out>/native-eval/result.json` (written
 on every exit path once the manifest is read and its run directory is writable;
 a timeout records exit code 124, and `error` is set for an exception; an
 unreadable or incomplete manifest, or one whose `paths.plugin` is not
-`<out>/pact-plugin`, fails with a message before anything is written), `report.json`, `report.html`, and `runs/`. The eval runs from `<temp-root>/pact-native-XXXXXXXX/work`, and the
+`<out>/pact-plugin`, fails with a message before anything is written), `report.json`, `report.html`, and
+`runs/<run id>/` (recorded as `runs_dir`). The clean-root check runs again after
+the eval; a memory or settings file that appeared meanwhile is listed in
+`clean_root_changed`, and the run exits 1. The eval runs from `<temp-root>/pact-native-XXXXXXXX/work`, and the
 child's `HOME` and `TMPDIR` are `<temp-root>/pact-native-XXXXXXXX/{home,tmp}`
 (default `--temp-root` is `/tmp`); `TMPDIR` must be at most 51 characters, checked before the temp root
 is created. `--keep-temp` scaffolds are moved to
@@ -231,7 +243,8 @@ runs, a SIGTERM or SIGHUP kills its process group, is recorded as
 143 (or 129); `provider-check.json` records a signal during the verify call the
 same way. At any other moment those signals take their default action and no
 record is written. A timeout or Ctrl-C (SIGINT) also kills the child's process
-group. A grandchild that starts its own session leaves the group and is not
+group, and the group is killed when the call ends on every path, normal exit
+included. A grandchild that starts its own session leaves the group and is not
 killed. Undecodable child output is stored with replacement characters.
 
 The cases directory must be non-empty; the runner refuses an empty suite. The
@@ -254,10 +267,14 @@ passing its inherited environment; this is not verified in this tree),
 then
 `plugin-eval score <scratch plugin> --depth quick` (whole plugin; static layer
 only) and `plugin-eval score <scratch plugin>/skills/<skill> --depth standard`
-for each skill in the skills file (static + experimental LLM judge). Each `uv`
-command starts in a fresh `<temp-root>/pact-plugin-eval-XXXXXXXX` directory
-(`--temp-root`, default `/tmp`, checked like the other runners' temp roots) with
-the checkout passed as `--project`; the directory is removed afterwards. The
+for each skill in the skills file (static + experimental LLM judge). All `uv`
+commands of a run share one fresh `<temp-root>/pact-plugin-eval-XXXXXXXX`
+directory (`--temp-root`, default `/tmp`, checked like the other runners' temp
+roots) with the checkout passed as `--project`; the directory is removed
+afterwards. The record notes the checkout's HEAD (`plugin_eval_commit`) and
+whether it is dirty (`plugin_eval_dirty`), both null if it is not a git repo; the
+pin is recorded, not enforced. At the start of a run, the per-command and sync
+output files a previous run left in `plugin-eval/` are removed. The
 skills come only from `--skills-file` or, by default,
 `bench/external/plugin-eval-skills.txt` (`~` is expanded); a missing or empty
 file, a duplicate entry, or an entry containing `/` or starting with `.` is an
@@ -272,7 +289,8 @@ manifest exits with `cannot read prepare manifest …` and leaves no record, and
 before they were resolved. A command
 that times out is recorded with exit code 124 and `timed_out: true`, with the
 output drained after the kill (`output_complete` false if that bounded drain ran
-out), and the run continues. An unexpected error in one command is recorded as
+out, and `child_exit_code` set if the command itself had already exited), and
+the run continues. An unexpected error in one command is recorded as
 `{label, command, exit_code: null, error}` and the run continues. Each
 command's raw output is saved as `<NN>-<slug>.stdout.json`/`.stderr.txt` (`NN` is
 its position, `00` the whole plugin; the record's `output_stem` names it); a missing `uv`
