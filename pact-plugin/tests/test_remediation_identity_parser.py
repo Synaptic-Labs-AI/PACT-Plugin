@@ -3463,3 +3463,22 @@ def test_the_classifier_docstring_states_the_host_rule_valid_host_applies():
     assert pi._valid_host("gh_work") and pi._valid_host("gitea_server")
     assert "outside `[a-z0-9.-]`" not in doc
     assert "outside `[a-z0-9._-]`" in doc
+
+
+@pytest.mark.parametrize(("url", "outcome"), [
+    ("s3://my-bucket/widget", pi.OUTCOME_NO_PORTABLE_ORIGIN),
+    ("hf://datasets/acme/widget", pi.OUTCOME_NO_PORTABLE_ORIGIN),
+    ("rad://z3gqcJUoA1n9HaHKufZs5FCSGazv5/widget", pi.OUTCOME_NO_PORTABLE_ORIGIN),
+    ("codecommit://widget", pi.OUTCOME_NO_PORTABLE_ORIGIN),
+    ("https://github.com/acme/widget", pi.OUTCOME_CANONICAL),
+    ("ftp://host.example/acme/widget", pi.OUTCOME_DECLINE),
+    ("1x://host.example/acme/widget", pi.OUTCOME_DECLINE),
+])
+def test_any_scheme_git_hands_to_a_helper_is_a_remote_helper(url, outcome):
+    """git transports file, git, ssh (and its aliases), http, https, ftp and
+    ftps itself and hands any other valid scheme to git-remote-<scheme>, so
+    s3://, hf:// and rad:// have no portable id and fall back to the folder
+    name, as a remote-helper origin does. A native scheme an id is not read
+    from (ftp) and a malformed scheme still decline. RED WHEN an unknown
+    helper scheme declines, refusing every save."""
+    assert pi.classify_remote_origin(url)[0] == outcome

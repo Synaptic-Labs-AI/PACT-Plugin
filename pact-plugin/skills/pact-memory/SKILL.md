@@ -266,8 +266,9 @@ folder-name bucket, save from a folder whose project id is that name
 (`project-id show` reports it).
 
 A session whose project id is a folder name (a repository with no portable
-origin or with a remote-helper transport origin (`<helper>::<address>`,
-`codecommit://`, `persistent-https://`, `sso://` or `keybase://`), a non-git
+origin or with a remote-helper transport origin (`<helper>::<address>`, or any
+`<scheme>://` git does not transport itself, such as `s3://`, `hf://`,
+`rad://` or `codecommit://`), a non-git
 project folder, the home-directory landing, or the user-scope `project_id`
 setting) reads and saves its same-name bucket, shared with every folder of
 the same name and every `--separate-git-dir` repository whose git dir has

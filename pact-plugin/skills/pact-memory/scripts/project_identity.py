@@ -49,10 +49,17 @@ from urllib.parse import quote, unquote
 _ACCEPTED_SCHEMES = frozenset({"https", "http", "ssh", "git", "git+ssh", "ssh+git"})
 
 # Schemes that are NOT network remotes: a local path written in URL form. They
-# fall through to the basename; every OTHER unsupported scheme DECLINES,
-# because a present network remote we cannot represent must not be silently
-# downgraded to a folder name.
+# fall through to the basename. A scheme git handles itself but an id is not
+# read from (`_GIT_NATIVE_SCHEMES` outside the accepted set: ftp, ftps)
+# DECLINES, because a present network remote we cannot represent must not be
+# silently downgraded to a folder name; any other scheme is a remote helper.
 _LOCAL_SCHEMES = frozenset({"file"})
+
+# Every scheme git transports itself (transport.c: file, git, ssh and its
+# aliases, and the curl transports http, https, ftp, ftps). git hands any
+# OTHER `<scheme>://` to `git-remote-<scheme>`, so that scheme is a
+# remote-helper transport (`_is_remote_helper`).
+_GIT_NATIVE_SCHEMES = _ACCEPTED_SCHEMES | _LOCAL_SCHEMES | frozenset({"ftp", "ftps"})
 
 # `scheme://` — the scheme is matched here and validated against the accepted
 # set afterwards, so an unsupported scheme can be classified rather than
@@ -1236,7 +1243,8 @@ def _is_network_shaped(url: object) -> bool:
     `file://` and bare local paths are NOT network-shaped. Every other
     `scheme://` IS - including schemes outside the accepted set, because a
     present network remote we cannot represent must not be silently
-    downgraded to a folder name, so `ftp://` declines too.
+    downgraded to a folder name, so `ftp://` declines too. A remote-helper
+    scheme (`_is_remote_helper`) is classified before this is asked.
 
     A scheme-less value whose PRE-SLASH prefix holds BOTH `@` and `:` is
     ALSO network-shaped. git's own scp heuristic reads the first `:` as the
@@ -1278,13 +1286,13 @@ def _is_network_shaped(url: object) -> bool:
 
 
 # REMOTE-HELPER TRANSPORTS. git hands `<helper>::<address>` to
-# git-remote-<helper>, and these schemes to their own helpers too. None of them
-# has a portable id, so such an origin is NO PORTABLE ORIGIN: the folder name,
-# disclosed (`REMOTE_HELPER_DETAIL`). Every other unknown scheme still
-# declines. The helper name holds no `/`, `@`, `[` or `:`, so an IPv6
-# literal's `::` never reads as one.
+# git-remote-<helper>, and every `<scheme>://` it does not transport itself
+# (`_GIT_NATIVE_SCHEMES`: s3, hf, rad, ipfs, codecommit, ...) to
+# git-remote-<scheme>. None of them has a portable id, so such an origin is NO
+# PORTABLE ORIGIN: the folder name, disclosed (`REMOTE_HELPER_DETAIL`). The
+# helper name holds no `/`, `@`, `[` or `:`, so an IPv6 literal's `::`
+# never reads as one.
 _REMOTE_HELPER_FORM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
-_REMOTE_HELPER_SCHEMES = frozenset({"codecommit", "persistent-https", "sso", "keybase"})
 
 # The `detail` for a folder-name id bound because the origin is a
 # remote-helper transport (`_is_remote_helper`).
@@ -1299,7 +1307,8 @@ REMOTE_HELPER_DETAIL = (
 
 def _is_remote_helper(url: str) -> bool:
     """Whether an origin value names a remote-helper transport: the
-    `<helper>::<address>` form, or a scheme in `_REMOTE_HELPER_SCHEMES`. A
+    `<helper>::<address>` form, or a `<scheme>://` git does not transport
+    itself (any scheme outside `_GIT_NATIVE_SCHEMES`). A
     value with a control character, a leading BOM or leading whitespace is
     not one (it declines as before)."""
     value = _strip_one_terminator(url)
@@ -1308,7 +1317,7 @@ def _is_remote_helper(url: str) -> bool:
     if _REMOTE_HELPER_FORM_RE.match(value):
         return True
     scheme = _SCHEME_PREFIX_RE.match(value)
-    return scheme is not None and scheme.group("scheme").lower() in _REMOTE_HELPER_SCHEMES
+    return scheme is not None and scheme.group("scheme").lower() not in _GIT_NATIVE_SCHEMES
 
 
 def unrepresentable_detail(url: Optional[str]) -> Optional[str]:

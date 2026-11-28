@@ -399,7 +399,9 @@ def test_a_remote_helper_transport_has_no_portable_origin(url):
 
 @pytest.mark.parametrize("url, outcome", [
     ("ftp://host.example/o/r", "decline"),
-    ("rsync://host.example/o/r", "decline"),
+    # git has no rsync transport (removed in git 2.8), so rsync:// goes to a
+    # git-remote-rsync helper like any scheme git does not transport.
+    ("rsync://host.example/o/r", "no_portable_origin"),
     ("git@[2001:db8::2]:o/r", "canonical"),
     ("ssh://git@[2001:db8::1]/o/r", "canonical"),
     ("https://[2001:db8::3]/o/r", "canonical"),

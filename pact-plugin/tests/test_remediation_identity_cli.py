@@ -3097,3 +3097,18 @@ def test_a_partial_move_prints_no_bucket_wide_unattributed_note(identity_env, st
     memory_api._LEGACY_SCOPE_CACHE.clear()
     memory_api._UNPROVEN_WARNED.clear()
     assert "came from no recorded session" not in output([*base, "--only-placed-here", "--db-path", str(store)])
+
+
+@pytest.mark.parametrize("remote", ["s3://my-bucket/widget", "hf://datasets/acme/widget"])
+def test_a_save_from_a_remote_helper_scheme_origin_uses_the_folder_name(
+    identity_env, store, monkeypatch, capfd, remote
+):
+    """An origin on a scheme git hands to a helper (s3, hf) saves under the
+    checkout's folder name, with the remote-helper disclosure, as main did.
+    RED WHEN the save is refused as PROJECT_IDENTITY_UNRESOLVED."""
+    repo = make_repo(identity_env / "widget", remote=remote)
+    monkeypatch.chdir(repo)
+    code, saved = _cli(["save", json.dumps({"context": "helper origin"}), "--db-path", str(store)], capfd)
+    assert code == 0, saved
+    code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    assert (shown["result"]["project_id"], shown["result"]["source"]) == ("widget", "remote helper"), shown
