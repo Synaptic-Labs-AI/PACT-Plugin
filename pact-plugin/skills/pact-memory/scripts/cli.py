@@ -60,6 +60,7 @@ from scripts.database import (
     escape_for_envelope,
 )
 from scripts.memory_api import (
+    GitHubPayloadIdRefusedError,
     LegacyBucketWriteRefusedError,
     PACTMemory,
     ProjectIdentityUnresolvedError,
@@ -639,13 +640,18 @@ def cmd_save(args, db_path=None):
         # An env/session-record disagreement remains distinct from an
         # unresolved identity, whose subclass is caught above.
         _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
+    except GitHubPayloadIdRefusedError as exc:
+        # Before the field-validation arm: no field list and no field note.
+        _error("INVALID_INPUT", escape_for_envelope(_scrub(str(exc))), exit_code=2)
     except ValueError as exc:
         _error(
             "ValueError",
             # Rendered inert: a ValueError on this path can embed a
             # caller-supplied identifier or field name.
-            f"{escape_for_envelope(_scrub(str(exc)))} (Note: 'id' and "
-            f"'created_at' are accepted on save and stripped before validation.)",
+            escape_for_envelope(_scrub(str(exc)))
+            # The id/created_at note explains a field-list refusal only.
+            + (" (Note: 'id' and 'created_at' are accepted on save and stripped "
+               "before validation.)" if hasattr(exc, "allowed_fields") else ""),
             exit_code=2,
             # Prefer the list the error itself carries, so this array and
             # the message's sentence are one computation. The constant is a
@@ -910,6 +916,9 @@ def cmd_update(args, db_path=None):
         _error(
             "LEGACY_BUCKET_WRITE_REFUSED", _scope_disagreement_message(exc), exit_code=2
         )
+    except GitHubPayloadIdRefusedError as exc:
+        # Before the field-validation arm: no field list and no field note.
+        _error("INVALID_INPUT", escape_for_envelope(_scrub(str(exc))), exit_code=2)
     except PrefixTooShortError as exc:
         # Order: PrefixTooShortError IS a ValueError; catch it before the
         # field-validation ValueError handler below.
@@ -945,8 +954,10 @@ def cmd_update(args, db_path=None):
             "ValueError",
             # Rendered inert: a ValueError on this path can embed a
             # caller-supplied identifier or field name.
-            f"{escape_for_envelope(_scrub(str(exc)))} (Note: 'id' and "
-            f"'created_at' are stripped before update validation.)",
+            escape_for_envelope(_scrub(str(exc)))
+            # The id/created_at note explains a field-list refusal only.
+            + (" (Note: 'id' and 'created_at' are stripped before update "
+               "validation.)" if hasattr(exc, "allowed_fields") else ""),
             exit_code=2,
             # Prefer the list the error itself carries, so this array and
             # the message's sentence are one computation. The constant is a

@@ -1327,7 +1327,7 @@ def _folded_payload_project(payload_id: Any) -> Any:
     if pin_spelled is not None:
         return pin_spelled
     if ":" not in hostport:
-        raise ValueError(
+        raise GitHubPayloadIdRefusedError(
             f"project_id {payload_id!r} names no GitHub repository: a "
             "github.com id is exactly owner/repo, each a GitHub name. Nothing "
             "was written."
@@ -3067,6 +3067,12 @@ class LegacyBucketWriteRefusedError(ValueError):
     (`PACTMemory._refuse_legacy_write`). Caller input the session may not
     write, so a ValueError, but not a field-validation error: the CLI reports
     it as `LEGACY_BUCKET_WRITE_REFUSED`, exit 2, with no field list."""
+
+
+class GitHubPayloadIdRefusedError(ValueError):
+    """A save or update payload's port-less github.com `project_id` is not
+    owner/repo of GitHub names (`_folded_payload_project`). Invalid input:
+    the CLI reports it as `INVALID_INPUT`, exit 2, with no field list."""
 
 
 class HiddenBucketMoveRefusedError(LegacyBucketWriteRefusedError):

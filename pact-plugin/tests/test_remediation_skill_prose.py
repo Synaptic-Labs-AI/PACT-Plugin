@@ -7485,6 +7485,9 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<name imported from a project module cli: LegacyBucketWriteRefusedError>"): (
             "memory_api's error class, caught by a command"
         ),
+        ("call", "<name imported from a project module cli: GitHubPayloadIdRefusedError>"): (
+            "memory_api's error class, caught by a command"
+        ),
         ("call", "<name imported from a project module cli: ProjectIdentityUnresolvedError>"): (
             "memory_api's error class, caught by a command"
         ),
