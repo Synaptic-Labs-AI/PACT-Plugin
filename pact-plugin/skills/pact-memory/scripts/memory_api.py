@@ -4722,13 +4722,14 @@ class PACTMemory:
                     _note_verified_unattributed(store, candidate, verdict.counts)
                 result = (scope, candidate) if included else (scope,)
         self._legacy_scope_state = state
-        # PRUNE superseded stamps for this same store/scope/legacy pair: the
+        # PRUNE superseded stamps for this same store, identity root, scope and
+        # legacy name (every key part but the stat): the
         # key carries the store's stat, so every write leaves the old entry
         # behind and the dict would grow with each write in the pass.
         if in_pass:
             for stale in [
                 key for key in _LEGACY_SCOPE_CACHE
-                if key != cache_key and key[:1] == (store,) and key[3:] == (scope, legacy)
+                if key != cache_key and key[:1] == (store,) and key[2:] == cache_key[2:]
             ]:
                 _LEGACY_SCOPE_CACHE.pop(stale, None)
             _LEGACY_SCOPE_CACHE[cache_key] = (result, state, self._legacy_verdict)

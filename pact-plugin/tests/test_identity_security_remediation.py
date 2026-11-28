@@ -1176,6 +1176,13 @@ class TestReadScopeCacheKeyIncludesTheIdentityRoot:
                 str(left.resolve()) in key for key in memory_api._LEGACY_SCOPE_CACHE
             ), memory_api._LEGACY_SCOPE_CACHE
             assert verdict(right) == ("github.com/o/PACT-prompt",)
+            # The second root's scope entry does not prune the first's: the
+            # prune drops only a stale stamp of the SAME root. A scope entry is
+            # (store, stat, root, scope, legacy).
+            assert [
+                key for key in memory_api._LEGACY_SCOPE_CACHE
+                if len(key) == 5 and key[2] == str(left) and key[3:] == ("github.com/o/PACT-prompt", "PACT-prompt")
+            ], memory_api._LEGACY_SCOPE_CACHE
             # SAME-ROOT CONTROL: asking again with the first root must include,
             # so the exclusion above is the ROOT's verdict and not "the second
             # call always excludes".
