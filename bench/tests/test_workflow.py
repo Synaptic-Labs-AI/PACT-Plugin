@@ -30,7 +30,7 @@ STEPS = [
     ("uses", "actions/checkout"),
     ("uses", "actions/setup-python"),
     ("run", f"python -m pip install {HASHED_INSTALL} constraints-ci.txt"),
-    ("run", "ruff check --select F401,F821 --target-version py312 bench/"),
+    ("run", "ruff check --select F401,F821 --target-version py312 bench/ bench/pact-bench"),
     ("run", VERIFY),
     ("run", "bash bench/run_hermetic.sh"),
     ("run", VERIFY),
@@ -103,12 +103,16 @@ def test_path_matcher_shapes() -> None:
 
 
 def test_path_filter_covers_every_file_the_bench_tests_read(pytestconfig: pytest.Config) -> None:
-    # Every ROOT-relative path chain in a bench test module, plus pytest's own config file.
+    # Every ROOT / "..." or REPO_ROOT / "..." path chain in a bench test module that names an
+    # existing path, plus pytest's own config file. A chain naming nothing on disk (an --out
+    # target a test creates) is not a read.
     read = set()
     for module in (ROOT / "bench" / "tests").glob("*.py"):
-        for chain in re.findall(r'\bROOT((?:\s*/\s*"[^"]+")+)', module.read_text(encoding="utf-8")):
+        for chain in re.findall(r'\b(?:REPO_)?ROOT((?:\s*/\s*"[^"]+")+)', module.read_text(encoding="utf-8")):
             read.add("/".join(re.findall(r'"([^"]+)"', chain)))
-    assert {"BENCHMARKS.md", "constraints-ci.txt", "bench/results"} <= read  # control: the scan sees known reads
+    read = {rel for rel in read if (ROOT / rel).exists()}
+    # control: the scan sees known reads, including one through prepare.REPO_ROOT (test_prepare).
+    assert {"BENCHMARKS.md", "constraints-ci.txt", "bench/results", "bench/README.md"} <= read
     inipath = pytestconfig.inipath
     if inipath is not None and inipath.is_relative_to(ROOT):
         read.add(inipath.relative_to(ROOT).as_posix())
@@ -156,9 +160,10 @@ def test_run_hermetic_runs_only_bench_tests_from_repo_root() -> None:
 
 def test_bootstrap_installs_the_hashed_bench_lock() -> None:
     text = BOOTSTRAP.read_text(encoding="utf-8")
-    assert f'-m pip install {HASHED_INSTALL} "$here/constraints.txt"' in text
     assert "sys.version_info < (3, 12)" in text
-    assert 'python3 -m venv --clear "$venv"' in text
+    # The install runs in a temp venv; bench/.venv is replaced only after it succeeds.
+    install = text.index(f'"$tmp/venv/bin/python" -m pip install {HASHED_INSTALL} "$here/constraints.txt"')
+    assert text.index('python3 -m venv "$tmp/venv"') < install < text.index('rm -rf "$venv"') < text.index('mv "$tmp/venv" "$venv"')
     assert "--upgrade" not in text
     bench = _lock(BENCH_LOCK)
     assert {"pip", "pytest", "pyyaml"} <= set(bench)
