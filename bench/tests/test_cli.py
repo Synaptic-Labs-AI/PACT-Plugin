@@ -39,6 +39,18 @@ def test_cli_dispatches_each_subcommand_help(command: tuple[str, ...]) -> None:
     assert COMMANDS[command] in proc.stdout
 
 
+def test_cli_imports_the_validator_by_package_path() -> None:
+    probe = (
+        "import runpy, sys\n"
+        f"runpy.run_path({str(BENCH / 'pact-bench')!r}, run_name='not_main')\n"
+        "assert 'validate' not in sys.modules, 'a bare validate module was imported'\n"
+        f"assert {str(BENCH / 'tasks')!r} not in sys.path\n"
+        "assert 'tasks.validate' in sys.modules\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+
+
 @pytest.mark.parametrize("args", [("compare",), ("report",), ("bogus",), ("tasks",), ("tasks", "bogus")])
 def test_cli_unknown_command_exits_2(args: tuple[str, ...]) -> None:
     assert _cli(*args).returncode == 2

@@ -16,7 +16,10 @@ FAKE_UV = """#!{python}
 import json, os, sys, time
 args = sys.argv[1:]
 with open({calls!r}, "a") as calls:
-    calls.write(json.dumps({{"cwd": os.getcwd(), "project": args[args.index("--project") + 1]}}) + "\\n")
+    calls.write(json.dumps({{
+        "cwd": os.getcwd(), "project": args[args.index("--project") + 1],
+        "token": os.environ.get("ANTHROPIC_AUTH_TOKEN"), "api_key": "ANTHROPIC_API_KEY" in os.environ,
+    }}) + "\\n")
 if args[0] == "sync":
     open({log!r}, "w").write(json.dumps({{"token": "ANTHROPIC_AUTH_TOKEN" in os.environ}}))
     if os.environ.get("FAKE_SYNC_SLEEP"):
@@ -291,25 +294,66 @@ def test_sigterm_during_a_command_kills_the_group_and_is_recorded(tmp_path: Path
     assert _dead(pid)
 
 
-def test_sigterm_between_commands_is_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+BETWEEN_HARNESS = """import os, signal, sys
+sys.path.insert(0, {bench!r})
+from external.runner import plugin_eval
+real = plugin_eval._score_one
+
+def score_then_signal(*args, **kwargs):
+    record = real(*args, **kwargs)
+    os.kill(os.getpid(), signal.SIGTERM)  # arrives while no child runs
+    return record
+
+plugin_eval._score_one = score_then_signal
+try:
+    plugin_eval.main({argv!r})
+except SystemExit as exc:
+    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL, "handler not restored"
+    raise
+"""
+
+
+def test_sigterm_between_commands_is_recorded(tmp_path: Path) -> None:
+    # Run in a subprocess: without plugin_eval's handler the SIGTERM would kill pytest itself.
     manifest, tool, uv, skills = _setup(tmp_path, ["good"])
-    real = plugin_eval._score_one
-
-    def score_then_signal(*args: object, **kwargs: object) -> dict:
-        record = real(*args, **kwargs)
-        os.kill(os.getpid(), signal.SIGTERM)  # arrives while no child runs
-        return record
-
-    monkeypatch.setattr(plugin_eval, "_score_one", score_then_signal)
-    with pytest.raises(SystemExit) as exc:
-        plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--skip-sync"))
-    assert exc.value.code == 128 + signal.SIGTERM
+    args = _args(manifest, tool, uv, "--skills-file", str(skills), "--skip-sync")
+    argv = [
+        "--manifest", args.manifest, "--plugin-eval-dir", args.plugin_eval_dir, "--uv", args.uv,
+        "--skills-file", args.skills_file, "--skip-sync", "--temp-root", args.temp_root,
+    ]
+    bench = str(Path(__file__).resolve().parents[1])
+    proc = subprocess.run(
+        [sys.executable, "-c", BETWEEN_HARNESS.format(bench=bench, argv=argv)],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert proc.returncode == 128 + signal.SIGTERM, proc.stderr
     summary = _result(manifest)
     assert summary["error"] == "terminated by SIGTERM"
     # The signal landed inside the first command's step, so that command is the aborted one.
     assert summary["aborted_command"]["label"] == str(manifest.parent / "pact-plugin")
     assert summary["not_run"] == ["good"]
-    assert signal.getsignal(signal.SIGTERM) is signal.SIG_DFL
+
+
+def test_failed_cwd_removal_is_recorded_and_fails_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+
+    def refuse(path: object) -> None:
+        raise OSError("busy")
+
+    monkeypatch.setattr(plugin_eval.shutil, "rmtree", refuse)
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 1
+    summary = _result(manifest)
+    assert "busy" in summary["cleanup_error"]
+    assert summary["complete"] is True
+
+
+def test_score_commands_get_the_provider_token_and_sync_does_not(tmp_path: Path) -> None:
+    # PluginEval's judge runs the claude CLI through claude-agent-sdk, which inherits this env.
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
+    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    assert [call["token"] for call in calls] == [None, "secret-token", "secret-token"]
+    assert not any(call["api_key"] for call in calls)
 
 
 def test_commands_run_from_a_clean_cwd_with_the_checkout_as_project(tmp_path: Path) -> None:

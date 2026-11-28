@@ -5,8 +5,12 @@ A task is valid only when:
   - the untouched fixture's seed tests pass;
   - hidden tests fail on the untouched fixture with pytest exit 1 (tests ran
     and failed; a collection error or an empty suite does not count);
+  - every task.json path resolves inside the task directory;
   - the gold patch leaves hidden_tests/ alone, applies, changes the tree, makes
-    hidden tests pass, and keeps seed tests green.
+    at least one hidden test pass with none skipped, and keeps seed tests green
+    with no fewer passing and no more skipped than before (counted from pytest's
+    JUnit report). A patch that rewrites that report from a conftest can still
+    fool it; the check targets accidental skips, not a hostile patch.
 
 Every task is validated and reported; the exit code is 1 if any task failed.
 Any Exception inside one task becomes that task's fail row.
@@ -23,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
@@ -125,15 +130,19 @@ def validate_task(task_dir: Path, python: str) -> dict[str, Any]:
     meta = _load_meta(task_dir)
     task_id = str(meta["id"])
     timeout = meta["timeout_seconds"]
-    fixture = task_dir / meta["fixture"]
-    hidden = task_dir / meta["hidden_tests"]
-    gold = task_dir / meta["gold_patch"]
-    prompt = task_dir / meta["prompt"]
-    rubric = task_dir / meta["rubric"]
-    for path, label in ((fixture, "fixture"), (hidden, "hidden_tests"), (gold, "gold_patch"), (prompt, "prompt"), (rubric, "rubric")):
+    paths: dict[str, Path] = {}
+    for label in ("fixture", "hidden_tests", "gold_patch", "prompt", "rubric"):
+        value = meta[label]
+        if not isinstance(value, str):
+            raise TaskInvalid(f"{task_id}: {label} must be a path string, got {value!r}")
+        # resolve() follows symlinks, so a link pointing out of the task is caught too.
+        path = (task_dir / value).resolve()
+        if not path.is_relative_to(task_dir):
+            raise TaskInvalid(f"{task_id}: {label} {value!r} resolves outside the task directory")
         if not path.exists():
             raise TaskInvalid(f"{task_id}: missing {label}: {path}")
-    _check_in_temp(task_id, fixture, hidden, gold, python, timeout)
+        paths[label] = path
+    _check_in_temp(task_id, paths["fixture"], paths["hidden_tests"], paths["gold_patch"], python, timeout)
     return {
         "id": meta["id"],
         "path": str(task_dir),
@@ -153,6 +162,12 @@ def _check_in_temp(task_id: str, fixture: Path, hidden: Path, gold: Path, python
     def pytest(*extra: str) -> subprocess.CompletedProcess[str]:
         return _run([*pytest_cmd, *extra], work, task_id, timeout)
 
+    def counted(name: str, *extra: str) -> tuple[subprocess.CompletedProcess[str], dict[str, int]]:
+        # The report lives outside work/, so it never shows up in the git status check.
+        report = Path(tmp) / f"{name}.xml"
+        proc = pytest(f"--junitxml={report}", *extra)
+        return proc, _junit_counts(report) if report.is_file() else {"passed": 0, "skipped": 0}
+
     with tempfile.TemporaryDirectory(prefix="pact-task-") as tmp:
         work = Path(tmp) / "work"
         shutil.copytree(fixture, work)
@@ -160,7 +175,7 @@ def _check_in_temp(task_id: str, fixture: Path, hidden: Path, gold: Path, python
         _git(["add", "-A"], work, task_id, timeout)
         _git(["commit", "-q", "--no-gpg-sign", "-m", "seed"], work, task_id, timeout)
 
-        seed = pytest()
+        seed, seed_counts = counted("seed")
         if seed.returncode != 0:
             raise TaskInvalid(f"{task_id}: seed tests failed:\n{seed.stdout[-4000:]}\n{seed.stderr[-2000:]}")
 
@@ -189,13 +204,32 @@ def _check_in_temp(task_id: str, fixture: Path, hidden: Path, gold: Path, python
         if not changed.stdout.strip():
             raise TaskInvalid(f"{task_id}: gold patch applied but changed nothing")
 
-        after = pytest(HIDDEN_DIR)
+        after, after_counts = counted("hidden-after", HIDDEN_DIR)
         if after.returncode != 0:
             raise TaskInvalid(f"{task_id}: hidden tests failed after gold patch:\n{after.stdout[-4000:]}\n{after.stderr[-2000:]}")
+        if after_counts["passed"] < 1 or after_counts["skipped"]:
+            raise TaskInvalid(
+                f"{task_id}: after the gold patch hidden tests must run and pass, none skipped: "
+                f"{after_counts['passed']} passed, {after_counts['skipped']} skipped"
+            )
 
-        seed_after = pytest(f"--ignore={HIDDEN_DIR}")
+        seed_after, seed_after_counts = counted("seed-after", f"--ignore={HIDDEN_DIR}")
         if seed_after.returncode != 0:
             raise TaskInvalid(f"{task_id}: seed tests failed after gold patch:\n{seed_after.stdout[-4000:]}")
+        if seed_after_counts["passed"] < seed_counts["passed"] or seed_after_counts["skipped"] > seed_counts["skipped"]:
+            raise TaskInvalid(
+                f"{task_id}: the gold patch skipped seed tests: {seed_counts} before, {seed_after_counts} after"
+            )
+
+
+def _junit_counts(report: Path) -> dict[str, int]:
+    root = ET.parse(report).getroot()
+    suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
+    total = {key: sum(int(suite.get(key, 0)) for suite in suites) for key in ("tests", "failures", "errors", "skipped")}
+    return {
+        "passed": total["tests"] - total["failures"] - total["errors"] - total["skipped"],
+        "skipped": total["skipped"],
+    }
 
 
 def _task_id(task_dir: Path) -> str:

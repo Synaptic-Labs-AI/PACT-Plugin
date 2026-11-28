@@ -27,6 +27,10 @@ def _add_patch(path: str, body: str) -> str:
 
 
 GOLD = _patch("calc.py", "1", "2")
+SKIP_ALL = (
+    "import pytest\n\n\ndef pytest_collection_modifyitems(items):\n"
+    "    for item in items:\n        item.add_marker(pytest.mark.skip(reason='skip'))\n"
+)
 
 
 def _write(path: Path, text: str) -> None:
@@ -107,6 +111,14 @@ def _hook_config(tmp_path: Path) -> Path:
     config = tmp_path / "gitconfig"
     _write(config, f"[core]\n\thooksPath = {hooks}\n")
     return config
+
+
+def test_symlink_out_of_the_task_is_rejected(tmp_path: Path) -> None:
+    task = make_task(tmp_path / "t", meta={"rubric": "rubric-link.md"})
+    _write(tmp_path / "outside.md", "x\n")
+    (task / "rubric-link.md").symlink_to(tmp_path / "outside.md")
+    with pytest.raises(validate.TaskInvalid, match="rubric 'rubric-link.md' resolves outside"):
+        validate.validate_task(task, sys.executable)
 
 
 def test_global_git_config_does_not_leak(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -195,6 +207,28 @@ BROKEN = {
         },
         "timed out after 1s",
     ),
+    "patch_skips_every_test": (
+        {"gold": GOLD + _add_patch("conftest.py", SKIP_ALL)},
+        "must run and pass, none skipped: 0 passed",
+    ),
+    "patch_skips_one_hidden_test": (
+        {
+            "hidden": {"test_hidden.py": HIDDEN_TEST + "\n\ndef test_extra():\n    assert value() == 2\n"},
+            "gold": GOLD + _add_patch(
+                "conftest.py",
+                "import pytest\n\n\ndef pytest_collection_modifyitems(items):\n"
+                "    for item in items:\n        if item.name == 'test_extra':\n"
+                "            item.add_marker(pytest.mark.skip(reason='skip'))\n",
+            ),
+        },
+        "1 passed, 1 skipped",
+    ),
+    "patch_skips_seed_tests": (
+        {"gold": GOLD + _add_patch("tests/conftest.py", SKIP_ALL)},
+        "the gold patch skipped seed tests",
+    ),
+    "fixture_path_escapes": ({"meta": {"fixture": "../elsewhere"}}, "resolves outside the task directory"),
+    "absolute_gold_path": ({"meta": {"gold_patch": "/etc/hostname"}}, "resolves outside the task directory"),
     "hidden_collection_error": (
         {"hidden": {"test_hidden.py": "def test_fix(:\n"}},
         "pytest exit 2",
@@ -248,7 +282,7 @@ BAD_INPUTS = {
     "non_utf8_task_json": ({}, _raw(b'{"id": "\xff"}'), "a_bad", "UnicodeDecodeError"),
     "unparseable_task_json": ({}, _raw(b"{"), "a_bad", "JSONDecodeError"),
     "task_json_not_an_object": ({}, _raw(b"7"), "a_bad", "TypeError"),
-    "non_string_path_field": ({"meta": {"id": "bad-id", "fixture": 5}}, None, "bad-id", "TypeError"),
+    "non_string_path_field": ({"meta": {"id": "bad-id", "fixture": 5}}, None, "bad-id", "must be a path string"),
     "deeply_nested_task_json": ({}, _raw(b"[" * 200000 + b"]" * 200000), "a_bad", "RecursionError"),
     "id_with_a_slash": ({"meta": {"id": "bad/id"}, "gold": ""}, None, "bad/id", "did not apply"),
     "unexpected_exception": ({"meta": {"id": "bad-id"}}, "check", "bad-id", "LookupError: unexpected"),

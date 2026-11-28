@@ -13,8 +13,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from external.runner import native_eval, plugin_eval, prepare  # noqa: E402
-sys.path.insert(0, str(HERE / "tasks"))
-from validate import main as tasks_validate_main  # noqa: E402
+from tasks.validate import main as tasks_validate_main  # noqa: E402
 
 USAGE = """usage: pact-bench prepare [args]
        pact-bench native-eval [args]
