@@ -155,3 +155,166 @@ def test_the_probe_passes_connections_that_never_overlap(tmp_path, monkeypatch):
     other.close()
     assert probe.overlaps == [], probe.overlaps
 
+
+# The driver modules whose `connect` the probe wraps, by import name.
+_DRIVER_MODULES = frozenset({"sqlite3", "sqlite3.dbapi2", "pysqlite3", "pysqlite3.dbapi2"})
+# Names a from-import may bind a driver module to.
+_DRIVER_NAMES = frozenset({"sqlite3", "pysqlite3", "dbapi2"})
+
+
+def _probe_bypasses(tree):
+    """Every way an ALLOWED module could reach a `connect` the probe does not
+    wrap: importing `connect` or `Connection` from a driver, importing a
+    driver's `dbapi2` submodule (its own `connect` binding), and taking
+    `<driver>.connect` at import time (a module-level alias, a default
+    argument, a decorator), before the fixture installs the probe; binding a
+    driver re-exported by another module, or importing one by name through
+    `importlib.import_module` or `__import__`; and calling
+    `<driver>.Connection(...)` anywhere, since the probe wraps `connect`
+    only. A call `<driver>.connect(...)` inside a function runs after the
+    fixture, so it is wrapped."""
+    found = []
+    drivers = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name in _DRIVER_MODULES:
+                    drivers.add(alias.asname or alias.name.split(".")[0])
+                if alias.name.endswith(".dbapi2"):
+                    found.append(f"line {node.lineno}: import {alias.name}")
+        elif isinstance(node, ast.ImportFrom) and not node.level and node.module:
+            if node.module in _DRIVER_MODULES:
+                found.append(f"line {node.lineno}: from {node.module} import ...")
+            for alias in node.names:
+                if (node.module, alias.name) == ("scripts.database", "sqlite3"):
+                    drivers.add(alias.asname or alias.name)
+                elif alias.name in _DRIVER_NAMES and node.module not in _DRIVER_MODULES:
+                    # A driver re-exported by another module (`from scripts.graph
+                    # import sqlite3`): only database's is the store driver.
+                    found.append(f"line {node.lineno}: from {node.module} import {alias.name}")
+        elif isinstance(node, ast.Call):
+            func = node.func
+            dynamic = (isinstance(func, ast.Name) and func.id == "__import__") or (
+                isinstance(func, ast.Attribute) and func.attr == "import_module"
+            )
+            if dynamic and node.args and isinstance(node.args[0], ast.Constant):
+                name = node.args[0].value
+                if isinstance(name, str) and (name in _DRIVER_MODULES or name.endswith(".dbapi2")):
+                    found.append(f"line {node.lineno}: imports {name!r} by name")
+
+    def import_time(node, called=False):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            for part in list(node.args.defaults) + [d for d in node.args.kw_defaults if d is not None]:
+                import_time(part)
+            for decorator in getattr(node, "decorator_list", []):
+                import_time(decorator)
+            return
+        if isinstance(node, ast.Call):
+            import_time(node.func, called=True)
+            for part in list(node.args) + [keyword.value for keyword in node.keywords]:
+                import_time(part)
+            return
+        if (
+            isinstance(node, ast.Attribute)
+            and node.attr == "connect"
+            and isinstance(node.value, ast.Name)
+            and node.value.id in drivers
+            and not called
+        ):
+            found.append(f"line {node.lineno}: {node.value.id}.connect taken at import time")
+        for child in ast.iter_child_nodes(node):
+            import_time(child)
+
+    import_time(tree)
+    for node in ast.walk(tree):
+        func = getattr(node, "func", None)
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(func, ast.Attribute)
+            and func.attr == "Connection"
+            and isinstance(func.value, ast.Name)
+            and func.value.id in drivers
+        ):
+            line = f"line {node.lineno}: {func.value.id}.Connection(...) called"
+            if line not in found:
+                found.append(line)
+    return found
+
+
+def test_no_allowlisted_module_reaches_an_unwrapped_connect():
+    """RED WHEN an ALLOWED module imports `connect` from a driver, imports a
+    driver's `dbapi2`, or takes `<driver>.connect` at import time: the probe
+    wraps the module attribute when a test starts, so those reach the real
+    `connect` and an overlap would go unrecorded."""
+    bypasses = {}
+    for name in ALLOWED:
+        found = _probe_bypasses(ast.parse((TESTS / name).read_text(encoding="utf-8")))
+        if found:
+            bypasses[name] = found
+    assert not bypasses, bypasses
+
+
+def test_the_bypass_scan_sees_each_form():
+    """Control: each bypass form is caught, and a call inside a test is not."""
+    cases = {
+        "from sqlite3 import connect\n": True,
+        "from sqlite3 import Connection\n": True,
+        "from sqlite3.dbapi2 import connect\n": True,
+        "import sqlite3.dbapi2\n": True,
+        "import sqlite3\nconnect = sqlite3.connect\n": True,
+        "import sqlite3 as std\nCONNECT = {'c': std.connect}\n": True,
+        "import sqlite3\ndef f(c=sqlite3.connect):\n    return c\n": True,
+        "from scripts.database import sqlite3 as store\nopen_store = store.connect\n": True,
+        "import sqlite3\ndef test_x(tmp_path):\n    sqlite3.connect(str(tmp_path / 'a.db')).close()\n": False,
+        "import sqlite3\ndef helper():\n    c = sqlite3.connect\n    return c(':memory:')\n": False,
+        "from scripts.graph import sqlite3\n": True,
+        "from scripts.search import pysqlite3\n": True,
+        "from somewhere import dbapi2\n": True,
+        "import importlib\ndef f():\n    return importlib.import_module('sqlite3')\n": True,
+        "def f():\n    return __import__('pysqlite3.dbapi2')\n": True,
+        "import sqlite3\ndef test_x(p):\n    sqlite3.Connection(str(p))\n": True,
+        "from scripts.database import sqlite3 as store\nc = None\ndef f(p):\n    return store.Connection(p)\n": True,
+        "from scripts.database import sqlite3\n": False,
+        "import importlib\ndef f():\n    return importlib.import_module('json')\n": False,
+    }
+    for source, bypasses in cases.items():
+        assert bool(_probe_bypasses(ast.parse(source))) is bypasses, source
+
+
+def test_the_probe_passes_a_positional_factory_through(tmp_path, monkeypatch):
+    """connect's positional arguments, a factory among them, go through
+    unchanged. RED WHEN a positional factory makes the probe raise TypeError,
+    or the connection is not of the caller's class."""
+
+    class SubConn(STDLIB_SQLITE3.Connection):
+        pass
+
+    store_driver = _fake_store_driver()
+    probe = CopyProbe(STDLIB_SQLITE3, store_driver)
+    probe.install(monkeypatch)
+    connection = STDLIB_SQLITE3.connect(str(tmp_path / "a.db"), 5.0, 0, None, True, SubConn)
+    try:
+        assert isinstance(connection, SubConn)
+        assert connection.isolation_level is None
+    finally:
+        connection.close()
+    assert probe.overlaps == [], probe.overlaps
+
+
+def test_the_probe_sees_a_hard_link_as_the_same_file(tmp_path, monkeypatch):
+    """A file is one file by its device and inode. RED WHEN a store-code
+    connection through a hard link escapes a standard-library connection held
+    on the original name."""
+    import os
+
+    store_driver = _fake_store_driver()
+    probe = CopyProbe(STDLIB_SQLITE3, store_driver)
+    probe.install(monkeypatch)
+    original = tmp_path / "store.db"
+    held = STDLIB_SQLITE3.connect(str(original))
+    held.execute("CREATE TABLE t (x)")
+    held.commit()
+    os.link(original, tmp_path / "linked.db")
+    store_driver.connect(str(tmp_path / "linked.db")).close()
+    held.close()
+    assert len(probe.overlaps) == 2, probe.overlaps

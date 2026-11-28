@@ -68,9 +68,28 @@ def _caller():
     return "unknown" if frame is None else f"{os.path.basename(frame.f_code.co_filename)}:{frame.f_lineno}"
 
 
+def _identity(path):
+    """The file's (st_dev, st_ino), so a hard link to it is the same file;
+    None when it does not exist yet."""
+    try:
+        status = os.stat(path)
+    except OSError:
+        return None
+    return (status.st_dev, status.st_ino)
+
+
+# `connect(database, timeout, detect_types, isolation_level,
+# check_same_thread, factory, cached_statements, uri, ...)`: the positions
+# after `database` of the two arguments the probe reads or replaces.
+_FACTORY_AT = 4
+_URI_AT = 6
+
+
 class CopyProbe:
     """Records every moment a connection of one driver opens or closes on a
-    file a connection of the other driver holds open."""
+    file a connection of the other driver holds open. A file is one file by
+    its (device, inode), so a hard link to it counts; messages name its real
+    path."""
 
     def __init__(self, stdlib_module, store_module):
         self.drivers = {"standard-library": stdlib_module, "store-code": store_module}
@@ -86,59 +105,60 @@ class CopyProbe:
     def _other(self, kind):
         return next(other for other in self.drivers if other != kind)
 
-    def _note(self, kind, path, what, where):
-        held = self.open[self._other(kind)].get(path)
+    def _note(self, kind, identity, path, what, where):
+        held = self.open[self._other(kind)].get(identity)
         if held:
             self.overlaps.append(
                 f"{path}: a {kind} connection {what} at {where} while the "
                 f"{self._other(kind)} connection opened at {next(iter(held.values()))} was open"
             )
 
+    def _close_noted(self, kind, state, what, where):
+        if state["done"]:
+            return
+        state["done"] = True
+        self.open[kind].get(state["identity"], {}).pop(state["id"], None)
+        self._note(kind, state["identity"], state["path"], what, where)
+
     def _wrapped(self, kind, connect, module):
         probe = self
         classes = {}
 
-        def wrapper(database, *args, **kwargs):
-            path = _file_of(database, kwargs.get("uri", False))
-            if path is None:
-                return connect(database, *args, **kwargs)
-            base = kwargs.pop("factory", None) or module.Connection
+        def probed(base):
             if base not in classes:
                 def close(self):
                     base.close(self)
-                    self._copy_probe_done("closed", _caller())
-
-                def done(self, what, where):
                     state = self.__dict__.get("_copy_probe_state")
-                    if state is not None and not state["done"]:
-                        state["done"] = True
-                        probe.open[kind][path_of(state)].pop(state["id"], None)
-                        probe._note(kind, path_of(state), what, where)
+                    if state is not None:
+                        probe._close_noted(kind, state, "closed", _caller())
 
-                classes[base] = type(
-                    "Probed" + base.__name__, (base,), {"close": close, "_copy_probe_done": done}
-                )
+                classes[base] = type("Probed" + base.__name__, (base,), {"close": close})
+            return classes[base]
+
+        def wrapper(database, *args, **kwargs):
+            uri = kwargs.get("uri", args[_URI_AT] if len(args) > _URI_AT else False)
+            path = _file_of(database, uri)
+            if path is None:
+                return connect(database, *args, **kwargs)
+            # Every argument goes through as given; only the factory is
+            # replaced by its probed subclass, at the place it was given.
+            if len(args) > _FACTORY_AT:
+                args = args[:_FACTORY_AT] + (probed(args[_FACTORY_AT] or module.Connection),) + args[_FACTORY_AT + 1:]
+            else:
+                kwargs["factory"] = probed(kwargs.get("factory") or module.Connection)
             where = _caller()
-            probe._note(kind, path, "opened", where)
-            connection = connect(database, *args, factory=classes[base], **kwargs)
-            state = {"done": False, "path": path, "id": id(connection)}
+            before = _identity(path)
+            if before is not None:
+                probe._note(kind, before, path, "opened", where)
+            connection = connect(database, *args, **kwargs)
+            identity = _identity(path) or ("missing", path)
+            state = {"done": False, "path": path, "identity": identity, "id": id(connection)}
             connection.__dict__["_copy_probe_state"] = state
-            probe.open[kind].setdefault(path, {})[state["id"]] = where
-
-            def collected(state=state):
-                if not state["done"]:
-                    state["done"] = True
-                    probe.open[kind][state["path"]].pop(state["id"], None)
-                    probe._note(kind, state["path"], "was garbage-collected", "unknown")
-
-            weakref.finalize(connection, collected)
+            probe.open[kind].setdefault(identity, {})[state["id"]] = where
+            weakref.finalize(connection, probe._close_noted, kind, state, "was garbage-collected", "unknown")
             return connection
 
         return wrapper
-
-
-def path_of(state):
-    return state["path"]
 
 
 STDLIB_SQLITE3 = _stdlib_sqlite3
