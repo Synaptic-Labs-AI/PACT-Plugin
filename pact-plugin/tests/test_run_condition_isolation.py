@@ -265,6 +265,7 @@ import importlib.util
 _spec = importlib.util.spec_from_file_location("pact_suite_conftest", {conftest!r})
 _suite = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_suite)
+_confine_embedding_markers = _suite._confine_embedding_markers
 _refuse_a_marker_under_an_importer_session_id = _suite._refuse_a_marker_under_an_importer_session_id
 '''
 
@@ -276,13 +277,25 @@ from fixtures.session_marker import embedding_marker, importer_session_id
 
 def test_leaves_a_marker_under_an_importer_id():
     session_id = importer_session_id()
-    Path(__file__).with_name("session_id.txt").write_text(session_id)
-    embedding_marker(session_id).touch()
+    marker = embedding_marker(session_id)
+    Path(__file__).with_name("marker.txt").write_text(str(marker))
+    marker.touch()
 
 
 def test_registers_an_importer_id_and_leaves_no_marker():
     importer_session_id()
 '''
+
+
+def test_the_embedding_markers_are_confined_to_this_test(tmp_path_factory):
+    """The suite's conftest points memory_init's marker directory, in this
+    process and in any child it spawns, at a directory of this test's own.
+    RED WHEN a test's markers would land in the real /tmp."""
+    from scripts import memory_init
+
+    assert memory_init._MARKER_DIR.is_relative_to(tmp_path_factory.getbasetemp())
+    assert os.environ["PACT_TEST_MARKER_DIR"] == str(memory_init._MARKER_DIR)
+    assert embedding_marker("s").parent == memory_init._MARKER_DIR
 
 
 def _summary_counts(output):
@@ -306,7 +319,7 @@ def test_the_conftest_fails_a_test_that_leaves_a_marker_under_an_importer_id(tmp
     (tmp_path / "test_marker_rig.py").write_text(_MARKER_RIG_TESTS, encoding="utf-8")
     # No PYTEST_* name from the shell that runs the suite reaches the child.
     env = env_without_pytest_vars()
-    record = tmp_path / "session_id.txt"
+    record = tmp_path / "marker.txt"
     try:
         proc = subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-rA", "-p", "no:cacheprovider",
@@ -314,7 +327,7 @@ def test_the_conftest_fails_a_test_that_leaves_a_marker_under_an_importer_id(tmp
             cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300)
         output = proc.stdout + proc.stderr
         assert record.exists(), output
-        marker = embedding_marker(record.read_text())
+        marker = Path(record.read_text())
         # A teardown error is counted beside its passed call, so the marker test
         # shows as one of the two passes and as the one error. Read by key, so a
         # counted warning or another outcome does not break the match.
@@ -327,4 +340,4 @@ def test_the_conftest_fails_a_test_that_leaves_a_marker_under_an_importer_id(tmp
         assert not marker.exists(), "the guard failed the test but left its marker behind"
     finally:
         if record.exists():
-            embedding_marker(record.read_text()).unlink(missing_ok=True)
+            Path(record.read_text()).unlink(missing_ok=True)

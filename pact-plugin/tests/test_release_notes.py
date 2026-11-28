@@ -109,6 +109,16 @@ def test_every_changelog_version_section_is_valid():
         assert code == 0, f"CHANGELOG.md v{version}: {reason}"
 
 
+def test_no_changelog_bullet_is_glued_to_the_line_before():
+    """A list item that lost its line break renders inside the previous one."""
+    import re
+
+    root = _require_checkout()
+    lines = (root / _CHANGELOG_REL).read_text(encoding="utf-8").splitlines()
+    glued = [n for n, line in enumerate(lines, 1) if re.search(r"[.)`]- [A-Z`]", line)]
+    assert glued == [], f"CHANGELOG.md lines with a bullet glued mid-line: {glued}"
+
+
 # v4.8.12's release body as it will be published: the per-version notes file
 # before the move to CHANGELOG.md (.github/release-notes/v4.8.12.md at
 # b505d81, line 3 on), with one intended wording change (the release.yml

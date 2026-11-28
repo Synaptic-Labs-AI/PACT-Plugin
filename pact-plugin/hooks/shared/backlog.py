@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import secrets
@@ -132,27 +133,13 @@ _STALE_AFTER = timedelta(days=14)
 # its last rung, `gh repo view`, can cost a budget of its own.
 _TRACKER_TIMEOUT_SECONDS = 5
 
-# Characters a repository owner or name may hold. Everything else is refused
-# rather than interpolated into a query.
-# `\Z` rather than `$`, matching the sibling anchor in backlog_store.py: Python's
-# `$` also matches before a trailing newline, so `$` would accept "owner\n".
-_SLUG_CHARS = re.compile(r"^[A-Za-z0-9._-]+\Z")
-
 # The only host the slug chain and the ref classifier accept. GitHub Enterprise
 # and every other host fall through rather than being read as this tracker.
 _GITHUB_HOST = "github.com"
-# Hosts a REMOTE may name for github.com: `ssh.github.com` is GitHub's own
-# SSH-over-443 endpoint (`ssh://git@ssh.github.com:443/O/N`), the same service.
-_GITHUB_REMOTE_HOSTS = {_GITHUB_HOST, f"ssh.{_GITHUB_HOST}"}
 # Appended to every `gh api` call. `gh api` takes its host from GH_HOST, not
 # from the slug, so without this an environment with GH_HOST set would send
 # github.com refs to another host and let its answers decide the verdicts.
 _GH_API_HOST_ARGS = ("--hostname", _GITHUB_HOST)
-# Remote-URL schemes `_slug_from_remote_url` parses, plus the scp-like form
-# `user@host:path`, which needs a non-empty user and the `@` so arbitrary text
-# (a sentence, a JSON body) never parses as a remote.
-_REMOTE_SCHEMES = {"https", "http", "ssh", "git", "git+ssh"}
-_SCP_REMOTE = re.compile(r"^[^@\s/:\\]+@([^:/\s]+):(.+)\Z")
 # A ref that names an issue or pull request of a github.com repository, as a
 # link. Owner and name are compared to this repository's slug by the callers.
 # Accepted around the number: `www.`, which GitHub redirects; a pull request's
@@ -163,14 +150,14 @@ _SCP_REMOTE = re.compile(r"^[^@\s/:\\]+@([^:/\s]+):(.+)\Z")
 # failed match never backtracks across a segment.
 _GITHUB_REF_URL = re.compile(
     r"^(?:https?://)?(?:www\.)?" + re.escape(_GITHUB_HOST)
-    + r"/([^/\s?#]+)/([^/\s?#]+)/(?:issues|pull)/(\d+)"
+    + r"/([^/\s?#]+)/([^/\s?#]+)/(?:issues|pull)/([0-9]+)"
     r"(?:/(?:files|commits|checks))?/?(?:[?#]\S*)?\Z",
     re.IGNORECASE,
 )
 # A ref that starts with a URL scheme. A scheme-less link (`jira.example.com/x`)
 # is recognised by `_looks_like_link` without a regex.
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
-_BARE_REF = re.compile(r"^#?(\d+)\Z")
+_BARE_REF = re.compile(r"^#?([0-9]+)\Z")
 
 # Ref bounds. A ref longer than this is refused on `add`/`set` and read as not
 # a ref without any regex work, so one bad item cannot stall or crash `show`.
@@ -238,13 +225,49 @@ def _memory_api():
     return memory_api
 
 
+# One detection per process per input. Keyed by the location, the declared
+# directory, the session id that selects the session record (written once at
+# session start), and the detector itself, so a different input or detector
+# is a fresh answer.
+_PROJECT_NAMES: Dict[tuple, Optional[str]] = {}
+
+
+def _project_name() -> Optional[str]:
+    """This location's pre-change project name, detected once per input."""
+    detector = _memory_api().PACTMemory.detect_project_basename
+    try:
+        cwd: Optional[str] = os.getcwd()
+    except OSError:
+        cwd = None
+    key = (
+        cwd,
+        os.environ.get("CLAUDE_PROJECT_DIR"),
+        os.environ.get("CLAUDE_CODE_SESSION_ID"),
+        detector,
+    )
+    if key not in _PROJECT_NAMES:
+        _PROJECT_NAMES[key] = detector()
+    return _PROJECT_NAMES[key]
+
+
 def store_path(backlog_dir: Optional[Path] = None) -> Path:
     """Absolute path of this project's backlog file.
 
     Raises BacklogWriteError when the project id will not resolve. A default
     slug would write a backlog nobody can find again.
     """
-    project = _memory_api().PACTMemory._detect_project_id()
+    # THE PRE-CHANGE FOLDER NAME, DELIBERATELY, NOT THE PROJECT ID. This value
+    # is a path component, and the canonical id contains `/`: using it here
+    # would nest the file as `<dir>/host/owner/repo.json` and orphan every
+    # existing `<basename>.json` with no recovery path. It is the pre-change
+    # value, including where the pre-change resolver refused, so this writer
+    # refuses in exactly the states it always did. Do not "fix" this to the
+    # canonical detector. So the file name and the project_path stored in it
+    # can name different folders: project_path is the identity root, which a
+    # linked worktree of a bare repository, a `--separate-git-dir` checkout or
+    # worktree, and a submodule key on themselves, while the file keeps the
+    # pre-change name: that of the folder holding their git directory.
+    project = _project_name()
     if not project:
         raise BacklogWriteError(
             "project id did not resolve, so there is no name to write under. "
@@ -270,8 +293,12 @@ def project_root() -> Path:
        repositories, itself under no `.git` — and it is a stable project key
        in its own right.
     3. Otherwise refuse: the variable is unset, names no directory, or names
-       a directory inside a repository git could not read. Writing under a
-       checkout git failed to resolve would key a second backlog on a
+       a directory inside a checkout whose main root did not resolve, or one
+       git answers for with no root (a bare repository, or a directory inside
+       one). That
+       refusal names the memory skill's root check and its cause when the
+       check refused the directory, and gives that cause's remedy. Writing
+       under a checkout git failed to resolve would key a second backlog on a
        subdirectory or worktree that every git-present session keys on the
        main root; a default would write a backlog nobody can find.
 
@@ -300,6 +327,15 @@ def project_root() -> Path:
       instead of refusing. The refusal itself is unchanged — it stays the
       guard for shells with no session behind them (cron, manual CLI).
     """
+    return _root_and_common_dir()[0]
+
+
+def _project_anchor() -> Tuple[Optional[str], str, Optional[Path]]:
+    """The declared project directory (None when nothing declares one), the
+    name of where it came from, and the common dir git gives for it (None
+    for an umbrella directory that no repository holds). Raises
+    BacklogWriteError when the environment and the session record name
+    different directories."""
     memory_api = _memory_api()
     disagreement = memory_api.env_record_project_dir_disagreement()
     if disagreement is not None:
@@ -308,22 +344,91 @@ def project_root() -> Path:
         )
     env_dir = os.environ.get("CLAUDE_PROJECT_DIR")
     record_dir = "" if env_dir else memory_api.get_project_dir_from_session_record()
-    # `source` names where the anchor came from so the refusal below never
-    # attributes a recorded value to the (unset) variable, or vice versa.
+    # `source` names where the anchor came from so a refusal of it
+    # (`_root_and_common_dir`) never attributes a recorded value to the
+    # (unset) variable, or vice versa.
     project_dir = env_dir or record_dir or None
     source = "CLAUDE_PROJECT_DIR" if env_dir else "the session record's project_dir"
-    root = memory_api.main_repo_root(project_dir)
+    return project_dir, source, memory_api.main_repo_common_dir(project_dir)
+
+
+# `_root_and_common_dir`'s default for `listing`: the caller read no
+# worktree listing, so the root's redirect check asks git itself.
+_LISTING_NOT_READ: Any = object()
+
+
+def _root_and_common_dir(
+    anchor: Optional[tuple] = None, listing: Any = _LISTING_NOT_READ
+) -> Tuple[Path, Optional[Path]]:
+    """`project_root()` and the repository's common dir git gave for it, or
+    None for an umbrella directory that no repository holds. One
+    `--git-common-dir` answer serves both, so `checkout_roots()` lists the
+    same repository the root came from and asks git for it once.
+
+    `anchor`, `_project_anchor()`'s answer, and `listing`, the worktree
+    listing of its common dir, when the caller already holds them, are used
+    instead of asking again: a linked worktree's root is checked against
+    that same listing, and so is a refusal's root check.
+
+    Raises BacklogWriteError when no root resolves. For a directory inside a
+    checkout, or one git answers for with no root, the refusal names the
+    memory skill's root check, its cause and its remedy when that check
+    refused the directory (`root_check_refusal`), and otherwise that git
+    gave no root for it."""
+    memory_api = _memory_api()
+    project_dir, source, common = anchor if anchor is not None else _project_anchor()
+    root = (
+        memory_api.main_repo_root(
+            project_dir, common=common,
+            listing=memory_api.project_identity.LISTING_UNASKED if listing is _LISTING_NOT_READ else listing,
+        )
+        if common is not None else None
+    )
     if root is not None:
-        return root
+        return root, common
+    if not project_dir and common is not None:
+        # Nothing declared, but the working directory is in a repository git
+        # gives no root for (a bare one, say): the root check judges it as it
+        # judges a declared directory, so the refusal names that check's
+        # cause and remedy rather than advising CLAUDE_PROJECT_DIR.
+        cwd = memory_api.cwd_or_none()
+        if cwd is not None:
+            project_dir, source = str(cwd), "the working directory"
     if project_dir and Path(project_dir).is_dir():
         # _resolved never raises: an unresolvable directory falls back to its
         # unresolved path, the same fallback the detector takes for the name.
         resolved = _resolved(Path(project_dir))
-        if _enclosing_checkout(resolved) is None:
-            return resolved
-        why = (
-            f"{source}={project_dir!r} sits inside a repository git "
-            f"could not read"
+        enclosing = _enclosing_checkout(resolved)
+        # AN UMBRELLA ONLY WHERE NO CHECKOUT ENCLOSES IT AND GIT GIVES NO
+        # COMMON DIR. A bare repository, or a directory inside one, can have
+        # no `.git` above it, but git still gives its common dir, so it is no
+        # umbrella and the memory skill declines it below. Inside a checkout
+        # it has that checkout's `.git` above it as well.
+        if enclosing is None and common is None:
+            return resolved, None
+        # Say what the memory skill's root check observed, with its own
+        # remedy, rather than advising a variable that already names this
+        # directory.
+        refusal = memory_api.root_check_refusal(
+            Path(project_dir), common,
+            listing=memory_api.project_identity.LISTING_UNASKED if listing is _LISTING_NOT_READ else listing,
+        )
+        if refusal is not None:
+            cause, remedy = refusal
+            raise BacklogWriteError(
+                f"the main repository root did not resolve: the memory skill's "
+                f"root check refused {source}={project_dir!r}, because {cause}. "
+                f"Nothing was written.{f' {remedy}' if remedy else ''}"
+            )
+        inside = (
+            f", which sits inside the checkout at {str(enclosing)!r}"
+            if enclosing is not None else ""
+        )
+        raise BacklogWriteError(
+            f"the main repository root did not resolve: git gave no root for "
+            f"{source}={project_dir!r}{inside}. Nothing was written. `git "
+            f"rev-parse --show-toplevel` run in that directory prints git's "
+            f"own reason."
         )
     elif project_dir:
         why = f"{source}={project_dir!r} does not name an existing directory"
@@ -337,7 +442,7 @@ def project_root() -> Path:
     )
 
 
-def checkout_roots() -> List[str]:
+def checkout_roots(recorded: Any = None) -> List[str]:
     """Every checkout of this project — the main one and each worktree — as
     absolute resolved paths. NEVER empty and never absent.
 
@@ -345,25 +450,126 @@ def checkout_roots() -> List[str]:
     another project's session. A missing entry costs that checkout a loud
     resolution failure UNLESS it sits inside a checkout that IS recorded, in
     which case the read path's enclosing-checkout rung still matches it. The
-    fallback when git cannot answer is the project root alone, which is
-    always right about at least itself.
+    project root is always one of them. With it come the listed worktrees
+    whose `.git` and admin entry name each other, and every listed worktree
+    whose folder is absent (a drive not mounted now, or a folder moved or
+    deleted), but only when the root is the checkout git lists first or git
+    lists the git dir there. The root is the only one, plus any carried root
+    below, when git gives no listing, the listing read raises, git prints a
+    listing that cannot be read whole or holds no record once its unusable
+    paths are dropped, git lists another checkout first, or a path will not
+    resolve: it is always right about at least itself. That holds where the
+    root does not rest on the listing. From a linked worktree it does: the
+    memory skill's redirect check confirms the worktree in that same
+    listing, so a listing that does not show it (none, a read that raises,
+    one that cannot be read whole, or one with no record left) refuses the
+    write with BacklogWriteError, naming the check's cause.
 
-    Deliberately NOT merged with _branch_and_worktree_names, which runs the
-    same porcelain: that caller reduces each `worktree` line to a BASENAME for
-    substring matching, this one resolves it to an absolute path for exact
-    membership — opposite ends of the same string, so one helper serving both
-    still needs a mode flag. It also runs a second git call this one does not
-    need. Two subprocesses per write on a path the design says can afford one.
+    `recorded`, the roots the backlog file already holds, carries forward
+    each one whose `.git` file names this repository's common dir. That is
+    the main checkout of a `--separate-git-dir` repository: git lists its
+    git dir in its place, so a write from one of its linked worktrees finds
+    no other evidence of it. It also carries each one whose `.git` is a
+    directory, not a link, that resolves to the common dir: that directory
+    is the repository's git dir, so the root is its own main checkout, which
+    a write from a folder whose `.git` file names that directory (git's own
+    `git init --separate-git-dir=<checkout>/.git` layout among them) finds
+    no other evidence of either. Each is checked again on every write; any
+    other recorded root is dropped. With no common dir (git is absent, or no
+    repository holds the root) there is nothing to check a recorded root
+    against, so none is carried and the root is the only one.
+
+    Deliberately NOT merged with _branch_and_worktree_names, which reads the
+    same listing with the same reader: that caller reduces each `worktree`
+    line to a BASENAME for substring matching, this one keeps whole paths
+    by the rules above — opposite ends of the same string, so one helper
+    serving both still needs a mode flag.
     """
-    porcelain = _run_capture(
-        ["git", "-C", str(project_root()), "worktree", "list", "--porcelain"]
+    # ONLY TWO-WAY-LINKED worktrees, as the memory skill's read gate keeps
+    # them (`project_identity.verified_worktree_roots`): a listed path is what this
+    # repository's admin entries claim, and a path cut at a newline or a
+    # delivered `.git` can name another repository's checkout. A listing git
+    # did not give, or one that cannot be read whole, adds no listed root.
+    # The project root is always the first, unresolved when its path will
+    # not resolve, and then only carried roots follow it.
+    # A listed worktree whose folder is absent is kept too (on a drive not
+    # mounted now; git before 2.31 cannot say whether it is locked): a
+    # session there after the drive returns matches before any write records
+    # it again, and an absent folder names no other repository's checkout.
+    # The listed worktrees join only when the root is the checkout git lists
+    # first, git lists the git dir there because it cannot name the main
+    # checkout (a `--separate-git-dir` or `core.worktree` repository), or git
+    # lists there the folder whose `.git` is the git dir. A folder whose
+    # `.git` file names another folder's `.git` directory, as `git init
+    # --separate-git-dir=<folder>/.git` makes it, shares that git dir, so it
+    # carries the worktrees git lists for it; a hand-written `.git` file of
+    # that shape reads the same and is listed adversarial-only.
+    memory_api = _memory_api()
+    # ONE LISTING PER LOOKUP: read here and handed to the root's redirect
+    # check, which a linked worktree runs on the same `--git-dir` listing.
+    # Read through the command's detection pass (`main`), so it is the
+    # listing the memory skill's guard read; a read that raises gives no
+    # listing, as a git that failed does.
+    anchor = _project_anchor()
+    records = (
+        memory_api.project_identity.listed_worktree_records(None, git_dir=Path(anchor[2]))
+        if anchor[2] is not None else None
     )
-    roots = [
-        str(Path(line[len("worktree "):]).resolve())
-        for line in (porcelain or "").splitlines()
-        if line.startswith("worktree ")
-    ]
-    return roots or [str(project_root())]
+    root, common = _root_and_common_dir(anchor, records)
+    try:
+        if common is None:
+            records = None
+        if not isinstance(records, list) or not _lists_first(records, root, common):
+            roots = [str(Path(root).resolve())]
+        else:
+            roots = [str(path) for path in memory_api.project_identity.verified_worktree_roots(root, common, records)]
+            for record in records[1:]:
+                path = record[0][len("worktree "):]
+                if not os.path.lexists(path):
+                    roots.append(str(Path(path).resolve()))
+    except (OSError, RuntimeError, ValueError):
+        roots = [str(root)]
+    if common is not None and isinstance(recorded, list):
+        # Stored resolved, as every other root is: a checkout recorded
+        # through a linked path is the same checkout, listed once.
+        roots += [str(_resolved(Path(r))) for r in recorded if _names_common_dir(r, common)]
+    return list(dict.fromkeys(roots))
+
+
+def _lists_first(records: List[List[str]], root: Any, common: Optional[Path]) -> bool:
+    """Whether git's listing `records` puts first `root`, the git dir
+    `common` (git cannot name the main checkout), or the folder whose `.git`
+    is `common` (where git lists the main worktree of a git dir named
+    `.git`, `git init --separate-git-dir=<folder>/.git` included): only then
+    are the listed worktrees `root`'s. An empty listing (its first record
+    was dropped) puts nothing first. Raises what `Path.resolve` raises."""
+    if common is None or not records:
+        return False
+    first = Path(records[0][0][len("worktree "):]).resolve()
+    common_path = Path(common).resolve()
+    listed_main = [common_path.parent] if common_path.name == ".git" else []
+    return first in (Path(root).resolve(), common_path, *listed_main)
+
+
+def _names_common_dir(checkout: Any, common: Path) -> bool:
+    """Whether `checkout`, an absolute path, holds a `.git` file whose
+    `gitdir:` resolves to `common`, or a `.git` directory, not a link, that
+    resolves to `common`: that directory IS the repository's git dir, so
+    the checkout is its main checkout. Never raises."""
+    if not isinstance(checkout, str) or not os.path.isabs(checkout):
+        return False
+    identity = _memory_api().project_identity
+    dot_git = Path(checkout) / ".git"
+    try:
+        if dot_git.is_dir() and not dot_git.is_symlink():
+            return dot_git.resolve() == Path(common).resolve()
+        text = identity.read_git_file(dot_git)
+        target = identity.gitfile_target(text) if text is not None else None
+        if target is None:
+            return False
+        return (Path(checkout) / target).resolve() == Path(common).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return False
 
 
 # Key under which load_or_create stashes the bytes it read, so save() can
@@ -438,7 +644,7 @@ def save(data: Dict[str, Any], path: Path) -> List[str]:
     # since the last write is recorded by the next one. That is what makes the
     # read path's exact-membership rule self-healing: its loud message names
     # /PACT:next, and /PACT:next writes.
-    data["roots"] = checkout_roots()
+    data["roots"] = checkout_roots(data.get("roots"))
     problems = validate(data)
     if problems:
         return problems
@@ -1144,9 +1350,10 @@ def _classify_ref(ref: Any) -> _RefKind:
         if number is None:
             return _RefKind(_KIND_OUT_OF_RANGE)
         return _RefKind(_KIND_GITHUB, number, link.group(1), link.group(2))
-    # isdecimal, NOT isdigit: isdigit also accepts superscripts such as '²'.
+    # ASCII decimal only: isdigit also accepts superscripts such as '²', and
+    # isdecimal accepts other scripts' digits, which are no issue number.
     tail = text.lstrip("#").rstrip("/").rsplit("/", 1)[-1]
-    if not tail.isdecimal():
+    if not (tail.isascii() and tail.isdecimal()):
         return _RefKind(_KIND_OPAQUE)
     return _RefKind(_KIND_LINK if _looks_like_link(text) else _KIND_NOT_A_REF)
 
@@ -1294,10 +1501,14 @@ def _local_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
 def _origin_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
     """The slug of the `origin` remote of `project_path`, or None. No network.
 
-    Read RAW with `git config --get remote.origin.url`: `git remote get-url`
-    applies `url.<base>.insteadOf`, so a rewrite rule in the repository's
-    config could point the slug at another repository. With no `project_path`
-    (None) git runs in the process CWD — the anchor `gh repo view` always had.
+    Read by the memory id's own reader (`project_identity.read_origin`) on
+    the repository's common dir: the FIRST `remote.origin.url` of its own
+    config file, raw (`git remote get-url` applies `url.<base>.insteadOf`,
+    so a rewrite rule could point the slug at another repository), so the
+    slug and the id always read the same url. Any other answer (no origin,
+    an included or empty url, git unavailable) gives no slug. With no
+    `project_path` (None) git runs in the process CWD — the anchor
+    `gh repo view` always had.
 
     The write path (`_normalise_ref`) uses THIS rung alone, never `GH_REPO`:
     a stored ref outlives the environment variable, so collapsing a link
@@ -1308,8 +1519,23 @@ def _origin_repo_slug(project_path: Any = None) -> Optional[Tuple[str, str]]:
     anchor = _git_anchor(project_path)
     if anchor is None:
         return None
-    url = _run_capture(["git", *anchor, "config", "--get", "remote.origin.url"])
-    return _slug_from_remote_url(url)
+    from shared.project_scope import _rev_parse_path
+
+    try:
+        start = Path(project_path) if anchor else Path.cwd()
+    except OSError:
+        return None
+    # The common-dir reader the identity roots use: no `--path-format` (git
+    # 2.31+), a relative answer resolved against `start`, bytes decoded with
+    # `os.fsdecode`.
+    common = _rev_parse_path(start, "--git-common-dir")
+    if common is None:
+        return None
+    identity = _project_identity()
+    origin = identity.read_origin(common)
+    if origin.state != identity.ORIGIN_PRESENT:
+        return None
+    return _slug_from_remote_url(origin.value)
 
 
 def _git_anchor(project_path: Any) -> Optional[List[str]]:
@@ -1352,63 +1578,56 @@ def _slug_from_gh_repo(value: Any) -> Optional[Tuple[str, str]]:
 
 
 def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
-    """`(owner, name)` from a github.com remote URL, or None. Pure.
+    """`(owner, name)` from a github.com remote URL, or None. Pure, no git.
 
-    Accepted: `https://` and `http://` (with or without `user[:token]@`),
-    `ssh://` and `git+ssh://` (`[user@]host[:port]`), `git://`, and the scp
-    form `user@host:O/N` with any non-empty user. The host is `github.com` or
-    GitHub's SSH-over-443 host `ssh.github.com`. One trailing `/` and one
-    `.git` are stripped, and exactly two path segments must remain. Any other
-    host — GitHub Enterprise, a loopback proxy, another forge — returns None
-    and the chain falls through to `gh repo view`.
-
-    Refused outright: a URL with a backslash or more than one `@`. Python's
-    `urlsplit` and git disagree on where such a host ends
-    (`https://evil.com\\@github.com/o/n` is github.com to one, not the other),
-    so neither reading is trusted.
+    DERIVED FROM THE MEMORY ID, so the two cannot disagree: the remote is
+    read by `project_identity.normalize_remote_url`, and only an id that is
+    `github.com/<owner>/<repo>` gives a slug. Every spelling, port, `.git`
+    form, host fold (www.github.com, ssh.github.com) and refusal
+    (a backslash, more than one `@`, a leading-zero port) is the id's.
+    Names come back lower-cased, as the id holds them; GitHub resolves them
+    case-insensitively. Any other id (GitHub Enterprise, another forge, a
+    decline) returns None and the chain falls through to `gh repo view`.
+    The slug must also pass `_valid_slug`, because it becomes a REST path.
     """
     if not isinstance(url, str):
         return None
-    url = url.strip()
-    if "\\" in url or url.count("@") > 1:
+    identifier = _project_identity().normalize_remote_url(url)
+    if identifier is None:
         return None
-    scp = _SCP_REMOTE.match(url)
-    if scp is not None and "://" not in url:
-        host, path = scp.group(1), scp.group(2)
-    else:
-        try:
-            parts = urlsplit(url)
-            host = parts.hostname or ""
-        except ValueError:
-            return None
-        if parts.scheme.lower() not in _REMOTE_SCHEMES:
-            return None
-        path = parts.path
-    if host.lower() not in _GITHUB_REMOTE_HOSTS:
+    host, _, path = identifier.partition("/")
+    owner, _, name = path.partition("/")
+    if host != _GITHUB_HOST or not name or "/" in name:
         return None
-    path = path[1:] if path.startswith("/") else path
-    path = path[:-1] if path.endswith("/") else path
-    path = path[: -len(".git")] if path.endswith(".git") else path
-    segments = path.split("/")
-    if len(segments) != 2:
-        return None
-    owner, name = segments
     return (owner, name) if _valid_slug(owner, name) else None
 
 
+def _project_identity():
+    """The pact-memory identity module, imported lazily as `_memory_api` is.
+    It loads no store and runs no git at import."""
+    scripts_parent = Path(__file__).resolve().parents[2] / "skills" / "pact-memory"
+    if str(scripts_parent) not in sys.path:
+        sys.path.insert(0, str(scripts_parent))
+    from scripts import project_identity
+
+    return project_identity
+
+
 def _valid_slug(owner: Any, name: Any) -> bool:
-    """Both parts hold only slug characters, and neither is dots alone.
+    """The owner is a GitHub owner name (`project_identity.is_github_owner`:
+    letters, digits, hyphens and underscores, starting with a letter or
+    digit, at most 39) and the name a
+    GitHub repository name (`project_identity.is_github_name`: the
+    characters a repository slug may contain, anchored at the true end of
+    the string, never dots alone).
 
     The slug is interpolated into a GraphQL string literal AND into a REST URL
-    path, so it is confirmed to hold nothing but the characters a repository
-    slug may contain. `.` and `..` pass `_SLUG_CHARS` but are path traversal
-    in a URL, so a name made only of dots is refused too.
+    path, so it is confirmed to hold nothing else; `.` and `..` would be
+    path traversal in a URL. The memory id applies the same rule, so a
+    github.com id and its slug agree.
     """
-    return all(
-        isinstance(part, str) and bool(_SLUG_CHARS.match(part))
-        and set(part) != {"."}
-        for part in (owner, name)
-    )
+    identity = _project_identity()
+    return identity.is_github_owner(owner) and identity.is_github_name(name)
 
 
 def _gh_repo_view_slug(project_path: Optional[str] = None) -> Optional[Tuple[str, str]]:
@@ -1449,7 +1668,7 @@ def _gh_repo_view_slug(project_path: Optional[str] = None) -> Optional[Tuple[str
 def _is_github_url(url: Any) -> bool:
     """`url` is an http(s) URL on github.com itself (not a subdomain, not GHE).
 
-    A backslash or an `@` is refused outright, as for remotes (S-F6): GitHub's
+    A backslash or an `@` is refused outright, as for remotes: GitHub's
     web URL never carries userinfo, and `urlsplit` reads
     `https://evil.com@github.com/...` as github.com.
     """
@@ -1478,14 +1697,21 @@ def _run_capture(
     Output is decoded with `errors="replace"`, so a non-UTF-8 byte (say in a
     remote URL) cannot raise UnicodeDecodeError out of `show`. `GH_HOST` is
     removed from the child's environment: the tracker is github.com, and
-    `gh repo view` would otherwise resolve against another host.
+    `gh repo view` would otherwise resolve against another host. Every
+    command also runs without GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR, as
+    the roots' git calls do, so `git` and `gh repo view` (which reads the
+    git remotes) answer for the repository they are anchored on, not one
+    the session's environment names.
 
     `timeout` exists for the per-ref REST calls, which share ONE deadline and
     so each get what is left of it. Every other caller takes the default.
     `cwd` anchors a command that reads the repository it runs in
     (`gh repo view`) on the project instead of the process CWD.
     """
-    env = {key: value for key, value in os.environ.items() if key != "GH_HOST"}
+    from shared.project_scope import git_env_without_location
+
+    env = git_env_without_location()
+    env.pop("GH_HOST", None)
     try:
         result = subprocess.run(
             list(command),
@@ -1808,7 +2034,20 @@ def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
     if not at:
         return None
     branches = _run_capture(["git", *at, "branch", "--format=%(refname:short)"])
-    worktrees = _run_capture(["git", *at, "worktree", "list", "--porcelain"])
+    memory_api = _memory_api()
+    # The worktrees are this project's only by the roots' rule: a folder
+    # whose `.git` names another repository's `.git` directory reads that
+    # repository's listing, and its worktree folders are not this project's.
+    # A listing read that raises gives no listing, as a git that failed does.
+    try:
+        worktrees = memory_api.project_identity.worktree_records(at)
+        ours = isinstance(worktrees, list) and _lists_first(
+            worktrees, project_path, memory_api.main_repo_common_dir(project_path)
+        )
+    except (OSError, RuntimeError, ValueError):
+        ours = False
+    if not ours:
+        worktrees = None
     if branches is None and worktrees is None:
         return None
     # NAMES ONLY. The porcelain also carries `HEAD <sha>` — once PER WORKTREE —
@@ -1818,11 +2057,11 @@ def _branch_and_worktree_names(project_path: Any = None) -> Optional[List[str]]:
     # silently suppressed. `detached`, `locked`, `bare` and `prunable` carry no
     # name and drop out with them.
     names = (branches or "").splitlines()
-    for line in (worktrees or "").splitlines():
-        if line.startswith("worktree "):
-            names.append(Path(line[len("worktree "):]).name)
-        elif line.startswith("branch "):
-            names.append(line[len("branch "):].removeprefix("refs/heads/"))
+    for field in (field for record in (worktrees or []) for field in record):
+        if field.startswith("worktree "):
+            names.append(Path(field[len("worktree "):]).name)
+        elif field.startswith("branch "):
+            names.append(field[len("branch "):].removeprefix("refs/heads/"))
     return names
 
 
@@ -1976,16 +2215,81 @@ def _add_item_arguments(parser: argparse.ArgumentParser) -> None:
         )
 
 
+class _HeldWarnings(logging.Filter):
+    """Holds the IDENTITY-RESOLUTION warnings logged on the memory skill's
+    resolver logger (`scripts.memory_api`'s `logger`) while one command runs:
+    a decline of the canonical id, an ignored override, a HOME landing, a
+    remote-helper folder name (`memory_api.is_identity_record`). The backlog
+    keys on the pre-change folder name, so none of them says anything about a
+    write that succeeds: a success drops them all. A command that does not
+    succeed prints them in the order they were logged (`replay`), so a
+    refusal still shows what the memory skill observed. Every OTHER record on
+    that logger passes at once: a warning from the memory store a command
+    opens (a show that checks memory ids reads it) is about that store, not
+    the identity, so it is never held or dropped."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        memory_api = _memory_api()
+        self.records: List[logging.LogRecord] = []
+        self.replayed = False
+        self.logger = memory_api.logger
+        self.is_identity = memory_api.is_identity_record
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not self.is_identity(record):
+            return True
+        self.records.append(record)
+        return False
+
+    def __enter__(self) -> "_HeldWarnings":
+        self.logger.addFilter(self)
+        return self
+
+    def __exit__(self, *_exc: Any) -> None:
+        self.logger.removeFilter(self)
+
+    def replay(self) -> None:
+        """Print the held warnings as the memory skill would have. Acts once
+        per command: a later call does nothing."""
+        if self.replayed:
+            return
+        self.replayed = True
+        self.__exit__()
+        records, self.records = self.records, []
+        for record in records:
+            self.logger.handle(record)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     backlog_dir = Path(args.backlog_dir) if args.backlog_dir else None
+    # ONE DETECTION PASS PER COMMAND: the memory skill's guard, the root,
+    # the roots, a refusal's root check and a memory store the command opens
+    # read the same git answers, each asked once, so a refusal names the
+    # cause the guard decided on.
+    # A REFUSAL REPLAYS AT ITS OWN PRINT (`_main`, `_handle_write_or_show`),
+    # so the decline precedes the refusal text. Here a raised command, or a
+    # failing one that did not replay, replays; `replay` acts once.
+    with _HeldWarnings() as held, _memory_api().detection_pass():
+        try:
+            code = _main(args, backlog_dir, held)
+        except BaseException:
+            held.replay()
+            raise
+        if code != _EXIT_OK:
+            held.replay()
+    return code
 
+
+def _main(args: argparse.Namespace, backlog_dir: Optional[Path], held: _HeldWarnings) -> int:
     try:
         path = store_path(backlog_dir)
         if args.command == "repair":
             return _handle_repair(path, args.force)
-        return _handle_write_or_show(args, path)
+        return _handle_write_or_show(args, path, held)
     except BacklogFileError as exc:
+        held.replay()
         # THE ADVICE DEPENDS ON THE SUBCLASS, because `repair` REFUSES an
         # unreadable file without --force. Promising a repair that declines is
         # worse than saying nothing: the user runs it, gets a refusal, and
@@ -2003,6 +2307,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print(f"backlog is unreadable: {exc}\n{advice}", file=sys.stderr)
         return _EXIT_UNREADABLE
     except BacklogWriteError as exc:
+        held.replay()
         print(f"refused: {exc}", file=sys.stderr)
         return _EXIT_REFUSED
 
@@ -2017,7 +2322,9 @@ def _handle_repair(path: Path, force: bool = False) -> int:
     return _EXIT_OK
 
 
-def _handle_write_or_show(args: argparse.Namespace, path: Path) -> int:
+def _handle_write_or_show(args: argparse.Namespace, path: Path, held: _HeldWarnings) -> int:
+    """Run `show` or a write. A refusal printed here prints the held
+    decline first (`held.replay`), as a refusal raised to `_main` does."""
     data = load_or_create(path)
     # Schema problems are file-local, so they show even with --no-reconcile.
     schema = [f"schema: {problem}" for problem in validate(data)]
@@ -2046,6 +2353,7 @@ def _handle_write_or_show(args: argparse.Namespace, path: Path) -> int:
     else:
         item = find_item(data, args.item_id)
         if item is None:
+            held.replay()
             if any(i.get("id") == args.item_id for i in _archived(data)):
                 print(
                     f"refused: item {args.item_id!r} is archived. "
@@ -2063,6 +2371,7 @@ def _handle_write_or_show(args: argparse.Namespace, path: Path) -> int:
 
     problems = save(data, path)
     if problems:
+        held.replay()
         print("refused, nothing written:", file=sys.stderr)
         for problem in problems:
             print(f"  {problem}", file=sys.stderr)

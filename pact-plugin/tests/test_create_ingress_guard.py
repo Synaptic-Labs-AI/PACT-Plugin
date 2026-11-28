@@ -39,10 +39,7 @@ import pytest
 
 from helpers import create_test_schema
 
-try:
-    import pysqlite3 as sqlite3
-except ImportError:
-    import sqlite3
+from scripts.database import sqlite3
 
 from memory_repair import shred_detect  # noqa: E402
 from scripts.database import (  # noqa: E402

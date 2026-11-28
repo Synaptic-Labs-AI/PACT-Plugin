@@ -92,7 +92,7 @@ def _env(project):
 
 
 def _store(tmp_path, name):
-    import sqlite3
+    from scripts.database import sqlite3
     db = tmp_path / name
     conn = sqlite3.connect(str(db))
     create_test_schema(conn)
@@ -392,9 +392,10 @@ class TestTheEnvelopeNamesItsProjectOnEveryOutcome:
         # anchor declared, which is the guard's refusal shape.
         envelope = _envelope(project, db)
 
+        project_id = self._project_id(project, db)
         assert envelope == {
             "sync_status": "refused", "projected": 0, "memory_ids": [],
-            "project_id": self._project_id(project, db),
+            "project_id": project_id, "read_scope": [project_id],
         }
         assert (project / "CLAUDE.md").read_bytes() == before
 
@@ -407,9 +408,10 @@ class TestTheEnvelopeNamesItsProjectOnEveryOutcome:
 
         envelope = _envelope(project, db, "--claude-md-root", str(project))
 
+        project_id = self._project_id(project, db)
         assert envelope == {
             "sync_status": "failed", "projected": 0, "memory_ids": [],
-            "project_id": self._project_id(project, db),
+            "project_id": project_id, "read_scope": [project_id],
         }
 
     def test_the_same_project_writes_when_the_obstruction_is_gone(self, stocked):
@@ -498,9 +500,8 @@ class TestTheReportTemplatesRenderTheProject:
         # with a census that lost a FILE. The per-file counts are pinned there;
         # the number of files is not, so pin it here.
         assert len(_SLOT_SITES) == 2, sorted(p.name for p in _SLOT_SITES)
-        counts = {path.name: path.read_text(encoding="utf-8").count(_REPORT_SLOT)
-                  for path in _SLOT_SITES}
-        assert counts == {path.name: n for path, n in _SLOT_SITES.items()}
+        counts = {path: path.read_text(encoding="utf-8").count(_REPORT_SLOT) for path in _SLOT_SITES}
+        assert counts == dict(_SLOT_SITES)
 
     def test_no_slot_renders_the_status_without_the_project(self):
         """Control: the count above cannot tell a dropped slot from a slot

@@ -17,7 +17,7 @@ MEM_START = "<!-- PACT_MEMORY_START -->"
 MEM_END = "<!-- PACT_MEMORY_END -->"
 RC = "<!-- Auto-managed by pact-memory skill. Last 3 retrieved memories shown. -->"
 WM = ("<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. "
-      "Keyed by folder name, so another checkout with the same name shares this section. -->")
+      "The memory skill's `project-id show` reports this section's key. When the identity declines, nothing is written to this section. -->")
 WMH = "## Working Memory"
 
 

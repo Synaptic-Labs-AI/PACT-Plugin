@@ -33,7 +33,7 @@ import pytest
 from helpers import create_test_schema, make_cli_memory_dict
 
 from scripts.cli import build_parser, cmd_save, cmd_search, cmd_list, cmd_get, cmd_status, cmd_setup, cmd_update, cmd_delete, main, _COMMANDS, _refuse_live_db_under_pytest
-from scripts.memory_api import PACTMemory
+from scripts.memory_api import PACTMemory, _DetectedIdentity
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +74,7 @@ def mock_pact_memory():
 def cli_db(tmp_path):
     """Create a temporary database for subprocess tests."""
     # Use the same sqlite3 module as the codebase
-    try:
-        import pysqlite3 as sqlite3
-    except ImportError:
-        import sqlite3
+    from scripts.database import sqlite3
 
     db_path = tmp_path / "cli_test.db"
     conn = sqlite3.connect(str(db_path))
@@ -295,8 +292,42 @@ class TestCliArgParsing:
         assert exc_info.value.code == 2
 
     def test_dispatch_table_covers_all_subcommands(self):
-        expected = {"save", "search", "list", "get", "status", "setup", "update", "delete", "sync", "project-file"}
+        expected = {"save", "search", "list", "get", "status", "setup", "update", "delete", "sync", "project-file", "project-id"}
         assert set(_COMMANDS.keys()) == expected
+
+    def test_the_project_id_rows_are_documented_and_dispatched(self):
+        """The SKILL.md rows, the CLI dispatch table and the parser agree.
+
+        The rows tell an agent to run `project-id show` when a project looks
+        empty, so a row for a verb or flag the parser does not accept is an
+        agent-facing dead end. Each documented verb and flag is parsed with
+        the CLI's own parser, so dropping one from the parser reds here.
+        """
+        skill = Path(__file__).parent.parent / "skills" / "pact-memory" / "SKILL.md"
+        text = skill.read_text(encoding="utf-8")
+
+        assert "project-id" in _COMMANDS, (
+            "SKILL.md documents a verb the dispatch table does not carry"
+        )
+        for subcommand in ("show", "rekey"):
+            assert f"project-id {subcommand}" in text, (
+                f"SKILL.md does not document `project-id {subcommand}`"
+            )
+        for flag in ("--from", "--candidates", "--apply", "--dry-run"):
+            assert flag in text, f"SKILL.md's project-id rows omit {flag}"
+
+        parser = build_parser()
+        show = parser.parse_args(["project-id", "show"])
+        assert (show.command, show.project_id_action) == ("project-id", "show")
+        rekey = parser.parse_args(
+            ["project-id", "rekey", "--from", "old", "--to", "new", "--dry-run"]
+        )
+        assert (rekey.project_id_action, rekey.from_id, rekey.to_id, rekey.dry_run) == (
+            "rekey", "old", "new", True,
+        )
+        for flag, field in (("--apply", "apply"), ("--candidates", "candidates")):
+            parsed = parser.parse_args(["project-id", "rekey", "--from", "old", flag])
+            assert getattr(parsed, field) is True, flag
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +474,7 @@ class TestCliSaveCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "'-'" in err_output["message"]
@@ -459,7 +490,7 @@ class TestCliSaveCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "--stdin" in err_output["message"]
@@ -499,7 +530,7 @@ class TestCliSaveCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
@@ -511,7 +542,7 @@ class TestCliSaveCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
@@ -538,7 +569,8 @@ class TestCliSaveVerification:
 
     Verification (save-then-get) lives in PACTMemory.save() so all callers
     benefit.  When verification fails, save() raises RuntimeError which
-    main()'s try/except catches as SYSTEM_ERROR (exit 2).
+    main()'s try/except catches as SYSTEM_ERROR (exit 3: the store did not
+    keep the write).
     """
 
     def test_save_success_when_save_returns_id(self, mock_pact_memory, capsys):
@@ -556,8 +588,8 @@ class TestCliSaveVerification:
         assert output["ok"] is True
         assert output["result"]["memory_id"] == "abc123def456"
 
-    def test_save_verification_failure_exits_2(self, capsys):
-        """When save() raises RuntimeError (verification failure), exits 2."""
+    def test_save_verification_failure_exits_3(self, capsys):
+        """When save() raises RuntimeError (verification failure), exits 3."""
         mock = MagicMock()
         mock.save.side_effect = RuntimeError(
             "Save verification failed — memory_id abc123 not found after save"
@@ -567,7 +599,7 @@ class TestCliSaveVerification:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", json.dumps(memory_dict)])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
 
     def test_save_verification_failure_error_format(self, capsys):
         """Verification failure outputs SYSTEM_ERROR JSON envelope to stderr."""
@@ -602,7 +634,7 @@ class TestCliSaveVerification:
         err_output = json.loads(captured.err)
         assert "custom_id_xyz" in err_output["message"]
 
-    def test_save_exception_via_main_exits_2(self, capsys):
+    def test_save_exception_via_main_exits_3(self, capsys):
         """Any exception from save() is caught by main() as SYSTEM_ERROR."""
         mock = MagicMock()
         mock.save.side_effect = RuntimeError("DB connection lost")
@@ -611,7 +643,7 @@ class TestCliSaveVerification:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", json.dumps(memory_dict)])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
@@ -630,7 +662,7 @@ class TestCliSaveVerification:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", "--stdin"])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "SYSTEM_ERROR"
@@ -672,7 +704,7 @@ class TestApiSaveVerification:
     @pytest.fixture
     def api_memory(self, tmp_path):
         """Create a PACTMemory instance with a real temp database."""
-        import sqlite3
+        from scripts.database import sqlite3
         db_path = tmp_path / "verify_test.db"
         conn = sqlite3.connect(str(db_path))
         create_test_schema(conn)
@@ -737,7 +769,7 @@ class TestApiSaveVerification:
         """
         import scripts.memory_api as memory_api_module
 
-        import sqlite3
+        from scripts.database import sqlite3
         db_path = tmp_path / "order_test.db"
         conn = sqlite3.connect(str(db_path))
         create_test_schema(conn)
@@ -1279,7 +1311,7 @@ class TestCliSetupCommand:
         with patch("scripts.cli.ensure_initialized", return_value=False):
             with pytest.raises(SystemExit) as exc_info:
                 cmd_setup(args)
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["ok"] is False
@@ -1387,7 +1419,7 @@ class TestCliUpdateCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_update(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "--stdin" in err_output["message"]
@@ -1404,7 +1436,7 @@ class TestCliUpdateCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_update(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         err_output = json.loads(capsys.readouterr().err)
         assert err_output["error"] == "MISSING_INPUT"
         assert "'-'" in err_output["message"]
@@ -1429,7 +1461,7 @@ class TestCliUpdateCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_update(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "INVALID_INPUT"
@@ -1440,7 +1472,7 @@ class TestCliUpdateCommand:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_update(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "MISSING_INPUT"
@@ -1594,7 +1626,7 @@ class TestCliSystemErrorPathScrubbing:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", json.dumps(memory_dict)])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
 
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
@@ -1631,7 +1663,7 @@ class TestCliSystemErrorPathScrubbing:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", json.dumps(memory_dict)])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
 
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
@@ -1858,12 +1890,12 @@ class TestLiveDbGuardScope:
 class TestCliErrorHandling:
     """Test error paths, exit codes, and the main() entry point."""
 
-    def test_no_command_exits_1(self, capsys):
+    def test_no_command_is_a_usage_error_exit_2(self, capsys):
         with pytest.raises(SystemExit) as exc_info:
             main([])
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
 
-    def test_system_error_exits_2(self, capsys):
+    def test_system_error_exits_3(self, capsys):
         parser = build_parser()
         args = parser.parse_args(["list"])
 
@@ -1872,7 +1904,7 @@ class TestCliErrorHandling:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["list"])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "SYSTEM_ERROR"
@@ -1909,7 +1941,7 @@ class TestCliErrorHandling:
                 main(["list"])
         mock_cls.assert_called_once_with(db_path=None)
 
-    def test_save_api_exception_exits_2(self, capsys):
+    def test_save_api_exception_exits_3(self, capsys):
         mock = MagicMock()
         mock.save.side_effect = Exception("Disk full")
         memory_dict = make_cli_memory_dict()
@@ -1917,7 +1949,7 @@ class TestCliErrorHandling:
         with patch("scripts.cli.PACTMemory", return_value=mock):
             with pytest.raises(SystemExit) as exc_info:
                 main(["save", json.dumps(memory_dict)])
-        assert exc_info.value.code == 2
+        assert exc_info.value.code == 3
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "SYSTEM_ERROR"
@@ -1941,12 +1973,12 @@ class TestCliSubprocess:
         """
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(cli_db.parent))
 
-    def test_no_command_exits_1(self, cli_script_path):
+    def test_no_command_is_a_usage_error_exit_2(self, cli_script_path):
         result = subprocess.run(
             [sys.executable, cli_script_path],
             capture_output=True, text=True, timeout=60,
         )
-        assert result.returncode == 1
+        assert result.returncode == 2
 
     def test_save_and_get_roundtrip(self, cli_script_path, cli_db, tmp_path):
         """E2E roundtrip, and THE ONLY E2E ARM THAT DECLARES A ROOT.
@@ -2015,10 +2047,7 @@ class TestCliSubprocess:
     def test_get_unique_prefix_resolves_via_subprocess(self, cli_script_path, cli_db):
         """E2E: real cli.py → memory_api → database → SQL roundtrip on a unique prefix."""
         from scripts.database import create_memory
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
 
         full_id = "fa11ce5" + "1" + "0" * 24  # 32 chars; prefix "fa11ce5" is 7 chars
         conn = sqlite3.connect(str(cli_db))
@@ -2045,10 +2074,7 @@ class TestCliSubprocess:
     def test_get_ambiguous_prefix_envelope_via_subprocess(self, cli_script_path, cli_db):
         """E2E: ambiguous prefix returns AMBIGUOUS_PREFIX envelope with full match list."""
         from scripts.database import create_memory
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
 
         id_a = "ambig00" + "a" + "0" * 24
         id_b = "ambig00" + "b" + "0" * 24
@@ -2105,10 +2131,7 @@ class TestCliSubprocess:
     def _seed_memory(self, db_path, memory_id, context):
         """Helper: insert one memory via storage primitive (bypasses CLI ingress strip)."""
         from scripts.database import create_memory
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
         conn = sqlite3.connect(str(db_path))
         conn.row_factory = sqlite3.Row
         with patch("scripts.database.ensure_initialized"):
@@ -2584,13 +2607,13 @@ class TestCliSubprocess:
         output = json.loads(result.stdout)
         assert len(output["result"]) == 2
 
-    def test_save_non_dict_exits_1(self, cli_script_path, cli_db):
+    def test_save_non_dict_exits_2(self, cli_script_path, cli_db):
         result = subprocess.run(
             [sys.executable, cli_script_path, "save", '"just a string"',
              "--no-sync", "--db-path", str(cli_db)],
             capture_output=True, text=True, timeout=60,
         )
-        assert result.returncode == 1
+        assert result.returncode == 2
         err_output = json.loads(result.stderr)
         assert err_output["error"] == "INVALID_INPUT"
 
@@ -2762,14 +2785,102 @@ class TestSearchWindowContainment:
     margins here (10 verbatim fillers vs a zero-overlap target for the
     below-5 arm; an 11-record store against a 20 window for the visible arm)
     are chosen so rank wobble inside those margins cannot flip either arm.
+
+    BOTH ARMS HOLD ONLY ON THE VECTOR PATH, so that path is a checked
+    precondition rather than an assumption. When the CLI child cannot embed
+    the query, `search` silently falls back to keyword text search, which
+    never returns the zero-overlap target: the default-window arm would then
+    fail as a missing target, which reads as a search defect. The seed must
+    therefore store a vector for every record, and the CLI child's own cold
+    start must produce a usable embedding service. Either failing fails the arm
+    with that cause named.
     """
 
     FILLER_QUERY = "orchestration cadence telemetry"
     FILLERS = 10
+    VECTOR_PATH_MARKER = "PACT_VECTOR_PATH="
+
+    # Runs IN THE CLI CHILD and WRAPS the real CLI entry point without warming
+    # anything, so the search's own first embedding is the cold start a user's
+    # fresh process makes. After the CLI exits it reports, from the same
+    # process, whether that cold start produced a usable embedding service
+    # (the per-process singleton the CLI's search created) with extensions
+    # enabled. `prewarmed` means something loaded the service before the CLI
+    # ran, which would make the arm measure the wrapper instead of the CLI.
+    _CHILD_WRAPPER = (
+        "import runpy, sys\n"
+        "from pathlib import Path\n"
+        "cli = sys.argv[1]\n"
+        "sys.path.insert(0, str(Path(cli).resolve().parent.parent))\n"
+        "from scripts import database, embeddings\n"
+        "cold = embeddings._service is None\n"
+        "sys.argv = sys.argv[1:]\n"
+        "code = 0\n"
+        "try:\n"
+        "    runpy.run_path(cli, run_name='__main__')\n"
+        "except SystemExit as exc:\n"
+        "    code = exc.code\n"
+        "service = embeddings._service\n"
+        "if not cold:\n"
+        "    state = 'prewarmed'\n"
+        "elif (service is not None and service.is_available()\n"
+        "      and database.SQLITE_EXTENSIONS_ENABLED):\n"
+        "    state = 'ready'\n"
+        "else:\n"
+        "    state = 'unavailable'\n"
+        "sys.stderr.write('PACT_VECTOR_PATH=' + state + '\\n')\n"
+        # NOT READY NAMES ITS CAUSE: the service's cached state, the extension
+        # flag, and what a fresh model load raises now.
+        "if state != 'ready':\n"
+        "    detail = 'available=%r extensions=%r' % (\n"
+        "        getattr(service, '_available', None), database.SQLITE_EXTENSIONS_ENABLED)\n"
+        "    try:\n"
+        "        from model2vec import StaticModel\n"
+        "        StaticModel.from_pretrained(embeddings._cache_snapshot_for(\n"
+        "            embeddings.MODEL_NAME) or embeddings.MODEL_NAME, force_download=False)\n"
+        "        detail += ' reload=ok'\n"
+        "    except Exception as exc:\n"
+        "        detail += ' reload=' + type(exc).__name__ + ': ' + str(exc)[:300]\n"
+        "    sys.stderr.write('PACT_VECTOR_DETAIL=' + detail + '\\n')\n"
+        "sys.stderr.flush()\n"
+        "raise SystemExit(code)\n"
+    )
+
+    @staticmethod
+    def _diagnosis():
+        """What this process's embedding service reports, and what a fresh
+        model load raises now: the cause a degraded seed names."""
+        from scripts import database, embeddings
+
+        service = embeddings._service
+        detail = (
+            f"available={getattr(service, '_available', None)!r} "
+            f"extensions={database.SQLITE_EXTENSIONS_ENABLED!r}"
+        )
+        try:
+            from model2vec import StaticModel
+
+            StaticModel.from_pretrained(
+                embeddings._cache_snapshot_for(embeddings.MODEL_NAME)
+                or embeddings.MODEL_NAME,
+                force_download=False,
+            )
+            detail += " reload=ok"
+        except Exception as exc:
+            detail += f" reload={type(exc).__name__}: {str(exc)[:300]}"
+        return detail
 
     def _seed(self, db_path):
-        """Seed in-process: one model load for all saves, not one per save."""
+        """Seed in-process: one model load for all saves, not one per save.
+
+        THE SEED STARTS ITS OWN EMBEDDING SERVICE. The service caches a failed
+        model load for the life of the process, so a service an earlier test
+        in this worker left unavailable would degrade every save below."""
+        from scripts import embeddings
+
+        embeddings.reset_embedding_service()
         memory = PACTMemory(db_path=db_path)
+        statuses = []
         for i in range(self.FILLERS):
             memory.save(
                 {
@@ -2778,22 +2889,64 @@ class TestSearchWindowContainment:
                 },
                 sync_to_claude=False,
             )
-        return memory.save(
+            statuses.append(memory.last_embedding_status)
+        target_id = memory.save(
             {
                 "context": "zebra quorum calibration note",
                 "goal": "distinctive target marker",
             },
             sync_to_claude=False,
         )
+        statuses.append(memory.last_embedding_status)
+        # PRECONDITION: `last_embedding_status` is None when the record's
+        # vector was stored, and names the degradation otherwise.
+        assert statuses == [None] * (self.FILLERS + 1), (
+            "vector search unavailable for the seed: a record was saved "
+            f"without a vector (embedding statuses {statuses!r}; "
+            f"{self._diagnosis()}), so the ranked window this arm measures "
+            "does not exist"
+        )
+        return target_id
 
     def _search(self, cli_script_path, db_path, *extra):
         result = subprocess.run(
-            [sys.executable, cli_script_path, "search", self.FILLER_QUERY,
-             "--db-path", str(db_path), *extra],
+            [sys.executable, "-c", self._CHILD_WRAPPER, cli_script_path,
+             "search", self.FILLER_QUERY, "--db-path", str(db_path), *extra],
             capture_output=True, text=True, timeout=300,
         )
         assert result.returncode == 0, f"stderr: {result.stderr}"
-        return json.loads(result.stdout)["result"]
+        markers = [
+            line for line in result.stderr.splitlines()
+            if line.startswith(self.VECTOR_PATH_MARKER)
+        ]
+        assert markers == [self.VECTOR_PATH_MARKER + "ready"], (
+            "the CLI child's own cold start did not give it a vector path "
+            "(`unavailable`: its search fell back to keyword text search; "
+            "`prewarmed`: something loaded the service first), so the window "
+            "cannot be measured: "
+            f"markers {markers!r}, stderr {result.stderr!r}"
+        )
+        try:
+            return json.loads(result.stdout)["result"]
+        except (ValueError, KeyError) as exc:
+            raise AssertionError(
+                f"the CLI child's stdout is not a result envelope ({exc!r}): "
+                f"stdout {result.stdout!r}, stderr {result.stderr!r}"
+            ) from exc
+
+    def test_a_load_failure_an_earlier_test_cached_does_not_degrade_the_seed(
+        self, cli_db
+    ):
+        """An earlier test in this worker that left the embedding service
+        unavailable must not degrade the seed. RED WHEN the seed reuses the
+        process's cached service."""
+        from scripts import embeddings
+
+        embeddings.get_embedding_service()._available = False
+        try:
+            self._seed(cli_db)
+        finally:
+            embeddings.reset_embedding_service()
 
     def test_target_below_window_invisible_at_5_visible_at_default(
         self, cli_script_path, cli_db
@@ -2819,8 +2972,9 @@ class TestCliSaveVerificationE2E:
 
     The save-then-get verification lives in PACTMemory.save(). When it
     fails, save() raises RuntimeError, which main()'s try/except catches
-    as SYSTEM_ERROR (exit 2). These tests exercise the full CLI binary
-    against real SQLite databases.
+    as SYSTEM_ERROR (exit 3). A store sqlite cannot open or write is a store
+    fault and exits 3 too. These tests exercise the full CLI binary against real
+    SQLite databases.
     """
 
     def test_save_roundtrip_confirms_verification_passed(self, cli_script_path, cli_db):
@@ -2881,13 +3035,9 @@ class TestCliSaveVerificationE2E:
         get_output = json.loads(get_result.stdout)
         assert get_output["result"]["context"] == "stdin verification test"
 
-    def test_save_exits_2_on_unwritable_db(self, cli_script_path, tmp_path):
-        """Save exits 2 with SYSTEM_ERROR when DB is inaccessible.
-
-        This exercises the same error-handling path that a verification
-        failure would take: PACTMemory.save() raises an exception, main()
-        catches it as SYSTEM_ERROR with exit code 2.
-        """
+    def test_save_exits_3_on_unwritable_db(self, cli_script_path, tmp_path):
+        """Save exits 3 with SYSTEM_ERROR when sqlite cannot open the store:
+        a store fault, not bad input."""
         # Create a directory where a file is expected — SQLite can't open it
         bad_db = tmp_path / "not_a_file"
         bad_db.mkdir()
@@ -2900,7 +3050,7 @@ class TestCliSaveVerificationE2E:
              "--db-path", str(bad_db)],
             capture_output=True, text=True, timeout=60,
         )
-        assert result.returncode == 2
+        assert result.returncode == 3
         assert result.stdout == ""
         err_output = json.loads(result.stderr)
         assert err_output["ok"] is False
@@ -2910,12 +3060,9 @@ class TestCliSaveVerificationE2E:
     # process: only mode bits give that, and uid 0 ignores them. The SYSTEM_ERROR
     # exit itself stays covered under root by the directory-as-db test above.
     @pytest.mark.requires_non_root
-    def test_save_exits_2_on_readonly_db(self, cli_script_path, cli_db):
-        """Save exits 2 when the database file is read-only.
-
-        A read-only DB prevents the INSERT in save() from succeeding,
-        triggering the SYSTEM_ERROR path (exit 2).
-        """
+    def test_save_exits_3_on_readonly_db(self, cli_script_path, cli_db):
+        """Save exits 3 when the database file is read-only: the INSERT
+        fails in sqlite, which is a store fault, not bad input."""
         import stat
         # Make the DB file read-only
         cli_db.chmod(stat.S_IRUSR | stat.S_IRGRP | stat.S_IROTH)
@@ -2928,7 +3075,7 @@ class TestCliSaveVerificationE2E:
                  "--db-path", str(cli_db)],
                 capture_output=True, text=True, timeout=60,
             )
-            assert result.returncode == 2
+            assert result.returncode == 3
             err_output = json.loads(result.stderr)
             assert err_output["ok"] is False
             assert err_output["error"] == "SYSTEM_ERROR"
@@ -2949,7 +3096,7 @@ class TestCliSaveVerificationE2E:
              "--db-path", str(bad_db)],
             capture_output=True, text=True, timeout=60,
         )
-        assert result.returncode == 2
+        assert result.returncode == 3
         err_output = json.loads(result.stderr)
         # Verify full envelope structure
         assert set(err_output.keys()) == {"ok", "error", "message"}
@@ -3072,7 +3219,7 @@ class TestCliSaveAdversarial:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "INVALID_INPUT"
@@ -3083,7 +3230,7 @@ class TestCliSaveAdversarial:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "INVALID_INPUT"
@@ -3094,7 +3241,7 @@ class TestCliSaveAdversarial:
 
         with pytest.raises(SystemExit) as exc_info:
             cmd_save(args)
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         err_output = json.loads(captured.err)
         assert err_output["error"] == "INVALID_INPUT"
@@ -3174,13 +3321,13 @@ class TestCliHelpOutput:
         with pytest.raises(json.JSONDecodeError):
             json.loads(captured.err)
 
-    def test_bare_invocation_prints_help_with_examples_exit_one(self, capsys):
-        # This CLI's pre-existing bare contract: subparsers are not required,
-        # so main() prints the full help (epilog Examples included) to stderr
-        # and exits 1 — not the argparse usage-error path.
+    def test_bare_invocation_prints_help_with_examples_exit_two(self, capsys):
+        # Subparsers are not required, so main() prints the full help (epilog
+        # Examples included) to stderr, not argparse's one-line usage, and
+        # exits 2 as the usage error it is.
         with pytest.raises(SystemExit) as exc_info:
             main([])
-        assert exc_info.value.code == 1
+        assert exc_info.value.code == 2
         captured = capsys.readouterr()
         assert captured.out == ""
         assert self._example_lines()["save"] in captured.err
@@ -3194,6 +3341,23 @@ class TestCliHelpOutput:
         assert "error:" in captured.err
         assert self._example_lines()["save"] in captured.err
 
+    def test_every_help_example_is_quoted_alike(self, capsys):
+        """Every top-level example runs the script the same way, with its
+        path double-quoted, the rekey example included, and holds no `<` or
+        `>` outside quotes (a pasted bare `<memory-id>` is a shell
+        redirection). RED WHEN one example is quoted differently."""
+        with pytest.raises(SystemExit):
+            main(["--help"])
+        text = capsys.readouterr().out
+        examples = [line.strip() for line in text.split("Examples:", 1)[1].splitlines() if line.strip()]
+        prog = sys.argv[0]
+        assert len(examples) >= 10, examples
+        assert all(line.startswith(f'python3 "{prog}" ') for line in examples), examples
+        assert f"python3 \"{prog}\" project-id rekey '--from=<id>' '--to=<canonical>'" in examples
+        unquoted = [re.sub(r"'[^']*'|\"[^\"]*\"", "", line) for line in examples]
+        assert not [line for line in unquoted if "<" in line or ">" in line], examples
+        assert sum("'<memory-id>'" in line for line in examples) == 3, examples
+
     @staticmethod
     def _example_lines():
         # Interpreter-prefixed, quoted script path, concrete flags: the exact
@@ -3203,11 +3367,11 @@ class TestCliHelpOutput:
             "save": f'python3 "{prog}" save --stdin',
             "search": f'python3 "{prog}" search "query"',
             "list": f'python3 "{prog}" list',
-            "get": f'python3 "{prog}" get <memory-id>',
+            "get": f"python3 \"{prog}\" get '<memory-id>'",
             "status": f'python3 "{prog}" status',
             "setup": f'python3 "{prog}" setup',
-            "update": f'python3 "{prog}" update <memory-id> --stdin',
-            "delete": f'python3 "{prog}" delete <memory-id>',
+            "update": f"python3 \"{prog}\" update '<memory-id>' --stdin",
+            "delete": f"python3 \"{prog}\" delete '<memory-id>'",
             "sync": f'python3 "{prog}" sync',
         }
 
@@ -3385,10 +3549,7 @@ class TestErrorEnvelopeSurvivesASharedStderr:
         the noisy path unexercised.
         """
         from scripts.database import create_memory
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
 
         id_a = "ambig00" + "a" + "0" * 24
         id_b = "ambig00" + "b" + "0" * 24
@@ -4208,7 +4369,7 @@ def _backdate(db_path, memory_id, stamp):
     here are the space form, which is what the schema DEFAULT emits and not
     what the writer emits -- an arm that needs the production form must say
     so explicitly."""
-    import sqlite3
+    from scripts.database import sqlite3
     conn = sqlite3.connect(str(db_path))
     conn.execute("UPDATE memories SET created_at = ? WHERE id = ?", (stamp, memory_id))
     conn.commit()
@@ -4277,7 +4438,7 @@ class TestCliSyncSubprocess:
         expected_id = self._project_id(cli_script_path, project, cli_db)
         assert expected_id, "status reported no project id; the agreement pin below is vacuous"
         assert result == {"sync_status": "empty", "projected": 0, "memory_ids": [],
-                          "project_id": expected_id}
+                          "project_id": expected_id, "read_scope": [expected_id]}
         assert (project / "CLAUDE.md").read_bytes() == before
 
     def test_sync_projects_the_records_under_their_own_dates(
@@ -4345,7 +4506,7 @@ class TestApiSync:
 
     @pytest.fixture
     def api_memory(self, tmp_path):
-        import sqlite3
+        from scripts.database import sqlite3
         db_path = tmp_path / "sync_test.db"
         conn = sqlite3.connect(str(db_path))
         create_test_schema(conn)
@@ -4417,8 +4578,10 @@ class TestTheSyncEnvelopeFoldsAnUnusableProjectId:
         monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (value, "cwd")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(value, "cwd", None, None, None)
+            ),
         )
 
     def test_an_unusable_detected_id_is_null_and_matches_status(
@@ -4487,8 +4650,10 @@ class TestTheSyncAndStatusEnvelopesCarryDisplayUnsafeIdsRaw:
         detected = f"proj{char}X"
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (detected, "cwd")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(detected, "cwd", None, None, None)
+            ),
         )
 
         with patch("scripts.memory_api._ensure_ready"), patch(
@@ -4553,6 +4718,13 @@ class TestTheDiagnosticEnvelopesSplitPayloadFromMessage:
         monkeypatch.setattr(
             "scripts.memory_api.main_repo_root",
             lambda *args, **kwargs: Path("/repo") / bidi,
+        )
+        # The patched root is NOT a repository here, so the resolver takes its
+        # designed basename branch and the raw spelling flows through. A
+        # DECLINE path yields None instead (no folder pseudo-id).
+        monkeypatch.setattr(
+            "scripts.memory_api.main_repo_common_dir",
+            lambda *args, **kwargs: None,
         )
         with patch("scripts.memory_api._ensure_ready"), patch(
             "scripts.memory_api.sync_to_claude_md"
@@ -4632,8 +4804,10 @@ class TestTheDiagnosticEnvelopesSplitPayloadFromMessage:
         )
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(None, "unresolved", None, None, None)
+            ),
         )
         with pytest.raises(SystemExit) as exit_info:
             main([
@@ -4779,10 +4953,7 @@ class TestTheAmbiguousPrefixEnvelopeEscapesItsPrefix:
         content assertion below.
         """
         from scripts.config import resolve_db_path, store_scope
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
 
         with store_scope(cli_db):
             assert Path(resolve_db_path()).resolve() == Path(cli_db).resolve(), (
@@ -4912,10 +5083,7 @@ _ROW_B2 = _PREFIX + "4" + "0" * 24
 def _seed_scoped_rows(cli_db, rows):
     """Seed (id, project_id) rows, BOUND to the throwaway store in-process."""
     from scripts.config import resolve_db_path, store_scope
-    try:
-        import pysqlite3 as sqlite3
-    except ImportError:
-        import sqlite3
+    from scripts.database import sqlite3
 
     with store_scope(cli_db):
         assert Path(resolve_db_path()).resolve() == Path(cli_db).resolve(), (
@@ -4938,10 +5106,7 @@ def _seed_scoped_rows(cli_db, rows):
 
 
 def _resolver_connection(cli_db):
-    try:
-        import pysqlite3 as sqlite3
-    except ImportError:
-        import sqlite3
+    from scripts.database import sqlite3
 
     conn = sqlite3.connect(str(cli_db))
     conn.row_factory = sqlite3.Row
@@ -5129,8 +5294,10 @@ class TestThePrefixCallSiteIsScopedAndRefusesWithoutIdentity:
         _seed_scoped_rows(cli_db, [(_ROW_A1, "proj-A")])
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(None, "unresolved", None, None, None)
+            ),
         )
         memory = PACTMemory(db_path=cli_db)
         assert memory.project_id is None, "precondition: identity is unresolved"
@@ -5161,10 +5328,7 @@ class TestTheCliPrefixResolvesOnlyWithinItsProject:
         self, cli_script_path, cli_db
     ):
         from scripts.database import create_memory
-        try:
-            import pysqlite3 as sqlite3
-        except ImportError:
-            import sqlite3
+        from scripts.database import sqlite3
 
         conn = sqlite3.connect(str(cli_db))
         conn.row_factory = sqlite3.Row
@@ -5220,8 +5384,10 @@ class TestTheUnresolvedPrefixRefusalHasItsOwnEnvelope:
         _seed_scoped_rows(cli_db, [(_ROW_A1, "proj-A")])
         monkeypatch.setattr(
             PACTMemory,
-            "_detect_project_id_with_source",
-            staticmethod(lambda: (None, "unresolved")),
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: _DetectedIdentity(None, "unresolved", None, None, None)
+            ),
         )
         capfd.readouterr()
         with patch("scripts.memory_api._ensure_ready"), \

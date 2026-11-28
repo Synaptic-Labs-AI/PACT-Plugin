@@ -13,6 +13,8 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def test_run_git_success_returns_completed_process():
     """Happy path: run_git returns the CompletedProcess (regardless of returncode)."""
@@ -201,3 +203,203 @@ def test_run_git_env_is_inherited_when_omitted_and_replaced_when_given(
         "with env given, git still saw GIT_DIR, so the mapping did not replace "
         "the inherited environment"
     )
+
+
+def test_a_pass_answers_each_git_question_once_and_no_other(tmp_path, monkeypatch):
+    """Inside one `git_results_pass`, `answered_once` runs a question once and
+    gives every later asker that answer, a raised failure included, and never
+    gives one question's answer to another: a different resolved directory,
+    argv, output mode, or a variable git reads (GIT_*, LC_*, HOME and the
+    rest of `_GIT_READS_FROM_ENV`) is a different question. A change to any
+    other variable is not. Outside a pass every call runs, and a pass ends
+    with its block."""
+    from shared.git_helpers import PASS_GIT_RESULTS, answered_once, git_results_pass
+
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir()
+    b.mkdir()
+    (tmp_path / "link").symlink_to(a)
+    monkeypatch.chdir(a)
+    runs = []
+
+    def ask(argv, text=False, env=None):
+        def run():
+            runs.append((tuple(argv), text))
+            if argv[-1] == "--raises":
+                raise OSError("could not run")
+            return len(runs)
+        return answered_once(argv, run, text=text, env=env)
+
+    env = {"PATH": "/usr/bin", "HOME": str(tmp_path), "UNRELATED": "1"}
+    outside = (ask(["git", "rev-parse"]), ask(["git", "rev-parse"]))
+    with git_results_pass():
+        first = ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env=env)
+        same = [
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env=env),
+            ask(["git", "rev-parse", "--git-dir"], env=env),  # the cwd is a
+            ask(["git", "-C", str(tmp_path / "link"), "rev-parse", "--git-dir"], env=env),
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env={**env, "UNRELATED": "2"}),
+        ]
+        with git_results_pass():  # a nested pass joins
+            same.append(ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env=env))
+        other = [
+            ask(["git", "-C", str(b), "rev-parse", "--git-dir"], env=env),
+            ask(["git", "-C", str(a), "rev-parse", "--show-toplevel"], env=env),
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], text=True, env=env),
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env={**env, "GIT_DIR": "x"}),
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env={**env, "LC_ALL": "C"}),
+            ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env={**env, "HOME": str(b)}),
+        ]
+        failures = []
+        for _ in range(3):
+            try:
+                ask(["git", "rev-parse", "--raises"])
+            except OSError as exc:
+                failures.append(exc)
+    after = ask(["git", "-C", str(a), "rev-parse", "--git-dir"], env=env)
+
+    assert outside == (1, 2), "outside a pass every call runs"
+    assert same == [first] * 5, (first, same)
+    assert len(set(other)) == len(other) and first not in other, (first, other)
+    # A failure to start git is retried once, then kept for every later asker.
+    assert len(failures) == 3 and failures[1] is failures[2] and failures[0] is not failures[1], failures
+    assert [r for r in runs if r[0][-1] == "--raises"] == [(("git", "rev-parse", "--raises"), False)] * 2
+    assert (PASS_GIT_RESULTS.get(), after) == (None, len(runs)), "the pass ended with its block"
+
+
+@pytest.mark.parametrize("tail, kept", [
+    (" \t\r\n", ""),  # git's isspace: trimmed
+    ("\v\n", "\v"),  # not git whitespace: stays in the path
+    ("\f\n", "\f"),
+])
+def test_a_worktree_gitdir_is_trimmed_as_git_trims_it(tail, kept):
+    """`git worktree list` keeps a trailing vertical tab or form feed in the
+    path a worktree's admin gitdir names (strbuf_rtrim trims only space, tab,
+    CR and LF). RED WHEN those two are trimmed too."""
+    from shared.git_helpers import worktree_admin_gitdir
+
+    assert worktree_admin_gitdir("/wt/.git" + tail) == "/wt/.git" + kept
+
+
+def test_a_failure_to_start_git_is_retried_once_in_a_pass():
+    """A transient failure to start git (EAGAIN) is not kept as the pass's
+    answer: the next asker runs git again and gets its answer, and later
+    askers share that answer. A completed run that git refused (a nonzero
+    exit) is an answer and is kept. RED WHEN the first OSError is re-raised
+    to every later reader."""
+    import subprocess
+
+    from shared.git_helpers import answered_once, git_results_pass
+
+    calls = []
+
+    def flaky():
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError(11, "Resource temporarily unavailable")
+        return subprocess.CompletedProcess(["git"], 0, "ok\n", "")
+
+    refusals = []
+
+    def refused():
+        refusals.append(1)
+        return subprocess.CompletedProcess(["git"], 128, "", "fatal: no\n")
+
+    with git_results_pass():
+        try:
+            answered_once(["git", "rev-parse", "--flaky"], flaky, text=True, env=None)
+            raise AssertionError("the first start failure must reach its caller")
+        except OSError:
+            pass
+        second = answered_once(["git", "rev-parse", "--flaky"], flaky, text=True, env=None)
+        third = answered_once(["git", "rev-parse", "--flaky"], flaky, text=True, env=None)
+        kept = [answered_once(["git", "rev-parse", "--no"], refused, text=True, env=None) for _ in range(3)]
+    assert second.stdout == "ok\n" and third is second and len(calls) == 2, calls
+    assert len(refusals) == 1 and kept[0].returncode == 128 and kept[0] is kept[2], refusals
+
+
+def test_a_kept_failure_does_not_grow_its_traceback_per_asker():
+    """A failure kept for a pass is raised again for each asker. RED WHEN
+    each raise extends the stored exception's traceback, so the tenth asker
+    gets a longer one than the third. (The first failure to start git is not
+    kept: the second asker retries, and its failure is the kept one.)"""
+    import traceback
+
+    from shared.git_helpers import answered_once, git_results_pass
+
+    def run():
+        raise OSError("could not run")
+
+    lengths = []
+    with git_results_pass():
+        for _ in range(10):
+            try:
+                answered_once(["git", "rev-parse", "--x"], run, text=True, env=None)
+            except OSError as exc:
+                assert str(exc) == "could not run"
+                lengths.append(len(traceback.extract_tb(exc.__traceback__)))
+    assert len(lengths) == 10 and len(set(lengths[1:])) == 1, lengths
+
+
+def test_a_pass_keys_a_question_on_the_directory_its_run_sets(tmp_path, monkeypatch):
+    """A `run` that sets its own `cwd=` is keyed on that directory, given to
+    `answered_once` as `cwd`: in one pass the same argv run in two
+    repositories is two questions with two answers, the same argv run again
+    in one of them is answered from the pass, and `-C` pairs resolve against
+    the given directory as git resolves them against its own.
+
+    Real repositories with no remote, real git."""
+    import subprocess
+
+    from shared.git_helpers import answered_once, git_results_pass
+
+    a, b = (tmp_path / "a").resolve(), (tmp_path / "b").resolve()
+    for repo in (a, b):
+        subprocess.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+    (b / "sub").mkdir()
+    monkeypatch.chdir(a)
+    runs = []
+
+    def ask(argv, cwd=None):
+        def run():
+            runs.append((tuple(argv), cwd))
+            return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=5, check=True)
+        return answered_once(argv, run, text=True, env=None, cwd=cwd).stdout.strip()
+
+    toplevel = ["git", "rev-parse", "--show-toplevel"]
+    with git_results_pass():
+        answers = [
+            ask(toplevel, cwd=b),
+            ask(toplevel),
+            ask(toplevel, cwd=b),
+            ask(["git", "-C", "..", *toplevel[1:]], cwd=b / "sub"),
+        ]
+
+    assert answers == [str(b), str(a), str(b), str(b)], answers
+    assert runs == [(tuple(toplevel), b), (tuple(toplevel), None)], runs
+
+
+def test_a_timed_out_read_is_not_the_answer_for_a_longer_wait(tmp_path, monkeypatch):
+    """In one pass, a read that timed out is not kept: the same question asked
+    again with a longer timeout runs git and gets its answer, and that answer
+    is then kept. RED WHEN `answered_once` keeps a TimeoutExpired, which hands
+    the longer wait the first caller's None."""
+    from shared.git_helpers import git_results_pass, run_git
+
+    monkeypatch.chdir(tmp_path)
+    answer = subprocess.CompletedProcess(["git"], 0, stdout="true\n", stderr="")
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs["timeout"])
+        if kwargs["timeout"] == 1:
+            raise subprocess.TimeoutExpired(cmd=["git"], timeout=1)
+        return answer
+
+    question = ["rev-parse", "--is-inside-work-tree"]
+    with patch("shared.git_helpers.subprocess.run", side_effect=fake_run), git_results_pass():
+        short = run_git(question, timeout=1, once_per_pass=True)
+        longer = run_git(question, timeout=30, once_per_pass=True)
+        kept = run_git(question, timeout=1, once_per_pass=True)
+
+    assert (short, longer, kept, calls) == (None, answer, answer, [1, 30])

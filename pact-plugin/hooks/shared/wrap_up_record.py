@@ -303,12 +303,26 @@ def _read_branch_over_rest(cwd: str | None) -> dict:
             wanted = f"{head[0]}:{remote_branch}"
         cross = str(_obj(head_part.get("repo")).get("full_name", "")).lower() != base_repo
         label = head_part.get("label") if cross else head_part.get("ref")
-        if label != wanted:
+        if not _same_head(label, wanted):
             continue
         if pull.get("state") != "open" and _obj(base_part.get("repo")).get("default_branch") == wanted:
             continue
         return _map_rest(pull)
     return {"pr_state": "NONE"}
+
+
+def _same_head(label, wanted: str) -> bool:
+    """Whether a pull's head `label` (`owner:branch`, or the bare branch)
+    is `wanted`. The owner is compared case-insensitively, as GitHub resolves
+    logins, because `wanted` takes it from the remote's id, which holds it
+    lower-cased; the branch is compared exactly."""
+    if not isinstance(label, str):
+        return False
+    if ":" not in wanted:
+        return label == wanted
+    owner, _, branch = label.partition(":")
+    wanted_owner, _, wanted_branch = wanted.partition(":")
+    return owner.lower() == wanted_owner.lower() and branch == wanted_branch
 
 
 def _rest_retry(result) -> bool:

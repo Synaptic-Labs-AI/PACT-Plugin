@@ -2143,6 +2143,11 @@ class TestCIEnvironmentBinding:
         r"effective distributions=\d+ closure=\d+ ok=(True|False)$", re.M)
 
     def _stub(self, verdict_ok, verdict=None):
+        """A stand-in verify module. BUILD IT IN THE TEST BODY, before the
+        gate is set: `_verify_script` skips outside a source checkout, and the
+        binding only calls the loader when it finds a repository root. A stub
+        built lazily inside the patched loader is then never built, so the
+        skip never fires and the arm fails for the layout, not the binding."""
         verify = TestDependencyDriftIsDetectable._verify_script()
         if verdict is None:
             verdict = (verify.Verdict({}, (), (), {}, None) if verdict_ok
@@ -2158,9 +2163,9 @@ class TestCIEnvironmentBinding:
         return Stub
 
     def test_gate_on_and_passing_proceeds(self, binding, monkeypatch, capsys):
+        stub = self._stub(True)
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
-        monkeypatch.setattr(binding, "_load_verify_script",
-                            lambda script: self._stub(True))
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
         assert binding.CIEnvironmentBinding().pytest_sessionstart(None) is None
         # The status line carries the CLI's first-line fields (spec section 8).
         assert self._STATUS_FIELDS_RE.search(capsys.readouterr().out)
@@ -2182,9 +2187,9 @@ class TestCIEnvironmentBinding:
         assert "scripts/verify_ci_environment.py" in str(exc.value)
 
     def test_gate_on_and_failing_exits_3_with_the_heading(self, binding, monkeypatch):
+        stub = self._stub(False)
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
-        monkeypatch.setattr(binding, "_load_verify_script",
-                            lambda script: self._stub(False))
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
         with pytest.raises(pytest.exit.Exception) as exc:
             binding.CIEnvironmentBinding().pytest_sessionstart(None)
         assert exc.value.returncode == 3
@@ -2285,9 +2290,9 @@ class TestCIEnvironmentBinding:
         """N10-1: drift found at session END sets exit status 3 with the
         end heading and the full report, even over a run that already
         failed, and then says so, so test failures are not hidden."""
+        stub = self._stub(False)
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
-        monkeypatch.setattr(binding, "_load_verify_script",
-                            lambda script: self._stub(False))
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
         clean = self._Session(0)
         binding.CIEnvironmentBinding().pytest_sessionfinish(clean, 0)
         assert clean.exitstatus == 3
@@ -2304,10 +2309,12 @@ class TestCIEnvironmentBinding:
         """A census raised the session's status to 1 in its own sessionfinish,
         after pytest had passed every sessionfinish hook the status as it stood
         before any ran (0). With drift at session end the note names that 1,
-        read from session.exitstatus, not the 0 the hook was passed."""
+        read from session.exitstatus, not the 0 the hook was passed. The stub
+        is built before the gate is set, so outside a source checkout the arm
+        skips as its siblings do (`_stub`)."""
+        stub = self._stub(False)
         monkeypatch.setenv("GITHUB_ACTIONS", "true")
-        monkeypatch.setattr(binding, "_load_verify_script",
-                            lambda script: self._stub(False))
+        monkeypatch.setattr(binding, "_load_verify_script", lambda script: stub)
         raised = self._Session(1)
         binding.CIEnvironmentBinding().pytest_sessionfinish(raised, 0)
         assert raised.exitstatus == 3
@@ -2431,9 +2438,20 @@ class TestMaybeEmbedPending:
             mock_catchup = MagicMock()
             mock_catchup.embed_pending_memories = MagicMock(return_value={'processed': 0})
 
-            with patch.dict(sys.modules, {'.embedding_catchup': mock_catchup}):
+            # The key is the name `from .embedding_catchup import ...` resolves
+            # to inside the `scripts` package, so the stub is what the import
+            # returns. setitem, not patch.dict: patch.dict restores the WHOLE
+            # of sys.modules on exit and evicts every module first imported
+            # inside the window (numpy among them), so a later numpy import in
+            # this process fails. Only the one key is restored here.
+            with pytest.MonkeyPatch.context() as modules:
+                modules.setitem(sys.modules, 'scripts.embedding_catchup', mock_catchup)
                 # First call creates marker and attempts embedding
                 result1 = maybe_embed_pending()
+                assert mock_catchup.embed_pending_memories.called, (
+                    "the real catch-up ran instead of the stub: the binding "
+                    "does not name the module the import resolves"
+                )
 
                 # Marker should now exist
                 assert marker_path.exists()
@@ -3641,7 +3659,7 @@ class TestTheEmbeddingAttemptMarkerPathIsSanitised:
         )
         marker = memory_init._get_embedding_attempted_path()
 
-        assert marker.parent == Path("/tmp"), marker
+        assert marker.parent == memory_init._MARKER_DIR, marker
         assert "\x00" not in marker.name, marker.name
         assert "/" not in marker.name, marker.name
         assert ".." not in marker.name, marker.name
@@ -3656,9 +3674,29 @@ class TestTheEmbeddingAttemptMarkerPathIsSanitised:
         monkeypatch.setattr(
             memory_init, "get_session_id_from_context_file", lambda: "abc-123_XY"
         )
-        assert memory_init._get_embedding_attempted_path() == Path(
-            "/tmp/pact_embedding_attempted_abc-123_XY"
+        assert memory_init._get_embedding_attempted_path() == (
+            memory_init._MARKER_DIR / "pact_embedding_attempted_abc-123_XY"
         )
+
+
+def test_the_marker_directory_is_tmp_unless_the_test_variable_names_one(tmp_path):
+    """Production composes markers in /tmp; PACT_TEST_MARKER_DIR, read at
+    import, relocates them. RED WHEN the default moves or the variable is not
+    read."""
+    import os
+    import subprocess
+    import sys
+
+    scripts = Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "scripts"
+    probe = "import memory_init; print(memory_init._MARKER_DIR)"
+    base = {k: v for k, v in os.environ.items() if k != "PACT_TEST_MARKER_DIR"}
+    unset = subprocess.run([sys.executable, "-c", probe], cwd=scripts, env=base,
+                           capture_output=True, text=True, timeout=60)
+    named = subprocess.run([sys.executable, "-c", probe], cwd=scripts,
+                           env={**base, "PACT_TEST_MARKER_DIR": str(tmp_path)},
+                           capture_output=True, text=True, timeout=60)
+    assert unset.stdout.strip() == "/tmp", unset.stderr
+    assert named.stdout.strip() == str(tmp_path), named.stderr
 
 
 class TestTheEmbeddingAttemptMarkerPathIsLengthBounded:
@@ -3779,3 +3817,56 @@ class TestTheEmbeddingAttemptMarkerPathIsLengthBounded:
         assert result["message"] == "Could not create session marker", result
         assert result["status"] == "skipped", result
         marker.touch.assert_called_once_with()
+
+
+def test_a_session_less_read_process_leaves_no_marker_behind(tmp_path, monkeypatch):
+    """A read in a process with no session id writes its attempt marker
+    under the per-process token; the exit cleanup removes it with the
+    process's base marker, so nothing is left in the marker directory. RED
+    WHEN the cleanup removes only the base marker."""
+    from scripts import config, embedding_catchup, memory_init
+
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    monkeypatch.setattr(memory_init, "_MARKER_DIR", markers)
+    monkeypatch.setattr(memory_init, "get_session_id_from_context_file", lambda: None)
+    monkeypatch.setattr(
+        embedding_catchup, "embed_pending_memories",
+        lambda **kwargs: {"processed": 0, "failed": False, "skipped_ram": False},
+    )
+    with config.catchup_projects(("github.com/o/a",)):
+        memory_init.maybe_embed_pending()
+    read_markers = list(markers.glob("pact_embedding_attempted_process-*_read_*"))
+    assert len(read_markers) == 1, list(markers.iterdir())
+    memory_init.maybe_embed_pending()  # a write's sweep writes the base marker
+    assert len(list(markers.iterdir())) == 2, list(markers.iterdir())
+    memory_init._remove_process_marker()
+    assert list(markers.iterdir()) == [], list(markers.iterdir())
+
+
+def test_clearing_the_marker_lets_reads_try_again(tmp_path, monkeypatch):
+    """clear_embedding_marker removes the session marker and the session's
+    read-attempt markers (one per read scope), so a read's catch-up runs
+    again after it, as its docstring says. RED WHEN the read markers outlive
+    the clear and keep reads suppressed."""
+    from scripts import config, embedding_catchup, memory_init
+
+    markers = tmp_path / "markers"
+    markers.mkdir()
+    monkeypatch.setattr(memory_init, "_MARKER_DIR", markers)
+    monkeypatch.setattr(memory_init, "get_session_id_from_context_file", lambda: "sess-1")
+    ran = []
+    monkeypatch.setattr(
+        embedding_catchup, "embed_pending_memories",
+        lambda **kwargs: (ran.append(1), {"processed": 0, "failed": False, "skipped_ram": False})[1],
+    )
+    for scope in (("github.com/o/a",), ("github.com/o/b",)):
+        with config.catchup_projects(scope):
+            memory_init.maybe_embed_pending()
+    memory_init.maybe_embed_pending()
+    assert len(ran) == 3 and len(list(markers.iterdir())) == 3, list(markers.iterdir())
+    memory_init.clear_embedding_marker()
+    assert list(markers.iterdir()) == [], list(markers.iterdir())
+    with config.catchup_projects(("github.com/o/a",)):
+        memory_init.maybe_embed_pending()
+    assert len(ran) == 4, ran

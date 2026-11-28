@@ -151,6 +151,37 @@ class TestProjectionReplacesTheSection:
         assert result.reason == SyncResult.EMPTY
         assert target.read_bytes() == before
 
+    @pytest.mark.parametrize("body", ["# Probe\n", _SCAFFOLD], ids=["no-section", "no-entry"])
+    def test_an_empty_replacement_adds_or_rewrites_no_bare_section(self, tmp_path, body):
+        """`entries=[]` writes nothing when the file has no section or the
+        section has no entry, with or without `clear_if`. RED WHEN the guard
+        is removed and a bare section is added or rewritten."""
+        target = _seed(tmp_path, body)
+        before = target.read_bytes()
+        for clear_if in (None, lambda existing: True):
+            result = wm.sync_to_claude_md(None, target=target, entries=[], clear_if=clear_if)
+            assert result.reason == SyncResult.EMPTY
+            assert target.read_bytes() == before
+
+    def test_clear_if_decides_whether_entries_are_emptied(self, tmp_path):
+        """With entries in the section, `entries=[]` empties it only when
+        `clear_if` accepts them, and `clear_if` sees the entries."""
+        body = _SCAFFOLD.replace(
+            "## Pinned Context",
+            "### 2025-01-01 01:00\n**Context**: hand one\n**Memory ID**: abc\n\n## Pinned Context",
+        )
+        target = _seed(tmp_path, body)
+        seen = []
+        refused = wm.sync_to_claude_md(
+            None, target=target, entries=[],
+            clear_if=lambda existing: seen.extend(existing) or False,
+        )
+        assert refused.reason == SyncResult.EMPTY and target.read_text(encoding="utf-8") == body
+        assert [wm.entry_memory_id(e) for e in seen] == ["abc"]
+        cleared = wm.sync_to_claude_md(None, target=target, entries=[], clear_if=lambda existing: True)
+        assert cleared.reason == SyncResult.WROTE
+        assert "hand one" not in target.read_text(encoding="utf-8")
+
     def test_the_given_entries_replace_the_hand_written_ones(self, tmp_path):
         target = _seed(tmp_path, _SCAFFOLD.replace(
             "## Pinned Context",
@@ -401,7 +432,7 @@ class TestSyncVerbReachesTheGuards:
         assert expected_id, "status reported no project id; the pin below is vacuous"
         assert result == {
             "sync_status": "unresolved", "projected": 0, "memory_ids": [],
-            "project_id": expected_id,
+            "project_id": expected_id, "read_scope": [expected_id],
         }
         assert (project / "CLAUDE.md").read_bytes() == before
 

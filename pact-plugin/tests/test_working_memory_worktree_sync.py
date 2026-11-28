@@ -1037,11 +1037,32 @@ class TestProjectIdStability:
         .git, whose parent differs from the subdirectory, so the main basename
         is returned. Kept alongside the unmocked pin as a quick regression check.
         """
-        mock_result = MagicMock()
-        mock_result.returncode = 0
-        mock_result.stdout = "/home/user/mainproj/.git\n"
+        # A BLANKET mock cannot describe a repository: `main_repo_root` also asks
+        # for `--show-toplevel` and `--git-dir`, so each subcommand needs its
+        # own answer. `config --get` exits 1, which is "no origin set" — a
+        # repository that legitimately falls back to its basename.
+        answers = {
+            "--git-common-dir": "/home/user/mainproj/.git\n",
+            "--show-toplevel": "/home/user/mainproj\n",
+            "--git-dir": "/home/user/mainproj/.git\n",
+        }
+
+        def _git_run(command, **_kwargs):
+            result = MagicMock()
+            for option, stdout in answers.items():
+                # Only a `rev-parse` asks these; the origin read also passes
+                # `--git-dir`, as the directory it reads.
+                if "rev-parse" in command and option in command:
+                    result.returncode = 0
+                    # Bytes, as `text=False` returns them.
+                    result.stdout = stdout.encode()
+                    return result
+            result.returncode = 1
+            result.stdout = b""
+            return result
+
         monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/home/user/mainproj/src/module")
-        with patch("scripts.memory_api.subprocess.run", return_value=mock_result):
+        with patch("scripts.memory_api.subprocess.run", side_effect=_git_run):
             assert PACTMemory._detect_project_id() == "mainproj"
 
     def test_git_timeout_in_env_branch_falls_back_to_env_basename(

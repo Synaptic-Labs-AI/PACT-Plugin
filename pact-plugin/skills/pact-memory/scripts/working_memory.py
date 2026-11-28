@@ -26,7 +26,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # THE STORE ORIGIN IS ASKED FOR, NEVER RE-DERIVED. `_refuse_ambient_sync_from_a_
 # redirected_store` must know if the row it is about to project went to the
@@ -121,7 +121,7 @@ _WORKING_MEMORY_TERMINATOR = re.compile(r"#\s|##\s(?!Working Memory)|---")
 # one converts a consistent statement into a disagreement.
 # `hooks/shared/session_resume.py` IMPORTS the name and must not be given a
 # definition of its own; the mirror gate names it the importer for that reason.
-WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. Keyed by folder name, so another checkout with the same name shares this section. -->"
+WORKING_MEMORY_COMMENT = "<!-- Auto-managed by pact-memory skill. Full history searchable via pact-memory skill. The memory skill's `project-id show` reports this section's key. When the identity declines, nothing is written to this section. -->"
 MAX_WORKING_MEMORIES = 3
 
 # Constants for retrieved context section (searched/retrieved memories)
@@ -2173,6 +2173,7 @@ def sync_to_claude_md(
     claude_md_root: Optional[Path] = None,
     *,
     entries: Optional[List[str]] = None,
+    clear_if: Optional[Callable[[List[str]], bool]] = None,
 ) -> "SyncResult":
     """
     Sync a memory entry to the Working Memory section of CLAUDE.md.
@@ -2277,6 +2278,9 @@ def sync_to_claude_md(
             for today's behaviour, where the anchor comes from the resolution.
             Supplying it also exempts the ambient-sync refusal, because a
             checked boundary is a stronger warrant than the unchecked `target`.
+        clear_if: With `entries=[]`, called under the lock with the
+            section's existing entries; the section is emptied only when it
+            returns True.
 
     Returns:
         A `SyncResult`. It is TRUTHY exactly when the write happened, so a
@@ -2447,7 +2451,15 @@ def sync_to_claude_md(
                 new_entry = _format_memory_entry(memory, files, memory_id)
                 all_entries = [new_entry] + existing_entries
             else:
-                # REPLACE: the file's entries are not consulted
+                # REPLACE: the file's entries are not consulted, except that
+                # an empty replacement writes nothing for a section that holds
+                # no entry (it would only add or rewrite a bare section), or
+                # whose entries `clear_if` does not accept.
+                if not entries and (
+                    not existing_entries
+                    or (clear_if is not None and not clear_if(existing_entries))
+                ):
+                    return SyncResult(SyncResult.EMPTY)
                 all_entries = list(entries)
             trimmed_entries = all_entries[:MAX_WORKING_MEMORIES]
 
@@ -2630,6 +2642,14 @@ def _format_retrieved_entry(
             lines.append(f"{_MEMORY_ID_LABEL}: {cleaned_id}")
 
     return "\n".join(lines)
+
+
+def entry_memory_id(entry: str) -> Optional[str]:
+    """The id a Working Memory entry's `**Memory ID**` line names, or None."""
+    line = _memory_id_line(entry)
+    if line is None or not line.startswith(_MEMORY_ID_LABEL + ":"):
+        return None
+    return line[len(_MEMORY_ID_LABEL) + 1:].strip() or None
 
 
 def _memory_id_line(entry: str) -> Optional[str]:

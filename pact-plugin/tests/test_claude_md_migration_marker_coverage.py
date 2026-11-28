@@ -20,6 +20,7 @@ from shared.claude_md_manager import (
     _MIGRATION_CARRIED_MARKERS,
     _ROUTING_END_MARKER,
     _ROUTING_START_PREFIX,
+    _SECTION_COMMENT_PREFIX,
     MANAGED_END_MARKER,
     MANAGED_START_MARKER,
     MEMORY_END_MARKER,
@@ -47,6 +48,9 @@ EXCLUDED = {
     RETRIEVED_CONTEXT_COMMENT: _SECTION_COMMENT,
     WORKING_MEMORY_COMMENT: _SECTION_COMMENT,
     "<!-- Auto-managed by session_init hook. Overwritten each session. -->": _SECTION_COMMENT,
+    # The prefix every release's memory-section comment starts with: the
+    # migration drops each such row and the rebuild adds the current comment.
+    _SECTION_COMMENT_PREFIX: _SECTION_COMMENT,
 }
 
 

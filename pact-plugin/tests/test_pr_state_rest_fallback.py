@@ -464,6 +464,19 @@ def test_the_head_owner_follows_gh_push_target_order(tmp_path, fake_gh, config, 
     assert lines["pr_number"] == ("81" if owner == "forker" else "60")
 
 
+def test_a_fork_owner_with_capitals_still_matches_its_pr(tmp_path, fake_gh):
+    """The head owner comes from the remote's id, which holds it lower-cased,
+    while GitHub labels the PR with the login's own case. RED WHEN the label
+    is compared case-sensitively (the fork's PR then reads as none)."""
+    worktree = _checkout(tmp_path / "wt", "feat/x")
+    _git(worktree, "remote", "add", "origin", "https://github.com/own/repo-x.git")
+    _git(worktree, "remote", "add", "fork", "git@github.com:Forker/repo-x.git")
+    _git(worktree, "config", "branch.feat/x.remote", "fork")
+    fake_gh["set"](rest={_branch_path(head_owner="forker"): [
+        _pull(number=60), _pull(number=82, owner="Forker")]})
+    assert _record(tmp_path, worktree)["pr_number"] == "82"
+
+
 def test_push_default_upstream_takes_the_merge_refs_branch(tmp_path, fake_gh):
     worktree = _fork_checkout(tmp_path)
     _git(worktree, "config", "push.default", "upstream")

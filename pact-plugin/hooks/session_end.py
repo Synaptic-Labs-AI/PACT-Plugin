@@ -19,6 +19,8 @@ Output: None (SessionEnd hooks cannot inject context)
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -26,6 +28,7 @@ import shutil
 import stat
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 # Add hooks directory to path for shared package imports
@@ -37,11 +40,13 @@ from shared.error_output import hook_error_json
 from shared import check_pr_state
 import shared.pact_context as pact_context
 from shared.pact_context import (
+    PRUNE_LEDGER_NAME,
     _UNSAFE_SLUG_CHARS_RE,
     get_project_dir,
     get_session_id,
     get_team_name,
     project_slug,
+    read_session_record,
 )
 from shared.session_journal import (
     _parse_ts,
@@ -76,14 +81,25 @@ def _at_or_after(ts: object, ref_ts: object) -> bool:
         return False
 
 
+# A PR number is a positive C int on GitHub, so ten digits bound it.
+_PR_NUMBER_MAX_DIGITS = 10
+
+
 def _as_pr_int(pr_number: object) -> int | None:
-    """The PR number as an int: an int (not a bool) as is, a digit string
-    converted, anything else None, which matches no wrap-up record."""
+    """The PR number as an int: an int (not a bool) as is, a string of at most
+    ten ASCII digits converted, anything else None, which matches no wrap-up
+    record. Never raises: `str.isdigit` alone accepts `²`, which `int()`
+    refuses, and `int()` refuses a decimal string past 4300 digits."""
     if isinstance(pr_number, bool):
         return None
     if isinstance(pr_number, int):
         return pr_number
-    if isinstance(pr_number, str) and pr_number.isdigit():
+    if (
+        isinstance(pr_number, str)
+        and len(pr_number) <= _PR_NUMBER_MAX_DIGITS
+        and pr_number.isascii()
+        and pr_number.isdigit()
+    ):
         return int(pr_number)
     return None
 
@@ -161,7 +177,7 @@ def check_unpaused_pr(
             handoff = metadata.get("handoff") or {}
             for value in handoff.values():
                 if isinstance(value, str):
-                    match = re.search(r'github\.com/[^/]+/[^/]+/pull/(\d+)', value)
+                    match = re.search(r'github\.com/[^/]+/[^/]+/pull/([0-9]+)', value)
                     if match:
                         pr_number = match.group(1)
                         break
@@ -521,6 +537,7 @@ def _reap_slug_dir(
     if not slug_dir.exists():
         return
 
+    ledger_wait = True
     try:
         for entry in slug_dir.iterdir():
             # Skip symlinks (live or dangling) — is_symlink uses lstat
@@ -567,6 +584,16 @@ def _reap_slug_dir(
                     if _journal_carries_unharvested_handoffs(
                         str(entry)
                     ) is False:
+                        # The evidence line goes BEFORE the removal, and it
+                        # never raises, so it cannot keep a folder alive.
+                        # After one lock timeout the run tries each later
+                        # line once without waiting, so a held lock costs
+                        # ~1 s, not 1 s a folder, and a lock freed mid-sweep
+                        # still records the rest.
+                        if not _record_pruned_session(
+                            slug_dir, entry, wait=ledger_wait
+                        ):
+                            ledger_wait = False
                         shutil.rmtree(entry, ignore_errors=True)
             except Exception:
                 # Wider than OSError, and the width is load-bearing HERE
@@ -581,6 +608,264 @@ def _reap_slug_dir(
                 continue
     except OSError:
         pass
+
+
+def _aware_iso_timestamp(value: object) -> bool:
+    """Whether `value` is an ISO-8601 timestamp that carries its time zone.
+
+    The prune ledger's `started_at` is compared with a file's ctime, so a
+    naive timestamp (no zone) would have to be guessed at, and is refused.
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        return datetime.fromisoformat(value).tzinfo is not None
+    except ValueError:
+        return False
+
+
+def _pruned_session_line(entry: Path) -> str | None:
+    """The prune-ledger line for the session folder `entry`, or None.
+
+    `{session_id, project_dir, started_at}` copied from the folder's own
+    `pact-session-context.json`, with `started_at` the session's earliest
+    confirmed start (`read_session_record`: a bounded read of a regular
+    file). With no confirmed start (no readable first journal event, or a
+    start that is not a zone-aware ISO-8601 timestamp) the line has no
+    `started_at`: it still places the session's folder, and readers take it
+    as no evidence that a bucket is the repository's. None when the context
+    is absent, not a regular file, oversized or malformed, when its sanitized
+    session id is not the folder's name, or when `project_dir` no longer
+    exists. Reads only; never raises.
+    """
+    try:
+        context = read_session_record(entry)
+        if context is None:
+            return None
+        session_id = context.get("session_id")
+        project_dir = context.get("project_dir")
+        started_at = context.get("started_at")
+        if not isinstance(session_id, str) or not session_id:
+            return None
+        if not isinstance(project_dir, str) or not project_dir:
+            return None
+        if _UNSAFE_SLUG_CHARS_RE.sub("_", session_id) != entry.name:
+            return None
+        os.stat(project_dir)
+        line = {"session_id": session_id, "project_dir": project_dir}
+        if _aware_iso_timestamp(started_at):
+            line["started_at"] = started_at
+        return json.dumps(line) + "\n"
+    except Exception:
+        return None
+
+
+# The memory store's evidence reader reads only the last 1 MiB of the ledger
+# (`memory_api._PRUNE_LEDGER_TAIL_BYTES`), so lines older than that window are
+# never read. Past twice the window the writer keeps only the last window's
+# whole lines, which bounds the file without dropping a line the reader sees.
+_PRUNE_LEDGER_KEEP_BYTES = 1024 * 1024
+_PRUNE_LEDGER_COMPACT_BYTES = 2 * _PRUNE_LEDGER_KEEP_BYTES
+
+
+def _cut_back_file_pattern(ledger: Path) -> "re.Pattern[str]":
+    """The exact name of a cut-back's new file: '.' + the ledger's name + '.'
+    + 8 lowercase hex digits, as `_create_cut_back_file` makes it."""
+    return re.compile(rf"\.{re.escape(ledger.name)}\.[0-9a-f]{{8}}")
+
+
+def _create_cut_back_file(ledger: Path) -> tuple[int, Path]:
+    """Create the cut-back's new file next to the ledger, mode 0600, and
+    return its fd and path. O_EXCL never reuses a name; a collision retries."""
+    for _ in range(16):
+        path = ledger.parent / f".{ledger.name}.{os.urandom(4).hex()}"
+        try:
+            # O_EXCL refuses any existing name, a symlink included.
+            return os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), path
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"no free cut-back name next to {ledger}")
+
+
+def _remove_cut_back_leftovers(ledger: Path) -> None:
+    """Remove the new files of earlier cut-backs that stopped before their
+    rename. The caller holds the ledger's lock, and a cut-back's file exists
+    only while its cut-back holds that lock, so none of these is in use. Only
+    regular files with the exact cut-back name go; never raises."""
+    pattern = _cut_back_file_pattern(ledger)
+    try:
+        names = os.listdir(ledger.parent)
+    except OSError:
+        return
+    for name in names:
+        if not pattern.fullmatch(name):
+            continue
+        path = ledger.parent / name
+        with contextlib.suppress(OSError):
+            if stat.S_ISREG(os.lstat(path).st_mode):
+                os.unlink(path)
+
+
+def _compact_ledger(ledger: Path, fd: int, size: int) -> None:
+    """Replace the ledger open on `fd` with its last whole lines within the
+    reader's window. The caller holds the lock. The kept lines go to a new
+    file in the same folder, which is then renamed over the ledger, so the
+    unlocked reader sees the whole old file or the whole new one, never an
+    empty or half-written one. A writer waiting on the old file's lock finds
+    the inode changed and reopens (`_open_locked_ledger`)."""
+    # Read from ONE BYTE BEFORE the window, so dropping everything through the
+    # first newline drops only a partial line: when the window starts exactly
+    # on a line boundary, that byte is the newline and the first line is kept.
+    want = _PRUNE_LEDGER_KEEP_BYTES + 1
+    os.lseek(fd, size - want, os.SEEK_SET)
+    tail = b""
+    while len(tail) < want:
+        chunk = os.read(fd, want - len(tail))
+        if not chunk:
+            break
+        tail += chunk
+    # No newline in the window: it holds one partial line only, so keep none.
+    newline = tail.find(b"\n")
+    tail = tail[newline + 1:] if newline >= 0 else b""
+    _remove_cut_back_leftovers(ledger)
+    new_fd, new_path = _create_cut_back_file(ledger)
+    try:
+        try:
+            _write_all(new_fd, tail)
+            os.fsync(new_fd)
+        finally:
+            os.close(new_fd)
+        os.replace(new_path, ledger)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(new_path)
+        raise
+
+
+# The ledger lock is taken non-blocking and retried for at most about one
+# second; a holder past that costs one evidence line, never a hung SessionEnd.
+_LEDGER_LOCK_ATTEMPTS = 20
+_LEDGER_LOCK_PAUSE_SECONDS = 0.05
+
+
+def _lock_ledger_bounded(fd: int, wait: bool = True) -> bool:
+    """Take the exclusive lock on `fd` within the bounded retry, or in one
+    attempt when `wait` is False; False when another holder kept it."""
+    attempts = _LEDGER_LOCK_ATTEMPTS if wait else 1
+    for attempt in range(attempts):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if attempt + 1 < attempts:
+                time.sleep(_LEDGER_LOCK_PAUSE_SECONDS)
+    return False
+
+
+def _open_locked_ledger(ledger: Path, wait: bool = True) -> int | None:
+    """Open the ledger for append and take its exclusive lock; return the fd,
+    or None when the path is not a regular file or the lock stayed held past
+    the bounded retry (`_lock_ledger_bounded`).
+
+    A compaction renames a new file over the ledger, so a writer that opened
+    the old file and then waited for the lock would append to a file no one
+    reads. After the lock, the open file must still be the one at the path;
+    if it is not, reopen and lock again.
+    """
+    for _ in range(8):
+        fd = os.open(
+            ledger,
+            os.O_RDWR | os.O_APPEND | os.O_CREAT
+            | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0),
+            0o600,
+        )
+        try:
+            held = os.fstat(fd)
+            if not stat.S_ISREG(held.st_mode):
+                os.close(fd)
+                return None
+            if not _lock_ledger_bounded(fd, wait):
+                # Another session end holds the lock too long: skip this
+                # evidence line rather than hang the hook.
+                os.close(fd)
+                return None
+            current = os.lstat(ledger)
+        except FileNotFoundError:
+            os.close(fd)
+            continue
+        except BaseException:
+            os.close(fd)
+            raise
+        if (current.st_dev, current.st_ino) == (held.st_dev, held.st_ino):
+            return fd
+        os.close(fd)
+    return None
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    """Write every byte of `data` to `fd`; `os.write` may write fewer."""
+    while data:
+        data = data[os.write(fd, data):]
+
+
+def _append_ledger_line(slug_dir: Path, line: str, wait: bool = True) -> bool:
+    """Append `line` to the slug's prune ledger. Never raises. False when the
+    ledger could not be opened and locked (another holder kept the lock past
+    the bounded wait, or the ledger is not a regular file), so a caller can
+    try its remaining appends with `wait=False` (one lock attempt, no wait)
+    rather than wait again for each.
+
+    Refuses a ledger that is a symlink or not a regular file. O_NOFOLLOW
+    refuses a symlink planted after the lstat, and O_NONBLOCK keeps a planted
+    FIFO from hanging the hook on open. The append and any compaction run
+    under an exclusive lock, so concurrent session ends do not interleave.
+    A write that fails partway is cut back, so no partial line remains.
+    """
+    try:
+        ledger = slug_dir / PRUNE_LEDGER_NAME
+        try:
+            if not stat.S_ISREG(os.lstat(ledger).st_mode):
+                return False
+        except FileNotFoundError:
+            pass
+        try:
+            fd = _open_locked_ledger(ledger, wait)
+        except OSError:
+            # A symlink planted after the lstat (O_NOFOLLOW refuses it), or
+            # any other failed open: the ledger was not opened.
+            return False
+        if fd is None:
+            return False
+        try:
+            before = os.fstat(fd).st_size
+            try:
+                _write_all(fd, line.encode("utf-8"))
+            except BaseException:
+                # A short write (ENOSPC) would leave a partial line the next
+                # append joins onto; cut back to the last whole line.
+                os.ftruncate(fd, before)
+                raise
+            size = os.fstat(fd).st_size
+            if size > _PRUNE_LEDGER_COMPACT_BYTES:
+                _compact_ledger(ledger, fd, size)
+        finally:
+            os.close(fd)
+    except Exception:
+        return True
+    return True
+
+
+def _record_pruned_session(slug_dir: Path, entry: Path, wait: bool = True) -> bool:
+    """Record `entry`'s evidence in the slug's prune ledger before it is reaped.
+
+    A failure here must never keep a folder alive or raise out of the hook;
+    both halves are silent on every error. Returns `_append_ledger_line`'s
+    answer: False when the ledger could not be opened and locked.
+    """
+    line = _pruned_session_line(entry)
+    if line is None:
+        return True
+    return _append_ledger_line(slug_dir, line, wait)
 
 
 def _dir_max_child_mtime(entry: Path, glob: str = "*.json") -> float | None:
@@ -1178,7 +1463,7 @@ def _prune_registry_dead_teams(
         try:
             os.fchmod(fd, 0o600)
             payload = ("\n".join(kept_lines) + "\n") if kept_lines else ""
-            os.write(fd, payload.encode("utf-8"))
+            _write_all(fd, payload.encode("utf-8"))
         finally:
             os.close(fd)
         os.replace(tmp_path, registry_path)

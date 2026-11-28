@@ -34,6 +34,7 @@ def _make_mock_database():
     mod.db_connection = MagicMock()
     mod.ensure_initialized = MagicMock()
     mod.get_memory = MagicMock()
+    mod.load_sqlite_vec = MagicMock()
     mod.SQLITE_EXTENSIONS_ENABLED = True
     return mod
 
@@ -85,6 +86,9 @@ def _load_embedding_catchup():
     mod = importlib.util.module_from_spec(spec)
     sys.modules[f"{pkg_name}.embedding_catchup"] = mod
     spec.loader.exec_module(mod)
+    # The store integrity check is a database dependency like the ones
+    # mocked above: these tests exercise the catch-up loop, not a store.
+    mod._store_integrity_fault = lambda: None
 
     # Cleanup fake package from sys.modules
     for key in [pkg_name, f"{pkg_name}.database",
@@ -413,7 +417,8 @@ class TestGetUnembeddedMemories:
         mock_cursor_master.fetchone.return_value = ("vec_memories",)
         mock_cursor_query = MagicMock()
         mock_cursor_query.fetchall.return_value = [("mem-1",), ("mem-2",), ("mem-3",)]
-        mock_conn.execute.side_effect = [mock_cursor_master, mock_cursor_query]
+        # The `memories` schema check, the vector-table check, then the query.
+        mock_conn.execute.side_effect = [mock_cursor_master, mock_cursor_master, mock_cursor_query]
 
         ec_module.db_connection = MagicMock()
         ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -447,7 +452,8 @@ class TestGetUnembeddedMemories:
         mock_cursor_master.fetchone.return_value = ("vec_memories",)
         mock_cursor_query = MagicMock()
         mock_cursor_query.fetchall.return_value = [("mem-1",)]
-        mock_conn.execute.side_effect = [mock_cursor_master, mock_cursor_query]
+        # The `memories` schema check, the vector-table check, then the query.
+        mock_conn.execute.side_effect = [mock_cursor_master, mock_cursor_master, mock_cursor_query]
 
         ec_module.db_connection = MagicMock()
         ec_module.db_connection.return_value.__enter__ = MagicMock(return_value=mock_conn)
@@ -456,7 +462,7 @@ class TestGetUnembeddedMemories:
         result = ec_module.get_unembedded_memories(project_id="my-proj", limit=5)
         assert result == ["mem-1"]
         # Verify the query params include project_id and limit
-        call_args = mock_conn.execute.call_args_list[1]
+        call_args = mock_conn.execute.call_args_list[2]
         params = call_args[0][1]
         assert "my-proj" in params
         assert 5 in params

@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import sys
 import tempfile
 import time
@@ -1572,6 +1573,120 @@ def get_session_dir() -> str:
     return str(_build_session_path(slug, session_id))
 
 
+# The prune ledger: one file per project slug, beside its session folders
+# (`<config root>/pact-sessions/<slug>/PRUNE_LEDGER_NAME`). The session reaper
+# appends one JSON line per session folder it deletes, so the legacy-bucket
+# evidence a session folder carried outlives the folder. The reaper iterates
+# directories only, so it never reaps this file. The writer
+# (`session_end._record_pruned_session`) and the memory store's evidence reader
+# both name the file through this constant.
+PRUNE_LEDGER_NAME = "pruned-sessions.jsonl"
+
+# A session context file is a few hundred bytes; anything larger is not one.
+SESSION_CONTEXT_MAX_BYTES = 64 * 1024
+
+# A journal's first event is a small JSON line; a longer one reads as no date.
+_JOURNAL_FIRST_LINE_MAX_BYTES = 64 * 1024
+
+
+def _journal_first_start(folder) -> str | None:
+    """The `ts` of the first event in `<folder>/session-journal.jsonl`, when
+    it is a zone-aware ISO-8601 time, else None. Never raises.
+
+    A resume or a heal rewrites the context file's `started_at` but keeps
+    the session folder and appends to its journal, so the journal's first
+    event dates the session's first start. Reads at most
+    `_JOURNAL_FIRST_LINE_MAX_BYTES` of a regular file (a symlink or FIFO is
+    refused, as for the context file).
+    """
+    path = os.path.join(folder, "session-journal.jsonl")
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except Exception:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        head = os.read(fd, _JOURNAL_FIRST_LINE_MAX_BYTES)
+        first = json.loads(head.split(b"\n", 1)[0].decode("utf-8"))
+        ts = first.get("ts") if isinstance(first, dict) else None
+        if isinstance(ts, str) and datetime.fromisoformat(ts).tzinfo is not None:
+            return ts
+        return None
+    except Exception:
+        return None
+    finally:
+        os.close(fd)
+
+
+def read_session_record(folder) -> dict | None:
+    """`<folder>/pact-session-context.json` as a dict, or None. Never raises.
+
+    Its `started_at` is the EARLIER of the recorded value and the first
+    journal event's time (`_journal_first_start`), because a resume or a
+    heal records its own time there. A recorded value earlier than the
+    journal's first event is kept although the journal does not confirm it:
+    the earlier date is the safe one to compare with a repository's
+    creation. With no readable first journal event the start cannot be
+    checked, and `started_at` is removed: the record then names its
+    folder but dates nothing, so it never counts as evidence that a bucket
+    is this repository's (it can still place the session elsewhere). Both
+    readers compare it with a repository's `description` ctime.
+
+    The two readers that take a session folder's record as evidence (the
+    reaper's prune-ledger line and the memory store's session census) read it
+    here. Only a REGULAR file is read: a symlink is refused by lstat and by
+    O_NOFOLLOW, O_NONBLOCK keeps a FIFO from blocking the open, and a file
+    larger than `SESSION_CONTEXT_MAX_BYTES` is refused rather than read.
+    """
+    path = os.path.join(folder, "pact-session-context.json")
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return None
+        fd = os.open(
+            path,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except Exception:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        data = b""
+        while len(data) <= SESSION_CONTEXT_MAX_BYTES:
+            chunk = os.read(fd, SESSION_CONTEXT_MAX_BYTES + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > SESSION_CONTEXT_MAX_BYTES:
+            return None
+        record = json.loads(data.decode("utf-8"))
+        if not isinstance(record, dict):
+            return None
+    except Exception:
+        return None
+    finally:
+        os.close(fd)
+    first = _journal_first_start(folder)
+    if first is None:
+        record.pop("started_at", None)
+        return record
+    try:
+        if datetime.fromisoformat(record["started_at"]) < datetime.fromisoformat(first):
+            return record
+    except Exception:
+        pass
+    record["started_at"] = first
+    return record
+
+
 def reconstruct_session_dir(project_dir: str, session_id: str) -> str:
     """Reconstruct the absolute session directory from explicit context-file
     fields — the off-lead, frame-independent counterpart to get_session_dir().
@@ -2727,8 +2842,11 @@ def heal_context_if_missing(input_data: dict) -> bool:
     Content parity with session_init: session_id is persisted as
     str(raw_id) — RAW, exactly as session_init's main() persists it
     (init() sanitizes only the PATH segment, not the stored value).
-    started_at is heal time, not session start — its consumers are
-    journal-naming/display only (cosmetic), documented trade-off.
+    started_at is heal time, not session start. The legacy-bucket evidence
+    readers (read_session_record) date the session by the earlier of it and
+    the journal's first event, and give no evidence at all when the journal
+    has no readable first event, so the heal time cannot make an old
+    session count as evidence.
 
     Two-healer race (bootstrap_marker_writer + bootstrap_prompt_gate fire
     on the same prompt; the platform runs same-event hooks in parallel):

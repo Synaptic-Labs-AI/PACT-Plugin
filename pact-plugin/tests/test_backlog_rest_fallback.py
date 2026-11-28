@@ -108,6 +108,7 @@ import concurrent.futures
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -235,7 +236,6 @@ def test_slug_from_remote_url_accepts_github_forms_and_refuses_the_rest():
         "ssh://git@github.com:22/o/r",
         "git@github.com:o/r.git",
         "git://github.com/o/r",
-        "  https://github.com/o/r\n",
         "me@github.com:o/r",  # B-F14: any non-empty scp user
     ]
     for url in accepted:
@@ -248,6 +248,11 @@ def test_slug_from_remote_url_accepts_github_forms_and_refuses_the_rest():
         "https://github.com/o", "https://github.com/o/r/extra",
         "https://github.com/o/..", "https://github.com/./r",
         'https://github.com/o/r"x', "https://github.com/o/r x",
+        # The id declines leading whitespace, and the slug comes from the id.
+        "  https://github.com/o/r\n",
+        # A trailing newline is part of the stored value; git keeps it and
+        # reaches no repository (measured, git 2.43), so it gives no slug.
+        "https://github.com/o/r\n",
     ]
     for url in refused:
         assert backlog._slug_from_remote_url(url) is None, url
@@ -305,13 +310,13 @@ def test_local_repo_slug_reads_origin_of_project_path_with_real_git(
     repo = _init_repo_with_origin(
         tmp_path / "proj", "https://user:secret-token@github.com/Real-Owner/real-repo.git")
 
-    assert backlog._local_repo_slug(str(repo)) == ("Real-Owner", "real-repo")
+    assert backlog._local_repo_slug(str(repo)) == ("real-owner", "real-repo")
     monkeypatch.chdir(tmp_path)
     assert (tmp_path / "proj").resolve() == repo.resolve()  # 'proj' resolves here
     assert backlog._local_repo_slug("proj") is None, "a relative project_path reached git"
     # No project_path: git runs in the process CWD, as `gh repo view` did.
     monkeypatch.chdir(repo)
-    assert backlog._local_repo_slug(None) == ("Real-Owner", "real-repo")
+    assert backlog._local_repo_slug(None) == ("real-owner", "real-repo")
 
 
 def test_r1_origin_is_read_raw_not_through_insteadof(tmp_path, hermetic_git):
@@ -330,6 +335,64 @@ def test_r1_origin_is_read_raw_not_through_insteadof(tmp_path, hermetic_git):
                                capture_output=True, text=True).stdout
     assert "attacker" in rewritten, "control: the rewrite rule is live"
     assert backlog._origin_repo_slug(str(repo)) == ("real", "repo")
+
+
+def test_the_origin_slug_reads_the_first_url_as_the_id_does(tmp_path, hermetic_git):
+    """Two `remote.origin.url` values: git's `config --get` answers the LAST,
+    while the memory id reads the FIRST of the repository's own config
+    (`project_identity.read_origin`). The slug reads the id's url, from the
+    repository root and from a subfolder alike.
+
+    RED WHEN the slug goes back to `git config --get` (the last url).
+    """
+    repo = _init_repo_with_origin(tmp_path / "proj", "https://github.com/o/first.git")
+    subprocess.run(["git", "-C", str(repo), "config", "--add", "remote.origin.url",
+                    "https://github.com/o/second.git"], check=True)
+    last = subprocess.run(["git", "-C", str(repo), "config", "--get", "remote.origin.url"],
+                          capture_output=True, text=True).stdout.strip()
+    assert last == "https://github.com/o/second.git", "control: git's answer is the last url"
+    (repo / "sub").mkdir()
+    assert backlog._origin_repo_slug(str(repo)) == ("o", "first")
+    assert backlog._origin_repo_slug(str(repo / "sub")) == ("o", "first")
+
+
+def test_the_origin_slug_works_on_a_git_without_path_format(tmp_path, monkeypatch, hermetic_git):
+    """A git before 2.31 does not know `rev-parse --path-format` and echoes it
+    before a relative common dir. A fake `git` first on PATH does exactly
+    that, so the slug must come from a read that never passes the flag, as
+    the memory id's does. RED WHEN the origin read uses `--path-format`."""
+    repo = _init_repo_with_origin(tmp_path / "proj", "https://github.com/o/r.git")
+    real = shutil.which("git")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    fake = bindir / "git"
+    fake.write_text(
+        f"#!{sys.executable}\n"
+        "import os, sys\n"
+        "args = sys.argv[1:]\n"
+        "for arg in args:\n"
+        "    if arg.startswith('--path-format'):\n"
+        "        print(arg, flush=True)\n"
+        f"os.execv({real!r}, [{real!r}] + [a for a in args if not a.startswith('--path-format')])\n"
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ['PATH']}")
+    echoed = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        capture_output=True, text=True,
+    ).stdout
+    assert echoed == "--path-format=absolute\n.git\n", f"control: the old-git shape is live: {echoed!r}"
+    assert backlog._origin_repo_slug(str(repo)) == ("o", "r")
+
+
+def test_the_origin_slug_reads_a_repository_whose_path_is_not_utf8(tmp_path, hermetic_git):
+    """A Linux path can hold bytes that are not UTF-8. The common dir is
+    decoded as the memory id decodes it (`os.fsdecode`), not with
+    replacement characters, so the origin is still read. RED WHEN the
+    common dir is decoded with errors='replace'."""
+    repo = _init_repo_with_origin(tmp_path / os.fsdecode(b"proj\xff"), "https://github.com/o/r.git")
+    assert os.fsencode(str(repo)).endswith(b"proj\xff"), "control: the path holds a non-UTF-8 byte"
+    assert backlog._origin_repo_slug(str(repo)) == ("o", "r")
 
 
 def test_a_non_utf8_origin_url_yields_no_slug_and_no_crash(tmp_path, hermetic_git):
@@ -579,8 +642,7 @@ def test_hostile_foreign_slugs_never_reach_a_rest_argv(monkeypatch):
     must pass `_valid_slug` before it is used. Traversal (`..`, `%2e%2e`,
     `b%2F..%2F..`), a template placeholder (`{owner}`) and a query tail
     carrying a gh flag (`--method=DELETE`) must never appear in any argv; an
-    owner with a leading `-` is a valid GitHub login character but must stay
-    INSIDE the path element, never become an argv element of its own.
+    owner with a leading `-` is no GitHub owner name and is refused too.
 
     Reproduces the security verify's probe (task #42) as an arm.
 
@@ -594,9 +656,8 @@ def test_hostile_foreign_slugs_never_reach_a_rest_argv(monkeypatch):
     refused = ["https://github.com/../x/issues/1", "https://github.com/%2e%2e/x/issues/2",
                "https://github.com/{owner}/x/issues/3", "https://github.com/a/../issues/5",
                "https://github.com/a/b%2F..%2F..%2Fuser/issues/6",
-               "https://github.com/.../x/issues/8"]
-    looked_up = {"https://github.com/-X/y/issues/4": "repos/-X/y/issues/4",
-                 "https://github.com/a/b/issues/12?per_page=100&x=--method=DELETE":
+               "https://github.com/.../x/issues/8", "https://github.com/-X/y/issues/4"]
+    looked_up = {"https://github.com/a/b/issues/12?per_page=100&x=--method=DELETE":
                      "repos/a/b/issues/12"}
     outcome = backlog.resolve_refs(refused + list(looked_up))
 

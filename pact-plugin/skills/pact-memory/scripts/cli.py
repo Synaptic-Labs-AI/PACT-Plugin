@@ -28,6 +28,9 @@ Commands:
     setup                Initialize/verify memory system
     project-file         Print this session's project memory file path, or
                          `unavailable: <reason>` (exit 3). Writes nothing.
+    project-id show      Report the detected project id, how it was decided,
+                         and every populated bucket; this checkout's own
+                         bucket carries its rekey command.
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import sys
 import tempfile
 from contextlib import contextmanager
@@ -47,21 +51,47 @@ _SKILL_ROOT = str(Path(__file__).resolve().parent.parent)
 if _SKILL_ROOT not in sys.path:
     sys.path.insert(0, _SKILL_ROOT)
 
-from scripts.config import store_scope
+from scripts.config import resolve_db_path, store_scope
 from scripts.database import (
     CALLER_FACING_CREATE_FIELDS,
     CALLER_FACING_UPDATE_FIELDS,
     AmbiguousPrefixError,
     PrefixTooShortError,
     escape_for_envelope,
+    folded_github_id,
+    origin_url_in_config,
 )
 from scripts.memory_api import (
+    GitHubPayloadIdRefusedError,
+    LegacyBucketWriteRefusedError,
     PACTMemory,
     ProjectIdentityUnresolvedError,
     ProjectScopeDisagreementError,
+    SHARED_BUCKET_REASONS,
+    _UNPROVEN_WARNED,
+    _invalidate_legacy_scope_cache,
+    _read_only_connection,
+    _stable_read_only,
+    _store_stamp,
+    _LOCKED_READS_ONLY,
+    _unproven_cause,
+    detection_pass,
+    hidden_legacy_buckets,
+    legacy_notices_quiet,
+    rekey_preview,
+    main_repo_root,
+    present_store_fault,
+    project_candidate_rows,
+    read_project_bucket_census,
+    render_rekey_command,
+)
+from scripts.project_identity import (
+    REMOTE_HELPER_DETAIL,
+    UNUSABLE_ORIGIN_DETAIL,
+    is_canonical,
+    ssh_alias_detail,
 )
 from scripts.setup_memory import ensure_initialized, get_setup_status
-
 
 # The stream the ERROR ENVELOPE is written to. None means "use sys.stderr",
 # which is the state outside a guarded window.
@@ -205,7 +235,8 @@ def _own_stderr_for_envelope():
     no thread today. Add a worker thread that logs, and its output joins the
     capture. Do not read this guard as a per-caller channel.
 
-    FAILS OPEN. If the descriptor cannot be duplicated, this yields without
+    FAILS OPEN. If the descriptor cannot be duplicated, or the capture file
+    cannot be created (an unusable temporary folder), this yields without
     guarding, so the command behaves as it did before rather than failing for
     a reason the caller cannot act on.
 
@@ -231,7 +262,12 @@ def _own_stderr_for_envelope():
         yield None
         return
 
-    capture = tempfile.TemporaryFile()
+    try:
+        capture = tempfile.TemporaryFile()
+    except OSError:
+        os.close(saved_fd)
+        yield None
+        return
     previous_envelope = _ENVELOPE_STREAM
     envelope_stream = os.fdopen(saved_fd, "w", buffering=1, closefd=False)
     replay = False
@@ -304,7 +340,7 @@ def _own_stderr_for_envelope():
         capture.close()
 
 
-def _success(result):
+def _success(result, **extra) -> NoReturn:
     """Print a success JSON envelope to stdout and exit 0.
 
     PAYLOADS ARE DATA, MESSAGES ARE DISPLAY. A success payload is a machine
@@ -330,9 +366,11 @@ def _success(result):
     `_neutralise_unwritable_std_streams`, called from the `__main__` block, is
     what closes the second case. Read the two together: this wrap keeps the
     exception out of the handler, and that step keeps the exit status intact.
+
+    `extra` adds top-level keys beside `result` (`_hidden_bucket_scope`).
     """
     _best_effort_report(
-        print, json.dumps({"ok": True, "result": result}, indent=2, default=str)
+        print, json.dumps({"ok": True, "result": result, **extra}, indent=2, default=str)
     )
     sys.exit(0)
 
@@ -556,11 +594,12 @@ def cmd_save(args, db_path=None):
                 "MISSING_INPUT",
                 f"{channel} received empty input; provide JSON via "
                 "--stdin or as an argument",
+                exit_code=2,
             )
     elif args.json_data:
         raw = args.json_data
     else:
-        _error("MISSING_INPUT", "Provide JSON as argument or use --stdin")
+        _error("MISSING_INPUT", "Provide JSON as argument or use --stdin", exit_code=2)
 
     try:
         memory_dict = json.loads(raw)
@@ -568,7 +607,11 @@ def cmd_save(args, db_path=None):
         _error("INVALID_JSON", f"Failed to parse JSON: {exc}")
 
     if not isinstance(memory_dict, dict):
-        _error("INVALID_INPUT", "JSON input must be an object, not a list or scalar")
+        _error(
+            "INVALID_INPUT",
+            "JSON input must be an object, not a list or scalar",
+            exit_code=2,
+        )
 
     memory = PACTMemory(db_path=db_path)
     try:
@@ -592,17 +635,28 @@ def cmd_save(args, db_path=None):
         # THE SAME RENDERER as the disagreement arm below: one escaping
         # discipline for every rendered refusal message.
         _error("PROJECT_IDENTITY_UNRESOLVED", _scope_disagreement_message(exc))
+    except LegacyBucketWriteRefusedError as exc:
+        # The payload names a folder-name bucket this session may not write:
+        # caller input, exit 2, but no field list and no field-validation note.
+        _error(
+            "LEGACY_BUCKET_WRITE_REFUSED", _scope_disagreement_message(exc), exit_code=2
+        )
     except ProjectScopeDisagreementError as exc:
         # An env/session-record disagreement remains distinct from an
         # unresolved identity, whose subclass is caught above.
         _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
+    except GitHubPayloadIdRefusedError as exc:
+        # Before the field-validation arm: no field list and no field note.
+        _error("INVALID_INPUT", escape_for_envelope(_scrub(str(exc))), exit_code=2)
     except ValueError as exc:
         _error(
             "ValueError",
             # Rendered inert: a ValueError on this path can embed a
             # caller-supplied identifier or field name.
-            f"{escape_for_envelope(_scrub(str(exc)))} (Note: 'id' and "
-            f"'created_at' are accepted on save and stripped before validation.)",
+            escape_for_envelope(_scrub(str(exc)))
+            # The id/created_at note explains a field-list refusal only.
+            + (" (Note: 'id' and 'created_at' are accepted on save and stripped "
+               "before validation.)" if hasattr(exc, "allowed_fields") else ""),
             exit_code=2,
             # Prefer the list the error itself carries, so this array and
             # the message's sentence are one computation. The constant is a
@@ -712,14 +766,32 @@ def cmd_search(args, db_path=None):
         args.query, current_file=current_file, limit=args.limit,
         sync_to_claude=False, **search_kwargs
     )
-    _success([r.to_dict() for r in results])
+    _success([r.to_dict() for r in results], **_hidden_bucket_scope(memory))
+
+
+def _hidden_bucket_scope(memory) -> dict:
+    """`{"legacy_scope": <record>}` when this read left an old folder-name
+    bucket out (`hidden_legacy_buckets`, the rule the stale Working Memory
+    section uses), and `{"earlier_ids": [{id, rekey}]}` when it left out a
+    bucket of this repository under an earlier canonical id; else {}. The stderr notice says the same; this puts it on stdout too, beside
+    `result`, so a caller reading only stdout sees why rows are missing."""
+    state = memory._legacy_scope_state
+    extra = {"legacy_scope": state} if hidden_legacy_buckets(state) else {}
+    # A CANONICAL BUCKET UNDER AN EARLIER ID of this repository is not read
+    # either; the stderr notice names it with its rekey command.
+    earlier = getattr(memory, "_earlier_canonical", None) or {}
+    if earlier:
+        extra["earlier_ids"] = [
+            {"id": bucket, "rekey": command} for bucket, command in sorted(earlier.items())
+        ]
+    return extra
 
 
 def cmd_list(args, db_path=None):
     """Handle the 'list' subcommand."""
     memory = PACTMemory(db_path=db_path)
     results = memory.list(limit=args.limit)
-    _success([r.to_dict() for r in results])
+    _success([r.to_dict() for r in results], **_hidden_bucket_scope(memory))
 
 
 def cmd_get(args, db_path=None):
@@ -738,7 +810,7 @@ def cmd_get(args, db_path=None):
         # still resolves), and `ProjectIdentityUnresolvedError` is this
         # class's subclass. The envelope and exit code match update/delete;
         # without this clause it would reach main()'s generic handler as
-        # SYSTEM_ERROR exit 2, which sends a caller looking for a bug in the
+        # SYSTEM_ERROR exit 3, which sends a caller looking for a bug in the
         # store instead of at its own project declaration.
         _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
     except PrefixTooShortError as exc:
@@ -799,7 +871,7 @@ def cmd_setup(args, db_path=None):
             "details": status,
         })
     else:
-        _error("SETUP_FAILED", "Memory system initialization failed", exit_code=2)
+        _error("SETUP_FAILED", "Memory system initialization failed", exit_code=3)
 
 
 def cmd_update(args, db_path=None):
@@ -818,11 +890,12 @@ def cmd_update(args, db_path=None):
                 "MISSING_INPUT",
                 f"{channel} received empty input; provide JSON via "
                 "--stdin or as an argument",
+                exit_code=2,
             )
     elif args.json_data:
         raw = args.json_data
     else:
-        _error("MISSING_INPUT", "Provide JSON as argument or use --stdin")
+        _error("MISSING_INPUT", "Provide JSON as argument or use --stdin", exit_code=2)
 
     try:
         updates = json.loads(raw)
@@ -830,7 +903,11 @@ def cmd_update(args, db_path=None):
         _error("INVALID_JSON", f"Failed to parse JSON: {exc}")
 
     if not isinstance(updates, dict):
-        _error("INVALID_INPUT", "JSON input must be an object, not a list or scalar")
+        _error(
+            "INVALID_INPUT",
+            "JSON input must be an object, not a list or scalar",
+            exit_code=2,
+        )
 
     memory = PACTMemory(db_path=db_path)
     try:
@@ -838,6 +915,15 @@ def cmd_update(args, db_path=None):
     except ProjectScopeDisagreementError as exc:
         # Same deliberate refusal shape as cmd_save: both values + remedy.
         _error("SCOPE_DISAGREEMENT", _scope_disagreement_message(exc))
+    except LegacyBucketWriteRefusedError as exc:
+        # Before the field-validation ValueError arm below, for the same
+        # envelope as cmd_save's.
+        _error(
+            "LEGACY_BUCKET_WRITE_REFUSED", _scope_disagreement_message(exc), exit_code=2
+        )
+    except GitHubPayloadIdRefusedError as exc:
+        # Before the field-validation arm: no field list and no field note.
+        _error("INVALID_INPUT", escape_for_envelope(_scrub(str(exc))), exit_code=2)
     except PrefixTooShortError as exc:
         # Order: PrefixTooShortError IS a ValueError; catch it before the
         # field-validation ValueError handler below.
@@ -873,8 +959,10 @@ def cmd_update(args, db_path=None):
             "ValueError",
             # Rendered inert: a ValueError on this path can embed a
             # caller-supplied identifier or field name.
-            f"{escape_for_envelope(_scrub(str(exc)))} (Note: 'id' and "
-            f"'created_at' are stripped before update validation.)",
+            escape_for_envelope(_scrub(str(exc)))
+            # The id/created_at note explains a field-list refusal only.
+            + (" (Note: 'id' and 'created_at' are stripped before update "
+               "validation.)" if hasattr(exc, "allowed_fields") else ""),
             exit_code=2,
             # Prefer the list the error itself carries, so this array and
             # the message's sentence are one computation. The constant is a
@@ -898,7 +986,14 @@ def cmd_update(args, db_path=None):
     # would either be absent or -- on a reused instance -- carry a PREVIOUS
     # save's outcome and misreport it as this update's. If `update` ever gains
     # a sync, add the field here rather than letting it inherit one.
-    result = {"memory_id": resolved_id}
+    result = {
+        "memory_id": resolved_id,
+        # THE QUARANTINE COUNT BELONGS IN THE ENVELOPE, not only in a stderr
+        # warning: it is the machine-readable half of "N links could not be
+        # re-tracked and stayed on their old project". Zero is the normal
+        # answer, so the field is always present.
+        "last_cascade_skipped": memory.last_cascade_skipped,
+    }
     embedding_status = memory.last_embedding_status
     if embedding_status is not None:
         result["embedding_status"] = embedding_status
@@ -914,7 +1009,9 @@ def cmd_sync(args, db_path=None):
     `wrote`. `empty` means project identity is unresolved or the project has
     no records; the file was not touched. `project_id` is the id the records
     were selected under, so an `empty` can be checked against the project the
-    caller expected.
+    caller expected. A bucket the read left out is named beside `result`
+    (`_hidden_bucket_scope`), as `list` and `search` name it, so a sync that
+    projects 0 rows says why on stdout.
     """
     memory = PACTMemory(db_path=db_path)
     sync_kwargs = {}
@@ -940,7 +1037,12 @@ def cmd_sync(args, db_path=None):
         # here would skip the fold, so an unusable detected value could reach
         # the envelope.
         "project_id": memory._project_id_for_envelope(),
-    })
+        # THE SCOPE THIS SESSION READS UNDER, on every outcome: the canonical
+        # (or other) id, then an admitted legacy bucket; `[]` with no
+        # identity. A consumer counting this project's records must count
+        # across all of it, not only `project_id`.
+        "read_scope": list(memory._read_project_scopes()),
+    }, **_hidden_bucket_scope(memory))
 
 
 def cmd_project_file(args, db_path=None) -> NoReturn:
@@ -971,6 +1073,906 @@ def cmd_project_file(args, db_path=None) -> NoReturn:
         text = "not a safe path"
     print(f"unavailable: {text}")
     sys.exit(3)
+
+
+def _project_candidates(memory, db_path) -> list:
+    """Every NON-EMPTY project bucket, with its relation and its remedy.
+
+    A census, not a filtered list: only the operator can decide which legacy
+    bucket belongs to this repository, and hiding the ambiguous ones is what
+    leaves thousands of memories unreachable with no notice. A command is
+    rendered only for the rows `project_candidate_rows` can defend. The store
+    is read READ-ONLY (`read_project_bucket_census`), so an absent or
+    schema-less store answers an empty list and is NEVER created or given a
+    schema by this report; a present store that cannot be opened, or is not
+    a readable SQLite database, raises, and the CLI reports exit 3 with the
+    remedy named.
+    `memory` must already have computed its read scope, which is what names
+    the legacy candidate.
+    """
+    store = Path(db_path) if db_path else resolve_db_path()
+    return project_candidate_rows(
+        read_project_bucket_census(str(store)),
+        store=store,
+        current_id=memory._project_scope(),
+        legacy_state=memory._legacy_scope_state,
+        earlier=getattr(memory, "_earlier_canonical", None),
+        declined_legacy=getattr(memory, "_declined_legacy", None),
+    )
+
+
+def _exit_store_fault(exc, store, error) -> NoReturn:
+    """Report a store that cannot serve the command: exit 3.
+
+    Every verb keeps one exit code for an OPERATIONAL fault (a locked store,
+    an integrity error, an I/O fault), so a corrupt store answers alike
+    whichever verb reaches it. Exit 2 stays the bad-input code. The message
+    names the store's remedy when it has one and is rendered inert, because
+    it echoes a path on a surface a caller prints.
+    """
+    _error(
+        error,
+        escape_for_envelope(
+            _scrub(present_store_fault(exc, str(store)) or str(exc))
+        ),
+        exit_code=3,
+    )
+
+
+def cmd_project_id(args, db_path=None) -> NoReturn:
+    """Handle the 'project-id' subcommand family.
+
+    `show` reports the detected identity, how it was decided (`source` and
+    `id_shape`), the resolved read scope, and the bucket census. It reads an
+    existing store only — a report must not bring a store into existence.
+    """
+    from scripts.database import sqlite3 as db_sqlite3
+
+    action = getattr(args, "project_id_action", None)
+    if action == "show":
+        try:
+            memory = PACTMemory(db_path=db_path)
+            read_scope = memory._read_project_scopes()
+            # `repo_root` IS THE IDENTITY ROOT: the root the winning rung resolved
+            # and the one the plausibility gate compared legacy rows against. A
+            # primary field named `repo_root` that named the PROCESS's repository
+            # would be the misdirection this field exists to remove; no earlier
+            # release had the field, so nothing depends on another meaning.
+            # `process_repo_root` is the root of the process's repository, which
+            # from a linked worktree is the main checkout, not the worktree; in a
+            # declared-repo session the two fields differ.
+            identity_root = memory._project_identity_root
+            process_root = main_repo_root()
+            _success({
+                "project_id": memory._project_id_for_envelope(),
+                "id_shape": memory._project_id_shape,
+                "source": memory._project_id_source,
+                "override_ignored": memory._override_ignored,
+                # A remote-helper origin's folder-name id says what it shares
+                # and how to isolate it, as the warning does.
+                "identity_detail": (
+                    REMOTE_HELPER_DETAIL
+                    if memory._project_id_source == "remote helper"
+                    else UNUSABLE_ORIGIN_DETAIL
+                    if memory._project_id_source == "unusable origin"
+                    else ssh_alias_detail(_origin_url_of(memory))
+                    if memory._project_id_source == "origin remote"
+                    else None
+                ),
+                # STRUCTURED DECLINE REASON, not just the warning. A repository
+                # chose the name a basename id would have used, so the refusal
+                # names the cause and the override file that is its remedy; a
+                # caller parsing this envelope never has to read stderr.
+                "decline_reason": memory._decline_reason,
+                "repo_root": str(identity_root) if identity_root is not None else None,
+                "process_repo_root": (
+                    str(process_root) if process_root is not None else None
+                ),
+                "read_scope": list(read_scope),
+                "legacy_scope": memory._legacy_scope_state,
+                "candidates": _project_candidates(memory, db_path),
+            })
+        except db_sqlite3.DatabaseError as exc:
+            _exit_store_fault(
+                exc, Path(db_path) if db_path else resolve_db_path(),
+                "SYSTEM_ERROR",
+            )
+    if action == "rekey":
+        _project_id_rekey(args, db_path)
+    _error(
+        "MISSING_INPUT",
+        "project-id requires an action: show or rekey",
+        exit_code=2,
+    )
+
+
+def _origin_url_of(memory: "PACTMemory") -> str | None:
+    """The first origin url of the identity root's repository config, or None
+    (for `project-id show`'s ssh-alias note; never printed)."""
+    root = memory._project_identity_root
+    if root is None:
+        return None
+    common = memory._legacy_gate_roots(root)[1]
+    if common is None:
+        return None
+    return origin_url_in_config(Path(common) / "config")
+
+
+_REKEY_ZERO_COUNTERS = (
+    "memories", "files_in_place", "files_conflicted", "links_repointed",
+    "links_conflicted", "relations_repointed", "vectors_moved",
+    "vectors_pending", "files_copied", "null_project_memories", "null_project_files",
+)
+
+
+class _RekeyCopyFailed(Exception):
+    """The dry run's temporary copy could not be made or written (an unusable
+    or full temporary folder). Its one argument is that folder, or None when
+    Python found no usable one. Not a `sqlite3.DatabaseError`, so
+    `_stable_read_only` does not repeat the read with locking, which would
+    leave `-wal`/`-shm` beside a store the dry run never needed to lock."""
+
+
+class _RekeyStoreMissing(Exception):
+    """The dry run's copy failed and the store could no longer be found (moved
+    or deleted while it ran). Its one argument is the store path. Not a
+    `sqlite3.DatabaseError`, so it is not repeated."""
+
+
+class _RekeyStoreFailed(Exception):
+    """The dry run's copy failed because the STORE no longer reads whole
+    (`_store_reads_whole`). Its one argument is the store path. Not a
+    `sqlite3.DatabaseError`, so `_stable_read_only` does not repeat the read
+    with locking beside a store that is failing."""
+
+
+# SQLite's messages for a file it cannot write, grow or open (SQLITE_IOERR,
+# SQLITE_FULL, SQLITE_CANTOPEN): faults of the copy's folder, never of a store
+# that moved during the read. Matched on the message because pysqlite3's
+# errors carry no `sqlite_errorcode`.
+_COPY_FAULT_MESSAGES = (
+    "disk I/O error", "database or disk is full", "unable to open database file",
+)
+
+
+def _rekey_on_copy(
+    store, from_id: str, to_id: str, dry_run: bool, own_target: bool, memory_ids=None
+) -> dict:
+    """`rekey_project`'s counters, computed on a COPY of `store` in a private
+    temporary folder, removed afterwards.
+
+    A rolled-back SAVEPOINT on the store itself still commits an empty
+    transaction, which rewrites the store's header and, on a WAL store,
+    creates `-wal` and `-shm` for the length of the run. The copy is read
+    through the read-only open (`_read_only_connection`), which on a settled
+    store takes no lock and creates no sidecar, so the store file is not
+    touched. Its caller wraps it in `_stable_read_only`, which repeats the
+    read with locking when the store moved under it. The copy is a file,
+    not an in-memory database, so a large store (vectors included) does not
+    have to fit in memory.
+    """
+    from scripts.database import rekey_project
+    from scripts.database import sqlite3 as db_sqlite3
+
+    source = _read_only_connection(str(store))
+    # The folder the copy went to, for the failure message. Before the
+    # folder exists it is the one Python already chose (`tempfile.tempdir`),
+    # or None when it found none: `gettempdir()` would raise again.
+    folder = None
+    try:
+        # A private folder (mode 0700), so the copy and any journal beside it
+        # go with it and no other user can read the store's rows.
+        with tempfile.TemporaryDirectory(prefix="pact-rekey-dry-run-") as scratch:
+            folder = str(Path(scratch).parent)
+            copy = db_sqlite3.connect(str(Path(scratch) / "copy.db"))
+            try:
+                source.backup(copy)
+                copy.row_factory = db_sqlite3.Row
+                copy.execute("PRAGMA foreign_keys=ON")
+                return rekey_project(
+                    copy, from_id, to_id, dry_run=dry_run,
+                    own_folder_name_target=own_target, memory_ids=memory_ids,
+                )
+            finally:
+                copy.close()
+    except OSError as exc:
+        raise _RekeyCopyFailed(folder or tempfile.tempdir) from exc
+    except db_sqlite3.DatabaseError as exc:
+        # A failing disk under the STORE raises the same messages, so the
+        # copy is blamed only when the store still reads whole.
+        if str(exc).startswith(_COPY_FAULT_MESSAGES):
+            whole = _store_reads_whole(store)
+            if whole is True:
+                raise _RekeyCopyFailed(folder or tempfile.tempdir) from exc
+            if whole is False:
+                raise _RekeyStoreFailed(str(store)) from exc
+            if whole == _STORE_MISSING:
+                raise _RekeyStoreMissing(str(store)) from exc
+            # The store changed during the check: re-raise, and
+            # `_stable_read_only` repeats the read with locking.
+        raise
+    finally:
+        source.close()
+
+
+_STORE_MISSING = "missing"
+
+
+def _store_reads_whole(store):
+    """Whether every page of `store` reads back through a fresh read-only
+    open (`PRAGMA quick_check` answers `ok`): True or False. None when that
+    open was immutable and the store changed while it was checked (its
+    `_store_stamp` differs or a journal appeared): an immutable read beside a
+    writer can read a torn page and answer "malformed", so such a check
+    decides nothing; the read then repeats with locking, where the open is
+    not immutable and its answer stands. `_STORE_MISSING` when the store
+    cannot be stat'ed before or after the check (moved or deleted): that
+    says nothing about its disk. Never raises."""
+    before = _store_stamp(str(store))
+    if before is None:
+        return _STORE_MISSING
+    immutable = not _LOCKED_READS_ONLY.get() and not before[3]
+    try:
+        probe = _read_only_connection(str(store))
+        try:
+            whole = probe.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+        finally:
+            probe.close()
+    except Exception:
+        whole = False
+    after = _store_stamp(str(store))
+    if after is None:
+        return _STORE_MISSING
+    if immutable and after != before:
+        return None
+    return whole
+
+
+def _bucket_file_rows(store: Path, bucket: str) -> int:
+    """How many file rows are filed under `bucket`, read without writing
+    (`_stable_read_only`). 0 for a store with no files table yet."""
+    from scripts.database import sqlite3 as db_sqlite3
+
+    def count() -> int:
+        conn = _read_only_connection(str(store))
+        try:
+            return conn.execute(
+                "SELECT COUNT(*) FROM files WHERE project_id = ?", (bucket,)
+            ).fetchone()[0]
+        except db_sqlite3.OperationalError:
+            return 0
+        finally:
+            conn.close()
+
+    return _stable_read_only(str(store), count)
+
+
+def _placed_split(memory, store: Path, bucket: str) -> dict:
+    """`database.placed_memory_split` of `bucket` for this checkout's roots,
+    read without writing; every memory is left (`left_files_elsewhere` or
+    `left_no_files`) when the checkout has no identity root or the store is
+    absent."""
+    from scripts.database import placed_memory_split
+
+    root = memory._project_identity_root
+    roots, common = memory._legacy_gate_roots(root) if root is not None else ([], None)
+    if not store.exists():
+        return {"placed": [], "left_no_files": 0, "left_files_elsewhere": 0}
+
+    def split() -> dict:
+        conn = _read_only_connection(str(store))
+        try:
+            return placed_memory_split(conn, bucket, roots, common)
+        finally:
+            conn.close()
+
+    return _stable_read_only(str(store), split)
+
+
+def _bucket_rows_under(store: Path, bucket: str, roots: list, common=None) -> int:
+    """How many of `bucket`'s file rows lie in this checkout by the legacy
+    gate's own row rule (`database.bucket_rows_here`), read without writing.
+    0 for a store with no files table yet."""
+    from scripts.database import bucket_rows_here
+    from scripts.database import sqlite3 as db_sqlite3
+
+    def count() -> int:
+        conn = _read_only_connection(str(store))
+        try:
+            return bucket_rows_here(conn, bucket, roots, common)
+        except db_sqlite3.OperationalError:
+            return 0
+        finally:
+            conn.close()
+
+    return _stable_read_only(str(store), count)
+
+def _own_folder_name_target(memory, from_id: str, to_id: str) -> bool:
+    """Whether `to_id` is this session's OWN folder-name id and `from_id` its
+    legacy candidate, the one folder-name target a rekey may take.
+
+    A gated folder-name id whose pre-change name differs (a
+    `--separate-git-dir` checkout without a portable origin) has no canonical
+    id to move its old bucket into, so its own id is the target, provided it
+    is a usable id (`_project_id_for_write` raises otherwise). Any other
+    folder-name target is the misfile this command exists to prevent.
+    """
+    if (
+        to_id != memory.project_id
+        or is_canonical(to_id)
+        or from_id != memory._legacy_project_basename
+        or not memory._folder_name_gated()
+    ):
+        return False
+    try:
+        return memory._project_id_for_write() == to_id
+    except (ProjectScopeDisagreementError, ValueError):
+        return False
+
+
+def _project_id_rekey(args, db_path) -> NoReturn:
+    """Move one ENTIRE project bucket to a canonical id, or report the plan.
+
+    `--dry-run` is the default posture and is the same code path rolled back,
+    so the reported counters are what an apply would produce. `--from ==
+    --to` is a no-op success.
+
+    A DEFAULTED `--to` is the detected canonical id, and it is accepted only
+    for THIS checkout's own legacy candidate when it is verified (a file row
+    places it here): a defaulted target applied to any other bucket, or to
+    one read on session evidence alone, moves rows the session cannot show
+    are its own. Every other move names its target.
+
+    Exit codes: 0 for a clean plan or an applied move, 1 for a refusal (no
+    canonical identity, a defaulted target the gate does not support, or a
+    `--db-path` store that is not present), 2
+    for BAD INPUT only, and 3 for an OPERATIONAL failure (a locked store, an
+    integrity error, an I/O fault), with nothing moved.
+    """
+    from scripts.database import db_connection, rekey_project
+    from scripts.database import sqlite3 as db_sqlite3
+
+    if getattr(args, "candidates", False):
+        if args.from_id or args.to_id or args.apply or args.dry_run:
+            _error(
+                "INVALID_INPUT",
+                "--candidates lists the buckets and takes no other option; "
+                "run it alone, then rekey one bucket with --from and --to.",
+                exit_code=2,
+            )
+        try:
+            memory = PACTMemory(db_path=db_path)
+            memory._read_project_scopes()
+            _success({"candidates": _project_candidates(memory, db_path)})
+        except db_sqlite3.DatabaseError as exc:
+            _exit_store_fault(
+                exc, Path(db_path) if db_path else resolve_db_path(),
+                "SYSTEM_ERROR",
+            )
+
+    if args.dry_run and args.apply:
+        _error(
+            "INVALID_INPUT",
+            "--dry-run and --apply are mutually exclusive; --dry-run is the "
+            "default posture.",
+            exit_code=2,
+        )
+
+    from_id = args.from_id
+    if not from_id:
+        _error(
+            "INVALID_INPUT",
+            "rekey requires --from=BUCKET naming the bucket to move, or "
+            "--candidates to list the buckets.",
+            exit_code=2,
+        )
+
+    if args.only_placed_here and not args.to_id:
+        _error(
+            "INVALID_INPUT",
+            "--only-placed-here needs --to naming this checkout's own id. "
+            "Nothing was moved.",
+            exit_code=2,
+        )
+    if args.to_id:
+        # A github.com target is folded as a save or update payload's
+        # project_id is, so a case or www spelling names the bucket this
+        # repository's sessions read, and one no pin may hold is refused.
+        try:
+            args.to_id = folded_github_id(args.to_id, "--to")
+        except ValueError as exc:
+            _error("INVALID_INPUT", escape_for_envelope(f"{exc} Nothing was moved."), exit_code=2)
+    store = Path(db_path) if db_path else resolve_db_path()
+    memory = PACTMemory(db_path=db_path)
+    if (
+        args.to_id
+        and args.to_id != from_id
+        and not is_canonical(args.to_id)
+        and not _own_folder_name_target(memory, from_id, args.to_id)
+    ):
+        # A SUPPLIED non-canonical target is caller input, refused on the
+        # bad-input channel. Moving rows into a basename bucket is the
+        # misfile this whole change exists to prevent. A target equal to
+        # --from moves nothing, so it gets the no-op answer instead. The one
+        # folder-name target allowed is this session's own
+        # (`_own_folder_name_target`).
+        _error(
+            "INVALID_INPUT",
+            escape_for_envelope(
+                f"--to {args.to_id!r} is not a canonical id. The target must "
+                "be host/owner/repo (see `project-id show`). Nothing was moved."
+            ),
+            exit_code=2,
+        )
+
+    target_defaulted = not args.to_id
+    to_id = args.to_id or memory.project_id
+    legacy_verdict = None
+    # Every envelope that answers `--from` equal to `--to` carries
+    # `noop: True`, whichever route answers it.
+    noop = from_id == to_id
+    try:
+        # AN APPLIED MOVE READS THE SCOPE QUIETLY: the legacy notices advise
+        # the very move this run performs, so printing them beside its result
+        # contradicts it. A dry run keeps them only when --from is this
+        # checkout's own legacy bucket (any case variant of its folder name);
+        # for another bucket they are about a bucket the run does not touch.
+        legacy_name = memory._legacy_project_basename
+        own_from = bool(legacy_name) and from_id.casefold() == legacy_name.casefold()
+        warned_before = set(_UNPROVEN_WARNED)
+        quiet = args.apply or not own_from
+        with legacy_notices_quiet() if quiet else rekey_preview(from_id, to_id):
+            memory._read_project_scopes()
+        # Whether THIS read disclosed --from's unattributed memories itself.
+        read_disclosed = any(
+            len(key) == 3 and key[1] == from_id
+            and key[2] in ("unattributed", "verified_unattributed")
+            for key in set(_UNPROVEN_WARNED) - warned_before
+        )
+    except db_sqlite3.DatabaseError as exc:
+        _exit_store_fault(exc, store, "REKEY_FAILED")
+    state = memory._legacy_scope_state or {}
+    own_legacy = from_id == memory._legacy_project_basename
+    if state.get("candidate") is not None and from_id == state["candidate"]:
+        legacy_verdict = (
+            "excluded" if state.get("excluded")
+            else "verified" if state.get("verified")
+            else "unproven" if state.get("unproven")
+            else "unverified"
+        )
+    if target_defaulted:
+        if not to_id or not is_canonical(to_id):
+            # No canonical identity resolves, so there is no defensible target:
+            # a detected BASENAME is exactly the bucket the move must leave.
+            # A PIN IS OFFERED ONLY WHERE ONE CAN WORK: an override file the
+            # resolver named for this decline. With no repository there is no
+            # override file, so the remedy is the explicit target.
+            override_path = (memory._decline_reason or {}).get("override_path")
+            pin = (
+                f" or write an explicit canonical id to {str(override_path)!r}"
+                if override_path
+                else ""
+            )
+            _error(
+                "PROJECT_IDENTITY_UNRESOLVED",
+                escape_for_envelope(
+                    "no canonical project id resolves here, so the rekey "
+                    f"target is unknown. Pass --to=host/owner/repo{pin}. A "
+                    "folder-name target is never defaulted: moving rows into a "
+                    "basename bucket is the misfile this command exists to "
+                    "prevent. The one folder-name target accepted is this "
+                    "session's own id, for its own legacy bucket, given "
+                    "explicitly with --to. Nothing was moved."
+                ),
+            )
+    # A DEFAULTED TARGET EQUAL TO --from MOVES NOTHING. It is the no-op the
+    # docstring promises, not a defaulted move of a canonical bucket, so the
+    # refusals below, which guard what a defaulted move would claim, do not
+    # apply. The unresolved-identity refusal above still runs first.
+    if target_defaulted and not noop:
+        if is_canonical(from_id):
+            _error(
+                "REKEY_REFUSED",
+                escape_for_envelope(
+                    f"--from={from_id!r} is a canonical bucket; a canonical "
+                    "bucket moves only with an explicit --to. Nothing was moved."
+                ),
+            )
+        # THIS CHECKOUT'S OWN pre-upgrade name with no rows left under it
+        # (already moved) is a no-op, not a foreign bucket: re-running an
+        # applied rekey must stay a clean success.
+        # A BUCKET WITH NO MEMORY ROWS HAS NO LEGACY CANDIDATE (candidates
+        # are counted from memories), so its own-name re-run is a no-op only
+        # when nothing at all is filed under it. File rows left there were
+        # never judged, so a defaulted --to may not move them.
+        if (
+            legacy_verdict is None
+            and own_legacy
+            and store.exists()
+            and _bucket_file_rows(store, from_id)
+        ):
+            _error(
+                "REKEY_REFUSED",
+                escape_for_envelope(
+                    f"--from={from_id!r} holds file rows but no memories, so "
+                    "nothing verified it as this checkout's; pass --to "
+                    "explicitly after confirming the rows belong here. "
+                    "Nothing was moved."
+                ),
+            )
+        if legacy_verdict is None and not own_legacy:
+            _error(
+                "REKEY_REFUSED",
+                escape_for_envelope(
+                    f"--from={from_id!r} is not this checkout's legacy "
+                    "candidate; pass --to explicitly after confirming the rows "
+                    "belong here. Nothing was moved."
+                ),
+            )
+        bucket_verdict = getattr(memory, "_legacy_verdict", None)
+        if (
+            legacy_verdict is not None
+            and bucket_verdict is not None
+            and not bucket_verdict.rekey_default
+        ):
+            # THE VERDICT REFUSES A DEFAULTED TARGET (`rekey_default`), as it
+            # refuses the read. The cause and the counts are the verdict's own
+            # (`_unproven_cause`), so this text and the read warning cannot
+            # disagree.
+            sessions = state.get("sessions")
+            cause = (
+                _unproven_cause(
+                    state["unproven_reason"],
+                    {**(sessions or {}), **(state.get("detail") or {})},
+                    from_id,
+                )
+                if state.get("unproven_reason")
+                else None
+            )
+            census = (
+                f" Of its memories, {sessions['here']} came from sessions "
+                f"recorded here, {sessions['subfolder']} from sessions "
+                "launched in a subfolder of this repository, "
+                f"{sessions['description_newer']} from sessions that started "
+                "before its `description` file last changed, "
+                f"{sessions['undated']} from sessions recorded here with no "
+                "confirmed start, "
+                f"{sessions['elsewhere']} from sessions recorded at another "
+                f"existing folder, and {sessions['unattributed']} from no "
+                "recorded session."
+                if sessions is not None
+                else ""
+            )
+            if cause is None:
+                # READ HERE, BUT NOT PLACED WHOLE: admitted on session evidence
+                # alone (`included_unverified`; only a `verified` bucket takes
+                # a defaulted target). A move carries every row, so the user
+                # names the target.
+                _error(
+                    "REKEY_REFUSED",
+                    escape_for_envelope(
+                        f"--from={from_id!r} is read here on session evidence "
+                        "alone: no file row places it here, so a defaulted --to "
+                        f"cannot claim the whole bucket.{census} "
+                        "Pass --to explicitly after confirming the rows belong "
+                        "here. Nothing was moved."
+                    ),
+                )
+            reading = (
+                "is unproven" if legacy_verdict == "unproven" else "was excluded"
+            )
+            _error(
+                "REKEY_REFUSED",
+                escape_for_envelope(
+                    f"--from={from_id!r} {reading}: {cause}, so it is not "
+                    f"read here and a defaulted --to cannot claim it.{census} "
+                    "Pass --to explicitly after confirming the rows belong "
+                    "here. Nothing was moved."
+                ),
+            )
+
+    own_id = memory.project_id
+    placed_split = None
+    if args.only_placed_here:
+        if own_id is None or to_id != own_id:
+            _error(
+                "INVALID_INPUT",
+                escape_for_envelope(
+                    f"--only-placed-here moves memories into this checkout's own "
+                    f"id only, and --to {to_id!r} is not it ({own_id!r}). Nothing "
+                    "was moved."
+                ),
+                exit_code=2,
+            )
+        placed_split = _placed_split(memory, store, from_id)
+    foreign_source = None
+    canonical_foreign = False
+    undetected_earlier = ""
+    try:
+        # An older spelling of this checkout's own id (`github.com/Acme/Widget`,
+        # `github.com:443/...`) folds to it, so it is this checkout's bucket.
+        # The fold decides ownership only: the move reads the stored spelling.
+        from_as_id = folded_github_id(from_id, "--from")
+    except ValueError:
+        from_as_id = from_id
+    if (
+        to_id == own_id
+        and not noop
+        and not args.from_another_repository
+        and from_as_id != own_id
+    ):
+        candidate = state.get("candidate")
+        if legacy_verdict == "unproven" and state.get("unproven_reason") in SHARED_BUCKET_REASONS:
+            foreign_source = (
+                "holds rows placed in another checkout too ("
+                + _unproven_cause(
+                    state["unproven_reason"],
+                    {**(state.get("sessions") or {}), **(state.get("detail") or {})},
+                    from_id,
+                )
+                + "), and a rekey moves the whole bucket, that checkout's rows "
+                "with it"
+            )
+        elif legacy_verdict == "excluded":
+            foreign_source = (
+                "was excluded for this checkout: its file rows place it in "
+                "another repository"
+            )
+        elif (
+            candidate is not None
+            and state.get("excluded")
+            and from_id.casefold() == candidate.casefold()
+        ):
+            foreign_source = (
+                f"differs only by case from the legacy bucket {candidate!r}, "
+                "which was excluded for this checkout: its file rows place it "
+                "in another repository"
+            )
+        elif from_id in (state.get("ambiguous") or []):
+            foreign_source = (
+                "is one of several buckets that match this checkout's folder "
+                "name only by case, so no read here can tell which, if any, "
+                "is this checkout's"
+            )
+        elif from_id == state.get("suppressed_candidate"):
+            foreign_source = (
+                "is this submodule's pre-upgrade bucket, whose name its "
+                "superproject chooses, so it is not read here"
+            )
+        elif is_canonical(from_id) and from_id not in (
+            getattr(memory, "_earlier_canonical", None) or {}
+        ):
+            canonical_foreign = True
+            roots, common = (
+                memory._legacy_gate_roots(memory._project_identity_root)
+                if memory._project_identity_root is not None and store.exists()
+                else ([], None)
+            )
+            rows_here = _bucket_rows_under(store, from_id, roots, common) if roots else 0
+            foreign_source = (
+                "is a canonical id that is neither this checkout's nor a "
+                "detected earlier id of it "
+                + (
+                    "(its 1 file row here comes only from memories saved before "
+                    "this clone and does not show the rows are this repository's)"
+                    if rows_here == 1
+                    else f"(its {rows_here} file rows here come only from memories "
+                    "saved before this clone and do not show the rows are this "
+                    "repository's)"
+                    if rows_here
+                    else "(no file row here places it)"
+                )
+            )
+            undetected_earlier = (
+                " It is also how to move an earlier id of this repository that "
+                "could not be detected, such as the bucket of a renamed "
+                + (
+                    "repository cloned again, whose rows here predate this clone."
+                    if rows_here
+                    else "repository that has no file row here."
+                )
+            )
+    if foreign_source is not None and args.only_placed_here and not canonical_foreign:
+        # A LEGACY FOLDER-NAME BUCKET'S PLACED MEMORIES ARE THIS CHECKOUT'S by
+        # the gate's own rule, so the partial move needs no flag. Another
+        # repository's canonical bucket still does: its id names that owner.
+        foreign_source = None
+    if foreign_source is not None:
+        # A MOVE INTO THIS CHECKOUT'S ID OF A BUCKET THE READ RULES SAY IS NOT
+        # ITS OWN merges another repository's rows into this one and cannot be
+        # undone, so the dry run refuses too rather than report a clean plan.
+        partial = (
+            " To move only the memories whose every file row lies in this "
+            "checkout, pass --only-placed-here together with "
+            "--from-another-repository, only with that approval."
+            if canonical_foreign
+            else " To move only the memories whose every file row lies in this "
+            "checkout, run the same command with --only-placed-here."
+        )
+        if args.only_placed_here:
+            partial = (
+                " With --only-placed-here, add --from-another-repository, only "
+                "with that approval: only the memories placed here then move."
+            )
+        _error(
+            "REKEY_REFUSED",
+            escape_for_envelope(
+                f"--from={from_id!r} {foreign_source}, so moving it into this "
+                f"checkout's id ({own_id!r}) would merge another repository's "
+                "rows here, and a rekey cannot be undone. Pass "
+                "--from-another-repository only with the user's explicit "
+                "approval that these rows belong to this repository."
+                f"{undetected_earlier}{partial} Nothing was moved."
+            ),
+        )
+    if (
+        args.apply
+        and not noop
+        and is_canonical(to_id)
+        and to_id != own_id
+        and not args.into_another_repository
+    ):
+        # AN APPLIED MOVE INTO ANOTHER REPOSITORY'S ID IS REFUSED: it files
+        # this bucket's rows under that repository and cannot be undone. A
+        # rename is a move into this checkout's own id (run it where the
+        # origin or pin already names the new id); a dry run still plans.
+        _error(
+            "INVALID_INPUT",
+            escape_for_envelope(
+                f"--to {to_id!r} is not this checkout's id ({own_id!r}), so "
+                "--apply would file these rows under another repository, and "
+                "a rekey cannot be undone. To rename this repository's bucket, "
+                "run from a checkout whose origin or pin names the new id. "
+                "Pass --into-another-repository only with the user's explicit "
+                "approval. Nothing was moved."
+            ),
+            exit_code=2,
+        )
+
+    if not store.exists():
+        # NOTHING TO MOVE AND NOTHING TO CREATE: a plan against a store that
+        # does not exist must not bring one into existence. ANSWERED ONLY
+        # AFTER THE TARGET GATES ABOVE, so an absent store refuses every
+        # input a present store refuses instead of reporting success.
+        _success({
+            "from": from_id,
+            "to": to_id,
+            "dry_run": not args.apply,
+            "store_absent": True,
+            "from_bucket_empty": True,
+            "schema_absent": True,
+            **({"noop": True} if noop else {}),
+            "target_defaulted": target_defaulted,
+            "legacy_verdict": None,
+            **{key: 0 for key in _REKEY_ZERO_COUNTERS},
+        })
+
+    # ON A PRESENT STORE `--from` EQUAL TO `--to` IS ANSWERED BY THE LIBRARY
+    # TOO, so the no-op envelope carries every counter a plan carries.
+    # A DRY RUN AND A NO-OP NEVER OPEN THE STORE FOR WRITING: they run on a
+    # temporary file copy read through the read-only open (`_rekey_on_copy`).
+    # Only an apply writes, and only an apply may convert a DELETE-mode store
+    # to WAL.
+    # A non-canonical target reaching here is an explicit --to that passed
+    # `_own_folder_name_target` above; a defaulted one is refused.
+    own_target = not is_canonical(to_id)
+    subset = placed_split["placed"] if placed_split is not None else None
+    try:
+        if args.apply and not noop:
+            with db_connection() as conn:
+                counters = rekey_project(
+                    conn, from_id, to_id, dry_run=False,
+                    own_folder_name_target=own_target, memory_ids=subset,
+                )
+        else:
+            counters = _stable_read_only(
+                str(store),
+                lambda: _rekey_on_copy(
+                    store, from_id, to_id, not args.apply, own_target, subset
+                ),
+            )
+    except ValueError as exc:
+        # The module's bad-input channel: an id that cannot be bound is
+        # caller input, not a system fault. Rendered inert because it is
+        # echoed back on a surface the caller parses and prints.
+        _error(
+            "INVALID_INPUT",
+            escape_for_envelope(str(exc)),
+            exit_code=2,
+        )
+    except _RekeyCopyFailed as exc:
+        folder = exc.args[0] if exc.args else None
+        _error(
+            "REKEY_FAILED",
+            escape_for_envelope(_scrub(
+                "the dry run could not write its temporary copy of the store "
+                + (f"in {folder}" if folder else "because no usable temporary folder was found")
+                + f" (set TMPDIR to a writable folder with room for it): {exc.__cause__}"
+            )),
+            exit_code=3,
+        )
+    except _RekeyStoreMissing as exc:
+        _error(
+            "REKEY_FAILED",
+            escape_for_envelope(_scrub(
+                f"the store {exc.args[0]} could not be found while the dry run "
+                f"copied it (it was moved or deleted); nothing was changed: "
+                f"{exc.__cause__}"
+            )),
+            exit_code=3,
+        )
+    except _RekeyStoreFailed as exc:
+        _error(
+            "REKEY_FAILED",
+            escape_for_envelope(_scrub(
+                f"the store {exc.args[0]} failed an integrity check while the "
+                f"dry run copied it, so its disk may be failing: {exc.__cause__}"
+            )),
+            exit_code=3,
+        )
+    except db_sqlite3.DatabaseError as exc:
+        # OPERATIONAL FAILURE, NOT BAD INPUT: a locked store, an integrity
+        # error or an I/O fault says nothing about the caller's arguments.
+        _exit_store_fault(exc, store, "REKEY_FAILED")
+    if args.apply:
+        # The move changed the bucket set this process cached.
+        _invalidate_legacy_scope_cache()
+    # A PARTIAL MOVE (--only-placed-here) MOVES ONLY MEMORIES ITS OWN FILE
+    # ROWS PLACE HERE, so the bucket-wide count of memories no session wrote
+    # says nothing about what it moved: no note.
+    unattributed = (
+        (state.get("sessions") or {}).get("unattributed", 0)
+        if legacy_verdict is not None and not noop and placed_split is None
+        else 0
+    )
+    if unattributed and not counters.get("from_bucket_empty") and not read_disclosed:
+        # A MOVE OF ROWS NO RECORDED SESSION WROTE IS SAID EXACTLY ONCE: the
+        # read's disclosure is quiet during --apply, so the rekey states it
+        # then; a dry run states it only when its read did not.
+        _best_effort_report(
+            print,
+            escape_for_envelope(
+                f"note: {unattributed} of the memories in "
+                f"{shlex.quote('--from=' + from_id)} "
+                "came from no recorded session; this rekey "
+                + ("moved" if args.apply else "would move")
+                + " them with the bucket."
+            ),
+            file=_envelope_stream(),
+        )
+    if counters.get("from_bucket_empty"):
+        _best_effort_report(
+            print,
+            escape_for_envelope(
+                f"warning: no rows are filed under --from={from_id!r}; nothing "
+                "to move (a typo, or already moved)."
+            ),
+            file=_envelope_stream(),
+        )
+    if placed_split is not None:
+        _best_effort_report(
+            print,
+            "note: --only-placed-here moves only the memories whose every file "
+            "row lies in this checkout, with their vectors; memories keep their "
+            "ids, so no link to a memory is lost, and a file row a staying "
+            "memory also links is copied to the target and kept for it.",
+            file=_envelope_stream(),
+        )
+    _success({
+        **counters,
+        **({"noop": True} if noop else {}),
+        "target_defaulted": target_defaulted,
+        "legacy_verdict": legacy_verdict,
+        **(
+            {
+                "only_placed_here": True,
+                "left_no_files": placed_split["left_no_files"],
+                "left_files_elsewhere": placed_split["left_files_elsewhere"],
+            }
+            if placed_split is not None
+            else {}
+        ),
+    })
 
 
 def cmd_delete(args, db_path=None):
@@ -1063,6 +2065,12 @@ def build_parser():
         "--db-path",
         help=argparse.SUPPRESS,  # Hidden flag for testing
     )
+    # A nested action's own --db-path: with no default it leaves the value
+    # parsed before the action (`project-id --db-path X show`) in place.
+    action_parent = argparse.ArgumentParser(add_help=False)
+    action_parent.add_argument(
+        "--db-path", default=argparse.SUPPRESS, help=argparse.SUPPRESS
+    )
 
     prog = sys.argv[0]
     fmt = argparse.RawDescriptionHelpFormatter
@@ -1072,13 +2080,21 @@ def build_parser():
         "save": f'python3 "{prog}" save --stdin',
         "search": f'python3 "{prog}" search "query"',
         "list": f'python3 "{prog}" list',
-        "get": f'python3 "{prog}" get <memory-id>',
+        "get": f"python3 \"{prog}\" get '<memory-id>'",
         "status": f'python3 "{prog}" status',
         "setup": f'python3 "{prog}" setup',
-        "update": f'python3 "{prog}" update <memory-id> --stdin',
-        "delete": f'python3 "{prog}" delete <memory-id>',
+        "update": f"python3 \"{prog}\" update '<memory-id>' --stdin",
+        "delete": f"python3 \"{prog}\" delete '<memory-id>'",
         "sync": f'python3 "{prog}" sync',
         "project-file": f'python3 "{prog}" project-file',
+        "project-id": f'python3 "{prog}" project-id show',
+        # THE SHARED HELPER RENDERS IT, with the script path quoted as the
+        # other examples quote it (`example_prog`). Every placeholder is
+        # shell-quoted, here and above: an unquoted `<id>` is a redirection.
+        # A dry run is the default, so it names no --dry-run.
+        "project-id-rekey": render_rekey_command(
+            "<id>", "<canonical>", prog=prog, example_prog=True
+        ),
     }
 
     parser = _TeachParser(
@@ -1276,7 +2292,20 @@ def build_parser():
             "the section is a view of the store, so fix a record with update "
             "or delete and run sync again. When project identity is unresolved "
             "or the project has no memories, sync reports sync_status 'empty' "
-            "and leaves the file untouched."
+            "and leaves the file untouched, except that a resolved project with "
+            "no memories whose section's every entry names, by its Memory ID, a "
+            "row of a bucket this read hides for this checkout has the section "
+            "rewritten with none ('wrote'). When the project has memories but "
+            "no CLAUDE.md resolves, sync reports 'unresolved' and writes "
+            "nothing. An empty result is not proof the "
+            "project has no memories: run `project-id show`. Only this "
+            "checkout's own bucket that is not excluded carries a rekey "
+            "command; "
+            + render_rekey_command("<id>", "<canonical>")
+            + " names both ends and previews moving that bucket into the "
+            "canonical id; --apply, only with the user's explicit approval, "
+            "performs it. Never apply it for an excluded bucket or another "
+            "repository's id."
         ),
         parents=[parent],
         formatter_class=fmt,
@@ -1309,6 +2338,130 @@ def build_parser():
     )
     project_file_parser._teach_example = examples["project-file"]
 
+    # project-id
+    project_id_parser = subparsers.add_parser(
+        "project-id",
+        help="Show the project identity pact-memory keys this repository by",
+        parents=[parent],
+        description=(
+            "Report the detected project id, how it was decided (`source` and "
+            "`id_shape`), the read scope, and every populated bucket with the "
+            "literal command that moves it. Reads an existing store only; it "
+            "creates none."
+        ),
+        formatter_class=fmt,
+        epilog=_cli_examples(examples["project-id"]),
+    )
+    project_id_parser._teach_example = examples["project-id"]
+    project_id_actions = project_id_parser.add_subparsers(
+        dest="project_id_action", parser_class=_TeachParser
+    )
+    project_id_show_parser = project_id_actions.add_parser(
+        "show",
+        help="Show the detected identity and the bucket census",
+        parents=[action_parent],
+        description=(
+            "The detected project id, `source`, `id_shape`, any structured "
+            "`decline_reason` (with the override path that remedies it), the "
+            "resolved read scope, and every non-empty bucket with its memory "
+            "count and its relation to this checkout. Only this checkout's own "
+            "buckets carry a rekey command, which names both ends."
+        ),
+        formatter_class=fmt,
+        epilog=_cli_examples(examples["project-id"]),
+    )
+    project_id_show_parser._teach_example = examples["project-id"]
+
+    project_id_rekey_parser = project_id_actions.add_parser(
+        "rekey",
+        help="Move an entire project bucket to the canonical id",
+        parents=[action_parent],
+        description=(
+            "Move EVERY row filed under `--from` to `--to` in one "
+            "transaction: memories, file rows (merging the UNIQUE(path, "
+            "project_id) collision), graph links and vector partitions. "
+            "`--dry-run` is the default and reports the plan by running it "
+            "on a temporary copy of the store, which is then deleted. Name "
+            "both ends: an omitted `--to` "
+            "is accepted only when `--from` is this checkout's own legacy "
+            "bucket and it is verified (a file row places it here). Run --apply only "
+            "with the user's "
+            "explicit approval, and never for an excluded bucket or another "
+            "repository's id: the move merges rows and cannot be undone. A "
+            "move into this checkout's own id from either is refused, the dry "
+            "run included, unless --from-another-repository is passed. Exit "
+            "codes: 0 for a clean plan or an applied move, 1 for a refusal, 2 "
+            "for bad input, 3 for an operational failure (nothing moved)."
+        ),
+        formatter_class=fmt,
+        epilog=_cli_examples(examples["project-id-rekey"]),
+    )
+    project_id_rekey_parser._teach_example = examples["project-id-rekey"]
+    project_id_rekey_parser.add_argument(
+        "--from",
+        dest="from_id",
+        metavar="<id>",
+        help="The entire bucket to retire.",
+    )
+    project_id_rekey_parser.add_argument(
+        "--to",
+        dest="to_id",
+        metavar="<canonical>",
+        help=(
+            "Target canonical id. Name it: it defaults only for this "
+            "checkout's own legacy bucket, and only when that bucket is "
+            "verified (a file row places it here)."
+        ),
+    )
+    project_id_rekey_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report the plan without changing anything (the default).",
+    )
+    project_id_rekey_parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Perform the move; only with the user's explicit approval.",
+    )
+    project_id_rekey_parser.add_argument(
+        "--into-another-repository",
+        dest="into_another_repository",
+        action="store_true",
+        help=(
+            "Allow --apply into a canonical --to that is not this checkout's "
+            "own id; only with the user's explicit approval."
+        ),
+    )
+    project_id_rekey_parser.add_argument(
+        "--from-another-repository",
+        dest="from_another_repository",
+        action="store_true",
+        help=(
+            "Allow a move into this checkout's own id from a bucket that is "
+            "excluded here or is a canonical id that is neither this "
+            "checkout's nor an earlier id of it; only with the user's "
+            "explicit approval."
+        ),
+    )
+    project_id_rekey_parser.add_argument(
+        "--only-placed-here",
+        dest="only_placed_here",
+        action="store_true",
+        help=(
+            "Move only the memories of --from whose every file row lies in this "
+            "checkout, into this checkout's own --to; the rest stay. Needs no "
+            "--from-another-repository."
+        ),
+    )
+    project_id_rekey_parser.add_argument(
+        "--candidates",
+        action="store_true",
+        help=(
+            "List every populated bucket with its count; only this "
+            "checkout's own buckets carry a rekey command."
+        ),
+    )
+
     return parser
 
 
@@ -1324,6 +2477,7 @@ _COMMANDS = {
     "delete": cmd_delete,
     "sync": cmd_sync,
     "project-file": cmd_project_file,
+    "project-id": cmd_project_id,
 }
 
 # The commands that never open a store. They run before every store guard
@@ -1356,8 +2510,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if not args.command:
+        # A missing command is a usage error, exit 2 like any other.
         parser.print_help(sys.stderr)
-        sys.exit(1)
+        sys.exit(2)
 
     handler = _COMMANDS.get(args.command)
     if handler is None:
@@ -1372,8 +2527,12 @@ def main(argv=None):
             f"Unknown command: {escape_for_envelope(str(args.command))}",
         )
 
+    # ONE DETECTION PASS PER COMMAND: the store's construction and the
+    # command's own work (a save's filing check and CLAUDE.md sync among
+    # them) read one set of git answers, each question asked once.
     if args.command in _COMMANDS_WITHOUT_A_STORE:
-        handler(args)
+        with detection_pass():
+            handler(args)
 
     db_path = Path(args.db_path) if args.db_path else None
 
@@ -1477,7 +2636,7 @@ def main(argv=None):
                     f"path, run: setup --db-path '{shown}'",
                 )
 
-            with store_scope(db_path):
+            with store_scope(db_path), detection_pass():
                 handler(args, db_path=db_path)
     except SystemExit:
         raise  # Let _success/_error exits propagate
@@ -1486,7 +2645,18 @@ def main(argv=None):
         # the realpath form) from the message so absolute paths
         # (e.g. ~/.claude/pact-memory/... — illustrative example, not a live path) don't leak into stderr for
         # callers piping the JSON envelope into logs.
-        _error("SYSTEM_ERROR", _scrub(str(exc)), exit_code=2)
+        # Nothing that reaches this handler is bad input, so nothing here
+        # exits 2. A store fault (sqlite could not open, read or write the
+        # store) exits 3, whichever verb reached it, as the project-id verbs
+        # do, and names the store's remedy when it has one. Every other
+        # failure (a save whose read-back finds no row, or an unexpected
+        # internal error) exits 3 as well.
+        from scripts.database import sqlite3 as db_sqlite3
+
+        if isinstance(exc, db_sqlite3.DatabaseError):
+            store = db_path if db_path is not None else resolve_db_path()
+            _exit_store_fault(exc, store, "SYSTEM_ERROR")
+        _error("SYSTEM_ERROR", _scrub(str(exc)), exit_code=3)
 
 
 if __name__ == "__main__":

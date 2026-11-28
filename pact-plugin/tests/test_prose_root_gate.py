@@ -92,7 +92,7 @@ ARM2 = re.compile(r"Path\.home\(\)\s*/\s*\"\.claude\"")
 
 _DB_PIN = (
     "pact-memory DB, default-root-pinned by design at "
-    "skills/pact-memory/scripts/config.py:186 (#1410)"
+    "skills/pact-memory/scripts/config.py:217 (#1410)"
 )
 _DB_PIN_MIRRORED = (
     _DB_PIN + " — MIRRORED PAIR: this is the one allowlist entry with a SECOND "
@@ -137,7 +137,7 @@ ARM1_ALLOWLIST = [
 ]
 
 ARM2_ALLOWLIST = [
-    ("skills/pact-memory/scripts/config.py", 186, _DB_PIN),
+    ("skills/pact-memory/scripts/config.py", 217, _DB_PIN),
 ]
 
 

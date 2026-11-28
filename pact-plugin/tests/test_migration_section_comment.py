@@ -147,6 +147,66 @@ class TestNoSectionEverGainsASecondComment:
         )
 
 
+class TestAnEarlierReleasesCommentIsReplaced:
+    """A section carrying an earlier release's wording of the comment comes
+    out with the current comment only. The add-when-absent test reads the old
+    wording as absent, so without the drop the two sat side by side."""
+
+    EARLIER = (
+        "<!-- Auto-managed by pact-memory skill. Full history searchable via "
+        "pact-memory skill. -->",
+        "<!-- Auto-managed by pact-memory skill. Full history searchable via "
+        "pact-memory skill. Keyed by folder name, so another checkout with the "
+        "same name shares this section. -->",
+        "<!-- Auto-managed by pact-memory skill. Full history searchable via "
+        "pact-memory skill. Keyed by repository identity (the repository's "
+        "override file or its origin remote); the memory skill's `project-id "
+        "show` command reports the key in use, which can be a folder name, and "
+        "how it was chosen. When the identity declines, nothing is written. -->",
+        "<!-- Auto-managed by pact-memory skill. Full history searchable via "
+        "pact-memory skill. Keyed by repository identity (the repository's "
+        "override file or its origin remote); the memory skill's `project-id "
+        "show` command reports the key in use, which can be a folder name, and "
+        "how it was chosen. When the identity declines, no memory entry is "
+        "written. -->",
+        "<!-- Auto-managed by pact-memory skill. Full history searchable via "
+        "pact-memory skill. Keyed by repository identity (the repository's "
+        "override file or its origin remote); the memory skill's `project-id "
+        "show` command reports the key in use, which can be a folder name, and "
+        "how it was chosen. When the identity declines, nothing is written to "
+        "this section. -->",
+    )
+
+    @pytest.mark.parametrize("earlier", EARLIER)
+    @pytest.mark.parametrize("lead", ["{c}\n", "\n{c}\n", "   {c}\n"])
+    def test_only_the_current_comment_remains(self, earlier, lead):
+        assert earlier != WORKING_MEMORY_COMMENT
+        out = _build_migrated_content(_old_format(wm_lead=lead.format(c=earlier)))
+        assert earlier not in out
+        assert out.count(WORKING_MEMORY_COMMENT) == 1
+        assert f"## Working Memory\n{WORKING_MEMORY_COMMENT}\n" in out
+
+    def test_a_pin_that_starts_like_the_comment_is_the_users_and_stays(self):
+        """`## Pinned Context` never carries the section comment, so a whole-line
+        pin that starts like it is the user's pin, kept through migration.
+        RED WHEN the drop counts Pinned Context as a section that owns the
+        comment."""
+        pin = "<!-- Auto-managed by pact-memory skill. My own reminder. -->"
+        source = _old_format().replace("## Pinned Context\n", f"## Pinned Context\n{pin}\n")
+        assert source.count(pin) == 1
+        out = _build_migrated_content(source)
+        assert out.count(pin) == 1, out
+
+    def test_a_quoted_copy_is_the_users_text_and_stays(self):
+        """CONTROL: the drop reads marker lines only, so a fenced copy and one
+        sharing its line with other text are left alone."""
+        earlier = self.EARLIER[1]
+        lead = f"```\n{earlier}\n```\nnote: {earlier}\n"
+        out = _build_migrated_content(_old_format(wm_lead=lead))
+        assert out.count(earlier) == 2
+        assert out.count(WORKING_MEMORY_COMMENT) == 1
+
+
 class TestMigrationStaysIdempotent:
     """NO TEST NAMED THIS BEFORE. The property is real and it is easy to lose
     to an emit change, because losing it reddens nothing else."""
@@ -190,3 +250,23 @@ class TestTheCommentIsSpelledInOnePlacePerConstant:
             f"constant assignment. A second spelling is a twin inside one "
             f"file, and the two writers here drifted apart that way before."
         )
+
+
+class TestOnlyTheMemorySectionsOwnCommentsAreDropped:
+    """A migration drops a stale section comment only inside a memory
+    section, where the rebuilt section writes the current one. A line that
+    reads the same in a user's own section is the user's text."""
+
+    USER_COPY = "<!-- Auto-managed by pact-memory skill. A note I keep here. -->"
+
+    def test_a_copy_in_a_user_section_survives(self):
+        source = _old_format() + "\n## My Notes\n" + self.USER_COPY + "\nkeep me\n"
+        out = _build_migrated_content(source)
+        assert self.USER_COPY in out, out
+        assert "keep me" in out
+
+    def test_an_old_comment_in_a_memory_section_is_still_replaced(self):
+        old = "<!-- Auto-managed by pact-memory skill. Keyed by folder name, an old wording. -->\n"
+        out = _build_migrated_content(_old_format(wm_lead=old))
+        assert "an old wording" not in out, out
+        assert WORKING_MEMORY_COMMENT in out

@@ -153,6 +153,10 @@ from fixtures.hf_cache import hf_cache_env  # noqa: E402
 from fixtures.root_guard import MARKER as _NON_ROOT_MARKER  # noqa: E402
 from fixtures.root_guard import non_root_skip_reason  # noqa: E402
 from fixtures.session_marker import remove_importer_markers  # noqa: E402
+from fixtures.sqlite_copy_probe import ALLOWED as _STDLIB_SQLITE3_ALLOWED  # noqa: E402
+from fixtures.sqlite_copy_probe import STDLIB_SQLITE3 as _STDLIB_SQLITE3  # noqa: E402
+from fixtures.sqlite_copy_probe import ACTIVE as _ACTIVE_COPY_PROBES  # noqa: E402
+from fixtures.sqlite_copy_probe import ModuleProbe as _ModuleProbe  # noqa: E402
 
 # These copy names from shared modules at first import; loading them here keeps a test patch from being copied.
 # tests/test_conftest_import_guard.py derives which modules need a line here.
@@ -221,6 +225,12 @@ _MEMORY_DIR_ENV = "PACT_TEST_MEMORY_DIR"
 # Session-wide fallback store, created once and reused. See pytest_configure.
 _SESSION_MEMORY_DIR = os.path.join(_process_temp_dir("pact-memory-suite-"), "pact-memory")
 
+# The variable that relocates memory_init's embedding markers, duplicated from
+# `scripts.memory_init.MARKER_DIR_ENV` for the reason above, and the
+# session-wide directory it names. See pytest_configure.
+_MARKER_DIR_ENV = "PACT_TEST_MARKER_DIR"
+_SESSION_MARKER_DIR = _process_temp_dir("pact-markers-suite-")
+
 
 def pytest_configure(config):
     """Register markers that DECLARE an external dependency.
@@ -287,6 +297,9 @@ def pytest_configure(config):
     # would point the whole suite at the very store this exists to protect. The
     # fail direction of `setdefault` here is ALLOW, and it is silent.
     os.environ[_MEMORY_DIR_ENV] = _SESSION_MEMORY_DIR
+    # The embedding markers likewise, for the same two reasons: an import at
+    # collection and a spawned child both read it before any fixture runs.
+    os.environ[_MARKER_DIR_ENV] = _SESSION_MARKER_DIR
 
     # UNLIKE `requires_embedding_backend` AND `claude_md_ambient` ABOVE, THIS
     # MARKER SKIPS THE TEST. The first is left for the operator to deselect, and
@@ -992,6 +1005,86 @@ def _scrub_session_id_from_test_env(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _confine_embedding_markers(tmp_path_factory, monkeypatch):
+    """Point memory_init's marker directory at a directory of this test's own.
+    Runs for EVERY test (autouse).
+
+    `memory_init` writes its embedding markers in `_MARKER_DIR` (`/tmp` in
+    production), and a session's marker outlives its process by design, so
+    without this a run leaves markers in the real /tmp. The variable carries
+    the directory to a child the test spawns; the session-wide one set in
+    pytest_configure covers what runs outside a test, and the bare
+    `memory_init` module some tests import. A test that sets `_MARKER_DIR`
+    itself replaces this one for that test.
+    """
+    try:
+        from scripts import memory_init
+    except Exception:  # noqa: BLE001 — a broken import fails its own tests
+        yield
+        return
+    markers = tmp_path_factory.mktemp("markers")
+    # A child spawned by the test reads the variable at import.
+    monkeypatch.setenv(_MARKER_DIR_ENV, str(markers))
+    monkeypatch.setattr(memory_init, "_MARKER_DIR", markers)
+    yield
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _sqlite_copy_probe_for_module(request):
+    """The probe for an ALLOWED module (fixtures/sqlite_copy_probe.py), or
+    None. Module-scoped and autouse, so it is installed before the module's
+    own module-scoped fixtures run and a connection they open is probed too
+    (a session- or package-scoped fixture there is refused by
+    tests/test_store_sqlite_copy_guard.py). An overlap no test reported, such
+    as one in a module fixture's teardown, fails the module's teardown."""
+    name = request.node.path.name
+    if name not in _STDLIB_SQLITE3_ALLOWED:
+        yield None
+        return
+    try:
+        from scripts import database
+    except Exception:  # noqa: BLE001 — a broken import fails its own tests
+        yield None
+        return
+    patcher = pytest.MonkeyPatch()
+    probe = _ModuleProbe(_STDLIB_SQLITE3, database.sqlite3)
+    probe.install(patcher)
+    _ACTIVE_COPY_PROBES[name] = probe
+    try:
+        yield probe
+    finally:
+        _ACTIVE_COPY_PROBES.pop(name, None)
+        patcher.undo()
+    left = probe.unreported()
+    assert not left, (
+        "a standard-library and a store-code connection to one file overlapped "
+        "(two SQLite copies corrupt its WAL): " + "; ".join(left)
+    )
+
+
+@pytest.fixture(autouse=True)
+def _probe_sqlite_copies(_sqlite_copy_probe_for_module):
+    """Fail a test of an ALLOWED module (fixtures/sqlite_copy_probe.py) during
+    or before which a standard-library sqlite3 connection to a file was open
+    while a store-code connection to the same file opened or closed, or the
+    reverse. Those modules import the standard module beside the memory
+    scripts; where pysqlite3 links SQLite statically that is a second SQLite
+    copy, and an overlap corrupts the store's WAL. Every other module keeps
+    the standard module out (tests/test_store_sqlite_copy_guard.py), so only
+    these are wrapped.
+    """
+    probe = _sqlite_copy_probe_for_module
+    yield
+    if probe is None:
+        return
+    overlaps = probe.unreported()
+    assert not overlaps, (
+        "a standard-library and a store-code connection to one file overlapped "
+        "(two SQLite copies corrupt its WAL): " + "; ".join(overlaps)
+    )
+
+
+@pytest.fixture(autouse=True)
 def _refuse_a_marker_under_an_importer_session_id():
     """Fail a test after which an importer session id's embedding marker exists.
 
@@ -1025,9 +1118,10 @@ def _reset_memory_init_state():
 
     WHAT THIS DOES NOT CLOSE, stated here so the reset is not read as more than
     it is. `maybe_embed_pending()` has a SECOND, INDEPENDENT guard: a marker
-    file at `/tmp/pact_embedding_attempted_<session>`, which is session-scoped
-    and shared, not per-database, and which this fixture deliberately does not
-    remove -- the marker belongs to any real session on the same machine, and
+    file `pact_embedding_attempted_<session>` (in a per-test directory, see
+    `_confine_embedding_markers`), which is session-scoped, not per-database,
+    and which this fixture deliberately does not remove -- outside the suite
+    the marker belongs to the session, and
     `memory_init` separates `clear_embedding_marker()` from
     `reset_initialization()` for exactly that reason. So a second store still
     gets "Already attempted this session" for the catch-up. This fixture

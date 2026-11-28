@@ -25,6 +25,7 @@ import atexit
 import hashlib
 import logging
 import os
+import re
 import uuid
 import struct
 import subprocess
@@ -42,6 +43,15 @@ logger = logging.getLogger(__name__)
 #    specifically, persists across process restarts within the same session
 _init_lock = threading.Lock()
 _initialized = False
+# The stores (resolved paths, `_store_key`) whose embedding migration a read
+# postponed: initialization ran inside a read scope and skipped it. The first
+# call outside a read scope ON THAT STORE runs it.
+_migration_deferred: "set[str]" = set()
+# The stores whose embedding catch-up a read postponed because it could not do
+# its work there (no vector table, or a migration due). The first call outside
+# a read scope on that store runs it after the migration. A postponed sweep
+# does not touch the session marker, so the marker is not spent.
+_catchup_deferred: "set[str]" = set()
 
 # Outcome of this session's embedding catch-up, kept so a STATUS READER can see
 # it. `_ensure_ready()` discards `ensure_memory_ready()`'s return value, and an
@@ -163,6 +173,60 @@ def check_and_install_dependencies() -> dict:
     return {'status': status, 'installed': installed, 'failed': failed}
 
 
+_DECLARED_DIMENSION = re.compile(r"\bembedding\s+float\[(\d+)\]", re.IGNORECASE)
+
+
+def _stored_vector_dimension(conn) -> "tuple[bool, int | None]":
+    """Whether `conn`'s store has a vector table, and its dimension.
+
+    The dimension is the one the table's own definition declares, so an empty
+    table left at an older dimension reads as that dimension rather than as
+    "nothing stored". Without a declaration this can parse, it is the size of
+    one stored vector; with neither, None, which callers treat as a migration
+    being due. sqlite-vec must be loaded on `conn`. Reads only."""
+    found = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='vec_memories'"
+    ).fetchone()
+    if found is None:
+        return False, None
+    declared = _DECLARED_DIMENSION.search(found[0] or "")
+    if declared:
+        return True, int(declared[1])
+    row = conn.execute("SELECT embedding FROM vec_memories LIMIT 1").fetchone()
+    return True, (None if row is None else len(row[0]) // 4)  # 4 bytes per float
+
+
+def _read_can_catch_up() -> bool:
+    """Whether the embedding catch-up can do its work inside a read scope.
+
+    Under the read scope no vector table is created and no migration runs, so
+    the catch-up can only add vectors to a table that already exists at the
+    current dimension. With no table, or with a migration due (a table declared
+    at another dimension, empty or not, or one whose dimension cannot be read),
+    it is postponed to the first call outside the scope. A store this cannot inspect is
+    postponed too, which writes nothing. Without sqlite-vec the catch-up writes
+    nothing and reports why, so it runs.
+    """
+    try:
+        import sqlite_vec  # noqa: F401  # availability probe
+        from .database import get_connection, load_sqlite_vec
+        from .embeddings import EMBEDDING_DIM
+    except ImportError:
+        return True
+    try:
+        conn = get_connection()
+    except Exception:  # noqa: BLE001
+        return False
+    try:
+        load_sqlite_vec(conn)
+        exists, dim = _stored_vector_dimension(conn)
+    except Exception:  # noqa: BLE001
+        return False
+    finally:
+        conn.close()
+    return exists and dim == EMBEDDING_DIM
+
+
 def maybe_migrate_embeddings() -> dict:
     """
     Check if embeddings need migration due to dimension change.
@@ -182,8 +246,8 @@ def maybe_migrate_embeddings() -> dict:
         # Import required modules - we're inside the scripts package now
         try:
             import pysqlite3 as sqlite3  # noqa: F401  # availability probe: absence must route to skipped_deps
-            import sqlite_vec
-            from .database import get_connection
+            import sqlite_vec  # noqa: F401  # availability probe: absence must route to skipped_deps
+            from .database import get_connection, load_sqlite_vec
             from .embeddings import get_embedding_service, generate_embedding_text, EMBEDDING_DIM
         except ImportError:
             # Distinct status to differentiate from "nothing to migrate"
@@ -194,15 +258,7 @@ def maybe_migrate_embeddings() -> dict:
 
         # Connect to database
         conn = get_connection()
-        sqlite_vec.load(conn)
-
-        # Check if vec_memories table exists
-        cursor = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='vec_memories'"
-        )
-        if cursor.fetchone() is None:
-            conn.close()
-            return result  # No table, nothing to migrate
+        load_sqlite_vec(conn)
 
         # Check actual dimension via byte-length of a stored embedding.
         # Uses len(blob)//4 (not MATCH probe) because we need the actual old
@@ -210,23 +266,17 @@ def maybe_migrate_embeddings() -> dict:
         # Note: database.py:_check_and_migrate_vector_table uses a MATCH probe
         # instead — it only needs binary match/mismatch, not the old value.
         try:
-            row = conn.execute("SELECT embedding FROM vec_memories LIMIT 1").fetchone()
-            if row is None:
-                conn.close()
-                return result  # Empty table, nothing to migrate
-
-            actual_dim = len(row[0]) // 4  # 4 bytes per float
-            if actual_dim == expected_dim:
-                conn.close()
-                return result  # Dimensions match, no migration needed
-
+            exists, actual_dim = _stored_vector_dimension(conn)
         except Exception:
             conn.close()
             return result
+        if not exists or actual_dim == expected_dim:
+            conn.close()
+            return result  # No table, or one at the current dimension
 
         # Dimension mismatch detected - need to migrate
         result["status"] = "migrating"
-        result["message"] = f"Migrating embeddings: {actual_dim}-dim -> {expected_dim}-dim"
+        result["message"] = f"Migrating embeddings: {actual_dim or 'unknown'}-dim -> {expected_dim}-dim"
 
         # Drop old table
         conn.execute("DROP TABLE IF EXISTS vec_memories")
@@ -289,6 +339,15 @@ try:
     from .pact_session import get_session_id_from_context_file
 except ImportError:
     from pact_session import get_session_id_from_context_file
+try:
+    from .config import catchup_projects_bound, read_only_scope_active, resolve_db_path
+except ImportError:
+    from config import catchup_projects_bound, read_only_scope_active, resolve_db_path
+
+
+def _store_key() -> str:
+    """The store this call is bound to, resolved, as the postponement key."""
+    return os.path.realpath(resolve_db_path())
 
 
 # Fallback marker name for when the session id cannot be resolved. Process-
@@ -300,6 +359,12 @@ except ImportError:
 # for every later session permanently. A process-unique name is fail-SAFE — the
 # worst case is that a sweep runs more than once.
 _PROCESS_MARKER_TOKEN = f"process-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+# Where the session markers live. A test harness relocates them with this
+# variable, read once at import, as it relocates the store
+# (`config.MEMORY_DIR_ENV`); production leaves it unset.
+MARKER_DIR_ENV = "PACT_TEST_MARKER_DIR"
+_MARKER_DIR = Path(os.environ.get(MARKER_DIR_ENV) or "/tmp")
 
 # Upper bound for the session-derived part of the /tmp marker filename. 64
 # keeps the whole name far below NAME_MAX (255 on the usual filesystems) while
@@ -327,11 +392,17 @@ def _remove_process_marker() -> None:
     empty and unmatchable rather than harmful, so nothing recovers them.
     """
     try:
-        (Path("/tmp") / f"pact_embedding_attempted_{_PROCESS_MARKER_TOKEN}").unlink(
-            missing_ok=True
-        )
+        _unlink_marker(_MARKER_DIR / f"pact_embedding_attempted_{_PROCESS_MARKER_TOKEN}")
     except OSError:
         pass
+
+
+def _unlink_marker(base: Path) -> None:
+    """Remove the attempt marker `base` and every read-attempt marker beside
+    it (`_read_attempt_path`, one per read scope). Raises what unlink raises."""
+    base.unlink(missing_ok=True)
+    for read_marker in base.parent.glob(f"{base.name}_read_*"):
+        read_marker.unlink(missing_ok=True)
 
 
 # Registered unconditionally: it is a no-op when no fallback marker was created,
@@ -364,7 +435,15 @@ def _get_embedding_attempted_path() -> Path:
     if len(slug) > _MAX_MARKER_SLUG_CHARS:
         digest = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:16]
         slug = f"{slug[:_MAX_MARKER_SLUG_CHARS - 17]}-{digest}"
-    return Path("/tmp") / f"pact_embedding_attempted_{slug}"
+    return _MARKER_DIR / f"pact_embedding_attempted_{slug}"
+
+
+def _read_attempt_path(marker_path: Path, scope) -> Path:
+    """The marker a read's catch-up writes for this session and `scope` (its
+    project ids), beside the session marker, which only a store-wide sweep
+    writes."""
+    digest = hashlib.sha256("\0".join(sorted(scope)).encode("utf-8")).hexdigest()[:16]
+    return marker_path.with_name(f"{marker_path.name}_read_{digest}")
 
 
 def maybe_embed_pending() -> dict:
@@ -393,9 +472,18 @@ def maybe_embed_pending() -> dict:
     # file may exist and be unreadable; telling the caller creation failed
     # sends them to the wrong remedy (permissions or the path, not a write
     # that was never attempted). Both skip the sweep.
+    # A READ'S CATCH-UP IS LIMITED TO ITS SCOPE (`catchup_projects`), so it
+    # does not spend the session marker: the store-wide sweep stays due, and
+    # `ensure_memory_ready` postpones it to the first call outside the read
+    # scope. It honours that marker, and records its own attempt in a marker
+    # for the session and that scope (`_read_attempt_path`), so a memory
+    # whose embedding keeps failing is tried once per session by reads, not by
+    # every read.
+    scope = catchup_projects_bound()
     marker_path = _get_embedding_attempted_path()
+    attempt_path = marker_path if scope is None else _read_attempt_path(marker_path, scope)
     try:
-        already_attempted = marker_path.exists()
+        already_attempted = marker_path.exists() or attempt_path.exists()
     except OSError:
         result["message"] = "Could not check session marker"
         return result
@@ -403,7 +491,7 @@ def maybe_embed_pending() -> dict:
         result["message"] = "Already attempted this session"
         return result
     try:
-        marker_path.touch()
+        attempt_path.touch()
     except OSError:
         result["message"] = "Could not create session marker"
         return result
@@ -489,15 +577,32 @@ def ensure_memory_ready() -> dict:
             - migration: dict - Migration result
             - embedding: dict - Embedding catch-up result
     """
-    global _initialized
+    global _initialized, _last_catchup_result
 
-    # Fast path: already initialized this session
-    if _initialized:
+    # Fast path: already initialized this session, and nothing a read
+    # postponed is due on this call's store.
+    if _initialized and not (
+        _migration_deferred and not read_only_scope_active()
+        and _store_key() in _migration_deferred
+    ):
         return {"already_initialized": True}
 
     with _init_lock:
         # Double-check after acquiring lock
         if _initialized:
+            store = _store_key()
+            if store in _migration_deferred and not read_only_scope_active():
+                _migration_deferred.discard(store)
+                deferred = {
+                    "already_initialized": True,
+                    "migration": maybe_migrate_embeddings(),
+                }
+                if store in _catchup_deferred:
+                    # After the migration, which may have rebuilt the table.
+                    _catchup_deferred.discard(store)
+                    _last_catchup_result = maybe_embed_pending()
+                    deferred["embedding"] = _last_catchup_result
+                return deferred
             return {"already_initialized": True}
 
         result = {
@@ -516,21 +621,44 @@ def ensure_memory_ready() -> dict:
         if deps_result.get("failed"):
             logger.warning(f"Failed to install: {', '.join(deps_result['failed'])}")
 
-        # 2. Migrate embeddings if dimension changed
-        migration_result = maybe_migrate_embeddings()
+        # 2. Migrate embeddings if dimension changed. A READ RUNS NO MIGRATION:
+        # the migration drops and recreates the vector table, so inside a read
+        # scope it waits for the first call outside one.
+        if read_only_scope_active():
+            _migration_deferred.add(_store_key())
+            migration_result = {"status": "deferred", "message": None}
+        else:
+            migration_result = maybe_migrate_embeddings()
         result["migration"] = migration_result
 
         if migration_result.get("message"):
             logger.info(f"Migration: {migration_result['message']}")
 
-        # 3. Process any unembedded memories
-        embedding_result = maybe_embed_pending()
+        # 3. Process any unembedded memories. THE ONE WRITE A READ MAY MAKE:
+        # under the read scope the catch-up runs only when a vector table
+        # exists at the current dimension, and then it adds vector rows for
+        # memories not yet embedded and changes nothing else. Without that
+        # table, or with a migration due, it cannot work there, so it is
+        # postponed without spending the session marker and runs after the
+        # migration on the first call outside the scope. Until then a read's
+        # search still returns those memories: with no vector table, search
+        # falls back to keyword matching. Running it whenever a table exists
+        # matters because search falls back to keywords only when vector search
+        # returns nothing, so an unembedded memory beside embedded ones would
+        # not be found.
+        if read_only_scope_active() and not _read_can_catch_up():
+            _catchup_deferred.add(_store_key())
+            embedding_result = {"status": "deferred", "message": None}
+        else:
+            embedding_result = maybe_embed_pending()
+            # Record it for `get_embedding_catchup_status()`. Assigned here
+            # rather than inside `maybe_embed_pending` so there is ONE write
+            # site instead of one per early return.
+            _last_catchup_result = embedding_result
+            if catchup_projects_bound() is not None:
+                # A read's scoped catch-up leaves the store-wide sweep due.
+                _catchup_deferred.add(_store_key())
         result["embedding"] = embedding_result
-        # Record it for `get_embedding_catchup_status()`. Assigned here rather
-        # than inside `maybe_embed_pending` so there is ONE write site instead
-        # of one per early return.
-        global _last_catchup_result
-        _last_catchup_result = embedding_result
 
         if embedding_result.get("message") and embedding_result.get("status") == "ok":
             logger.info(f"Embedding catch-up: {embedding_result['message']}")
@@ -572,17 +700,19 @@ def reset_initialization() -> None:
     global _initialized
     with _init_lock:
         _initialized = False
+        _migration_deferred.clear()
+        _catchup_deferred.clear()
 
 
 def clear_embedding_marker() -> None:
     """
-    Delete the embedding attempt marker so maybe_embed_pending() can run again.
+    Delete the embedding attempt marker, and the session's read-attempt
+    markers, so maybe_embed_pending() can run again for a write and a read.
 
     Separated from reset_initialization() so that resetting the in-memory flag
     cannot remove a marker belonging to another process.
     """
-    marker_path = _get_embedding_attempted_path()
-    marker_path.unlink(missing_ok=True)
+    _unlink_marker(_get_embedding_attempted_path())
 
 
 def is_initialized() -> bool:

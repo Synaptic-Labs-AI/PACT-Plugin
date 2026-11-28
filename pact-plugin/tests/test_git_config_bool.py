@@ -1,0 +1,188 @@
+"""
+Location: pact-plugin/tests/test_git_config_bool.py
+Summary: Holds shared/git_helpers.git_config_bool to git's own boolean parser,
+value by value, and both callers (project_identity and project_scope) to it.
+Used by: the test suite; no production code imports it.
+
+Each expected answer is git's, asked through `git config --type=bool`, the
+parser GIT_DISCOVERY_ACROSS_FILESYSTEM goes through (`git_env_bool` calls
+`git_config_bool`). A value git refuses answers None here.
+"""
+
+import os
+import random
+import subprocess
+
+import pytest
+
+from shared import project_scope
+from shared.git_helpers import git_config_bool
+
+# Spellings the two old parsers disagreed with git on (" 1", "0x1", "1k",
+# "maybe"), the edges of git's integer rule, and the word forms.
+_NAMED = [
+    "", " ", "1", " 1", "1 ", "\t1", "\n0", "  0", "0x1", "0x0", "0X1F", "0x",
+    "0x1g", "1k", "0k", "1K", "2m", "1g", "2g", "-2g", "1kk", "1kb", "k", "010",
+    "07", "08", "00", "0", "+0", "-0", "-1", "+1", "+", "-", "1.0", "1_0",
+    "2147483647", "2147483648", "-2147483647", "-2147483648", "2097151k",
+    "2097152k", "2047m", "2048m", "0x7fffffff", "0x80000000", "9999999999999",
+    "maybe", "tru", "true", " true", "true ", "TRUE", "On", "Yes", "yes ",
+    "OFF", "fAlSe", "no", "\u00a01", "\uff34\uff32\uff35\uff25", "\u0661",
+]
+
+
+def _random_values(count: int) -> list:
+    rng = random.Random(28)
+    alphabet = " \t+-0123456789xXabcdefkKmMgGtrueyonsfl"
+    return [
+        "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 6)))
+        for _ in range(count)
+    ]
+
+
+def _git_answer(value: str):
+    result = subprocess.run(
+        ["git", "-c", f"pact.probe={value}", "config", "--type=bool", "pact.probe"],
+        capture_output=True, text=True, timeout=30,
+        env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1"},
+    )
+    answer = result.stdout.strip()
+    if result.returncode == 0 and answer in ("true", "false"):
+        return answer == "true"
+    assert "bad boolean config value" in result.stderr, result.stderr
+    return None
+
+
+# The spellings of -2^31 among the values below, the one integer git
+# versions disagree on (git 2.43 refuses it, a newer git accepts it); the
+# parser accepts it. Written out, not derived, so a bug the test and the
+# parser shared could not hide. A seed or list change that brings in another
+# spelling reds against the installed git until it is added here.
+_INT_MIN_SPELLINGS = frozenset({"-2147483648", "-2g"})
+
+
+@pytest.mark.parametrize("value", _NAMED + _random_values(400))
+def test_the_shared_parser_answers_as_git_does(value):
+    """Every value the installed git agrees on with every supported git."""
+    if value in _INT_MIN_SPELLINGS:
+        assert git_config_bool(value) is True, value
+        return
+    assert git_config_bool(value) is _git_answer(value)
+
+
+@pytest.mark.parametrize("value", [
+    "-2147483648", "-0x80000000", "-020000000000", "-2097152k", "-2097152K",
+    "-2048m", "-2g", "-2G",
+])
+def test_minus_two_to_the_31_is_accepted_as_a_newer_git_accepts_it(value):
+    """The parser accepts what any supported git accepts. RED WHEN the
+    negative bound is git 2.43's -(2^31-1) rather than -2^31."""
+    assert git_config_bool(value) is True
+
+
+@pytest.mark.parametrize("value", ["-2147483649", "-2097153k", "-3g", "2147483648", "2g"])
+def test_beyond_a_c_int_is_refused_by_every_git(value):
+    assert git_config_bool(value) is None
+
+
+@pytest.mark.parametrize("value", [" 1", "0x1", "1k", "2m", "1 ", "maybe", "0"])
+def test_both_walks_read_one_shared_answer(value, monkeypatch):
+    """Both marker walks read GIT_DISCOVERY_ACROSS_FILESYSTEM through the one
+    shared reader: a known value is git's answer, and a value git refuses is
+    true in both (fail closed), so the two walks never disagree."""
+    from scripts.project_identity import _git_env_bool as identity_bool
+    from shared.git_helpers import git_env_bool
+
+    git = _git_answer(value)
+    expected = True if git is None else git
+    monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", value)
+    assert identity_bool("GIT_DISCOVERY_ACROSS_FILESYSTEM") is expected
+    assert git_env_bool(value) is expected
+
+
+@pytest.mark.parametrize("value, crosses", [
+    ("1k", True), ("0x1", True), (" 1", True), ("0", False), ("false", False),
+    ("maybe", True),
+])
+def test_project_scopes_walk_reads_the_variable_as_git_does(tmp_path, value, crosses, monkeypatch):
+    """project_scope's marker walk crosses a filesystem boundary to a `.git`
+    above exactly when GIT_DISCOVERY_ACROSS_FILESYSTEM is git-true (a value
+    git refuses reads true, fail closed). The boundary is staged by giving
+    the start directory its own device number. RED WHEN the walk reads the
+    variable with any parser but the shared one (`1k`, `0x1` and ` 1` are
+    git-true, which a truthiness or word check gets wrong)."""
+    import os as os_module
+
+    (tmp_path / ".git").mkdir()
+    start = tmp_path / "mount"
+    start.mkdir()
+    real_stat = os_module.stat
+    start_real = os_module.path.realpath(start)
+
+    class _Moved:
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        @property
+        def st_dev(self):
+            return self._inner.st_dev + 1
+
+    def stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        return _Moved(result) if os_module.path.realpath(path) == start_real else result
+
+    monkeypatch.setattr(project_scope.os, "stat", stat)
+    monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", value)
+    monkeypatch.delenv("GIT_CEILING_DIRECTORIES", raising=False)
+    assert project_scope._git_metadata_at_or_above(start) is crosses
+
+
+@pytest.mark.parametrize(
+    "value, bare",
+    [("true", True), ("yes", True), ("on", True), ("1", True), ("TRUE", True),
+     ("false", False), ("no", False), ("0", False), ("maybe", False)],
+)
+def test_core_bare_is_read_as_git_reads_a_boolean(tmp_path, value, bare):
+    """project_scope reads `core.bare` with git's boolean parser, so every
+    spelling git accepts as true marks the repository bare; a value git
+    refuses reads as not bare."""
+    common = tmp_path / "repo.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(common)], check=True)
+    subprocess.run(
+        ["git", "--git-dir", str(common), "config", "core.bare", value], check=True
+    )
+    assert project_scope._repository_is_bare(common) is bare
+
+
+def test_a_valueless_core_bare_reads_as_bare_and_global_config_is_ignored(tmp_path, monkeypatch):
+    """project_scope reads core.bare as the memory identity does: the
+    repository's own config, as `git config --bool` reads it. A hand-written
+    valueless `bare` (git config cannot write one) is bare; a global
+    core.bare does not make a non-bare repository bare. RED WHEN the check
+    reads every config level or drops --bool."""
+    from scripts import project_identity
+
+    common = tmp_path / "repo.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(common)], check=True)
+    config = common / "config"
+    config.write_text(config.read_text().replace("bare = true", "bare"))
+    assert "\tbare\n" in config.read_text()
+    assert project_scope._repository_is_bare(common) is True
+    assert project_identity._git_dir_is_bare(common) is True
+
+    plain = tmp_path / "plain"
+    subprocess.run(["git", "init", "-q", str(plain)], check=True)
+    plain_common = plain / ".git"
+    text = (plain_common / "config").read_text()
+    (plain_common / "config").write_text(text.replace("\tbare = false\n", ""))
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text("[core]\n\tbare = true\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("GIT_CONFIG_GLOBAL", raising=False)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    assert project_scope._repository_is_bare(plain_common) is False
+    assert project_identity._git_dir_is_bare(plain_common) is False

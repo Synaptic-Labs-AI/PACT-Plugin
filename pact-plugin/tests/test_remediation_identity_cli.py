@@ -1,0 +1,3143 @@
+"""CLI contracts: what a refusal names, and what a printed remedy does.
+
+Each class names the behaviour it pins and the defect it would catch. The
+fixtures are REAL repositories built from a fresh `git init` with a fake
+origin URL, and every store is a scratch file under `tmp_path`.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+from scripts.database import sqlite3
+from pathlib import Path
+
+import pytest
+from fixtures.identity_git import (
+    assert_outside_repository,
+    make_repo,
+    make_separate_git_dir_repo,
+    write_common_dir_override,
+)
+from helpers import create_test_schema
+
+UNREPRESENTABLE = "https://host.example/own%ZZr/repo"
+
+
+@pytest.fixture
+def identity_env(monkeypatch, tmp_path):
+    """A tmp root outside any repository, with no ambient declaration."""
+    assert_outside_repository(tmp_path)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    return tmp_path
+
+
+@pytest.fixture
+def store(tmp_path):
+    """A scratch store with the schema present."""
+    path = tmp_path / "store.db"
+    conn = sqlite3.connect(str(path))
+    create_test_schema(conn)
+    conn.close()
+    return path
+
+
+def _cli(argv, capfd):
+    """Run the CLI in process; return (exit code, parsed envelope)."""
+    from scripts.cli import main
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(argv)
+    captured = capfd.readouterr()
+    stream = captured.out if exit_info.value.code == 0 else captured.err
+    return exit_info.value.code, json.loads(stream)
+
+
+class TestTheRefusalNamesTheDecision:
+    """An unresolved-identity refusal reports what the resolver decided.
+
+    Catches a refusal that re-derives its cause from the process location:
+    it then names the cwd's override instead of the declared repository's,
+    says "None could be verified" about a repository git answered for, and
+    tells a caller standing inside the project to run from inside it.
+    """
+
+    def _declined_repo(self, root):
+        repo = make_repo(root / "declined", remote=UNREPRESENTABLE)
+        override = write_common_dir_override(repo, "bad\x01pin")
+        return repo, override
+
+    def test_a_declared_repository_names_its_cause_and_its_override(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        repo, override = self._declined_repo(identity_env)
+        outside = identity_env / "elsewhere"
+        outside.mkdir()
+        monkeypatch.chdir(outside)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+        code, envelope = _cli(
+            ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+        )
+        assert code == 1
+        assert envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED"
+        message = envelope["message"]
+        assert "no single project id can be read" in message
+        assert str(override) in message
+        assert "None could be verified" not in message
+        assert "U+003C" not in message
+
+    def test_inside_the_repository_it_does_not_claim_nothing_was_declared(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        repo, override = self._declined_repo(identity_env)
+        monkeypatch.chdir(repo)
+        code, envelope = _cli(
+            ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+        )
+        assert code == 1
+        message = envelope["message"]
+        assert "No project directory was declared" not in message
+        assert "no single project id can be read" in message
+        assert str(override) in message
+        assert "U+003C" not in message
+
+
+class TestAnEmptyUrlDeclineNamesItsDetailOnce:
+    """The empty-url decline's fixed detail prints once in the warning and
+    once in the refusal.
+
+    Catches the detail dropped on the way from the root identity to the
+    operator (the cause then reads as a generic unrepresentable origin), and
+    the detail appended twice by two layers.
+    """
+
+    def _repo(self, root):
+        from fixtures.identity_git import run_git
+
+        repo = make_repo(root / "proj", remote="git@a.example:o/a.git")
+        run_git("config", "--add", "remote.origin.url", "", cwd=repo)
+        return repo
+
+    def test_the_warning_and_the_refusal_each_carry_it_once(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        from scripts import memory_api
+        from scripts.project_identity import EMPTY_URL_ENTRY_DETAIL
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        monkeypatch.chdir(self._repo(identity_env))
+        caplog.clear()
+        code, envelope = _cli(
+            ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+        )
+        assert code == 1, envelope
+        assert envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED"
+        assert envelope["message"].count(EMPTY_URL_ENTRY_DETAIL) == 1, envelope
+        warnings = [r.getMessage() for r in caplog.records if "no project id was derived" in r.getMessage()]
+        assert warnings, caplog.text
+        assert all(w.count(EMPTY_URL_ENTRY_DETAIL) == 1 for w in warnings), warnings
+
+    def test_another_unrepresentable_origin_carries_no_detail(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        """Control: the detail belongs to the empty-url cause only."""
+        from scripts import memory_api
+        from scripts.project_identity import EMPTY_URL_ENTRY_DETAIL
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote=UNREPRESENTABLE))
+        code, envelope = _cli(
+            ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+        )
+        assert code == 1, envelope
+        assert "no single project id can be read" in envelope["message"]
+        assert EMPTY_URL_ENTRY_DETAIL not in envelope["message"]
+        assert EMPTY_URL_ENTRY_DETAIL not in caplog.text
+
+
+class TestShowRunsNoWritePathInitialiser:
+    """`project-id show` reports on a store; it never prepares one.
+
+    Catches the legacy probe running the write-path initialiser behind a
+    read: on a store with no vector table it tries the CREATE, logs that it
+    could not, and loads the embedding service a report never needs.
+    """
+
+    def test_show_on_a_store_without_a_vector_table(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        import logging
+
+        from scripts import embeddings
+
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        conn = sqlite3.connect(str(store))
+        conn.execute(
+            "INSERT INTO memories (id, context, project_id, created_at, updated_at) "
+            "VALUES ('legacy0001', 'c', 'proj', '2026-01-01', '2026-01-01')"
+        )
+        conn.commit()
+        conn.close()
+        calls = []
+        real = embeddings.get_embedding_service
+        monkeypatch.setattr(
+            embeddings, "get_embedding_service",
+            lambda: calls.append(1) or real(),
+        )
+        monkeypatch.chdir(repo)
+        with caplog.at_level(logging.WARNING):
+            code, envelope = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["legacy_scope"]["candidate"] == "proj"
+        messages = " ".join(record.getMessage() for record in caplog.records)
+        assert "Could not create vector table" not in messages
+        assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Printed remedies name their target; a defaulted target is refused where the
+# gate cannot support it
+# ---------------------------------------------------------------------------
+
+CREATED_AT = "2026-01-01T00:00:00+00:00"
+
+
+def _seed(store, bucket, *, memory_id, path, session_id="legacy-session"):
+    conn = sqlite3.connect(str(store))
+    conn.execute(
+        "INSERT INTO memories "
+        "(id, context, project_id, session_id, created_at, updated_at) "
+        "VALUES (?, 'row', ?, ?, ?, ?)",
+        (memory_id, bucket, session_id, CREATED_AT, CREATED_AT),
+    )
+    conn.execute(
+        "INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)",
+        ("file-" + memory_id, path, bucket),
+    )
+    conn.commit()
+    conn.close()
+
+
+def _snapshot(store):
+    conn = sqlite3.connect(str(store))
+    try:
+        return (
+            sorted(conn.execute("SELECT id, project_id FROM memories").fetchall()),
+            sorted(conn.execute("SELECT id, path, project_id FROM files").fetchall()),
+        )
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def excluded_rig(identity_env, store, monkeypatch):
+    """Two checkouts named `proj`: the bucket's absolute rows are in `two`.
+
+    The cwd is `one/proj`, a different repository, so the gate EXCLUDES the
+    `proj` bucket: its rows belong to `two/proj`.
+    """
+    from scripts import memory_api
+
+    for memo in (memory_api._LEGACY_SCOPE_CACHE, memory_api._EXCLUSION_WARNED):
+        memo.clear()
+    one = make_repo(identity_env / "one" / "proj", remote="https://github.com/o/one.git")
+    two = identity_env / "two" / "proj"
+    two.mkdir(parents=True)
+    # A project marker: an unmarked folder named like the bucket is neutral.
+    (two / ".claude").mkdir()
+    # The file EXISTS: a vanished row is neutral and would not exclude.
+    (two / "secret.py").write_text("x\n")
+    _seed(store, "proj", memory_id="victim0001", path=str(two / "secret.py"))
+    _seed(store, "github.com/o/one", memory_id="own00001", path=str(one / "a.py"))
+    monkeypatch.chdir(one)
+    return one
+
+
+class TestTheRekeyNoOpGivesTheLibrarysAnswer:
+    """`--from` equal to `--to` reports what the library reports for the
+    same no-op, key for key, and leaves the store as it found it, its
+    journal mode included, whether the store file is writable or not. An
+    absent store answers without the library and still marks the no-op.
+
+    Catches a CLI no-op that answers before the library and drops the
+    counters a plan carries (`from_bucket_empty`, the NULL-row counts), and
+    a no-op route that leaves out `noop: True`.
+    """
+
+    BUCKET = "github.com/o/same"
+
+    @pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+    @pytest.mark.parametrize("writable", [
+        pytest.param(True, id="writable"),
+        # root writes through a 0444 file, so the read-only case needs a non-root uid
+        pytest.param(False, id="read-only file", marks=pytest.mark.requires_non_root),
+    ])
+    def test_the_no_op_envelope_is_the_librarys_answer(
+        self, identity_env, store, monkeypatch, capfd, apply, writable
+    ):
+        import hashlib
+
+        from scripts.database import rekey_project
+
+        _seed(store, self.BUCKET, memory_id="same0001", path="a.py")
+        _seed(store, None, memory_id="null0001", path="b.py")
+        monkeypatch.chdir(identity_env)
+        conn = sqlite3.connect(str(store))
+        try:
+            library = rekey_project(conn, self.BUCKET, self.BUCKET, dry_run=not apply)
+            journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        finally:
+            conn.close()
+        assert library["null_project_memories"] == 1, "control: the library counts the NULL row"
+        before = hashlib.sha256(store.read_bytes()).hexdigest()
+        if not writable:
+            store.chmod(0o444)
+
+        code, envelope = _cli(
+            ["project-id", "rekey", f"--from={self.BUCKET}", f"--to={self.BUCKET}",
+             *(["--apply"] if apply else []), "--db-path", str(store)],
+            capfd,
+        )
+
+        result = envelope.get("result", {})
+        assert (code, {key: result.get(key) for key in library}) == (0, library), envelope
+        assert result.get("noop") is True, envelope
+        store.chmod(0o644)
+        assert hashlib.sha256(store.read_bytes()).hexdigest() == before
+        conn = sqlite3.connect(str(store))
+        try:
+            assert conn.execute("PRAGMA journal_mode").fetchone()[0] == journal
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+    @pytest.mark.parametrize(
+        ("to_id", "noop"), [(BUCKET, True), ("github.com/o/other", None)],
+        ids=["same bucket", "another bucket"],
+    )
+    def test_an_absent_store_marks_the_no_op_and_creates_nothing(
+        self, identity_env, monkeypatch, capfd, apply, to_id, noop
+    ):
+        memory_dir = identity_env / "user-memory"
+        memory_dir.mkdir()
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
+        monkeypatch.chdir(identity_env)
+
+        code, envelope = _cli(
+            ["project-id", "rekey", f"--from={self.BUCKET}", f"--to={to_id}",
+             *(["--apply", "--into-another-repository"] if apply else [])],
+            capfd,
+        )
+
+        result = envelope.get("result", {})
+        assert (code, result.get("store_absent"), result.get("noop")) == (0, True, noop), envelope
+        assert list(memory_dir.iterdir()) == []
+
+
+class TestTheRekeyRefusalContract:
+    """A defaulted `--to` moves only this checkout's own, non-excluded bucket.
+
+    Catches the printed remedy moving another checkout's live bucket into
+    this repository's id: the gate excluded it, the command did not ask.
+    """
+
+    def test_an_excluded_bucket_with_a_defaulted_target_is_refused(
+        self, excluded_rig, store, capfd
+    ):
+        before = _snapshot(store)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--apply", "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 1
+        assert envelope["error"] == "REKEY_REFUSED"
+        assert _snapshot(store) == before
+
+    def test_the_same_move_with_an_explicit_target_applies(
+        self, excluded_rig, store, capfd
+    ):
+        code, envelope = _cli(
+            [
+                "project-id", "rekey", "--from=proj", "--to=github.com/o/two",
+                "--apply", "--into-another-repository", "--db-path", str(store),
+            ],
+            capfd,
+        )
+        assert code == 0, envelope
+        result = envelope["result"]
+        assert result["memories"] == 1
+        assert result["target_defaulted"] is False
+        assert result["legacy_verdict"] == "excluded"
+
+    def test_an_apply_into_another_repositorys_id_is_refused(
+        self, excluded_rig, store, capfd
+    ):
+        """The cwd is github.com/o/one, so --to=github.com/o/two is another
+        repository's id: --apply is refused as bad input (exit 2) and moves
+        nothing, while a dry run still plans. RED WHEN an apply into another
+        repository's canonical id runs without --into-another-repository."""
+        before = _snapshot(store)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--to=github.com/o/two",
+             "--apply", "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 2 and envelope["error"] == "INVALID_INPUT", envelope
+        assert "not this checkout's id ('github.com/o/one')" in envelope["message"], envelope
+        assert _snapshot(store) == before
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--to=github.com/o/two",
+             "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 0 and envelope["result"]["dry_run"] is True, envelope
+
+    @pytest.mark.parametrize("variant", ["Proj", "PROJ"])
+    def test_a_case_variant_of_an_excluded_bucket_into_this_checkouts_id_is_refused(
+        self, excluded_rig, store, capfd, variant
+    ):
+        """'proj' is excluded here (its rows are in two/proj), so a bucket that
+        differs from it only by case is not this checkout's to claim either:
+        the dry run and the apply refuse, and only --from-another-repository
+        moves it. RED WHEN the case variant moves without the flag."""
+        _seed(store, variant, memory_id="variant01", path="v.py")
+        before = _snapshot(store)
+        argv = ["project-id", "rekey", f"--from={variant}", "--to=github.com/o/one",
+                "--db-path", str(store)]
+        for apply in ([], ["--apply"]):
+            code, envelope = _cli([*argv, *apply], capfd)
+            assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
+            assert "differs only by case from the legacy bucket 'proj'" in envelope["message"], envelope
+            assert _snapshot(store) == before
+        code, envelope = _cli([*argv, "--apply", "--from-another-repository"], capfd)
+        assert code == 0 and envelope["result"]["memories"] == 1, envelope
+
+    def test_a_rename_into_this_checkouts_own_id_applies(
+        self, excluded_rig, store, capfd
+    ):
+        """A repository rename: the checkout's origin already names the new id
+        (github.com/o/one). An old canonical bucket no file row here places is
+        not detected as an earlier id, so it moves into it only with
+        --from-another-repository, and needs no --into-another-repository.
+        RED WHEN the guard refuses a move into this checkout's own id that
+        the user approved."""
+        _seed(store, "github.com/o/old-name", memory_id="renamed01", path="r.py")
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=github.com/o/old-name",
+             "--to=github.com/o/one", "--apply", "--from-another-repository",
+             "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1, envelope
+
+    @pytest.mark.parametrize("apply", [False, True], ids=["dry-run", "apply"])
+    @pytest.mark.parametrize(
+        ("source", "reason"),
+        [("proj", "was excluded for this checkout"),
+         ("github.com/o/two", "neither this checkout's nor a detected earlier id of it (no file row here places it)")],
+        ids=["excluded bucket", "another repository's id"],
+    )
+    def test_a_foreign_bucket_into_this_checkouts_own_id_is_refused(
+        self, excluded_rig, store, capfd, apply, source, reason
+    ):
+        """A bucket the read rules say is not this checkout's (the excluded
+        legacy bucket, whose rows are in two/proj, or another repository's
+        canonical id) is not merged into this checkout's id: the dry run and
+        the apply both refuse, and only --from-another-repository moves it.
+        RED WHEN the move runs, or the dry run reports a clean plan."""
+        if source.startswith("github.com/"):
+            _seed(store, source, memory_id="theirs001", path="t.py")
+        before = _snapshot(store)
+        argv = ["project-id", "rekey", f"--from={source}", "--to=github.com/o/one",
+                "--db-path", str(store), *(["--apply"] if apply else [])]
+        code, envelope = _cli(argv, capfd)
+        assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
+        assert reason in envelope["message"], envelope
+        assert "--from-another-repository" in envelope["message"], envelope
+        # Only a canonical source can be an earlier id the detection missed.
+        assert ("earlier id of this repository that could not be detected" in envelope["message"]) is (
+            source.startswith("github.com/")
+        ), envelope
+        assert _snapshot(store) == before
+        code, envelope = _cli([*argv, "--from-another-repository"], capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1, envelope
+        assert (_snapshot(store) == before) is not apply
+
+    def test_a_canonical_source_with_a_defaulted_target_is_refused(
+        self, excluded_rig, store, capfd
+    ):
+        _seed(store, "github.com/o/other", memory_id="other0001", path="x.py")
+        before = _snapshot(store)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=github.com/o/other", "--apply",
+             "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 1 and envelope["error"] == "REKEY_REFUSED"
+        assert _snapshot(store) == before
+
+    def test_a_bucket_that_is_not_the_candidate_with_a_defaulted_target_is_refused(
+        self, excluded_rig, store, capfd
+    ):
+        _seed(store, "foreign", memory_id="foreign01", path="y.py")
+        before = _snapshot(store)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=foreign", "--apply", "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 1 and envelope["error"] == "REKEY_REFUSED"
+        assert _snapshot(store) == before
+
+    def test_no_surface_renders_a_command_for_an_excluded_bucket(
+        self, excluded_rig, store, capfd, caplog
+    ):
+        import logging
+
+        with caplog.at_level(logging.WARNING):
+            code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+            assert code == 0
+            code, status = _cli(["status", "--db-path", str(store)], capfd)
+            assert code == 0
+        assert show["result"]["legacy_scope"]["excluded"] is True
+        surfaces = [json.dumps(show), json.dumps(status)] + [
+            record.getMessage() for record in caplog.records
+        ]
+        offenders = [text for text in surfaces if "--from=proj" in text]
+        assert offenders == []
+        rows = {row["id"]: row for row in show["result"]["candidates"]}
+        assert rows["proj"]["relation"] == "legacy_candidate"
+        assert rows["proj"]["rekey"] is None
+        assert rows["github.com/o/one"]["relation"] == "current"
+
+    def test_every_rendered_command_names_its_target(self, identity_env, monkeypatch):
+        from scripts import memory_api
+
+        commands = [
+            memory_api.render_rekey_command("a", "github.com/o/a"),
+            memory_api.render_rekey_command("a", "github.com/o/a", db_path="/s.db"),
+        ]
+        for command in commands:
+            assert "--to=github.com/o/a" in command and "--from=a" in command
+
+
+class TestAPrintedCommandRuns:
+    """A printed rekey command, pasted as printed, runs.
+
+    Catches an id beginning with `-` reaching argparse as an option, so the
+    remedy exits 2 'expected one argument' for a legal folder name.
+    """
+
+    @pytest.mark.parametrize("name", ["-weird", "--to"])
+    def test_a_dash_led_bucket_id_round_trips(
+        self, identity_env, store, monkeypatch, capfd, name
+    ):
+        import os
+        import shlex
+        import subprocess
+        import sys
+
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        memory_api._UNPROVEN_WARNED.clear()
+        repo = make_repo(identity_env / name, remote="https://github.com/o/dash.git")
+        _seed(store, name, memory_id="dash0001", path="rel.py")
+        monkeypatch.chdir(repo)
+        code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert code == 0
+        command = show["result"]["legacy_scope"]["rekey"]
+        assert command and "--to=" in command
+        argv = shlex.split(command)
+        argv[0] = sys.executable
+        proc = subprocess.run(
+            argv, capture_output=True, text=True, cwd=str(repo), timeout=120,
+            env=dict(os.environ),
+        )
+        assert proc.returncode == 0, proc.stderr
+        assert json.loads(proc.stdout)["result"]["dry_run"] is True
+
+
+class TestNoRekeyRefusalRendersAnAngleBracket:
+    """Every rekey refusal, and the show and status remedies, print as typed.
+
+    Catches a placeholder written with angle brackets: the envelope escaper
+    renders `<` as `<U+003C>`, so `--to=<canonical id>` reached the operator
+    as `--to=<U+003C>canonical id>`. The inputs below carry no `<`, so any
+    `<` or marker in the output came from the message text itself.
+    """
+
+    @staticmethod
+    def _rendered(argv, capfd):
+        from scripts.cli import main
+
+        capfd.readouterr()
+        with pytest.raises(SystemExit) as exit_info:
+            main(argv)
+        captured = capfd.readouterr()
+        return exit_info.value.code, captured.out + captured.err
+
+    def _assert_plain(self, rendered):
+        """No marker anywhere; no `<` in any error message. Returns the
+        number of error envelopes read, so a caller can require one."""
+        assert "U+003C" not in rendered, rendered
+        errors = 0
+        for line in rendered.splitlines():
+            if line.startswith('{"ok": false'):
+                errors += 1
+                assert "<" not in json.loads(line)["message"], line
+        return errors
+
+    @pytest.mark.parametrize("args, code, error", [
+        (["--candidates", "--apply"], 2, "INVALID_INPUT"),
+        (["--from=proj", "--dry-run", "--apply"], 2, "INVALID_INPUT"),
+        ([], 2, "INVALID_INPUT"),
+        (["--from=proj", "--to=other"], 2, "INVALID_INPUT"),
+        (["--from=proj"], 1, "REKEY_REFUSED"),
+        (["--from=github.com/o/other"], 1, "REKEY_REFUSED"),
+        (["--from=foreign"], 1, "REKEY_REFUSED"),
+    ], ids=["candidates-with-option", "dry-run-and-apply", "no-from",
+            "non-canonical-to", "excluded", "canonical-source", "not-candidate"])
+    def test_a_refusal_in_a_repository(self, excluded_rig, store, capfd, args, code, error):
+        _seed(store, "github.com/o/other", memory_id="other0001", path="x.py")
+        _seed(store, "foreign", memory_id="foreign01", path="y.py")
+        got, rendered = self._rendered(
+            ["project-id", "rekey", *args, "--db-path", str(store)], capfd
+        )
+        assert got == code, rendered
+        assert f'"error": "{error}"' in rendered, rendered
+        assert self._assert_plain(rendered) == 1
+
+    @pytest.mark.parametrize("remote", [None, UNREPRESENTABLE], ids=["no-repository", "declined"])
+    def test_the_unresolved_target_refusal(self, identity_env, store, monkeypatch, capfd, remote):
+        if remote is None:
+            where = identity_env / "proj"
+            where.mkdir()
+        else:
+            where = make_repo(identity_env / "proj", remote=remote)
+        monkeypatch.chdir(where)
+        got, rendered = self._rendered(
+            ["project-id", "rekey", "--from=proj", "--db-path", str(store)], capfd
+        )
+        assert got == 1, rendered
+        assert "PROJECT_IDENTITY_UNRESOLVED" in rendered
+        assert "--to=host/owner/repo" in rendered, rendered
+        assert self._assert_plain(rendered) == 1
+
+    @pytest.mark.parametrize("command", [["project-id", "show"], ["status"]])
+    def test_the_show_and_status_remedies_for_an_excluded_bucket(
+        self, excluded_rig, store, capfd, command
+    ):
+        got, rendered = self._rendered([*command, "--db-path", str(store)], capfd)
+        assert got == 0, rendered
+        assert self._assert_plain(rendered) == 0
+
+    @pytest.mark.parametrize("command", [["project-id", "show"], ["status"]])
+    def test_the_show_and_status_remedies_for_a_declined_repository(
+        self, identity_env, store, monkeypatch, capfd, caplog, command
+    ):
+        """The remedy is the decline warning; the envelope carries its cause."""
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote=UNREPRESENTABLE))
+        got, rendered = self._rendered([*command, "--db-path", str(store)], capfd)
+        warned = "\n".join(caplog.messages)
+        assert got == 0, rendered
+        assert "origin_unrepresentable" in rendered, rendered
+        assert "no single project id can be read" in warned, warned
+        assert self._assert_plain(rendered + warned) == 0
+
+
+def _rendered_help() -> dict:
+    """Every parser's `format_help()`, keyed by its command path, with the
+    wrapping argparse adds collapsed to single spaces."""
+    import argparse
+
+    from scripts.cli import build_parser
+
+    found = {}
+
+    def walk(parser, path):
+        found[path] = " ".join(parser.format_help().split())
+        for action in parser._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                for name, child in action.choices.items():
+                    walk(child, f"{path} {name}".strip())
+
+    walk(build_parser(), "")
+    return found
+
+
+def test_the_rekey_help_example_matches_the_other_examples():
+    """The rekey example names no --dry-run (a dry run is the default) and
+    runs the same CLI path as every other example, rendered by the shared
+    helper. RED WHEN the example carries --dry-run or another CLI path."""
+    import sys
+
+    from scripts.memory_api import render_rekey_command
+
+    rekey = _rendered_help()["project-id rekey"]
+    example = rekey.split("Examples:", 1)[1].strip()
+    assert example == render_rekey_command(
+        "<id>", "<canonical>", prog=sys.argv[0], example_prog=True
+    ), example
+    assert example.startswith(f'python3 "{sys.argv[0]}" project-id rekey '), example
+    assert "--dry-run" not in example
+    assert f'python3 "{sys.argv[0]}" list' in _rendered_help()[""]
+
+
+class TestTheHelpNeverSaysFollowTheCandidate:
+    """The rendered help gives the skill's rekey rule, not "follow the candidate".
+
+    Catches help text telling an operator to follow whatever bucket `show`
+    lists, which can be an excluded bucket or another repository's id, and a
+    defaulted `--to` described as always safe.
+    """
+
+    def test_no_help_says_follow_the_candidate(self):
+        rendered = _rendered_help()
+        assert {"sync", "project-id show", "project-id rekey"} <= set(rendered)
+        for path, text in rendered.items():
+            assert "follow the candidate" not in text.lower(), path
+
+    def test_the_rekey_help_requires_approval_and_names_the_limits(self):
+        text = _rendered_help()["project-id rekey"]
+        assert "--apply only with the user's explicit approval" in text, text
+        assert "never for an excluded bucket or another repository's id" in text, text
+
+    def test_the_sync_help_says_the_printed_command_previews_the_move(self):
+        """The template the sync help prints is a dry run: it previews the
+        move, and --apply, with the user's approval, performs it."""
+        text = " ".join(_rendered_help()["sync"].split())
+        assert "previews moving that bucket into the canonical id" in text, text
+        assert "--apply, only with the user's explicit approval, performs it" in text, text
+        assert "Never apply it for an excluded bucket or another repository's id" in text, text
+        assert "and moves that bucket" not in text, text
+
+    def test_the_target_defaults_only_for_this_checkouts_own_bucket(self):
+        text = _rendered_help()["project-id rekey"]
+        assert "Defaults to the detected canonical id" not in text, text
+        assert "it defaults only for this checkout's own legacy bucket" in text, text
+
+
+class TestTheSyncHelpMatchesWhatSyncReports:
+    """Each outcome the `sync` help states is the status `sync` reports.
+
+    Catches help that names the wrong status for a case: an operator reading
+    `empty` as "no CLAUDE.md" (or `unresolved` as "no identity") looks for the
+    wrong fault.
+    """
+
+    EMPTY_SENTENCE = (
+        "When project identity is unresolved or the project has no memories, "
+        "sync reports sync_status 'empty' and leaves the file untouched, except "
+        "that a resolved project with no memories whose section's every entry "
+        "names, by its Memory ID, a row of a bucket this read hides for this "
+        "checkout has the section rewritten with none ('wrote')."
+    )
+    UNRESOLVED_SENTENCE = (
+        "When the project has memories but no CLAUDE.md resolves, sync "
+        "reports 'unresolved' and writes nothing."
+    )
+
+    def _sync(self, where, store, capfd, *, row_bucket=None, claude_md=True):
+        from scripts import memory_api
+
+        for memo in (memory_api._LEGACY_SCOPE_CACHE, memory_api._EXCLUSION_WARNED):
+            memo.clear()
+        if row_bucket is not None:
+            _seed(store, row_bucket, memory_id="row000001", path="a.py")
+        target = where / "CLAUDE.md"
+        if claude_md:
+            target.write_text("# project\n", encoding="utf-8")
+        before = target.read_bytes() if claude_md else None
+        code, envelope = _cli(
+            ["sync", "--db-path", str(store), "--claude-md-root", str(where)], capfd
+        )
+        assert code == 0, envelope
+        after = target.read_bytes() if target.exists() else None
+        return envelope["result"], before == after
+
+    @pytest.mark.parametrize("remote", [UNREPRESENTABLE, None], ids=["unresolved-identity", "no-memories"])
+    def test_empty_is_an_unresolved_identity_or_no_memories(
+        self, identity_env, store, monkeypatch, capfd, remote
+    ):
+        assert self.EMPTY_SENTENCE in _rendered_help()["sync"]
+        where = make_repo(
+            identity_env / "proj", remote=remote or "https://github.com/o/proj.git"
+        )
+        monkeypatch.chdir(where)
+        # The unresolved identity holds a row too: `empty` is about the
+        # identity there, not about the store.
+        result, untouched = self._sync(
+            where, store, capfd, row_bucket="proj" if remote else None
+        )
+        assert result["sync_status"] == "empty"
+        assert (result["project_id"] is None) == (remote is not None)
+        assert untouched
+
+    STALE = (
+        "# project\n\n## Working Memory\n"
+        "<!-- Auto-managed by pact-memory skill. Full history searchable via "
+        "pact-memory skill. Keyed by folder name, so another checkout with the "
+        "same name shares this section. -->\n\n"
+        "### 2026-01-01 00:00\n**Context**: an old folder-name memory\n"
+        "**Memory ID**: {memory_id}\n"
+    )
+
+    @pytest.mark.parametrize(
+        "shape",
+        ["upgrade", "case-variant", "unrelated", "mixed", "fresh", "declined", "no-section"],
+    )
+    def test_a_stale_section_is_emptied_only_when_its_entries_are_hidden(
+        self, identity_env, store, monkeypatch, capfd, shape
+    ):
+        """upgrade: the id resolves, has no rows, the read hides this
+        checkout's old folder-name bucket (unproven), and the section's every
+        entry names a row of that bucket: it is rewritten with none ('wrote').
+        case-variant: the old bucket differs only by case ('Proj' saved from a
+        folder later renamed 'proj'), so it is never read; same outcome.
+        unrelated: the same hidden bucket (another project's, same folder
+        name), but the committed section's entry names a row it does not
+        hold: untouched. mixed: one entry names a hidden row and one does
+        not: untouched (every entry must be hidden). fresh (no rows anywhere), declined and a CLAUDE.md
+        with no section: untouched. RED WHEN the upgrade section keeps its
+        entry, or any other shape is rewritten (any-entry instead of
+        every-entry reds [mixed])."""
+        from scripts.working_memory import WORKING_MEMORY_COMMENT
+
+        skill = (Path(__file__).resolve().parents[1] / "skills" / "pact-memory" / "SKILL.md")
+        assert (
+            "A resolved project with no memories whose section's every entry "
+            "names, by its Memory ID, a row of a bucket this read hides for this "
+            "checkout (the old folder-name bucket when unproven or excluded, a "
+            "case variant or ambiguous match of it, or a submodule's suppressed "
+            "name) has the section rewritten with none, and `sync_status` is "
+            "`wrote`."
+        ) in " ".join(skill.read_text(encoding="utf-8").split())
+        remote = UNREPRESENTABLE if shape == "declined" else "https://github.com/o/proj.git"
+        where = make_repo(identity_env / "proj", remote=remote)
+        monkeypatch.chdir(where)
+        if shape == "case-variant":
+            # A base-era save from folder 'Proj', then the folder renamed to
+            # 'proj': the bucket is a case variant, never read.
+            _seed(store, "Proj", memory_id="row000001", path="a.py")
+        elif shape != "fresh":
+            _seed(store, "proj", memory_id="row000001", path="a.py")
+        target = where / "CLAUDE.md"
+        if shape == "no-section":
+            original = "# project\n"
+        else:
+            named = "foreign00001" if shape == "unrelated" else "row000001"
+            original = self.STALE.format(memory_id=named)
+            if shape == "mixed":
+                # One entry from the hidden bucket and one hand entry naming a
+                # row it does not hold: the section is not all stale.
+                original += (
+                    "\n### 2026-01-02 00:00\n**Context**: a hand entry\n"
+                    "**Memory ID**: foreign00001\n"
+                )
+        target.write_text(original, encoding="utf-8")
+        code, envelope = _cli(
+            ["sync", "--db-path", str(store), "--claude-md-root", str(where)], capfd
+        )
+        assert code == 0, envelope
+        text = target.read_text(encoding="utf-8")
+        if shape in ("upgrade", "case-variant"):
+            assert envelope["result"]["sync_status"] == "wrote", envelope
+            _code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+            if shape == "upgrade":
+                assert shown["result"]["legacy_scope"]["unproven"] is True, shown
+            else:
+                assert shown["result"]["legacy_scope"]["case_variant"] == ["Proj"], shown
+            assert "an old folder-name memory" not in text and "Keyed by folder name" not in text
+            assert WORKING_MEMORY_COMMENT in text
+        else:
+            assert envelope["result"]["sync_status"] == "empty", envelope
+            assert text == original
+
+    def _sync_stale(self, where, store, capfd, memory_id="row000001"):
+        target = where / "CLAUDE.md"
+        original = self.STALE.format(memory_id=memory_id)
+        target.write_text(original, encoding="utf-8")
+        code, envelope = _cli(
+            ["sync", "--db-path", str(store), "--claude-md-root", str(where)], capfd
+        )
+        assert code == 0, envelope
+        return envelope["result"], original, target.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("foreign", [False, True], ids=["hidden", "foreign"])
+    def test_an_ambiguous_folded_match_is_a_hidden_bucket(
+        self, identity_env, store, monkeypatch, capfd, foreign
+    ):
+        """On a filesystem that folds case, buckets 'Proj' and 'PROJ' both
+        match folder 'proj', so neither is read (ambiguous). A section whose
+        entry names a row of one of them is rewritten ('wrote'); one naming a
+        foreign row stays. RED WHEN ambiguous buckets are not counted as
+        hidden."""
+        from scripts import project_identity
+        from scripts.working_memory import WORKING_MEMORY_COMMENT
+
+        monkeypatch.setattr(project_identity, "filesystem_case_insensitive", lambda root: True)
+        where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(where)
+        _seed(store, "Proj", memory_id="row000001", path="a.py")
+        _seed(store, "PROJ", memory_id="row000002", path="b.py")
+        result, original, text = self._sync_stale(
+            where, store, capfd, "foreign00001" if foreign else "row000001"
+        )
+        _code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert shown["result"]["legacy_scope"]["ambiguous"] == ["PROJ", "Proj"], shown
+        if foreign:
+            assert result["sync_status"] == "empty" and text == original, result
+        else:
+            assert result["sync_status"] == "wrote", result
+            assert "an old folder-name memory" not in text and WORKING_MEMORY_COMMENT in text
+
+    @pytest.mark.parametrize("foreign", [False, True], ids=["hidden", "foreign"])
+    def test_a_submodules_suppressed_bucket_is_a_hidden_bucket(
+        self, identity_env, store, monkeypatch, capfd, foreign
+    ):
+        """A submodule checkout's pre-change name (its admin dir's parent,
+        'modules') is suppressed, never read. A section whose entry names a
+        row of it is rewritten ('wrote'); one naming a foreign row stays.
+        RED WHEN the suppressed bucket is not counted as hidden."""
+        from fixtures.identity_git import run_git
+        from scripts.working_memory import WORKING_MEMORY_COMMENT
+
+        upstream = make_repo(identity_env / "libup", remote="https://github.com/acme/lib.git")
+        sup = make_repo(identity_env / "super", remote="https://github.com/acme/super.git")
+        run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                str(upstream), "lib", cwd=sup)
+        lib = sup / "lib"
+        run_git("remote", "set-url", "origin", "https://github.com/acme/lib.git", cwd=lib)
+        monkeypatch.chdir(lib)
+        _seed(store, "modules", memory_id="row000001", path="a.py")
+        result, original, text = self._sync_stale(
+            lib, store, capfd, "foreign00001" if foreign else "row000001"
+        )
+        _code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert shown["result"]["legacy_scope"]["suppressed_candidate"] == "modules", shown
+        if foreign:
+            assert result["sync_status"] == "empty" and text == original, result
+        else:
+            assert result["sync_status"] == "wrote", result
+            assert "an old folder-name memory" not in text and WORKING_MEMORY_COMMENT in text
+
+    @pytest.mark.parametrize("verb", [["list"], ["search", "x"]])
+    def test_an_ambiguous_folded_match_is_named_on_stdout(
+        self, identity_env, store, monkeypatch, capfd, verb
+    ):
+        """list and search put the read's legacy_scope on stdout for an
+        ambiguous folded match (never read), by the stale-section rule
+        (`hidden_legacy_buckets`). RED WHEN only the candidate and case
+        variants count."""
+        from scripts import project_identity
+
+        monkeypatch.setattr(project_identity, "filesystem_case_insensitive", lambda root: True)
+        where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(where)
+        _seed(store, "Proj", memory_id="row000001", path="a.py")
+        _seed(store, "PROJ", memory_id="row000002", path="b.py")
+        code, envelope = _cli([*verb, "--db-path", str(store)], capfd)
+        assert code == 0 and envelope["result"] == [], envelope
+        assert envelope["legacy_scope"]["ambiguous"] == ["PROJ", "Proj"], envelope
+
+    @pytest.mark.parametrize("verb", [["list"], ["search", "x"]])
+    def test_a_submodules_suppressed_bucket_is_named_on_stdout(
+        self, identity_env, store, monkeypatch, capfd, verb
+    ):
+        """A submodule's suppressed pre-change bucket ('modules') is never
+        read; list and search name it on stdout. RED WHEN it is left out."""
+        from fixtures.identity_git import run_git
+
+        upstream = make_repo(identity_env / "libup", remote="https://github.com/acme/lib.git")
+        sup = make_repo(identity_env / "super", remote="https://github.com/acme/super.git")
+        run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q",
+                str(upstream), "lib", cwd=sup)
+        lib = sup / "lib"
+        run_git("remote", "set-url", "origin", "https://github.com/acme/lib.git", cwd=lib)
+        monkeypatch.chdir(lib)
+        _seed(store, "modules", memory_id="row000001", path="a.py")
+        code, envelope = _cli([*verb, "--db-path", str(store)], capfd)
+        assert code == 0 and envelope["result"] == [], envelope
+        assert envelope["legacy_scope"]["suppressed_candidate"] == "modules", envelope
+
+    def test_control_a_read_that_hides_nothing_adds_no_key(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(where)
+        _seed(store, "github.com/o/proj", memory_id="row000001", path="a.py")
+        code, envelope = _cli(["list", "--db-path", str(store)], capfd)
+        assert code == 0 and len(envelope["result"]) == 1 and "legacy_scope" not in envelope, envelope
+
+    def test_unresolved_is_memories_with_no_claude_md(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        assert self.UNRESOLVED_SENTENCE in _rendered_help()["sync"]
+        where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(where)
+        result, untouched = self._sync(
+            where, store, capfd, row_bucket="github.com/o/proj", claude_md=False
+        )
+        assert result["sync_status"] == "unresolved"
+        assert untouched and not (where / "CLAUDE.md").exists()
+
+    def test_the_same_project_writes_with_a_claude_md(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        """Control: the row and the identity above are writable."""
+        where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(where)
+        result, untouched = self._sync(where, store, capfd, row_bucket="github.com/o/proj")
+        assert result["sync_status"] == "wrote" and result["projected"] == 1
+        assert not untouched
+
+
+def _not_a_database(path: Path, kind: str) -> Path:
+    """A present store file sqlite cannot read: random bytes, or a real
+    store whose pages past the header were overwritten."""
+    if kind == "garbage":
+        path.write_bytes(b"not a sqlite store, " * 8)
+        return path
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE memories (id TEXT)")
+    conn.executemany(
+        "INSERT INTO memories VALUES (?)", [(str(i) * 50,) for i in range(200)]
+    )
+    conn.commit()
+    conn.close()
+    data = bytearray(path.read_bytes())
+    data[100:4096] = b"\xff" * (4096 - 100)
+    path.write_bytes(bytes(data))
+    return path
+
+
+class TestAStoreThatIsNotADatabaseNamesItsRemedy:
+    """Each read-only verb names the remedy for a store sqlite cannot read.
+
+    Catches the bare `SYSTEM_ERROR: file is not a database` (or `database
+    disk image is malformed`): the operator sees sqlite's words and no check
+    to make, while an unopenable store already names one.
+    """
+
+    @pytest.mark.parametrize("kind", ["garbage", "corrupt"])
+    @pytest.mark.parametrize("argv, code, error", [
+        (["project-id", "show"], 3, "SYSTEM_ERROR"),
+        (["status"], 3, "SYSTEM_ERROR"),
+        (["project-id", "rekey", "--candidates"], 3, "SYSTEM_ERROR"),
+        (["project-id", "rekey", "--from=proj", "--to=github.com/o/p"], 3, "REKEY_FAILED"),
+    ], ids=["show", "status", "candidates", "rekey-dry-run"])
+    @pytest.mark.parametrize("where", ["no-repository", "repository"])
+    def test_the_refusal_names_the_check(
+        self, identity_env, monkeypatch, capfd, argv, code, error, kind, where
+    ):
+        """In a repository the legacy-bucket probe reads the store first."""
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        store = _not_a_database(identity_env / "store.db", kind)
+        before = store.read_bytes()
+        monkeypatch.chdir(
+            make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+            if where == "repository"
+            else identity_env
+        )
+        got, envelope = _cli([*argv, "--db-path", str(store)], capfd)
+        assert got == code, envelope
+        assert envelope["error"] == error
+        message = envelope["message"]
+        assert "exists but cannot be opened" in message, message
+        assert "is a PACT memory store" in message, message
+        assert "no memory was written to it" in message, message
+        assert store.read_bytes() == before
+
+    @pytest.mark.parametrize("argv", [["project-id", "show"], ["status"]], ids=["show", "status"])
+    def test_a_default_store_names_no_flag_the_caller_did_not_pass(
+        self, identity_env, monkeypatch, capfd, argv
+    ):
+        """With no --db-path the remedy names the file, not a flag."""
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        home = identity_env / "memdir"
+        home.mkdir()
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(home))
+        store = _not_a_database(home / "memory.db", "garbage")
+        monkeypatch.chdir(identity_env)
+        got, envelope = _cli(argv, capfd)
+        assert got != 0, envelope
+        message = envelope["message"]
+        assert "is a PACT memory store" in message, message
+        assert "--db-path" not in message, message
+        assert store.read_bytes() == b"not a sqlite store, " * 8
+
+
+def _page_corrupt_store(path: Path, journal: str = "wal") -> Path:
+    """A store with the real schema whose MIDDLE page is overwritten.
+
+    The schema page is intact, so the store opens and a narrow query can
+    still answer; only a read that reaches the overwritten page fails.
+    `journal="delete"` leaves it in rollback-journal mode, as an older store
+    may be.
+    """
+    conn = sqlite3.connect(str(path))
+    create_test_schema(conn)
+    conn.executemany(
+        "INSERT INTO memories (id, context, project_id, session_id, created_at, updated_at) "
+        "VALUES (?, ?, 'github.com/o/proj', 's', ?, ?)",
+        [(f"m{i:05d}", "x" * 300, CREATED_AT, CREATED_AT) for i in range(400)],
+    )
+    conn.commit()
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    if journal == "delete":
+        conn.execute("PRAGMA journal_mode=DELETE")
+    conn.close()
+    data = bytearray(path.read_bytes())
+    page = 4096
+    middle = (len(data) // page // 2) * page
+    data[middle:middle + page] = bytes((i * 37 + 11) % 256 for i in range(page))
+    path.write_bytes(bytes(data))
+    return path
+
+
+class TestStatusNeverWritesIntoACorruptStore:
+    """`status` on a page-corrupt store names the remedy and writes nothing.
+
+    Catches the embedding catch-up inserting vectors into a store whose
+    pending query still answers although its pages are corrupt, and the bare
+    sqlite text in place of the store remedy.
+    """
+
+    @pytest.fixture
+    def catchup(self, tmp_path, monkeypatch):
+        """Let the catch-up run once in this test, with one pending memory,
+        and record each embedding instead of loading a model. The recorder
+        writes a row, as an embedding does."""
+        from scripts import embedding_catchup, memory_init
+
+        monkeypatch.setattr(
+            memory_init, "_get_embedding_attempted_path",
+            lambda: tmp_path / "catchup-attempted",
+        )
+        monkeypatch.setattr(embedding_catchup, "get_available_ram_mb", lambda: 1e9)
+        monkeypatch.setattr(
+            embedding_catchup, "get_unembedded_memories",
+            lambda project_id=None, limit=20: ["m00001"],
+        )
+        embedded = []
+
+        def record(memory_id):
+            from scripts.config import resolve_db_path
+
+            embedded.append(memory_id)
+            conn = sqlite3.connect(str(resolve_db_path()))
+            conn.execute(
+                "INSERT INTO files (id, path, project_id) VALUES ('f-x', 'x.py', 'p')"
+            )
+            conn.commit()
+            conn.close()
+            return True
+
+        monkeypatch.setattr(embedding_catchup, "embed_single_memory", record)
+        return embedded
+
+    def _status(self, store, capfd):
+        from scripts.cli import main
+
+        capfd.readouterr()
+        with pytest.raises(SystemExit) as exit_info:
+            main(["status", "--db-path", str(store)])
+        captured = capfd.readouterr()
+        return exit_info.value.code, captured.out + captured.err
+
+    @staticmethod
+    def _first_call_outside_the_read(store):
+        """`status` is a read, and a read postpones the catch-up on a store
+        with no vector table. The first call outside the read scope runs it,
+        so that is where the integrity check must stop it."""
+        from scripts import memory_init
+        from scripts.config import store_scope
+
+        assert memory_init._catchup_deferred, "the read did not postpone the catch-up"
+        with store_scope(store):
+            memory_init.ensure_memory_ready()
+
+    def test_a_corrupt_store_is_left_byte_identical(
+        self, identity_env, monkeypatch, capfd, catchup
+    ):
+        store = _page_corrupt_store(identity_env / "store.db")
+        before = store.read_bytes()
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        code, rendered = self._status(store, capfd)
+        assert store.read_bytes() == before
+        assert code == 3, rendered
+        assert "exists but cannot be opened" in rendered, rendered
+        assert "is a PACT memory store" in rendered, rendered
+        self._first_call_outside_the_read(store)
+        assert catchup == [], "the catch-up embedded into a corrupt store"
+
+    # The header fields a read-write open may rewrite: the file-format
+    # versions (WAL), the change counter and the version-valid-for number.
+    HEADER_FIELDS_AN_OPEN_REWRITES = {18, 19, *range(24, 28), *range(92, 100)}
+
+    def test_a_rollback_journal_store_keeps_every_page_and_says_so(
+        self, identity_env, monkeypatch, capfd, catchup
+    ):
+        """Opening a rollback-journal store switches it to WAL in the header,
+        so the remedy may only claim what holds: no memory was written."""
+        store = _page_corrupt_store(identity_env / "store.db", journal="delete")
+        before = store.read_bytes()
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        code, rendered = self._status(store, capfd)
+        self._first_call_outside_the_read(store)
+        after = store.read_bytes()
+        assert catchup == []
+        assert code == 3, rendered
+        assert "no memory was written to it" in rendered, rendered
+        assert "not modified" not in rendered, rendered
+        assert len(after) == len(before)
+        assert after[100:] == before[100:], "a page past the header changed"
+        changed = {i for i in range(100) if after[i] != before[i]}
+        assert changed <= self.HEADER_FIELDS_AN_OPEN_REWRITES, sorted(changed)
+
+    def test_a_check_that_reports_rows_instead_of_raising_stops_the_catch_up(
+        self, identity_env, monkeypatch, capfd, catchup
+    ):
+        """`quick_check` RETURNS rows, rather than raising, for a store whose
+        pages read but whose structure is wrong (here a freelist count), so
+        the rows are the only signal and must stop the catch-up."""
+        import struct
+
+        store = identity_env / "store.db"
+        conn = sqlite3.connect(str(store))
+        create_test_schema(conn)
+        conn.execute(
+            "INSERT INTO memories (id, context, project_id, session_id, created_at, updated_at) "
+            "VALUES ('m00001', 'c', 'github.com/o/proj', 's', ?, ?)",
+            (CREATED_AT, CREATED_AT),
+        )
+        conn.commit()
+        conn.close()
+        data = bytearray(store.read_bytes())
+        data[36:40] = struct.pack(">I", 999)
+        store.write_bytes(bytes(data))
+        check = sqlite3.connect(store.resolve().as_uri() + "?mode=ro", uri=True)
+        try:
+            rows = check.execute("PRAGMA quick_check").fetchall()
+        finally:
+            check.close()
+        assert rows != [("ok",)], "precondition: the check must report rows"
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        self._status(store, capfd)
+        self._first_call_outside_the_read(store)
+        assert catchup == [], "the catch-up embedded into a store that failed its check"
+
+    def test_a_healthy_vector_store_still_embeds_through_the_real_catch_up(
+        self, identity_env, monkeypatch, capfd
+    ):
+        """Unpatched catch-up on an intact store that already has vec_memories
+        and vectors: the integrity check must pass and the pending memory must
+        gain its vector.
+
+        Catches a check that judges a healthy vec0 store as corrupt, which
+        would stop every later embedding silently. Which driver and extension
+        the check uses is pinned by the spy arm below, because on a store this
+        healthy a check on another driver, or without the extension, still
+        answers "ok".
+        """
+        sqlite_vec = pytest.importorskip("sqlite_vec")
+        import struct
+
+        from scripts import database, embedding_catchup, embeddings, memory_init
+
+        assert database.SQLITE_EXTENSIONS_ENABLED, "no extension loading: nothing to prove"
+        if embeddings.generate_embedding("vector path probe") is None:
+            pytest.skip("no embedding model available, so the catch-up cannot embed")
+        monkeypatch.setattr(
+            memory_init, "_get_embedding_attempted_path",
+            lambda: identity_env / "catchup-attempted",
+        )
+        monkeypatch.setattr(embedding_catchup, "get_available_ram_mb", lambda: 1e9)
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(repo)
+        store = identity_env / "store.db"
+        assert _cli(["setup", "--db-path", str(store)], capfd)[0] == 0
+        conn = database.sqlite3.connect(str(store))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        dim = embeddings.get_embedding_service().embedding_dimension
+        for memory_id, vector in (("embedded01", True), ("pending001", False)):
+            conn.execute(
+                "INSERT INTO memories (id, context, project_id, session_id, created_at, updated_at) "
+                "VALUES (?, 'a pending memory to embed', 'github.com/o/proj', 's', ?, ?)",
+                (memory_id, CREATED_AT, CREATED_AT),
+            )
+            if vector:
+                conn.execute(
+                    "INSERT INTO vec_memories (memory_id, project_id, embedding) VALUES (?, ?, ?)",
+                    (memory_id, "github.com/o/proj", struct.pack(f"{dim}f", *[0.1] * dim)),
+                )
+        conn.commit()
+        conn.close()
+        code, rendered = self._status(store, capfd)
+        assert code == 0, rendered
+        conn = database.sqlite3.connect(str(store))
+        conn.enable_load_extension(True)
+        sqlite_vec.load(conn)
+        try:
+            embedded = {
+                row[0] for row in conn.execute("SELECT memory_id FROM vec_memories")
+            }
+        finally:
+            conn.close()
+        assert embedded == {"embedded01", "pending001"}, embedded
+
+    def test_the_check_connects_through_the_store_driver_and_loads_its_extension(
+        self, identity_env, monkeypatch, capfd
+    ):
+        """Spy arm: the integrity check opens ONE read-only connection through
+        the module `database` binds as its driver, and loads the vector
+        extension on that same connection before it reads.
+
+        RED WHEN the check imports its own sqlite3 (the spy then sees no
+        connection), opens the store read-write, or skips the extension load
+        or runs it on another connection.
+        """
+        from scripts import config, database, embedding_catchup
+
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        store = identity_env / "store.db"
+        assert _cli(["setup", "--db-path", str(store)], capfd)[0] == 0
+        monkeypatch.setattr(config, "resolve_db_path", lambda: store)
+
+        real_driver = database.sqlite3
+        opened = []
+
+        class DriverSpy:
+            def __getattr__(self, name):
+                return getattr(real_driver, name)
+
+            def connect(self, *args, **kwargs):
+                connection = real_driver.connect(*args, **kwargs)
+                opened.append((args, kwargs, connection))
+                return connection
+
+        monkeypatch.setattr(database, "sqlite3", DriverSpy())
+        real_load = embedding_catchup._load_vector_extension
+        loaded_on = []
+
+        def load_spy(connection):
+            loaded_on.append(connection)
+            return real_load(connection)
+
+        monkeypatch.setattr(embedding_catchup, "_load_vector_extension", load_spy)
+
+        assert embedding_catchup._store_integrity_fault() is None
+        assert len(opened) == 1, opened
+        args, kwargs, connection = opened[0]
+        assert kwargs.get("uri") is True and str(args[0]).endswith("?mode=ro"), (args, kwargs)
+        assert len(loaded_on) == 1 and loaded_on[0] is connection, loaded_on
+
+    @pytest.mark.parametrize("journal", ["wal", "delete"])
+    def test_the_real_pending_query_writes_no_schema(
+        self, identity_env, monkeypatch, capfd, journal
+    ):
+        """Unpatched: the real pending query and the real integrity check run.
+
+        A store without a vector table is the shape where the pending query's
+        connection used to CREATE vec_memories before the check.
+        """
+        pytest.importorskip("sqlite_vec")
+        from scripts import database, embedding_catchup, memory_init
+
+        assert database.SQLITE_EXTENSIONS_ENABLED, "no extension loading: nothing to prove"
+        monkeypatch.setattr(
+            memory_init, "_get_embedding_attempted_path",
+            lambda: identity_env / "catchup-attempted",
+        )
+        monkeypatch.setattr(embedding_catchup, "get_available_ram_mb", lambda: 1e9)
+        queried = []
+        real_query = embedding_catchup.get_unembedded_memories
+
+        def recording_query(*args, **kwargs):
+            result = real_query(*args, **kwargs)
+            queried.append(list(result))
+            return result
+
+        monkeypatch.setattr(embedding_catchup, "get_unembedded_memories", recording_query)
+        store = _page_corrupt_store(identity_env / "store.db", journal=journal)
+        before = store.read_bytes()
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        code, rendered = self._status(store, capfd)
+        assert queried == [], "the read ran the pending query instead of postponing it"
+        self._first_call_outside_the_read(store)
+        after = store.read_bytes()
+        assert queried and queried[0], "the real pending query found no work"
+        assert code == 3, rendered
+        assert "no memory was written to it" in rendered, rendered
+        if journal == "wal":
+            assert after == before
+        else:
+            assert after[100:] == before[100:] and len(after) == len(before)
+
+    def test_an_intact_store_still_gets_its_catch_up(
+        self, identity_env, monkeypatch, capfd, catchup
+    ):
+        """Control: the integrity check passes and the pending memory embeds."""
+        store = identity_env / "store.db"
+        conn = sqlite3.connect(str(store))
+        create_test_schema(conn)
+        conn.close()
+        monkeypatch.chdir(make_repo(identity_env / "proj", remote="https://github.com/o/proj.git"))
+        code, rendered = self._status(store, capfd)
+        assert code == 0, rendered
+        assert catchup == []
+        self._first_call_outside_the_read(store)
+        assert catchup == ["m00001"]
+
+
+# Each read-only verb, with the exit code its store fault reports.
+# Every verb answers a store fault with exit 3, the operational-fault code;
+# exit 2 is bad input.
+STORE_FAULT_COMMANDS = {
+    "show": (["project-id", "show"], 3),
+    "status": (["status"], 3),
+    "candidates": (["project-id", "rekey", "--candidates"], 3),
+    "rekey-dry-run": (["project-id", "rekey", "--from=proj", "--to=github.com/o/p"], 3),
+    "list": (["list"], 3),
+    "search": (["search", "anything"], 3),
+}
+# A page-corrupt store faults only where a read reaches the overwritten page;
+# these are the verbs that do, from inside the repository.
+CORRUPT_STORE_FAULTS = ("list", "search", "status")
+
+
+class TestAStoreFaultNamesItsRemedyOnce:
+    """Every store-fault message carries the remedy exactly once.
+
+    Catches a wrapper that meets an error whose text already IS the remedy
+    and builds it again, so the operator reads "exists but cannot be opened
+    (... exists but cannot be opened (...) ...)".
+    """
+
+    @staticmethod
+    def _store(path: Path, kind: str) -> Path:
+        if kind == "garbage":
+            return _not_a_database(path, "garbage")
+        if kind == "corrupt":
+            return _page_corrupt_store(path)
+        conn = sqlite3.connect(str(path))
+        create_test_schema(conn)
+        conn.close()
+        path.chmod(0)
+        return path
+
+    @pytest.mark.parametrize(
+        "kind, command, where",
+        [
+            # The mode-000 store is unreadable only to a non-root process.
+            pytest.param(
+                kind, command, where,
+                marks=[pytest.mark.requires_non_root] if kind == "mode000" else [],
+            )
+            for kind in ("garbage", "mode000")
+            for command in STORE_FAULT_COMMANDS
+            for where in ("repository", "outside")
+        ]
+        + [("corrupt", command, "repository") for command in CORRUPT_STORE_FAULTS],
+    )
+    def test_the_remedy_appears_once(
+        self, identity_env, monkeypatch, capfd, kind, command, where
+    ):
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        store = self._store(identity_env / "store.db", kind)
+        monkeypatch.chdir(
+            make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+            if where == "repository"
+            else identity_env
+        )
+        argv, code = STORE_FAULT_COMMANDS[command]
+        try:
+            got, envelope = _cli([*argv, "--db-path", str(store)], capfd)
+        finally:
+            store.chmod(0o600)
+        assert got == code, envelope
+        assert envelope["message"].count("exists but cannot be opened") == 1, envelope
+
+
+def _clear_disclosure_memos():
+    from scripts import memory_api
+
+    for memo in (
+        memory_api._LEGACY_SCOPE_CACHE, memory_api._EXCLUSION_WARNED,
+        memory_api._UNPROVEN_WARNED, memory_api._CASE_VARIANT_WARNED,
+    ):
+        memo.clear()
+
+
+class TestADefaultedTargetRefusesAnUnprovenBucket:
+    """A defaulted `--to` claims only what the read gate admits.
+
+    Catches the rekey default accepting a bucket the read gate refused as
+    unproven: no file row places it and no session from this repository
+    wrote it, so it may be another checkout's rows under the same name.
+    """
+
+    def _rig(self, identity_env, monkeypatch, store, evidence):
+        from fixtures.identity_git import seed_session_evidence
+
+        _clear_disclosure_memos()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        _seed(store, "proj", memory_id="legacy0001", path="src/relative.py")
+        if evidence:
+            seed_session_evidence(identity_env / "home" / ".claude", repo, "legacy-session")
+        monkeypatch.chdir(repo)
+
+    def test_an_unproven_bucket_is_refused(self, identity_env, store, monkeypatch, capfd):
+        self._rig(identity_env, monkeypatch, store, evidence=False)
+        before = _snapshot(store)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--apply", "--db-path", str(store)], capfd
+        )
+        assert code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
+        assert "is unproven" in envelope["message"]
+        assert _snapshot(store) == before
+
+    @pytest.mark.parametrize(
+        "cause, clause, counts",
+        [
+            (
+                "no_session",
+                "no file row places it and no session launched at the root of "
+                "this repository or of one of its linked worktrees wrote it",
+                (0, 0, 0, 0, 0, 1),
+            ),
+            (
+                "recorded_elsewhere",
+                "1 of its memories were written by sessions recorded at "
+                "another existing folder (0 by sessions recorded here)",
+                (0, 0, 0, 0, 1, 0),
+            ),
+            (
+                "subfolder_launch",
+                "no file row places it, and the sessions recorded as writing "
+                "it were launched in a "
+                "subfolder of this repository",
+                (0, 1, 0, 0, 0, 0),
+            ),
+            (
+                "description_newer",
+                "no file row places it, and this repository's `description` "
+                "file changed after the "
+                "sessions that wrote it started",
+                (0, 0, 1, 0, 0, 0),
+            ),
+            (
+                "undated",
+                "no file row places it, and the sessions recorded here that "
+                "wrote it have no confirmed start",
+                (0, 0, 0, 1, 0, 0),
+            ),
+        ],
+    )
+    def test_the_refusal_names_the_cause_and_the_counts(
+        self, identity_env, store, monkeypatch, capfd, cause, clause, counts
+    ):
+        """The refusal says why the read gate refused the bucket, in the read
+        warning's words, and how many of its memories each kind of session
+        wrote.
+
+        RED WHEN the refusal states one fixed cause, or drops a count."""
+        from fixtures.identity_git import seed_session_evidence
+
+        self._rig(identity_env, monkeypatch, store, evidence=False)
+        repo = identity_env / "proj"
+        config = identity_env / "home" / ".claude"
+        if cause == "recorded_elsewhere":
+            elsewhere = identity_env / "delivered" / "proj"
+            elsewhere.mkdir(parents=True)
+            seed_session_evidence(config, elsewhere, "legacy-session")
+        elif cause == "subfolder_launch":
+            (repo / "src").mkdir()
+            seed_session_evidence(config, repo / "src", "legacy-session")
+        elif cause == "description_newer":
+            seed_session_evidence(
+                config, repo, "legacy-session", started_at="2000-01-01T00:00:00+00:00"
+            )
+        elif cause == "undated":
+            context = seed_session_evidence(config, repo, "legacy-session")
+            (context.parent / "session-journal.jsonl").unlink()
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--apply", "--db-path", str(store)], capfd
+        )
+        assert code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
+        message = envelope["message"]
+        # Elsewhere-only evidence with nothing placing it here is excluded.
+        reading = "was excluded" if cause == "recorded_elsewhere" else "is unproven"
+        assert f"--from='proj' {reading}: {clause}" in message, message
+        here, subfolder, newer, undated, elsewhere_count, unattributed = counts
+        assert (
+            f"Of its memories, {here} came from sessions recorded here, "
+            f"{subfolder} from sessions launched in a subfolder of this repository, "
+            f"{newer} from sessions that started before its `description` file "
+            f"last changed, {undated} from sessions recorded here with no confirmed "
+            f"start, {elsewhere_count} from sessions recorded at another "
+            f"existing folder, and {unattributed} from no recorded session."
+        ) in message, message
+        assert message.endswith("Nothing was moved."), message
+
+    def test_the_same_bucket_with_session_evidence_moves(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        """Control: a recorded session admits it to reads, but a bucket read on
+        session evidence alone moves only with an explicit --to."""
+        from scripts.memory_api import PACTMemory
+
+        self._rig(identity_env, monkeypatch, store, evidence=True)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--apply", "--db-path", str(store)], capfd
+        )
+        assert code == 1 and envelope["error"] == "REKEY_REFUSED", envelope
+        assert "session evidence alone" in envelope["message"], envelope
+        target = PACTMemory(db_path=store).project_id
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", f"--to={target}", "--apply",
+             "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1
+        assert envelope["result"]["target_defaulted"] is False
+
+
+class TestAPrintedRekeyCommandRunsAsPrinted:
+    """The unproven and case-variant warnings print a command that runs.
+
+    Catches the command printed through `%r` (one quoted word that no shell
+    runs), and a control character in the command forging a log line.
+    """
+
+    @staticmethod
+    def _printed_command(caplog, marker):
+        messages = [r.getMessage() for r in caplog.records if marker in r.getMessage()]
+        assert len(messages) == 1, messages
+        command = messages[0].split("preview the move with: ", 1)[1]
+        clause = " (add --apply, with the user's approval, to perform it)"
+        assert command.endswith(clause), command  # the printed command is a dry run
+        return command[: -len(clause)]
+
+    @staticmethod
+    def _run_printed(text, capfd):
+        import shlex
+
+        argv = shlex.split(text)
+        assert argv[0] == "python3" and argv[1].endswith("cli.py"), argv
+        return _cli(argv[2:], capfd)
+
+    @pytest.mark.parametrize("folder", ["proj", "my proj", "-proj", "pro'j"])
+    def test_the_unproven_warning_command_moves_the_bucket(
+        self, identity_env, store, monkeypatch, capfd, caplog, folder
+    ):
+        _clear_disclosure_memos()
+        repo = make_repo(identity_env / folder, remote="https://github.com/o/proj.git")
+        _seed(store, folder, memory_id="legacy0001", path="src/relative.py")
+        monkeypatch.chdir(repo)
+        caplog.clear()
+        assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
+        text = self._printed_command(caplog, "no session launched at the root")
+        code, envelope = self._run_printed(text + " --apply", capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1, envelope
+
+    def test_the_case_variant_warning_command_moves_the_bucket(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        from scripts import project_identity
+
+        # The variant warning is printed only on a case-SENSITIVE filesystem.
+        # Forcing the probe's answer keeps this arm running on every platform;
+        # the probe itself is pinned by TestTheCaseProbe.
+        monkeypatch.setattr(project_identity, "filesystem_case_insensitive", lambda _root: False)
+        _clear_disclosure_memos()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        _seed(store, "Proj", memory_id="variant001", path="src/relative.py")
+        monkeypatch.chdir(repo)
+        caplog.clear()
+        assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
+        text = self._printed_command(caplog, "only by case")
+        code, envelope = self._run_printed(text + " --apply", capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1, envelope
+
+    def test_a_store_path_with_a_newline_points_at_show_and_its_command_runs(
+        self, identity_env, monkeypatch, capfd, caplog
+    ):
+        """The id is fine but the store path holds a newline: the warning must
+        not print it (one log line), and `project-id show` must carry a
+        command that runs."""
+        import shlex
+
+        _clear_disclosure_memos()
+        store = identity_env / "st\nore.db"
+        conn = sqlite3.connect(str(store))
+        create_test_schema(conn)
+        conn.close()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        _seed(store, "proj", memory_id="legacy0001", path="src/relative.py")
+        monkeypatch.chdir(repo)
+        caplog.clear()
+        assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
+        messages = [
+            r.getMessage() for r in caplog.records
+            if "no session launched at the root" in r.getMessage()
+        ]
+        assert len(messages) == 1 and "\n" not in messages[0], messages
+        assert "printed by the `project-id show` verb" in messages[0]
+        code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert code == 0, show
+        rows = [row for row in show["result"]["candidates"] if row["id"] == "proj"]
+        argv = shlex.split(rows[0]["rekey"])
+        code, envelope = _cli([*argv[2:], "--apply"], capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["memories"] == 1, envelope
+
+    def test_an_id_rekey_refuses_gets_no_command_anywhere(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        """A newline in the bucket id: rekey refuses the id, so neither the
+        warning nor `project-id show` may print a command, and the warning
+        stays one line."""
+        _clear_disclosure_memos()
+        folder = "pro\nj"
+        repo = make_repo(identity_env / folder, remote="https://github.com/o/proj.git")
+        _seed(store, folder, memory_id="legacy0001", path="src/relative.py")
+        monkeypatch.chdir(repo)
+        caplog.clear()
+        assert _cli(["status", "--db-path", str(store)], capfd)[0] == 0
+        messages = [
+            r.getMessage() for r in caplog.records
+            if "no session launched at the root" in r.getMessage()
+        ]
+        assert len(messages) == 1 and "\n" not in messages[0], messages
+        assert "refuses this bucket id (a control character" in messages[0]
+        code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert code == 0, show
+        rows = [row for row in show["result"]["candidates"] if row["id"] == folder]
+        assert rows and rows[0]["rekey"] is None, rows
+
+
+class TestRekeyInputAndStoreEdges:
+    def test_candidates_takes_no_other_option(self, identity_env, store, capfd):
+        code, envelope = _cli(
+            ["project-id", "rekey", "--candidates", "--apply", "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 2 and envelope["error"] == "INVALID_INPUT"
+
+    def test_an_absent_source_bucket_warns_and_succeeds(
+        self, excluded_rig, store, capfd
+    ):
+        from scripts.cli import main
+
+        with pytest.raises(SystemExit) as exit_info:
+            main([
+                "project-id", "rekey", "--from=nosuch", "--to=github.com/o/one",
+                "--db-path", str(store),
+            ])
+        captured = capfd.readouterr()
+        assert exit_info.value.code == 0
+        assert json.loads(captured.out)["result"]["from_bucket_empty"] is True
+        assert "no rows are filed under --from='nosuch'" in captured.err
+
+    def test_a_dry_run_against_an_absent_store_creates_nothing(
+        self, identity_env, monkeypatch, capfd
+    ):
+        memory_dir = identity_env / "user-memory"
+        memory_dir.mkdir()
+        monkeypatch.setenv("PACT_TEST_MEMORY_DIR", str(memory_dir))
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(repo)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--to=github.com/o/proj"], capfd
+        )
+        assert code == 0, envelope
+        assert envelope["result"]["store_absent"] is True
+        assert list(memory_dir.iterdir()) == []
+
+    def test_an_applied_move_drops_the_cached_scope(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        from scripts import memory_api
+        from scripts.memory_api import PACTMemory
+        from fixtures.identity_git import seed_session_evidence
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        _seed(store, "proj", memory_id="legacy01", path="rel.py")
+        seed_session_evidence(identity_env / "home" / ".claude", repo, "legacy-session")
+        monkeypatch.chdir(repo)
+        # A constant stamp: only the explicit clear can drop the cached scope.
+        monkeypatch.setattr(memory_api, "_store_stat_key", lambda store: ("fixed",))
+        assert PACTMemory(db_path=store)._read_project_scopes() == (
+            "github.com/o/proj", "proj",
+        )
+        # Admitted on session evidence alone, so the move names its target.
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=proj", "--to=github.com/o/proj", "--apply",
+             "--db-path", str(store)],
+            capfd,
+        )
+        assert code == 0, envelope
+        assert PACTMemory(db_path=store)._read_project_scopes() == ("github.com/o/proj",)
+
+
+# ---------------------------------------------------------------------------
+# sync reports its read scope, and the secretary counts across it
+# ---------------------------------------------------------------------------
+
+SECRETARY = Path(__file__).resolve().parents[1] / "agents" / "pact-secretary.md"
+
+# The single-id form the secretary used before it read the scope: the inverse
+# control, so the arm below proves the scope is what reaches both buckets.
+SINGLE_ID_SQL = """
+SELECT COUNT(*) FROM memories
+WHERE project_id = :project_id
+  AND EXISTS (
+    SELECT 1 FROM json_each(COALESCE(memories.entities,'[]')) je
+    WHERE (je.type='object' AND json_extract(je.value,'$.name') = :name)
+       OR (je.type='text'   AND je.value = :name))
+"""
+
+
+def _secretary_calibration_sql() -> str:
+    """The calibration count exactly as the secretary agent file states it."""
+    text = SECRETARY.read_text(encoding="utf-8")
+    blocks = re.findall(r"```sql\n(.*?)```", text, re.S)
+    matches = [block for block in blocks if "json_each(COALESCE" in block]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
+class TestSyncReportsItsReadScope:
+    """`sync` names every bucket this session reads, and the count uses it.
+
+    Catches the secretary's calibration count reading only the canonical id
+    while the session also reads an admitted legacy bucket, so records filed
+    before the upgrade stop counting toward the gate.
+    """
+
+    def test_the_scope_and_the_secretary_count_cover_both_buckets(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        from fixtures.identity_git import seed_session_evidence
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        (repo / "CLAUDE.md").write_text("# proj\n", encoding="utf-8")
+        entity = json.dumps([{"name": "orchestration_calibration"}])
+        conn = sqlite3.connect(str(store))
+        for memory_id, project in (("canon001", "github.com/o/proj"), ("legacy01", "proj")):
+            conn.execute(
+                "INSERT INTO memories "
+                "(id, context, project_id, session_id, entities, created_at, updated_at) "
+                "VALUES (?, 'c', ?, 'legacy-session', ?, ?, ?)",
+                (memory_id, project, entity, CREATED_AT, CREATED_AT),
+            )
+        conn.commit()
+        conn.close()
+        seed_session_evidence(identity_env / "home" / ".claude", repo, "legacy-session")
+        monkeypatch.chdir(repo)
+        code, envelope = _cli(
+            ["sync", "--db-path", str(store), "--claude-md-root", str(repo)], capfd
+        )
+        assert code == 0, envelope
+        read_scope = envelope["result"]["read_scope"]
+        assert read_scope == ["github.com/o/proj", "proj"]
+
+        conn = sqlite3.connect(str(store))
+        try:
+            counted = conn.execute(
+                _secretary_calibration_sql(),
+                {"name": "orchestration_calibration", "scope": json.dumps(read_scope)},
+            ).fetchone()[0]
+            single = conn.execute(
+                SINGLE_ID_SQL,
+                {"name": "orchestration_calibration", "project_id": "github.com/o/proj"},
+            ).fetchone()[0]
+        finally:
+            conn.close()
+        assert counted == 2
+        assert single == 1
+
+    def test_no_identity_is_an_empty_scope(self, identity_env, store, monkeypatch, capfd):
+        from scripts import memory_api
+        from scripts.memory_api import PACTMemory
+
+        monkeypatch.setattr(
+            PACTMemory,
+            "_detect_project_identity_with_legacy",
+            staticmethod(
+                lambda: memory_api._DetectedIdentity(
+                    project_id=None, source="unresolved", legacy_basename=None,
+                    override_ignored=None, identity_root=None,
+                )
+            ),
+        )
+        monkeypatch.chdir(identity_env)
+        code, envelope = _cli(["sync", "--db-path", str(store)], capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["read_scope"] == []
+
+
+class TestAZeroByteStoreDegrades:
+    """A store file with no schema is reported, never initialised or crashed.
+
+    Catches a read primitive reached before the schema check: with the
+    primitives free of any initialiser, a 0-byte store would raise "no such
+    table" from `show` or `search` instead of degrading.
+    """
+
+    def _zero_byte(self, identity_env, monkeypatch):
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        monkeypatch.chdir(repo)
+        store = identity_env / "zero.db"
+        store.write_bytes(b"")
+        return store
+
+    def test_show_on_a_zero_byte_store(self, identity_env, monkeypatch, capfd):
+        store = self._zero_byte(identity_env, monkeypatch)
+        code, envelope = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert code == 0, envelope
+        assert envelope["result"]["candidates"] == []
+        assert store.read_bytes() == b""
+
+    def test_search_on_a_zero_byte_store(self, identity_env, monkeypatch, capfd):
+        store = self._zero_byte(identity_env, monkeypatch)
+        from scripts.cli import main
+
+        with pytest.raises(SystemExit) as exit_info:
+            main(["search", "anything", "--db-path", str(store)])
+        captured = capfd.readouterr()
+        assert "no such table" not in captured.err + captured.out
+        assert exit_info.value.code == 0, captured.err
+        assert json.loads(captured.out)["result"] == []
+        assert store.read_bytes() == b""
+
+
+class TestARedirectsRemedyIsItsMarker:
+    """A forged `.git` pointer's remedy names the marker, never a pin.
+
+    Catches the refusal printing the TARGET repository's override path as
+    the fix: following it leaves the forged checkout declined and re-pins
+    the victim repository and every genuine checkout of it.
+    """
+
+    def test_following_the_printed_remedy_leaves_the_victim_unchanged(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        from fixtures.identity_git import make_worktree, run_git
+        from scripts.memory_api import PACTMemory
+
+        source = make_repo(identity_env / "subsrc")
+        superproject = make_repo(identity_env / "super")
+        run_git(
+            "-c", "protocol.file.allow=always", "submodule", "add", "-q", "-f",
+            str(source), "vendor/lib", cwd=superproject,
+        )
+        lib = superproject / "vendor" / "lib"
+        run_git("remote", "set-url", "origin", "https://github.com/victim/lib.git", cwd=lib)
+        libwt = make_worktree(lib, identity_env / "libwt")
+        admin_root = superproject / ".git" / "modules" / "vendor" / "lib"
+        forged = identity_env / "forged"
+        forged.mkdir()
+        (forged / ".git").write_text(
+            f"gitdir: {admin_root / 'worktrees' / 'libwt'}\n", encoding="utf-8"
+        )
+
+        def victim_ids():
+            ids = []
+            for checkout in (lib, libwt):
+                monkeypatch.chdir(checkout)
+                ids.append(PACTMemory._detect_project_identity_with_legacy().project_id)
+            return ids
+
+        before = victim_ids()
+        assert before == ["github.com/victim/lib", "github.com/victim/lib"]
+
+        monkeypatch.chdir(forged)
+        code, envelope = _cli(
+            ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+        )
+        assert code == 1
+        message = envelope["message"]
+        assert str(admin_root) not in message
+        assert "run from the repository the `.git` points at" in message
+        assert "remove" not in message.lower()
+        code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        assert show["result"]["decline_reason"]["reason"] == "gitfile_redirect"
+        assert show["result"]["decline_reason"]["override_path"] is None
+
+        # Follow the remedy the refusal printed: run from the repository the
+        # `.git` points at. The forged marker stays in place.
+        assert victim_ids() == before
+        assert not (admin_root / "pact-project-id").exists()
+
+
+class TestTheRepairSentencePrintsOnlyForAMovedWorktree:
+    """The redirect remedy names `git worktree repair` only when git lists
+    the checkout's worktree entry at another path and marks it prunable, as
+    for a worktree moved with `mv`. Catches the sentence printing for a
+    copied worktree, where running the repair would unregister the honest
+    original, and the save refusal, its warning and the `show` warning
+    disagreeing about one cause."""
+
+    def _printed(self, checkout, store, monkeypatch, capfd, caplog) -> list:
+        from scripts import memory_api
+
+        monkeypatch.chdir(checkout)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(checkout))
+        texts = []
+        with caplog.at_level("WARNING", logger=memory_api.__name__):
+            code, envelope = _cli(
+                ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+            )
+            assert code == 1, envelope
+            texts += [envelope["message"], " ".join(r.getMessage() for r in caplog.records)]
+            caplog.clear()
+            code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+            assert code == 0, show
+            assert show["result"]["decline_reason"]["reason"] == "gitfile_redirect", show
+            texts.append(" ".join(r.getMessage() for r in caplog.records))
+        return texts
+
+    def test_a_moved_worktree_prints_the_repair_sentence(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        from fixtures.identity_git import make_worktree
+        from scripts import memory_api
+
+        main = make_repo(identity_env / "main")
+        moved = identity_env / "moved"
+        make_worktree(main, identity_env / "wt").rename(moved)
+        for text in self._printed(moved, store, monkeypatch, capfd, caplog):
+            assert memory_api._REDIRECT_MOVED_REMEDY in " ".join(text.split()), text
+
+    def test_a_copied_worktree_does_not(self, identity_env, store, monkeypatch, capfd, caplog):
+        import shutil
+
+        from fixtures.identity_git import make_worktree
+        from scripts import memory_api
+
+        main = make_repo(identity_env / "main")
+        original = make_worktree(main, identity_env / "wt")
+        copy = identity_env / "copy"
+        shutil.copytree(original, copy, symlinks=True)
+        for text in self._printed(copy, store, monkeypatch, capfd, caplog):
+            assert memory_api._REDIRECT_REMEDY in " ".join(text.split()), text
+            assert "git worktree repair" not in text, text
+
+
+# A `git` that prints the `worktree list -z` answer from $LISTING_FILE,
+# notes each such call in $LISTING_LOG, and runs the real git otherwise.
+_LISTING_GIT = """#!/bin/sh
+listing=0
+for a in "$@"; do
+  [ "$a" = worktree ] && listing=$((listing + 1))
+  [ "$a" = -z ] && listing=$((listing + 1))
+done
+if [ "$listing" = 2 ]; then
+  echo listed >> "$LISTING_LOG"
+  cat "$LISTING_FILE"
+  exit 0
+fi
+exec "{git}" "$@"
+"""
+
+
+class TestANulInAWorktreeEntryAnswersTheSameFromAnyCwd:
+    """A moved worktree whose admin `gitdir` file starts with a NUL names a
+    path git cannot print, and git versions list that entry differently:
+    git 2.43 with an empty path, git 2.56 at the entry's admin directory.
+    Whatever git prints, the answer is the same from inside the moved
+    checkout and from elsewhere, and it is a decline. Catches a listed path
+    resolving against the process cwd: from inside the moved checkout an
+    empty path then matched, and the identity bound there while every
+    other cwd declined. The listing git prints here is used as it is, and
+    each other version's listing is built from it and served by a
+    stand-in `git`."""
+
+    @pytest.mark.parametrize(
+        "listed_as", ["as git here lists it", "an empty path", "its admin directory"]
+    )
+    def test_every_cwd_gets_the_same_decline(
+        self, identity_env, store, monkeypatch, capfd, listed_as
+    ):
+        import shutil
+
+        from fixtures.identity_git import make_worktree, run_git
+
+        main = make_repo(identity_env / "main", remote="https://github.com/o/main.git")
+        moved = identity_env / "moved"
+        make_worktree(main, identity_env / "wt").rename(moved)
+        admin = main / ".git" / "worktrees" / "wt"
+        (admin / "gitdir").write_bytes(b"\0/nowhere/.git\n")
+        listing = run_git("worktree", "list", "--porcelain", "-z", cwd=moved)
+        records = [record.split("\0") for record in listing.split("\0\0") if record]
+        # control: git lists the main checkout and the damaged entry, and
+        # lists no record at the moved checkout
+        assert len(records) == 2, records
+        assert f"worktree {moved}" not in [record[0] for record in records], records
+        log = identity_env / "listing.log"
+        if listed_as != "as git here lists it":
+            damaged = "" if listed_as == "an empty path" else str(admin)
+            records[1][0] = "worktree " + damaged
+            served = identity_env / "listing"
+            served.write_bytes("".join("\0".join(r) + "\0\0" for r in records).encode())
+            bin_dir = identity_env / "bin"
+            bin_dir.mkdir()
+            stand_in = bin_dir / "git"
+            stand_in.write_text(_LISTING_GIT.replace("{git}", shutil.which("git")), encoding="utf-8")
+            stand_in.chmod(0o755)
+            monkeypatch.setenv("LISTING_FILE", str(served))
+            monkeypatch.setenv("LISTING_LOG", str(log))
+            monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(moved))
+        answers = {}
+        for name, cwd in (("cwd inside", moved), ("cwd elsewhere", identity_env)):
+            monkeypatch.chdir(cwd)
+            code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+            assert code == 0, show
+            decline = show["result"].get("decline_reason") or {}
+            answers[name] = (show["result"]["project_id"], decline.get("reason"))
+        if listed_as != "as git here lists it":
+            assert log.exists(), "control: the stand-in git served no listing"
+        assert answers == {
+            "cwd inside": (None, "gitfile_redirect"),
+            "cwd elsewhere": (None, "gitfile_redirect"),
+        }, answers
+
+
+class TestADeclaredRepositoryWithNoWorkingTreeSaysOnlyWhatGitShowed:
+    """A declared directory git gives no toplevel for is refused with a
+    detail, cause and remedy that hold for a bare repository AND for a
+    checkout git cannot describe. Catches the declared route asserting "is a
+    bare repository" for a checkout whose only evidence is git's missing
+    toplevel."""
+
+    def _printed(self, declared, store, monkeypatch, capfd, caplog) -> list:
+        from scripts import memory_api
+
+        monkeypatch.chdir(declared)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(declared))
+        with caplog.at_level("WARNING", logger=memory_api.__name__):
+            code, envelope = _cli(
+                ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+            )
+        assert code == 1, envelope
+        return [envelope["message"], " ".join(r.getMessage() for r in caplog.records)]
+
+    def _assert_hedged(self, texts, declared):
+        from scripts import memory_api
+
+        refusal, warning = texts
+        assert (
+            f"{str(declared)!r} is a bare repository, or git cannot describe "
+            "its working tree"
+        ) in " ".join(warning.split()), warning
+        for text in texts:
+            flat = " ".join(text.split())
+            assert "is a bare repository'" not in flat and "is a bare repository." not in flat, flat
+            # The cause states only that git gave no working tree, never that
+            # the repository has none: the checkout case has one.
+            assert "has no working tree" not in flat, flat
+            assert memory_api._DECLINE_CAUSES["no_working_tree"] in flat, flat
+            assert memory_api._UNPINNABLE_REMEDIES["no_working_tree"] in flat, flat
+            assert "git rev-parse --show-toplevel" in flat, flat
+
+    def test_a_declared_bare_repository(self, identity_env, store, monkeypatch, capfd, caplog):
+        from fixtures.identity_git import run_git
+
+        bare = identity_env / "bare.git"
+        bare.mkdir()
+        run_git("init", "-q", "--bare", cwd=bare)
+        self._assert_hedged(self._printed(bare, store, monkeypatch, capfd, caplog), bare)
+
+    def test_a_declared_checkout_git_gives_no_toplevel_for(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        from scripts import memory_api
+
+        repo = make_repo(identity_env / "repo")
+        real = memory_api._git_rev_parse
+        monkeypatch.setattr(
+            memory_api, "_git_rev_parse",
+            lambda start, *args: None if "--show-toplevel" in args else real(start, *args),
+        )
+        self._assert_hedged(self._printed(repo, store, monkeypatch, capfd, caplog), repo)
+
+
+class TestTheRekeyRefusalOffersOnlyAWorkablePin:
+    """With no canonical identity, `rekey` names the remedy that works here.
+
+    Catches the refusal telling an operator in a non-repository directory to
+    write a `<git-common-dir>/pact-project-id` pin: there is no repository,
+    so there is no such file to write, and the only remedy is `--to=`.
+    """
+
+    def test_a_non_repository_directory_is_told_to_pass_to(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        plain = identity_env / "plain"
+        plain.mkdir()
+        monkeypatch.chdir(plain)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=plain", "--db-path", str(store)], capfd
+        )
+        assert code == 1
+        assert envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED"
+        message = envelope["message"]
+        assert "--to=" in message
+        assert "pact-project-id" not in message and "git-common-dir" not in message
+
+    def test_a_declining_repository_is_offered_its_own_override_file(
+        self, identity_env, store, monkeypatch, capfd
+    ):
+        repo = make_repo(identity_env / "declined", remote=UNREPRESENTABLE)
+        monkeypatch.chdir(repo)
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=declined", "--db-path", str(store)], capfd
+        )
+        assert code == 1
+        assert envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED"
+        assert str(repo / ".git" / "pact-project-id") in envelope["message"]
+
+
+def _remedy_after(text: str, marker: str) -> str:
+    """The sentence(s) between `marker` and the closing show-verb pointer."""
+    head = text.rsplit(" Run the `project-id show`", 1)[0]
+    return head.split(marker, 1)[1].strip() if marker in head else ""
+
+
+def _refusing_instance(record):
+    """A `PACTMemory` holding only a detection pass's decline outcome."""
+    from scripts import memory_api
+
+    instance = object.__new__(memory_api.PACTMemory)
+    instance._decline_reason = record
+    instance._override_ignored = None
+    instance._decline_detail = None
+    return instance
+
+
+def _undeclined_remedy(monkeypatch) -> str:
+    """The write refusal's own remedy, printed only when no rung declined."""
+    from scripts import memory_api
+
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    monkeypatch.setattr(memory_api, "get_project_dir_from_session_record", lambda: None)
+    undeclined = _refusing_instance(None)._unresolved_identity_message()
+    remedy = undeclined.rsplit(" Run the `project-id show`", 1)[0].rsplit(". ", 1)[1]
+    assert remedy, undeclined
+    return remedy
+
+
+class TestADeclineCausePrintsOneRemedyOnEveryVerb:
+    """A decline cause prints the same remedy in the detection warning and
+    in the write refusal.
+
+    Catches the refusal choosing its remedy by its own rules: a repository
+    git cannot read then warns "check that git can read the repository" but
+    refuses `save` with "run from inside the project directory", which the
+    caller already was, and a pinnable decline names its pin in two
+    different sentences.
+    """
+
+    @staticmethod
+    def _surfaces(record, monkeypatch, caplog):
+        from scripts import memory_api
+
+        monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+        monkeypatch.setattr(memory_api, "get_project_dir_from_session_record", lambda: None)
+        caplog.clear()
+        memory_api._warn_declined(record, "/nowhere")
+        warning = " ".join(
+            r.getMessage() for r in caplog.records if "no project id was derived" in r.getMessage()
+        )
+        instance = _refusing_instance(record)
+        refusal = instance._unresolved_identity_message()
+        instance._project_scope = lambda: None
+        conn = sqlite3.connect(":memory:")
+        create_test_schema(conn)
+        with pytest.raises(memory_api.ProjectIdentityUnresolvedError) as refused:
+            instance._resolve_id_or_full(conn, "abc1234")
+        conn.close()
+        return warning, refusal, str(refused.value)
+
+    def test_every_cause_prints_its_own_remedy_on_both_surfaces(
+        self, identity_env, monkeypatch, caplog
+    ):
+        from scripts import memory_api
+
+        fallback = _undeclined_remedy(monkeypatch)
+        pin = identity_env / ".git" / "pact-project-id"
+        cells = 0
+        for token in sorted(memory_api._DECLINE_CAUSES):
+            for override in (None, str(pin)):
+                record = {"source": "probe", "reason": token, "override_path": override}
+                warning, refusal, prefix = self._surfaces(record, monkeypatch, caplog)
+                # The prefix refusal says what it refused, then prints what
+                # the write refusal prints after its own opening.
+                assert prefix.split("still resolves. ", 1)[1] == refusal.split(
+                    "Nothing was written. ", 1
+                )[1], (token, override, prefix, refusal)
+                printed = _remedy_after(warning, "so no project id was derived.")
+                if token == "gitfile_redirect":
+                    assert printed == memory_api._REDIRECT_REMEDY, (token, override, warning)
+                elif override is not None:
+                    assert override in printed, (token, override, warning)
+                else:
+                    assert printed == memory_api._UNPINNABLE_REMEDIES.get(token, ""), (
+                        token, warning,
+                    )
+                head = refusal.rsplit(" Run the `project-id show`", 1)[0]
+                assert head.endswith(printed), (token, override, printed, refusal)
+                assert fallback not in refusal, (token, override, refusal)
+                cells += 1
+        assert cells == 2 * len(memory_api._DECLINE_CAUSES)
+
+    @pytest.mark.requires_non_root
+    def test_an_unreadable_repository_prints_one_remedy_on_every_verb(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        from scripts import memory_api
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        fallback = _undeclined_remedy(monkeypatch)
+        repo = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+        config = repo / ".git" / "config"
+        monkeypatch.chdir(repo)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+        config.chmod(0)
+        try:
+            caplog.clear()
+            code, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+            warning = " ".join(
+                r.getMessage() for r in caplog.records
+                if "no project id was derived" in r.getMessage()
+            )
+            code, refusal = _cli(
+                ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+            )
+            prefix_code, prefix = _cli(["get", "abc1234", "--db-path", str(store)], capfd)
+        finally:
+            config.chmod(0o644)
+        assert show["result"]["decline_reason"]["reason"] == "broken_git_marker", show
+        remedy = memory_api._UNPINNABLE_REMEDIES["broken_git_marker"]
+        assert _remedy_after(warning, "so no project id was derived.") == remedy, warning
+        assert code == 1, refusal
+        message = refusal["message"]
+        assert message.rsplit(" Run the `project-id show`", 1)[0].endswith(remedy), message
+        assert fallback not in message, message
+        assert prefix_code != 0, prefix
+        assert prefix["message"].split("still resolves. ", 1)[1] == message.split(
+            "Nothing was written. ", 1
+        )[1], (prefix, message)
+
+    def test_an_unreadable_origin_with_no_pin_path_prints_a_remedy_on_every_verb(
+        self, identity_env, store, monkeypatch, capfd, caplog
+    ):
+        """A separate git dir withholds the pin path, so the unreadable
+        origin's own table remedy is all three surfaces have to print."""
+        from scripts import memory_api
+        from scripts import project_identity as pi
+
+        memory_api._LEGACY_SCOPE_CACHE.clear()
+        repo = make_separate_git_dir_repo(
+            identity_env / "sep", identity_env / "stores" / "sep.git"
+        )
+        monkeypatch.setattr(
+            pi, "read_origin", lambda git_dir: pi.OriginRead(pi.ORIGIN_UNAVAILABLE, None)
+        )
+        monkeypatch.chdir(repo)
+        monkeypatch.setenv("CLAUDE_PROJECT_DIR", str(repo))
+        caplog.clear()
+        _, show = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+        warning = " ".join(
+            r.getMessage() for r in caplog.records
+            if "no project id was derived" in r.getMessage()
+        )
+        code, refusal = _cli(
+            ["save", json.dumps({"context": "c"}), "--db-path", str(store)], capfd
+        )
+        prefix_code, prefix = _cli(["get", "abc1234", "--db-path", str(store)], capfd)
+        assert show["result"]["decline_reason"] == {
+            "source": show["result"]["decline_reason"]["source"],
+            "reason": "origin_unreadable",
+            "override_path": None,
+        }, show
+        remedy = memory_api._UNPINNABLE_REMEDIES["origin_unreadable"]
+        assert _remedy_after(warning, "so no project id was derived.") == remedy, warning
+        assert code == 1 and prefix_code != 0, (refusal, prefix)
+        message = refusal["message"]
+        assert message.rsplit(" Run the `project-id show`", 1)[0].endswith(remedy), message
+        assert prefix["message"].split("still resolves. ", 1)[1] == message.split(
+            "Nothing was written. ", 1
+        )[1], (prefix, message)
+
+
+# Every memory CLI command, with the arguments it needs; MEMID is the id of
+# the record the arm saves first, and START the checkout it runs in. A save
+# and a sync name START as their CLAUDE.md root: a CLI the suite starts
+# refuses an ambient sync, and a declared root keeps the sync, and the git
+# questions it asks, inside the test's checkout.
+_EVERY_CLI_COMMAND = (
+    ("save --no-sync", ["save", "--stdin", "--no-sync"], {"context": "arm two"}),
+    ("save", ["save", "--stdin", "--claude-md-root", "START"], {"context": "arm three"}),
+    ("save, default root", ["save", "--stdin"], {"context": "arm four"}),
+    ("search", ["search", "arm"], None),
+    ("search --claude-md-root", ["search", "arm", "--claude-md-root", "START"], None),
+    ("search --current-file", ["search", "arm", "--current-file", "START_FILE"], None),
+    ("list", ["list"], None),
+    ("get", ["get", "MEMID"], None),
+    ("status", ["status"], None),
+    ("update", ["update", "MEMID", "--stdin"], {"context": "arm changed"}),
+    ("update --replace", ["update", "MEMID", "--stdin", "--replace"], {"context": "arm replaced"}),
+    ("sync", ["sync", "--claude-md-root", "START"], None),
+    ("sync, default root", ["sync"], None),
+    ("project-file", ["project-file"], None),
+    ("project-id show", ["project-id", "show"], None),
+    ("project-id rekey --dry-run", ["project-id", "rekey", "--from", "a/b", "--to", "c/d", "--dry-run"], None),
+    ("project-id rekey", ["project-id", "rekey", "--from", "a/b", "--to", "c/d"], None),
+    ("project-id rekey --apply", ["project-id", "rekey", "--from", "a/b", "--to", "c/d", "--apply", "--into-another-repository"], None),
+    ("project-id rekey --candidates", ["project-id", "rekey", "--candidates"], None),
+    ("project-id rekey --from only", ["project-id", "rekey", "--from", "a/b"], None),
+    ("delete", ["delete", "MEMID"], None),
+)
+
+# The routes that refuse by design, each with its exit code and the message
+# that says why: a canonical bucket moves only with an explicit --to.
+_REFUSED_ROUTES = {
+    "project-id rekey --from only": (1, "a canonical bucket moves only with an explicit --to"),
+}
+
+class TestEachCliCommandAsksGitEachQuestionOnce:
+    """Each memory CLI command, by every route its flags choose, runs its
+    store's construction and its own work (a save's filing check and
+    CLAUDE.md sync among them) in one detection pass, so it asks git each
+    question once: no two git commands of one command run in the same
+    resolved directory with the same arguments. A route that refuses by
+    design gives its own exit code and message (`_REFUSED_ROUTES`).
+    Catches a command whose work after construction asks git again, as a
+    save did with its filing check and its sync.
+
+    Real repositories and git, the CLI as its own process with its own HOME
+    and Claude config directory, and a `git` first on PATH that logs each
+    command with the directory it ran in."""
+
+    @pytest.mark.parametrize("layout", [
+        "main checkout", "linked worktree", "linked worktree of a bare repository",
+        "separate-git-dir linked worktree", "inside a checkout's .git",
+    ])
+    def test_no_command_repeats_a_git_question(self, identity_env, layout):
+        import shutil
+        import subprocess
+        import sys
+
+        from fixtures.identity_git import make_separate_git_dir_repo, make_worktree, run_git
+
+        # `root` is the checkout a session declares and syncs; `start` is where
+        # each command runs. They differ only inside a checkout's .git, where
+        # the session declares nothing.
+        main = make_repo(identity_env / "main", remote="https://example.com/o/r.git").resolve()
+        if layout == "linked worktree":
+            root = make_worktree(main, identity_env / "wt").resolve()
+        elif layout == "linked worktree of a bare repository":
+            run_git("clone", "-q", "--bare", str(main), str(identity_env / "hub.git"), cwd=identity_env)
+            # A URL origin, as a hub cloned from a server has; a clone of a
+            # local path has a path origin, which resolves to no canonical id.
+            run_git("remote", "set-url", "origin", "https://example.com/o/hub.git", cwd=identity_env / "hub.git")
+            run_git("worktree", "add", "-q", str(identity_env / "hubwt"), "-b", "w", cwd=identity_env / "hub.git")
+            root = (identity_env / "hubwt").resolve()
+        elif layout == "separate-git-dir linked worktree":
+            other = make_separate_git_dir_repo(identity_env / "sep", identity_env / "store.git")
+            run_git("remote", "add", "origin", "https://example.com/o/sep.git", cwd=other)
+            root = make_worktree(other, identity_env / "sepwt").resolve()
+        else:
+            root = main
+        start = (main / ".git").resolve() if layout == "inside a checkout's .git" else root
+        home = identity_env / "home"
+        (home / ".claude").mkdir(parents=True)
+        log = identity_env / "git.log"
+        bin_dir = identity_env / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "git").write_text(
+            "#!/bin/sh\n"
+            f"{{ printf '%s\\t' \"$PWD\" \"$@\"; printf '\\n'; }} >> '{log}'\n"
+            f"exec '{shutil.which('git')}' \"$@\"\n",
+            encoding="utf-8",
+        )
+        (bin_dir / "git").chmod(0o755)
+        env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_", "PACT_", "GIT_"))}
+        env.update(
+            PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", HOME=str(home),
+            CLAUDE_CONFIG_DIR=str(home / ".claude"),
+            PACT_TEST_MEMORY_DIR=str(identity_env / "memdir"),
+        )
+        if start == root:
+            env["CLAUDE_PROJECT_DIR"] = str(root)
+        cli = Path(__file__).resolve().parent.parent / "skills" / "pact-memory" / "scripts" / "cli.py"
+        db = identity_env / "store.db"
+
+        def run(argv, document=None, where=None):
+            log.unlink(missing_ok=True)
+            if argv[0] != "project-file":
+                argv = [*argv, "--db-path", str(db)]
+            done = subprocess.run(
+                [sys.executable, str(cli), *argv], env=env, cwd=str(where or start), capture_output=True,
+                text=True, timeout=120, input=None if document is None else json.dumps(document),
+            )
+            questions = []
+            for line in (log.read_text(encoding="utf-8").splitlines() if log.exists() else []):
+                where, *args = line.rstrip("\t").split("\t")
+                while len(args) >= 2 and args[0] == "-C":
+                    where, args = os.path.join(where, args[1]), args[2:]
+                questions.append((os.path.realpath(where), tuple(args)))
+            return done, questions
+
+        documents = {p: p.read_bytes() for p in identity_env.rglob("CLAUDE.md")}
+        assert run(["setup"])[0].returncode == 0
+        # `search --current-file` is given a tracked file of the checkout, as a user passes it.
+        tracked = root / "README"
+        assert tracked.is_file()  # control
+        # The memory every later route reads is saved from the checkout itself.
+        saved, _ = run(["save", "--stdin", "--no-sync"], {"context": "arm one"}, where=root)
+        memory_id = json.loads(saved.stdout)["result"]["memory_id"]
+        asked, repeated = {}, {}
+        for name, argv, document in _EVERY_CLI_COMMAND:
+            done, questions = run([{"MEMID": memory_id, "START": str(root), "START_FILE": str(tracked)}.get(a, a) for a in argv], document)
+            refusal = _REFUSED_ROUTES.get(name)
+            if refusal is None:
+                assert done.returncode == 0, (name, done.stderr)
+            else:
+                assert (done.returncode, refusal[1] in done.stderr) == (refusal[0], True), (name, done.stderr)
+            asked[name] = len(questions)
+            repeated[name] = sorted({q for q in questions if questions.count(q) > 1})
+        # Control: every command asked git something, so a log that stayed
+        # empty cannot pass for one that held no repeat.
+        assert all(asked.values()), asked
+        assert repeated == {name: [] for name, _, _ in _EVERY_CLI_COMMAND}, (asked, repeated)
+        # Control: no command wrote a CLAUDE.md under the test's tree.
+        assert {p: p.read_bytes() for p in identity_env.rglob("CLAUDE.md")} == documents
+
+
+def test_the_legacy_write_refusal_says_the_printed_rekey_is_a_preview(identity_env, monkeypatch):
+    """The refusal names `project-id rekey` as a preview, with --apply as the
+    user-approved step that performs the move: run as printed, the command
+    is a dry run."""
+    from scripts.memory_api import LegacyBucketWriteRefusedError, PACTMemory
+
+    repo = make_repo(identity_env / "proj", remote="https://github.com/acme/proj.git")
+    monkeypatch.chdir(repo)
+    memory = PACTMemory(session_id="s", db_path=identity_env / "m.db")
+    with pytest.raises(LegacyBucketWriteRefusedError) as refusal:
+        memory._refuse_legacy_write("save")
+    text = " ".join(str(refusal.value).replace("`", "").split())
+    assert "preview the move with project-id rekey --from=FOLDER_NAME --to=host/owner/repo" in text, text
+    assert "add --apply, with the user's approval, to perform it" in text, text
+
+
+@pytest.mark.parametrize("url, reason", [
+    ("https://localhost/o/r", "its host is this machine (a loopback or unspecified address)"),
+    ("https://127.0.0.1/o/r", "its host is this machine (a loopback or unspecified address)"),
+    ("https://h.invalid/o/r", "its host is in the reserved .invalid namespace"),
+    ("https://h.example/o/r?x=1", "carries a query or fragment"),
+    ("https://github.com/o/r.git.git", "GitHub serves no repository at its path"),
+    ("git@github.com:~/o/r", "GitHub serves no repository at its path"),
+    ("https://h.example:0/o/r", "its port is not a valid port number"),
+])
+def test_a_declined_origin_names_its_reason_and_the_pin(tmp_path, monkeypatch, capfd, url, reason):
+    """save from a repository whose origin declines says why and keeps the
+    pin remedy, without echoing the url. RED WHEN the cause is only 'no
+    single project id can be read from the repository's origin'."""
+    from fixtures.identity_git import assert_outside_repository, make_repo
+    from scripts.cli import main
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "r", remote=url)
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    from scripts.database import db_connection, ensure_initialized
+
+    with db_connection(tmp_path / "store.db") as conn:
+        ensure_initialized(conn)
+    with pytest.raises(SystemExit) as exit_info:
+        main(["save", json.dumps({"context": "c"}), "--db-path", str(tmp_path / "store.db")])
+    envelope = json.loads(capfd.readouterr().err)
+    assert exit_info.value.code == 1 and envelope["error"] == "PROJECT_IDENTITY_UNRESOLVED", envelope
+    message = envelope["message"]
+    assert reason in message, message
+    assert "no single project id can be read from the repository's origin" in message, message
+    assert "pact-project-id" in message, message
+    assert url not in message, message
+
+
+@pytest.mark.parametrize("remote, noted", [
+    ("git@github.com-work:Owner/Repo.git", "github"),
+    ("ssh://git@github.com-work/Owner/Repo", "github"),
+    ("git@gh_work:Owner/Repo.git", "neutral"),
+    ("ssh://git@githubwork/Owner/Repo", "neutral"),
+    ("git@github.mycorp.com:Owner/Repo.git", None),
+    ("git@github.com.evil.example:Owner/Repo.git", None),
+    ("git@github.com:Owner/Repo.git", None),
+    ("git@gitlab.example.com:Owner/Repo.git", None),
+    ("https://github.com/Owner/Repo", None),
+])
+def test_show_notes_an_ssh_host_alias_origin(tmp_path, monkeypatch, capfd, remote, noted):
+    """An ssh or scp origin whose host looks like an ssh alias (no dot, or a
+    name starting with github.com) gets the alias's id, so project-id show
+    points to the pin. Only an alias of github.com is given github.com's id as
+    the example; a GitHub Enterprise host such as github.mycorp.com gets no
+    note. RED WHEN the note is missing, is given for a real host, or names
+    github.com for a host that is not an alias of it."""
+    from fixtures.identity_git import assert_outside_repository, make_repo
+    from scripts.cli import main
+    from scripts.database import db_connection, ensure_initialized
+    from scripts.project_identity import SSH_ALIAS_DETAIL, SSH_ALIAS_GITHUB_DETAIL
+
+    expected = {"github": SSH_ALIAS_GITHUB_DETAIL, "neutral": SSH_ALIAS_DETAIL, None: None}[noted]
+
+    assert_outside_repository(tmp_path)
+    repo = make_repo(tmp_path / "r", remote=remote)
+    monkeypatch.chdir(repo)
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR", raising=False)
+    with db_connection(tmp_path / "store.db") as conn:
+        ensure_initialized(conn)
+    with pytest.raises(SystemExit):
+        main(["project-id", "show", "--db-path", str(tmp_path / "store.db")])
+    shown = json.loads(capfd.readouterr().out)["result"]
+    assert shown["identity_detail"] == expected, shown
+    assert "pact-project-id" in SSH_ALIAS_DETAIL and "github.com" not in SSH_ALIAS_DETAIL
+    assert "github.com/owner/repo" in SSH_ALIAS_GITHUB_DETAIL
+
+
+def _rekey_refused(argv, store, capfd, reason):
+    before = _snapshot(store)
+    for apply in ([], ["--apply"]):
+        code, envelope = _cli([*argv, *apply], capfd)
+        assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
+        assert reason in envelope["message"] and "--from-another-repository" in envelope["message"], envelope
+        assert _snapshot(store) == before
+    code, envelope = _cli([*argv, "--apply", "--from-another-repository"], capfd)
+    assert code == 0 and envelope["result"]["memories"] == 1, envelope
+
+
+def test_an_ambiguous_folded_bucket_into_this_checkouts_id_is_refused(identity_env, store, monkeypatch, capfd):
+    """On a filesystem that folds case, 'Proj' and 'PROJ' both match folder
+    'proj', so neither is read: moving one into this checkout's id is refused
+    unless --from-another-repository is passed. RED WHEN it moves without
+    the flag."""
+    from scripts import project_identity
+
+    monkeypatch.setattr(project_identity, "filesystem_case_insensitive", lambda root: True)
+    where = make_repo(identity_env / "proj", remote="https://github.com/o/proj.git")
+    monkeypatch.chdir(where)
+    _seed(store, "Proj", memory_id="row000001", path="a.py")
+    _seed(store, "PROJ", memory_id="row000002", path="b.py")
+    _rekey_refused(
+        ["project-id", "rekey", "--from=Proj", "--to=github.com/o/proj", "--db-path", str(store)],
+        store, capfd, "one of several buckets that match this checkout's folder name only by case",
+    )
+
+
+def test_a_submodules_suppressed_bucket_into_its_id_is_refused(identity_env, store, monkeypatch, capfd):
+    """A submodule's pre-upgrade bucket ('modules') is named by its
+    superproject, so it is not read here and moving it into the submodule's
+    id needs --from-another-repository. RED WHEN it moves without the
+    flag."""
+    from fixtures.identity_git import run_git
+
+    upstream = make_repo(identity_env / "libup", remote="https://github.com/acme/lib.git")
+    sup = make_repo(identity_env / "super", remote="https://github.com/acme/super.git")
+    run_git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(upstream), "lib", cwd=sup)
+    lib = sup / "lib"
+    run_git("remote", "set-url", "origin", "https://github.com/acme/lib.git", cwd=lib)
+    monkeypatch.chdir(lib)
+    _seed(store, "modules", memory_id="row000001", path="a.py")
+    _rekey_refused(
+        ["project-id", "rekey", "--from=modules", "--to=github.com/acme/lib", "--db-path", str(store)],
+        store, capfd, "this submodule's pre-upgrade bucket",
+    )
+
+
+def test_a_bucket_shared_with_another_checkout_offers_no_move_and_refuses_one(
+    identity_env, store, monkeypatch, capfd, caplog
+):
+    """x/app (origin a/app) and y/app (origin b/app) both saved files into the
+    old 'app' bucket, so from x/app it is unproven and shared. No surface
+    prints a runnable move for it, and the move into this checkout's id is
+    refused (dry run too) naming the other checkout's rows; only
+    --from-another-repository moves it. RED WHEN the shared bucket's rows can
+    be moved out of y/app's reads unflagged, or a command is printed."""
+    import logging
+
+    from scripts import memory_api
+
+    for memo in (memory_api._LEGACY_SCOPE_CACHE, memory_api._UNPROVEN_WARNED):
+        memo.clear()
+    mine = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    theirs = make_repo(identity_env / "y" / "app", remote="https://github.com/b/app.git")
+    (mine / "f.py").write_text("x\n")
+    (theirs / "g.py").write_text("y\n")
+    _seed(store, "app", memory_id="mine00001", path=str(mine / "f.py"))
+    _seed(store, "app", memory_id="theirs001", path=str(theirs / "g.py"))
+    monkeypatch.chdir(mine)
+    with caplog.at_level(logging.WARNING):
+        code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    assert code == 0 and shown["result"]["legacy_scope"]["unproven"] is True, shown
+    rows = {row["id"]: row for row in shown["result"]["candidates"]}
+    assert rows["app"]["rekey"] is None, rows
+    warned = " ".join(record.getMessage() for record in caplog.records)
+    assert "--from=app" not in warned and "--from-another-repository" in warned, warned
+    assert "that checkout's rows with it" in warned and "no longer reads" not in warned, warned
+    before = _snapshot(store)
+    argv = ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--db-path", str(store)]
+    for apply in ([], ["--apply"]):
+        code, envelope = _cli([*argv, *apply], capfd)
+        assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
+        assert "holds rows placed in another checkout too" in envelope["message"], envelope
+        assert "1 of its file rows lie in another checkout" in envelope["message"], envelope
+        assert "that checkout's rows with it" in envelope["message"], envelope
+        assert "no longer read" not in envelope["message"] and envelope["message"].count(", so ") == 1, envelope
+        assert _snapshot(store) == before
+    code, envelope = _cli([*argv, "--apply", "--from-another-repository"], capfd)
+    assert code == 0 and envelope["result"]["memories"] == 2, envelope
+
+
+def test_a_declined_identity_names_its_folder_name_bucket_and_the_pin(
+    identity_env, store, monkeypatch, capfd, caplog
+):
+    """An origin on this machine declines, so no id resolves and no read sees
+    this checkout's folder-name bucket 'repoL'. The read says the bucket holds
+    its memories and that the pin brings it back into judgment; show labels it
+    this checkout's legacy candidate; and the pin remedy no longer offers
+    CLAUDE_PROJECT_DIR. RED WHEN the bucket is hidden with no notice, or shows
+    as another project's."""
+    import logging
+
+    from scripts import memory_api
+
+    memory_api._DECLINED_BUCKET_WARNED.clear()
+    repo = make_repo(identity_env / "repoL", remote="http://localhost:3000/o/repoL")
+    _seed(store, "repoL", memory_id="old000001", path="a.py")
+    monkeypatch.chdir(repo)
+    with caplog.at_level(logging.WARNING):
+        code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    assert code == 0, shown
+    rows = {row["id"]: row for row in shown["result"]["candidates"]}
+    assert (rows["repoL"]["relation"], rows["repoL"]["rekey"]) == ("legacy_candidate", None), rows
+    warned = " ".join(record.getMessage() for record in caplog.records)
+    assert "this checkout's folder-name bucket 'repoL' holds 1 memory" in warned, warned
+    assert "pact-project-id" in warned and "another project root" not in warned, warned
+
+
+@pytest.mark.parametrize("verb", [["list"], ["search", "old"], ["status"]])
+def test_every_read_from_a_declined_checkout_names_its_folder_name_bucket(
+    identity_env, store, monkeypatch, capfd, caplog, verb
+):
+    """list and search return before any scope read when no id resolves, and
+    must still say that this checkout's folder-name bucket holds memories no
+    read sees. RED WHEN a read prints only the decline warning."""
+    import logging
+
+    from scripts import memory_api
+
+    memory_api._DECLINED_BUCKET_WARNED.clear()
+    repo = make_repo(identity_env / "repoL", remote="http://localhost:3000/o/repoL")
+    _seed(store, "repoL", memory_id="old000001", path="a.py")
+    monkeypatch.chdir(repo)
+    with caplog.at_level(logging.WARNING):
+        _cli([*verb, "--db-path", str(store)], capfd)
+    warned = " ".join(record.getMessage() for record in caplog.records)
+    assert "this checkout's folder-name bucket 'repoL' holds 1 memory" in warned, warned
+
+
+@pytest.mark.parametrize("placed", [True, False], ids=["file row here", "no evidence"])
+def test_writing_the_pin_brings_the_folder_name_bucket_back_as_the_warning_says(
+    identity_env, store, monkeypatch, capfd, caplog, placed
+):
+    """After the pin a declined checkout has an id, and its old folder-name
+    bucket is judged as its legacy bucket: read when a file row places it
+    here, and otherwise left out with the rekey that moves it. RED WHEN the
+    pin does not do what the declined-checkout warning says."""
+    import logging
+
+    from scripts import memory_api
+
+    for memo in (memory_api._DECLINED_BUCKET_WARNED, memory_api._LEGACY_SCOPE_CACHE, memory_api._UNPROVEN_WARNED):
+        memo.clear()
+    repo = make_repo(identity_env / "repoL", remote="http://localhost:3000/o/repoL")
+    (repo / "a.py").write_text("x\n")
+    _seed(store, "repoL", memory_id="old000001", path=str(repo / "a.py") if placed else "a.py")
+    monkeypatch.chdir(repo)
+    with caplog.at_level(logging.WARNING):
+        _cli(["list", "--db-path", str(store)], capfd)
+    warned = " ".join(record.getMessage() for record in caplog.records)
+    assert "include that bucket when its file rows or the sessions recorded here place it" in warned, warned
+    assert "one whose rows are all another checkout's gets no move" in warned, warned
+    assert "gets the move of only the memories placed here when it has any," in warned, warned
+    (repo / ".git" / "pact-project-id").write_text("local.invalid/o/repoL\n")
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    caplog.clear()
+    with caplog.at_level(logging.WARNING):
+        code, envelope = _cli(["list", "--db-path", str(store)], capfd)
+    assert code == 0, envelope
+    assert [row["id"] for row in envelope["result"]] == (["old000001"] if placed else []), envelope
+    if not placed:
+        assert "--from=repoL --to=local.invalid/o/repoL" in caplog.text, caplog.text
+
+
+def _seed_linked(store, bucket, memory_id, paths):
+    """A memory in `bucket` linked to a file row for each path (one row per
+    (path, bucket), shared when it already exists)."""
+    conn = sqlite3.connect(str(store))
+    conn.execute(
+        "INSERT INTO memories (id, context, project_id, session_id, created_at, updated_at) "
+        "VALUES (?, 'row', ?, 'legacy-session', ?, ?)",
+        (memory_id, bucket, CREATED_AT, CREATED_AT),
+    )
+    for path in paths:
+        row = conn.execute(
+            "SELECT id FROM files WHERE path = ? AND project_id = ?", (path, bucket)
+        ).fetchone()
+        file_id = row[0] if row else "f-" + memory_id + "-" + str(abs(hash(path)))
+        if row is None:
+            conn.execute("INSERT INTO files (id, path, project_id) VALUES (?, ?, ?)", (file_id, path, bucket))
+        conn.execute(
+            "INSERT INTO memory_files (memory_id, file_id, relationship) VALUES (?, ?, 'modified')",
+            (memory_id, file_id),
+        )
+    conn.commit()
+    conn.close()
+
+
+def _placed_rows(store):
+    conn = sqlite3.connect(str(store))
+    try:
+        return {
+            "memories": dict(conn.execute("SELECT id, project_id FROM memories").fetchall()),
+            "links": sorted(conn.execute(
+                "SELECT mf.memory_id, f.path, f.project_id FROM memory_files mf JOIN files f ON f.id = mf.file_id"
+            ).fetchall()),
+        }
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def shared_app(identity_env, store, monkeypatch):
+    """x/app (origin a/app) and y/app (origin b/app) both wrote into 'app':
+    x's memory links only x's file; y's only y's; 'both' links one of each;
+    'bare' links none; 'paired' links x's file and y's (so it stays and
+    shares x's file row with 'mine')."""
+    from scripts import memory_api
+
+    for memo in (memory_api._LEGACY_SCOPE_CACHE, memory_api._UNPROVEN_WARNED):
+        memo.clear()
+    x = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    y = make_repo(identity_env / "y" / "app", remote="https://github.com/b/app.git")
+    (x / "f.py").write_text("x\n")
+    (y / "g.py").write_text("y\n")
+    _seed_linked(store, "app", "mine00001", [str(x / "f.py")])
+    _seed_linked(store, "app", "theirs001", [str(y / "g.py")])
+    _seed_linked(store, "app", "both00001", [str(x / "f.py"), str(y / "g.py")])
+    _seed_linked(store, "app", "bare00001", [])
+    monkeypatch.chdir(x)
+    return x, y
+
+
+def test_only_placed_here_moves_only_this_checkouts_memories(shared_app, store, capfd, caplog):
+    """From x/app, --only-placed-here moves only the memory whose every file
+    row lies in x/app; y's memory, the one with files in both checkouts and
+    the one with no files stay in 'app'. The shared file row stays for the
+    memory that keeps it, and its moved copy carries the moved memory's link.
+    The dry run is the default and leaves the store byte-identical; a re-run
+    moves nothing. Show and the warning name this command for the shared
+    bucket, and the whole-bucket refusal names it as the alternative. RED
+    WHEN a foreign or unplaced memory moves, a link is lost, or the dry run
+    writes."""
+    import hashlib
+    import logging
+
+    x, y = shared_app
+    with caplog.at_level(logging.WARNING):
+        code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    rows = {row["id"]: row for row in shown["result"]["candidates"]}
+    assert rows["app"]["rekey"] and "--only-placed-here" in rows["app"]["rekey"], rows
+    assert "--only-placed-here" in caplog.text, caplog.text
+    code, refused = _cli(
+        ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--db-path", str(store)], capfd,
+    )
+    assert code == 1 and "--only-placed-here" in refused["message"], refused
+    argv = ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--only-placed-here",
+            "--db-path", str(store)]
+    digest = hashlib.sha256(store.read_bytes()).hexdigest()
+    code, plan = _cli(argv, capfd)
+    assert code == 0, plan
+    result = plan["result"]
+    assert (result["dry_run"], result["memories"], result["left_files_elsewhere"], result["left_no_files"]) == (
+        True, 1, 2, 1), result
+    assert result["files_copied"] == 1, result
+    assert hashlib.sha256(store.read_bytes()).hexdigest() == digest
+    code, applied = _cli([*argv, "--apply"], capfd)
+    assert code == 0 and applied["result"]["memories"] == 1, applied
+    after = _placed_rows(store)
+    assert after["memories"] == {
+        "mine00001": "github.com/a/app", "theirs001": "app", "both00001": "app", "bare00001": "app",
+    }, after
+    assert ("mine00001", str(x / "f.py"), "github.com/a/app") in after["links"], after
+    assert ("both00001", str(x / "f.py"), "app") in after["links"], after
+    assert ("both00001", str(y / "g.py"), "app") in after["links"], after
+    assert ("theirs001", str(y / "g.py"), "app") in after["links"], after
+    code, again = _cli([*argv, "--apply"], capfd)
+    assert code == 0 and again["result"]["memories"] == 0, again
+    assert _placed_rows(store) == after
+
+
+def test_only_placed_here_is_refused_for_another_target(shared_app, store, capfd):
+    """Only this checkout's own id takes the partial move. RED WHEN it moves
+    rows into another repository's id."""
+    before = _snapshot(store)
+    # The dry run too: an apply into another id is also refused by the
+    # into-another-repository rule, so only a dry run shows this check.
+    for argv in (["--to=github.com/b/app"], ["--to=github.com/b/app", "--apply"], ["--apply"]):
+        code, envelope = _cli(
+            ["project-id", "rekey", "--from=app", *argv, "--only-placed-here",
+             "--db-path", str(store)], capfd,
+        )
+        assert (code, envelope.get("error")) == (2, "INVALID_INPUT"), envelope
+        assert "--only-placed-here" in envelope["message"], envelope
+    assert _snapshot(store) == before
+
+
+def test_only_placed_here_moves_nothing_of_an_excluded_bucket(identity_env, store, monkeypatch, capfd):
+    """'app' is excluded here: y/app holds its only existing file row, and x's
+    memory's file is gone and undated, so the gate does not count it as here
+    (it is vanished). No memory is placed, so show prints no command and the
+    move moves nothing. RED WHEN a row the gate does not count as here
+    places a memory."""
+    from scripts import memory_api
+
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    x = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    y = make_repo(identity_env / "y" / "app", remote="https://github.com/b/app.git")
+    (y / "g.py").write_text("y\n")
+    _seed_linked(store, "app", "mine00001", [str(x / "gone.py")])
+    _seed_linked(store, "app", "theirs001", [str(y / "g.py")])
+    monkeypatch.chdir(x)
+    code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    assert shown["result"]["legacy_scope"]["excluded"] is True, shown
+    rows = {row["id"]: row for row in shown["result"]["candidates"]}
+    assert rows["app"]["rekey"] is None, rows
+    code, applied = _cli(
+        ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--only-placed-here", "--apply",
+         "--db-path", str(store)], capfd,
+    )
+    assert code == 0 and applied["result"]["memories"] == 0, applied
+    assert applied["result"]["left_files_elsewhere"] == 2, applied
+
+
+def test_only_placed_here_places_a_row_as_the_gate_does(identity_env, store, monkeypatch, capfd):
+    """Placement is the gate's own row classification. A path that climbs out
+    of x/app with '..' into y/app's file is y's row, not placed; so is
+    x/app/../app2/f.py; a row reached through a symlink into x/app is here,
+    placed; a sibling x/app2 is not inside x/app; and a separate repository
+    nested in x/app (origin b/app) owns its rows, as the bucket check counts
+    them. RED WHEN placement compares the stored string instead of
+    the gate's resolved containment."""
+    from scripts import memory_api
+
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    x = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    y = make_repo(identity_env / "y" / "app", remote="https://github.com/b/app.git")
+    (x / "f.py").write_text("x\n")
+    (y / "f.py").write_text("y\n")
+    sibling = identity_env / "x" / "app2"
+    sibling.mkdir()
+    (sibling / "s.py").write_text("s\n")
+    (sibling / "f.py").write_text("s\n")
+    link = identity_env / "via"
+    link.symlink_to(x)
+    nested = make_repo(x / "nested" / "app", remote="https://github.com/b/app.git")
+    (nested / "n.py").write_text("n\n")
+    _seed_linked(store, "app", "climb0001", [str(x) + "/../../y/app/f.py"])
+    _seed_linked(store, "app", "link00001", [str(link / "f.py")])
+    _seed_linked(store, "app", "sibling01", [str(sibling / "s.py")])
+    _seed_linked(store, "app", "updown001", [str(x) + "/../app2/f.py"])
+    _seed_linked(store, "app", "nested001", [str(nested / "n.py")])
+    monkeypatch.chdir(x)
+    code, applied = _cli(
+        ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--only-placed-here", "--apply",
+         "--db-path", str(store)], capfd,
+    )
+    assert code == 0, applied
+    assert _placed_rows(store)["memories"] == {
+        "climb0001": "app", "link00001": "github.com/a/app", "sibling01": "app",
+        "updown001": "app", "nested001": "app",
+    }, applied
+
+
+
+def test_only_placed_here_moves_a_memory_placed_in_a_linked_worktree(identity_env, store, monkeypatch, capfd):
+    """A linked worktree of this repository is part of this checkout: a
+    memory whose every file row lies under it is placed and moves, run from
+    the main checkout. RED WHEN only the main checkout's root counts."""
+    from fixtures.identity_git import run_git
+    from scripts import memory_api
+
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    main = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    worktree = identity_env / "wt" / "app-feature"
+    run_git("worktree", "add", "-q", "-b", "feature", str(worktree), cwd=main)
+    (worktree / "w.py").write_text("w\n")
+    _seed_linked(store, "app", "wtmem0001", [str(worktree / "w.py")])
+    _seed_linked(store, "app", "away00001", [str(identity_env / "elsewhere.py")])
+    monkeypatch.chdir(main)
+    code, applied = _cli(
+        ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--only-placed-here", "--apply",
+         "--db-path", str(store)], capfd,
+    )
+    assert code == 0, applied
+    assert (applied["result"]["memories"], applied["result"]["left_files_elsewhere"]) == (1, 1), applied
+    assert _placed_rows(store)["memories"] == {"wtmem0001": "github.com/a/app", "away00001": "app"}
+
+
+@pytest.mark.parametrize(("path", "inside"), [
+    ("/a/app/f.py", True),
+    ("/a/app", True),
+    ("/a/app2/f.py", False),
+    ("/a/app-old/f.py", False),
+    ("/a/ap", False),
+])
+def test_containment_is_separator_aware(path, inside):
+    """/a/app2 shares a string prefix with /a/app but is not inside it. RED
+    WHEN containment is a plain string startswith."""
+    from scripts.database import _contained_by_root
+
+    assert _contained_by_root(path, "/a/app", {}, None) is inside
+
+
+def test_only_placed_here_from_another_repositorys_canonical_id_needs_the_flag(
+    identity_env, store, monkeypatch, capfd
+):
+    """From x/app, github.com/b/app is another repository's canonical id: a
+    move of only its placed memories into this checkout's id is still
+    refused unless --from-another-repository is passed too, and then only the
+    placed memory moves. The whole-bucket refusal suggests the combination.
+    A legacy folder-name bucket keeps working with --only-placed-here alone
+    (test_only_placed_here_moves_only_this_checkouts_memories). RED WHEN
+    --only-placed-here alone moves another repository's canonical bucket."""
+    from scripts import memory_api
+
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    x = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    (x / "f.py").write_text("x\n")
+    _seed_linked(store, "github.com/b/app", "placed001", [str(x / "f.py")])
+    _seed_linked(store, "github.com/b/app", "away00001", [str(identity_env / "away.py")])
+    monkeypatch.chdir(x)
+    base = ["project-id", "rekey", "--from=github.com/b/app", "--to=github.com/a/app", "--db-path", str(store)]
+    before = _snapshot(store)
+    code, whole = _cli(base, capfd)
+    assert code == 1 and "pass --only-placed-here together with --from-another-repository" in whole["message"], whole
+    for apply in ([], ["--apply"]):
+        code, envelope = _cli([*base, "--only-placed-here", *apply], capfd)
+        assert (code, envelope.get("error")) == (1, "REKEY_REFUSED"), envelope
+        assert "With --only-placed-here, add --from-another-repository" in envelope["message"], envelope
+    assert _snapshot(store) == before
+    code, applied = _cli([*base, "--only-placed-here", "--from-another-repository", "--apply"], capfd)
+    assert code == 0 and applied["result"]["memories"] == 1, applied
+    assert _placed_rows(store)["memories"] == {"placed001": "github.com/a/app", "away00001": "github.com/b/app"}
+
+
+def test_a_partial_move_prints_no_bucket_wide_unattributed_note(identity_env, store, monkeypatch, capfd):
+    """x/app's old 'app' bucket is verified by its file row here and holds
+    memories no recorded session wrote; a whole move says it moved them with
+    the bucket. --only-placed-here moves only memories its own file rows
+    place here, so it prints no such note. RED WHEN the partial move claims
+    it moved the bucket's unattributed memories."""
+    from scripts import memory_api
+    from scripts.cli import main
+
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    memory_api._UNPROVEN_WARNED.clear()
+    x = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    (x / "f.py").write_text("x\n")
+    _seed_linked(store, "app", "mine00001", [str(x / "f.py")])
+    _seed_linked(store, "app", "bare00001", [])
+    monkeypatch.chdir(x)
+
+    def output(argv):
+        with pytest.raises(SystemExit):
+            main(argv)
+        captured = capfd.readouterr()
+        return captured.out + captured.err
+
+    import shutil
+
+    twin = store.with_name("twin.db")
+    shutil.copy(store, twin)
+    # --apply: the read's own disclosure is quiet then, so the rekey states it.
+    base = ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--apply"]
+    assert "came from no recorded session" in output([*base, "--db-path", str(twin)])
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    memory_api._UNPROVEN_WARNED.clear()
+    assert "came from no recorded session" not in output([*base, "--only-placed-here", "--db-path", str(store)])
+
+
+@pytest.mark.parametrize(("remote", "source", "detail"), [
+    ("a_b://bad", "unusable origin", "git cannot use its origin"),
+    ("git@host:x://y", "unusable origin", "git cannot use its origin"),
+    ("1x://bad", "remote helper", "remote-helper or ftp transport"),
+])
+def test_a_save_from_an_origin_git_cannot_use_uses_the_folder_name(
+    identity_env, store, monkeypatch, capfd, remote, source, detail
+):
+    """git refuses an origin whose text before :// is no scheme ("protocol
+    'a_b' is not supported") and hands a digit-first scheme to a helper;
+    either saves under the folder name, as the merge base did, and show names
+    what happened. RED WHEN the save is refused, or the detail misnames it."""
+    repo = make_repo(identity_env / "widget", remote=remote)
+    monkeypatch.chdir(repo)
+    code, saved = _cli(["save", json.dumps({"context": "odd origin"}), "--db-path", str(store)], capfd)
+    assert code == 0, saved
+    code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    result = shown["result"]
+    assert (result["project_id"], result["source"]) == ("widget", source), shown
+    assert detail in result["identity_detail"], shown
+
+
+@pytest.mark.parametrize("remote", [
+    "s3://my-bucket/widget", "hf://datasets/acme/widget",
+    "ftp://host.example/acme/widget", "ftps://host.example/acme/widget",
+])
+def test_a_save_from_a_remote_helper_scheme_origin_uses_the_folder_name(
+    identity_env, store, monkeypatch, capfd, remote
+):
+    """An origin on a scheme git hands to a helper (s3, hf), or an ftp or
+    ftps origin, saves under the checkout's folder name, with the
+    remote-helper disclosure, as main did. RED WHEN the save is refused as
+    PROJECT_IDENTITY_UNRESOLVED."""
+    repo = make_repo(identity_env / "widget", remote=remote)
+    monkeypatch.chdir(repo)
+    code, saved = _cli(["save", json.dumps({"context": "helper origin"}), "--db-path", str(store)], capfd)
+    assert code == 0, saved
+    code, shown = _cli(["project-id", "show", "--db-path", str(store)], capfd)
+    assert (shown["result"]["project_id"], shown["result"]["source"]) == ("widget", "remote helper"), shown

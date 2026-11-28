@@ -19,15 +19,21 @@ eliminating startup cost for non-memory users.
 
 from __future__ import annotations
 
+import contextvars
 import functools
 import json
 import logging
 import os
+import shlex
+import stat
 import struct
 import subprocess
 import threading
+import unicodedata
+from contextlib import closing, contextmanager
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, NamedTuple, Optional, Tuple, cast
 
 # Use the same sqlite3 module as database.py for type consistency
 try:
@@ -35,7 +41,15 @@ try:
 except ImportError:
     import sqlite3
 
-from .config import resolve_db_path, store_scope
+from .config import (
+    DERIVED_STORE_ORIGINS,
+    catchup_projects,
+    get_user_memory_dir,
+    read_only_scope,
+    resolve_db_path,
+    store_path_origin,
+    store_scope,
+)
 from .database import (
     db_connection,
     create_memory,
@@ -43,22 +57,51 @@ from .database import (
     update_memory,
     delete_memory,
     list_memories,
+    load_sqlite_vec,
     ensure_initialized,
     resolve_memory_id_prefix,
     _unusable_identifier,
     MEMORY_ID_LENGTH,
-    SQLITE_EXTENSIONS_ENABLED
+    SQLITE_EXTENSIONS_ENABLED,
+    BUCKET_EVIDENCE_KEYS,
+    UNKNOWN_NAME,
+    checkout_is_same_owner,
+    common_dir_parent_name,
+    origin_url_in_config,
+    folded_github_id,
+    pre_change_name,
+    pre_change_name_of_common,
+    validate_identifier_for_write,
 )
 from .embeddings import (
     generate_embedding,
     generate_embedding_text
 )
 from .graph import (
+    count_project_file_paths,
     link_memory_to_paths,
     track_file,
     get_files_for_memory
 )
 from .models import MemoryObject, memory_from_db_row
+from . import project_identity
+from .project_identity import (
+    EMPTY_LISTING,
+    UNREADABLE_LISTING,
+    _submodule_admin_dir,
+    decline_record,
+    detect_id_for_root,
+    find_git_marker,
+    is_canonical,
+    read_user_setting,
+)
+if TYPE_CHECKING:
+    # ANNOTATION-ONLY. `RootIdentity` appears solely in the string
+    # annotations of `_disclosed_source` and `_warn_override_ignored`, which
+    # an AST usage walk cannot see; the repo's import-hygiene sweep has an
+    # explicit carve-out for this block, so this is the intended shape rather
+    # than a noqa.
+    from .project_identity import RootIdentity
 from .search import (
     graph_enhanced_search,
     search_by_file,
@@ -68,6 +111,7 @@ from .working_memory import (
     MAX_WORKING_MEMORIES,
     AmbientSyncRefused,
     SyncResult,
+    entry_memory_id,
     project_memories_to_claude_md,
     sync_to_claude_md,
     sync_retrieved_to_claude_md,
@@ -104,6 +148,2241 @@ CONTENT_FIELDS = {
 }
 
 
+class _DetectedIdentity(NamedTuple):
+    """One detection pass's full result.
+
+    `legacy_basename` is what the PRE-change resolver produced for this
+    location — the id existing stored rows were keyed by. It is carried from
+    this same pass rather than re-derived: re-deriving it from the canonical
+    id yields the REMOTE's repo name, not the folder name, and the two differ
+    whenever a checkout folder is named differently from its repository. The
+    read-scope union uses this value to find the legacy bucket, so a drifted
+    derivation would silently stop finding it.
+
+    `override_ignored` is a structured {path, reason} when an override file
+    was read and found unusable — a stderr warning alone is invisible to a
+    caller that parses the envelope. It is None, with nothing read, when a
+    rung declines before the identity read (a repository with no working
+    tree, a `.git` naming a linked worktree's admin dir that does not link
+    back, a broken `.git` marker, a declaration that cannot be resolved) and
+    when the checkout the session is in is the user's home directory
+    (inside a repository, a stray `.git` that git looks past, such as an
+    empty directory or a dangling symlink, does not make its folder a
+    checkout).
+    `path` is None (the reason is
+    kept) when
+    the checkout's `.git` is a redirect, or points at a git directory outside
+    the checkout that is neither a linked worktree's nor a submodule's admin
+    dir.
+    """
+
+    project_id: Optional[str]
+    source: str
+    legacy_basename: Optional[str]
+    override_ignored: Optional[dict]
+    # THE ROOT THE WINNING RUNG RESOLVED. The plausibility gate compares a
+    # legacy bucket's absolute file rows against THIS, not against the
+    # process's cwd repository: in a declared-repo session the two differ, and
+    # gating on the cwd would exclude the declared repo's own legacy bucket.
+    identity_root: Optional[Path]
+    # STRUCTURED DECLINE DISCLOSURE — `{source, reason, override_path}`, built
+    # by `project_identity.decline_record`, when a rung declined for a named
+    # cause, else None. `project-id show` reports it; a warning alone is
+    # invisible to a caller that parses the envelope.
+    decline_reason: Optional[dict] = None
+    # A FIXED sentence naming a narrower cause than the reason token
+    # (`RootIdentity.detail`), printed once in the warning and the refusal.
+    decline_detail: Optional[str] = None
+    # WHAT THE PRE-CHANGE RESOLVER PRODUCED for this exact input, or None
+    # where it refused. The backlog file name reads only this.
+    pre_change_name: Optional[str] = None
+    # THE COMMON DIR THE IDENTITY WAS READ FROM, when a rung bound one. Every
+    # later git question about the identity (the read gate's worktree
+    # listing and submodule exemption, the suppression disclosure) is asked
+    # of this repository. Asking git again at `identity_root` would not do:
+    # that root is git's work-tree top level, and a `core.worktree` that
+    # places it inside ANOTHER repository makes git, asked there, answer
+    # for that repository.
+    identity_common_dir: Optional[Path] = None
+    # True when the id came from the HOME-landing branch: a folder-name id the
+    # user chose by working at HOME, which the legacy gate does not judge.
+    home_landing: bool = False
+
+
+# `_read_project_scopes` result cache, held for ONE DETECTION PASS: (store,
+# store stat, identity root, canonical, legacy) -> (scope tuple, scope state).
+# It is read and written only while a pass is open, and the outermost pass
+# empties it when it ends, so a read scope lives exactly as
+# long as the command that computed it, like every other answer the pass
+# holds, and the next command computes it afresh from the files it depends on
+# (the store, the worktree listing and links, session records, prune ledgers,
+# the repository's `description`, row paths). Keying on the store's stat is
+# what makes a rekey performed by ANOTHER process during the pass observable;
+# an in-process write clears it (`_invalidate_legacy_scope_cache`).
+# SINGLE-THREAD CONTRACT: this is one module-level dict, so detection passes
+# running at once in two threads would share it. Run at most one pass at a
+# time per process (the memory CLI and the backlog command each run one); a
+# caller that needs concurrent passes must first move this into a ContextVar
+# like the other pass memos.
+_LEGACY_SCOPE_CACHE: Dict[tuple, tuple] = {}
+
+# Exclusion notices already emitted, keyed by (store, candidate). A warning
+# repeated on every read is a warning readers learn to ignore.
+_EXCLUSION_WARNED: set = set()
+# Roots whose remote-helper folder-name id was disclosed, once per process.
+_REMOTE_HELPER_WARNED: set = set()
+# Earlier canonical buckets of this repository, computed once per store stamp
+# and root (`PACTMemory._earlier_canonical_buckets`), and the ones named.
+_EARLIER_CANONICAL: Dict[tuple, Dict[str, Optional[str]]] = {}
+_EARLIER_CANONICAL_WARNED: set = set()
+
+# Set while a command reads the scope only to act on the bucket it names
+# (`legacy_notices_quiet`): the legacy notices advise a move, and printing
+# that advice beside the move's own result contradicts it. A quiet read
+# marks nothing as disclosed, so a later read still discloses.
+_LEGACY_NOTICES_QUIET: contextvars.ContextVar = contextvars.ContextVar(
+    "pact_legacy_notices_quiet", default=False
+)
+
+
+# Set while `project-id rekey` dry-runs a move (`rekey_preview`): a notice
+# whose printed command is that same move does not print it again.
+_REKEY_PREVIEW: contextvars.ContextVar = contextvars.ContextVar(
+    "pact_rekey_preview", default=None
+)
+
+
+@contextmanager
+def rekey_preview(from_id: str, to_id: str):
+    """Mark the reads inside as `project-id rekey --from=from_id --to=to_id`'s
+    dry run, so a legacy notice does not print that command back."""
+    token = _REKEY_PREVIEW.set((from_id, to_id))
+    try:
+        yield
+    finally:
+        _REKEY_PREVIEW.reset(token)
+
+
+def _preview_clause(lead: str, candidate: str, target: str, command) -> str:
+    """` <lead> <command>`, the sentence a legacy notice ends with, or "" when
+    this run is already that preview."""
+    if _REKEY_PREVIEW.get() == (candidate, target):
+        return ""
+    return " " + lead + " " + _printed_rekey_remedy([command])
+
+
+@contextmanager
+def legacy_notices_quiet():
+    """Suppress the legacy-bucket read notices for the reads inside, as
+    `project-id rekey --apply` does for the scope read before its move."""
+    token = _LEGACY_NOTICES_QUIET.set(True)
+    try:
+        yield
+    finally:
+        _LEGACY_NOTICES_QUIET.reset(token)
+
+
+# Case-variant notices already emitted, keyed by (store, variants). The fold
+# suppression is silent loss unless it is reported; reported once per process
+# for the same reason as the exclusion notice.
+_CASE_VARIANT_WARNED: set = set()
+
+# Submodule legacy-suppression notices already emitted, keyed by admin dir.
+# Detection runs on every memory operation, so this disclosure is once per
+# process for the same reason `_EXCLUSION_WARNED` is.
+_SUBMODULE_SUPPRESSED: set = set()
+# Unproven legacy buckets already disclosed in this process, (store, bucket).
+_UNPROVEN_WARNED: set = set()
+# Folder-name buckets of a declined identity already disclosed, (store, bucket).
+_DECLINED_BUCKET_WARNED: set = set()
+
+
+LEGACY_SCOPE_KEYS = frozenset({
+    "candidate", "memory_count", "file_paths", "rekey", "included",
+    "verified", "included_unverified", "excluded", "unproven",
+    "session_evidence", "ambiguous", "canonical_count", "detail",
+    "case_variant", "case_variant_rekey", "suppressed",
+    "suppressed_candidate", "degraded", "sessions", "unproven_reason",
+})
+
+
+def _legacy_scope_record(**overrides: Any) -> Dict[str, Any]:
+    """THE ONE BUILDER for `legacy_scope`: every key, in every state.
+
+    A consumer reads a fixed key set, so a branch that forgets a key cannot
+    turn "absent" into a second meaning of "false". Exactly one of
+    `included`, `excluded` and `unproven` is true when `candidate` is set;
+    all three are false when it is not.
+    """
+    unknown = set(overrides) - LEGACY_SCOPE_KEYS
+    if unknown:
+        raise ValueError(f"unknown legacy_scope keys: {sorted(unknown)}")
+    record: Dict[str, Any] = {
+        "candidate": None,
+        "memory_count": 0,
+        "file_paths": None,
+        "rekey": None,
+        "included": False,
+        "verified": False,
+        "included_unverified": False,
+        "excluded": False,
+        "unproven": False,
+        "session_evidence": None,
+        "ambiguous": [],
+        "canonical_count": None,
+        "detail": None,
+        "case_variant": [],
+        "case_variant_rekey": [],
+        "suppressed": None,
+        "suppressed_candidate": None,
+        "degraded": None,
+        "sessions": None,
+        "unproven_reason": None,
+    }
+    record.update(overrides)
+    return record
+
+
+def hidden_legacy_buckets(state: Optional[Dict[str, Any]]) -> List[str]:
+    """EVERY BUCKET A READ HIDES FOR THIS CHECKOUT, from its `legacy_scope`
+    record: the legacy candidate when unproven or excluded, its case variants
+    and ambiguous folded matches (never read), and a submodule's suppressed
+    candidate. THE ONE PREDICATE for the stale Working Memory section and the
+    `legacy_scope` key `list` and `search` put on stdout."""
+    legacy = state or {}
+    return [
+        *(
+            [legacy["candidate"]]
+            if legacy.get("candidate") is not None
+            and (legacy.get("unproven") or legacy.get("excluded"))
+            else []
+        ),
+        *(legacy.get("case_variant") or []),
+        *(legacy.get("ambiguous") or []),
+        *(
+            [legacy["suppressed_candidate"]]
+            if legacy.get("suppressed_candidate")
+            else []
+        ),
+    ]
+
+
+def _suppressed_bucket_rows(store: str, bucket: Optional[str]) -> int:
+    """Rows in a SUPPRESSED legacy bucket, read read-only; disclosed if any.
+
+    The suppression must never be silent when it hides rows: an operator
+    whose pre-upgrade memories sit in that bucket would otherwise see them
+    disappear with no notice. It is silent when the bucket is empty, because
+    a notice with nothing behind it is one readers learn to skip. Once per
+    process per (store, bucket). The bucket is never read beyond its count.
+    """
+    if not bucket:
+        return 0
+    count = read_project_bucket_census(store).get(bucket, 0)
+    key = (store, bucket)
+    if count and key not in _SUBMODULE_SUPPRESSED:
+        _SUBMODULE_SUPPRESSED.add(key)
+        logger.warning(
+            "this repository is a submodule, so the pre-upgrade project "
+            "bucket %r derived from its admin directory (%d memories) is NOT "
+            "in this project's read scope: a superproject chooses that name "
+            "through its tracked .gitmodules, so reading it would let a "
+            "repository read another project's memories. If those rows belong "
+            "to this checkout, list them with `project-id show` and move them "
+            "with `project-id rekey` and --from-another-repository, only with "
+            "the user's approval.",
+            bucket,
+            count,
+        )
+    return count
+
+
+# The prune ledger is read from its end, at most this many bytes. A line is
+# about 200 bytes, so this covers roughly the last 5,000 pruned sessions of
+# one project; an older pruned session reads as no evidence (unproven), the
+# fail-closed direction, and the unproven notice prints its remedy.
+_PRUNE_LEDGER_TAIL_BYTES = 1024 * 1024
+
+
+def _description_predates(common_dir: Optional[Path], started_at: Any) -> bool:
+    """Whether `<common_dir>/description` last changed before `started_at`,
+    or the repository has no `description` file at all.
+
+    `started_at` must be an ISO-8601 timestamp that carries its zone; a naive
+    or unparseable one fails closed. A description that exists must be a
+    regular file by `lstat` (a symlink to an old file is refused), and its
+    ctime must be STRICTLY earlier than the session's start. The ctime is the
+    file's last status change, not its creation: a copied, restored or
+    re-cloned repository (an `rsync -a` copy included) has a new description,
+    and a `chmod` or `chown` that reaches the file moves its ctime later too,
+    so in each case the old sessions fail.
+
+    NO DESCRIPTION FILE, NO ORDERING CHECK. A repository made from a template
+    without one (`git init --template=<dir>`) has nothing to date it by, so a
+    session recorded at its root counts on the record alone. The record
+    still names the root it was launched at and the session id that wrote
+    the rows, so it admits only a bucket that session wrote into. With no
+    common dir (git could not name the repository) there is nothing to date
+    by and nothing to show the root is a repository, so the record is no
+    evidence. Never raises.
+    """
+    if common_dir is None or not isinstance(started_at, str) or not started_at:
+        return False
+    try:
+        started = datetime.fromisoformat(started_at)
+        if started.tzinfo is None:
+            return False
+        try:
+            described = os.lstat(Path(common_dir) / "description")
+        except FileNotFoundError:
+            return True
+        return (
+            stat.S_ISREG(described.st_mode)
+            and described.st_ctime < started.timestamp()
+        )
+    except Exception:
+        return False
+
+
+def _session_record_counts(
+    record: Any, roots: set, common_dir: Optional[Path]
+) -> bool:
+    """Whether one recorded session (a live context or a ledger line) counts.
+
+    It ran in a gate root (its `project_dir` resolves to one) and started
+    after this repository's `description` file last changed, or the
+    repository has no `description` file (`_description_predates`). Never
+    raises.
+    """
+    try:
+        project_dir = record.get("project_dir")
+        return (
+            isinstance(project_dir, str)
+            and bool(project_dir)
+            and os.path.realpath(project_dir) in roots
+            and _description_predates(common_dir, record.get("started_at"))
+        )
+    except Exception:
+        return False
+
+
+def _pruned_session_records(ledger: Path) -> List[dict]:
+    """The parseable lines at the end of a prune ledger, newest last.
+
+    Reads at most `_PRUNE_LEDGER_TAIL_BYTES` from the end of a REGULAR file
+    (a symlink or FIFO is refused, O_NONBLOCK keeps a FIFO from blocking the
+    open), drops the partial first line of a cut read (never a whole one),
+    and skips every line
+    that is not a JSON object. Never raises; any failure is an empty list.
+    """
+    try:
+        if not stat.S_ISREG(os.lstat(ledger).st_mode):
+            return []
+        fd = os.open(
+            ledger,
+            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+        )
+    except Exception:
+        return []
+    try:
+        size = os.fstat(fd).st_size
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return []
+        offset = max(0, size - _PRUNE_LEDGER_TAIL_BYTES)
+        # A cut read starts ONE BYTE EARLY, so dropping through the first
+        # newline drops only a partial line: a window that starts exactly on
+        # a line boundary keeps its first line.
+        if offset > 0:
+            offset -= 1
+        os.lseek(fd, offset, os.SEEK_SET)
+        chunks = []
+        remaining = size - offset
+        while remaining > 0:
+            chunk = os.read(fd, min(remaining, 65536))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        data = b"".join(chunks)
+        if offset > 0:
+            data = data.partition(b"\n")[2]
+        records = []
+        for line in data.split(b"\n"):
+            try:
+                record = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(record, dict):
+                records.append(record)
+        return records
+    except Exception:
+        return []
+    finally:
+        os.close(fd)
+
+
+# One parsed ledger per (path, size, mtime, ctime, inode) for the life of the process. A
+# bucket that stays unproven re-runs the evidence check whenever the store
+# changes, and without this each run re-reads and re-parses the same ledger.
+_PRUNED_SESSION_INDEX: Dict[str, tuple] = {}
+
+
+def _pruned_session_index(ledger: Path) -> Dict[str, List[dict]]:
+    """The ledger's parseable lines grouped by `session_id`; never raises.
+
+    Built once per ledger state and then reused, so the evidence check costs
+    one dictionary lookup per writing session instead of a scan of every
+    line. The cache key carries the file's size, mtime, change time and inode,
+    so an appended line or a cut-back (the reaper's two writes) is seen on the
+    next read, as is a compaction's new file renamed over the ledger at the
+    same size within one mtime tick.
+    """
+    try:
+        status = os.lstat(ledger)
+        stamp = (status.st_size, status.st_mtime_ns, status.st_ctime_ns, status.st_ino)
+    except OSError:
+        return {}
+    cached = _PRUNED_SESSION_INDEX.get(str(ledger))
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    index: Dict[str, List[dict]] = {}
+    for record in _pruned_session_records(ledger):
+        session_id = record.get("session_id")
+        if isinstance(session_id, str):
+            index.setdefault(session_id, []).append(record)
+    _PRUNED_SESSION_INDEX[str(ledger)] = (stamp, index)
+    return index
+
+
+# Where a legacy bucket's writing sessions are recorded, by row count:
+# `here` (a session that counts as evidence here), `elsewhere` (recorded at a
+# directory outside every gate root, or inside another checkout nested under
+# one), `subfolder` (recorded at a folder of a gate root's own checkout, below
+# the root), `description_newer` (recorded at a gate
+# root but started before `description` last changed), `undated` (recorded
+# at a gate root with no confirmed start: its journal has no readable first
+# event, so it cannot be dated against `description`), `unattributed`
+# (no session id, no record found, or a record whose directory no longer
+# exists). Every place but `unattributed` is a directory that exists.
+_SESSION_CENSUS_KEYS = (
+    "here", "elsewhere", "subfolder", "description_newer", "undated", "unattributed",
+)
+
+
+# Directory listings the session census and the recorded-dir loader reuse
+# across commands in one process: {path: ((st_mtime_ns, st_ctime_ns, st_size,
+# st_ino), names)}. A folder is listed again only when its stat moves (an
+# entry added, removed or renamed); the change time and size join the mtime so
+# a filesystem with a coarse mtime still sees a change inside one tick, so an unchanged sessions root costs one stat per folder, not one
+# listing per verdict. Writes to the store do not clear it: they change no
+# session folder.
+_DIR_LISTINGS: Dict[str, tuple] = {}
+
+
+def _listing(directory: Path) -> set:
+    """The names in `directory`, from `_DIR_LISTINGS` while its stat is
+    unchanged. Raises what `os.stat` and `os.listdir` raise."""
+    key = str(directory)
+    status = os.stat(key)
+    stamp = (status.st_mtime_ns, status.st_ctime_ns, status.st_size, status.st_ino)
+    cached = _DIR_LISTINGS.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    names = set(os.listdir(key))
+    _DIR_LISTINGS[key] = (stamp, names)
+    return names
+
+
+def _legacy_session_census(
+    conn: Any,
+    candidate: str,
+    gate_roots: list,
+    common_dir: Optional[Path],
+    own: Optional[Tuple[str, Optional[str]]] = None,
+) -> Dict[str, int]:
+    """`candidate`'s memories counted by where their writing session is
+    recorded (`_SESSION_CENSUS_KEYS`).
+
+    EVERY SLUG FOLDER UNDER THE SESSIONS ROOT, NOT ONLY THE GATE ROOTS'. A
+    session recorded at ANOTHER checkout is what marks a row as that
+    checkout's, and a subfolder launch is recorded under the subfolder's own
+    slug. Each slug folder is listed once per call. A session with records in
+    two places counts by the first of elsewhere, here, subfolder,
+    description_newer, undated.
+
+    A PRESENT ENTRY IS A LIVE FOLDER: its context file is the record, and a
+    present entry that is not a folder is no record. An absent entry, or a
+    folder with no readable record (a reap whose delete failed after removing
+    the context file), lets that slug folder's prune ledger stand in. A slug folder that exists but cannot
+    be listed is not taken as empty: each session is then looked up in it by
+    path. Never raises: a store or filesystem failure leaves the affected
+    rows `unattributed`.
+
+    A SESSION RECORDED IN A SAME-OWNER CHECKOUT (`checkout_is_same_owner`
+    with `own`, this session's canonical id and origin url: a sibling clone
+    of the same origin or pin) is not elsewhere: it
+    places the session nowhere, as `bucket_evidence` treats that checkout's
+    rows as no rival's.
+
+    WHAT THIS CANNOT TELL APART: a row whose writing session has no record
+    anywhere (no session id, a session older than session records, or one
+    pruned past the ledger's tail). Such a row reads like this repository's
+    own once another of the bucket's sessions counts here. A row whose
+    session IS recorded at another checkout keeps the whole bucket out of
+    the read scope (its `elsewhere` count). A repository that has no
+    origin keeps writing folder-name rows after the upgrade, so a bucket can
+    gain rows of either kind at any time.
+    """
+    from shared.pact_context import (
+        PRUNE_LEDGER_NAME,
+        _UNSAFE_SLUG_CHARS_RE,
+        read_session_record,
+        reconstruct_session_dir,
+    )
+
+    from .database import bucket_session_counts
+
+    counts = dict.fromkeys(_SESSION_CENSUS_KEYS, 0)
+    try:
+        rows = bucket_session_counts(conn, candidate)
+    except sqlite3.Error:
+        return counts
+    roots = set()
+    for root in gate_roots:
+        try:
+            roots.add(os.path.realpath(root))
+        except (OSError, ValueError):
+            continue
+    named = [
+        (session_id, count) for session_id, count in rows
+        if isinstance(session_id, str) and session_id
+    ]
+    counts["unattributed"] = sum(count for _, count in rows) - sum(c for _, c in named)
+    sessions_root: Optional[Path] = None
+    entries: Dict[str, Optional[set]] = {}
+    if named:
+        try:
+            # Every session folder sits at `<sessions root>/<slug>/<id>`;
+            # any named path gives the root (the filesystem root has no slug).
+            sessions_root = Path(
+                reconstruct_session_dir(os.path.join(os.sep, "x"), "_")
+            ).parent.parent
+            for slug in sorted(_listing(sessions_root)):
+                try:
+                    entries[slug] = _listing(sessions_root / slug)
+                except (FileNotFoundError, NotADirectoryError):
+                    continue
+                except OSError:
+                    entries[slug] = None
+        except Exception:
+            sessions_root = None
+    ledgers: Dict[str, Dict[str, List[dict]]] = {}
+
+    names: Dict[str, Any] = {}
+
+    def where(record: Any) -> Optional[str]:
+        try:
+            project_dir = os.path.realpath(record.get("project_dir"))
+        except Exception:
+            return None
+        if not os.path.exists(project_dir):
+            # A DIRECTORY THAT IS GONE PLACES THE SESSION NOWHERE. A removed
+            # linked worktree of this repository is gone and so is a deleted
+            # checkout elsewhere, and nothing left on disk tells them apart.
+            # The reaper writes no ledger line for such a folder, so the live
+            # record and the reaped one both leave the row unattributed.
+            return None
+        if project_dir in roots:
+            if _session_record_counts(record, roots, common_dir):
+                return "here"
+            # NO CONFIRMED START IS ITS OWN CAUSE: the record dates nothing
+            # (`read_session_record` drops an unconfirmed start), so it is not
+            # a session that started before `description` changed.
+            started = record.get("started_at")
+            return "description_newer" if isinstance(started, str) and started else "undated"
+        if any(
+            project_dir.startswith(root if root.endswith(os.sep) else root + os.sep)
+            for root in roots
+        ):
+            # BELOW A ROOT IS A SUBFOLDER LAUNCH (neutral) unless the folder lies
+            # in a separate checkout nested inside the root, which owns it. A
+            # root with no `.git` (a non-git project folder) therefore never
+            # makes its own subfolders "elsewhere", and neither does a gate
+            # root inside another (a linked worktree at `<main>/.worktrees/`).
+            marker = find_git_marker(project_dir)
+            owner = os.path.realpath(marker.parent) if marker is not None else None
+            nested = owner is not None and owner not in roots and any(
+                owner.startswith(root if root.endswith(os.sep) else root + os.sep)
+                for root in roots
+            )
+            return "elsewhere" if nested else "subfolder"
+        if any(
+            root.startswith(project_dir if project_dir.endswith(os.sep) else project_dir + os.sep)
+            for root in roots
+        ):
+            # A FOLDER AROUND A ROOT (a session launched in `$HOME`) is this
+            # repository's surroundings, neutral, unless its pre-change name is
+            # the bucket's (a linked worktree of that project around the root)
+            # or cannot be read.
+            name = pre_change_name(project_dir, names)
+            return "elsewhere" if name is UNKNOWN_NAME or name == candidate else None
+        if own is not None:
+            marker = find_git_marker(project_dir)
+            if marker is not None and checkout_is_same_owner(
+                os.path.realpath(marker.parent), *own
+            ):
+                return None
+        return "elsewhere"
+
+    for session_id, count in named:
+        places = set()
+        if sessions_root is not None:
+            safe_id = _UNSAFE_SLUG_CHARS_RE.sub("_", session_id)
+            for slug, present in entries.items():
+                try:
+                    # A LISTED SLUG IS DECIDED BY SET MEMBERSHIP, and a path is
+                    # built only for a slug that answers, so a sessions root of
+                    # thousands of slugs costs no path join per session per slug.
+                    if safe_id in present if present is not None else os.path.lexists(
+                        sessions_root / slug / safe_id
+                    ):
+                        recorded = read_session_record(sessions_root / slug / safe_id)
+                        if recorded is not None:
+                            places.add(where(recorded))
+                            continue
+                        if not stat.S_ISDIR(os.lstat(sessions_root / slug / safe_id).st_mode):
+                            continue
+                    if (
+                        PRUNE_LEDGER_NAME in present
+                        if present is not None
+                        else os.path.lexists(sessions_root / slug / PRUNE_LEDGER_NAME)
+                    ):
+                        if slug not in ledgers:
+                            ledgers[slug] = _pruned_session_index(sessions_root / slug / PRUNE_LEDGER_NAME)
+                        for record in ledgers[slug].get(session_id, ()):
+                            places.add(where(record))
+                except Exception:
+                    continue
+        for place in ("elsewhere", "here", "subfolder", "description_newer", "undated"):
+            if place in places:
+                counts[place] += count
+                break
+        else:
+            counts["unattributed"] += count
+    return counts
+
+
+def _recorded_project_dirs() -> set:
+    """The resolved `project_dir` of every recorded session: each live
+    session folder's context file and each slug's prune ledger. Rule (b)'s
+    session-record marker (`bucket_evidence`) loads it only for a folder
+    named like the bucket that has no `.git` or `.claude`; cached while a
+    detection pass is open. Never raises; a failure is an empty set."""
+    key = ("recorded_dirs",)
+    in_pass = project_identity.DETECTION_ANSWERS.get() is not None
+    if in_pass and key in _LEGACY_SCOPE_CACHE:
+        return _LEGACY_SCOPE_CACHE[key]
+    from shared.pact_context import (
+        PRUNE_LEDGER_NAME,
+        read_session_record,
+        reconstruct_session_dir,
+    )
+
+    found: set = set()
+
+    def add(record: Any) -> None:
+        try:
+            if isinstance(record, dict) and isinstance(record.get("project_dir"), str):
+                found.add(os.path.realpath(record["project_dir"]))
+        except (OSError, ValueError):
+            pass
+
+    try:
+        sessions_root = Path(reconstruct_session_dir(os.path.join(os.sep, "x"), "_")).parent.parent
+        for slug in _listing(sessions_root):
+            slug_dir = sessions_root / slug
+            try:
+                entries = _listing(slug_dir)
+            except OSError:
+                continue
+            for entry in entries:
+                if entry == PRUNE_LEDGER_NAME:
+                    for record in _pruned_session_records(slug_dir / entry):
+                        add(record)
+                elif (slug_dir / entry).is_dir():
+                    add(read_session_record(slug_dir / entry))
+    except Exception:
+        pass
+    if in_pass:
+        _LEGACY_SCOPE_CACHE[key] = found
+    return found
+
+
+def _warn_legacy_excluded(
+    store: str, candidate: str, memories: int, file_paths: int, cause: str
+) -> None:
+    """Disclose an EXCLUDED legacy bucket, once per process per bucket.
+
+    NO COMMAND IS RENDERED: an excluded bucket has positive evidence of
+    another owner and none of this repository (`decide_bucket`), so a printed
+    move into this id would file that owner's rows here. `cause` is
+    `_unproven_cause`'s clause for the verdict's reason.
+    """
+    if _LEGACY_NOTICES_QUIET.get():
+        return
+    key = (store, candidate)
+    if key in _EXCLUSION_WARNED:
+        return
+    _EXCLUSION_WARNED.add(key)
+    logger.warning(
+        "legacy project bucket %r holds %d memor%s and %d file path%s, but "
+        "%s, and nothing places it here, so it is NOT in this read scope. No "
+        "rekey command is printed: its rows belong where that evidence "
+        "points, and the `project-id show` verb run there can move them.",
+        candidate,
+        memories,
+        "y" if memories == 1 else "ies",
+        file_paths,
+        "" if file_paths == 1 else "s",
+        cause,
+    )
+
+
+def _printed_rekey_remedy(commands: list) -> str:
+    """The remedy text a warning prints: the commands as they run, or why not.
+
+    A rendered command is shell-quoted, so pasted as printed it runs (`%r`
+    made it one quoted word). None (`runnable_rekey_command` found the id is
+    one rekey refuses) prints why no command exists. A command holding a
+    control or format character (a store path with a newline) is NOT
+    printed: in a log line it would start a forged line. `project-id show`
+    carries the same command in its JSON envelope, where it is escaped.
+    """
+    if any(command is None for command in commands):
+        return (
+            "no command: `project-id rekey` refuses this bucket id (a control "
+            "character, a lone surrogate or an over-long id)"
+        )
+    if any(
+        unicodedata.category(char) in ("Cc", "Cf", "Zl", "Zp")
+        for command in commands
+        for char in command
+    ):
+        return (
+            "the command printed by the `project-id show` verb (its bucket id "
+            "or store path holds a control character, so it is not printed "
+            "in this log line)" + _APPLY_CLAUSE
+        )
+    return " ; ".join(commands) + _APPLY_CLAUSE
+
+
+# A printed rekey command is a DRY RUN (`render_rekey_command` never adds
+# --apply): it previews the move, and only --apply performs it.
+_APPLY_CLAUSE = " (add --apply, with the user's approval, to perform it)"
+
+
+# Why a bucket was not read: the verdict's `reason` and the clause every
+# text prints for it (`_unproven_cause`). "another checkout" is said only
+# when a file row lies in one; a session folder need not be a checkout.
+_UNPROVEN_CAUSES = {
+    # Rendered by `_foreign_rows_clause`, which names each kind of rival.
+    "foreign_rows": "{foreign_rows} of its file rows lie in another checkout",
+    "recorded_elsewhere": (
+        "{elsewhere} of its memories were written by sessions recorded at "
+        "another existing folder ({here} by sessions recorded here)"
+    ),
+    "subfolder_launch": (
+        "no file row places it, and the sessions recorded as writing it were "
+        "launched in a subfolder of this repository; only a session launched "
+        "at the root of this repository or of one of its linked worktrees "
+        "counts"
+    ),
+    "description_newer": (
+        "no file row places it, and this repository's `description` file "
+        "changed after the sessions that wrote it started (a copy, restore, "
+        "chmod or chown changes it), or git could not name the repository "
+        "to date them by"
+    ),
+    "undated": (
+        "no file row places it, and the sessions recorded here that wrote it "
+        "have no confirmed start (their journal has no readable first event) "
+        "to date against this repository's `description` file"
+    ),
+    "no_session": (
+        "no file row places it and no session launched at the root of this "
+        "repository or of one of its linked worktrees wrote it"
+    ),
+}
+
+
+def _foreign_rows_clause(values: Dict[str, Any], bucket: Optional[str]) -> str:
+    """The `foreign_rows` clause, naming each kind of rival that holds rows:
+    a checkout, a marked project folder named like the bucket, or both."""
+    checkout = values["foreign_checkout_rows"]
+    folder = values["foreign_folder_rows"]
+    if not checkout and not folder:
+        checkout = values["foreign_rows"]
+    named = f"another project folder named {bucket!r}"
+    if checkout and folder:
+        return (
+            f"{checkout} of its file rows lie in another checkout and {folder} "
+            f"lie in {named}"
+        )
+    if folder:
+        return f"{folder} of its file rows lie in {named}"
+    return f"{checkout} of its file rows lie in another checkout"
+
+
+def _unproven_cause(
+    reason: str, counts: Optional[Dict[str, Any]], bucket: Optional[str] = None
+) -> str:
+    """The clause for a verdict's `reason`, filled from its counts
+    (`decide_bucket`); `bucket` is the bucket's id, which the folder-kind
+    clause names. THE ONE TEXT HELPER: the legacy read warnings
+    (`_read_project_scopes`) and the rekey refusal (`cli._project_id_rekey`)
+    both print it, so they cannot disagree. A
+    shared bucket (`foreign_rows` with rows here too) says so in
+    parentheses, never with a "so" that the templates' own "so" would
+    double."""
+    values: Dict[str, Any] = {
+        **dict.fromkeys(_SESSION_CENSUS_KEYS, 0),
+        **dict.fromkeys(BUCKET_EVIDENCE_KEYS, 0),
+        **(counts or {}),
+    }
+    clause = (
+        _foreign_rows_clause(values, bucket)
+        if reason == "foreign_rows"
+        else _UNPROVEN_CAUSES[reason].format(**values)
+    )
+    if reason == "foreign_rows" and values["contained_rows"]:
+        clause += (
+            f" ({values['contained_rows']} under this repository: the bucket "
+            "is shared)"
+        )
+    return clause
+
+
+class BucketVerdict(NamedTuple):
+    """`decide_bucket`'s answer; every consumer reads only this."""
+
+    read: bool
+    rekey_default: bool
+    state: Optional[str]
+    reason: Optional[str]
+    counts: Dict[str, Any]
+    sessions_counted: bool
+
+
+def decide_bucket(
+    evidence: Dict[str, int], sessions: Optional[Dict[str, int]]
+) -> BucketVerdict:
+    """THE ONE OWNERSHIP RULE: what every consumer does with a legacy bucket.
+
+    The bucket is a LEGACY CANDIDATE: the pre-change name of a session whose
+    own id differs (a canonical id, or a folder-name id whose old resolver
+    named it otherwise). A folder-name id's OWN bucket is never judged: it is
+    read and saved into as before this change. `evidence` is
+    `bucket_evidence`'s counts; `sessions` the session census, or None when
+    it was skipped because file rows already showed another owner.
+
+    FOREIGN = `foreign_rows` or `elsewhere`; OWN = `contained_rows` or
+    `here`. The bucket is read only with OWN and no FOREIGN. The verdicts,
+    tried in this order:
+
+    - foreign file rows (`foreign_rows`): `unproven` when `contained_rows`
+      is there too, else `excluded`; reason `foreign_rows`. The census is
+      skipped, so `contained_rows` alone decides between the two.
+    - sessions recorded elsewhere (`elsewhere`): `unproven` when
+      `contained_rows` or `here` is there too, else `excluded`; reason
+      `recorded_elsewhere`.
+    - `contained_rows`: `verified` (read; a defaulted rekey may move it).
+    - `here`: `included_unverified` (read; it moves only with an explicit
+      --to).
+    - no evidence either way: `unproven`, with the first reason that holds:
+      `subfolder_launch` (sessions launched below a root), `description_newer`
+      (root sessions that started before `description` changed), `undated`
+      (root sessions with no confirmed start), else `no_session`.
+
+    `excluded` always has foreign evidence: neutral rows (vanished,
+    unresolvable, relative, outside any rival) never exclude.
+
+    Returns a `BucketVerdict` (read, rekey_default, state, reason, counts,
+    sessions_counted): `state` is `verified`, `included_unverified`,
+    `unproven` or `excluded`; `reason` keys `_UNPROVEN_CAUSES`. Pure: no
+    I/O.
+    """
+    counts: Dict[str, Any] = {
+        **dict.fromkeys(_SESSION_CENSUS_KEYS, 0),
+        **(sessions or {}),
+        **evidence,
+    }
+    contained = evidence.get("contained_rows", 0)
+    if evidence.get("foreign_rows", 0):
+        state, reason = ("unproven" if contained else "excluded"), "foreign_rows"
+    elif counts["elsewhere"]:
+        own = contained or counts["here"]
+        state = "unproven" if own else "excluded"
+        reason = "recorded_elsewhere"
+    elif contained:
+        state, reason = "verified", None
+    elif counts["here"]:
+        state, reason = "included_unverified", None
+    else:
+        state = "unproven"
+        reason = (
+            "subfolder_launch" if counts["subfolder"]
+            else "description_newer" if counts["description_newer"]
+            else "undated" if counts["undated"]
+            else "no_session"
+        )
+    read = state in ("verified", "included_unverified")
+    # A DEFAULTED REKEY MOVES THE WHOLE BUCKET, so it needs file rows that
+    # place it here (`verified`). A bucket read on session evidence alone
+    # (`included_unverified`) can carry many rows no session places, so it
+    # moves only with an explicit --to the user has read.
+    rekey_default = state == "verified"
+    # Positional, in field order: read, rekey_default, state, reason, counts,
+    # sessions_counted.
+    return BucketVerdict(
+        read,
+        rekey_default,
+        state,
+        reason,
+        counts,
+        sessions is not None,
+    )
+
+
+def _census_part(verdict: BucketVerdict) -> Optional[Dict[str, int]]:
+    """The session census counts of a verdict, or None when it was skipped."""
+    if not verdict.sessions_counted:
+        return None
+    return {key: verdict.counts[key] for key in _SESSION_CENSUS_KEYS}
+
+
+def _evidence_part(verdict: BucketVerdict) -> Dict[str, int]:
+    """The file-row evidence counts of a verdict (`bucket_evidence`)."""
+    return {key: verdict.counts[key] for key in BUCKET_EVIDENCE_KEYS}
+
+
+# The unproven reasons whose evidence places rows in another checkout too:
+# such a bucket is shared, so no surface offers a whole-bucket move.
+SHARED_BUCKET_REASONS = frozenset({"foreign_rows", "recorded_elsewhere"})
+
+
+def _warn_legacy_unproven(
+    store: str,
+    candidate: str,
+    target: str,
+    memories: int,
+    file_paths: int,
+    cause: str,
+    shared: bool = False,
+    placed_command: Optional[str] = None,
+) -> None:
+    """Disclose an UNPROVEN legacy bucket, once per process per bucket, with
+    the reason it was not read (`_unproven_cause`). A `shared` bucket
+    (`SHARED_BUCKET_REASONS`) gets no runnable command: a move takes every
+    row, the other checkout's too."""
+    if _LEGACY_NOTICES_QUIET.get():
+        return
+    key = (store, candidate)
+    if key in _UNPROVEN_WARNED:
+        return
+    _UNPROVEN_WARNED.add(key)
+    logger.warning(
+        "legacy project bucket %r holds %d memor%s and %d file path%s, but "
+        "%s, so it is NOT in this read scope: its folder name alone does not "
+        "show that the rows are this repository's.%s",
+        candidate,
+        memories,
+        "y" if memories == 1 else "ies",
+        file_paths,
+        "" if file_paths == 1 else "s",
+        cause,
+        (
+            " Its rows include another checkout's, and a move takes the whole "
+            "bucket, that checkout's rows with it: move it only with the "
+            "user's approval that every row is this repository's, passing "
+            "--from-another-repository to `project-id rekey`."
+            + (
+                _preview_clause(
+                    "To move only the memories whose every file row lies in this "
+                    "checkout, preview it with:",
+                    candidate, target, placed_command,
+                )
+                if placed_command
+                else ""
+            )
+            if shared
+            else _preview_clause(
+                "If they are, preview the move with:", candidate, target,
+                runnable_rekey_command(candidate, target, db_path=store),
+            )
+        ),
+    )
+
+
+def _warn_legacy_unattributed(
+    store: str, candidate: str, target: str, counts: Dict[str, Any]
+) -> None:
+    """Disclose a legacy bucket read on session evidence alone
+    (`included_unverified`) that holds rows no session record places, once
+    per process per bucket. Such a row reads like this repository's own,
+    though nothing shows it is (`_legacy_session_census`'s limit). A
+    `verified` bucket's rows are placed by its file rows instead, so it gets
+    the informational line (`_note_verified_unattributed`)."""
+    if _LEGACY_NOTICES_QUIET.get():
+        return
+    key = (store, candidate, "unattributed")
+    if key in _UNPROVEN_WARNED:
+        return
+    _UNPROVEN_WARNED.add(key)
+    logger.warning(
+        "legacy project bucket %r is in this read scope because %d of its "
+        "memories came from sessions recorded here, but %d of its memories "
+        "came from no recorded session, so nothing shows they are this "
+        "repository's.%s",
+        candidate,
+        counts["here"],
+        counts["unattributed"],
+        _preview_clause(
+            "If every row belongs here, preview the move to this repository's "
+            "id with:", candidate, target,
+            runnable_rekey_command(candidate, target, db_path=store),
+        ),
+    )
+
+
+def _note_verified_unattributed(store: str, candidate: str, counts: Dict[str, Any]) -> None:
+    """Say, once per process per bucket, how many memories of a `verified`
+    legacy bucket came from no recorded session. The bucket's file rows place
+    the whole bucket here (`decide_bucket`), so they are read and a defaulted
+    rekey moves them. The line states that and asks the user to do nothing.
+    It is logged at WARNING only so the CLI shows it: the CLI configures no
+    handler, and `logging.lastResort` prints WARNING and above. Its key is
+    its own, so a bucket that turns from `included_unverified` to
+    `verified` in one process still gets this line after the warning."""
+    if _LEGACY_NOTICES_QUIET.get():
+        return
+    key = (store, candidate, "verified_unattributed")
+    if key in _UNPROVEN_WARNED:
+        return
+    _UNPROVEN_WARNED.add(key)
+    logger.warning(
+        "legacy project bucket %r is in this read scope because its file rows "
+        "place it here (%d under this repository, none elsewhere); %d of its "
+        "memories came from no recorded session and are read, and moved by "
+        "its rekey, with it",
+        candidate,
+        counts["contained_rows"],
+        counts["unattributed"],
+    )
+
+
+def _note_earlier_canonical(
+    store: str, bucket: str, scope: str, memories: int, linked: int,
+    command: Optional[str], in_submodules: int = 0,
+) -> None:
+    """Name, once per process, a canonical bucket that may be this repository
+    under an earlier id (`PACTMemory._earlier_canonical_buckets`), with the
+    command that moves it into this checkout's id. `memories` is the
+    bucket's memory count, `linked` those linked to a file in this checkout
+    outside its submodules, `in_submodules` its file rows inside one; such a
+    bucket gets no command. A bucket with no memories is not named."""
+    if _LEGACY_NOTICES_QUIET.get() or not memories:
+        return
+    key = (store, bucket, scope)
+    if key in _EARLIER_CANONICAL_WARNED:
+        return
+    _EARLIER_CANONICAL_WARNED.add(key)
+    if in_submodules:
+        logger.warning(
+            "project bucket %r holds %d memor%s, %d linked to files in this "
+            "checkout outside its submodules (at least one saved after this "
+            "checkout was cloned). %d of its file rows %s in a submodule of "
+            "this checkout, so it may be that submodule's bucket, and a "
+            "whole-bucket rekey would move those rows too, so no rekey command "
+            "is offered. It may be this repository under an earlier id, but it "
+            "is not this checkout's id %r, so it is NOT in this read scope.",
+            bucket,
+            memories,
+            "y" if memories == 1 else "ies",
+            linked,
+            in_submodules,
+            "lies" if in_submodules == 1 else "lie",
+            scope,
+        )
+        return
+    logger.warning(
+        "project bucket %r holds %d memor%s, %d linked to files in this "
+        "checkout (at least one saved after this checkout was cloned), and "
+        "none of its file rows names an existing file outside it. It may be this repository under "
+        "an earlier id, but it is not this checkout's id %r, so it is NOT in "
+        "this read scope.%s",
+        bucket,
+        memories,
+        "y" if memories == 1 else "ies",
+        linked,
+        scope,
+        _preview_clause(
+            "If its rows are this repository's, preview the move with:",
+            bucket, scope, command,
+        ),
+    )
+
+
+def _warn_case_variant(
+    store: str, legacy: str, variants: list, target: str
+) -> None:
+    """DISCLOSE a suppressed case-variant candidate, once per process.
+
+    A fold suppression that is not reported is silent loss: the operator's
+    own pre-upgrade bucket can be visible in `project-id show`'s census and
+    absent from every read with no explanation. Naming the bucket and the
+    literal rekey command is the difference between a deliberate non-binding
+    and a lost bucket. The bucket is NEVER read here.
+    """
+    if _LEGACY_NOTICES_QUIET.get():
+        return
+    key = (store, tuple(variants))
+    if key in _CASE_VARIANT_WARNED:
+        return
+    _CASE_VARIANT_WARNED.add(key)
+    commands = _printed_rekey_remedy(
+        [runnable_rekey_command(variant, target, db_path=store) for variant in variants]
+    )
+    logger.warning(
+        "the legacy project basename %r matches stored bucket(s) %s only by "
+        "case, and this filesystem distinguishes case, so none is in this "
+        "read scope: on a case-sensitive filesystem those are different "
+        "projects, not one project spelled differently. If a bucket belongs "
+        "to this project, preview the move with: %s",
+        legacy,
+        ", ".join(repr(variant) for variant in variants),
+        commands,
+    )
+
+
+_DECLINE_CAUSES = {
+    "gitfile_redirect": (
+        "git does not confirm this checkout as a worktree of the repository "
+        "git reports for it"
+    ),
+    "origin_unreadable": "git could not read the repository's origin remote",
+    "origin_unrepresentable": (
+        "no single project id can be read from the repository's origin"
+    ),
+    "broken_git_marker": (
+        "the directory is at or below a `.git` marker git could not answer for"
+    ),
+    "no_working_tree": "git gives no working tree for the repository",
+    "submodule_checkout": (
+        "the checkout is a submodule, so its folder name is chosen by the "
+        "superproject's .gitmodules"
+    ),
+    "declaration_unresolved": "the declared directory could not be resolved",
+}
+
+# THE REMEDY FOR A DECLINE NO PIN CAN FIX. A pin is offered only when the
+# decline names the override file that would fix it; every other cause names
+# its own remedy, so an unworkable `<git-common-dir>` pin is never printed.
+_UNPINNABLE_REMEDIES = {
+    "origin_unreadable": (
+        "Check that git can read the repository's config here: "
+        "`git config --get remote.origin.url` run here prints git's own reason."
+    ),
+    "broken_git_marker": (
+        "Check that git is installed and can read the repository here: "
+        "`git rev-parse --git-dir` run here prints git's own reason."
+    ),
+    "no_working_tree": (
+        "Run from a checkout with a working tree; a bare repository has none. "
+        "Otherwise, `git rev-parse --show-toplevel` run in the declined "
+        "directory prints git's own reason."
+    ),
+    "declaration_unresolved": (
+        "Set CLAUDE_PROJECT_DIR to an existing project root."
+    ),
+}
+
+# THE REDIRECT'S REMEDY IS THE MARKER, AND IT NAMES NO PIN PATH. The common
+# dir a redirect could name belongs to the repository the `.git` file points
+# AT, and a forged pointer looks exactly like a user's own
+# `--separate-git-dir` layout, so no reader of this text can judge whether a
+# pin there is safe. Pinning one's own layout is the USER's decision,
+# described in the memory skill.
+# No removal advice: a worktree the user moved and a separate-git-dir layout
+# are git's own layouts that refuse here too.
+_REDIRECT_REMEDY = (
+    "Check that git can answer for this checkout (`git rev-parse --git-dir`, "
+    "`git worktree list`), or run from the repository the `.git` points at. "
+    "A `git init --separate-git-dir` layout of your own is a user decision: "
+    "see the pact-memory skill."
+)
+
+# The repair sentence prints only when git's listing shows the move
+# (REDIRECT_MOVED): `git worktree repair` run in a COPY of a worktree, or in
+# a forged pointer at a live one, re-registers that directory and
+# unregisters the honest checkout.
+_REDIRECT_MOVED_REMEDY = (
+    _REDIRECT_REMEDY + " A linked worktree you moved is re-registered by "
+    "running `git worktree repair` in it; the user runs that, not an agent."
+)
+
+
+def _folded_payload_project(payload_id: Any) -> Any:
+    """A caller's `project_id` through `database.folded_github_id`, the fold
+    a rekey target takes too. Raises GitHubPayloadIdRefusedError for a
+    port-less github.com value no pin may hold."""
+    try:
+        return folded_github_id(payload_id, "project_id")
+    except ValueError as exc:
+        raise GitHubPayloadIdRefusedError(f"{exc} Nothing was written.") from None
+
+
+def _decline_cause(token: Optional[str], cause_detail: Optional[str]) -> Optional[str]:
+    """The cause a decline prints: its reason's sentence (`_DECLINE_CAUSES`)
+    with the decline's own detail appended, or None for no known reason.
+    A folder-name id declined because git could not read `core.bare` is an
+    `origin_unreadable` decline whose origin was never the problem, so its
+    detail is the whole cause."""
+    if cause_detail == project_identity.BARE_UNREAD_DETAIL:
+        return cause_detail
+    cause = _DECLINE_CAUSES.get(token) if token else None
+    if cause is not None and cause_detail:
+        cause = f"{cause}; {cause_detail}"
+    return cause
+
+
+# The remedy of a `core.bare` read that failed (`_decline_cause`), when no
+# override file is named.
+_BARE_UNREAD_REMEDY = (
+    "Check that git can read the repository's config here: "
+    "`git config --local --get core.bare` run here prints git's own reason."
+)
+
+
+def _decline_remedy(
+    record: Optional[dict], cause_detail: Optional[str] = None
+) -> Optional[str]:
+    """The remedy a decline cause prints, or None when the cause has none:
+    one cause, one remedy, on every verb and route that reports it.
+
+    A redirect names its marker (`_REDIRECT_REMEDY`), and adds the repair
+    sentence only when its detail is the moved worktree's
+    (`_REDIRECT_MOVED_REMEDY`); a decline that names the override file that
+    would fix it offers that file; any other cause takes its own
+    `_UNPINNABLE_REMEDIES` entry.
+    """
+    token = (record or {}).get("reason")
+    if isinstance(cause_detail, _OwnershipDetail):
+        # The detail names the fix itself.
+        return None
+    if token == "gitfile_redirect":
+        if cause_detail == _REDIRECT_CAUSE_DETAILS[REDIRECT_MOVED]:
+            return _REDIRECT_MOVED_REMEDY
+        return _REDIRECT_REMEDY
+    override_path = (record or {}).get("override_path")
+    if cause_detail == project_identity.BARE_UNREAD_DETAIL:
+        # The core.bare read is the cause's own remedy from every checkout;
+        # a pin, where one would fix it, follows as the alternative.
+        if override_path is None:
+            return _BARE_UNREAD_REMEDY
+        return f"{_BARE_UNREAD_REMEDY} {_pin_remedy(override_path)}"
+    if override_path is not None:
+        return _pin_remedy(override_path)
+    return _UNPINNABLE_REMEDIES.get(token)
+
+
+def _pin_remedy(override_path: Any) -> str:
+    """The remedy that writes an operator-chosen id to `override_path`."""
+    return f"Write an operator-chosen canonical id to {str(override_path)!r}."
+
+
+def _warn_declined(
+    record: Optional[dict],
+    root: Any = None,
+    detail: Optional[str] = None,
+    cause_detail: Optional[str] = None,
+) -> None:
+    """Log ONE decline warning with its real cause, never a generic origin claim.
+
+    The generic sentence ("an origin remote that could not be read or
+    represented") is WRONG for a forged `.git` marker or a broken repository,
+    and sent the operator to inspect a remote that was not the problem. The
+    structured token knows the cause, so the message uses it and falls back
+    to the generic sentence only when no reason was recorded. `detail` names
+    the rung's own facts (which declaration, which path); `cause_detail` is
+    the decline's own fixed sentence, appended to the cause.
+    """
+    token = (record or {}).get("reason")
+    cause = _decline_cause(token, cause_detail)
+    if cause is None:
+        cause = (
+            "the repository at %r has an origin remote that could not be "
+            "read or represented as a project id" % (str(root),)
+        )
+    if detail:
+        cause = f"{cause} ({detail})"
+    remedy = _decline_remedy(record, cause_detail)
+    logger.warning(
+        "%s, so no project id was derived.%s Run the `project-id show` verb "
+        "to inspect the detected identity.",
+        cause,
+        f" {remedy}" if remedy else "",
+        extra={"pact_identity_decline": True, **_IDENTITY_RECORD},
+    )
+
+
+# Marks a warning the identity RESOLUTION logs (a decline, a HOME landing, an
+# ignored override, a remote-helper folder name, an unresolved declaration),
+# as against one a store read logs: `is_identity_record` tells them apart.
+_IDENTITY_RECORD = {"pact_identity": True}
+
+
+def is_identity_record(record: logging.LogRecord) -> bool:
+    """Whether `record` is an identity-resolution warning (`_IDENTITY_RECORD`).
+    A caller that does not use the canonical id can hold those apart from the
+    store's own warnings, which it should still show."""
+    return getattr(record, "pact_identity", False) is True
+
+
+def is_decline_record(record: logging.LogRecord) -> bool:
+    """Whether `record` is an identity decline warning (`_warn_declined`).
+    A caller that does not use the canonical id holds that warning apart
+    from every other one by it. The attribute name is spelled here and in
+    `_warn_declined` only."""
+    return getattr(record, "pact_identity_decline", False) is True
+
+
+def _decline(
+    source: str,
+    reason: str,
+    *,
+    label: Optional[str] = None,
+    override_path: Optional[str] = None,
+    root: Optional[Path] = None,
+    legacy: Optional[str] = None,
+    pre_change_name: Optional[str] = None,
+    override_ignored: Optional[dict] = None,
+    detail: Optional[str] = None,
+    cause_detail: Optional[str] = None,
+    broken_marker: Optional[Path] = None,
+) -> "_DetectedIdentity":
+    """THE ONE PLACE a resolver decline is built and reported.
+
+    `source` is the rung token recorded in `decline_reason`; `label` is the
+    `source` the result discloses, `"unresolved"` unless the rung keeps its
+    own label (the declared rungs do). Logs exactly one warning.
+    `broken_marker` is the `.git` a `broken_git_marker` decline rests on:
+    when git refuses that repository for its owner, the decline says so and
+    names the fix (`_dubious_ownership_detail`).
+    """
+    if (
+        reason == "broken_git_marker"
+        and broken_marker is not None
+        and cause_detail is None
+        and project_identity.git_refuses_ownership(broken_marker.parent)
+    ):
+        cause_detail = _dubious_ownership_detail(broken_marker.parent)
+    record = decline_record(reason, override_path, source)
+    _warn_declined(record, root, detail, cause_detail)
+    return _DetectedIdentity(
+        project_id=None,
+        source=label or "unresolved",
+        legacy_basename=legacy,
+        override_ignored=override_ignored,
+        identity_root=root,
+        decline_reason=record,
+        pre_change_name=pre_change_name,
+        decline_detail=cause_detail,
+    )
+
+
+def _decline_detected(
+    identity: "RootIdentity",
+    source: str,
+    *,
+    label: Optional[str] = None,
+    root: Optional[Path] = None,
+    legacy: Optional[str] = None,
+    pre_change_name: Optional[str] = None,
+) -> "_DetectedIdentity":
+    """`_decline` for a decline `detect_id_for_root` already named.
+
+    That layer does not know which rung called it, so its record carries no
+    `source`; the rung supplies it here.
+    """
+    reason = identity.decline_reason or {}
+    return _decline(
+        source,
+        reason.get("reason") or "origin_unrepresentable",
+        label=label,
+        override_path=reason.get("override_path"),
+        root=root,
+        legacy=legacy,
+        pre_change_name=pre_change_name,
+        override_ignored=identity.override_ignored,
+        cause_detail=getattr(identity, "detail", None),
+    )
+
+
+# Where the `.git` marker a decline rests on is, the marker's path following:
+# it may sit in a parent of the declined directory, so the decline names it.
+_MARKER_CLAUSE = "the `.git` marker is "
+
+# `_root_guard`'s default for `toplevel`: the caller holds no answer, so the
+# guard asks git itself.
+_TOPLEVEL_UNASKED: Any = object()
+
+# The default for `listing` in `main_repo_root`, `root_check_refusal` and
+# the redirect check: the caller holds no worktree listing, so the check
+# asks git itself.
+_LISTING_UNASKED: Any = project_identity.LISTING_UNASKED
+
+
+def _root_guard(
+    asked_root: Optional[Path],
+    common_dir: Optional[Path],
+    source: str,
+    *,
+    label: Optional[str] = None,
+    root: Optional[Path] = None,
+    toplevel: Any = _TOPLEVEL_UNASKED,
+    no_working_tree_detail: Optional[str] = None,
+) -> "Optional[_DetectedIdentity]":
+    """The repository guards every rung runs before it derives an id.
+
+    1. No common dir, but a `.git` marker git could not answer for: a broken
+       repository, not an umbrella folder -> `broken_git_marker`.
+    2. A linked-worktree shape that `git worktree list` does not back (a
+       forged `.git` file naming another repository's worktree admin dir),
+       or one git gave no evidence for (`_worktree_redirect_cause`)
+       -> `gitfile_redirect`, with the detail of that one cause.
+    3. A common dir git answers for, but git gives no toplevel for the root
+       -> `no_working_tree`. Every rung reaches this shape (the cwd-marker
+       rung through a `GIT_CEILING_DIRECTORIES` entry at the checkout root),
+       so it is checked here, not per rung.
+
+    `toplevel` is the caller's `--show-toplevel` answer for `asked_root`,
+    when it holds one (None: git gave none); left out, the guard asks git
+    once, which only the rungs that reach the guard with a common dir pay.
+    `no_working_tree_detail` keeps a rung's own wording for arm 3.
+
+    Returns the decline, or None when the root passes. The arm is chosen by
+    `_root_guard_arm`, which `root_check_refusal` asks too.
+    """
+    arm = _root_guard_arm(asked_root, common_dir, toplevel=toplevel)
+    if arm is None:
+        return None
+    cause_detail = _REDIRECT_CAUSE_DETAILS[arm[1]] if arm[1] is not None else None
+    # No override path for a redirect: the common dir is the TARGET
+    # repository's.
+    return _decline(
+        source,
+        arm[0],
+        label=label,
+        root=root,
+        detail=(
+            no_working_tree_detail or (
+                f"{source}: {str(asked_root)!r} is a bare repository, or git "
+                "cannot describe its working tree"
+            )
+            if arm[0] == "no_working_tree"
+            else f"{source}: {str(asked_root)!r}; {_MARKER_CLAUSE}{str(arm[2])!r}"
+            if arm[2] is not None
+            else f"{source}: {str(asked_root)!r}"
+        ),
+        cause_detail=cause_detail,
+        broken_marker=arm[2] if arm[0] == "broken_git_marker" else None,
+    )
+
+
+# GIT REFUSES A REPOSITORY ANOTHER USER OWNS ("dubious ownership") until it is
+# listed in safe.directory; the generic "can git read it" remedy hides that.
+class _OwnershipDetail(str):
+    """A decline detail that names its own remedy (dubious ownership). The
+    type, not the wording, tells `_decline_remedy` to add no generic one."""
+
+
+def _dubious_ownership_detail(repository: Path) -> str:
+    """The cause and fix for a repository git refuses for its owner. The fix
+    is the user's to run: safe.directory is git's guard against acting on a
+    repository another user owns."""
+    return _OwnershipDetail(
+        "git refuses it as owned by another user (dubious ownership); if the "
+        "user trusts this repository, the user, not an agent, runs "
+        f"`git config --global --add safe.directory {shlex.quote(str(repository))}`"
+    )
+
+
+def _root_guard_arm(
+    asked_root: Optional[Path],
+    common_dir: Optional[Path],
+    *,
+    toplevel: Any = _TOPLEVEL_UNASKED,
+    listing: Any = _LISTING_UNASKED,
+) -> Optional[Tuple[str, Optional[str], Optional[Path]]]:
+    """THE ONE PLACE the root guard's arm is chosen, in the order
+    `_root_guard` lists them, for `_root_guard` and `root_check_refusal`
+    alike: (reason,
+    redirect cause, `.git` marker) for the arm that declines `asked_root`,
+    or None when the root passes.
+
+    The redirect cause is `_worktree_redirect_cause`'s answer, None for the
+    other arms. The marker is the `.git` git's discovery reaches from
+    `asked_root` (`find_git_marker`), at or above it, for the two arms that
+    rest on one (a broken marker and a redirect), else None. `toplevel` and
+    `listing` are the caller's answers when it holds them, as in
+    `_root_guard` and `_worktree_redirect_cause`."""
+    if common_dir is None:
+        marker = _unanswerable_repository(asked_root) if asked_root is not None else None
+        if marker is None:
+            return None
+        return "broken_git_marker", None, marker
+    # ONE TOPLEVEL QUESTION per guard: arm 2 needs it for a linked-worktree
+    # shape and arm 3 needs it always, so it is asked here once and shared.
+    if toplevel is _TOPLEVEL_UNASKED:
+        toplevel = (
+            _git_rev_parse(str(asked_root), "--show-toplevel")
+            if asked_root is not None
+            else None
+        )
+    cause = (
+        _worktree_redirect_cause(
+            asked_root, common_dir,
+            toplevel=Path(toplevel) if toplevel else None, listing=listing,
+        )
+        if asked_root is not None
+        else None
+    )
+    if cause is not None:
+        return "gitfile_redirect", cause, find_git_marker(asked_root)
+    if toplevel is None:
+        return "no_working_tree", None, None
+    return None
+
+
+def root_check_refusal(
+    asked_root: Path, common_dir: Optional[Path], *, listing: Any = _LISTING_UNASKED,
+) -> Optional[Tuple[str, Optional[str]]]:
+    """The cause and the remedy `_root_guard` gives when it declines
+    `asked_root`, as one sentence each, or None when the root passes. The
+    arm is `_root_guard_arm`'s, as for `_root_guard`; nothing is logged.
+
+    `listing` is the caller's `project_identity.worktree_records` answer for `--git-dir
+    <common_dir>`, when it holds one, for the redirect check; left out, the
+    check asks git."""
+    arm = _root_guard_arm(asked_root, common_dir, listing=listing)
+    if arm is None:
+        return None
+    cause_detail = _REDIRECT_CAUSE_DETAILS[arm[1]] if arm[1] is not None else None
+    cause = _DECLINE_CAUSES[arm[0]]
+    if cause_detail:
+        cause = f"{cause}; {cause_detail}"
+    if arm[2] is not None:
+        cause = f"{cause} ({_MARKER_CLAUSE}{str(arm[2])!r})"
+    return cause, _decline_remedy(decline_record(arm[0], None, None), cause_detail)
+
+
+def _is_live_decline(detected: "_DetectedIdentity") -> bool:
+    """Whether a declared rung declined for a cause OTHER than a gone path.
+
+    Only `declaration_unresolved` means "the declared directory is gone", the
+    one case the git root is designed to answer for. Every other cause names
+    a LIVE repository that refused (an unrepresentable origin, a submodule, a
+    redirected `.git`): falling through to the process's own repository would
+    file the declared session's memories under another project.
+    """
+    reason = (detected.decline_reason or {}).get("reason")
+    return detected.project_id is None and reason not in (None, "declaration_unresolved")
+
+
+def _is_home(root: Path) -> bool:
+    """Whether `root` is the user's home directory."""
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        return False
+    return os.path.normcase(str(root)) == os.path.normcase(str(home))
+
+
+def _git_skips_marker(root: Path, common: Optional[Path], git_dir: Optional[str]) -> bool:
+    """Whether git looked past the `.git` directory at `root`: git, asked at
+    `root`, answered with a git dir that is not `root/.git`. A git dir that
+    IS `root/.git` means git used it, whatever its common dir and work tree
+    name. A `.git` file is never looked past (git refuses a bad gitfile).
+    Inside a repository, git looks past a `.git` it cannot use, an
+    unreadable one included, and answers for the repository above, a bare
+    one included. With no repository above, git gives no answer, and no
+    answer is no evidence: the `.git` stays a marker git cannot answer for."""
+    dot_git = root / ".git"
+    if common is None or not git_dir or not dot_git.is_dir():
+        return False
+    return os.path.realpath(git_dir) != os.path.realpath(dot_git)
+
+
+def _home_checkout(
+    root: Path, asked_root: Optional[Path], toplevel: Optional[str]
+) -> Optional[Path]:
+    """HOME, when the checkout the session is in is HOME, else None: the
+    directory of the nearest `.git` marker above `asked_root`, or git's
+    worktree toplevel for it, or, with neither, the identity root. A marker
+    whose directory will not resolve is tested as it is spelled."""
+    candidates = []
+    marker = find_git_marker(asked_root) if asked_root is not None else None
+    if marker is not None:
+        try:
+            candidates.append(marker.parent.resolve())
+        except (OSError, RuntimeError):
+            candidates.append(Path(os.path.abspath(marker.parent)))
+    if toplevel:
+        candidates.append(Path(toplevel))
+    for candidate in candidates or [root]:
+        if _is_home(candidate):
+            return candidate
+    return None
+
+
+def _warn_home_landing(root: Path) -> None:
+    """The HOME-landing warning, shared by every rung that can land there."""
+    logger.warning(
+        "project_id resolved to the HOME directory (%r); memories "
+        "will be scoped to user scope %r, not a project. Run from "
+        "the project directory or set CLAUDE_PROJECT_DIR.",
+        root,
+        root.name,
+        extra=_IDENTITY_RECORD,
+    )
+
+
+def _suppression_record() -> dict:
+    """The record for a SUPPRESSED legacy candidate. Not a decline.
+
+    The identity still resolves; only the pre-upgrade bucket derived from a
+    submodule admin dir is kept out of the read scope, so this record never
+    goes through `_decline` and its reason is not a decline token.
+    `override_path` is None because the remedy is an explicit rekey, not a
+    pin.
+    """
+    return {
+        "source": "submodule_admin_dir",
+        "reason": "repository_chosen_name",
+        "override_path": None,
+    }
+
+
+def _pre_change_declared_name(
+    declared_dir: str, declared_root: Optional[Path], common_dir: Optional[Path]
+) -> Optional[str]:
+    """What the PRE-change resolver named a LIVE declared directory.
+
+    It compared the common dir's PARENT (not the worktree- and
+    submodule-aware root) with the resolved declared path: when they differ
+    it named the parent, otherwise the declared path itself. A path that
+    does not exist is the gone arm, which the caller names separately.
+    """
+    old_main = common_dir.parent if common_dir is not None else None
+    if (
+        old_main is not None
+        and declared_root is not None
+        and os.path.normcase(str(old_main)) != os.path.normcase(str(declared_root))
+    ):
+        return old_main.name
+    return (declared_root or Path(declared_dir)).name or None
+
+
+def _legacy_suppression(
+    identity_root: Optional[Path],
+    common_dir: Optional[Path] = None,
+) -> "tuple[Optional[dict], Optional[str]]":
+    """The structured disclosure for a SUPPRESSED legacy candidate.
+
+    A submodule admin dir supplies a REPOSITORY-CHOSEN bucket name, so the
+    pre-upgrade candidate derived from it is never admitted to the read
+    scope. Returning no name is not enough: the operator must be able to see
+    what was suppressed and why, on the same envelope as every other
+    read-scope field. Returns `(record, derived_name)` or `(None, None)`.
+    """
+    if identity_root is None:
+        return None, None
+    if common_dir is None:
+        # No rung recorded the identity's common dir (a home landing, a
+        # basename): git is asked at the root, which is then the folder
+        # that holds the repository it names.
+        common_dir = main_repo_common_dir(str(identity_root))
+    if common_dir is None or not _submodule_admin_dir(common_dir):
+        return None, None
+    return _suppression_record(), common_dir_parent_name(common_dir)
+
+
+def _disclosed_source(identity: "RootIdentity", rung_label: str) -> str:
+    """The source token to disclose when a declared rung won.
+
+    When an operator pin decided the value, the disclosure must say
+    `override file`, not the declaration label: a reader who sees
+    `CLAUDE_PROJECT_DIR` believes the environment chose the id, and the
+    whole point of the pin is that a human chose it.
+    """
+    if identity.source == "override file":
+        return "override file"
+    if identity.detail == project_identity.REMOTE_HELPER_DETAIL:
+        # The folder-name id of a remote-helper origin: disclosed as such.
+        return "remote helper"
+    if identity.detail == project_identity.UNUSABLE_ORIGIN_DETAIL:
+        return "unusable origin"
+    return rung_label
+
+
+def runnable_rekey_command(
+    from_id: str, to_id: str, db_path: Any = None, only_placed: bool = False
+) -> Optional[str]:
+    """`render_rekey_command`, or None when rekey would refuse `from_id`.
+
+    A printed remedy must run as printed. `project-id rekey` binds `--from`
+    through the write-ingress rule, so an id that rule refuses (a control
+    character, a lone surrogate, an over-long id) has no runnable command,
+    and printing one would be a remedy that fails.
+    """
+    try:
+        validate_identifier_for_write(from_id)
+    except ValueError:
+        return None
+    return render_rekey_command(from_id, to_id, db_path=db_path, only_placed=only_placed)
+
+
+def render_rekey_command(
+    from_id: str, to_id: str, db_path: Any = None, prog: Any = None,
+    only_placed: bool = False, example_prog: bool = False,
+) -> str:
+    """The literal, SHELL-QUOTED AND RUNNABLE rekey command for one bucket.
+
+    ONE HELPER FOR EVERY RENDER SURFACE, because a bucket id is
+    STORE-INFLUENCED and this string is presented as something a user pastes
+    into a shell. An unquoted id containing a space, `;`, `$` or a quote is a
+    copy-paste command-injection surface.
+
+    THE TARGET IS REQUIRED. A command that leaves `--to` to its default
+    moves the bucket into whatever id the session that RUNS it resolves,
+    which is another repository's id when the command is pasted elsewhere.
+
+    EVERY VALUE IS ONE `--flag=value` ARGUMENT, so an id that begins with `-`
+    (a legal folder name) is a value to argparse, never an option.
+
+    INTERPRETER-PREFIXED, because there is no `pact-memory` executable: the
+    skill's documented invocation is `python3 <skill>/scripts/cli.py`.
+
+    `db_path` IS CARRIED WHEN KNOWN. Without it the printed remedy runs
+    against the DEFAULT store, so a bucket reported from `--db-path X` is
+    "moved" in some other file and reports success.
+
+    NO `--apply`: the printed command is a DRY RUN that previews the move,
+    and every message printing it says so (`_APPLY_CLAUSE`), leaving the
+    apply to the user.
+    """
+    argv = [
+        "python3",
+        str(prog) if prog is not None else str(Path(__file__).parent / "cli.py"),
+        "project-id",
+        "rekey",
+        "--from=" + from_id,
+        "--to=" + to_id,
+    ]
+    if only_placed:
+        # The move of only the memories placed in this checkout
+        # (`database.placed_memory_split`), for a bucket whose whole move
+        # would take another checkout's rows.
+        argv.append("--only-placed-here")
+    if db_path is not None:
+        argv.append("--db-path=" + str(db_path))
+    if example_prog:
+        # A --help example: the script path is double-quoted as every other
+        # example of the CLI writes it; the rest stays shell-quoted.
+        return f'python3 "{argv[1]}" ' + shlex.join(argv[2:])
+    return shlex.join(argv)
+
+
+def project_candidate_rows(
+    buckets: Dict[str, int],
+    *,
+    store: Any,
+    current_id: Optional[str],
+    legacy_state: Optional[Dict[str, Any]],
+    earlier: Optional[Dict[str, Optional[str]]] = None,
+    declined_legacy: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """THE ONE CENSUS BUILDER: every non-empty bucket, its relation and remedy.
+
+    A command is rendered only for a bucket this session can defend moving
+    into its own id: its own legacy candidate (unless the gate excluded it,
+    whose rows lie in another repository), a case variant of it, and an
+    earlier canonical id of this repository (`earlier`, relation
+    `earlier_id`: its file rows place it in this checkout). The session's
+    own bucket and every other bucket get none, because a printed command is
+    read as advice to run it.
+    """
+    earlier = earlier or {}
+    state = legacy_state or {}
+    candidate = state.get("candidate")
+    variants = list(state.get("case_variant") or [])
+    variant_commands = list(state.get("case_variant_rekey") or [])
+    rows = []
+    for bucket_id, count in sorted(buckets.items(), key=lambda item: (-item[1], item[0])):
+        if bucket_id == current_id:
+            relation, rekey = "current", None
+        elif candidate is not None and bucket_id == candidate:
+            relation, rekey = "legacy_candidate", state.get("rekey")
+        elif bucket_id in variants:
+            index = variants.index(bucket_id)
+            relation = "case_variant"
+            rekey = variant_commands[index] if index < len(variant_commands) else None
+        elif bucket_id in earlier:
+            relation, rekey = "earlier_id", earlier[bucket_id]
+        elif bucket_id == declined_legacy:
+            # This checkout's own folder-name bucket while its identity
+            # declined: no id resolves to move it into, so no command.
+            relation, rekey = "legacy_candidate", None
+        else:
+            relation, rekey = "other", None
+        rows.append({
+            "id": bucket_id,
+            "memory_count": count,
+            "relation": relation,
+            "rekey": rekey,
+        })
+    return rows
+
+
+def _store_stat_key(store: str):
+    """`(main, wal)` change stamps for the store, or None when it is absent.
+
+    NOT `_store_stamp`: this key asks "did any row possibly change?" for the
+    scope and verdict caches, so it follows the `-wal` file's own stamp;
+    `_store_stamp` asks "may an immutable read have seen a moving file?",
+    so it carries the inode and only whether a journal exists.
+
+    The `-wal` leg is load-bearing: under WAL another process's commit can
+    land only in the journal, leaving the main file's stamp unchanged, and a
+    cache keyed on the main file alone would keep serving a stale legacy
+    membership. `-shm` is deliberately not included — shared-memory churn
+    would recompute on every call without any row having changed.
+
+    THE `-wal` LEG IS ITS `(mtime_ns, size)` WHENEVER THE FILE EXISTS, empty
+    or not. A writer's last close checkpoints the journal and deletes it, and
+    a TRUNCATE checkpoint empties it, so the journal appearing, disappearing
+    or being emptied is a change signal even when the main file's stamp did
+    not move (a write inside one timestamp tick that kept the file's size).
+
+    An absent `-wal` is the leg None. A read-only open of a store with no
+    `-wal` is immutable (`_read_only_connection`) and creates none, so the
+    read the key is taken for leaves the key unchanged.
+
+    THE STAMP'S LIMIT: a change is missed only when it leaves both legs'
+    `(mtime_ns, size)` unchanged, for example a `-wal` deleted and recreated
+    at its old size within one timestamp tick while the main file's stamp is
+    unchanged too. Every stamp-keyed read shares that limit. Because a read
+    of a store with no `-wal` creates none, one case of it is named: two
+    scope reads in one command, with another process's commit and close
+    between them, inside one timestamp tick and with no change in the main
+    file's size. The second read is served the scope decided before that
+    commit.
+    """
+    try:
+        main = os.stat(store)
+    except OSError:
+        return None
+    # SQLite keeps the journal beside the store's REAL file, so a store
+    # reached through a symlink has its `-wal` next to the link's target.
+    wal_path = os.path.realpath(store) + "-wal"
+    try:
+        wal = os.stat(wal_path)
+        wal_key = (wal.st_mtime_ns, wal.st_size)
+    except OSError:
+        wal_key = None
+    return ((main.st_mtime_ns, main.st_size), wal_key)
+
+
+def _invalidate_legacy_scope_cache() -> None:
+    """Drop every cached read scope after an in-process write."""
+    _LEGACY_SCOPE_CACHE.clear()
+
+
+# Set while a read that found the store changing under an immutable open is
+# repeated with SQLite's locking (`_stable_read_only`).
+_LOCKED_READS_ONLY: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "_LOCKED_READS_ONLY", default=False
+)
+
+
+# Set while `_stable_read_only` runs a read, so a reader that wraps itself
+# does not wrap again.
+_STABLE_READ_ACTIVE: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "_STABLE_READ_ACTIVE", default=False
+)
+
+
+def _journal_present(real: str) -> bool:
+    """Whether a `-wal` or a rollback `-journal` sits beside the store's
+    REAL file. Either means the file alone is not the whole database: a
+    `-wal` holds commits not yet checkpointed, and a hot `-journal` left by a
+    crashed DELETE-mode writer holds pages SQLite must roll back first. An
+    immutable open would skip both."""
+    return os.path.lexists(real + "-wal") or os.path.lexists(real + "-journal")
+
+
+def _read_only_connection(store: str):
+    """Open `store` READ-ONLY; raises sqlite3.OperationalError on failure.
+
+    A PURE READ MUST NOT CREATE OR MIGRATE THE STORE. `db_connection` opens
+    read-write, and every counter it runs calls `ensure_initialized`, so a
+    `project-id show` against a 0-byte store used to CREATE the full schema —
+    contradicting the verb's own "creates none" contract. The URI form with
+    `mode=ro` refuses those writes instead.
+
+    NO SIDECARS ON A SETTLED STORE. When no `-wal` and no `-journal` exist
+    beside the store's real file (a symlinked store's journal is beside its target) the open is
+    also `immutable=1`, so SQLite takes no lock and creates no `-wal` or
+    `-shm`. Immutable means SQLite trusts the file not to change, and a
+    writer in another process can change it during the read (measured: an
+    immutable reader beside a committing, checkpointing writer raised
+    "database disk image is malformed" and also returned wrong row counts),
+    so every caller reads through `_stable_read_only`, which repeats the
+    read with locking when the store moved. With a `-wal` present, or while
+    that repeat runs, the open is `mode=ro` alone, which may leave the empty
+    `-wal`/`-shm` sidecars; they carry no schema and no rows. The store file
+    itself is never written.
+    """
+    real = Path(store).resolve()
+    uri = real.as_uri() + "?mode=ro"
+    # The `-wal` SQLite reads sits beside the real file, not beside a
+    # symlink naming it.
+    if not _LOCKED_READS_ONLY.get() and not _journal_present(str(real)):
+        uri += "&immutable=1"
+    connection = sqlite3.connect(uri, uri=True)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def _store_stamp(store: str):
+    """What an immutable read relies on staying put: the store's inode,
+    size and mtime, and whether a `-wal` or `-journal` exists
+    (`_journal_present`). None when unreadable. The caches' change key is
+    `_store_stat_key`, which answers a different question (see there)."""
+    try:
+        main = os.stat(store)
+    except OSError:
+        return None
+    return (
+        main.st_ino, main.st_size, main.st_mtime_ns,
+        _journal_present(os.path.realpath(store)),
+    )
+
+
+def _stable_read_only(store: str, read: Callable[[], Any]) -> Any:
+    """Run `read()`, whose connections `_read_only_connection` opens, and
+    repeat it once with SQLite's locking when the store moved under it.
+
+    A read counts as moved when the store's stamp (`_store_stamp`) differs
+    before and after it, whether it answered or raised a
+    `sqlite3.DatabaseError`. The repeat's own answer or error stands, so an
+    empty answer is never served for a store that was being written. A read
+    that RAISED while the stamp stayed put met a fault of the settled store
+    itself, which a repeat would only meet again: the error is raised at
+    once, because the locked repeat's `mode=ro` open of a WAL store creates
+    `-wal` and `-shm` that a read-only connection cannot remove.
+    """
+    active = _STABLE_READ_ACTIVE.set(True)
+    try:
+        if _LOCKED_READS_ONLY.get():
+            return read()
+        before = _store_stamp(store)
+        if before is None or before[3]:
+            return read()
+        try:
+            answer = read()
+        except sqlite3.DatabaseError:
+            if _store_stamp(store) == before:
+                raise
+        else:
+            if _store_stamp(store) == before:
+                return answer
+        # THE REPEAT RE-DECIDES: a verdict cached from the moved read is
+        # dropped, so the locked repeat counts the bucket again.
+        for key in [
+            key for key in _LEGACY_SCOPE_CACHE
+            if key[:2] == ("verdict", store) or key[:1] == (store,)
+        ]:
+            _LEGACY_SCOPE_CACHE.pop(key, None)
+        locked = _LOCKED_READS_ONLY.set(True)
+        try:
+            return read()
+        finally:
+            _LOCKED_READS_ONLY.reset(locked)
+    finally:
+        _STABLE_READ_ACTIVE.reset(active)
+
+
+def _store_schema_present(store: str) -> bool:
+    """Whether an EXISTING store carries the `memories` table.
+
+    A READ MUST NOT INITIALISE AN EXISTING STORE IT IS ONLY REPORTING ON, and
+    the guard has to run BEFORE any read-write connection: opening one is
+    already a write, because `get_connection` pre-creates the file and the WAL
+    switch writes the header. So this uses the same read-only URI the identity
+    probe uses and answers False for a store without a schema, creating
+    nothing.
+
+    AN ABSENT STORE IS NOT DECIDED HERE. `_schema_present` treats absence
+    according to the store's ORIGIN: a derived location bootstraps on first
+    use (pre-existing production contract), while a caller-named store must
+    already exist. This function only inspects a store that is present.
+    """
+    try:
+        if not Path(store).exists():
+            return False
+        def read() -> bool:
+            with closing(_read_only_connection(store)) as connection:
+                return _connection_has_memories_table(connection)
+
+        return _stable_read_only(store, read)
+    except sqlite3.DatabaseError as exc:
+        if _read_only_store_unavailable(exc, store):
+            return False
+        raise
+
+
+def _connection_has_memories_table(conn: Any) -> bool:
+    """Whether an OPEN connection's store carries the `memories` table.
+
+    `sqlite_master` answers on an empty database without creating anything,
+    so this is safe on a connection whose store is 0 bytes. A corrupt store
+    raises, which is the non-transient direction.
+    """
+    return conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='memories'"
+    ).fetchone() is not None
+
+
+class StoreFaultError(sqlite3.OperationalError):
+    """A store fault whose message IS the remedy `present_store_fault` built.
+
+    Still an OperationalError, so every existing handler and exit code
+    applies. Its own class so a wrapper that meets it again passes the
+    message through instead of naming the remedy a second time.
+    """
+
+
+def present_store_fault(exc: Exception, store: str) -> Optional[str]:
+    """The remedy for a store that EXISTS and cannot serve a read, or None.
+
+    Two causes, each with its own check: the file cannot be opened
+    (SQLITE_CANTOPEN: permissions or a parent directory that cannot be
+    traversed), or it opens but is not a usable SQLite database
+    (SQLITE_NOTADB, SQLITE_CORRUPT). None for an absent path and for every
+    other failure, which the caller reports as it would have. A
+    `StoreFaultError` already carries the remedy and is returned as it is.
+    """
+    if isinstance(exc, StoreFaultError):
+        return str(exc)
+    if not Path(store).exists():
+        return None
+    errorname = getattr(exc, "sqlite_errorname", "")
+    text = str(exc).lower()
+    if errorname == "SQLITE_CANTOPEN" or (
+        not errorname and "unable to open database file" in text
+    ):
+        check = "that this process can read the file and traverse its parent directory"
+    elif errorname in ("SQLITE_NOTADB", "SQLITE_CORRUPT") or (
+        not errorname
+        and ("file is not a database" in text or "disk image is malformed" in text)
+    ):
+        # THE FLAG IS NOT NAMED. A fault raised inside a read does not know
+        # whether the path came from --db-path or from the default, and the
+        # message already names the path itself.
+        check = "that the file is a PACT memory store, or restore it from a backup"
+    else:
+        return None
+    return (
+        f"the store at {store!r} exists but cannot be opened ({exc}). Check "
+        f"{check}; no memory was written to it."
+    )
+
+
+def _read_only_store_unavailable(
+    exc: "sqlite3.DatabaseError", store: str
+) -> bool:
+    """Whether a read-only probe failure is the DEGRADED state, not a fault.
+
+    ONE sqlite condition is the fail-soft the architecture record promises:
+    the store EXISTS but has no schema yet, so the DDL is refused read-only
+    (SQLITE_READONLY) and the caller narrows to the canonical scope.
+
+    SQLITE_CANTOPEN IS DEGRADED ONLY WHEN THE PATH IS ABSENT — a race after
+    the presence check. A store that EXISTS and cannot be opened, or is not
+    a database, is a FAULT: reporting "no memories" for it is a loud-to-silent
+    regression, so this RAISES `present_store_fault`'s remedy. Any other
+    failure raises unchanged.
+    """
+    errorname = getattr(exc, "sqlite_errorname", "")
+    text = str(exc).lower()
+    readonly = errorname == "SQLITE_READONLY" or (
+        not errorname and "readonly" in text and "database" in text
+    )
+    if readonly:
+        return True
+    remedy = present_store_fault(exc, store)
+    if remedy is not None:
+        raise StoreFaultError(remedy) from exc
+    cantopen = errorname == "SQLITE_CANTOPEN" or (
+        not errorname and "unable to open database file" in text
+    )
+    return cantopen
+
+
+@contextmanager
+def _legacy_probe_context(store: str, conn):
+    """Yield `(connection, degraded_reason)` for the legacy-scope probe.
+
+    A caller's live connection (the save path) is used UNCHANGED: it is
+    already initialized, and its writes belong to the caller. Otherwise the
+    store is opened READ-ONLY, because this path is reached by PURE READS and
+    must not bring a store, or a schema, into existence.
+
+    When the open or its initialization check is refused for one of the two
+    degraded conditions, yield `(None, reason)` so the caller narrows to the
+    canonical scope and discloses it. Every other failure raises.
+
+    THE `try` WRAPS THE PROBE ONLY, never the yielded connection: an
+    exception raised by the CALLER's body must propagate, not be re-caught
+    here (a generator cannot yield a second time after an exception is
+    thrown into it).
+    """
+    if conn is not None:
+        yield conn, None
+        return
+    degraded: Optional[str] = None
+    connection = None
+    try:
+        connection = _read_only_connection(store)
+        # A SCHEMA CHECK, NOT THE INITIALISER: a read never runs migrations
+        # or the vector-table CREATE. A store with no schema degrades BEFORE
+        # any of the body's work.
+        if not _connection_has_memories_table(connection):
+            connection.close()
+            degraded = "no schema"
+    except BaseException as exc:
+        # A connection opened before the failure is closed here, whether the
+        # failure degrades or propagates.
+        if connection is not None:
+            connection.close()
+        if not isinstance(exc, sqlite3.DatabaseError) or not _read_only_store_unavailable(exc, store):
+            raise
+        degraded = str(exc)
+    # EVERY YIELD SITS OUTSIDE THE `try`: an exception the caller's body
+    # raises is thrown in at the yield, and inside the `try` the
+    # OperationalError arm would catch it and yield a second time.
+    if degraded is not None:
+        yield None, degraded
+        return
+    with closing(connection), read_only_scope():
+        yield connection, None
+
+
+def read_project_bucket_census(store: str) -> Dict[str, int]:
+    """Every NON-EMPTY project bucket in `store`, read READ-ONLY.
+
+    The `project-id show` / `rekey --candidates` census. An ABSENT or
+    SCHEMA-LESS store answers `{}`: a report must not create a store or its
+    schema. A store that is PRESENT but cannot be opened, or is not a
+    readable SQLite database, RAISES with the remedy named
+    (`present_store_fault`), which the CLI reports as exit 3: "no buckets"
+    for an unreadable store would hide its rows.
+    """
+    if not Path(store).exists():
+        return {}
+    from .database import project_bucket_counts
+
+    def read() -> Dict[str, int]:
+        with closing(_read_only_connection(store)) as connection:
+            # NO SCHEMA, NO BUCKETS. `project_bucket_counts` requires the
+            # schema and never creates it, so the census checks first.
+            if not _connection_has_memories_table(connection):
+                return {}
+            return project_bucket_counts(connection)
+
+    try:
+        return _stable_read_only(store, read)
+    except sqlite3.DatabaseError as exc:
+        if not _read_only_store_unavailable(exc, store):
+            raise
+        return {}
+
+
+def _match_legacy_candidate(
+    legacy: str, buckets: Dict[str, int], allow_fold: bool = False
+) -> "tuple[Optional[str], list]":
+    """The stored bucket spelling that matches `legacy`, or None.
+
+    Exact case first. A folded fallback is used ONLY when `allow_fold` is
+    True — the caller's statement that the filesystem holding the identity
+    root PROVABLY cannot distinguish the two spellings (see
+    `project_identity.filesystem_case_insensitive`). On a case-sensitive
+    filesystem `ForeignProj` and `foreignproj` are two different projects, so
+    folding them is a cross-project disclosure; when the filesystem cannot be
+    determined the answer is False and no fold happens.
+
+    A folded-first lookup passes on a case-insensitive filesystem and misses
+    on a case-sensitive one; two folded matches are two different projects on
+    such a filesystem, so guessing would merge them.
+
+    Returns `(candidate, ambiguous)`. `ambiguous` is the sorted list of folded
+    matches when more than one bucket differs only by case; it is carried into
+    the disclosure so the operator can choose, rather than being dropped
+    silently.
+
+    THE FOLDED MATCH IS NOT REQUIRED TO BE `verified`, AND MUST NOT BE. The
+    live legacy bucket's file rows are all relative, so the plausibility gate
+    can only ever call it `unverified`; requiring `verified` here would hide a
+    bucket holding thousands of memories on a case-folding path mismatch —
+    silent loss, which is the defect this change exists to remove. The guards
+    that keep a fold from merging two projects are the FILESYSTEM CAPABILITY
+    gate and UNIQUENESS (exactly one folded match). The matched bucket then
+    passes the same admission as an exact match: read when verified, or when
+    unverified with session evidence (disclosed `included_unverified`), and
+    otherwise `unproven` and not read.
+
+    THE RETURNED VALUE IS THE STORED SPELLING, BYTE FOR BYTE. Folding finds a
+    candidate; it never produces one.
+
+    `allow_fold` DEFAULTS TO FALSE, THE FAIL-CLOSED DIRECTION. A security gate
+    with a permissive default is a footgun for the next call site: a new
+    caller that forgets the argument must lose a fold, never gain one. The
+    production call site passes
+    `project_identity.filesystem_case_insensitive(root)` explicitly, and the
+    pure-string surrogate arms pass True because they exercise the matcher,
+    not the gate.
+    """
+    if legacy in buckets:
+        return legacy, []
+    if not allow_fold:
+        return None, []
+    folded = [bucket for bucket in buckets if bucket.casefold() == legacy.casefold()]
+    if len(folded) == 1:
+        return folded[0], []
+    if len(folded) > 1:
+        logger.warning(
+            "legacy project basename %r matches %d stored buckets by case "
+            "(%s); none is used, because a fold cannot tell them apart.",
+            legacy,
+            len(folded),
+            ", ".join(sorted(folded)),
+        )
+        return None, sorted(folded)
+    return None, []
+
+
 def _content_fields_changed(
     before: Dict[str, Any],
     after: Dict[str, Any],
@@ -111,7 +2390,7 @@ def _content_fields_changed(
 ) -> bool:
     """Return True if any of ``keys`` differs between ``before`` and ``after``.
 
-    Used by ``PACTMemory.update`` (M7, #374 remediation) to skip embedding
+    Used by ``PACTMemory.update`` to skip embedding
     regeneration when an additive merge produces no actual change. Values are
     compared via canonical JSON serialization so that dict/list ordering and
     non-JSON-native types (e.g. datetimes) compare deterministically.
@@ -170,45 +2449,136 @@ def _with_store_scope(method):
     return wrapper
 
 
-def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
-    """Resolve the MAIN repository root via `git rev-parse --git-common-dir`.
+# ONE DETECTION PASS'S git common-dir answers, keyed by the resolved start.
+# Set only by `detection_pass` (a fresh dict per pass: one backlog command,
+# one memory CLI command, or one `PACTMemory` construction outside any pass),
+# and handed by a construction to its FIRST legacy read, which asks the same
+# question about the same directory. Nothing survives the pass. A
+# ContextVar, so concurrent passes never share one.
+_DETECTION_COMMON_DIRS: "contextvars.ContextVar[Optional[Dict[str, Optional[Path]]]]" = (
+    contextvars.ContextVar("_DETECTION_COMMON_DIRS", default=None)
+)
 
-    Worktree-safe: --git-common-dir points at the shared .git directory from a
-    linked worktree as well as from the main checkout, so its parent is the
-    main repo root in both. `git rev-parse --show-toplevel` would return the
-    WORKTREE path instead, fragmenting a project across its own checkouts.
+# THE PASS'S OTHER GIT ANSWERS AND ITS WORKTREE LISTINGS live in
+# `project_identity` (`DETECTION_ANSWERS`, `DETECTION_LISTINGS`) beside its
+# git-dir memo, because its worktree listing reader fills them; this module
+# opens and closes them in `detection_pass`.
+
+
+@contextmanager
+def detection_pass():
+    """One detection pass, the only setup of the pass memos: inside it every
+    git question (`--git-common-dir`, `--git-dir`, the other `rev-parse`
+    answers, worktree listings) is asked once and its answer is reused, so
+    every check in the pass reads the same answers. An outermost pass starts
+    empty and ends with the block; the read-scope cache
+    (`_LEGACY_SCOPE_CACHE`), consulted only while a pass is open, is emptied
+    when the outermost pass ends. Yields the pass's own memos by name
+    (`common_dirs`, `git_dirs`, `answers`, `listings`), so a caller can
+    keep what the pass filled; a `PACTMemory` construction keeps its common
+    dirs and listings for its first legacy read. The pass also opens
+    `git_helpers.git_results_pass`, so readers outside this module (the
+    project-memory root and CLAUDE.md resolvers in `shared.project_scope`)
+    share each git command with the readers here. A pass opened inside
+    another (a `PACTMemory` construction during a backlog command or a memory
+    CLI command) joins it: it yields the outer pass's memos, sets nothing and
+    resets nothing, so one command asks each question once and every check in
+    it reads one answer."""
+    from shared.git_helpers import git_results_pass
+
+    if project_identity.DETECTION_ANSWERS.get() is not None:
+        yield {
+            "common_dirs": _DETECTION_COMMON_DIRS.get(),
+            "git_dirs": project_identity.DETECTION_GIT_DIRS.get(),
+            "answers": project_identity.DETECTION_ANSWERS.get(),
+            "listings": project_identity.DETECTION_LISTINGS.get(),
+        }
+        return
+    memos = {"common_dirs": {}, "git_dirs": {}, "answers": {}, "listings": {}}
+    tokens = (
+        (_DETECTION_COMMON_DIRS, _DETECTION_COMMON_DIRS.set(memos["common_dirs"])),
+        (project_identity.DETECTION_GIT_DIRS, project_identity.DETECTION_GIT_DIRS.set(memos["git_dirs"])),
+        (project_identity.DETECTION_ANSWERS, project_identity.DETECTION_ANSWERS.set(memos["answers"])),
+        (project_identity.DETECTION_LISTINGS, project_identity.DETECTION_LISTINGS.set(memos["listings"])),
+    )
+    try:
+        with git_results_pass():
+            yield memos
+    finally:
+        for var, token in reversed(tokens):
+            var.reset(token)
+        _LEGACY_SCOPE_CACHE.clear()
+
+
+def main_repo_common_dir(start: Optional[str] = None) -> Optional[Path]:
+    """Resolve the repository's GIT COMMON DIR via `git rev-parse`.
+
+    Split out of `main_repo_root` because two callers need different things
+    from the same answer: the identity resolver needs the common dir itself
+    (the repository override file lives at `<common_dir>/pact-project-id`, and
+    that path is NOT necessarily `<root>/.git` — `git init
+    --separate-git-dir` and bare repositories both break the literal join),
+    while every existing caller wants its parent.
 
     Args:
         start: Directory git resolves from, passed as `-C`. When None, git
             runs in the current working directory.
 
     Returns:
-        The main repo root, or None when git is absent, times out, exits
+        The resolved common dir, or None when git is absent, times out, exits
         non-zero, or the path is not inside a repository.
     """
+    # INSIDE ONE DETECTION PASS, ONE ANSWER PER DIRECTORY (see
+    # `_DETECTION_COMMON_DIRS`): a second call for the same resolved
+    # directory returns the first answer instead of running the identical
+    # git command again. Outside a pass every call runs git.
+    memo = _DETECTION_COMMON_DIRS.get()
+    if memo is not None:
+        try:
+            key = os.path.realpath(start if start is not None else os.getcwd())
+        except (OSError, ValueError):
+            key = None
+        if key is not None:
+            if key not in memo:
+                outside_pass = _DETECTION_COMMON_DIRS.set(None)
+                try:
+                    memo[key] = main_repo_common_dir(start)
+                finally:
+                    _DETECTION_COMMON_DIRS.reset(outside_pass)
+            return memo[key]
+
     command = ["git"]
     if start is not None:
         command += ["-C", str(start)]
     command += ["rev-parse", "--git-common-dir"]
     # Function-level: the shared package is importable once pact_session's
     # sys.path bootstrap has run, which this module's import of it does.
+    from shared.git_helpers import answered_once
     from shared.project_scope import git_env_without_location
 
     try:
-        result = subprocess.run(
+        result = answered_once(
             command,
-            capture_output=True,
+            lambda: subprocess.run(
+                command,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
             text=False,
-            timeout=5,
             env=git_env_without_location(),
         )
-        if result.returncode != 0 or not result.stdout.strip():
+        # os.fsdecode (in `one_git_answer`), never subprocess's locale
+        # decoding: a path may contain bytes invalid in the locale, and
+        # UnicodeDecodeError would escape this reader.
+        answer = project_identity.one_git_answer(result)
+        # A git older than 2.5 prints `--git-common-dir` back as an
+        # argument: that is no answer, not a path relative to `start`.
+        if answer is None or answer == "--git-common-dir":
             return None
-        # os.fsdecode, never subprocess's locale decoding: a path may contain
-        # bytes invalid in the locale, and UnicodeDecodeError would escape this
-        # reader (#1653 F1 twin site).
-        common_dir = Path(os.fsdecode(result.stdout).strip())
-        if not common_dir.is_absolute():
+        common = Path(answer)
+        if not common.is_absolute():
             # git returns this path RELATIVE TO THE DIRECTORY IT RAN IN, at any
             # depth — measured in the main checkout: ".git" at the root,
             # "../.git" one level down, "../../../.git" three levels down. Not
@@ -223,14 +2593,466 @@ def main_repo_root(start: Optional[str] = None) -> Optional[Path]:
             # branch never runs there. The case it protects is the main
             # checkout, not the worktree.
             base = Path(start) if start is not None else Path.cwd()
-            common_dir = base / common_dir
-        return common_dir.resolve().parent
+            common = base / common
+        return common.resolve()
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
         # git not installed, not a repo, command timed out, a subprocess-level
         # refusal (ValueError: e.g. an embedded NUL), or the path could not be
         # resolved. NOT an undecodable answer: stdout is bytes and decoded by
         # os.fsdecode, which cannot raise.
         return None
+
+
+
+# `_worktree_redirect_cause`'s answers when the check refuses.
+REDIRECT_UNLISTED = "unlisted"
+REDIRECT_NO_GIT_DIR = "no_git_dir"
+REDIRECT_UNRESOLVABLE = "unresolvable"
+REDIRECT_UNLISTABLE = "unlistable"
+REDIRECT_UNREADABLE_LISTING = "unreadable_listing"
+REDIRECT_EMPTY_LISTING = "empty_listing"
+REDIRECT_MOVED = "moved"
+
+# Each cause's `cause_detail`: what was observed, and nothing more.
+_REDIRECT_CAUSE_DETAILS = {
+    REDIRECT_UNLISTED: (
+        "git reports a git directory for it other than the repository's "
+        "common directory, and that repository's worktree list does not hold it"
+    ),
+    REDIRECT_NO_GIT_DIR: "git gave no git directory for it",
+    REDIRECT_UNRESOLVABLE: "a path git gave for it would not resolve",
+    REDIRECT_UNLISTABLE: "git could not list that repository's worktrees",
+    REDIRECT_UNREADABLE_LISTING: (
+        "git listed that repository's worktrees, but the listing's records are "
+        "not git's fields in git's order"
+    ),
+    REDIRECT_EMPTY_LISTING: (
+        "git listed that repository's worktrees, but the listing holds no "
+        "record, or an empty one"
+    ),
+    REDIRECT_MOVED: (
+        "git lists the worktree entry its `.git` names at another path, which "
+        "git marks prunable, and not at this checkout"
+    ),
+}
+
+
+def _worktree_redirect(
+    asked_root, common_dir, *, git_dir: Optional[Path] = None,
+    toplevel: Optional[Path] = None, listing: Any = _LISTING_UNASKED,
+) -> bool:
+    """Whether the check refuses the shape (`_worktree_redirect_cause`)."""
+    return _worktree_redirect_cause(
+        asked_root, common_dir, git_dir=git_dir, toplevel=toplevel, listing=listing
+    ) is not None
+
+
+def _worktree_redirect_cause(
+    asked_root, common_dir, *, git_dir: Optional[Path] = None,
+    toplevel: Optional[Path] = None, listing: Any = _LISTING_UNASKED,
+) -> Optional[str]:
+    """Why the linked-worktree shape is NOT backed by git's listing, or None
+    when it is (or is not a linked-worktree shape).
+
+    A `.git` FILE naming another repository's WORKTREE ADMIN dir makes every
+    git answer agree — `--git-dir`, `--git-common-dir` and `--show-toplevel`
+    all describe that other repository — while `asked_root` is not a checkout
+    of it at all (the forged-pointer shape `shared/project_scope.py` names).
+    A genuine linked
+    worktree IS listed by `git worktree list`, so the listing test separates
+    them.
+
+    APPLIED ONLY WHEN THE GIT DIR DIFFERS FROM THE COMMON DIR. A submodule and
+    a `--separate-git-dir` checkout report the same directory as both, and
+    `worktree list` there reports the GIT DIR rather than the checkout — they
+    would fail this test (measured). They never reach it.
+
+    `git_dir` and `toplevel`, when the caller already holds git's answers
+    for `asked_root`, are used instead of asking git again. So is `listing`,
+    the caller's `project_identity.worktree_records` answer for `--git-dir <common_dir>`
+    (any answer it gave, None included).
+
+    MISSING EVIDENCE REFUSES, and the cause names what was missing:
+    `REDIRECT_UNLISTED` (git's listing does not hold the checkout),
+    `REDIRECT_NO_GIT_DIR` (git gave no git dir), `REDIRECT_UNRESOLVABLE` (a
+    path would not resolve), `REDIRECT_UNLISTABLE` (no listing:
+    `project_identity.listed_worktree_records` is None), `REDIRECT_EMPTY_LISTING` (git
+    printed a listing with no record or an empty one: `EMPTY_LISTING`) or
+    `REDIRECT_UNREADABLE_LISTING` (git printed records that are not git's
+    fields in git's order: `UNREADABLE_LISTING`). An unlisted
+    checkout whose worktree entry the same listing holds at another path
+    marked prunable is `REDIRECT_MOVED` instead (`_entry_listed_as_moved`),
+    the one cause whose remedy names `git worktree repair`. A git that does
+    not answer with a toplevel is not refused here: that shape has no working
+    tree, and `_root_guard` declines it `no_working_tree`.
+    """
+    if asked_root is None or common_dir is None:
+        return None
+    try:
+        if git_dir is None:
+            git_dir_raw = _git_rev_parse(str(asked_root), "--git-dir")
+            if git_dir_raw is None:
+                return REDIRECT_NO_GIT_DIR
+            git_dir = Path(git_dir_raw)
+            if not git_dir.is_absolute():
+                git_dir = Path(asked_root) / git_dir
+        git_dir = Path(git_dir).resolve()
+        common_path = Path(common_dir).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return REDIRECT_UNRESOLVABLE
+    if git_dir == common_path:
+        return None
+    # LISTED BY THE REPOSITORY THE COMMON DIR BELONGS TO: a submodule's
+    # admin dir sits inside the superproject's `.git`, so a listing run from
+    # a directory would report the SUPERPROJECT's worktrees.
+    records = (
+        project_identity.listed_worktree_records(None, git_dir=common_path)
+        if listing is _LISTING_UNASKED else listing
+    )
+    if records is None:
+        return REDIRECT_UNLISTABLE
+    if records == EMPTY_LISTING:
+        return REDIRECT_EMPTY_LISTING
+    if records == UNREADABLE_LISTING:
+        return REDIRECT_UNREADABLE_LISTING
+    if toplevel is None:
+        toplevel_raw = _git_rev_parse(str(asked_root), "--show-toplevel")
+        if toplevel_raw is None:
+            return None
+        toplevel = Path(toplevel_raw)
+    try:
+        toplevel = Path(toplevel).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return REDIRECT_UNRESOLVABLE
+    if toplevel in project_identity.worktree_toplevels(records):
+        return None
+    return REDIRECT_MOVED if _entry_listed_as_moved(git_dir, records) else REDIRECT_UNLISTED
+
+
+def _entry_listed_as_moved(git_dir: Path, records: List[List[str]]) -> bool:
+    """Whether `records`, git's listing of the repository, mark `prunable`
+    the path that the worktree entry at `git_dir` records: git lists a
+    worktree moved with `mv` at its old path and marks it prunable.
+
+    Evidence git does not give shows no move: a git before 2.31, which
+    prints no `prunable` line, and an entry whose `gitdir` file cannot be
+    read or whose path will not resolve answer False, so the repair
+    sentence is not printed. A listing read without `-z` keeps a record
+    whose folder is gone, so git 2.31 to 2.35, which rejects `-z` but
+    prints `prunable`, answers True as later git does.
+    """
+    try:
+        text = project_identity.read_git_file(Path(git_dir) / "gitdir")
+        if text is None:
+            return False
+        # A relative `gitdir` is relative to the entry; joining an absolute
+        # one leaves it as it is.
+        recorded = (Path(git_dir) / project_identity.worktree_admin_gitdir(text)).parent.resolve()
+        return any(
+            Path(record[0][len("worktree "):]).resolve() == recorded
+            and any(field.startswith("prunable ") for field in record)
+            for record in records
+        )
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def _git_dir_start(start: Optional[Path]) -> Optional[Path]:
+    """The checkout a start inside a git dir belongs to
+    (`project_scope.git_dir_checkout`), or None when `start` is not inside
+    one or its git dir has no checkout to name; the caller then asks from
+    `start` itself. Callers ask it only of a start git gives a common dir
+    but no top level for, as it gives a start inside a git dir."""
+    if start is None:
+        return None
+    from shared.project_scope import git_dir_checkout
+
+    return git_dir_checkout(start)[1]
+
+
+def _start_and_toplevel(
+    start: Optional[str], common: Optional[Path]
+) -> "tuple[Optional[str], Optional[str]]":
+    """(the start to ask git from, its `--show-toplevel` answer).
+
+    `start` (None: the process cwd) and git's top level for it, unless git
+    gives a common dir but no top level, as for a start inside a git dir:
+    then the start is the checkout that git dir belongs to
+    (`_git_dir_start`), and the top level is asked again from there. With
+    no common dir nothing is asked, and the top level is None.
+    """
+    if common is None:
+        return start, None
+    toplevel = _git_rev_parse(start, "--show-toplevel")
+    if toplevel is None:
+        checkout = _git_dir_start(Path(start) if start is not None else cwd_or_none())
+        if checkout is not None:
+            start = str(checkout)
+            toplevel = _git_rev_parse(start, "--show-toplevel")
+    return start, toplevel
+
+
+def cwd_or_none() -> Optional[Path]:
+    """`Path.cwd()`, or None when the process cwd no longer exists.
+
+    `Path.cwd()` RAISES FileNotFoundError once the directory is deleted, so it
+    must never be called inline on a path that resolves identity: a deleted
+    cwd is an ordinary state for a long-lived process and the resolver's job
+    is to decline, not to crash.
+    """
+    try:
+        return Path.cwd()
+    except (OSError, RuntimeError):
+        return None
+
+
+def _unanswerable_repository(start) -> Optional[Path]:
+    """The `.git` marker proving `start` sits in a repository git could not answer for.
+
+    Returns the marker path, or None when no marker is reachable. ONE WALK,
+    `project_identity.find_git_marker`, with git's own boundaries, so a
+    directory git would not treat as inside a repository is never declined
+    for that reason:
+
+    - a `.git` FILE counts (a submodule and a linked worktree both use one),
+      tested with `lexists` so a broken marker still marks a repository;
+    - the START directory is always examined, even when it is a
+      `GIT_CEILING_DIRECTORIES` entry (git uses it); a PARENT that is a
+      ceiling stops the walk before it is examined (git will not move up
+      into one);
+    - it stops when the device changes, unless
+      `GIT_DISCOVERY_ACROSS_FILESYSTEM` is truthy, and at the filesystem root.
+
+    Never raises: an unreadable path or environment answers None.
+    """
+    return find_git_marker(start)
+
+
+def _git_rev_parse(start: Optional[str], *args: str) -> Optional[str]:
+    """One `git rev-parse` answer, decoded, or None.
+
+    Bytes are decoded with `os.fsdecode` (never locale decoding), so a path
+    holding bytes invalid in the locale answers rather than raising.
+    """
+    if args == ("--git-dir",):
+        # One answer per directory inside a detection pass, shared with the
+        # identity layer's submodule check (`git_dir_answer`).
+        return project_identity.git_dir_answer(start)
+    return project_identity.detection_answer(
+        ("rev-parse", project_identity.question_dir(start), args), lambda: _ask_rev_parse(start, args)
+    )
+
+
+def _git_dir_and_toplevel(start: Optional[str]) -> "tuple[Optional[str], Optional[str]]":
+    """(absolute git dir, top level) from ONE `git rev-parse
+    --absolute-git-dir --show-toplevel`, either None when git gave no
+    answer. A bare repository answers its git dir and then exits non-zero
+    on the top level, so the git dir is kept and the top level is None."""
+    return project_identity.detection_answer(
+        ("rev-parse", project_identity.question_dir(start), ("--absolute-git-dir", "--show-toplevel")),
+        lambda: _ask_git_dir_and_toplevel(start),
+    )
+
+
+def _ask_git_dir_and_toplevel(start: Optional[str]) -> "tuple[Optional[str], Optional[str]]":
+    command = ["git"]
+    if start is not None:
+        command += ["-C", str(start)]
+    command += ["rev-parse", "--absolute-git-dir", "--show-toplevel"]
+    from shared.git_helpers import answered_once
+    from shared.project_scope import git_env_without_location
+
+    try:
+        result = answered_once(
+            command,
+            lambda: subprocess.run(
+                command,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
+            text=False,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None, None
+    git_dir, toplevel = _parse_git_dir_and_toplevel(result.stdout, result.returncode, start)
+    # Both paths are ones git prints absolute. A git dir that is not, such
+    # as `--absolute-git-dir` printed back by a git older than 2.13, is no
+    # answer at all; a top level that is not is no top level.
+    if git_dir is not None and not os.path.isabs(git_dir):
+        return None, None
+    return git_dir, toplevel if toplevel is None or os.path.isabs(toplevel) else None
+
+
+def _parse_git_dir_and_toplevel(
+    out: bytes, returncode: int, start: Optional[str]
+) -> "tuple[Optional[str], Optional[str]]":
+    """(git dir, top level) from the bytes of `rev-parse --absolute-git-dir
+    --show-toplevel` asked at `start`. Git ends each answer with `\\n`, and
+    either path can hold a `\\n` or any other line separator, so the answer
+    is never split at a line separator. In order:
+
+    - no answer ending in `\\n`: (None, None);
+    - a non-zero exit (a bare repository): git printed only the git dir, so
+      the git dir is the answer minus its final `\\n`, and the top level is
+      None;
+    - the answer starts with `<realpath start>/.git` and `\\n`: that is the
+      git dir, and the top level is the rest minus its final `\\n`;
+    - the answer holds exactly one other `\\n`: neither path holds one, so
+      the git dir and the top level are the text either side of it;
+    - otherwise the top level is the longest of `realpath start` and its
+      ancestors that the answer ends with, after a `\\n`, and the git dir is
+      the text before that `\\n`;
+    - otherwise the git dir is the whole answer, which is not the `.git` at
+      `start`, and the top level is None.
+    """
+    if not out.endswith(b"\n"):
+        return None, None
+    body = out[:-1]
+    if returncode != 0:
+        return os.fsdecode(body) or None, None
+    root = os.path.realpath(start if start is not None else os.curdir)
+    own = os.fsencode(os.path.join(root, ".git")) + b"\n"
+    if out.startswith(own):
+        return os.fsdecode(own[:-1]), os.fsdecode(out[len(own):-1]) or None
+    if body.count(b"\n") == 1:
+        git_dir, toplevel = body.split(b"\n")
+        return os.fsdecode(git_dir) or None, os.fsdecode(toplevel) or None
+    candidate = root
+    while True:
+        ending = b"\n" + os.fsencode(candidate)
+        if body.endswith(ending) and len(body) > len(ending):
+            return os.fsdecode(body[: -len(ending)]), candidate
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            return os.fsdecode(body) or None, None
+        candidate = parent
+
+
+def _ask_rev_parse(start: Optional[str], args: tuple) -> Optional[str]:
+    command = ["git"]
+    if start is not None:
+        command += ["-C", str(start)]
+    command += ["rev-parse", *args]
+    from shared.git_helpers import answered_once
+    from shared.project_scope import git_env_without_location
+
+    try:
+        result = answered_once(
+            command,
+            lambda: subprocess.run(
+                command,
+                capture_output=True,
+                text=False,
+                timeout=5,
+                env=git_env_without_location(),
+            ),
+            text=False,
+            env=git_env_without_location(),
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError, ValueError):
+        return None
+    answer = project_identity.one_git_answer(result)
+    # Every path this asks for is one git prints absolute; anything else,
+    # such as the option itself printed back by a git that predates it, is
+    # no answer.
+    return answer if answer is not None and os.path.isabs(answer) else None
+
+
+def main_repo_root(
+    start: Optional[str] = None,
+    common: Optional[Path] = None,
+    toplevel: Any = _TOPLEVEL_UNASKED,
+    listing: Any = _LISTING_UNASKED,
+) -> Optional[Path]:
+    """The repository's identity ROOT — the working tree, or the main checkout.
+
+    `common.parent` IS NOT ALWAYS THE ROOT. It is right only when the common
+    dir is literally `<root>/.git`. Measured counter-examples:
+
+    - SUBMODULE: common is `<super>/.git/modules/vendor/sub`, so
+      `common.parent` is `.../modules/vendor` -- a path with no origin, which
+      filed the submodule under the basename `vendor`.
+    - `git init --separate-git-dir=<ext>/sep.git`: common is external, so
+      `common.parent` is `<ext>` -- again not the working tree.
+
+    The rule: `git rev-parse --show-toplevel` IS the identity root, EXCEPT for
+    a LINKED WORKTREE, where `git_dir` is per-worktree (`.../.git/worktrees/x`)
+    while `common` is the main repository's `.git`; there the main checkout is
+    the identity, so `common.parent` is returned. The discriminator is
+    `git_dir != common` AND `realpath(common.parent/.git) == common`: a
+    submodule's git dir EQUALS its common dir, and an external
+    `--separate-git-dir` has no `.git` at `common.parent`, so neither can be
+    mistaken for a linked worktree.
+
+    A BARE repository has no toplevel, so it DECLINES (None): there is no
+    working tree to name, and guessing one would be the misfile this change
+    exists to prevent.
+
+    Args:
+        start: Directory git resolves from, passed as `-C`. When None, git
+            runs in the current working directory.
+        common: The already-resolved common dir, when the caller has it. Saves
+            a duplicate `rev-parse`; `None` resolves it here.
+        toplevel: The caller's `--show-toplevel` answer for `start` (None: git
+            gave none), when it holds one; left out, it is asked here.
+        listing: The caller's `project_identity.worktree_records` answer for
+            `--git-dir <common>`, when it holds one, for the redirect check a
+            linked worktree runs; left out, the check asks git.
+
+    Returns:
+        The identity root, or None when git is absent, times out, exits
+        non-zero, the path is not inside a repository, or the repository is
+        bare.
+    """
+    if common is None:
+        common = main_repo_common_dir(start)
+    if common is None:
+        return None
+    if toplevel is _TOPLEVEL_UNASKED:
+        # A start inside a git dir is asked from its checkout.
+        start, toplevel = _start_and_toplevel(start, common)
+    if toplevel is None:
+        # No working tree: a bare repository, or a repository git cannot
+        # describe. There is no root to name.
+        return None
+    # NO ROOT WITHOUT THE GIT DIR. The git dir decides whether the forged-
+    # worktree check runs at all, so a git dir git did not give, or one that
+    # will not resolve, declines here; the caller's guard names the cause
+    # (`gitfile_redirect`), as for every other refusal of that check.
+    git_dir_raw = _git_rev_parse(start, "--git-dir")
+    if git_dir_raw is None:
+        return None
+    try:
+        git_dir = Path(git_dir_raw)
+        if not git_dir.is_absolute():
+            base = Path(start) if start is not None else Path.cwd()
+            git_dir = base / git_dir
+        git_dir = git_dir.resolve()
+        common_path = common.resolve()
+        main_git = (common_path.parent / ".git").resolve()
+        root = Path(toplevel).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if git_dir != common_path:
+        # ANY LINKED WORKTREE IS VERIFIED, of a main checkout or of a
+        # submodule: a forged `.git` FILE naming another repository's
+        # worktree admin dir makes every git answer agree, and a genuine
+        # linked worktree is listed. The caller reports the refusal: every
+        # resolver rung names it as `gitfile_redirect` through its own guard,
+        # so a warning here would log the one cause twice.
+        asked = Path(start) if start is not None else cwd_or_none()
+        if asked is None:
+            return None
+        if _worktree_redirect(asked, common_path, git_dir=git_dir, toplevel=root, listing=listing):
+            return None
+        if main_git == common_path:
+            # LINKED WORKTREE of a main checkout: the main checkout is the
+            # identity.
+            return common_path.parent
+    return root
 
 
 def _declared_path_exists(declared_dir: str) -> bool:
@@ -259,6 +3081,27 @@ def _declared_path_exists(declared_dir: str) -> bool:
         # THIS function and must not depend on a library's internal exception
         # policy, so the type is named here rather than left implicit.
         return False
+
+
+class LegacyBucketWriteRefusedError(ValueError):
+    """A repository session's write into a folder-name bucket was refused
+    (`PACTMemory._refuse_legacy_write`). Caller input the session may not
+    write, so a ValueError, but not a field-validation error: the CLI reports
+    it as `LEGACY_BUCKET_WRITE_REFUSED`, exit 2, with no field list."""
+
+
+class GitHubPayloadIdRefusedError(ValueError):
+    """A save or update payload's port-less github.com `project_id` is not
+    owner/repo of GitHub names (`_folded_payload_project`). Invalid input:
+    the CLI reports it as `INVALID_INPUT`, exit 2, with no field list."""
+
+
+class HiddenBucketMoveRefusedError(LegacyBucketWriteRefusedError):
+    """An update's `project_id` change on a row whose bucket this session's
+    read hides (`hidden_legacy_buckets`: an excluded or unproven legacy
+    candidate, a case variant, an ambiguous match or a suppressed name) was
+    refused. Moving such a bucket is `project-id rekey`'s job, which judges
+    the whole bucket; the CLI reports it as `LEGACY_BUCKET_WRITE_REFUSED`."""
 
 
 class ProjectIdentityUnresolvedError(ProjectScopeDisagreementError):
@@ -309,10 +3152,17 @@ class PACTMemory:
         Initialize the PACTMemory API.
 
         Args:
-            project_id: Project identifier. If not provided, auto-detected using
-                        (in order): CLAUDE_PROJECT_DIR env var, the session
-                        record's project_dir, git repo root, or current working
-                        directory basename (home scope warns).
+            project_id: Project identifier. If not provided, it is the
+                        repository identity of the first rung that resolves:
+                        CLAUDE_PROJECT_DIR, the session record's project_dir,
+                        the git root, then a repository the working
+                        directory's marker walk finds (each reading its
+                        repository's override file, then its origin), then
+                        the user-scope setting (only
+                        with no declaration and no repository found; a home
+                        directory the marker walk reaches is not asked, so
+                        it counts as none), then the working directory's
+                        folder name (home scope warns).
             session_id: Session identifier. Auto-detected from context file if not provided.
             db_path: Custom database path. Uses default if not provided.
 
@@ -354,9 +3204,78 @@ class PACTMemory:
                 )
             self._project_id: Optional[str] = project_id
             self._project_id_source = "supplied"
+            # A SUPPLIED value is arbitrary by design: the caller named the
+            # destination. It is neither canonicalised nor classified as a
+            # folder name, so the disclosure says so rather than guessing.
+            self._project_id_shape = "caller"
+            self._legacy_project_basename = None
+            self._override_ignored = None
+            # A SUPPLIED id does not widen: there is no legacy candidate and
+            # therefore no gate root to carry. PINNED, not coded around.
+            self._project_identity_root = None
+            self._project_common_dir = None
+            self._project_home_landing = False
+            self._git_rung_root = None
+            self._decline_reason = None
+            self._decline_detail = None
+            self._legacy_suppressed = None
+            self._legacy_suppressed_name = None
         else:
-            self._project_id, self._project_id_source = (
-                self._detect_project_id_with_source()
+            joined = project_identity.DETECTION_ANSWERS.get() is not None
+            with detection_pass() as memos:
+                detected = self._detect_project_identity_with_legacy()
+                # THE SUPPRESSION DISCLOSURE ASKS INSIDE THE SAME PASS: its
+                # common-dir question is the one detection just answered for
+                # the identity root.
+                suppression = (
+                    _legacy_suppression(detected.identity_root, detected.identity_common_dir)
+                    if detected.legacy_basename is None
+                    else (None, None)
+                )
+            # The pass's own memos, not copies: the first legacy read asks
+            # the same questions of the same directories. A joined pass's
+            # memos are the outer caller's, and that read pops what it takes,
+            # so it takes from copies and the caller keeps its answers.
+            self._detection_common_dirs = dict(memos["common_dirs"]) if joined else memos["common_dirs"]
+            self._detection_listings = dict(memos["listings"]) if joined else memos["listings"]
+            self._project_id = detected.project_id
+            self._project_id_source = detected.source
+            # The name the PRE-change resolver produced for this location.
+            # The read-scope union needs it to find rows filed under the old
+            # key; it is carried from the detection pass, never re-derived.
+            self._legacy_project_basename = detected.legacy_basename
+            self._override_ignored = detected.override_ignored
+            # THE ROOT THE WINNING RUNG RESOLVED. The plausibility gate and
+            # the override read use this, not the process's cwd repository:
+            # in a declared-repo session those differ, and gating on the cwd
+            # would exclude the declared repo's own legacy bucket.
+            self._project_identity_root = detected.identity_root
+            self._project_common_dir = detected.identity_common_dir
+            self._project_home_landing = detected.home_landing
+            # THE GIT RUNG RESOLVED FROM THE PROCESS'S OWN LOCATION, so its
+            # identity root IS the working directory's repository root: the
+            # divergence check reuses it instead of asking git again.
+            self._git_rung_root = (
+                detected.identity_root
+                if detected.source in ("origin remote", "git root")
+                else None
+            )
+            # STRUCTURED DECLINE DISCLOSURE, carried from the same pass. None
+            # on every resolution that produced an id; otherwise
+            # `{source, reason, override_path}` from `decline_record`, for
+            # whichever rung declined and why.
+            self._decline_reason = detected.decline_reason
+            self._decline_detail = detected.decline_detail
+            # STRUCTURED SUPPRESSION DISCLOSURE. A submodule admin dir yields
+            # no legacy candidate; carry WHY and WHICH name, once, so every
+            # later read can report it without another git call.
+            self._legacy_suppressed, self._legacy_suppressed_name = suppression
+            self._project_id_shape = (
+                "canonical"
+                if self._project_id is not None and is_canonical(self._project_id)
+                else "basename"
+                if self._project_id is not None
+                else None
             )
             # THE DETECTED ID IS ADOPTED AS FOUND, NOT VALIDATED HERE — the
             # same rule as the detected session id below, for the same
@@ -397,12 +3316,22 @@ class PACTMemory:
             self._session_id = self._detect_session_id()
         self._db_path = db_path
 
-        # Cache for the cwd's main repo root, resolved lazily by
-        # _project_scope_warning. One git subprocess per instance rather than
-        # per save: the working directory does not move under a live instance,
-        # and the CLI builds a fresh instance per invocation anyway. `False`
-        # means "not yet resolved" — None is a real answer (not in a repo).
-        self._cwd_repo_root: Any = False
+        # Cache for the cwd's main repo root and its canonical identity, read
+        # by the location-divergence check on every save. `False` means "not
+        # yet resolved"; None is a real answer (not in a repo). BOTH ARE
+        # KEYED ON `_cwd_cache_dir`, the working directory they were derived
+        # for: a process that changes directory after construction gets them
+        # derived again (`_refresh_cwd_cache`), so a save from another
+        # repository still warns. While the directory is unchanged the seed
+        # and the cached answers stand, and no git call repeats.
+        self._cwd_cache_dir: Optional[Path] = cwd_or_none()
+        self._cwd_repo_root: Any = (
+            self._git_rung_root if self._git_rung_root is not None else False
+        )
+        self._cwd_repo_id: Any = False
+        # Set by `_read_project_scopes` when it decides whether a populated
+        # legacy bucket joins this read. Process state, not a store write.
+        self._legacy_scope_state: Optional[dict] = None
 
         # Session file tracking (populated by hooks)
         self._session_files: List[str] = []
@@ -412,6 +3341,10 @@ class PACTMemory:
         # this is how a caller reaches the embedding outcome without changing
         # that signature.
         self._last_embedding_status: Optional[str] = None
+        # File links the most recent update() left on their old project
+        # because their recorded path could not be re-tracked. See
+        # _cascade_rekey: a quarantined link is reported, never fatal.
+        self._last_cascade_skipped: int = 0
 
         # Outcome of the most recent save()'s CLAUDE.md sync, or None before
         # any save has run. Unlike the embedding status above, this is set on
@@ -456,7 +3389,7 @@ class PACTMemory:
         )
 
     @staticmethod
-    def _find_project_root(start: Path) -> Path:
+    def _find_project_root(start: Path, skipped_git: frozenset = frozenset()) -> Path:
         """
         Walk UP from `start` looking for a project marker; return the first
         marker-containing directory.
@@ -471,6 +3404,8 @@ class PACTMemory:
 
         Args:
             start: Path to begin the walk from (typically Path.cwd()).
+            skipped_git: resolved directories whose `.git` is not a marker
+                (the cwd-marker rung passes the ones git looked past).
 
         Returns:
             First ancestor (inclusive of `start`) containing a project marker,
@@ -481,7 +3416,7 @@ class PACTMemory:
         except (OSError, RuntimeError):
             return start
         for parent in [current] + list(current.parents):
-            if (parent / ".git").exists():
+            if parent not in skipped_git and (parent / ".git").exists():
                 return parent
             if (parent / ".claude").is_dir():
                 return parent
@@ -492,82 +3427,161 @@ class PACTMemory:
         return start  # fallback: use original
 
     @staticmethod
-    def _project_name_for_declared_dir(
-        declared_dir: str, source: str
-    ) -> "tuple[Optional[str], str]":
-        """Name the project a DECLARED directory belongs to, and its label.
+    def _legacy_project_name(
+        common_dir: Optional[Path], root: Optional[Path]
+    ) -> Optional[str]:
+        """The PRE-change resolver's output for this location.
+
+        It is `common_dir.resolve().parent.name`, which is what the old
+        resolver returned, NOT the new identity root's name. The two differ
+        exactly where this matters: a submodule's common dir is
+        `<super>/.git/modules/vendor/sub`, so the old bucket is `vendor` while
+        the new identity root is `sub`; an external `--separate-git-dir` puts
+        the common dir outside the working tree. Unioning on the NEW name
+        would look for a bucket that never existed and report no candidate at
+        all — silent loss of every pre-upgrade row.
+
+        A SUBMODULE ADMIN DIR YIELDS NO CANDIDATE AT ALL. The name there is
+        chosen by the superproject's tracked `.gitmodules` (`modules`,
+        `vendor`, `checks` — whatever path the superproject writes), so it is
+        a REPOSITORY-CHOSEN BUCKET NAME and admitting it to the union would
+        let a checkout read another project's memories. An ordinary
+        `--separate-git-dir` checkout is NOT suppressed: its common dir is an
+        arbitrary external path, not `<...>/.git/modules/<name>`, and it
+        keeps its pre-upgrade name. The suppression is disclosed by the read
+        scope when the bucket holds rows (`_suppressed_bucket_rows`).
+        """
+        if common_dir is not None:
+            # A submodule admin dir gives None, disclosed by the read scope
+            # only when the bucket holds rows (`_suppressed_bucket_rows`). One
+            # rule with the file-reading twin (`pre_change_name_of_common`).
+            return pre_change_name_of_common(common_dir)
+        if root is not None:
+            return Path(root).name
+        return None
+
+    @staticmethod
+    def _warn_override_ignored(identity: "RootIdentity") -> None:
+        """Report an unusable override once, at the rung that read it."""
+        ignored = identity.override_ignored
+        if not ignored:
+            return
+        if ignored.get("path") is None:
+            # THE PATH IS WITHHELD, NOT THE REPORT: the checkout's `.git` is
+            # a redirect, or points at an outside git directory that is no
+            # linked worktree's or submodule's admin dir.
+            logger.warning(
+                "ignoring an unusable project override (%s) in the git "
+                "directory this checkout's `.git` points at; resolution "
+                "continues without it. Pinning that directory is a user "
+                "decision: see the pact-memory skill.",
+                ignored.get("reason"),
+                extra=_IDENTITY_RECORD,
+            )
+            return
+        logger.warning(
+            "ignoring the project override at %r (%s); resolution continues "
+            "without it.",
+            ignored.get("path"),
+            ignored.get("reason"),
+            extra=_IDENTITY_RECORD,
+        )
+
+    @staticmethod
+    def _declared_dir_identity(declared_dir: str, source: str) -> "_DetectedIdentity":
+        """The identity a DECLARED directory belongs to, as one record.
 
         Shared by Strategy 1 (CLAUDE_PROJECT_DIR) and Strategy 1.5 (the
-        session record): both carry one directory naming the session's scope,
-        and both must derive the project name from it identically.
+        session record). The identity root is the repository root of the
+        declared directory — a worktree main root, a recorded checkout, or the
+        declared path itself — and it is carried so the plausibility gate and
+        the override read use the SAME root the identity came from.
 
-        When the directory points below a repo's root (a worktree OR an
-        in-repo subdirectory), its basename is not the project name and would
-        fragment the project_id across sessions. Prefer the MAIN repo's
-        basename so every session of a project shares one key, aligning these
-        branches with the git-root and cwd-marker branches (Strategies 2/3),
-        which already resolve to the repo root. The rewrite fires when git
-        resolves a main repo whose root differs from the declared path; only
-        a repo-root declared path or a non-git path (where the main anchor
-        equals, or cannot be resolved from, the declared path) keeps the
-        declared basename — RESOLVED, so a symlinked project dir names its
-        target, which is the path the git branch above and the backlog writer
-        already record. A path that will not resolve keeps its unresolved
-        basename.
+        The legacy basename is `common_dir.resolve().parent.name` whenever a
+        common dir exists, because that is what the PRE-change resolver
+        produced; see `_legacy_project_name`.
 
-        WHEN THE DECLARED PATH IS GONE, none of the live derivations above can
-        answer: git cannot resolve a directory that no longer exists. The
-        session's own worktree identity record can, because session_init wrote
-        it while the relationship was still provable, and it names the main
-        checkout the declaration belonged to. That record is trusted only
-        through `recorded_main_root`, which requires it to name THIS
-        declaration exactly and re-verifies the recorded checkout (see
-        `record_resolution`); a record that proves nothing is not followed.
-        When no verified record answers, the function DECLINES rather than
-        deriving a basename from a dead path: a worktree folder name would key
-        a second project, and the reads that followed would silently miss
-        every row saved while the worktree was live.
+        A declared directory that no longer exists declines. A declaration
+        whose repository has a remote that could not be read or represented also
+        declines: never a basename for a real but unrepresentable remote,
+        because a basename there is a silently different bucket. A decline
+        keeps the declaration's own label as `source`.
 
-        Args:
-            declared_dir: The directory value (env var or session record).
-            source: Label for the debug log naming where the value came from.
-
-        Returns:
-            ``(name, label)``. ``name`` is a non-empty string, or None on the
-            declined arm — never ``""``, because an empty name is not a
-            project. ``label`` is what a caller discloses as the resolution
-            source when this call wins: the declaring strategy on the live
-            arms, and ``worktree identity record`` when the record answered.
+        A declared directory inside a git dir stands for the checkout that git
+        dir belongs to (`_git_dir_start`).
         """
+        declared_common_dir = main_repo_common_dir(declared_dir)
+        # The toplevel is asked once and handed to the root lookup and to the
+        # home check, which both need it.
+        mapped_dir, declared_toplevel = _start_and_toplevel(declared_dir, declared_common_dir)
+        declared_dir = cast(str, mapped_dir)
         try:
             declared_root = Path(declared_dir).resolve()
         except (OSError, RuntimeError, ValueError):
             # ValueError: a NUL byte (or another embedded invalid value) in a
             # session record must read as "cannot resolve", not crash the
-            # resolver. Same tuple `main_repo_root` already catches.
+            # resolver.
             declared_root = None
-        # The local name is declared_main_root, NOT main_repo_root: rebinding
-        # the module-level helper's own name would make it local for the whole
-        # method and raise UnboundLocalError on the call itself.
-        declared_main_root = main_repo_root(declared_dir)
-        # Compare via normcase so a case-insensitive filesystem does not
-        # fire the rewrite for paths that differ only in case (a no-op on
-        # case-sensitive systems, where normcase is identity).
+        declared_main_root = main_repo_root(
+            declared_dir, declared_common_dir, toplevel=declared_toplevel
+        )
+        # WHAT THE PRE-CHANGE RESOLVER NAMED THIS DECLARATION, carried on every
+        # result below that the pre-change resolver would also have named.
+        pre_change = _pre_change_declared_name(
+            declared_dir, declared_root, declared_common_dir
+        )
+
+        def done(detected: "_DetectedIdentity") -> "_DetectedIdentity":
+            return detected._replace(pre_change_name=pre_change)
+
+        # Compare via normcase so a case-insensitive filesystem does not fire
+        # the rewrite for paths that differ only in case.
         if (
             declared_main_root is not None
             and declared_root is not None
-            and os.path.normcase(str(declared_main_root)) != os.path.normcase(str(declared_root))
+            and os.path.normcase(str(declared_main_root))
+            != os.path.normcase(str(declared_root))
         ):
-            logger.debug(
-                "project_id detected from %s worktree main repo: %s",
-                source,
-                declared_main_root.name,
+            return done(PACTMemory._identity_at_root(
+                declared_main_root,
+                declared_common_dir,
+                asked_root=declared_root or Path(declared_dir),
+                source=source,
+                label=source,
+                toplevel=declared_toplevel,
+            ))
+        # A FORGED WORKTREE-ADMIN POINTER DECLINES HERE. `main_repo_root`
+        # correctly refuses the redirect and returns None, but the fall-through
+        # below would then hand `detect_id_for_root` the DECLARED directory
+        # paired with the VICTIM's common dir, and the origin read binds the
+        # victim. The asked-root predicate cannot see this shape: the target's
+        # basename is the worktree's name, not `.git`, and it is not under
+        # `.git/modules/`. Measured: both the declared root and a declared
+        # subdirectory bound `github.com/victim/secret-lib`.
+        #
+        # A BARE repository also has `main_repo_root() is None`, but its git
+        # dir EQUALS its common dir, so `_worktree_redirect` answers False; the
+        # guard declines it `no_working_tree`, exactly as on every rung.
+        live_root = declared_main_root or declared_root or Path(declared_dir)
+        if declared_main_root is None and declared_root is not None:
+            # A `.git`-MARKED BUT UNANSWERABLE declared directory declines for
+            # the same reason as the git rung; a non-git declared path has no
+            # marker and keeps the designed basename. `toplevel=None`:
+            # `main_repo_root` found no root, so git gave none.
+            guarded = _root_guard(
+                declared_root, declared_common_dir, source, label=source,
+                root=live_root if declared_common_dir is None else None,
+                toplevel=None,
+                no_working_tree_detail=(
+                    f"declared via {source}: {declared_dir!r} is a bare repository, "
+                    "or git cannot describe its working tree"
+                ),
             )
-            return declared_main_root.name, source
+            if guarded is not None:
+                return done(guarded)
+
         # GONE-DECLARATION ARM. Reached only when the live rewrite could not
-        # fire AND the declared path does not resolve to an existing target —
-        # absent, unreadable, or a broken symlink. A path that exists never
-        # enters here, so live behaviour stays byte-identical.
+        # fire AND the declared path does not resolve to an existing target.
         if not _declared_path_exists(declared_dir):
             # Function-level: the shared package is importable only after
             # pact_session's sys.path bootstrap has run at module import.
@@ -575,11 +3589,8 @@ class PACTMemory:
 
             # AN INVALID DECLARATION MUST NOT CRASH THE RESOLVER. A corrupt
             # session record can carry a NUL byte, which `os.path.realpath`
-            # (reached inside `record_resolution`) rejects with ValueError.
-            # Catch it HERE, at the boundary this module owns, so the
-            # never-raises contract holds for the whole method rather than
-            # only for the `resolve()` call above. The outcome is the same as
-            # any other unverifiable record: no recorded root, then decline.
+            # rejects with ValueError. Catch it HERE, at the boundary this
+            # module owns.
             try:
                 recorded_root = recorded_main_root(
                     Path(declared_dir),
@@ -587,26 +3598,424 @@ class PACTMemory:
                 )
             except (OSError, RuntimeError, ValueError):
                 recorded_root = None
-            if recorded_root is not None:
-                logger.debug(
-                    "project_id resolved from the worktree identity record for "
-                    "%s via %s: %s",
-                    declared_dir,
+            if recorded_root is None:
+                return _decline(
                     source,
-                    recorded_root.name,
+                    "declaration_unresolved",
+                    label=source,
+                    detail=(
+                        f"declared via {source}: {declared_dir!r} does not exist "
+                        "and no verified worktree identity record names it; no "
+                        "name was derived from the path"
+                    ),
                 )
-                return recorded_root.name, "worktree identity record"
-            logger.warning(
-                "the directory declared via %s could not be resolved: %s "
-                "does not exist and no verified worktree identity record "
-                "names it. No name was derived from the path.",
-                source,
-                declared_dir,
+            recorded_label = "worktree identity record"
+            # The pre-change resolver named a recorded declaration by the
+            # recorded checkout itself.
+            pre_change = recorded_root.name
+            recorded_common_dir = main_repo_common_dir(str(recorded_root))
+            recorded_toplevel = (
+                _git_rev_parse(str(recorded_root), "--show-toplevel")
+                if recorded_common_dir is not None
+                else None
             )
-            return None, source
-        project_name = (declared_root or Path(declared_dir)).name
-        logger.debug("project_id detected from %s: %s", source, project_name)
-        return project_name, source
+            # The same guards as every other rung, on the recorded checkout.
+            guarded = _root_guard(
+                recorded_root, recorded_common_dir, recorded_label,
+                label=recorded_label, root=recorded_root, toplevel=recorded_toplevel,
+            )
+            if guarded is not None:
+                return done(guarded)
+            # The record's own label is disclosed; a decline's record names the
+            # rung that asked, as it always has. The identity read asks about
+            # the recorded checkout, the root the guard just judged: the
+            # declared directory is gone, so a `.git` predicate evaluated on
+            # it sees no marker and passes whatever the recorded root holds.
+            return done(PACTMemory._identity_at_root(
+                recorded_root,
+                recorded_common_dir,
+                asked_root=recorded_root,
+                source=source,
+                label=recorded_label,
+                toplevel=recorded_toplevel,
+            ))
+        return done(PACTMemory._identity_at_root(
+            live_root, declared_common_dir, asked_root=Path(declared_dir),
+            source=source, label=source, toplevel=declared_toplevel,
+        ))
+
+    @staticmethod
+    def _identity_at_root(
+        root: Path,
+        common_dir: Optional[Path],
+        *,
+        asked_root: Optional[Path],
+        source: str,
+        label: str,
+        decline_label: Optional[str] = None,
+        toplevel: Optional[str] = None,
+    ) -> "_DetectedIdentity":
+        """Detect the identity of one established root and wrap it as a record.
+
+        `label` is the disclosed source when an id is found (an override pin
+        discloses `override file` instead); `decline_label` is the disclosed
+        source when the root declines (defaults to `label`).
+
+        A CHECKOUT THAT IS THE USER'S HOME IS A HOME LANDING on every rung
+        that reaches it, declared or discovered, repository or not: it warns
+        and keeps the folder name, and is never canonicalised. A dotfiles home
+        would otherwise give every directory under it that repository's id.
+        The checkout tested is the one the session is in, not the identity
+        root, and it is a landing when EITHER of the two answers naming it is
+        HOME: the directory holding the nearest `.git` marker above
+        `asked_root`, and git's worktree toplevel for `asked_root`
+        (`toplevel`, the answer the rung already holds). They differ where
+        git skips a `.git` that is not a git directory (an empty or partial
+        directory, a dangling symlink): the marker names the folder holding
+        it, git the repository around it. So a home that is a linked worktree
+        of a repository stored elsewhere is a landing, a main checkout at home
+        is not one for a session in its worktree outside home, and a stray
+        `.git` under a home repository does not move the landing off it.
+        """
+        legacy_name = PACTMemory._legacy_project_name(common_dir, root)
+        landing = _home_checkout(root, asked_root, toplevel)
+        if landing is not None:
+            _warn_home_landing(landing)
+            return _DetectedIdentity(
+                project_id=landing.name,
+                source=label,
+                legacy_basename=legacy_name,
+                override_ignored=None,
+                identity_root=landing,
+                home_landing=True,
+            )
+        # One pass reads a root's identity (override and origin) once.
+        identity = project_identity.detection_answer(
+            ("identity", project_identity.question_dir(root), str(common_dir), str(asked_root)),
+            lambda: detect_id_for_root(root, common_dir, asked_root=asked_root),
+        )
+        PACTMemory._warn_override_ignored(identity)
+        if (
+            identity.project_id is not None
+            and identity.detail in (
+                project_identity.REMOTE_HELPER_DETAIL,
+                project_identity.UNUSABLE_ORIGIN_DETAIL,
+            )
+            and str(root) not in _REMOTE_HELPER_WARNED
+        ):
+            # ONCE PER ROOT, AND NEVER THE URL: a helper address can carry an
+            # account id or a token.
+            _REMOTE_HELPER_WARNED.add(str(root))
+            logger.warning(
+                "project_id for %r is its folder-name id %r: %s.",
+                str(root), identity.project_id, identity.detail,
+                extra=_IDENTITY_RECORD,
+            )
+        if identity.project_id is not None:
+            logger.debug(
+                "project_id detected from %s: %s", source, identity.project_id
+            )
+            return _DetectedIdentity(
+                project_id=identity.project_id,
+                source=_disclosed_source(identity, label),
+                legacy_basename=legacy_name,
+                override_ignored=identity.override_ignored,
+                identity_root=root,
+                identity_common_dir=common_dir,
+            )
+        return _decline_detected(
+            identity,
+            source,
+            label=decline_label or label,
+            root=root,
+            legacy=legacy_name,
+        )
+
+    @staticmethod
+    def _detect_project_identity_with_legacy() -> "_DetectedIdentity":
+        """Detect the project identity, its provenance, and the legacy name.
+
+        The precedence is `supplied` (handled by the constructor, never here)
+        -> CLAUDE_PROJECT_DIR -> session record -> git root -> a repository
+        the cwd marker finds -> user setting -> the cwd marker's folder name.
+        The repository override is NOT a rung of its own: it
+        follows the identity root, so each root rung reads its own
+        `<git-common-dir>/pact-project-id`. That is what stops a cwd pin from
+        retargeting a declared session, and what stops a declared repo's pin
+        from being silently ignored.
+
+        A declaration that is PRESENT but cannot be honoured DECLINES before
+        the user-scope setting is consulted: a stale declaration must not be
+        silently absorbed by a user setting. The setting answers only when no
+        declaration was present at all and no repository was found, so a
+        repository pin outranks it wherever one is read. No rung reads a pin
+        when the checkout the session is in is the HOME directory, a linked
+        worktree included (inside a repository, a stray `.git` that git looks
+        past does not make its folder a checkout): the git-root, declared and recorded rungs land
+        there on its folder name, and the cwd-marker rung, whose HOME landing
+        never asks git, binds the user setting there when one exists. A
+        session in a worktree outside HOME reads its repository's pin even
+        when the main checkout is HOME.
+        """
+        # A DECLARATION THAT WAS PRESENT BUT NAMED NO PROJECT. Local only: no
+        # instance, module or thread state.
+        declined_declaration = False
+        # The STRUCTURED reason from the highest-priority declaration that
+        # declined, so `project-id show` can name it when no later rung
+        # answers. First non-None wins: the env declaration outranks the
+        # session record.
+        declined_reason: Optional[dict] = None
+        # THE ROOT A DECLINED DECLARATION NAMED, carried so the folder-name
+        # fallback derives from the winning rung's location rather than the
+        # process cwd. First non-None wins for the same reason.
+        declined_root: Optional[Path] = None
+
+        # Strategy 1: Environment variable (original behavior)
+        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
+        if project_dir:
+            detected = PACTMemory._declared_dir_identity(project_dir, "CLAUDE_PROJECT_DIR")
+            if detected.project_id:
+                return detected
+            if _is_live_decline(detected):
+                # A LIVE declaration that declines ENDS resolution.
+                return detected._replace(source="unresolved")
+            declined_reason = declined_reason or detected.decline_reason
+            declined_root = declined_root or detected.identity_root
+            declined_declaration = True
+
+        # Strategy 1.5: session record (inert under pytest: the discovery
+        # refuses test processes).
+        record_dir = get_project_dir_from_session_record()
+        if record_dir:
+            detected = PACTMemory._declared_dir_identity(record_dir, "session record")
+            if detected.project_id:
+                return detected
+            if _is_live_decline(detected):
+                # A LIVE declaration that declines ENDS resolution.
+                return detected._replace(source="unresolved")
+            declined_reason = declined_reason or detected.decline_reason
+            declined_root = declined_root or detected.identity_root
+            declined_declaration = True
+
+        # Strategy 2: Git repository root (worktree-safe). A process inside
+        # a git dir (git gives a common dir but no top level) asks from the
+        # checkout that git dir belongs to; one with no such checkout (a bare
+        # repository, a separate-git-dir store) asks from where it is. A
+        # submodule's git dir gets its top level from git and is asked as is.
+        start_arg: Optional[str] = None
+        asked_start = cwd_or_none()
+        cwd_common_dir = main_repo_common_dir()
+        if cwd_common_dir is not None:
+            # The pre-change resolver named every repository it reached here,
+            # bare and redirected included, by its common dir's parent.
+            git_pre_change = common_dir_parent_name(cwd_common_dir) or None
+            start_arg, cwd_toplevel = _start_and_toplevel(None, cwd_common_dir)
+            if start_arg is not None:
+                asked_start = Path(start_arg)
+            repo_root = main_repo_root(common=cwd_common_dir, toplevel=cwd_toplevel, start=start_arg)
+            if repo_root is None:
+                # NO ROOT: a forged worktree pointer, or git gave no toplevel
+                # (a bare repository gives none). The guard tells them apart,
+                # so a redirect is reported as a redirect and only a root git
+                # gave no toplevel for as having no working tree. With a
+                # common dir and `toplevel=None` the guard always declines,
+                # so the result is never None here.
+                guarded = cast("_DetectedIdentity", _root_guard(
+                    asked_start, cwd_common_dir, "git root",
+                    toplevel=None,
+                    no_working_tree_detail=(
+                        "the process's repository is bare, or git cannot "
+                        "describe its working tree"
+                    ),
+                ))
+                return guarded._replace(pre_change_name=git_pre_change)
+            detected = PACTMemory._identity_at_root(
+                repo_root,
+                cwd_common_dir,
+                asked_root=asked_start,
+                source="git root",
+                label="git root",
+                decline_label="unresolved",
+                toplevel=cwd_toplevel,
+            )._replace(pre_change_name=git_pre_change)
+            if detected.project_id is not None:
+                # THE DISCLOSURE DECISION LIVES IN ONE PLACE: a canonical id
+                # discloses its remote, a pin discloses the override file,
+                # and anything else is the git root's folder name.
+                if detected.source == "git root" and is_canonical(detected.project_id):
+                    return detected._replace(source="origin remote")
+                return detected
+            # A REAL remote that cannot be represented. Falling through to a
+            # basename would file this project under a different bucket from
+            # the one its remote names, which is the defect this change
+            # exists to remove.
+            return detected
+        # A `.git`-MARKED DIRECTORY WHERE GIT CANNOT ANSWER DECLINES. Falling
+        # through to a folder name here files the project in a silently
+        # different bucket. git absent from PATH, a corrupted or partial
+        # `.git`, or a timeout all take this arm; a genuinely non-git umbrella
+        # has no marker and keeps its designed basename fallback.
+        broken_start = cwd_or_none()
+        broken_marker = _unanswerable_repository(broken_start)
+        if broken_marker is not None:
+            # With no declaration the pre-change resolver fell through to the
+            # cwd marker and named it; with one, it refused.
+            return _decline(
+                "git root",
+                "broken_git_marker",
+                pre_change_name=(
+                    PACTMemory._find_project_root(broken_start).name or None
+                    if not declined_declaration and broken_start is not None
+                    else None
+                ),
+                detail=(
+                    "the working directory is inside that work tree; "
+                    f"{_MARKER_CLAUSE}{str(broken_marker)!r}"
+                ),
+                broken_marker=broken_marker,
+            )
+        # git not installed, not a repo, or command timed out
+        logger.debug("Git detection failed, falling back to cwd")
+
+        # A PRESENT DECLARATION THAT COULD NOT BE HONOURED DECLINES HERE, and
+        # BEFORE the user setting: absorbing a stale declaration into a
+        # user-scope pin hides the failure instead of reporting it. Strategy 3
+        # is skipped for the same reason it always was — it names the PROCESS,
+        # not the session.
+        if declined_declaration:
+            logger.warning(
+                "project_id unresolved: the git root did not answer either, "
+                "so Strategy 3 is skipped and no project scope was derived.",
+                extra=_IDENTITY_RECORD,
+            )
+            return _DetectedIdentity(
+                project_id=None,
+                source="unresolved",
+                legacy_basename=None,
+                override_ignored=None,
+                identity_root=declined_root,
+                decline_reason=declined_reason,
+            )
+
+        # Strategy 3: Current working directory — walk UP to nearest project
+        # marker. A walk that lands on HOME WARNS and never canonicalises.
+        unresolved = _DetectedIdentity(
+            project_id=None, source="unresolved", legacy_basename=None,
+            override_ignored=None, identity_root=None,
+        )
+        try:
+            cwd_start = cwd_or_none()
+            cwd_root = None
+            cwd_common_dir = None
+            marker_toplevel = None
+            # A `.git` GIT LOOKED PAST IS NO MARKER: when git, asked at the
+            # walk's root, answers with a git dir other than that root's
+            # `.git` (`_git_skips_marker`),
+            # the walk runs again without that `.git`, so the root is where
+            # the same folder with no `.git` would land. The answers asked at
+            # a root are kept, so no root is asked twice.
+            skipped: set = set()
+            asked: dict = {}
+            while cwd_start is not None:
+                cwd_root = PACTMemory._find_project_root(cwd_start, frozenset(skipped))
+                cwd_common_dir = marker_git_dir = marker_toplevel = None
+                if not cwd_root.name or _is_home(cwd_root):
+                    break
+                key = Path(os.path.realpath(cwd_root))
+                if key not in asked:
+                    common = main_repo_common_dir(str(cwd_root))
+                    asked[key] = (common, *(
+                        _git_dir_and_toplevel(str(cwd_root)) if common is not None else (None, None)
+                    ))
+                cwd_common_dir, marker_git_dir, marker_toplevel = asked[key]
+                if key in skipped or not _git_skips_marker(cwd_root, cwd_common_dir, marker_git_dir):
+                    break
+                skipped.add(key)
+            if cwd_root is not None and cwd_root.name and not _is_home(cwd_root):
+                # A REPOSITORY THE WALK FINDS DECIDES BEFORE THE USER SETTING,
+                # exactly as on the git-root rung: it binds its pin or its
+                # origin, or declines, and the setting is never read. The same
+                # guards as the declared rungs: a marker without a git answer,
+                # the forged worktree-admin shape, and a repository with no
+                # working tree (`main_repo_root` is not called on this rung, so
+                # the guard asks git). This rung meets a `.git` marker when git
+                # cannot see the checkout from the cwd: a
+                # `GIT_CEILING_DIRECTORIES` entry above the cwd hid it from git
+                # and from `find_git_marker`, but `_find_project_root` does not
+                # stop at a ceiling, and `git -C <root>` examines the root
+                # itself.
+                if cwd_common_dir is not None and marker_git_dir is None:
+                    # git answered with a common dir but gave no git dir for
+                    # the marker (it failed, or printed back an option it
+                    # predates): a marker git could not answer for, not one
+                    # without a working tree.
+                    cwd_marker = find_git_marker(cwd_root)
+                    return _decline(
+                        "cwd",
+                        "broken_git_marker",
+                        root=cwd_root,
+                        pre_change_name=cwd_root.name,
+                        detail=(
+                            f"cwd: {str(cwd_root)!r} gave no git dir; {_MARKER_CLAUSE}{str(cwd_marker)!r}"
+                            if cwd_marker is not None
+                            else f"cwd: {str(cwd_root)!r} gave no git dir"
+                        ),
+                        broken_marker=cwd_marker,
+                    )
+                guarded = _root_guard(
+                    cwd_root, cwd_common_dir, "cwd", root=cwd_root, toplevel=marker_toplevel,
+                )
+                if guarded is not None:
+                    return guarded._replace(pre_change_name=cwd_root.name)
+            if cwd_common_dir is None:
+                # Strategy 3.5: the USER-SCOPE setting. Reached only when NO
+                # declaration was present, no repository answered from the cwd,
+                # and the cwd marker found no repository: a repository found on
+                # any route has decided by now, so a repo-scoped override and
+                # this setting never disagree within one resolution — that is
+                # why there is no disagreement warning to emit. The one
+                # repository it outranks is a checkout that is the HOME
+                # directory (a linked worktree included), on this route only:
+                # the walk's HOME landing never asks git (the git-root rung
+                # reaches such a home and lands there instead).
+                user_setting = read_user_setting(get_user_memory_dir() / "config.json")
+                if user_setting is not None:
+                    # THE PRE-CHANGE VALUE IS STILL COMPUTABLE, so it must be
+                    # carried. Dropping it would silently strand every row
+                    # filed under the folder name (the union has no legacy
+                    # candidate to widen to) and would make
+                    # `detect_project_basename()` return None, which makes the
+                    # backlog writer refuse to write at all.
+                    # `_find_project_root` falls back to the cwd itself, which
+                    # is exactly the value the pre-change resolver produced for
+                    # this location. A DELETED CWD leaves `cwd_root` None and
+                    # must not crash construction: the setting still answers.
+                    setting_name = cwd_root.name if cwd_root is not None else None
+                    return _DetectedIdentity(
+                        project_id=user_setting,
+                        source="user setting",
+                        legacy_basename=setting_name,
+                        override_ignored=None,
+                        identity_root=cwd_root,
+                        pre_change_name=setting_name,
+                    )
+                if cwd_root is None or not cwd_root.name:
+                    return unresolved
+            # A repository or a folder, HOME included: `_identity_at_root`
+            # lands a HOME checkout on its folder name and warns.
+            cwd_root = cast(Path, cwd_root)
+            return PACTMemory._identity_at_root(
+                cwd_root,
+                cwd_common_dir,
+                asked_root=cwd_root,
+                source="cwd",
+                label="cwd",
+                decline_label="unresolved",
+                toplevel=marker_toplevel,
+            )._replace(pre_change_name=cwd_root.name)
+        except OSError:
+            logger.debug("Failed to detect project_id from cwd")
+        return unresolved
 
     @staticmethod
     def _detect_project_id() -> Optional[str]:
@@ -619,142 +4028,43 @@ class PACTMemory:
         return PACTMemory._detect_project_id_with_source()[0]
 
     @staticmethod
-    def _detect_project_id_with_source() -> "tuple[Optional[str], str]":
-        """
-        Detect project ID with multiple fallback strategies, naming the winner.
+    def detect_project_basename() -> Optional[str]:
+        """The FOLDER-NAME id the PRE-change resolver produced here, or None.
 
-        Returns (project_id, source) where source is the strategy that decided
-        it. The source exists so a save can DISCLOSE how its project was
-        resolved: the resolution is otherwise invisible, and an invisible
-        resolution is what makes a mis-scope unrecoverable after the fact.
+        For callers that use the id as a FILE NAME. A canonical id contains
+        `/`, so using one as a path component silently nests the file and
+        orphans every existing `<basename>.json` — the backlog does exactly
+        that, so it asks for this shape explicitly.
+
+        It returns the pre-change value AND NOTHING ELSE: where the pre-change
+        resolver refused, this refuses too, so the backlog writer refuses in
+        exactly the states it always did. No walk of the cwd or of the
+        identity root stands in for a missing value.
+        """
+        return PACTMemory._detect_project_identity_with_legacy().pre_change_name
+
+    @staticmethod
+    def _detect_project_id_with_source() -> "tuple[Optional[str], str]":
+        """Detect the identity and name the rung that decided it.
 
         Detection order:
         1. CLAUDE_PROJECT_DIR environment variable (original behavior)
         1.5. Session record — the project_dir session_init persisted at
-           SessionStart, discovered via the CLAUDE_CODE_SESSION_ID glob in
-           pact_session. BELOW env (a present declaration wins) and ABOVE git:
+           SessionStart. BELOW env (a present declaration wins) and ABOVE git:
            in a multi-repo workspace the cwd's git root can be the WRONG
            scope, so the session's own recorded identity outranks it.
-        2. Git repository root via 'git rev-parse --git-common-dir' (worktree-safe)
-        3. Current working directory — walked UP to the nearest project marker
-           (.git, .claude/, or CLAUDE.md at either location). This handles the
-           case where the user runs the CLI from a subdirectory. A walk that
-           lands on the HOME directory WARNS: home scope means every project
-           shares one memory space, and silent home scope is a mis-scope
-           vector.
+        2. Git repository root (worktree-safe)
+        3. A repository the cwd marker finds, then the user-scope setting,
+           then the cwd marker's folder name.
 
-        A DECLARED DIRECTORY THAT NO LONGER EXISTS declines. Either declared
-        rung may answer from the session's worktree identity record (label
-        `worktree identity record`); when a rung was PRESENT and named no
-        project, `declined_declaration` is set. Strategy 2 still runs, because
-        a live git root is a real answer about this process. If it fails too,
-        Strategy 3 is SKIPPED and the result is `(None, "unresolved")` with a
-        warning: Strategy 3 describes the PROCESS, not the session, and is the
-        only rung that can return HOME or an unrelated directory. The ordinary
-        path with NO declaration keeps Strategy 3 and its HOME warning
-        unchanged.
-
-        Returns:
-            (project_id, source). `project_id` is a non-empty directory
-            basename, or None when nothing resolved. `source` names the
-            resolution that won; it is disclosed by a save so an
-            otherwise-invisible resolution is diagnosable.
+        A declaration that is present but cannot be honoured declines. `source`
+        is one of `supplied`, `override file`, `CLAUDE_PROJECT_DIR`,
+        `session record`, `worktree identity record`, `origin remote`,
+        `git root`, `user setting`, `cwd`, `unresolved`.
         """
-        # A DECLARATION THAT WAS PRESENT BUT NAMED NO PROJECT. Local only: no
-        # instance, module or thread state. This flag is what separates the
-        # decline arm from the ordinary no-declaration path, which keeps
-        # Strategy 3 and its HOME warning.
-        declined_declaration = False
+        detected = PACTMemory._detect_project_identity_with_legacy()
+        return detected.project_id, detected.source
 
-        # Strategy 1: Environment variable (original behavior)
-        project_dir = os.environ.get("CLAUDE_PROJECT_DIR")
-        if project_dir:
-            # Kept on ONE LINE deliberately: test_project_id.py's
-            # source-equivalence pin matches the literal substring
-            # `_project_name_for_declared_dir(project_dir,`. Wrapping this call
-            # breaks that marker without changing behaviour, which is a silent
-            # way to disarm a working pin.
-            name, label = PACTMemory._project_name_for_declared_dir(project_dir, "CLAUDE_PROJECT_DIR")
-            if name:
-                return name, label
-            declined_declaration = True
-
-        # Strategy 1.5: session record (inert under pytest — the discovery
-        # refuses test processes — so the replica in test_project_id.py needs
-        # no record leg to stay equivalent here).
-        record_dir = get_project_dir_from_session_record()
-        if record_dir:
-            name, label = PACTMemory._project_name_for_declared_dir(record_dir, "session record")
-            if name:
-                return name, label
-            declined_declaration = True
-
-        # Strategy 2: Git repository root (worktree-safe)
-        # main_repo_root() carries the --git-common-dir resolution and the
-        # relative-result guard for both this strategy and Strategy 1, so the
-        # two share one derivation of the path exactly as they already share
-        # one derivation of the name. Passing no `start` runs git in the cwd,
-        # which is this strategy's base.
-        # The project CLAUDE.md is NOT located this way: its resolver
-        # classifies the session's root through project_scope.memory_root_of,
-        # which verifies the main checkout rather than trusting the common
-        # dir's parent. This derivation names the project for its id only.
-        repo_root = main_repo_root()
-        if repo_root is not None:
-            project_name = repo_root.name
-            logger.debug("project_id detected from git root: %s", project_name)
-            return project_name, "git root"
-        # git not installed, not a repo, or command timed out
-        logger.debug("Git detection failed, falling back to cwd")
-
-        # THE DECLINE ARM (D10, and it subsumes D11's outcome). A declaration
-        # was made and could not be honoured, and the process's own git root
-        # did not answer either. Strategy 3 is SKIPPED rather than consulted:
-        # it names the PROCESS, not the session, and it is the only rung that
-        # can return the HOME directory or an unrelated checkout. Returning
-        # None here is what makes the miss loud downstream (a refused write,
-        # an empty read) instead of a basename-derived bucket nobody looks in.
-        if declined_declaration:
-            # The per-declaration warning (naming the path) is emitted by
-            # `_project_name_for_declared_dir`; repeating it here would report
-            # one event twice. This line adds what the helper cannot know: the
-            # git-root rung also failed and the cwd rung was skipped.
-            logger.warning(
-                "project_id unresolved: the git root did not answer either, "
-                "so Strategy 3 is skipped and no project scope was derived."
-            )
-            return None, "unresolved"
-
-        # Strategy 3: Current working directory — walk UP to nearest project marker.
-        # Fixes subdirectory invocation (e.g., running CLI from .claude/ or src/
-        # would previously return the subdirectory basename as the project_id).
-        try:
-            cwd_root = PACTMemory._find_project_root(Path.cwd())
-            cwd_name = cwd_root.name
-            if cwd_name:
-                # Home scope is the last resort, and it must not be silent: a
-                # walk that lands on the home directory (typically via the
-                # .claude marker there) scopes every save to the USER, and
-                # searches under a project then silently miss. Warn so the
-                # mis-scope is visible.
-                try:
-                    home = Path.home().resolve()
-                except (OSError, RuntimeError):
-                    home = None
-                if home is not None and os.path.normcase(str(cwd_root)) == os.path.normcase(str(home)):
-                    logger.warning(
-                        "project_id resolved to the HOME directory (%s); memories "
-                        "will be scoped to user scope %r, not a project. Run from "
-                        "the project directory or set CLAUDE_PROJECT_DIR.",
-                        cwd_root,
-                        cwd_name,
-                    )
-                logger.debug("project_id detected from cwd: %s", cwd_name)
-                return cwd_name, "cwd"
-        except OSError:
-            logger.debug("Failed to detect project_id from cwd")
-
-        return None, "unresolved"
 
     @staticmethod
     def _detect_session_id() -> Optional[str]:
@@ -801,6 +4111,792 @@ class PACTMemory:
         if self._detected_project_id_is_unusable():
             return None
         return self._project_id
+
+    def _schema_present(self) -> bool:
+        """Whether this READ may proceed against the store.
+
+        "Zero CREATE" is SCOPED TO AN EXISTING STORE (the accepted ruling).
+        An existing store without a schema (0 bytes, a truncated file) answers
+        the empty result and is never initialised by a read. An ABSENT store
+        is decided by ORIGIN: on the DERIVED route the first memory operation
+        bootstraps directory + file + schema — the pre-existing initialisation
+        path, a separately asserted exception the security change did not take
+        on — while a store the caller NAMED answers empty and is not created.
+        """
+        from .database import get_db_path
+
+        try:
+            # `get_db_path` performs the derived DIRECTORY creation as a path
+            # side effect; the store file/schema decision is separate.
+            store = get_db_path()
+        except (OSError, RuntimeError, ValueError):
+            store = self._db_path or resolve_db_path()
+        if not Path(store).exists():
+            return store_path_origin() in DERIVED_STORE_ORIGINS
+        return _store_schema_present(str(store))
+
+    def _ensure_ready_for_read(self) -> None:
+        """Run `_ensure_ready()` for a READ verb.
+
+        A store that exists is only read, so the initialization runs inside
+        the read scope: no schema DDL, no column migration and no embedding
+        migration. The one write it may make is the embedding catch-up adding
+        vector rows for memories not yet embedded, and only into a vector
+        table that already exists at the current dimension; otherwise the
+        catch-up is postponed to the first call outside the scope. An absent
+        store reaches a read verb only on
+        the derived route (see `_schema_present`), where the first memory
+        operation creates the store and its schema, so that call runs outside
+        the scope.
+        """
+        from .database import get_db_path
+
+        try:
+            store = get_db_path()
+        except (OSError, RuntimeError, ValueError):
+            store = self._db_path or resolve_db_path()
+        if Path(store).exists():
+            with read_only_scope():
+                # The catch-up embeds only the rows this read covers.
+                try:
+                    scope = self._read_project_scopes()
+                except Exception:
+                    scope = ()
+                with catchup_projects(scope):
+                    _ensure_ready()
+        else:
+            _ensure_ready()
+            # THE SCHEMA IS CREATED HERE, not left to `_ensure_ready()`: only
+            # its embedding catch-up opens a connection that initializes, and
+            # a catch-up skipped for this session (its marker spent) would
+            # leave the read a store with no tables.
+            with db_connection() as connection:
+                ensure_initialized(connection)
+
+    def _bucket_verdict(
+        self, connection: Any, store: str, bucket: str
+    ) -> BucketVerdict:
+        """`decide_bucket`'s verdict for `bucket`, from this repository's gate
+        roots, computed ONCE PER COMMAND.
+
+        The evidence is counted on `connection` (`bucket_evidence`), and the
+        session census runs only when no file row already shows another owner,
+        so it runs at most once per bucket per command. The verdict is cached
+        while a detection pass is open, keyed on the store, its change stamp
+        (`_store_stat_key`, as the scope cache is), the identity root and the
+        bucket, so a folder-name save and the reads around it share one
+        answer while the store is unchanged; every in-process write clears it
+        (`_invalidate_legacy_scope_cache`), and a write by another process
+        during the command moves the stamp and re-decides.
+        """
+        from .database import bucket_evidence
+
+        repo_root = self._project_identity_root
+        # KEYED ON THE STORE'S STAMP, as the scope cache is: another process's
+        # write during this command must re-decide the include/exclude
+        # answer. The cost: a save that opens the store read-write between its
+        # guard and its scope read can move the stamp with no row changed and
+        # count the bucket once more.
+        key = ("verdict", store, _store_stat_key(store), str(repo_root), bucket)
+        in_pass = project_identity.DETECTION_ANSWERS.get() is not None
+        cached = _LEGACY_SCOPE_CACHE.get(key) if in_pass else None
+        if cached is not None:
+            return cached
+        memo = getattr(self, "_read_gate_roots", None)
+        self._read_gate_roots = None
+        if memo is not None and memo[0] == str(repo_root):
+            roots, common = memo[1]
+        else:
+            roots, common = self._legacy_gate_roots(repo_root)
+        own = self._own_identity(common)
+        evidence = bucket_evidence(
+            connection, bucket, roots or None, root_common=common,
+            recorded_dirs=_recorded_project_dirs,
+            same_owner=(
+                functools.partial(checkout_is_same_owner, own_id=own[0], own_url=own[1])
+                if own else None
+            ),
+        )
+        sessions = (
+            None
+            if evidence["foreign_rows"]
+            else _legacy_session_census(connection, bucket, roots, common, own)
+        )
+        verdict = decide_bucket(evidence, sessions)
+        if in_pass:
+            _LEGACY_SCOPE_CACHE[key] = verdict
+        return verdict
+
+    def _declined_folder_bucket(self) -> Optional[str]:
+        """This checkout's folder-name bucket when its identity declined for a
+        cause a pin remedies and the bucket holds memories, else None. No read
+        sees that bucket while no id resolves, so it is disclosed once per
+        process with the pin that brings it back into judgment. Never raises:
+        a store that cannot be read answers None."""
+        legacy = self._legacy_project_basename
+        override = (self._decline_reason or {}).get("override_path")
+        if not legacy or override is None:
+            return None
+        store = str(self._db_path or resolve_db_path())
+        try:
+            count = read_project_bucket_census(store).get(legacy, 0)
+        except Exception:  # noqa: BLE001 — a disclosure never fails the read
+            return None
+        if not count:
+            return None
+        key = (store, legacy)
+        if key not in _DECLINED_BUCKET_WARNED and not _LEGACY_NOTICES_QUIET.get():
+            _DECLINED_BUCKET_WARNED.add(key)
+            logger.warning(
+                "this checkout's folder-name bucket %r holds %d memor%s, which no "
+                "read sees while no project id resolves. Writing the canonical id "
+                "that names this repository to %r gives this checkout an id. Its "
+                "reads then include that bucket when its file rows or the "
+                "sessions recorded here place it in this repository. Otherwise "
+                "they leave it out and say why: a bucket nothing places gets the "
+                "`project-id rekey` command that moves it, one shared with "
+                "another checkout gets the move of only the memories placed "
+                "here when it has any, and one whose rows are all another checkout's gets no "
+                "move.",
+                legacy,
+                count,
+                "y" if count == 1 else "ies",
+                str(override),
+            )
+        return legacy
+
+    def _earlier_canonical_buckets(self, scope: str, conn: Any = None) -> Dict[str, Optional[str]]:
+        """{bucket: rekey command} for each CANONICAL bucket other than
+        `scope` that has a file row in this checkout linked by a memory saved
+        after its clone (`bucket_evidence` with `dated_only`), and whose
+        every existing absolute file row lies in this checkout (none foreign
+        or outside). Such a bucket may be this repository's under an earlier
+        id. It is not read; one notice per process names it with the command
+        that moves it into `scope`. Every other bucket stays silent. Never raises: a store that
+        cannot be read answers {}."""
+        from .database import (
+            _linked_after_description,
+            bucket_evidence,
+            count_project_memories,
+        )
+
+        store = str(self._db_path or resolve_db_path())
+        root = self._project_identity_root
+        stat_key = _store_stat_key(store)
+        if root is None or stat_key is None:
+            return {}
+        key = ("earlier", store, stat_key, str(root), scope)
+        if key in _EARLIER_CANONICAL:
+            return _EARLIER_CANONICAL[key]
+        found: Dict[str, Optional[str]] = {}
+        counts: Dict[str, Tuple[int, int]] = {}
+        try:
+            with _legacy_probe_context(store, conn) as (connection, _reason):
+                if connection is not None:
+                    # ONLY A BUCKET WITH A FILE ROW UNDER THE IDENTITY ROOT CAN
+                    # BE PLACED, so the SQL keeps those alone and the gate roots
+                    # (a `git worktree list`) are asked for only when one is
+                    # canonical: a shared store whose other buckets live
+                    # elsewhere adds no git call and no evidence walk.
+                    prefixes = sorted({str(root), os.path.realpath(str(root))})
+                    clauses, params = [], [scope]
+                    for prefix in prefixes:
+                        under = prefix.rstrip(os.sep) + os.sep
+                        clauses.append("path = ? OR substr(path, 1, ?) = ?")
+                        params += [prefix, len(under), under]
+                    with_files = [
+                        row[0] for row in connection.execute(
+                            "SELECT DISTINCT project_id FROM files "
+                            "WHERE project_id IS NOT NULL AND project_id != ? "
+                            f"AND ({' OR '.join(clauses)})",
+                            params,
+                        ).fetchall()
+                        if is_canonical(row[0])
+                    ]
+                    # A bucket with an EXISTING file outside the identity root
+                    # is another live repository's (or spans one): it is ruled
+                    # out here, before any git call. shortcut: a row in a
+                    # linked worktree outside the root also rules it out, so
+                    # such an earlier id stays silent rather than misnamed.
+                    with_files = [
+                        bucket for bucket in with_files
+                        if not any(
+                            os.path.isabs(path) and os.path.lexists(path)
+                            for (path,) in connection.execute(
+                                "SELECT path FROM files WHERE project_id = ? "
+                                f"AND NOT ({' OR '.join(clauses)})",
+                                [bucket, *params[1:]],
+                            )
+                        )
+                    ]
+                    # NO ROW HERE LINKED AFTER THE CLONE: it can never be
+                    # named (`dated_only` below), so it is ruled out before
+                    # git too. Without a recorded common dir the date is
+                    # left to the evidence walk.
+                    recorded_common = getattr(self, "_project_common_dir", None)
+                    if recorded_common is not None:
+                        with_files = [
+                            bucket for bucket in with_files
+                            if any(
+                                _linked_after_description(
+                                    connection, file_id, recorded_common,
+                                    missing_counts=False, memory_bucket=bucket,
+                                )
+                                for (file_id,) in connection.execute(
+                                    "SELECT id FROM files WHERE project_id = ? "
+                                    f"AND ({' OR '.join(clauses)})",
+                                    [bucket, *params[1:]],
+                                )
+                            )
+                        ]
+                    roots, common, own = None, None, None
+                    if with_files:
+                        roots, common = self._legacy_gate_roots(root)
+                        # The legacy verdict in this same read reuses it.
+                        self._read_gate_roots = (str(root), (roots, common))
+                        own = self._own_identity(common)
+                    for bucket in sorted(with_files):
+                        in_submodules: List[Any] = []
+                        evidence = bucket_evidence(
+                            connection, bucket, roots or None, root_common=common,
+                            recorded_dirs=_recorded_project_dirs,
+                            same_owner=(
+                                functools.partial(
+                                    checkout_is_same_owner, own_id=own[0], own_url=own[1]
+                                )
+                                if own else None
+                            ),
+                            # ONLY A ROW LINKED AFTER THIS CLONE places an
+                            # earlier id: a file that merely exists here (a
+                            # README) is shared by unrelated repositories.
+                            dated_only=True,
+                            submodule_rows=in_submodules,
+                        )
+                        # A LIVE OTHER REPOSITORY that cross-links one file here
+                        # also has rows in its own checkout (outside): those
+                        # rule it out, so every existing row must lie here.
+                        if (
+                            evidence["contained_rows"]
+                            and not evidence["foreign_rows"]
+                            and not evidence["neutral_outside"]
+                        ):
+                            memories = count_project_memories(connection, bucket)
+                            if not memories:
+                                # Its rows are linked by another bucket's
+                                # memories: nothing of its own would move.
+                                continue
+                            # ROWS IN ONE OF THIS CHECKOUT'S SUBMODULES may be the
+                            # submodule's: they are left out of the count, and a
+                            # whole-bucket rekey would move them too, so no
+                            # command is offered for such a bucket.
+                            found[bucket] = (
+                                None if in_submodules
+                                else runnable_rekey_command(bucket, scope, db_path=store)
+                            )
+                            # Submodule rows are dropped here, not bound into the
+                            # SQL: a list past SQLite's variable limit would fail
+                            # the whole scan.
+                            submodule_ids = set(in_submodules)
+                            linked = len({
+                                memory_id for memory_id, file_id in connection.execute(
+                                    "SELECT mf.memory_id, f.id FROM memory_files mf "
+                                    "JOIN files f ON f.id = mf.file_id "
+                                    "JOIN memories m ON m.id = mf.memory_id "
+                                    "WHERE f.project_id = ? AND m.project_id = ? "
+                                    f"AND ({' OR '.join(clauses)})",
+                                    [bucket, bucket, *params[1:]],
+                                )
+                                if file_id not in submodule_ids
+                            })
+                            counts[bucket] = (memories, linked, len(in_submodules))
+        except (sqlite3.Error, OSError, StoreFaultError):
+            return {}
+        # A QUIET RUN (a rekey --apply) is not cached: its notice was
+        # suppressed, and a cached answer would keep a later read silent.
+        if _LEGACY_NOTICES_QUIET.get():
+            return found
+        # One entry per store, root and scope: a newer store stamp replaces it.
+        for stale in [k for k in _EARLIER_CANONICAL if k[1] == store and k[3:] == key[3:]]:
+            del _EARLIER_CANONICAL[stale]
+        _EARLIER_CANONICAL[key] = found
+        for bucket, command in found.items():
+            memories, linked, in_submodules = counts.get(bucket, (0, 0, 0))
+            _note_earlier_canonical(
+                store, bucket, scope, memories, linked, command, in_submodules
+            )
+        return found
+
+    def _own_identity(self, common: Any) -> Optional[Tuple[str, Optional[str]]]:
+        """(canonical id, origin url) for a canonical session, else None: what
+        a sibling clone must carry to be the same owner
+        (`checkout_is_same_owner`). The url is the first origin url of this
+        repository's own config (`origin_url_in_config`, read from the
+        common dir git reported), the url the id came from; a session whose
+        id comes from its pin has none and matches siblings by pin alone."""
+        own_id = self._project_id
+        if not own_id or not is_canonical(own_id) or common is None:
+            return None
+        if project_identity.read_override(Path(common)).value is not None:
+            return own_id, None
+        return own_id, origin_url_in_config(Path(common) / "config")
+
+    def _folder_name_gated(self) -> bool:
+        """Whether this folder-name id's LEGACY CANDIDATE (a pre-change name
+        that differs from it, as for a `--separate-git-dir` checkout) is
+        judged and may be moved into it. Not for the sources the user chose and
+        no repository controls: a supplied id, the user-scope `project_id`
+        setting, and a HOME landing. A folder-name id's own bucket is never
+        judged.
+        """
+        return (
+            self._project_id_source not in ("supplied", "user setting")
+            and not getattr(self, "_project_home_landing", False)
+        )
+
+    def _legacy_gate_roots(self, repo_root: Any) -> tuple:
+        """`(gate roots, gate common dir)` for the plausibility gate and the
+        session census: the identity root plus its two-way-linked worktrees,
+        deduplicated, and the common dir git reported for the identity root
+        (None when git failed). An empty list when `repo_root` is None.
+        Never raises."""
+        gate_roots = []
+        # The common dir GIT reported for the identity root. It anchors
+        # the worktree listing and the gate's submodule exemption, and
+        # its `description` dates the repository for session evidence;
+        # None (git failed) only narrows the gate, never fails the read.
+        gate_common = None
+        if repo_root is not None:
+            try:
+                # THE COMMON DIR THE IDENTITY WAS READ FROM, when a
+                # rung recorded one, so the listing and the exemption
+                # describe the repository the id came from. Otherwise
+                # the detection pass's answer for the same directory
+                # is taken ONCE, by the first read; a later read asks
+                # `main_repo_common_dir`, answered from an open pass
+                # when it already asked about that directory, and by
+                # git otherwise.
+                passed = getattr(self, "_detection_common_dirs", None) or {}
+                key = os.path.realpath(str(repo_root))
+                gate_common = (
+                    self._project_common_dir
+                    if getattr(self, "_project_common_dir", None) is not None
+                    else passed.pop(key) if key in passed
+                    else main_repo_common_dir(str(repo_root))
+                )
+            except Exception:
+                gate_common = None
+            # ONLY TWO-WAY-LINKED worktrees widen the gate: a listed
+            # entry is what the repository's own `.git` CLAIMS, and a
+            # delivered `.git` can claim another project's checkout.
+            # The detection pass's listing of the same common dir,
+            # spelled as git was given it, is taken ONCE, by the first
+            # read; a later read lists again, answered from an open
+            # pass's git results when it already listed that common
+            # dir, and by git otherwise.
+            try:
+                listings = getattr(self, "_detection_listings", None) or {}
+                gate_roots.extend(
+                    str(root)
+                    for root in project_identity.verified_worktree_roots(
+                        Path(repo_root),
+                        gate_common,
+                        listings.pop(str(gate_common), None)
+                        if gate_common is not None
+                        else None,
+                    )
+                )
+            except Exception:
+                # A listing failure must narrow the gate to the
+                # identity root alone, never fail the read.
+                gate_roots = [str(Path(repo_root).resolve())]
+        return list(dict.fromkeys(gate_roots)), gate_common
+
+    def _read_project_scopes(self, conn: Any = None) -> tuple:
+        """The project ids a READ may bind: the canonical id plus its legacy bucket.
+
+        Returns `()` when `_project_scope()` is None: an EMPTY scope, which
+        every store, graph and search seam treats as no rows. It is never
+        None, because None is the library's whole-store value and a read with
+        no identity must not reach a query as an unscoped filter. A
+        NON-canonical id (a supplied value, or a folder name) is a
+        one-element scope, never judged: a folder-name id reads its own bucket
+        as before this change, EXCEPT that a folder-name id whose
+        pre-change name differs (a `--separate-git-dir` checkout): its legacy
+        candidate is judged and disclosed exactly as a canonical id's is.
+
+        For a canonical id, the PRE-change basename joins the scope ONLY when
+        its bucket has rows and either the plausibility gate verifies it, or
+        the gate finds it unverified and a recorded session from this
+        repository wrote into it (`_legacy_session_census`). An excluded or
+        unproven bucket is not read.
+        The candidate is matched exact-case first and folded only as a
+        fallback, and only when the identity root's filesystem PROVABLY
+        folds case (`project_identity.filesystem_case_insensitive`): a
+        folded-first lookup passes on a case-insensitive filesystem and
+        misses on a case-sensitive one, and on a case-sensitive filesystem
+        the two spellings are two different projects. The value returned is
+        the STORED spelling, byte for byte — folding finds a candidate, it
+        never produces one.
+
+        READS NEVER WRITE. An absent store returns the canonical scope alone
+        rather than being created, and when `conn` is not supplied the probe
+        opens the store READ-ONLY, so a read never runs `init_schema`.
+
+        WHAT DEGRADES AND WHAT RAISES. A store with no schema yet, or one that
+        vanished between the presence check and the open, is DEGRADED, not
+        fatal: the scope narrows to the canonical id, the state is disclosed
+        in `_legacy_scope_state` (`degraded` is `no schema` or
+        `store_unreadable`), and the result is not cached. A store that is
+        PRESENT but cannot be opened, or is not a readable SQLite database,
+        RAISES `StoreFaultError` with the remedy named: reporting the
+        canonical scope alone for it would hide every legacy row it holds.
+
+        THE RESULT IS CACHED FOR THE OPEN DETECTION PASS ONLY
+        (`_LEGACY_SCOPE_CACHE`): one command reads one answer, and the next
+        command, or a read outside any pass, computes it afresh from the files
+        it depends on.
+
+        THE CACHE KEY STATS BOTH THE DATABASE AND ITS `-wal` SIBLING. The
+        store runs in WAL mode, and another process's commit can land only in
+        the `-wal` file, leaving the main file's `(mtime_ns, size)` unchanged
+        — a pass would then keep serving a stale legacy membership after a
+        rekey elsewhere during it, which is the silent-loss class this change
+        exists to remove. `-shm` is deliberately EXCLUDED: it is
+        shared-memory churn and would defeat the cache with spurious
+        recomputes. When the `-wal` is absent, a read-only open is immutable
+        and creates none, so the read itself cannot move the key (see
+        `_store_stat_key`). An in-process write clears the cache as well, so a save
+        that changes the bucket set is observed immediately.
+        """
+        # THE OUTERMOST CALL CLEARS the worktree list the earlier-id scan
+        # shares with the legacy check, so no later write-path verdict reuses
+        # this read's list.
+        if not getattr(self, "_in_scope_read", False):
+            self._in_scope_read = True
+            try:
+                return self._read_project_scopes(conn)
+            finally:
+                self._in_scope_read = False
+                self._read_gate_roots = None
+        # A READ ON ITS OWN CONNECTION IS REPEATED WITH LOCKING when the store
+        # moved under its immutable open (`_stable_read_only`); a caller's
+        # connection is read as it is.
+        if conn is None and not _STABLE_READ_ACTIVE.get():
+            return _stable_read_only(
+                str(self._db_path or resolve_db_path()),
+                lambda: self._read_project_scopes(),
+            )
+        self._legacy_scope_state = None
+        # The canonical legacy candidate's verdict, read by the defaulted rekey.
+        self._legacy_verdict = None
+        self._earlier_canonical = {}
+        self._read_gate_roots = None
+        self._declined_legacy = None
+        scope = self._project_scope()
+        if scope is None:
+            self._declined_legacy = self._declined_folder_bucket()
+            return ()
+        if is_canonical(scope):
+            # AN EARLIER CANONICAL ID OF THIS REPOSITORY (an origin renamed,
+            # transferred or respelled) is not read, but it is named once
+            # with its rekey command (`_earlier_canonical_buckets`).
+            self._earlier_canonical = self._earlier_canonical_buckets(scope, conn)
+        if not is_canonical(scope):
+            # A FOLDER-NAME ID'S OWN BUCKET IS NOT JUDGED: it is read and saved
+            # into as before this change, shared with any same-name folder.
+            legacy = self._legacy_project_basename
+            if not legacy or legacy == scope or not self._folder_name_gated():
+                return (scope,)
+            # A FOLDER-NAME ID WITH A DIFFERENT PRE-CHANGE NAME (a
+            # `--separate-git-dir` checkout: the old resolver named it after
+            # the external git dir's parent) has a legacy candidate like a
+            # canonical id does. It falls through to the same candidate
+            # match, verdict and disclosure, with this id as the target.
+        legacy = self._legacy_project_basename
+        store = str(self._db_path or resolve_db_path())
+        if not legacy or legacy == scope:
+            if self._legacy_suppressed is not None:
+                # STRUCTURED SUPPRESSION DISCLOSURE: the operator sees that a
+                # candidate existed, what it was, why it is not read and how
+                # many rows it holds. Nothing is read from it.
+                self._legacy_scope_state = _legacy_scope_record(
+                    suppressed={
+                        **self._legacy_suppressed,
+                        "memory_count": _suppressed_bucket_rows(
+                            store, self._legacy_suppressed_name
+                        ),
+                    },
+                    suppressed_candidate=self._legacy_suppressed_name,
+                )
+            return (scope,)
+        stat_key = _store_stat_key(store)
+        if stat_key is None:
+            # Absent store: nothing to reconcile and nothing to create.
+            return (scope,)
+        # THE IDENTITY ROOT IS THE THIRD INPUT TO THE DECISION, so it belongs
+        # in the key: the plausibility verdict is computed against it, and two
+        # same-named checkouts of one repository share store, scope and legacy
+        # while gating against DIFFERENT roots. Omitting it serves one root's
+        # include/exclude verdict for the other.
+        cache_key = (store, stat_key, str(self._project_identity_root), scope, legacy)
+        in_pass = project_identity.DETECTION_ANSWERS.get() is not None
+        cached = _LEGACY_SCOPE_CACHE.get(cache_key) if in_pass else None
+        if cached is not None:
+            self._legacy_scope_state, self._legacy_verdict = cached[1], cached[2]
+            return cached[0]
+
+        from .database import (
+            count_project_memories,
+            project_bucket_counts,
+        )
+
+        # THE IDENTITY ROOT OF THE WINNING RUNG, not the process's cwd
+        # repository. In a declared-repo session those differ, and gating on
+        # the cwd would exclude the declared repo's OWN legacy bucket while
+        # advising a rekey the operator does not need.
+        repo_root = self._project_identity_root
+        # BIND THE RESOLVED STORE EXPLICITLY. A pathless `db_connection()` only
+        # inherits an enclosing scope; a direct call outside one (the CLI verb
+        # is scoped, but a library caller is not) would read the DEFAULT store
+        # while the stat above inspected the caller's. The two must be the
+        # same file.
+        with _legacy_probe_context(store, conn) as (connection, degraded_reason):
+            if connection is None:
+                # FAIL-SOFT, DISCLOSED. The store has no schema yet, or it
+                # vanished before the read-only open, so the legacy bucket
+                # cannot be judged. Narrow to the canonical scope and say so;
+                # nothing was written and the degraded result is NOT cached,
+                # so a store that appears is observed on the next read. A
+                # present store that cannot be opened never reaches here:
+                # the probe raises StoreFaultError.
+                logger.warning(
+                    "the legacy project bucket could not be checked: the store "
+                    "at %r has no schema yet or was not there to open (%s). "
+                    "Reads are limited to the canonical project id %r until "
+                    "the store holds memories.",
+                    store,
+                    degraded_reason,
+                    scope,
+                )
+                self._legacy_scope_state = _legacy_scope_record(
+                    degraded=(
+                        "no schema"
+                        if degraded_reason == "no schema"
+                        else "store_unreadable"
+                    ),
+                )
+                return (scope,)
+            buckets = project_bucket_counts(connection)
+            # The canonical count is what lets a SAVE disclose that it landed
+            # in a bucket with no prior rows. The pass's cache makes a second
+            # READ in one command cheap, but every save/update/delete clears
+            # `_LEGACY_SCOPE_CACHE`, so both COUNTs and the `git worktree list`
+            # below re-run after each write — that is the accepted cost, not a
+            # once-per-command constant.
+            canonical_count = count_project_memories(connection, scope)
+            # THE FOLD IS GATED ON THE FILESYSTEM, NOT ON `verified`: see
+            # `_match_legacy_candidate`. The predicate is called as a module
+            # attribute so a test can substitute it.
+            allow_fold = project_identity.filesystem_case_insensitive(repo_root)
+            candidate, ambiguous = _match_legacy_candidate(
+                legacy, buckets, allow_fold=allow_fold
+            )
+            # THE FOLD SUPPRESSION IS SILENT LOSS UNLESS DISCLOSED. On a
+            # case-sensitive filesystem a bucket that differs from the legacy
+            # basename only by case is never read — and it may be the
+            # operator's own pre-upgrade bucket, filed on a machine whose
+            # filesystem folded case. Report it as PRESENT BUT NOT INCLUDED
+            # with the literal rekey command, while never reading it. It is
+            # NOT the `excluded` state: the plausibility gate never judged it.
+            case_variants = (
+                sorted(
+                    bucket
+                    for bucket in buckets
+                    if bucket.casefold() == legacy.casefold()
+                )
+                if candidate is None and not allow_fold
+                else []
+            )
+            # MEASURED WHENEVER A CANDIDATE EXISTS, not only when the canonical
+            # bucket is empty: a few canonical rows hiding a large legacy
+            # bucket is exactly the case the file count is judged by. `None`
+            # still means "no candidate", never zero.
+            file_paths = (
+                count_project_file_paths(connection, candidate)
+                if candidate is not None
+                else None
+            )
+            if candidate is None:
+                result = (scope,)
+                state = _legacy_scope_record(
+                    ambiguous=ambiguous,
+                    canonical_count=canonical_count,
+                    case_variant=case_variants,
+                    case_variant_rekey=[
+                        runnable_rekey_command(bucket, scope, db_path=store)
+                        for bucket in case_variants
+                    ],
+                )
+                if case_variants:
+                    _warn_case_variant(store, legacy, case_variants, scope)
+            else:
+                # A SET OF ROOTS, NOT ONE, AND ROOTED AT THE IDENTITY ROOT.
+                # A linked worktree's identity root is the MAIN checkout (by
+                # design), while a row saved from the worktree records the
+                # WORKTREE's absolute path, so gating on the main checkout
+                # alone excludes the operator's own pre-upgrade bucket.
+                # `git worktree list` run AT `repo_root` returns that
+                # repository's main checkout plus each of its worktrees —
+                # exactly the set the gate needs.
+                #
+                # NOT `backlog.checkout_roots()`, DELIBERATELY: that helper
+                # resolves against the PROCESS, so in a declared-repo session
+                # it appends the cwd repository's checkouts to the declared
+                # one's gate, and it refuses with a write-oriented error that
+                # must never escape a read.
+                verdict = self._bucket_verdict(connection, store, candidate)
+                self._legacy_verdict = verdict
+                # A BUCKET HOLDING ANOTHER CHECKOUT'S ROWS (excluded, or shared)
+                # gets no whole-bucket move; its remedy is the move of only the
+                # memories placed here, when there is one.
+                foreign_held = verdict.state == "excluded" or (
+                    verdict.state == "unproven" and verdict.reason in SHARED_BUCKET_REASONS
+                )
+                placed_command = None
+                if foreign_held:
+                    from .database import placed_memory_split
+
+                    gate_roots, gate_common = self._legacy_gate_roots(repo_root)
+                    placed = placed_memory_split(
+                        connection, candidate, gate_roots, gate_common
+                    )["placed"]
+                    placed_command = (
+                        runnable_rekey_command(candidate, scope, db_path=store, only_placed=True)
+                        if placed
+                        else None
+                    )
+                included = verdict.read
+                state_name = verdict.state
+                memory_count = buckets.get(candidate, 0)
+                sessions = _census_part(verdict)
+                state = _legacy_scope_record(
+                    candidate=candidate,
+                    memory_count=memory_count,
+                    # DISTINCT PATHS, not rows: one path can carry a row in
+                    # each bucket of a union.
+                    file_paths=file_paths,
+                    # An EXCLUDED bucket has another owner, so it gets no
+                    # runnable command anywhere.
+                    rekey=(
+                        placed_command
+                        if foreign_held
+                        else runnable_rekey_command(candidate, scope, db_path=store)
+                    ),
+                    included=included,
+                    verified=state_name == "verified",
+                    included_unverified=state_name == "included_unverified",
+                    # LOAD-BEARING: the exclusion disclosure fires on this
+                    # field. Without it a populated legacy bucket can be
+                    # dropped with no notice at all.
+                    excluded=state_name == "excluded",
+                    unproven=state_name == "unproven",
+                    session_evidence=(
+                        bool(sessions["here"]) if sessions is not None else None
+                    ),
+                    sessions=sessions,
+                    unproven_reason=verdict.reason,
+                    ambiguous=ambiguous,
+                    canonical_count=canonical_count,
+                    detail=_evidence_part(verdict),
+                )
+                if state_name == "excluded":
+                    _warn_legacy_excluded(
+                        store, candidate, memory_count, file_paths or 0,
+                        _unproven_cause(verdict.reason, verdict.counts, candidate),
+                    )
+                elif state_name == "unproven":
+                    _warn_legacy_unproven(
+                        store, candidate, scope, memory_count, file_paths or 0,
+                        _unproven_cause(verdict.reason, verdict.counts, candidate),
+                        shared=verdict.reason in SHARED_BUCKET_REASONS,
+                        placed_command=placed_command,
+                    )
+                elif state_name == "included_unverified" and verdict.counts["unattributed"]:
+                    _warn_legacy_unattributed(store, candidate, scope, verdict.counts)
+                elif state_name == "verified" and verdict.counts["unattributed"]:
+                    _note_verified_unattributed(store, candidate, verdict.counts)
+                result = (scope, candidate) if included else (scope,)
+        self._legacy_scope_state = state
+        # PRUNE superseded stamps for this same store, identity root, scope and
+        # legacy name (every key part but the stat): the
+        # key carries the store's stat, so every write leaves the old entry
+        # behind and the dict would grow with each write in the pass.
+        if in_pass:
+            for stale in [
+                key for key in _LEGACY_SCOPE_CACHE
+                if key != cache_key and key[:1] == (store,) and key[2:] == cache_key[2:]
+            ]:
+                _LEGACY_SCOPE_CACHE.pop(stale, None)
+            _LEGACY_SCOPE_CACHE[cache_key] = (result, state, self._legacy_verdict)
+        return result
+
+    def _detected_identity_is_canonical(self) -> bool:
+        """Whether this instance DETECTED a canonical id (not a supplied one)."""
+        return (
+            self._project_id_source != "supplied"
+            and self._project_id is not None
+            and is_canonical(self._project_id)
+        )
+
+    def _identity_declined(self) -> bool:
+        """Whether this instance's DETECTION declined at a LIVE repository
+        (no id was supplied): the `_is_live_decline` rule. A gone declared
+        directory (`declaration_unresolved`) and the final unnamed
+        `unresolved` (a deleted or nameless cwd) name no repository."""
+        reason = (getattr(self, "_decline_reason", None) or {}).get("reason")
+        return (
+            self._project_id_source != "supplied"
+            and self._project_id is None
+            and reason not in (None, "declaration_unresolved")
+        )
+
+    def _guards_folder_name_buckets(self) -> bool:
+        """Whether this session may not write into a folder-name bucket: it
+        detected a canonical id, or its detection declined. A declined
+        checkout becomes a repository session once its origin is fixed, so a
+        row it files now would be that session's evidence later."""
+        return self._detected_identity_is_canonical() or self._identity_declined()
+
+    def _refuse_legacy_write(self, what: str) -> None:
+        """Refuse a canonical (or declined) session's write into a
+        non-canonical bucket.
+
+        AFTER THE UPGRADE ONLY A BASENAME-IDENTITY SESSION WRITES A BASENAME
+        BUCKET. A canonical session that filed (or relabelled) a row there
+        could create the session evidence that admits that bucket to its own
+        reads, so a delivered checkout sharing a folder name could read
+        another project's memories. A refusal of caller input
+        (`LegacyBucketWriteRefusedError`, exit 2).
+        """
+        if self._identity_declined():
+            raise LegacyBucketWriteRefusedError(
+                f"{what}: this session is in a repository whose identity "
+                f"declined ({self._decline_reason['reason']}), and a repository "
+                "checkout, resolved or not, does not write into a folder-name "
+                "bucket. Nothing was written. Fix the identity (`project-id "
+                "show` names the remedy), or save with a canonical "
+                "host/owner/repo project_id."
+            )
+        raise LegacyBucketWriteRefusedError(
+            f"{what}: this session's project id is {self._project_id!r} (a "
+            "repository identity), and a repository session does not write "
+            "into a folder-name bucket. Nothing was written. To move rows, "
+            "preview the move with `project-id rekey --from=FOLDER_NAME "
+            "--to=host/owner/repo` and add --apply, with the user's approval, "
+            "to perform it; "
+            "to write a folder-name bucket, save from a folder whose project "
+            "id is that name (`project-id show` reports it)."
+        )
 
     def _project_id_for_write(self) -> Optional[str]:
         """The project id a WRITE may bind; ValueError for an unusable one.
@@ -881,18 +4977,49 @@ class PACTMemory:
         return self._last_embedding_status
 
     @property
+    def last_cascade_skipped(self) -> int:
+        """File links the most recent update() quarantined.
+
+        A quarantined link is one whose recorded path could not be
+        re-tracked (a NUL byte, refused by `track_file`), so the link was
+        left on its old project instead of aborting the re-key. Zero is the
+        normal answer. Reported here because the library's update() returns
+        no structured result; the CLI's `update` envelope carries this count
+        as `last_cascade_skipped`. The count is the structured half, the
+        warning in `_cascade_rekey` is the human half.
+        """
+        return self._last_cascade_skipped
+
+    @property
     def last_project_scope(self) -> Optional[Dict[str, Any]]:
         """How the most recent save resolved its project, and from where.
 
-        Keys: `project_id` (what it was filed under), `source` (which of
-        supplied / CLAUDE_PROJECT_DIR / session record / worktree identity
-        record / git root / cwd decided it), `cwd_repo` (the main repo root of
-        the working directory, or None when not in one) and
-        `location_divergence` (True when those last two name different
-        projects). `unresolved` never appears here: it cannot reach a
-        completed filing, because save() refuses an unresolved instance
-        identity unless the payload itself names the project (which then
-        discloses as `supplied`).
+        Keys, all seven emitted on every completed filing:
+        - `project_id` — what the record was filed under;
+        - `source` — which of supplied / CLAUDE_PROJECT_DIR / session record /
+          worktree identity record / git root / cwd decided it;
+        - `id_shape` — `canonical`, `basename`, or `caller` when the payload
+          supplied the id;
+        - `cwd_repo` — the CANONICAL PROJECT ID of the process's working
+          directory repository, or None when none resolved (NOT the repo
+          root path: the root is `repo_root` on the `project-id show`
+          envelope);
+        - `override_ignored` — `{path, reason}` when the identity read found
+          `<git-common-dir>/pact-project-id` unusable, else None (a rung that
+          declines before that read, or a home-directory root, reads none);
+          `path`
+          is None when the checkout's `.git` is a redirect or points at an
+          outside git dir that is no linked worktree's or submodule's admin
+          dir;
+        - `legacy_scope` — the legacy candidate, its admission state and the
+          canonical bucket's prior count (the same state `project-id show`
+          reports);
+        - `location_divergence` — True when `cwd_repo` and `project_id` name
+          different projects.
+        `unresolved` never appears in `source`: it cannot reach a completed
+        filing, because save() refuses an unresolved instance identity unless
+        the payload itself names the project (which then discloses as
+        `supplied`).
 
         `location_divergence` IS NOT A MISFILE FLAG. It compares where the
         PROCESS was against what the record was filed under. It cannot see
@@ -998,6 +5125,70 @@ class PACTMemory:
         """Clear the list of tracked files."""
         self._session_files.clear()
 
+    def _refresh_cwd_cache(self) -> None:
+        """Drop the cached cwd root and identity if the directory moved.
+
+        One `getcwd` per call and no git call: the cached answers are reused
+        only while the working directory is the one they were derived for.
+        """
+        current = cwd_or_none()
+        if current != self._cwd_cache_dir:
+            self._cwd_cache_dir = current
+            self._cwd_repo_root = False
+            self._cwd_repo_id = False
+
+    def _current_repo_identity(self) -> Optional[str]:
+        """The identity of the repository this PROCESS is in, override included.
+
+        Cached on the instance beside `_cwd_repo_root`. The override is part
+        of the comparison ON PURPOSE: a repository pinned by
+        `<git-common-dir>/pact-project-id` binds that value, so comparing
+        against the remote-derived id would fire the divergence warning on
+        every in-repo save — exactly the noise the fix exists to stop.
+
+        `common_dir is None` means the cwd is not an established repository;
+        the folder name is then the honest answer, and a divergence warning
+        from a non-repository location is not a divergence at all.
+        """
+        self._refresh_cwd_cache()
+        if self._cwd_repo_id is not False:
+            return self._cwd_repo_id
+        if self._cwd_repo_root is False:
+            self._cwd_repo_root = main_repo_root()
+        root = self._cwd_repo_root
+        if root is None:
+            self._cwd_repo_id = None
+            return None
+        if self._project_identity_root is not None and root == self._project_identity_root:
+            # The resolver already derived this root's identity; asking git
+            # again would answer the same question twice.
+            self._cwd_repo_id = self._project_id
+            return self._cwd_repo_id
+        # ASK FROM THE SAME START `main_repo_root` WAS ASKED FROM (the process
+        # cwd), never from the root: the root is git's work-tree top level,
+        # and a `core.worktree` that places it inside ANOTHER repository makes
+        # git, asked there, answer with that repository's common dir. The
+        # cached root is dropped when the cwd moves (`_refresh_cwd_cache`), so
+        # both answers describe one start. A start that is not a repository
+        # answers None, which is the designed basename arm.
+        common_dir = main_repo_common_dir()
+        asked = cwd_or_none()
+        # A CHECKOUT THAT IS HOME LANDS, as on every resolver rung
+        # (`_identity_at_root`): the resolver binds HOME's folder name and never
+        # a dotfiles repository's id, so the comparison uses the same name.
+        toplevel = _git_dir_and_toplevel(str(asked))[1] if asked is not None else None
+        landing = _home_checkout(root, asked, toplevel)
+        if landing is not None:
+            self._cwd_repo_id = landing.name
+            return self._cwd_repo_id
+        identity = detect_id_for_root(root, common_dir, asked_root=asked)
+        # NO FOLDER PSEUDO-ID ON A DECLINE. `identity.project_id or root.name`
+        # invented an id the resolver had just refused, and the warning then
+        # advised a save that would itself be refused. None means "unknown
+        # here"; the divergence warning skips on it.
+        self._cwd_repo_id = identity.project_id
+        return self._cwd_repo_id
+
     def _location_divergence_warning(self, project_id: Optional[str]) -> Optional[str]:
         """Warning text when the filed project disagrees with the repo we sit in.
 
@@ -1029,15 +5220,30 @@ class PACTMemory:
         """
         if not project_id:
             return None
+        self._refresh_cwd_cache()
         if self._cwd_repo_root is False:
+            # The process's directory at filing time: inside a command's
+            # detection pass it is answered from the pass when the pass already
+            # asked about that same resolved directory, and asked afresh
+            # otherwise, because the pass's answers are keyed by path and one
+            # directory's answer cannot serve another.
             self._cwd_repo_root = main_repo_root()
         root = self._cwd_repo_root
-        if root is None or root.name == project_id:
+        if root is None:
+            return None
+        # COMPARE IDS, NOT FOLDER NAMES. The filed project is now a canonical
+        # id; comparing it with `root.name` would differ on every in-repo save
+        # and fire this warning until readers learned to ignore it. The
+        # canonical id of the working directory is the same derivation the
+        # resolver used — INCLUDING a repository override, which is why the
+        # helper resolves one rather than reading only the remote.
+        cwd_id = self._current_repo_identity()
+        if cwd_id is None or cwd_id == project_id:
             return None
         return (
             f"location divergence: this memory is being filed under "
             f"{project_id!r}, but the working directory is inside repository "
-            f"{root.name!r} ({str(root)!r}). If the record is about {root.name!r}, "
+            f"{cwd_id!r} ({str(root)!r}). If the record is about {cwd_id!r}, "
             f"pass project_id explicitly or save from that project. "
             f"THIS IS NOT A MISFILE DETECTOR: it compares the process LOCATION "
             f"against the filed project, so it cannot see what the record is "
@@ -1045,26 +5251,29 @@ class PACTMemory:
             f"correct directory, produces no warning and is still misfiled."
         )
 
-    def _unresolved_identity_message(self) -> str:
+    def _unresolved_identity_message(
+        self,
+        refused: str = (
+            "the write was refused rather than filed under an unknown "
+            "project. Nothing was written."
+        ),
+    ) -> str:
         """Explain a refusal caused by NO project identity resolving.
 
-        Re-derived at raise time from BOTH declarations, deliberately without
-        short-circuiting: when the env var is set the session record may still
-        name a second declaration that ALSO failed, and the message must be
-        able to name every declaration that was present. The resolver keeps no
-        state for this; nothing here is cached.
+        `refused` says what was refused; every refusal (a write, a memory-id
+        prefix) then prints the same cause, detail, remedy and pointer.
 
-        The wording reports causes it OBSERVED. It never claims the two
-        sources disagree — that is a different refusal with a different remedy
-        — and it never advises re-exporting the recorded value, because the
-        recorded directory may not exist.
+        THE CAUSE IS THE RESOLVER'S OWN DECISION, carried from this instance's
+        detection pass (`_decline_reason`, `_override_ignored`), never
+        re-derived from the process's location: a re-derivation reads the
+        cwd's repository, which in a declared session is not the one that
+        declined, and invents a cause the resolver did not reach.
+
+        The declarations are still listed from BOTH sources, without
+        short-circuiting, so a session record that also failed is named. The
+        wording reports what was observed; it never claims the two sources
+        disagree, which is a different refusal with a different remedy.
         """
-        # THE DISPATCHER IS THE AUTHORITY for which declarations exist and in
-        # what order: `_detect_project_id_with_source` reads the same two
-        # sources to decide precedence. This method re-reads them because the
-        # message must name every declaration that was PRESENT, not only the
-        # first one tried. A THIRD declared rung added to the dispatcher must
-        # be added here too, or the refusal message will silently omit it.
         env_dir = os.environ.get("CLAUDE_PROJECT_DIR") or ""
         record_dir = get_project_dir_from_session_record() or ""
         declarations = []
@@ -1072,26 +5281,55 @@ class PACTMemory:
             declarations.append(f"declared via CLAUDE_PROJECT_DIR: {env_dir!r}")
         if record_dir:
             declarations.append(f"declared via the session record: {record_dir!r}")
+        reason = self._decline_reason or {}
+        ignored = self._override_ignored or {}
+        parts = []
+        if reason.get("reason"):
+            cause = _decline_cause(
+                reason["reason"], getattr(self, "_decline_detail", None)
+            ) or reason["reason"]
+            parts.append(f"The {reason.get('source') or 'resolver'} rung declined: {cause}.")
         if declarations:
-            # OBSERVATION, never a comparison: the message names what was
-            # present and what could not be verified, and does not imply the
-            # declarations caused each other to fail or that they disagree.
-            cause = (
-                "Declarations present — "
-                + "; ".join(declarations)
-                + ". None could be verified against a repository. "
+            parts.append("Declarations present: " + "; ".join(declarations) + ".")
+        elif not reason.get("reason"):
+            parts.append(
+                "No project directory was declared (CLAUDE_PROJECT_DIR is unset "
+                "and the session record names none), and no repository answered."
             )
-        else:
-            cause = (
-                "No project directory was declared (CLAUDE_PROJECT_DIR is "
-                "unset and the session record names none). "
+        if ignored.get("path"):
+            parts.append(
+                f"An override file at {str(ignored['path'])!r} was present but "
+                f"unusable ({ignored.get('reason')})."
             )
+        elif ignored.get("reason"):
+            parts.append(
+                "An override file in the git directory this checkout's `.git` "
+                f"points at was present but unusable ({ignored['reason']})."
+            )
+        remedy = self._unresolved_identity_remedy()
         return (
-            "no project identity could be resolved, so the write was refused "
-            "rather than filed under an unknown project. Nothing was written. "
-            f"{cause}"
-            "Run from inside the project directory, or set CLAUDE_PROJECT_DIR "
-            "to an existing project root."
+            f"no project identity could be resolved, so {refused} "
+            + " ".join(parts)
+            + (f" {remedy}" if remedy else "")
+            + " Run the `project-id show` verb to inspect the detected identity."
+        )
+
+    def _unresolved_identity_remedy(self) -> Optional[str]:
+        """The remedy every unresolved-identity refusal prints.
+
+        A decline's remedy is its cause's, the same one the warning prints
+        (`_decline_remedy`). Only a refusal no rung declined (nothing was
+        declared or answered) has a remedy of its own here.
+        """
+        reason = self._decline_reason or {}
+        ignored = self._override_ignored or {}
+        if reason.get("reason"):
+            return _decline_remedy(reason, getattr(self, "_decline_detail", None))
+        if ignored.get("path"):
+            return _pin_remedy(ignored["path"])
+        return (
+            "Run from inside the project directory, or set "
+            "CLAUDE_PROJECT_DIR to an existing project root."
         )
 
     @_with_store_scope
@@ -1215,6 +5453,21 @@ class PACTMemory:
                 "surrogates (U+D800-U+DFFF); omit it to auto-detect the "
                 "project. Nothing was written."
             )
+        # A github.com id is spelled as a pin naming it is, so a payload
+        # spelling of a repository GitHub reads as the same one files where
+        # that repository's sessions read (`_folded_payload_project`).
+        folded_project = _folded_payload_project(payload_project)
+        if folded_project != payload_project:
+            memory = {**memory, "project_id": folded_project}
+            payload_project = folded_project
+        if (
+            payload_project is not None
+            and self._guards_folder_name_buckets()
+            and not is_canonical(payload_project)
+        ):
+            self._refuse_legacy_write(
+                f"save into project_id {payload_project!r} was refused"
+            )
 
         # THE SAME RULE FOR session_id, SAME VERB, SAME SHAPE: a supplied
         # value must be usable; null does NOT apply here — on save, a null
@@ -1324,18 +5577,65 @@ class PACTMemory:
         if divergence_warning:
             logger.warning("%s", divergence_warning)
 
+        # VALIDATE THE FILE LIST BEFORE ANY ROW IS WRITTEN. A NUL in a path
+        # makes the file layer refuse, and by then `create_memory` has already
+        # inserted the memory row — MEASURED: the row persisted while the
+        # error text said "nothing was written". Refusing HERE, before the
+        # connection is even opened, is what makes that promise true.
+        files_to_link = []
+        if files:
+            files_to_link.extend(files)
+        if include_tracked and self._session_files:
+            files_to_link.extend(self._session_files)
+        for candidate in files_to_link:
+            try:
+                raw_path = os.fspath(candidate)
+            except TypeError:
+                raise ValueError(
+                    "file path must be a string or a path-like object, got "
+                    f"{type(candidate).__name__}; nothing was written."
+                ) from None
+            if isinstance(raw_path, bytes):
+                # THE CONTRACT IS `List[str]`, SO BYTES ARE REFUSED OUTRIGHT.
+                # Decoding only to CHECK left the original bytes in the list,
+                # and `_normalize_path` raised on them AFTER the memory row
+                # was committed — measured: 1 memory row, 0 file rows. Refusing
+                # the type at the ingress is what makes the promise true for
+                # NUL-free bytes as well as NUL-bearing ones.
+                raise ValueError(
+                    "file paths must be str, not bytes; nothing was written."
+                )
+            if "\x00" in raw_path:
+                raise ValueError(
+                    f"file path {raw_path!r} must not contain a NUL character; "
+                    "nothing was written."
+                )
+
         with db_connection() as conn:
             ensure_initialized(conn)
 
+            # The save envelope's evidence, computed BEFORE the write: "no prior rows"
+            # must be the state the save FOUND, not the state it created.
+            # `_read_project_scopes` records the legacy candidate, whether it
+            # was admitted, and the canonical bucket's prior count.
+            self._read_project_scopes(conn)
+            # A PAYLOAD-SUPPLIED ID ELSEWHERE IS ITS OWN BUCKET: the instance's
+            # legacy reconciliation says nothing about it, so the record
+            # carries only that bucket's prior count.
+            if (
+                payload_supplied_project
+                and memory.get("project_id") != self._project_scope()
+            ):
+                from .database import count_project_memories
+
+                self._legacy_scope_state = _legacy_scope_record(
+                    canonical_count=count_project_memories(
+                        conn, memory.get("project_id")
+                    ),
+                )
+
             # Create the memory record
             memory_id = create_memory(conn, memory)
-
-            # Collect files to link
-            files_to_link = []
-            if files:
-                files_to_link.extend(files)
-            if include_tracked and self._session_files:
-                files_to_link.extend(self._session_files)
 
             # Link files to memory
             if files_to_link:
@@ -1358,6 +5658,12 @@ class PACTMemory:
             )
 
             logger.info(f"Saved memory {memory_id} with {len(files_to_link)} files")
+
+        # IN-PROCESS WRITE: drop the cached read scope. The stat guard may not
+        # see this commit while the connection is still open (WAL), and a
+        # stale legacy membership in the same process is the silent-loss
+        # class this change exists to remove.
+        _invalidate_legacy_scope_cache()
 
         # Verify the save persisted by reading back (before syncing to CLAUDE.md,
         # so we never reference a phantom memory in working memory)
@@ -1460,17 +5766,34 @@ class PACTMemory:
         # scoped to the SUCCESS path, because on the failure path they are
         # required to disagree.
         filed_under = memory.get("project_id")
-        if self._cwd_repo_root is False:
-            self._cwd_repo_root = main_repo_root()
+        # THE SAME ID COMPARISON THE WARNING USES, through the same helper, so
+        # the two fields always describe one derivation — override included.
+        self._current_repo_identity()
         cwd_repo = self._cwd_repo_root
         self._last_project_scope = {
             "project_id": filed_under,
             "source": (
                 "supplied" if payload_supplied_project else self._project_id_source
             ),
-            "cwd_repo": cwd_repo.name if cwd_repo is not None else None,
+            "id_shape": (
+                "caller"
+                if payload_supplied_project
+                else self._project_id_shape
+            ),
+            "cwd_repo": self._cwd_repo_id,
+            "override_ignored": self._override_ignored,
+            # The legacy candidate, its admission state and the
+            # canonical bucket's PRIOR count. Present on every save, so a
+            # caller never has to read an absent field as "nothing to say".
+            "legacy_scope": self._legacy_scope_state,
+            # SILENT ON AN UNKNOWN, exactly as the warning above is: when the
+            # cwd repository's identity did not resolve, there is no second id
+            # to disagree with, and `None != filed_under` is not a divergence.
             "location_divergence": bool(
-                filed_under and cwd_repo is not None and cwd_repo.name != filed_under
+                filed_under
+                and cwd_repo is not None
+                and self._cwd_repo_id is not None
+                and self._cwd_repo_id != filed_under
             ),
         }
 
@@ -1583,11 +5906,8 @@ class PACTMemory:
             return self._degraded_reason(self.DEGRADED_NO_MODEL)
 
         try:
-            # Enable extension loading (safe because SQLITE_EXTENSIONS_ENABLED is True)
-            conn.enable_load_extension(True)
             try:
-                import sqlite_vec
-                sqlite_vec.load(conn)
+                load_sqlite_vec(conn)
             except ImportError:
                 logger.debug("sqlite-vec not installed, skipping embedding storage")
                 # Same as the no-extension exit: the vector table is
@@ -1698,9 +6018,7 @@ class PACTMemory:
         be reached, so a stale vector may survive.
         """
         try:
-            conn.enable_load_extension(True)
-            import sqlite_vec
-            sqlite_vec.load(conn)
+            load_sqlite_vec(conn)
             conn.execute("DELETE FROM vec_memories WHERE memory_id = ?", (memory_id,))
             if commit:
                 conn.commit()
@@ -1744,16 +6062,33 @@ class PACTMemory:
         # that returns nothing must not initialize the store either.
         project_scope = self._project_scope()
         if project_scope is None:
+            # No read sees this checkout's folder-name bucket while its
+            # identity declines; every read says so (`_declined_folder_bucket`).
+            self._declined_legacy = self._declined_folder_bucket()
             return []
-        # Ensure memory system is ready (lazy initialization)
-        _ensure_ready()
-
-        results = graph_enhanced_search(
-            query,
-            current_file=current_file,
-            project_id=project_scope,
-            limit=limit
-        )
+        # A READ MUST NOT INITIALISE THE STORE. Checked before
+        # `_ensure_ready()` and before any read-write connection, so a 0-byte
+        # store answers empty instead of being grown by the WAL pragma or the
+        # schema DDL.
+        if not self._schema_present():
+            return []
+        # Ensure memory system is ready (lazy initialization).
+        self._ensure_ready_for_read()
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`. The scope is
+        # computed INSIDE the block too: it is a read, and its probe must not
+        # run the write-path initialiser either.
+        with read_only_scope():
+            # THE UNION, AFTER `_ensure_ready()`: the canonical id plus the
+            # caller's own legacy bucket when the gate admits it. The early
+            # `_project_scope()` return above stays first so a no-op read
+            # does no store work.
+            project_scopes = self._read_project_scopes()
+            results = graph_enhanced_search(
+                query,
+                current_file=current_file,
+                project_id=project_scopes,
+                limit=limit
+            )
 
         # Sync to CLAUDE.md Retrieved Context section
         if sync_to_claude and results:
@@ -1763,7 +6098,7 @@ class PACTMemory:
                 memory_ids = [r.id for r in results]
                 # graph_enhanced_search doesn't return scores, so pass None
                 #
-                # KEEP THE RESULT (F5). This call used to discard it, so the
+                # KEEP THE RESULT. This call used to discard it, so the
                 # reason it produced -- including ROOT_UNKNOWN, "git could not
                 # answer, so the project memory target is unknown" -- reached
                 # no reader.
@@ -1802,11 +6137,21 @@ class PACTMemory:
         # initialize the store.
         project_scope = self._project_scope()
         if project_scope is None:
+            # No read sees this checkout's folder-name bucket while its
+            # identity declines; every read says so (`_declined_folder_bucket`).
+            self._declined_legacy = self._declined_folder_bucket()
             return []
-        # Ensure memory system is ready (lazy initialization)
-        _ensure_ready()
+        # A READ MUST NOT INITIALISE THE STORE (see `search`).
+        if not self._schema_present():
+            return []
+        # Ensure memory system is ready (lazy initialization).
+        self._ensure_ready_for_read()
 
-        return search_by_file(file_path, project_scope, limit)
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
+        with read_only_scope():
+            return search_by_file(
+                file_path, self._read_project_scopes(), limit
+            )
 
     def _resolve_id_or_full(
         self, conn, memory_id: str
@@ -1828,7 +6173,11 @@ class PACTMemory:
         can REACH. A full 32-character id is returned before any query, so
         the by-id capability stays project-blind; a prefix is resolved with
         `_project_scope()` so a prefix matching only another project's row
-        resolves as no row at all.
+        resolves as no row at all. So `get`, `update` and `delete` by FULL id
+        reach a row outside the read scope, an unproven or excluded legacy
+        bucket's row included: a full id is an explicit target (the Memory
+        IDs Working Memory prints), and it is how such a row is still
+        reached until a rekey moves its bucket.
 
         AN UNRESOLVED OR UNUSABLE IDENTITY REFUSES THE PREFIX. `None` at the
         resolver
@@ -1863,6 +6212,12 @@ class PACTMemory:
         memory_id = memory_id.lower()
         if len(memory_id) >= MEMORY_ID_LENGTH:
             return memory_id
+        # A PREFIX CANNOT MATCH IN A STORE WITH NO SCHEMA. Checked on the
+        # caller's connection (sqlite_master answers without creating), so a
+        # prefix lookup on an empty store returns None instead of letting the
+        # resolver's CREATE-on-read initialize it.
+        if not _connection_has_memories_table(conn):
+            return None
         # `_project_scope()` returns None for an UNUSABLE detected id as well
         # as for an absent one, and the prefix refusal below then applies to
         # both. The full-id return above happens FIRST, which is what keeps
@@ -1871,14 +6226,14 @@ class PACTMemory:
         project_scope = self._project_scope()
         if project_scope is None:
             raise ProjectIdentityUnresolvedError(
-                "no project identity could be resolved, so a memory-id "
-                "prefix was refused rather than listing matches from every "
-                "project. A full 32-character id still resolves. Run from "
-                "inside the project directory, or set CLAUDE_PROJECT_DIR to "
-                "an existing project root."
+                self._unresolved_identity_message(
+                    "a memory-id prefix was refused rather than listing "
+                    "matches from every project. A full 32-character id "
+                    "still resolves."
+                )
             )
         return resolve_memory_id_prefix(
-            conn, memory_id, project_id=project_scope
+            conn, memory_id, project_id=self._read_project_scopes(conn)
         )
 
     @_with_store_scope
@@ -1905,10 +6260,15 @@ class PACTMemory:
                 detected value that cannot be bound). A full 32-character
                 id still resolves.
         """
-        # Ensure memory system is ready (lazy initialization)
-        _ensure_ready()
+        # A READ MUST NOT INITIALISE THE STORE. A by-id lookup on an empty
+        # store has no row to return, so it answers None without creating one.
+        if not self._schema_present():
+            return None
+        # Ensure memory system is ready (lazy initialization).
+        self._ensure_ready_for_read()
 
-        with db_connection() as conn:
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
+        with read_only_scope(), db_connection() as conn:
             ensure_initialized(conn)
 
             resolved = self._resolve_id_or_full(conn, memory_id)
@@ -1988,6 +6348,10 @@ class PACTMemory:
         # readable as this one's. update() shares the field with save(), so a
         # failed update could surface the last SAVE's code.
         self._last_embedding_status = None
+        # The cascade's skip count is per call for the same reason: a caller
+        # reading it after a later update must not see an earlier one's
+        # quarantine.
+        self._last_cascade_skipped = 0
 
         # Same fail-closed rule as save()/sync(), evaluated at CALL time — the
         # constructor-bound project_id may predate a mid-process disagreement.
@@ -2043,6 +6407,11 @@ class PACTMemory:
                     f"{_identity_field} unchanged. Nothing was written."
                 )
 
+        if "project_id" in updates:
+            folded_project = _folded_payload_project(updates["project_id"])
+            if folded_project != updates["project_id"]:
+                updates = {**updates, "project_id": folded_project}
+
         # NO ADOPTED-SESSION GUARD BELONGS HERE. `update_memory` writes only
         # the fields this payload carries, so update() never binds
         # `self._session_id`: the only session id it can write is a SUPPLIED
@@ -2062,7 +6431,72 @@ class PACTMemory:
                 return None
             memory_id = resolved
 
-            # M7 (#374 remediation): snapshot CONTENT_FIELDS before the
+            # NOT FOUND COMES BEFORE EVERY REFUSAL. A full id resolves without
+            # a query, so a missing row must be detected here; otherwise a
+            # refusal below would report a folder-name bucket the row does
+            # not have, and exit 2 where the caller should learn "no row".
+            stored = get_memory(conn, memory_id)
+            if stored is None:
+                return None
+
+            # A ROW OF A BUCKET THIS READ HIDES IS NOT MOVED ONE ROW AT A TIME.
+            # Its bucket is hidden because nothing shows it belongs to this
+            # checkout (or something shows it does not); `project-id rekey`
+            # judges and moves the whole bucket, with its refusals. A row in a
+            # bucket the read scope reads, or in any other bucket, keeps the
+            # per-row move.
+            if (
+                "project_id" in updates
+                and updates["project_id"] != stored.get("project_id")
+            ):
+                self._read_project_scopes(conn)
+                if stored.get("project_id") in hidden_legacy_buckets(
+                    self._legacy_scope_state
+                ):
+                    raise HiddenBucketMoveRefusedError(
+                        f"update to project_id {updates['project_id']!r} was "
+                        "refused: the row is in the bucket "
+                        f"{stored.get('project_id')!r}, which this checkout's "
+                        "reads hide (`project-id show` says why). Nothing was "
+                        "written. Preview moving that bucket with "
+                        + render_rekey_command(
+                            stored.get("project_id"), updates["project_id"],
+                            db_path=self._db_path,
+                        )
+                        + " and add --apply only with the user's approval."
+                    )
+
+            # THE WRITE-INGRESS RULE PROTECTS FOLDER-NAME BUCKETS ONLY: a
+            # canonical session may neither file a row into one (a project_id
+            # change) nor relabel a session in one (a session_id change),
+            # because either can create the session evidence that admits that
+            # bucket to its own reads. A row with NO project (NULL) is not a
+            # folder-name bucket, so its session_id may change, and so may one
+            # this same call moves to this repository's own id.
+            if self._guards_folder_name_buckets():
+                if "project_id" in updates and not is_canonical(
+                    updates["project_id"]
+                ):
+                    self._refuse_legacy_write(
+                        f"update to project_id {updates['project_id']!r} "
+                        "was refused"
+                    )
+                stored_project = stored.get("project_id")
+                if (
+                    "session_id" in updates
+                    and stored_project is not None
+                    and not is_canonical(stored_project)
+                    and (
+                        self._project_id is None
+                        or updates.get("project_id") != self._project_id
+                    )
+                ):
+                    self._refuse_legacy_write(
+                        "update of session_id on a row in the folder-name "
+                        f"bucket {stored_project!r} was refused"
+                    )
+
+            # Snapshot CONTENT_FIELDS before the
             # update so we can detect whether the merge actually changed
             # any embedding-relevant value. update_memory's additive merge
             # is idempotent for repeat calls — without this snapshot we'd
@@ -2123,6 +6557,8 @@ class PACTMemory:
                 # moving anything to a NULL target.
                 row_after_update = get_memory(conn, memory_id)
                 if row_after_update is None:
+                    if success:
+                        _invalidate_legacy_scope_cache()
                     return memory_id if success else None
                 target_project = row_after_update.get("project_id")
                 # The CHANGE half is kept as it was: a call that re-keyed the
@@ -2147,6 +6583,8 @@ class PACTMemory:
                         vector_current=vector_current and not vector_stale,
                     )
 
+            if success:
+                _invalidate_legacy_scope_cache()
             return memory_id if success else None
 
     @staticmethod
@@ -2185,9 +6623,7 @@ class PACTMemory:
         Only an observed row under a different project makes this true.
         """
         try:
-            conn.enable_load_extension(True)
-            import sqlite_vec
-            sqlite_vec.load(conn)
+            load_sqlite_vec(conn)
             row = conn.execute(
                 "SELECT project_id FROM vec_memories WHERE memory_id = ?",
                 (memory_id,),
@@ -2224,6 +6660,19 @@ class PACTMemory:
         counts rows rather than links. Deleting the old row instead could
         dangle `file_relations` references, so the residue is left, not
         hidden.
+
+        A LINK WHOSE PATH CANNOT BE RE-TRACKED IS QUARANTINED, NOT FATAL.
+        `track_file` refuses a path carrying a NUL byte, and that refusal
+        arrives AFTER update_memory has committed the row under its new
+        project. Letting it escape would half-apply the update — the row
+        moved, the link stranded under the old project — and re-issuing the
+        update would hit the same row and fail identically forever. The row is
+        SKIPPED (left where it is, never deleted), every other link still
+        moves, and one warning names the memory and the stranded file ids. The
+        number of links left behind is `last_cascade_skipped`, which the
+        `update` envelope carries; zero is the normal answer. No scoped read
+        serves the stranded link, because every read confirms the row's
+        stored project.
 
         Vector: vec0 partitions by project_id, so a vector left in the old
         partition is invisible to the new project's semantic search — and,
@@ -2267,8 +6716,23 @@ class PACTMemory:
             "WHERE mf.memory_id = ?",
             (memory_id,),
         ).fetchall()
+        quarantined: List[str] = []
         for row in linked:
-            new_file_id = track_file(conn, row["path"], new_project)
+            try:
+                new_file_id = track_file(conn, row["path"], new_project)
+            except ValueError:
+                # A REFUSED PATH MUST NOT ABORT THE CASCADE. `update_memory`
+                # has ALREADY committed the memory row under its new project
+                # before this runs, so letting the refusal escape leaves the
+                # update half applied — the row moved, the link stranded under
+                # the old project — and re-issuing the update hits the same
+                # row and fails identically forever. The link is left exactly
+                # where it is (quarantined, never deleted: this is somebody's
+                # recorded data), and reported once below. No scoped read
+                # serves it: every read confirms the row's stored project, so
+                # the link and the row disagreeing is already invisible.
+                quarantined.append(row["file_id"])
+                continue
             # `new_file_id == row["file_id"]` IS THE "already in the target"
             # TEST. track_file resolves (path, new_project), which is this
             # very row iff it already carries the target, so a separate
@@ -2297,6 +6761,22 @@ class PACTMemory:
         # undone with it — the row would stay addressable only under its OLD
         # key, the exact state the cascade exists to retire.
         conn.commit()
+        self._last_cascade_skipped = len(quarantined)
+        if quarantined:
+            # THE REPORT. Ids only: the path is the thing that was refused,
+            # so it can carry a control character and must not reach a log
+            # line that someone tail-parses. Re-issuing the update skips the
+            # same rows and reports them again, which is the honest answer —
+            # the row is unrepairable until its recorded path is corrected.
+            logger.warning(
+                "re-key of memory %r left %d file link(s) on their old "
+                "project: the recorded path cannot be re-tracked (file ids: "
+                "%s). The memory row moved; the links did not, and no scoped "
+                "read serves a link whose file row carries another project.",
+                memory_id,
+                len(quarantined),
+                ", ".join(repr(file_id) for file_id in quarantined),
+            )
         if not vector_current:
             memory_dict = get_memory(conn, memory_id)
             if memory_dict:
@@ -2371,7 +6851,10 @@ class PACTMemory:
                 if "no such table" not in str(exc):
                     raise
 
-            return memory_id if delete_memory(conn, memory_id) else None
+            deleted = delete_memory(conn, memory_id)
+            if deleted:
+                _invalidate_legacy_scope_cache()
+            return memory_id if deleted else None
 
     @_with_store_scope
     def list(
@@ -2397,9 +6880,12 @@ class PACTMemory:
         # no-op call must not initialize the store.
         project_scope = self._project_scope()
         if project_scope is None:
+            # No read sees this checkout's folder-name bucket while its
+            # identity declines; every read says so (`_declined_folder_bucket`).
+            self._declined_legacy = self._declined_folder_bucket()
             return []
         # THIS READ BINDS THE SESSION ID ONLY WHEN `session_only` IS ASKED
-        # FOR, and an unusable DETECTED id must not gate it (F10). No row can
+        # FOR, and an unusable DETECTED id must not gate it. No row can
         # carry such a value — every write validates it before binding — so
         # the empty answer is the correct one, and it is returned before
         # _ensure_ready() so a no-op read does no store work.
@@ -2414,17 +6900,21 @@ class PACTMemory:
             and _unusable_identifier(self._session_id)
         ):
             return []
-        # Ensure memory system is ready (lazy initialization)
-        _ensure_ready()
+        # A READ MUST NOT INITIALISE THE STORE (see `search`).
+        if not self._schema_present():
+            return []
+        # Ensure memory system is ready (lazy initialization).
+        self._ensure_ready_for_read()
 
-        with db_connection() as conn:
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
+        with read_only_scope(), db_connection() as conn:
             ensure_initialized(conn)
 
             session_id = self._session_id if session_only else None
 
             memories_data = list_memories(
                 conn,
-                project_id=project_scope,
+                project_id=self._read_project_scopes(conn),
                 session_id=session_id,
                 limit=limit
             )
@@ -2450,7 +6940,12 @@ class PACTMemory:
         first, when the file was written; [] otherwise. `last_sync_status`
         carries the outcome as for save(); `empty` means nothing was
         projected -- no project id resolved, or the project has no records --
-        and the file was not touched.
+        and the file was not touched. A resolved id with no records whose old
+        folder-name bucket this read hides (unproven, excluded, a case
+        variant, an ambiguous match or a submodule's suppressed name) gets a
+        section whose every entry's Memory ID names a row of a bucket this
+        read hides rewritten with none (`wrote`), so it never shows what reads no
+        longer return.
 
         Refuses (raises ProjectScopeDisagreementError, status `refused`) when
         CLAUDE_PROJECT_DIR and the session record disagree — UNLESS the caller
@@ -2492,8 +6987,62 @@ class PACTMemory:
                 raise ProjectScopeDisagreementError(
                     format_project_dir_disagreement(*disagreement)
                 )
+        # A READ MUST NOT INITIALISE THE STORE: an empty store has nothing to
+        # project, and `empty` is the honest outcome.
+        if not self._schema_present():
+            self._last_sync_status = SyncResult.EMPTY
+            return []
         records = self.list(limit=MAX_WORKING_MEMORIES)
         payload = [r.to_dict() for r in records]
+        hidden = hidden_legacy_buckets(self._legacy_scope_state)
+        if not payload and not hidden:
+            # NOTHING HIDDEN (a fresh store, or no old bucket): the section is
+            # left as it is, so a committed CLAUDE.md on a new clone keeps it.
+            self._last_sync_status = SyncResult.EMPTY
+            return []
+        if not payload:
+            # NO ROWS, AND THIS READ HIDES A BUCKET OF THIS CHECKOUT (`hidden`):
+            # a section whose every entry's Memory ID names a row of a bucket
+            # this read hides shows what reads no longer return, so it is
+            # rewritten with none. Any other section (no entry, an entry with
+            # no id or another bucket's id, as in a committed CLAUDE.md on a
+            # new clone), and a refused or failed rewrite, leave the file as
+            # it is: `empty`.
+            store = str(self._db_path or resolve_db_path())
+
+            def entries_from_hidden_bucket(existing: List[str]) -> bool:
+                ids = [entry_memory_id(entry) for entry in existing]
+                if not ids or None in ids:
+                    return False
+                with _legacy_probe_context(store, None) as (connection, _reason):
+                    if connection is None:
+                        return False
+                    found = {
+                        row[0] for row in connection.execute(
+                            "SELECT id, project_id FROM memories WHERE id IN "
+                            f"({', '.join('?' * len(ids))})",
+                            ids,
+                        )
+                        if row[1] in hidden
+                    }
+                return set(ids) <= found
+
+            try:
+                cleared = sync_to_claude_md(
+                    None, claude_md_root=claude_md_root, entries=[],
+                    clear_if=entries_from_hidden_bucket,
+                )
+            except AmbientSyncRefused:
+                cleared = None
+            except Exception as e:
+                logger.warning(f"Failed to clear CLAUDE.md Working Memory: {e}")
+                cleared = None
+            self._last_sync_status = (
+                SyncResult.WROTE
+                if cleared is not None and cleared.reason == SyncResult.WROTE
+                else SyncResult.EMPTY
+            )
+            return []
         try:
             result = project_memories_to_claude_md(
                 payload, claude_md_root=claude_md_root
@@ -2510,6 +7059,47 @@ class PACTMemory:
         if self._last_sync_status != SyncResult.WROTE:
             return []
         return [r.id for r in records]
+
+    def _empty_status_envelope(self) -> Dict[str, Any]:
+        """The zeroed status envelope for NO IDENTITY or NO SCHEMA yet.
+
+        Both states mean "there are no records to report", and neither may
+        initialise the store: the schema guard must run before
+        `_ensure_ready()`, which can CREATE the schema on first use.
+        """
+        return {
+            "project_id": self._project_id_for_envelope(),
+            "session_id": self._session_id_for_envelope(),
+            # PROVENANCE, ALWAYS. `id_shape` says whether the id is a
+            # canonical repository id or a legacy folder name, so a reader
+            # can tell at a glance which population the counts describe.
+            # `override_ignored` is structured, not a warning: an
+            # envelope-parsing caller never sees stderr.
+            "id_shape": self._project_id_shape,
+            "override_ignored": self._override_ignored,
+            # STRUCTURED DECLINE REASON, beside the override it names.
+            "decline_reason": self._decline_reason,
+            "project_candidates": [],
+            # ALWAYS PRESENT, null when no candidate exists. An
+            # envelope consumer must be able to tell that a bucket was
+            # dropped without reading a warning it may never see.
+            "legacy_scope": self._legacy_scope_state,
+            "memory_count": 0,
+            "tracked_files_count": len(self._session_files),
+            "graph_stats": {
+                "files": 0,
+                "file_paths": 0,
+                "memories": 0,
+                "memory_file_links": 0,
+                "file_relations": 0,
+            },
+            "capabilities": get_search_capabilities(),
+            "embedding_catchup": get_embedding_catchup_status(),
+            # A PROCESS fact, like session_id and capabilities, and part of
+            # the envelope every other status call returns. Dropping it on
+            # this arm alone would change the envelope's key set.
+            "db_path": str(resolve_db_path()),
+        }
 
     @_with_store_scope
     def get_status(self) -> Dict[str, Any]:
@@ -2529,8 +7119,13 @@ class PACTMemory:
         Returns:
             Dictionary with database stats and capabilities.
         """
-        # Ensure memory system is ready (lazy initialization)
-        _ensure_ready()
+        # A READ MUST NOT INITIALISE THE STORE. Checked BEFORE
+        # `_ensure_ready()`, which can CREATE the schema on first use; an
+        # uninitialized store has no counts to report.
+        if not self._schema_present():
+            return self._empty_status_envelope()
+        # Ensure memory system is ready (lazy initialization).
+        self._ensure_ready_for_read()
 
         # NO IDENTITY MEANS NO STATUS QUERY. Both the memory count and the graph
         # stats report WHOLE-STORE numbers when the id is None, so an unguarded
@@ -2542,13 +7137,16 @@ class PACTMemory:
         # first and may do store work itself, including a whole-store
         # embedding catch-up on the process's first memory surface.
         #
-        # WHAT ZERO HERE GUARANTEES: `memory_count`, `graph_stats["files"]` and
-        # `graph_stats["memories"]` — the three project-scoped counters.
-        # `graph_stats["memory_file_links"]` and `graph_stats["file_relations"]`
-        # are UNCONDITIONAL global counts even when a real project id is passed;
-        # they are not project-scoped, are pre-existing, and are not part of
-        # this fix. They read 0 here only because the guard performs no query —
-        # an implementation choice, not a guarantee.
+        # WHAT ZERO HERE GUARANTEES: every counter in `graph_stats`.
+        # All five are project-scoped — `files`, `file_paths`, `memories`,
+        # `memory_file_links` and `file_relations`. `graph.get_graph_stats`
+        # applies the same scope predicate to the last three as to `files`
+        # and `memories`, and derives `file_paths` from the scoped rows.
+        # The earlier wording here called `memory_file_links` and
+        # `file_relations` "UNCONDITIONAL global counts"; that was false, and
+        # a reader who trusted it would write a global-count arm (red) or
+        # revert the scoping. They read 0 here only because the guard performs
+        # no query — an implementation choice, not a guarantee.
         # `_project_scope()` folds an UNUSABLE detected id into the unresolved
         # answer: zeroed, not an exception, and never a binding of the raw
         # value. The ENVELOPE VALUES are computed once so BOTH arms report
@@ -2560,39 +7158,46 @@ class PACTMemory:
         project_id = self._project_id_for_envelope()
         session_id = self._session_id_for_envelope()
         if project_scope is None:
-            return {
-                "project_id": project_id,
-                "session_id": session_id,
-                "memory_count": 0,
-                "tracked_files_count": len(self._session_files),
-                "graph_stats": {
-                    "files": 0,
-                    "memories": 0,
-                    "memory_file_links": 0,
-                    "file_relations": 0,
-                },
-                "capabilities": get_search_capabilities(),
-                "embedding_catchup": get_embedding_catchup_status(),
-                # A PROCESS fact, like session_id and capabilities, and part of
-                # the envelope every other status call returns. Dropping it on
-                # this arm alone would change the envelope's key set.
-                "db_path": str(resolve_db_path()),
-            }
+            return self._empty_status_envelope()
 
-        from .database import get_memory_count
+        from .database import get_memory_count, project_bucket_counts
         from .graph import get_graph_stats
 
-        with db_connection() as conn:
+        # NO SCHEMA DDL ON A READ: see `config.read_only_scope`.
+        with read_only_scope(), db_connection() as conn:
             ensure_initialized(conn)
 
-            memory_count = get_memory_count(conn, project_scope)
-            graph_stats = get_graph_stats(conn, project_scope)
+            # THE UNION: counts report the canonical id TOGETHER with the
+            # caller's legacy bucket when the gate admits it. Reporting only
+            # the canonical count is how a repo with a few new rows hides two
+            # thousand old ones.
+            project_scopes = self._read_project_scopes(conn)
+            memory_count = get_memory_count(conn, project_scopes)
+            graph_stats = get_graph_stats(conn, project_scopes)
+            # Every populated bucket, with the literal command that
+            # moves it. This is the report a reader lands on after an empty
+            # search, so it must name the remedy rather than only the counts.
+            project_candidates = project_candidate_rows(
+                project_bucket_counts(conn),
+                store=str(resolve_db_path()),
+                current_id=self._project_scope(),
+                legacy_state=self._legacy_scope_state,
+                declined_legacy=getattr(self, "_declined_legacy", None),
+            )
 
         capabilities = get_search_capabilities()
 
         return {
             "project_id": project_id,
             "session_id": session_id,
+            "id_shape": self._project_id_shape,
+            "override_ignored": self._override_ignored,
+            # STRUCTURED DECLINE REASON: the same field the zeroed arm and
+            # `project-id show` report, so a status consumer never has to read
+            # a warning it may not receive.
+            "decline_reason": self._decline_reason,
+            "project_candidates": project_candidates,
+            "legacy_scope": self._legacy_scope_state,
             "memory_count": memory_count,
             "tracked_files_count": len(self._session_files),
             "graph_stats": graph_stats,

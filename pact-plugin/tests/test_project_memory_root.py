@@ -106,12 +106,13 @@ def test_a5b_worktree_of_a_bare_repo_returns_input(tmp_path):
 
 
 @pytest.mark.parametrize("broken", [False, True], ids=["healthy", "head_removed"])
-def test_a5c_a_bare_repository_as_the_anchor_is_its_own_known_root(tmp_path, broken):
-    """A bare repository directory has no `.git` entry (it IS a git dir) and
-    no other checkout to defer to, so it is a KNOWN root equal to itself,
-    healthy or broken. A git failure there must not change that answer: the
-    git-failure rule exists to stop a write moving to the wrong checkout, and
-    there is none."""
+def test_a5c_a_bare_repository_as_the_anchor_has_no_project_root(tmp_path, broken):
+    """A bare repository directory IS a git dir, with no checkout to defer
+    to, so a healthy one has no project root: the project memory never lives
+    inside a git dir. A broken one, which git cannot read, keeps the answer
+    git can give no reason to change, the directory itself: the git-failure
+    rule exists to stop a write moving to the wrong checkout, and there is
+    none."""
     src = tmp_path / "src"
     src.mkdir()
     _git("init", "-q", ".", cwd=src)
@@ -129,7 +130,8 @@ def test_a5c_a_bare_repository_as_the_anchor_is_its_own_known_root(tmp_path, bro
         )
         assert failed.returncode != 0, "FIXTURE INVALID: git still reads the repository"
 
-    assert project_scope.memory_root_of(bare) == (bare, None)
+    expected = (bare, None) if broken else (None, project_scope.ROOT_CAUSE_UNVERIFIED)
+    assert project_scope.memory_root_of(bare) == expected
 
 
 def test_a6_inherited_git_dir_is_stripped(repo, monkeypatch):
@@ -215,12 +217,12 @@ def test_a11_a_worktree_path_with_a_newline_redirects_to_main(repo, tmp_path):
     assert root_or_input(path) == repo.resolve()
 
 
-def test_a11b_when_z_is_unsupported_the_line_parser_still_resolves(
+def test_a11b_when_z_is_unsupported_the_admin_records_still_resolve(
     repo, monkeypatch
 ):
     """The fallback is decided by the `-z` call failing, not by a version
-    string: an older git keeps today's line parser, which still resolves an
-    ordinary path."""
+    string: an older git reads the admin `gitdir` records, which still
+    resolve an ordinary path."""
     worktree = _worktree(repo, "wt-fallback")
     real = project_scope.run_git
 
@@ -239,7 +241,7 @@ def test_a11c_the_fallback_still_guards_forged_gitfiles(repo, tmp_path, monkeypa
     A fallback that returned an empty set (or skipped the membership test)
     would silently reopen the forged-gitfile hole on every git older than
     2.36. Under the forced failure, BOTH forged spellings must still return
-    the started directory -- the line parser is doing the guarding.
+    the started directory -- the admin records are doing the guarding.
     """
     _worktree(repo, "wt-fallback-guard")
     admin = next((repo / ".git" / "worktrees").iterdir())
@@ -306,8 +308,8 @@ def test_a11d_a_newline_path_survives_a_forced_z_failure(repo, tmp_path, monkeyp
     """Item 2: when `-z` is unavailable, the admin `gitdir` enumeration still
     recovers a newline-containing path, so it redirects to MAIN.
 
-    The old line-parser fallback truncated the path and fell back to the
-    worktree. RED by reverting the admin enumeration to the line parser.
+    A line-based listing would truncate the path and fall back to the
+    worktree. RED when the admin enumeration answers nothing.
     """
     path = tmp_path / "wt\nnl-fallback"
     _git("worktree", "add", "-q", str(path), "-b", "nlfb", cwd=repo)
@@ -375,7 +377,7 @@ def test_a15_a_separate_git_dir_with_a_trailing_space_returns_input(tmp_path):
 
 
 # --- F1 (#1653): undecodable path bytes must still classify -----------------
-# Four decode sites, each armed below. `os.fsdecode` is how a Linux path with
+# Three decode sites, each armed below. `os.fsdecode` is how a Linux path with
 # arbitrary bytes is carried as str; the helper must decode git's output the
 # same way (surrogateescape), never via subprocess's locale decoding.
 
@@ -420,15 +422,6 @@ def test_f1_c_admin_gitdir_fallback_decodes(repo, monkeypatch):
 
     monkeypatch.setattr(project_scope, "run_git", failing_list)
     assert root_or_input(worktree) == repo.resolve()
-
-
-def test_f1_e_git_output_preserves_an_undecodable_path(repo):
-    """Site 4: `_git_output` -- the last-resort line parser and
-    `same_repository`'s launcher -- returns the path bytes round-tripped."""
-    worktree = _bad_worktree(repo)
-    out = project_scope._git_output(worktree, "rev-parse", "--show-toplevel")
-    assert out is not None
-    assert os.fsencode(out) == os.fsencode(str(worktree))
 
 
 def test_d2_a_relative_admin_gitdir_record_resolves(repo, monkeypatch):
@@ -506,7 +499,7 @@ def test_r9_the_z_listing_is_the_only_source_that_keeps_a_newline_path(
     existing fixture, so disabling `-z` reddened nothing. Here the fallback is
     unavailable and the path contains a newline: only the NUL-separated
     listing can produce a record that matches the resolved toplevel. Without
-    `-z` the line parser splits the path and the membership check fails.
+    `-z` there is no source left, so the listing has no answer.
     """
     worktrees = repo / ".worktrees"
     worktrees.mkdir(exist_ok=True)
@@ -552,7 +545,7 @@ def test_a_core_worktree_redirect_leaves_its_linked_worktree_unverified(tmp_path
 
 def test_a_worktree_listing_no_source_can_answer_is_unanswerable(repo, monkeypatch):
     """Every listing source fails -- `worktree list -z`, the admin `gitdir`
-    records and the line parser -- while rev-parse still answers. That is git
+    records -- while rev-parse still answers. That is git
     failing to ENUMERATE, not a verified answer, so the root is UNKNOWN.
 
     Revert check: answering the candidate as KNOWN when the listing is None
@@ -604,3 +597,57 @@ def test_a_record_whose_worktree_is_a_sibling_of_the_declaration_is_corrupt(repo
     assert project_scope.record_resolution(declared, identity) == (
         project_scope.RECORD_CORRUPT, None
     )
+
+
+def test_project_file_from_a_bare_repository_at_a_folders_git_asks_each_question_once(repo, tmp_path):
+    """A bare repository kept at `<folder>/.git` (`git clone --bare <url>
+    <folder>/.git`): from `<folder>`, `--show-toplevel` refuses while a `.git`
+    is there, so the root lookup asks `rev-parse --git-dir` of `<folder>` to
+    tell a bare repository from one git cannot open, and the git-dir reader
+    has asked that same question. `project-file` must run it once.
+
+    Real repositories and git, the CLI as its own process with its own HOME
+    and Claude config directory, and a `git` first on PATH that logs each
+    command with the directory it ran in."""
+    import shutil
+    import sys
+    from pathlib import Path
+
+    folder = tmp_path / "bare-at-dot-git"
+    folder.mkdir()
+    _git("clone", "-q", "--bare", str(repo), str(folder / ".git"), cwd=tmp_path)
+    log = tmp_path / "git.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "git").write_text(
+        "#!/bin/sh\n"
+        f"{{ printf '%s\\t' \"$PWD\" \"$@\"; printf '\\n'; }} >> '{log}'\n"
+        f"exec '{shutil.which('git')}' \"$@\"\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "git").chmod(0o755)
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("CLAUDE_", "PACT_", "GIT_"))}
+    env.update(
+        PATH=f"{bin_dir}{os.pathsep}{env['PATH']}", HOME=str(home),
+        CLAUDE_CONFIG_DIR=str(home / ".claude"), PACT_TEST_MEMORY_DIR=str(tmp_path / "memdir"),
+    )
+    cli = Path(__file__).resolve().parent.parent / "skills" / "pact-memory" / "scripts" / "cli.py"
+    documents = {p: p.read_bytes() for p in tmp_path.rglob("CLAUDE.md")}
+    done = subprocess.run(
+        [sys.executable, str(cli), "project-file"], env=env, cwd=str(folder),
+        capture_output=True, text=True, timeout=120,
+    )
+    assert done.returncode == 0, done.stderr
+    questions = []
+    for line in log.read_text(encoding="utf-8").splitlines():
+        where, *args = line.rstrip("\t").split("\t")
+        while len(args) >= 2 and args[0] == "-C":
+            where, args = os.path.join(where, args[1]), args[2:]
+        questions.append((os.path.realpath(where), tuple(args)))
+    # Control: the route reaches the git-dir question about the folder.
+    assert (os.path.realpath(folder), ("rev-parse", "--git-dir")) in questions, questions
+    assert sorted({q for q in questions if questions.count(q) > 1}) == [], questions
+    # Control: the command wrote no CLAUDE.md.
+    assert {p: p.read_bytes() for p in tmp_path.rglob("CLAUDE.md")} == documents
