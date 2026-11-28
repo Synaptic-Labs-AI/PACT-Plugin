@@ -885,3 +885,19 @@ def test_live_env_outside_the_allowlist_or_with_url_credentials_is_dropped(tmp_p
     blob = b"".join(p.read_bytes() for p in out.rglob("*") if p.is_file())
     for value in (b"PROXYPASS", b"SECRET-AUTH", b"URLPASS"):
         assert value not in blob
+
+
+
+@pytest.mark.parametrize(
+    ("value", "kept"),
+    [
+        ("https://user:pass@proxy:8080", False),  # an 's' in the userinfo
+        ("https://bob:hunter2@proxy", False),
+        ("http://token@host/path", False),
+        ("https://api.example.invalid/anthropic", True),
+        ("mailto user@example.invalid", True),  # no scheme separator before the @
+        ("deepseek-flash[1m]", True),
+    ],
+)
+def test_url_userinfo_values_are_not_kept(value: str, kept: bool) -> None:
+    assert prepare.keeps_live_env("ANTHROPIC_CUSTOM_URL", value) is kept

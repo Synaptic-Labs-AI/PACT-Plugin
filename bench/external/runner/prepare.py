@@ -84,7 +84,7 @@ CREDENTIAL_KEY = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|HEADERS|CREDENTIAL", re.
 NON_SECRET_KEY = re.compile(r"^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$")
 # Live settings env names copied at all (an allowlist); anything else is dropped and recorded.
 LIVE_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DISABLE_", "ENABLE_", "MAX_", "BASH_", "MCP_", "API_TIMEOUT_MS")
-URL_USERINFO = re.compile(r"://[^/s@]+@")
+URL_USERINFO = re.compile(r"://[^/\s@]+@")
 # The only live-environment keys a child inherits; everything else comes from
 # the scratch settings env or is set explicitly below.
 INHERITED_ENV_KEYS = ("PATH", "LANG", "TERM")
