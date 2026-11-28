@@ -130,6 +130,25 @@ def test_outside_link_behind_an_inside_directory_link_is_rejected(tmp_path: Path
         validate.validate_task(task, sys.executable)
 
 
+def test_outside_directory_link_is_not_walked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    host = tmp_path / "host"
+    _write(host / "deep" / "deeper" / "file.txt", "x\n")
+    task = make_task(tmp_path / "t")
+    (task / "fixture" / "host").symlink_to(host, target_is_directory=True)
+    walked: list[str] = []
+    real_walk = validate.os.walk
+
+    def counting_walk(top, **kwargs):
+        for entry in real_walk(top, **kwargs):
+            walked.append(os.path.realpath(entry[0]))
+            yield entry
+
+    monkeypatch.setattr(validate.os, "walk", counting_walk)
+    with pytest.raises(validate.TaskInvalid, match=r"fixture has symlinks resolving outside .*fixture/host"):
+        validate.validate_task(task, sys.executable)
+    assert not any(Path(root).is_relative_to(host) for root in walked)
+
+
 def test_directory_link_cycle_does_not_hang(tmp_path: Path) -> None:
     task = make_task(tmp_path / "t")
     (task / "fixture" / "loop").symlink_to(task / "fixture", target_is_directory=True)

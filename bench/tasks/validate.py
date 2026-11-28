@@ -251,11 +251,17 @@ def _outside_links(directory: Path, task_dir: Path) -> list[str]:
     found = []
     # followlinks matches copytree, which descends into directory links. A link cycle ends
     # at the OS symlink-depth limit (ELOOP), which os.walk skips; test_directory_link_cycle_does_not_hang.
+    # An outside directory link is recorded and pruned, so the walk never enters a host tree.
+    def outside(path: Path) -> bool:
+        if path.is_symlink() and not path.resolve().is_relative_to(task_dir):
+            found.append(str(path.relative_to(task_dir)))
+            return True
+        return False
+
     for root, dirs, files in os.walk(directory, followlinks=True):
-        for name in (*dirs, *files):
-            path = Path(root) / name
-            if path.is_symlink() and not path.resolve().is_relative_to(task_dir):
-                found.append(str(path.relative_to(task_dir)))
+        dirs[:] = [name for name in dirs if not outside(Path(root) / name)]
+        for name in files:
+            outside(Path(root) / name)
     return found
 
 
