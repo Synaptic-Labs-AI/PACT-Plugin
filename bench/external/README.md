@@ -10,19 +10,22 @@ not a second copy of that suite.
 
 | Field | Value |
 |---|---|
-| Map version | `1.0.1` |
-| Decision hash | `sha256:eb9831b083eee27893d7489775edf3745a1cf5ab8f3fe83e70307de3f7b5b6ac` — sha256 of the sorted, newline-joined rows `check id|decision|status` (no trailing newline), exactly as listed in the summary table |
+| Map version | `1.0.2` (1.0.2 renamed `evalbench/review` to `evalbench/review-findings`, matching its prompt id; no decision changed. The 4.8.38 baseline was produced under 1.0.1.) |
+| Decision hash | `sha256:644c44d2413e405da20d9083251a3de23c3ff5c08e424eefb7156caecdb44afb` — sha256 of the sorted, newline-joined rows `check id|decision|status` (no trailing newline), exactly as listed in the summary table |
 | Generated | 2026-11-25 |
 | Base commit | `1befafb314dd8124ad9225b87d0d5b064f0a6af6` (worktree HEAD at map time) |
 | Plugin under test | `pact-plugin` v4.8.38 |
 | Internal-suite fingerprint | `sha256:6f94098412764f598e6c312bf4e069c32564d00e54be32529e621cc8bed2d46c` — sha256 over `find pact-plugin/tests -type f | sort | xargs sha256sum` (775 files, 620 Python test files) |
-| External tool pins | `claude` 2.1.332; PluginEval checkout `/home/ubuntu/projects/agents/plugins/plugin-eval` at `c96b5f6552dba32e4492307493ee613581430715` |
+| External tool pins | `claude` 2.1.332; PluginEval (`wshobson/agents`, `plugins/plugin-eval`) at `c96b5f6552dba32e4492307493ee613581430715` |
 | Decision counts | **keep 6**, **narrow 4**, **drop 3** (13 checks mapped; 2 of 5 PluginEval skills and 3 whole checks dropped) |
-| Reviewer status | reviewed 2026-11-25 by coverage-reviewer (task-8): 13/13 agree on direction, no flips; fixes required by the review were applied. Review note: `bench/.runs/p2/review.md` (gitignored). Native checks remain blocked/deferred. |
+| Reviewer status | reviewed 2026-11-25 by an independent coverage reviewer: 13/13 agree on direction, no flips; fixes required by the review were applied. The review note is unpublished, so the agreement cannot be verified from this tree. Native checks remain blocked/deferred. |
 
 Re-baseline the map (bump the version and regenerate the fingerprint and decision
-hash) whenever `pact-plugin/` or `pact-plugin/tests/` changes on the branch under
-evaluation. A stale map silently certifies the wrong tree.
+hash) whenever the plugin tree under evaluation changes, that is the
+`pact-plugin/` or `pact-plugin/tests/` contents of the ref being evaluated. A
+committed baseline records its own plugin SHA, so later commits on the branch
+that carries the harness do not stale it. A stale map silently certifies the
+wrong tree.
 
 ## Where Track A sits
 
@@ -43,9 +46,8 @@ evaluation. A stale map silently certifies the wrong tree.
 
 ```
 bench/
-  bootstrap.sh                  # build bench/.venv (Python 3.12 + pytest 9.2.0)
+  bootstrap.sh                  # build bench/.venv (Python >= 3.12; hashed lock: pytest 9.2.0, pyyaml 6.0.3)
   pact-bench                    # CLI: prepare | native-eval | plugin-eval | tasks validate
-  plans/                        # suite definitions (smoke, full, release)
   external/
     README.md                   # this file
     native-evals/evals/         # native claude plugin eval cases (prompt/graders or case.yaml)
@@ -59,7 +61,7 @@ bench/
 
 ## Setup
 
-Prerequisites: Python 3.12, `uv`, `git`, `claude` CLI (>= 2.1.332 for
+Prerequisites: Python >= 3.12, `uv`, `git`, `claude` CLI (>= 2.1.332 for
 `claude plugin eval`), and a local PluginEval checkout for the skill-judge runs.
 
 ```bash
@@ -67,11 +69,13 @@ Prerequisites: Python 3.12, `uv`, `git`, `claude` CLI (>= 2.1.332 for
 ./bench/bootstrap.sh
 
 # 2. PluginEval (external tool; not vendored here, not cloned by the runner).
-git clone https://github.com/wshobson/agents.git /home/ubuntu/projects/agents   # if absent
-cd /home/ubuntu/projects/agents/plugins/plugin-eval && uv sync --frozen --extra llm
+git clone https://github.com/wshobson/agents.git <agents-checkout>   # if absent
+cd <agents-checkout>/plugins/plugin-eval
+git checkout c96b5f6552dba32e4492307493ee613581430715
+uv sync --frozen --extra llm
 
-# 3. Prepare an isolated run: copies current pact-plugin/ (excluding tests/ and
-#    caches) into scratch, builds a scratch Claude settings.json from the live
+# 3. Prepare an isolated run: copies current pact-plugin/ (without tests/ and
+#    caches at any depth, and without git-ignored files) into scratch, builds a scratch Claude settings.json from the live
 #    DeepSeek settings, runs a provider smoke check, writes manifest.json.
 ./bench/pact-bench prepare --out bench/.runs/external/probe --verify
 
@@ -87,33 +91,51 @@ jq '{exit_code, model_keys, is_error, result}' \
 
 The prepared copy is what external checks evaluate. Nothing under
 `pact-plugin/` is written: native eval cases are injected into the **scratch
-copy** (`<out>/pact-plugin/evals`), and native-eval results land under
-`bench/.runs/`.
+copy** (`<out>/pact-plugin/evals`) for the run and removed after it, and
+native-eval results land under `<out>/native-eval/`. All three plugin sources
+(the worktree, `--plugin-ref`, `--plugin-dir`) drop `tests/`, `__pycache__`,
+`.git` and `.pytest_cache` at every depth.
+
+`prepare` checks its inputs (settings and token files, a non-empty token,
+`--plugin-dir`, a clean source unless `--allow-dirty`, and the `claude` binary
+with `--verify`) before it creates `<out>`. `--force` replaces only an `<out>`
+that holds a previous pact-bench output, and never `/`, `$HOME`, or the repo
+root or one of its ancestors.
 
 ## Provider configuration (DeepSeek)
 
 `prepare.py` copies the `env` block from `~/.claude-deepseek/settings.json`
-into a scratch config and overrides the session plumbing; the live config is
-never read during a run.
+into a scratch config, minus every key whose name matches
+`TOKEN|KEY|SECRET|PASSWORD|HEADERS|CREDENTIAL` (case-insensitive) and the live
+session ids, and overrides the session plumbing; the live config is never read
+during a run.
 
 - **Endpoint:** `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`.
 - **Credential:** `ANTHROPIC_AUTH_TOKEN` read from `~/.claude-keys/deepseek`
-  (path overridable with `--token-file`); never written to the manifest or
-  committed. `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, and live session
-  IDs are unset for the child.
+  (path overridable with `--token-file`); never written to disk, and the
+  manifest records only the file path.
+- **Child environment (allowlist):** from the live environment the child gets
+  only `PATH`, `LANG`, `TERM` and `LC_*`; then the scratch settings env,
+  filtered by the same credential rule; then `CLAUDE_CONFIG_DIR`, `HOME`,
+  `TMPDIR`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. No other live
+  variable reaches it (no `CLAUDE*`, `GH_TOKEN`, `SSH_*`, `AWS_*` or
+  `ANTHROPIC_API_KEY`). `plugin-eval` uses the same child environment.
 - **Model:** `deepseek-flash[1m]` via `ANTHROPIC_MODEL` and the
   `ANTHROPIC_DEFAULT_*/CLAUDE_CODE_SUBAGENT_MODEL` aliases, all mapped to the
-  same DeepSeek alias. Override with `--model` on `prepare`/`native-eval`, or by
-  editing the env block in `<out>/config/settings.json` for a one-off.
-- **Scratch settings and env override:** `CLAUDE_CONFIG_DIR`, `HOME`, `TMPDIR`,
-  team/task/session dirs, and `permissions.additionalDirectories` point inside
-  the scratch `<out>/`. Live `enabledPlugins` and the PACT orchestrator
+  same DeepSeek alias. Override with `--model` on `prepare` or `native-eval`;
+  either sets all five keys. `prepare --verify` checks the requested model
+  (any `[..]` suffix stripped) against the reported usage keys.
+- **Scratch settings and env override:** `CLAUDE_CONFIG_DIR`, `HOME`, `TMPDIR`
+  and the team/task/session dirs point inside the scratch `<out>/`, and
+  `permissions.additionalDirectories` is exactly `<out>/teams`, `<out>/tasks`
+  and `<out>/pact-sessions`. Live `enabledPlugins` and the PACT orchestrator
   agent setting are **not** copied; `teammateMode` is preserved from the live
   settings (currently `in-process`).
 - **Do not "fix" the model warning:** the provider check prints
   `[claude-code:unrecognized_model]` on stderr yet exits 0 and reports a
   `deepseek-flash[1m]` usage key. Treat an exit code + `model_keys` mismatch as
-  the failure, not that line.
+  the failure, not that line. `<out>/provider-check.json` is written on every
+  outcome, including a missing binary and a timeout.
 - **Costs:** `total_cost_usd`/`costUSD` are Anthropic list-price estimates over
   a DeepSeek connection (`costBasis: unknown`). Report **tokens**, never USD.
 - **Unattended caveat:** in-process teammate mode can stall when the lead waits
@@ -136,27 +158,37 @@ The runner copies `bench/external/native-evals/evals/` into the scratch plugin a
 --ablation with-without --trust-plugin --no-publish --scaffold --runs 3
 --json report.json --report report.html --output-dir runs --model ...`.
 Case layout is the CLI's native format: `<eval dir>/**/case.yaml`, or
-`prompt.md` + `graders/*.md`. Results: `<out>/native-eval/result.json`,
-`report.json`, `report.html`, and `runs/`.
+`prompt.md` + `graders/*.md`. Results: `<out>/native-eval/result.json` (written
+on every exit once the manifest loads; a timeout records exit code 124),
+`report.json`, `report.html`, and `runs/`. The child's `HOME` and `TMPDIR` are
+`<temp-root>/pact-native-XXXXXXXX/{home,tmp}` (default `--temp-root` is
+`$HOME`); `TMPDIR` must be at most 51 characters, checked before anything is
+created. `--keep-temp` scaffolds are moved to `<out>/native-eval/kept-temp/`,
+any `evals/results/` the tool wrote to `<out>/native-eval/plugin-evals-results/`,
+and the rest of the temp root is deleted.
 
-The cases directory must be non-empty; the runner refuses an empty suite. At map
-time `bench/external/native-evals/evals/` is still being authored — the intended
-case inventory is in [Native eval cases](#native-eval-cases).
+The cases directory must be non-empty; the runner refuses an empty suite. The
+authored cases and the inventory they must meet are in
+[Native eval cases](#native-eval-cases).
 
 ### PluginEval (whole-plugin lint + per-skill judge)
 
 ```bash
 ./bench/pact-bench plugin-eval \
   --manifest bench/.runs/external/probe/manifest.json \
-  --plugin-eval-dir /home/ubuntu/projects/agents/plugins/plugin-eval \
+  --plugin-eval-dir <agents-checkout>/plugins/plugin-eval \
   --skills-file bench/external/plugin-eval-skills.txt
 ```
 
-Runs `uv sync --frozen --extra llm`, then `plugin-eval score <scratch plugin>
---depth quick` (whole plugin; static layer only) and `plugin-eval score
-<scratch plugin>/skills/<skill> --depth standard` for each skill in
-`plugin-eval-skills.txt` (static + experimental LLM judge). Results:
-`<out>/plugin-eval/result.json`. PluginEval's judge layers are experimental and
+Runs `uv sync --frozen --extra llm` (without the provider token), then
+`plugin-eval score <scratch plugin> --depth quick` (whole plugin; static layer
+only) and `plugin-eval score <scratch plugin>/skills/<skill> --depth standard`
+for each skill in the skills file (static + experimental LLM judge). The skills
+come only from `--skills-file` or, by default,
+`bench/external/plugin-eval-skills.txt`; a missing or empty file is an error.
+Results: `<out>/plugin-eval/result.json`, always written. A command that times
+out is recorded with exit code 124 and `timed_out: true` and the run continues;
+the runner exits 1 if any command failed, timed out or printed no JSON object. PluginEval's judge layers are experimental and
 not human-validated; model labels are Anthropic-oriented. Use the judge score as
 a diagnostic, not a gate.
 
@@ -169,7 +201,8 @@ each prompt headlessly in a prepared scratch environment, once with the PACT
 plugin present and once without (the with/without baseline arm), for 3 runs each,
 and grade blind to condition:
 
-1. Prepare one scratch run per arm (`--plugin-ref current` vs. a no-plugin
+1. Prepare one scratch run per arm (`prepare` with no `--plugin-ref`, which
+   copies the current worktree, vs. a no-plugin
    scratch config that does not register PACT).
 2. For each prompt: `prompt.md` becomes the `claude -p --output-format json`
    input; working directory is a scratch workspace copy; capture the full JSON.
@@ -202,12 +235,6 @@ this host** (verified absent from `PATH` and common checkouts), so the
 spawn-byte pin (`test_spawn_overhead_benchmark.py`), which measures static body
 bytes, not runtime tokens.
 
-### Plans
-
-`bench/plans/{smoke,full,release}.json` define which external checks run and the
-repeat count. `release.json` is the version-A/B plan (current vs. previous
-release). Commit summaries only; raw runs stay under `bench/.runs/`.
-
 ## Coverage map
 
 ### Summary
@@ -224,7 +251,7 @@ release). Commit summaries only; raw runs stay under `bench/.runs/`.
 | evalbench/variety-assessment | mocked | **keep** | ready | agree |
 | evalbench/handoff-contract | mocked, static | **narrow** | ready | agree |
 | evalbench/memory-use | mocked | **drop** | n/a | agree |
-| evalbench/review | static | **keep** | ready | agree |
+| evalbench/review-findings | static | **keep** | ready | agree |
 | token-snapshot | static | **narrow** | ready | agree |
 | orchestration-smoke | manual | **keep** | ready | agree |
 
@@ -263,7 +290,7 @@ and `memory-save` (save then retrieve in one session).
   marker. No re-assertion of hook unit behavior.
 - **Rationale:** highest-value black-box path; cheap; the marker is the
   load-bearing gate and its live acquisition is not proven internally.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 #### native/impact-triage — narrow (reframe)
 
@@ -291,7 +318,7 @@ and `memory-save` (save then retrieve in one session).
   framing. 1 case.
 - **Rationale:** keeps the only black-box path through a real blocker; drops a
   behavior the plugin does not have.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 #### native/memory-save — keep (narrowed to save + retrieve)
 
@@ -314,7 +341,7 @@ and `memory-save` (save then retrieve in one session).
   assert schema shapes beyond what `validate` already tests.
 - **Rationale:** the documented-vs-allowed field divergence caught by the
   internal pin is exactly the class that a live skill invocation can re-open.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 #### native/handoff-schema — drop
 
@@ -338,7 +365,7 @@ and `memory-save` (save then retrieve in one session).
   smoke.
 - **Rationale:** schema/validator evidence is already exhaustive; do not re-buy
   it with model tokens.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 ### PluginEval
 
@@ -366,7 +393,7 @@ and `memory-save` (save then retrieve in one session).
   behavior.
 - **Rationale:** static-byte/structure territory the internal suite already
   owns; keeping it would violate the no-duplication rule.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 #### plugin-eval/skills-standard — narrow (3 of 5 skills)
 
@@ -395,7 +422,7 @@ and `memory-save` (save then retrieve in one session).
 - **Rationale:** keep the judge only where it prices a real external quality
   question cheaply; avoid paying 4 judge calls per skill for static-adjacent
   signal.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 ### eval-bench prompts
 
@@ -420,7 +447,7 @@ and `memory-save` (save then retrieve in one session).
   no-plugin baseline.
 - **Rationale:** this is the core orchestration-choice question and is exactly
   what a prompt-level probe measures well.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 #### evalbench/variety-assessment — keep (narrowed)
 
@@ -443,7 +470,7 @@ and `memory-save` (save then retrieve in one session).
   rubric. One prompt.
 - **Rationale:** the contamination/parroting failure mode is model behavior and
   cheaply observable in a prompt probe.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 #### evalbench/handoff-contract — narrow
 
@@ -462,7 +489,7 @@ and `memory-save` (save then retrieve in one session).
   evidence; `orchestration-smoke` asserts a real handoff passes the hook).
 - **Rationale:** avoids paying a model to restate a schema the suite already
   enforces in both directions.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 #### evalbench/memory-use — drop
 
@@ -479,9 +506,9 @@ and `memory-save` (save then retrieve in one session).
   a free local sanity prompt, not Track A evidence.
 - **Rationale:** duplicate of a kept native case; two probes of the same gap
   add cost without evidence.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
-#### evalbench/review — keep (prompt added)
+#### evalbench/review-findings — keep (prompt added)
 
 - **User-visible behavior:** `/PACT:peer-review` produces correct, independent
   review findings on a diff (including a seeded defect), with verification
@@ -503,7 +530,7 @@ and `memory-save` (save then retrieve in one session).
   arm.
 - **Rationale:** highest-value external quality gap in the proposed list; the
   internal suite protects process (independence/freshness) but not output.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 ### token-snapshot — narrow
 
@@ -525,7 +552,7 @@ and `memory-save` (save then retrieve in one session).
   release) per run, with A/B reserved for `release.json`.
 - **Rationale:** cheap, real, and completely unproven internally; the main risk
   is tool availability, hence the fallback and the "narrow" label.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 ### orchestration-smoke — keep (minimal)
 
@@ -552,7 +579,7 @@ and `memory-save` (save then retrieve in one session).
 - **Rationale:** proves the integration that internal mocks and manual runbooks
   cannot certify; folded-in handoff assertion removes the need for the dropped
   standalone handoff case.
-- **Reviewer decision:** pending.
+- **Reviewer decision:** agree (see Reviewer status).
 
 ## Dropped checks
 
@@ -645,10 +672,11 @@ tests with parametrization):
 - **MCP mocks:** `claude plugin eval --mocks record` does not start the plugin's
   `pact-telegram` MCP server when it has no mock (`has no mock and is NOT
   started`). No native case may depend on its tools.
-- **Reviewer status:** reviewed 2026-11-25 by coverage-reviewer (task-8):
-  13/13 agree on direction, no flips. Required fixes were applied; the review
-  note is `bench/.runs/p2/review.md`. Native checks remain blocked/deferred, so
-  do not report a native eval baseline.
+- **Reviewer status:** reviewed 2026-11-25 by an independent coverage
+  reviewer: 13/13 agree on direction, no flips. Required fixes were applied. The
+  review note is unpublished, so the agreement cannot be verified from this
+  tree. Native checks remain blocked/deferred, so do not report a native eval
+  baseline.
 
 ## Maintenance
 

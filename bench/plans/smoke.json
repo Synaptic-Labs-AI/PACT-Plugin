@@ -1,7 +1,0 @@
-{
-  "schema": "pact-bench/plan/1",
-  "id": "smoke",
-  "description": "Minimal Track A preparation and tool smoke.",
-  "external": ["native-eval", "plugin-eval"],
-  "repeats": 1
-}

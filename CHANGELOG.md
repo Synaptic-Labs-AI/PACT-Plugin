@@ -18,6 +18,26 @@ column 0. Inside a section use `###` or deeper; an `## [Unreleased]` heading
 goes only above the newest version. Every PR checks the whole file with
 `.github/scripts/check-release-notes.sh`.
 
+## v4.8.39: add an external evaluation harness and a 4.8.38 baseline
+
+### Summary
+
+Adds `bench/`, a dev-only harness for evaluating PACT from outside, and the first recorded baseline for 4.8.38. Nothing under `bench/` ships to plugin users, and plugin runtime behavior does not change: the only `pact-plugin/` edits in this release are the version strings in `.claude-plugin/plugin.json` and `README.md`. The harness prepares an isolated copy of the plugin and a scratch Claude Code configuration for a DeepSeek-backed run, runs the native `claude plugin eval` cases and PluginEval skill scoring against that copy, and validates Track B outcome-benchmark tasks. The baseline records native eval as blocked, not passed, and makes no coding-outcome claim. An advisory, path-triggered CI workflow runs the harness's hermetic tests.
+
+### What landed
+
+- `bench/external/runner/prepare.py` copies the plugin under test (the current worktree, a git ref or an explicit directory) into a scratch directory without its tests and caches, builds a scratch `settings.json` from the live DeepSeek settings with the session plumbing pointed inside the scratch directory, optionally verifies the provider with a one-turn headless call, and writes a provenance manifest. It checks its inputs before writing anything, and `--force` replaces only a previous pact-bench output. The child process receives only `PATH`, `LANG`, `TERM` and `LC_*` from the live environment, plus the scratch settings env with credential-named keys removed and the provider variables; the provider token is never written to disk.
+- `bench/external/runner/native_eval.py` and `plugin_eval.py` run `claude plugin eval` and PluginEval against a prepared copy and record each command, exit code and parsed result; each always writes its `result.json`, and `plugin-eval` reads its skills only from a skills file and runs `uv sync` without the provider token. `bench/external/native-evals/` holds three authored native cases, `bench/external/eval-bench/prompts.yaml` four prompt and rubric pairs, and `bench/external/README.md` the reviewed Track A coverage map, which decides for each external check whether the internal suite already covers it.
+- `bench/tasks/validate.py` checks a Track B task: its seed tests pass on the untouched fixture, its hidden tests fail there, and its gold patch applies, makes the hidden tests pass and keeps the seed tests green. It validates every task and reports each, runs git without the host's global config, and rejects a gold patch that touches the hidden tests. The six task fixtures are not in this release.
+- `bench/pact-bench` is the command-line entry point for `prepare`, `native-eval`, `plugin-eval` and `tasks validate`.
+- `bench/results/4.8.38/2026-11-25T2232Z/` holds the baseline's `summary.json` and `report.md`, and `BENCHMARKS.md` its row. Both are assembled by hand from raw runs that stay gitignored under `bench/.runs/`; `bench/tests/test_results.py` checks each row against its summary.
+- `bench/bootstrap.sh` builds a local `bench/.venv` (Python 3.12 or newer) from the hashed lock `bench/constraints.txt` (pytest and pyyaml).
+- `bench/tests/` holds hermetic tests that make no model calls and use no network. `.github/workflows/bench-harness.yml` runs them when `bench/`, the workflow, `constraints-ci.txt` or `scripts/verify_ci_environment.py` changes, installing the repository's hashed `constraints-ci.txt` lock, with read-only permissions and no secrets; it is advisory and must never be a required check, because a path-filtered workflow reports no check run on a PR it skips.
+
+### Why
+
+Issue #833 asks for systematic evidence of where PACT helps and where it does not. The internal suite proves PACT's mechanics but not how a real session behaves, so this release adds the harness and the first measurements, and records the limits of those measurements beside them: native eval is blocked by the eval sandbox on the measuring host, PluginEval scores are experimental, the token sample is two spawns, and the Track B tasks are validated out of tree but not yet run.
+
 ## v4.8.38: arm a structural wait watcher instead of refilling the loop
 
 ### Summary

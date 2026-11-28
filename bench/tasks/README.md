@@ -4,6 +4,9 @@ Each task is a small, deterministic Python 3.12 stdlib project. The agent under
 test receives fixture/ as its workspace, prompt.md as the request, and is scored
 against hidden_tests/ that are never present in its workspace.
 
+No task directories are committed yet; they land in a follow-up PR. Until then
+`bench/pact-bench tasks validate` exits with "no tasks found".
+
 ## Task directory layout
 
     <task-id>/
@@ -74,3 +77,15 @@ Run from the task directory:
 5. Run seed tests again; they pass.
 
 Record the test counts and any issues in the final report.
+
+## Validator
+
+    bench/pact-bench tasks validate [--root DIR] [--task DIR ...]
+
+With no `--task` it validates every task under `--root` (default bench/tasks)
+and reports each one: a passing task carries `"status": "pass"`, a failing one
+`{"path", "status": "fail", "error"}`. It exits 1 if any task failed. Each
+command is bounded by the task's `timeout_seconds`, git runs without the global
+or system config and with hooks off, a gold patch that touches hidden_tests/ is
+rejected, a gold patch that only adds files is accepted, and the seed tests
+after the patch run with `--ignore=hidden_tests`.

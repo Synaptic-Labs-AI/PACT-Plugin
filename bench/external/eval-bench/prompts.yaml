@@ -51,8 +51,10 @@
     plus a merge recommendation.
 
     diff --git a/auth.py b/auth.py
-    @@ -1,5 +1,14 @@
+    @@ -1 +1,17 @@
      import os
+    +import jwt
+    +
     +SECRET = os.environ.get("JWT_SECRET", "dev-secret")
     +ALGORITHM = "HS256"
     +
@@ -64,8 +66,8 @@
     +
     +def check_admin(path, user):
     +    if path.startswith("/admin"):
-    +        return True
-    +    return is_admin(user)
+    +        return is_admin(user)
+    +    return True
     +# TODO: rename the local variable later
   rubric: |
     Score 0-5 on:

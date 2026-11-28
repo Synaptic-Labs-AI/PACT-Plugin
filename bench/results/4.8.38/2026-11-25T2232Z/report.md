@@ -6,6 +6,8 @@ Plugin tree: e668fbf505d74f4eb7b35a543cfa26e70e8b0f1b
 Status: provisional on native behavior. P1 is green, the harness and smoke pass,
 PluginEval completed, native eval is blocked by the host shell sandbox, and the
 coverage map (1.0.1) has an independent review with 13/13 agreement on direction.
+This report and summary.json are assembled by hand from the raw runs under
+bench/.runs/ (gitignored); no command generates them.
 
 ## What ran
 
@@ -19,19 +21,19 @@ coverage map (1.0.1) has an independent review with 13/13 agreement on direction
 | A5 evolve | skipped: conditional tool; no candidate change package above threshold |
 | A6 token snapshot | 2 spawn samples: 52,112 and 86,606 first-request tokens; median 69,359 |
 | A1 orchestration smoke | pass: exit 0, feature branch commit, 9 tasks, 3 valid HANDOFFs |
-| P2 coverage map | version 1.0.0 written; independent review in progress at cut time |
-| Track B | 6 tasks authored and validated; no outcome runs executed yet |
+| P2 coverage map | version 1.0.1; independently reviewed, 13/13 agree, no flips (review note unpublished) |
+| Track B | 6 tasks authored and validated out of tree; fixtures land in a follow-up PR; no outcome runs executed |
 
 ## Independent coverage review
 
-Reviewer coverage-reviewer agreed with all 13 keep/narrow/drop decisions and
+The independent coverage reviewer agreed with all 13 keep/narrow/drop decisions and
 recommended no flips. Required fixes were applied: native checks are marked
 blocked/deferred, the bootstrap/impact-triage/memory-save graders were hardened,
 the eval-bench review prompt now uses a diff with a seeded defect plus a
 distractor, map metadata/citations were corrected, and the token measurement
-sources were recorded. The full review note is gitignored at
-bench/.runs/p2/review.md. Because native eval is blocked, the review does not
-certify a native score.
+sources were recorded. The review note is unpublished, so the agreement
+cannot be verified from this tree. Because native eval is blocked, the review
+does not certify a native score.
 
 ## Native eval probe: blocked, not passed
 
@@ -107,9 +109,9 @@ TaskUpdate, TaskList, and TaskGet returned "No matching deferred tools found",
 and no TodoWrite/TodoRead calls were observed. TodoWrite/TodoRead do not exist
 in Claude Code 2.1.332.
 
-Root cause: under claude -p, 2.1.332 does not initialize the session team;
-named spawns fall back to ordinary background subagents, and the four Task
-tools are reserved for true teammates. PACT's README already documents that a
+Hypothesis, not isolated by a probe: under claude -p, 2.1.332 does not
+initialize the session team; named spawns fall back to ordinary background
+subagents, and the four Task tools are reserved for true teammates. PACT's README already documents that a
 named -p agent is an ordinary subagent, not team formation. A foreground spawn
 with run_in_background:false does receive the four Task tools, and PACT
 documents that only as a legacy non-TTY compatibility workaround. Interactive
@@ -124,7 +126,9 @@ share of spawn cost and should be audited before adding more agents.
 
 ## Track B suite
 
-Six tasks are authored and independently validated by bench/tasks/validate.py:
+Six tasks were authored and validated with bench/tasks/validate.py outside
+this tree. Their fixtures land in a follow-up PR, so this validation is not
+reproducible from this commit:
 
 | Task | Class | Variety | Validation |
 |---|---|---:|---|
@@ -155,11 +159,13 @@ full PACT-vs-solo matrix with the scorecard; no coding-outcome claim is made.
 
 ## Reproduce
 
+These commands produce the raw runs under bench/.runs/; summary.json and this
+report are then written by hand from them.
+
     bench/bootstrap.sh
     bench/pact-bench prepare --out bench/.runs/external/probe --verify
     bench/pact-bench native-eval --manifest bench/.runs/external/probe/manifest.json --runs 3
     bench/pact-bench plugin-eval --manifest bench/.runs/external/probe/manifest.json --plugin-eval-dir <pinned-plugin-eval>
-    bench/pact-bench tasks validate --all
 
 ## Caveats
 
@@ -168,4 +174,5 @@ full PACT-vs-solo matrix with the scorecard; no coding-outcome claim is made.
 - Token sample n=2.
 - The coverage map 1.0.1 is independently reviewed (13/13 agree, no flips), but
   native checks remain blocked/deferred and are not a native score.
-- Track B is validated but not executed.
+- Track B was validated out of tree and is not executed; its fixtures are not
+  in this commit.

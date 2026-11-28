@@ -1,7 +1,0 @@
-{
-  "schema": "pact-bench/plan/1",
-  "id": "full",
-  "description": "Full Track A external diagnostics baseline.",
-  "external": ["native-eval", "plugin-eval", "eval-bench", "evolve", "token-snapshot"],
-  "repeats": 3
-}
