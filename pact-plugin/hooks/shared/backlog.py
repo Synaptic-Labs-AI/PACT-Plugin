@@ -1615,7 +1615,8 @@ def _project_identity():
 
 def _valid_slug(owner: Any, name: Any) -> bool:
     """The owner is a GitHub owner name (`project_identity.is_github_owner`:
-    letters, digits and hyphens, no leading hyphen, at most 39) and the name a
+    letters, digits, hyphens and underscores, starting with a letter or
+    digit, at most 39) and the name a
     GitHub repository name (`project_identity.is_github_name`: the
     characters a repository slug may contain, anchored at the true end of
     the string, never dots alone).

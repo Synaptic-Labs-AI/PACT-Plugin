@@ -69,8 +69,10 @@ CORPUS = [
     # no repository (measured, git 2.43), so the value declines.
     ("https://github.com/o/r\n", None),
     ("https://github.com/a-b/c_d-e", ("a-b", "c_d-e")),
-    # GitHub's owner rule: letters, digits and hyphens, no leading hyphen, at
-    # most 39; a trailing or doubled hyphen is accepted (older accounts).
+    # GitHub's owner rule: letters, digits, hyphens and underscores, starting
+    # with a letter or digit, at most 39.
+    ("https://github.com/octocat_acme/r", ("octocat_acme", "r")),
+    ("https://github.com/_o/r", None),
     ("https://github.com/a.b/c_d-e", None),
     ("https://github.com/-o/r", None),
     ("https://github.com/o--x/r", ("o--x", "r")),
