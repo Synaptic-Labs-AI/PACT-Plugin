@@ -1526,6 +1526,7 @@ def test_a_github_payload_id_drops_a_default_port(canonical_session, capfd, payl
         "SSH.GitHub.com:443/Acme/Widget",
         "ssh.github.com:22/Acme/Widget",
         "ssh.github.com/Acme/Widget.git",
+        "ssh.github.com:9418/Acme/Widget",
     ],
 )
 def test_ssh_github_com_folds_to_github_com_in_a_pin_a_payload_and_a_target(
@@ -1551,10 +1552,10 @@ def test_ssh_github_com_folds_to_github_com_in_a_pin_a_payload_and_a_target(
     assert (code, envelope.get("result", {}).get("to")) == (0, CANONICAL), envelope
 
 
-@pytest.mark.parametrize("spelling", ["ssh.github.com:8443/acme/widget", "ssh.github.com:9418/acme/widget"])
+@pytest.mark.parametrize("spelling", ["ssh.github.com:8443/acme/widget", "ssh.github.com:2222/acme/widget"])
 def test_ssh_github_com_on_another_port_keeps_its_spelling(spelling):
-    """Only ssh's ports (22, 443) make ssh.github.com github.com. RED WHEN
-    another port folds."""
+    """Only a port some scheme takes as its default (or none) makes
+    ssh.github.com github.com. RED WHEN another port folds."""
     from scripts.database import folded_github_id, pin_file_value
 
     assert pin_file_value(spelling.encode("utf-8")) == (spelling, None)

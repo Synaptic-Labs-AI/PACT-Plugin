@@ -215,7 +215,7 @@ the memory is NOT written.
 | `reasoning_chains` | list | you supply | How key decisions connect — "X because Y, which required Z" |
 | `agreements_reached` | list | you supply | What was verified via teachback or agreement check |
 | `disagreements_resolved` | list | you supply | Where agents disagreed and how it was settled |
-| `project_id` | string | optional | Accepted in the payload, with leading and trailing spaces stripped; a `github.com` id is spelled as a pin naming it is (host, owner and repository lower-cased, a scheme's default port (`443`, `80`, `22` or `9418`, or an empty one) is dropped as a remote drops it, `www.github.com` with no port, and `ssh.github.com` with no port or port `22` or `443`, become `github.com`; any other port is kept, and a port-less github.com id drops one trailing `.git` and is refused when it is not owner/repo); auto-detected from the environment when you omit it |
+| `project_id` | string | optional | Accepted in the payload, with leading and trailing spaces stripped; a `github.com` id is spelled as a pin naming it is (host, owner and repository lower-cased, a port some scheme takes as its default (`443`, `80`, `22` or `9418`), or an empty one, is dropped from `github.com`, `www.github.com` and `ssh.github.com`, as a pin's is, and `www.github.com` and `ssh.github.com` with no port then become `github.com`; any other port is kept (`ssh://git@github.com:443`, a remote GitHub never serves, keeps `:443` in its own id), and a port-less github.com id drops one trailing `.git` and is refused when it is not owner/repo); auto-detected from the environment when you omit it |
 | `session_id` | string | optional | Accepted in the payload; auto-detected from the environment when you omit it |
 | `files` | list | **never** | Read-only. Returned by `get`/`search`/`list`; REJECTED as a payload key — see below |
 
@@ -438,7 +438,7 @@ store could not be checked, else `null`.
   `host/owner/repo` id is accepted: a folder-name value is reported as
   `override_ignored` with reason `not_canonical`, and resolution continues
   without it. Write the pin as the id `project-id show` reports for the
-  remote (`github.com/owner/repo`, with no `.git`). A pin naming `ssh.github.com`, with no port or port 22 or 443, names `github.com`, as its ssh remote does. An ssh host alias from
+  remote (`github.com/owner/repo`, with no `.git`). A pin takes the payload's port rule: a port some scheme takes as its default is dropped from `github.com`, `www.github.com` and `ssh.github.com`, and `ssh.github.com` with no port then names `github.com`, as its remote does on every scheme. An ssh host alias from
   the user's ssh config stays in the id: `git@github-work:Acme/Widget` gives `github-work/Acme/Widget`,
   while an https clone of the same repository gives `github.com/acme/widget`.
   Only clones whose origin uses that same alias share an alias id.

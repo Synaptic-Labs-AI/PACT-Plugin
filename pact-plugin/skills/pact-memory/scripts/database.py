@@ -2045,14 +2045,19 @@ def _github_folded_pin(candidate: str) -> Optional[str]:
     port-less github.com path loses one trailing `.git` in any case and is
     read as a remote's is (`github_repo_path`): decoded and lower-cased, or
     None when it is not exactly owner/repo of GitHub names. Every other host keeps its spelling, a ported
-    `www.github.com` included, exactly as a remote naming it does."""
+    `www.github.com` included, exactly as a remote naming it does.
+
+    THE ONE PORT RULE for a pin, a payload and a rekey target: on github.com,
+    www.github.com and ssh.github.com a port that some scheme's remote drops as
+    its default (`SCHEME_DEFAULT_PORTS`), or an empty one, is dropped, since an
+    id holds no scheme; then a port-less ssh.github.com, GitHub's ssh host, is
+    github.com, as its remote is (`project_identity._identifier`)."""
     hostport, _, path = candidate.partition("/")
     host, colon, port = hostport.partition(":")
-    if host == "ssh.github.com" and port in ("", "22", "443"):
-        # GitHub's SSH-over-443 host is github.com itself, as an ssh or scp
-        # remote naming it folds (`project_identity._identifier`); an id holds
-        # no scheme, so a pin or payload naming it folds the same way.
-        host, colon, port = "github.com", "", ""
+    if github_default_port(host, colon, port):
+        colon, port = "", ""
+    if host == "ssh.github.com" and not port:
+        host = "github.com"
     host = github_folded_host(host, port)
     if host != "github.com":
         return candidate
@@ -2067,6 +2072,17 @@ def _github_folded_pin(candidate: str) -> Optional[str]:
     segments = path.split("/")
     return host + colon + port + "/" + "/".join(
         github_folded_segment(segment) for segment in segments
+    )
+
+
+def github_default_port(host: str, colon: str, port: str) -> bool:
+    """Whether a lower-cased GitHub host's port (`host[:port]`, `colon` the
+    separator) is one some scheme's remote drops as its default, or empty: the
+    port a pin, a payload or a rekey target drops (`_github_folded_pin`)."""
+    return (
+        host in ("github.com", "www.github.com", "ssh.github.com")
+        and bool(colon)
+        and (not port or port in {str(p) for p in SCHEME_DEFAULT_PORTS.values()})
     )
 
 
@@ -2101,8 +2117,9 @@ def folded_github_id(value: Any, what: str) -> Any:
     `GitHub.com/Acme/Widget` names the bucket `github.com/acme/widget` that
     repository's sessions read. A port some scheme's remote drops as its
     default (`SCHEME_DEFAULT_PORTS`: 443, 80, 22 or 9418, or an
-    empty port) is dropped, as that remote's id drops it; any other port is
-    kept (an id holds no scheme). Any
+    empty port) is dropped and a port-less ssh.github.com is github.com, by
+    the pin's one port rule (`_github_folded_pin`); any other port is kept.
+    Any
     other host's value is returned unchanged except that, as for every
     value, leading and trailing spaces are stripped first, as a pin's are (a
     tab is a control character, refused before the fold); a non-string is
@@ -2120,19 +2137,14 @@ def folded_github_id(value: Any, what: str) -> Any:
     host, colon, port = hostport.partition(":")
     if host.lower() not in ("github.com", "www.github.com", "ssh.github.com"):
         return value
-    if (
-        host.lower() != "ssh.github.com"
-        and colon
-        and (not port or port in {str(p) for p in SCHEME_DEFAULT_PORTS.values()})
-    ):
-        # ssh.github.com's ports are the pin fold's (`_github_folded_pin`): it
-        # is github.com only over ssh, whose ports are 22 and 443.
-        hostport = host
-        value = hostport + slash + path
+    if github_default_port(host.lower(), colon, port):
+        # An empty port (`github.com:/o/r`) is no canonical id, so it is
+        # dropped before the pin's reader sees it; the rule is the pin's.
+        value = host + slash + path
     pin_spelled, _ = pin_file_value(value.encode("utf-8"))
     if pin_spelled is not None:
         return pin_spelled
-    if ":" not in hostport:
+    if not colon or github_default_port(host.lower(), colon, port):
         raise ValueError(f"{what} {value!r} names no GitHub repository: {GITHUB_ID_RULE}")
     return value
 

@@ -230,15 +230,20 @@ def test_githubs_ssh_over_443_host_is_github(url):
     assert f"github.com/{owner}/{name}".lower() == pi.normalize_remote_url(url)
 
 
-@pytest.mark.parametrize("url", ["https://ssh.github.com/Acme/Widget", "http://ssh.github.com/acme/widget"])
-def test_the_ssh_443_fold_is_for_ssh_only(url):
-    """GitHub's ssh.github.com serves ssh; an https remote there is another
-    endpoint: it keeps its own id, and the backlog's remote parser reads no
-    github.com slug from it either, so the two parsers agree."""
+@pytest.mark.parametrize("url", [
+    "https://ssh.github.com/Acme/Widget",
+    "http://ssh.github.com/acme/widget",
+    "http://ssh.github.com:443/Acme/Widget",
+])
+def test_the_ssh_443_host_is_github_on_every_scheme(url):
+    """An id holds no scheme, so ssh.github.com is github.com on every scheme,
+    as a pin naming it is: the remote and a pin copied from it agree, and the
+    backlog's remote parser, which reads the id, gives the github.com slug.
+    RED WHEN the fold is for ssh only again."""
     from shared import backlog
 
-    assert pi.normalize_remote_url(url).startswith("ssh.github.com/")
-    assert backlog._slug_from_remote_url(url) is None
+    assert pi.normalize_remote_url(url) == "github.com/acme/widget"
+    assert backlog._slug_from_remote_url(url) == ("acme", "widget")
 
 
 @pytest.mark.parametrize("url", ["https://www.github.com/Acme/Widget.git", "http://www.github.com/acme/widget"])

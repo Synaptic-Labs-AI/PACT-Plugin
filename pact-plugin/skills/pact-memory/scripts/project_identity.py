@@ -859,19 +859,24 @@ _CASE_INSENSITIVE_PATH_HOSTS = frozenset({"github.com"})
 _GITHUB_SSH_443_HOST = "ssh.github.com"
 
 
-def _identifier(
-    host: str, port: str, segments: list, ssh: bool = False
-) -> str:
+def _identifier(host: str, port: str, segments: list) -> str:
     """`host[:port]/<segments>`, after the bounded Azure DevOps Services rule
     and the lower-cased path of a `_CASE_INSENSITIVE_PATH_HOSTS` host. No
     `.git` is removed here: `_strip_path_suffixes` drops the one literal
     `.git`, so a `.GIT` spelling stays part of the name on every host.
-    `ssh` says the remote is an ssh or scp one, the only transport
-    `ssh.github.com` folds for."""
-    if ssh and host == _GITHUB_SSH_443_HOST and port in ("", "443"):
-        # GitHub's SSH-over-443 endpoint is github.com itself, for ssh only.
+    `ssh.github.com` with no port left or with a port some scheme takes as
+    its default is github.com on every scheme, as a pin naming it is
+    (`database._github_folded_pin`): an id holds no scheme, so the two share
+    one rule."""
+    from .database import (
+        github_default_port,
+        github_folded_host,
+        github_folded_segment,
+    )
+
+    if host == _GITHUB_SSH_443_HOST and (not port or github_default_port(host, ":", port)):
+        # GitHub's SSH-over-443 endpoint is github.com itself.
         host, port = "github.com", ""
-    from .database import github_folded_host, github_folded_segment
 
     # GitHub redirects www.github.com to github.com: one repository. The
     # rule is database's one copy, which a pin takes too.
@@ -1074,7 +1079,6 @@ def normalize_remote_url(url: object) -> Optional[str]:
 
         if port and SCHEME_DEFAULT_PORTS.get(scheme) == int(port):
             port = ""
-        ssh = scheme in _HOME_RELATIVE_SCHEMES
         host = _url_host(host)
         if host is None:
             return None
@@ -1098,7 +1102,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
             return None
         if scheme in _HOME_RELATIVE_SCHEMES:
             segments = _home_segments(sent_path, segments, login)
-        identifier = _identifier(host, port, segments, ssh)
+        identifier = _identifier(host, port, segments)
     else:
         scp_match = _scp_match(value)
         if scp_match is None:
@@ -1157,7 +1161,7 @@ def normalize_remote_url(url: object) -> Optional[str]:
         # the same endpoint, and the grammar allows a single segment;
         # declining the scp spelling while accepting the URL spelling would
         # split one repository into two ids.
-        identifier = _identifier(host, "", segments, True)
+        identifier = _identifier(host, "", segments)
 
     if len(identifier) > _max_id_length():
         return None

@@ -103,7 +103,7 @@ CORPUS = [
     ("https://github.com:8443/o/r", None),
     ("ssh://git@github.com:022/o/r", None),
     ("https://github.com:00443/o/r", None),
-    ("https://ssh.github.com/o/r", None),
+    ("https://ssh.github.com/o/r", ("o", "r")),
     ("ssh://git@ssh.github.com:2222/o/r", None),
     ("https://www.github.com:8443/o/r", None),
     ("  https://github.com/o/r\n", None),

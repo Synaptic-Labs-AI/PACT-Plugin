@@ -7229,6 +7229,11 @@ class TestEveryRouteEntryConditionIsARoute:
             "database's one copy of GitHub's owner/repo name rule and fold, applied to an id "
             "path the remote grammar already built; pure, it asks git nothing"
         ),
+        ("call", "github_default_port"): (
+            "database's one port rule for a GitHub host (a port some scheme takes as its "
+            "default), applied to a port the remote grammar already parsed; pure, it asks git "
+            "nothing"
+        ),
         ("call", "pin_file_value"): (
             "classifies the bytes read_override already read from the pin file (database's one "
             "copy of the pin's text rule); it validates an id value and asks git nothing"

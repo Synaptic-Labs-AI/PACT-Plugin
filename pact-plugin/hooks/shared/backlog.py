@@ -1583,7 +1583,7 @@ def _slug_from_remote_url(url: Any) -> Optional[Tuple[str, str]]:
     DERIVED FROM THE MEMORY ID, so the two cannot disagree: the remote is
     read by `project_identity.normalize_remote_url`, and only an id that is
     `github.com/<owner>/<repo>` gives a slug. Every spelling, port, `.git`
-    form, host fold (www.github.com, ssh.github.com over ssh) and refusal
+    form, host fold (www.github.com, ssh.github.com) and refusal
     (a backslash, more than one `@`, a leading-zero port) is the id's.
     Names come back lower-cased, as the id holds them; GitHub resolves them
     case-insensitively. Any other id (GitHub Enterprise, another forge, a

@@ -180,9 +180,14 @@ def test_the_file_reader_never_answers_where_read_origin_declines(tmp_path, arra
 @pytest.mark.parametrize("pin, expected", [
     ("github.com/Acme/Widget", "github.com/acme/widget"),
     ("www.github.com/Acme/Widget", "github.com/acme/widget"),
-    ("github.com:443/Acme/Caf%C3%A9", "github.com:443/acme/caf%C3%A9"),
-    ("github.com:443/Acme/Widget", "github.com:443/acme/widget"),
-    ("ssh.github.com:443/Acme/Widget", "ssh.github.com:443/Acme/Widget"),
+    ("github.com:8443/Acme/Caf%C3%A9", "github.com:8443/acme/caf%C3%A9"),
+    # A port some scheme takes as its default is dropped (an id holds no
+    # scheme), and a port-less ssh.github.com is github.com.
+    ("github.com:443/Acme/Widget", "github.com/acme/widget"),
+    ("github.com:22/Acme/Widget", "github.com/acme/widget"),
+    ("ssh.github.com:443/Acme/Widget", "github.com/acme/widget"),
+    ("ssh.github.com/Acme/Widget", "github.com/acme/widget"),
+    ("ssh.github.com:2222/Acme/Widget", "ssh.github.com:2222/Acme/Widget"),
     ("www.github.com:8443/Acme/Widget", "www.github.com:8443/Acme/Widget"),
     ("gitlab.com/Acme/Widget", "gitlab.com/Acme/Widget"),
     # A host is case-insensitive in a pin as in a remote.
@@ -200,7 +205,9 @@ def test_a_pin_takes_githubs_spelling_rules(pin, expected):
     from scripts.database import pin_file_value
 
     assert pin_file_value((pin + "\n").encode()) == (expected, None)
-    if expected.startswith("github.com/"):
+    # An https remote on github.com:22 keeps its port, a remote GitHub never
+    # serves (test_a_remote_on_another_schemes_default_port_keeps_it).
+    if expected.startswith("github.com/") and not pin.startswith("github.com:22/"):
         assert pi.normalize_remote_url("https://" + pin) == expected
 
 
@@ -396,13 +403,34 @@ def test_a_pasted_dot_git_pin_is_the_checkouts_id_with_no_detail(tmp_path, monke
 
 @pytest.mark.parametrize("url, pin", [
     ("https://github.com:8443/O/N", "github.com:8443/O/N"),
-    ("ssh://git@github.com:443/O/N", "github.com:443/O/N"),
     ("https://github.com:8443/O", "github.com:8443/O"),
     ("https://www.github.com:8443/O/N", "www.github.com:8443/O/N"),
     ("http://ssh.github.com:443/O/N", "ssh.github.com:443/O/N"),
+    ("https://ssh.github.com/O/N", "ssh.github.com/O/N"),
+    ("https://github.com:443/O/N", "github.com:443/O/N"),
     ("ssh://git@ssh.github.com:2222/O/N", "ssh.github.com:2222/O/N"),
 ])
 def test_a_ported_pin_copied_from_its_url_names_the_remotes_id(url, pin):
+    """The one exception is a remote GitHub never serves: a github.com or
+    www.github.com remote on another scheme's default port
+    (`ssh://git@github.com:443/O/N`) keeps its port, while a pin naming it
+    drops it (test_a_remote_on_another_schemes_default_port_keeps_it)."""
+    _pin_copied_from_url_names_its_remotes_id(url, pin)
+
+
+def test_a_remote_on_another_schemes_default_port_keeps_it():
+    """GitHub serves ssh on github.com:22 and https on :443, so
+    `ssh://git@github.com:443/O/N` reaches nothing. Its id keeps the port; a
+    pin or payload naming github.com:443 names github.com. RED WHEN either
+    side changes without the documentation."""
+    from scripts import project_identity as pi
+    from scripts.database import pin_file_value
+
+    assert pi.normalize_remote_url("ssh://git@github.com:443/O/N") == "github.com:443/o/n"
+    assert pin_file_value(b"github.com:443/O/N\n") == ("github.com/o/n", None)
+
+
+def _pin_copied_from_url_names_its_remotes_id(url, pin):
     """A pin written as the url's host, port and path names the id that url's
     remote gets: one GitHub rule for pins and remotes."""
     from scripts import project_identity as pi
