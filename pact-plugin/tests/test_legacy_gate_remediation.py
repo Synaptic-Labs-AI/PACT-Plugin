@@ -1477,17 +1477,46 @@ def test_a_payload_id_loses_surrounding_blanks(canonical_session, capfd, payload
     assert (code, envelope.get("result", {}).get("to")) == (0, filed), envelope
 
 
-@pytest.mark.parametrize("port", ["443", "8443"])
+@pytest.mark.parametrize("port", ["8443", "2222"])
 def test_a_github_payload_id_keeps_its_port(canonical_session, port):
-    """A port is kept, as a pin keeps it: an id holds no scheme, so
-    `github.com:443` is the id of an ssh remote on port 443. RED WHEN the
-    port is dropped or the host keeps its case."""
+    """A port no scheme takes as its default is kept, as a pin keeps it. RED
+    WHEN the port is dropped or the host keeps its case."""
     repo, store = canonical_session
     memory = PACTMemory(session_id="s", db_path=store)
     memory.save({"context": "a ported id", "project_id": f"GitHub.com:{port}/Acme/Widget"})
     with sqlite3.connect(str(store)) as conn:
         filed = {row[0] for row in conn.execute("SELECT project_id FROM memories")}
     assert filed == {f"github.com:{port}/acme/widget"}, filed
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "github.com:443/Acme/Widget",
+        "GitHub.com:22/Acme/Widget",
+        "github.com:80/Acme/Widget",
+        "github.com:9418/Acme/Widget",
+        "github.com:/Acme/Widget",
+        "www.github.com:443/Acme/Widget",
+    ],
+)
+def test_a_github_payload_id_drops_a_default_port(canonical_session, capfd, payload):
+    """A remote drops its scheme's default port (`https://github.com:443/O/R`
+    and `ssh://git@github.com:22/O/R` give `github.com/o/r`), so a payload id
+    or rekey --to spelled with one files where those remotes' sessions read.
+    RED WHEN the port is kept, filing the row in a bucket no remote reads."""
+    repo, store = canonical_session
+    memory = PACTMemory(session_id="s", db_path=store)
+    memory.save({"context": "a default port", "project_id": payload})
+    with sqlite3.connect(str(store)) as conn:
+        filed = {row[0] for row in conn.execute("SELECT project_id FROM memories")}
+    assert filed == {CANONICAL}, filed
+    _seed(store, "oldbucket")
+    code, envelope = _rekey_cli(
+        ["project-id", "rekey", "--from=oldbucket", f"--to={payload}", "--db-path", str(store)],
+        capfd,
+    )
+    assert (code, envelope.get("result", {}).get("to")) == (0, CANONICAL), envelope
 
 
 @pytest.mark.parametrize("payload", ["github.com/Acme/Widget.git", "github.com/acme/widget.GIT"])

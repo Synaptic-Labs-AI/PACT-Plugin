@@ -2065,6 +2065,20 @@ def _github_folded_pin(candidate: str) -> Optional[str]:
     )
 
 
+# The scheme's own default port is dropped so two spellings of one endpoint
+# share one id (`project_identity`'s remote grammar, and `folded_github_id`
+# for a github.com id). Non-default ports are preserved: two different servers
+# on one host must never merge.
+SCHEME_DEFAULT_PORTS = {
+    "https": 443,
+    "http": 80,
+    "ssh": 22,
+    "git": 9418,
+    "git+ssh": 22,
+    "ssh+git": 22,
+}
+
+
 # What a github.com id is, for a refusal that names the rule
 # (`folded_github_id`).
 GITHUB_ID_RULE = (
@@ -2080,7 +2094,10 @@ def folded_github_id(value: Any, what: str) -> Any:
     (`pin_file_value`): host, owner and repository lower-cased, a port-less
     `www.` host dropped and one trailing `.git` dropped, so
     `GitHub.com/Acme/Widget` names the bucket `github.com/acme/widget` that
-    repository's sessions read. A port is kept (an id holds no scheme). Any
+    repository's sessions read. A port some scheme's remote drops as its
+    default (`SCHEME_DEFAULT_PORTS`: 443, 80, 22 or 9418, or an
+    empty port) is dropped, as that remote's id drops it; any other port is
+    kept (an id holds no scheme). Any
     other host's value is returned unchanged except that, as for every
     value, leading and trailing spaces are stripped first, as a pin's are (a
     tab is a control character, refused before the fold); a non-string is
@@ -2094,10 +2111,13 @@ def folded_github_id(value: Any, what: str) -> Any:
     if not isinstance(value, str):
         return value
     value = value.strip(" ")
-    hostport = value.partition("/")[0]
-    host = hostport.partition(":")[0].lower()
-    if host not in ("github.com", "www.github.com"):
+    hostport, slash, path = value.partition("/")
+    host, colon, port = hostport.partition(":")
+    if host.lower() not in ("github.com", "www.github.com"):
         return value
+    if colon and (not port or port in {str(p) for p in SCHEME_DEFAULT_PORTS.values()}):
+        hostport = host
+        value = hostport + slash + path
     pin_spelled, _ = pin_file_value(value.encode("utf-8"))
     if pin_spelled is not None:
         return pin_spelled

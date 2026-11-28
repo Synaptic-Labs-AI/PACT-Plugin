@@ -54,18 +54,6 @@ _ACCEPTED_SCHEMES = frozenset({"https", "http", "ssh", "git", "git+ssh", "ssh+gi
 # downgraded to a folder name.
 _LOCAL_SCHEMES = frozenset({"file"})
 
-# The scheme's own default port is dropped so two spellings of one endpoint
-# share one id. Non-default ports are preserved: two different servers on one
-# host must never merge.
-_DEFAULT_PORTS = {
-    "https": 443,
-    "http": 80,
-    "ssh": 22,
-    "git": 9418,
-    "git+ssh": 22,
-    "ssh+git": 22,
-}
-
 # `scheme://` — the scheme is matched here and validated against the accepted
 # set afterwards, so an unsupported scheme can be classified rather than
 # silently treated as a local path.
@@ -1077,7 +1065,9 @@ def normalize_remote_url(url: object) -> Optional[str]:
                 return None
         else:
             host, port = authority, ""
-        if port and _DEFAULT_PORTS.get(scheme) == int(port):
+        from .database import SCHEME_DEFAULT_PORTS
+
+        if port and SCHEME_DEFAULT_PORTS.get(scheme) == int(port):
             port = ""
         ssh = scheme in _HOME_RELATIVE_SCHEMES
         host = _url_host(host)

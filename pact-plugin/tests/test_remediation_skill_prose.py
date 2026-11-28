@@ -7197,6 +7197,10 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<name imported from a project module memory_api: ProjectScopeDisagreementError>"): (
             "pact_session's error class, the base of a class memory_api defines"
         ),
+        ("call", "<name imported from a project module project_identity: SCHEME_DEFAULT_PORTS>"): (
+            "database's fixed table of scheme default ports, which the remote grammar drops "
+            "from a remote's id and the payload fold drops from a github.com id"
+        ),
         ("call", "<name imported from a project module project_identity: CANONICAL_ID_MAX_LENGTH>"): (
             "database's id length constant, which the importing function returns"
         ),

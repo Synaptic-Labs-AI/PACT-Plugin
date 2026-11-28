@@ -668,7 +668,7 @@ class TestEveryDefaultPortIsPinned:
         ],
     )
     def test_each_default_port_is_dropped(self, url):
-        """RED WHEN its entry is removed from `_DEFAULT_PORTS`.
+        """RED WHEN its entry is removed from `SCHEME_DEFAULT_PORTS`.
 
         A kept default port splits `host:80/owner/repo` from
         `host/owner/repo` — two ids for one endpoint, the split this change
