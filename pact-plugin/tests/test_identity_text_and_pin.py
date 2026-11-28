@@ -88,12 +88,14 @@ class TestNoRemoteDerivesAnInvalidHost:
 
 @pytest.mark.parametrize("owner, ok", [
     ("acme", True), ("a-b", True), ("Acme-Widget9", True), ("a" * 39, True),
-    ("-o", False), ("o-", False), ("a--b", False), ("a.b", False), ("a_b", False), ("a" * 40, False),
+    ("o-", True), ("a--b", True),
+    ("-o", False), ("a.b", False), ("a_b", False), ("a" * 40, False),
 ])
 def test_a_github_owner_follows_githubs_owner_rule(owner, ok):
-    """GitHub owner names hold only letters, digits and single inner hyphens,
-    at most 39 characters (GitHub docs, "Username considerations for external
-    authentication"). A remote naming another owner declines, a pin holding
+    """GitHub owner names hold only letters, digits and hyphens, never a
+    leading hyphen, at most 39 characters (GitHub docs, "Username
+    considerations for external authentication"); a trailing or doubled
+    hyphen is accepted, since older accounts can hold one. A remote naming another owner declines, a pin holding
     it is refused and the backlog reads no slug, so the three agree. RED
     WHEN `github.com/-o/r` or a 40-character owner gets an id."""
     from shared import backlog

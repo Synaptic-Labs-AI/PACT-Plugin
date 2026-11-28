@@ -2004,12 +2004,12 @@ def is_github_name(name: object) -> bool:
     return isinstance(name, str) and bool(GITHUB_NAME_RE.match(name)) and set(name) != {"."}
 
 
-# A GitHub owner (user or organization) name: ASCII letters and digits with
-# single hyphens between them, never at either end, at most 39 characters
-# (GitHub docs, "Username considerations for external authentication": only
-# alphanumeric characters and dashes, no leading, trailing or consecutive
-# dash, at most 39 characters). `\Z` anchored.
-GITHUB_OWNER_RE = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}\Z")
+# A GitHub owner (user or organization) name: ASCII letters, digits and
+# hyphens, not starting with a hyphen, at most 39 characters (GitHub docs,
+# "Username considerations for external authentication"). A trailing or
+# doubled hyphen is accepted: older accounts can hold one, and refusing a
+# real owner would block that user's saves. `\Z` anchored.
+GITHUB_OWNER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]{0,38}\Z")
 
 
 def is_github_owner(name: object) -> bool:
