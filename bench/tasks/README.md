@@ -56,7 +56,7 @@ No task directories are committed yet; they land in a follow-up PR. Until then
 
 - A git-format patch relative to fixture/.
 - Apply with: git apply --directory=fixture gold.patch (or from a copy of fixture).
-- It must not modify hidden_tests/.
+- It must not modify hidden_tests/ in any way (edit, delete, rename in or out).
 - It must make hidden tests pass and keep seed tests passing.
 
 ## Prompt
@@ -84,8 +84,13 @@ Record the test counts and any issues in the final report.
 
 With no `--task` it validates every task under `--root` (default bench/tasks)
 and reports each one: a passing task carries `"status": "pass"`, a failing one
-`{"path", "status": "fail", "error"}`. It exits 1 if any task failed. Each
-command is bounded by the task's `timeout_seconds`, git runs without the global
-or system config and with hooks off, a gold patch that touches hidden_tests/ is
-rejected, a gold patch that only adds files is accepted, and the seed tests
-after the patch run with `--ignore=hidden_tests`.
+`{"id", "path", "status": "fail", "error"}` (id from task.json, else the
+directory name). One task's failure, including a copy error, fails only that
+task; the run exits 1 if any task failed. `timeout_seconds` must be a positive
+integer and bounds each command; a command that times out has its whole
+process group killed. Git runs without the global or system config, with hooks
+off and with no inherited `GIT_*` variables. The hidden tests are snapshotted
+before the gold patch is applied, and any change to them (an edit, a deletion,
+a rename in or out, non-ASCII names included) rejects the task. A gold patch
+that only adds files is accepted, and the seed tests after the patch run with
+`--ignore=hidden_tests`.

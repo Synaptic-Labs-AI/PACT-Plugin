@@ -203,7 +203,8 @@ Runs `uv sync --frozen --extra llm` (without the provider token), then
 only) and `plugin-eval score <scratch plugin>/skills/<skill> --depth standard`
 for each skill in the skills file (static + experimental LLM judge). The skills
 come only from `--skills-file` or, by default,
-`bench/external/plugin-eval-skills.txt`; a missing or empty file is an error.
+`bench/external/plugin-eval-skills.txt` (`~` is expanded); a missing or empty
+file is an error.
 Results: `<out>/plugin-eval/result.json`, always written. A command that times
 out is recorded with exit code 124 and `timed_out: true` (its whole process
 group is killed) and the run continues; the runner exits 1 if any command
