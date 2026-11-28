@@ -298,11 +298,16 @@ for each skill in the skills file (static + experimental LLM judge). All `uv`
 commands of a run share one fresh `<temp-root>/pact-plugin-eval-XXXXXXXX`
 directory (`--temp-root`, default `/tmp`, checked like the other runners' temp
 roots) with the checkout passed as `--project`; the directory is removed
-afterwards. The record notes the checkout's HEAD (`plugin_eval_commit`) and
-whether it is dirty (`plugin_eval_dirty`), both null unless `--plugin-eval-dir` is the top of a git
-checkout. The pin is recorded, not enforced, unless you pass
-`--expect-commit <full SHA>`, which refuses the run (recorded in `result.json`,
-before any command) unless the checkout is at that commit and clean. At the start of a run, the per-command and sync
+afterwards. The record notes the git checkout that holds `--plugin-eval-dir`
+(`plugin_eval_repo`, its top-level path; for the documented layout, the agents
+clone with the dir at `plugins/plugin-eval`), that checkout's HEAD
+(`plugin_eval_commit`), and whether files under the PluginEval dir have changes
+(`plugin_eval_dirty`; edits elsewhere in the clone do not count). All three are
+null only if the dir is in no git checkout. The pin is recorded, not enforced,
+unless you pass `--expect-commit <full SHA>`, which compares it with that
+checkout's HEAD and refuses the run (recorded in `result.json`, before any
+command) on a different commit, a dirty PluginEval dir, or a dir in no git
+checkout. The setup's pin (the agents commit above) works with it as written. At the start of a run, the per-command and sync
 output files a previous run left in `plugin-eval/` are removed. The
 skills come only from `--skills-file` or, by default,
 `bench/external/plugin-eval-skills.txt` (`~` is expanded); a missing or empty
