@@ -347,6 +347,15 @@ def test_failed_cwd_removal_is_recorded_and_fails_the_run(tmp_path: Path, monkey
     assert summary["complete"] is True
 
 
+def test_stdout_prints_no_child_output(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["slow"])
+    plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills)))
+    out = capsys.readouterr().out
+    assert "late-marker" in _result(manifest)["results"][1]["stderr_tail"]
+    assert "late-marker" not in out and "partial-out" not in out
+    assert str(manifest.parent / "plugin-eval" / "result.json") in out
+
+
 def test_score_commands_get_the_provider_token_and_sync_does_not(tmp_path: Path) -> None:
     # PluginEval's judge runs the claude CLI through claude-agent-sdk, which inherits this env.
     manifest, tool, uv, skills = _setup(tmp_path, ["good"])

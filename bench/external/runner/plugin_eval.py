@@ -11,6 +11,9 @@ Score commands get the provider token as ANTHROPIC_AUTH_TOKEN (with
 ANTHROPIC_BASE_URL); PluginEval's judge reaches the provider through
 claude-agent-sdk, which passes its inherited environment to the claude CLI.
 uv sync gets no token, and ANTHROPIC_API_KEY is never set.
+Child output (in result.json's tails and parsed results, and the per-command
+.stdout.json/.stderr.txt and sync.*.txt files) can contain the token; stdout
+prints only the record's path.
 Once the manifest is read, plugin-eval/result.json is written when the run ends,
 fails a check, times out, aborts or gets SIGTERM/SIGHUP. An unreadable manifest
 exits with a message and no record (the record lives under the manifest's out
@@ -220,7 +223,8 @@ def run(args: argparse.Namespace) -> int:
             except OSError as exc:
                 summary["cleanup_error"] = f"{cwd}: {exc}"
         (out / "result.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(summary, indent=2))
+    # Only the path: the record holds child output, which can contain the provider token.
+    print(f"plugin-eval: complete={summary['complete']} record={out / 'result.json'}")
     ok = all(item.get("exit_code") == 0 and "parse_error" not in item for item in results)
     return 0 if ok and "cleanup_error" not in summary else 1
 
