@@ -153,6 +153,9 @@ from fixtures.hf_cache import hf_cache_env  # noqa: E402
 from fixtures.root_guard import MARKER as _NON_ROOT_MARKER  # noqa: E402
 from fixtures.root_guard import non_root_skip_reason  # noqa: E402
 from fixtures.session_marker import remove_importer_markers  # noqa: E402
+from fixtures.sqlite_copy_probe import ALLOWED as _STDLIB_SQLITE3_ALLOWED  # noqa: E402
+from fixtures.sqlite_copy_probe import STDLIB_SQLITE3 as _STDLIB_SQLITE3  # noqa: E402
+from fixtures.sqlite_copy_probe import CopyProbe  # noqa: E402
 
 # These copy names from shared modules at first import; loading them here keeps a test patch from being copied.
 # tests/test_conftest_import_guard.py derives which modules need a line here.
@@ -1023,6 +1026,33 @@ def _confine_embedding_markers(tmp_path_factory, monkeypatch):
     monkeypatch.setenv(_MARKER_DIR_ENV, str(markers))
     monkeypatch.setattr(memory_init, "_MARKER_DIR", markers)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _probe_sqlite_copies(request, monkeypatch):
+    """Fail a test of an ALLOWED module (fixtures/sqlite_copy_probe.py) in which a
+    standard-library sqlite3 connection to a file is open while a store-code
+    connection to the same file opens or closes, or the reverse. Those modules
+    import the standard module beside the memory scripts; where pysqlite3 links
+    SQLite statically that is a second SQLite copy, and an overlap corrupts the
+    store's WAL. Every other module keeps the standard module out
+    (tests/test_store_sqlite_copy_guard.py), so only these are wrapped.
+    """
+    if request.node.path.name not in _STDLIB_SQLITE3_ALLOWED:
+        yield
+        return
+    try:
+        from scripts import database
+    except Exception:  # noqa: BLE001 — a broken import fails its own tests
+        yield
+        return
+    probe = CopyProbe(_STDLIB_SQLITE3, database.sqlite3)
+    probe.install(monkeypatch)
+    yield
+    assert not probe.overlaps, (
+        "a standard-library and a store-code connection to one file overlapped "
+        "(two SQLite copies corrupt its WAL): " + "; ".join(probe.overlaps)
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -12,11 +12,15 @@ process holds on it, so a standard-library connection held open beside the
 store's can reset the WAL under it and leave the store reading as "database
 disk image is malformed". A test module that imports the memory scripts
 therefore imports `sqlite3` from `scripts.database`, never the standard
-library, unless the allowlist below names why it needs the standard module.
+library, unless ALLOWED (tests/fixtures/sqlite_copy_probe.py) names why it is
+safe there; the suite's conftest then runs that module's tests under
+`CopyProbe`, which fails any test that breaks the stated condition.
 """
 
 import ast
 from pathlib import Path
+
+from fixtures.sqlite_copy_probe import ALLOWED, STDLIB_SQLITE3, CopyProbe
 
 TESTS = Path(__file__).resolve().parent
 SCRIPTS = TESTS.parent / "skills" / "pact-memory" / "scripts"
@@ -27,31 +31,6 @@ MEMORY_MODULES = frozenset(path.stem for path in SCRIPTS.glob("*.py")) - {"__ini
 BARE_MEMORY_MODULES = frozenset({
     "database", "memory_api", "memory_init", "embedding_catchup", "working_memory", "setup_memory",
 })
-
-# Modules that need the standard library module for a reason unrelated to the
-# store they share, each with that reason.
-ALLOWED = {
-    "test_connection_transaction_mode.py": (
-        "compares the standard driver with pysqlite3 on connections of its own"
-    ),
-    "test_file_permissions.py": (
-        "patches database.sqlite3 with the standard module, so every connection the test "
-        "makes, the store's included, is one SQLite copy"
-    ),
-    "test_shred_detect.py": (
-        "shred_detect is a standalone tool that reads the store with the standard module "
-        "by design (it needs no extension), and the test drives it the same way"
-    ),
-    "test_memory_graph.py": (
-        "runs graph.py's duplicate-write arms on a standard-library connection to a "
-        "private database the store code never opens, beside the production class"
-    ),
-    "test_earlier_canonical_bucket.py": (
-        "lowers SQLITE_LIMIT_VARIABLE_NUMBER with Connection.setlimit, which pysqlite3 "
-        "does not provide, on the one connection that test reads through"
-    ),
-}
-
 
 def _imports(tree):
     for node in ast.walk(tree):
@@ -103,6 +82,14 @@ def test_no_store_test_imports_the_standard_sqlite3():
     )
 
 
+def test_every_allowlisted_module_states_why_it_is_safe():
+    """RED WHEN an ALLOWED entry has no reason: an entry must name the
+    condition under which its standard-library connections never overlap a
+    store-code connection to the same file."""
+    blank = sorted(path for path, reason in ALLOWED.items() if not str(reason or "").strip())
+    assert not blank, blank
+
+
 def test_every_allowlisted_module_still_needs_its_entry():
     """RED WHEN an allowlisted module no longer imports the standard module
     beside the memory scripts, so its entry has gone stale."""
@@ -122,3 +109,49 @@ def test_the_guard_sees_both_import_shapes(tmp_path):
     for source, offends in cases.items():
         tree = ast.parse(source)
         assert (_reads_the_store(tree) and _imports_stdlib_sqlite3(tree)) is offends, source
+
+
+def _fake_store_driver():
+    """A second driver object over the standard module, so the probe sees two
+    kinds wherever it runs (one SQLite copy or two)."""
+    import types
+
+    return types.SimpleNamespace(connect=STDLIB_SQLITE3.connect, Connection=STDLIB_SQLITE3.Connection)
+
+
+def test_the_probe_catches_a_held_connection_across_a_store_open_and_close(tmp_path, monkeypatch):
+    """The 693adf3d shape: a standard-library connection held open while the
+    store code opens and closes its own connection to the same file. RED WHEN
+    the probe records nothing, or does not name the file and both sites."""
+    store_driver = _fake_store_driver()
+    probe = CopyProbe(STDLIB_SQLITE3, store_driver)
+    probe.install(monkeypatch)
+    db = tmp_path / "store.db"
+    held = STDLIB_SQLITE3.connect(str(db))
+    held.execute("CREATE TABLE t (x)")
+    held.commit()
+    store = store_driver.connect(str(db))
+    store.execute("SELECT * FROM t").fetchall()
+    store.close()
+    held.close()
+    assert len(probe.overlaps) == 2, probe.overlaps
+    assert all(str(db.resolve()) in line for line in probe.overlaps), probe.overlaps
+    assert "store-code connection opened at test_store_sqlite_copy_guard.py:" in probe.overlaps[0], probe.overlaps
+    assert "standard-library connection opened at test_store_sqlite_copy_guard.py:" in probe.overlaps[0], probe.overlaps
+    assert "store-code connection closed at" in probe.overlaps[1], probe.overlaps
+
+
+def test_the_probe_passes_connections_that_never_overlap(tmp_path, monkeypatch):
+    """Control: one after the other on one file, and both at once on two
+    files, record nothing."""
+    store_driver = _fake_store_driver()
+    probe = CopyProbe(STDLIB_SQLITE3, store_driver)
+    probe.install(monkeypatch)
+    first = STDLIB_SQLITE3.connect(str(tmp_path / "a.db"))
+    first.close()
+    store_driver.connect(str(tmp_path / "a.db")).close()
+    other = STDLIB_SQLITE3.connect(str(tmp_path / "b.db"))
+    store_driver.connect(str(tmp_path / "a.db")).close()
+    other.close()
+    assert probe.overlaps == [], probe.overlaps
+
