@@ -2808,6 +2808,10 @@ def rekey_project(
             the calling session's own folder-name id and `from_id` its legacy
             candidate (`cli._own_folder_name_target`), the one non-canonical
             target allowed.
+        memory_ids: None moves the whole bucket. Otherwise only these of its
+            memories that are still filed under `from_id` move, as the subset
+            move above describes; an empty list, or ids no longer there, moves
+            nothing.
 
     Returns:
         The counters dict. Every key is always present.
