@@ -66,11 +66,29 @@ def _body(path: Path) -> str:
     return _flatten("\n".join(_body_lines(path)))
 
 
+def _section(path: Path, start: str, end: str) -> str:
+    """The flattened body from the line `start` to the line `end`."""
+    body = _body(path)
+    assert body.count(start) == 1, f"expected one {start!r} in {path.name}"
+    at = body.index(start)
+    return body[at:body.index(end, at)]
+
+
+def _show_fields() -> str:
+    """The `project-id show` field list that follows the CLI table."""
+    return _section(SKILL, "project-id show fields:", "project-id rekey rules:")
+
+
+def _rekey_rules() -> str:
+    """The `project-id rekey` rule list that follows the CLI table."""
+    return _section(SKILL, "project-id rekey rules:", "Decline remedies.")
+
+
 class TestDeclineReasonIsDocumentedAsEmitted:
     """The `project-id show` row names the shape and every cause."""
 
     def test_the_row_states_the_emitted_shape(self):
-        row = _table_row(SKILL, "project-id show")
+        row = _show_fields()
         assert (
             "decline_reason is {source, reason, override_path} whenever "
             "resolution declined for a named cause, and null otherwise"
@@ -81,13 +99,13 @@ class TestDeclineReasonIsDocumentedAsEmitted:
 
     @pytest.mark.parametrize("token", DECLINE_TOKENS)
     def test_each_cause_is_named_in_the_row(self, token):
-        assert token in _table_row(SKILL, "project-id show")
+        assert token in _show_fields()
 
     REASON_LIST_START = "reason is one of "
     REASON_LIST_END = ", and override_path is"
 
     def _documented_reasons(self) -> set:
-        row = _table_row(SKILL, "project-id show")
+        row = _show_fields()
         start = row.index(self.REASON_LIST_START) + len(self.REASON_LIST_START)
         listed = row[start:row.index(self.REASON_LIST_END, start)]
         return {n.strip() for n in listed.replace(" or ", ", ").split(",") if n.strip()}
@@ -361,6 +379,14 @@ class TestSecretaryProjectionKey:
             "in the briefing."
         ) in _body(SECRETARY)
 
+    def test_a_hidden_bucket_on_sync_is_reported_to_the_lead(self):
+        assert (
+            "When sync shows projected: 0, or its output carries a legacy_scope "
+            "or an earlier_ids list beside result, report that legacy_scope or "
+            "earlier_ids entry and the rekey command it names to the team-lead; "
+            "do not run that command yourself."
+        ) in _body(SECRETARY)
+
     def test_the_resolver_restatement_is_gone(self):
         """The rule lives in SKILL.md and the code; a copy here drifts."""
         body = _body(SECRETARY)
@@ -498,7 +524,7 @@ class TestOverridePathIsNullWhenNoPinCanRemedy:
     def _clause(self) -> str:
         """The override_path clause of the show row plus the decline-remedy
         paragraph that follows the table."""
-        row = _table_row(SKILL, "project-id show")
+        row = _show_fields()
         body = _body(SKILL)
         remedies = body[body.index("Decline remedies."):body.index("WHEN A PROJECT RETURNS NO MEMORIES")]
         return row[row.index("override_path is the"):] + " " + remedies
@@ -515,7 +541,7 @@ class TestOverridePathIsNullWhenNoPinCanRemedy:
     def test_the_show_row_is_bare_and_the_remedies_follow_the_table(self):
         row = _table_row(SKILL, "project-id show")
         assert "because" not in row and "For gitfile_redirect:" not in row
-        assert "The decline remedies follow the table" in row
+        assert "Its fields, then the decline remedies, follow the table" in row
         assert "Decline remedies. For gitfile_redirect, the CLI prints: " in _body(SKILL)
 
     def test_the_redirect_remedy_is_the_code_remedy(self):
@@ -815,7 +841,7 @@ class TestRekeyRemediesNameTheirTarget:
         assert "follow the candidate it names" not in body.lower()
 
     def test_the_census_row_shape_and_which_rows_carry_a_command(self):
-        row = _table_row(SKILL, "project-id show")
+        row = _show_fields()
         assert (
             "Each candidate row is {id, memory_count, relation, rekey}, relation "
             "one of current, legacy_candidate, case_variant, earlier_id or other; "
@@ -831,7 +857,7 @@ class TestRekeyRemediesNameTheirTarget:
         ) in _body(SKILL)
 
     def test_a_named_absent_store_is_refused_not_reported_absent(self):
-        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository] [--only-placed-here], or project-id rekey --candidates alone")
+        row = _rekey_rules()
         assert (
             "DB_PATH_NOT_FOUND when --db-path names a store that is not "
             "present, and nothing is created"
@@ -839,7 +865,7 @@ class TestRekeyRemediesNameTheirTarget:
         assert "A store path that does not exist answers store_absent" not in row
 
     def test_the_row_names_the_foreign_source_refusal(self):
-        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository] [--only-placed-here], or project-id rekey --candidates alone")
+        row = _rekey_rules()
         assert (
             "A move into this checkout's own id from a bucket excluded here, or "
             "from a canonical id that is neither this checkout's nor an earlier "
@@ -848,7 +874,7 @@ class TestRekeyRemediesNameTheirTarget:
         ) in row
 
     def test_the_envelope_field_sentences_are_present(self):
-        row = _table_row(SKILL, "project-id rekey --from=<id> [--to=<canonical>] [--dry-run] [--apply] [--into-another-repository] [--from-another-repository] [--only-placed-here], or project-id rekey --candidates alone")
+        row = _rekey_rules()
         assert (
             "When the default store does not exist yet, the command answers "
             "store_absent: true and creates nothing; a --from bucket with no rows answers "
@@ -1516,7 +1542,7 @@ class TestNullOverridePathIsMeasured:
         return cells
 
     def _clause(self) -> str:
-        row = _table_row(SKILL, "project-id show")
+        row = _show_fields()
         return row[row.index("override_path is the"):]
 
     def _documented_causes(self) -> set:
@@ -1624,18 +1650,18 @@ class TestNullOverridePathIsMeasured:
             "remote and the origin is an ssh or scp url whose host looks like an ssh "
             "host alias (no dot, or a name in which github.com is followed by a "
             "character other than a dot, such as github.com-work); else null."
-        ) in _table_row(SKILL, "project-id show")
+        ) in _show_fields()
 
     def test_the_show_row_says_process_repo_root_is_the_main_checkout(self):
         assert (
             "process_repo_root is the root of the process's repository, the main "
             "checkout from a linked worktree."
-        ) in _table_row(SKILL, "project-id show")
+        ) in _show_fields()
 
     def test_the_show_row_names_what_repo_root_is(self):
         assert (
             "repo_root is the identity root;"
-        ) in _table_row(SKILL, "project-id show")
+        ) in _show_fields()
 
     DOC_LEAD = "It is None for "
 
