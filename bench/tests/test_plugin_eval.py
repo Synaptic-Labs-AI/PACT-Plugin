@@ -316,48 +316,62 @@ def test_previous_run_outputs_are_removed(tmp_path: Path) -> None:
     assert "notes.txt" in names  # files the runner does not write are left alone
 
 
-def test_record_names_the_plugin_eval_commit(tmp_path: Path) -> None:
-    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
-    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
-    assert (_result(manifest)["plugin_eval_commit"], _result(manifest)["plugin_eval_dirty"]) == (None, None)
-    git_env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, env=git_env, check=True)
-    # A plain directory inside another repo must not report that repo's commit.
-    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
-    assert (_result(manifest)["plugin_eval_commit"], _result(manifest)["plugin_eval_dirty"]) == (None, None)
-    env = {
-        **os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid", "GIT_COMMITTER_NAME": "t",
-        "GIT_COMMITTER_EMAIL": "t@e.invalid",
-    }
+GIT_TEST_ENV = {
+    "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid", "GIT_COMMITTER_NAME": "t",
+    "GIT_COMMITTER_EMAIL": "t@e.invalid",
+}
+
+
+def _nested_checkout(tmp_path: Path) -> tuple[Path, Path, str]:
+    """The documented layout: PluginEval at plugins/plugin-eval inside a committed agents clone."""
+    agents = tmp_path / "agents"
+    tool = agents / "plugins" / "plugin-eval"
+    tool.mkdir(parents=True)
+    (tool / "pyproject.toml").write_text("", encoding="utf-8")
+    (agents / "README.md").write_text("agents\n", encoding="utf-8")
+    env = {**os.environ, **GIT_TEST_ENV}
     for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-gpg-sign", "-m", "pin"]):
-        subprocess.run(["git", *cmd], cwd=tool, env=env, check=True)
-    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tool, env=env, capture_output=True, text=True).stdout.strip()
+        subprocess.run(["git", *cmd], cwd=agents, env=env, check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=agents, env=env, capture_output=True, text=True).stdout
+    return agents, tool, head.strip()
+
+
+def _state(manifest: Path) -> tuple:
+    summary = _result(manifest)
+    return summary["plugin_eval_repo"], summary["plugin_eval_commit"], summary["plugin_eval_dirty"]
+
+
+def test_record_names_the_checkout_holding_the_plugin_eval_dir(tmp_path: Path) -> None:
+    manifest, plain_tool, uv, skills = _setup(tmp_path, ["good"])
+    assert plugin_eval.run(_args(manifest, plain_tool, uv, "--skills-file", str(skills))) == 0
+    assert _state(manifest) == (None, None, None)  # in no git checkout
+    agents, tool, head = _nested_checkout(tmp_path)
     assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
-    assert (_result(manifest)["plugin_eval_commit"], _result(manifest)["plugin_eval_dirty"]) == (head, False)
+    assert _state(manifest) == (str(agents.resolve()), head, False)
+    (agents / "README.md").write_text("edited elsewhere in the clone\n", encoding="utf-8")
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
+    assert _state(manifest)[2] is False  # a change outside the PluginEval dir does not count
     (tool / "local-edit.py").write_text("x = 1\n", encoding="utf-8")
     assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
-    assert _result(manifest)["plugin_eval_dirty"] is True
+    assert _state(manifest)[2] is True
 
 
-def _pin(tool: Path) -> str:
-    env = {
-        **os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid", "GIT_COMMITTER_NAME": "t",
-        "GIT_COMMITTER_EMAIL": "t@e.invalid",
-    }
-    for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-gpg-sign", "-m", "pin"]):
-        subprocess.run(["git", *cmd], cwd=tool, env=env, check=True)
-    return subprocess.run(["git", "rev-parse", "HEAD"], cwd=tool, env=env, capture_output=True, text=True).stdout.strip()
-
-
-def test_expect_commit_refuses_a_mismatch_or_a_dirty_checkout(tmp_path: Path) -> None:
-    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
-    head = _pin(tool)
+def test_expect_commit_passes_for_a_nested_dir_at_the_pin(tmp_path: Path) -> None:
+    manifest, _, uv, skills = _setup(tmp_path, ["good"])
+    agents, tool, head = _nested_checkout(tmp_path)
+    (agents / "README.md").write_text("edited elsewhere in the clone\n", encoding="utf-8")
     assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--expect-commit", head)) == 0
+
+
+def test_expect_commit_refuses_a_mismatch_a_dirty_dir_or_no_git(tmp_path: Path) -> None:
+    manifest, plain_tool, uv, skills = _setup(tmp_path, ["good"])
+    agents, tool, head = _nested_checkout(tmp_path)
     with pytest.raises(SystemExit, match="expected clean 0000"):
         plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--expect-commit", "0" * 40))
     assert _result(manifest)["results"] == [] and "expected clean" in _result(manifest)["error"]
+    with pytest.raises(SystemExit, match="is at None"):
+        plugin_eval.run(_args(manifest, plain_tool, uv, "--skills-file", str(skills), "--expect-commit", head))
     (tool / "local-edit.py").write_text("x = 1\n", encoding="utf-8")
     with pytest.raises(SystemExit, match="dirty=True"):
         plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--expect-commit", head))

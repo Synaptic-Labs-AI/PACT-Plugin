@@ -7,10 +7,12 @@ uv sync --frozen, then the whole-plugin quick score and the skill scores listed
 in plugin-eval-skills.txt (or --skills-file). All uv commands of a run share one
 fresh cwd under --temp-root (refused by prepare.check_clean_root if that root is
 in the repo or below a Claude Code memory file), with the checkout passed as
---project; uv sync and uv run both use --frozen. The record names the checkout's
-git commit and whether it was dirty (null unless the directory is itself the top
-of a git checkout). The pin is enforced only with --expect-commit, which refuses
-a different commit or a dirty checkout before any command runs. A score whose
+--project; uv sync and uv run both use --frozen. The record names the git
+checkout holding the PluginEval dir (plugin_eval_repo, its toplevel), that
+checkout's HEAD commit, and whether files under the PluginEval dir are dirty; all
+three are null if the dir is in no git checkout. The pin is enforced only with
+--expect-commit, which refuses a different commit, a dirty PluginEval dir or a
+non-git dir before any command runs. A score whose
 JSON has no composite counts as a failed command.
 Output files a previous run left in plugin-eval/ are removed at the start.
 Score commands start with the provider token as ANTHROPIC_AUTH_TOKEN (with
@@ -59,18 +61,18 @@ def _parse_json(text: str) -> dict[str, Any]:
     raise ValueError("no JSON object in output")
 
 
-def _checkout_state(directory: Path) -> tuple[str | None, bool | None]:
-    """(HEAD commit, dirty) of the PluginEval checkout, or (None, None) if the directory is
-    not itself the top of a git checkout (a plain dir inside another repo reads as None)."""
+def _checkout_state(directory: Path) -> tuple[str | None, str | None, bool | None]:
+    """(toplevel, HEAD commit, dirty) of the git checkout holding the PluginEval dir; the dir
+    may sit below the toplevel (plugins/plugin-eval in the agents clone). dirty covers only
+    files under the dir. (None, None, None) if the dir is in no git checkout."""
     try:
         top = prepare._git(directory, "rev-parse", "--show-toplevel").strip()
-        if Path(top).resolve() != directory.resolve():
-            return None, None
         commit = prepare._git(directory, "rev-parse", "HEAD").strip()
-        dirty = bool(prepare._git(directory, "status", "--porcelain").strip())
+        # git -C <dir> status -- . scopes the check to the PluginEval dir.
+        dirty = bool(prepare._git(directory, "status", "--porcelain", "--", ".").strip())
     except (SystemExit, OSError):
-        return None, None
-    return commit, dirty
+        return None, None, None
+    return top, commit, dirty
 
 
 def load_skills(skills_file: Path) -> list[str]:
@@ -188,6 +190,7 @@ def run(args: argparse.Namespace) -> int:
     summary: dict[str, Any] = {
         "schema": "pact-bench/plugin-eval/1",
         "plugin_eval_dir": None,
+        "plugin_eval_repo": None,
         "plugin_eval_commit": None,
         "plugin_eval_dirty": None,
         "temp_root": None,
@@ -209,7 +212,9 @@ def run(args: argparse.Namespace) -> int:
             summary["plugin_eval_dir"] = str(plugin_eval_dir)
             if not (plugin_eval_dir / "pyproject.toml").is_file():
                 raise SystemExit(f"not a PluginEval checkout: {plugin_eval_dir}")
-            summary["plugin_eval_commit"], summary["plugin_eval_dirty"] = _checkout_state(plugin_eval_dir)
+            (
+                summary["plugin_eval_repo"], summary["plugin_eval_commit"], summary["plugin_eval_dirty"]
+            ) = _checkout_state(plugin_eval_dir)
             if args.expect_commit and (
                 summary["plugin_eval_commit"] != args.expect_commit or summary["plugin_eval_dirty"] is not False
             ):
@@ -294,7 +299,8 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument(
         "--expect-commit",
         default=None,
-        help="refuse to run unless the PluginEval checkout is at this commit (full SHA) and clean",
+        help="refuse to run unless the git checkout holding the PluginEval dir is at this commit (full SHA) "
+        "and the PluginEval dir is clean",
     )
     parser.add_argument(
         "--temp-root",
