@@ -65,7 +65,9 @@ def build_commands(
 
 def _exec(cmd: list[str], cwd: Path, env: dict[str, str], timeout: int) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(cmd, cwd=str(cwd), env=env, capture_output=True, text=True, timeout=timeout)
+        return prepare.run_process_group(
+            cmd, timeout, cwd=str(cwd), env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
     except FileNotFoundError as exc:
         raise SystemExit(f"cannot run {cmd[0]!r}: {exc}") from exc
 
@@ -87,7 +89,8 @@ def _score_one(
         parsed = _parse_json(proc.stdout)
         record["result"] = parsed
         record["composite"] = parsed.get("composite")
-        record["layers"] = [layer.get("layer") for layer in parsed.get("layers", []) if isinstance(layer, dict)]
+        layers = parsed.get("layers")
+        record["layers"] = [layer.get("layer") for layer in layers if isinstance(layer, dict)] if isinstance(layers, list) else []
         record["model_usage"] = parsed.get("model_usage")
     except ValueError as exc:
         record["parse_error"] = str(exc)
@@ -105,7 +108,7 @@ def run(args: argparse.Namespace) -> int:
     plugin_eval_dir = Path(args.plugin_eval_dir).expanduser().resolve()
     if not (plugin_eval_dir / "pyproject.toml").is_file():
         raise SystemExit(f"not a PluginEval checkout: {plugin_eval_dir}")
-    skills = load_skills(Path(args.skills_file) if args.skills_file else DEFAULT_SKILLS_FILE)
+    skills = load_skills(Path(args.skills_file).expanduser() if args.skills_file else DEFAULT_SKILLS_FILE)
     settings = json.loads((scratch / "config" / "settings.json").read_text(encoding="utf-8"))
     env = prepare.build_child_env(
         dict(settings.get("env") or {}),
@@ -120,23 +123,43 @@ def run(args: argparse.Namespace) -> int:
     out.mkdir(parents=True, exist_ok=True)
     sync, commands = build_commands(args.uv, plugin, skills)
     results: list[dict[str, Any]] = []
+    not_run = [label for label, _ in commands]
+    # complete stays false, with error/aborted_command/not_run set, unless every command was attempted.
     summary: dict[str, Any] = {
         "schema": "pact-bench/plugin-eval/1",
         "plugin_eval_dir": str(plugin_eval_dir),
+        "complete": False,
+        "error": None,
+        "aborted_command": None,
+        "sync": None,
         "results": results,
+        "not_run": not_run,
     }
+    current: dict[str, Any] | None = None
     try:
         if not args.skip_sync:
+            current = {"label": "sync", "command": sync}
+            summary["sync"] = dict(current)
             try:
                 proc = _exec(sync, plugin_eval_dir, sync_env, args.sync_timeout)
             except subprocess.TimeoutExpired as exc:
+                summary["sync"]["timed_out"] = True
                 raise SystemExit(f"uv sync timed out after {args.sync_timeout}s") from exc
+            summary["sync"].update(exit_code=proc.returncode, stderr_tail=proc.stderr[-2000:])
             (out / "sync.stdout.txt").write_text(proc.stdout, encoding="utf-8")
             (out / "sync.stderr.txt").write_text(proc.stderr, encoding="utf-8")
             if proc.returncode != 0:
                 raise SystemExit(f"uv sync failed: {proc.returncode}")
         for label, cmd in commands:
+            current = {"label": label, "command": cmd}
+            not_run.remove(label)
             results.append(_score_one(label, cmd, plugin_eval_dir, env, args.timeout, out))
+        current = None
+        summary["complete"] = True
+    except BaseException as exc:
+        summary["error"] = str(exc.code) if isinstance(exc, SystemExit) else f"{type(exc).__name__}: {exc}"
+        summary["aborted_command"] = current
+        raise
     finally:
         (out / "result.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2))

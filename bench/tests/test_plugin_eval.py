@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -13,9 +15,16 @@ import json, os, sys, time
 args = sys.argv[1:]
 if args[0] == "sync":
     open({log!r}, "w").write(json.dumps({{"token": "ANTHROPIC_AUTH_TOKEN" in os.environ}}))
-    sys.exit(0)
+    sys.exit(int(os.environ.get("FAKE_SYNC_RC", "0")))
 name = os.path.basename(args[3])
-if name == "nonjson":
+if name == "nullayers":
+    print(json.dumps({{"composite": 1, "layers": None}}))
+elif name == "slowkid":
+    import subprocess
+    kid = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    open({kid_pid!r}, "w").write(str(kid.pid))
+    time.sleep(30)
+elif name == "nonjson":
     print("score finished")
 elif name == "scalar":
     print("42")
@@ -53,7 +62,9 @@ def _setup(tmp_path: Path, skills: list[str] | None) -> tuple[Path, Path, Path, 
     (tool / "pyproject.toml").write_text("", encoding="utf-8")
     log = tmp_path / "sync.json"
     uv = tmp_path / "uv"
-    uv.write_text(FAKE_UV.format(python=sys.executable, log=str(log)), encoding="utf-8")
+    uv.write_text(
+        FAKE_UV.format(python=sys.executable, log=str(log), kid_pid=str(tmp_path / "kid.pid")), encoding="utf-8"
+    )
     uv.chmod(0o755)
     skills_file = tmp_path / "skills.txt"
     if skills is not None:
@@ -105,6 +116,45 @@ def test_run_all_good_returns_zero_and_hides_token_from_sync(tmp_path: Path) -> 
     assert [r["label"] for r in records] == [str(manifest.parent / "pact-plugin"), "good"]
     assert all(r["exit_code"] == 0 and "parse_error" not in r for r in records)
     assert records[1]["layers"] == ["static"]
+    summary = _result(manifest)
+    assert (summary["complete"], summary["error"], summary["aborted_command"], summary["not_run"]) == (True, None, None, [])
+    assert summary["sync"]["exit_code"] == 0
+
+
+def test_run_null_layers_does_not_lose_later_records(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["nullayers", "good"])
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
+    records = {r["label"]: r for r in _result(manifest)["results"]}
+    assert records["nullayers"]["layers"] == []
+    assert records["good"]["layers"] == ["static"]
+
+
+def _dead(pid: int) -> bool:
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
+        except FileNotFoundError:
+            return True
+        if state == "Z":
+            return True
+        time.sleep(0.1)
+    return False
+
+
+def test_timeout_kills_grandchildren(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["slowkid"])
+    started = time.monotonic()
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 1
+    # A surviving grandchild holds the output pipe open until its 30s sleep ends.
+    assert time.monotonic() - started < 15
+    assert _result(manifest)["results"][1]["timed_out"] is True
+    pid = int((tmp_path / "kid.pid").read_text())
+    try:
+        assert _dead(pid)
+    finally:
+        if not _dead(pid):
+            os.kill(pid, 9)
 
 
 @pytest.mark.parametrize(
@@ -129,7 +179,32 @@ def test_run_missing_uv_exits_clearly_and_writes_result(tmp_path: Path) -> None:
     args = _args(manifest, tool, tmp_path / "no-uv", "--skills-file", str(skills), "--skip-sync")
     with pytest.raises(SystemExit, match="cannot run"):
         plugin_eval.run(args)
-    assert _result(manifest)["results"] == []
+    summary = _result(manifest)
+    assert summary["results"] == []
+    assert summary["complete"] is False
+    assert "cannot run" in summary["error"]
+    assert summary["aborted_command"]["label"] == str(manifest.parent / "pact-plugin")
+    assert summary["not_run"] == ["good"]
+
+
+def test_run_failed_sync_is_recorded(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    settings = manifest.parent / "config" / "settings.json"
+    settings.write_text(json.dumps({"env": {"FAKE_SYNC_RC": "5"}}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="uv sync failed: 5"):
+        plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills)))
+    summary = _result(manifest)
+    assert summary["complete"] is False
+    assert summary["error"] == "uv sync failed: 5"
+    assert summary["sync"]["exit_code"] == 5
+    assert summary["aborted_command"]["label"] == "sync"
+    assert summary["not_run"] == [str(manifest.parent / "pact-plugin"), "good"]
+
+
+def test_skills_file_expands_user(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    monkeypatch.setenv("HOME", str(tmp_path))
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", "~/" + skills.name)) == 0
 
 
 @pytest.mark.parametrize("content", [None, ""])

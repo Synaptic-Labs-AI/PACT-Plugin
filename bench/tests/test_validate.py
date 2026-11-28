@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -152,6 +155,30 @@ BROKEN = {
          "@@ -3,2 +3,2 @@\n def test_fix():\n-    assert value() == 2\n+    assert value() == 1\n"},
         "modifies hidden_tests",
     ),
+    "patch_touches_non_ascii_hidden_path": (
+        {
+            "hidden": {"test_\u00e9.py": HIDDEN_TEST},
+            "gold": "diff --git a/hidden_tests/test_\u00e9.py b/hidden_tests/test_\u00e9.py\n"
+            "--- a/hidden_tests/test_\u00e9.py\n+++ b/hidden_tests/test_\u00e9.py\n"
+            "@@ -3,2 +3,2 @@\n def test_fix():\n-    assert value() == 2\n+    assert value() == 1\n",
+        },
+        "modifies hidden_tests",
+    ),
+    "patch_renames_into_hidden_tests": (
+        {
+            "gold": "diff --git a/calc.py b/hidden_tests/calc.py\nsimilarity index 100%\n"
+            "rename from calc.py\nrename to hidden_tests/calc.py\n",
+        },
+        "modifies hidden_tests",
+    ),
+    "patch_renames_out_of_hidden_tests": (
+        {
+            "gold": "diff --git a/hidden_tests/test_hidden.py b/test_moved.py\nsimilarity index 100%\n"
+            "rename from hidden_tests/test_hidden.py\nrename to test_moved.py\n",
+        },
+        "modifies hidden_tests",
+    ),
+    "git_fails": ({"files": {".git": "gitdir: /nonexistent\n"}}, "git init -q -b main failed"),
     "timeout": (
         {
             "files": {"tests/test_calc.py": "import time\n\ndef test_seed():\n    time.sleep(10)\n"},
@@ -159,6 +186,9 @@ BROKEN = {
         },
         "timed out after 1s",
     ),
+    "timeout_not_a_number": ({"meta": {"timeout_seconds": "60"}}, "timeout_seconds must be a positive integer"),
+    "timeout_zero": ({"meta": {"timeout_seconds": 0}}, "timeout_seconds must be a positive integer"),
+    "timeout_bool": ({"meta": {"timeout_seconds": True}}, "timeout_seconds must be a positive integer"),
 }
 
 
@@ -171,11 +201,63 @@ def test_validator_rejects_broken_task(tmp_path: Path, case: str) -> None:
 
 def test_main_reports_every_task_and_fails_if_any_failed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     make_task(tmp_path, "a_bad", gold="")
-    make_task(tmp_path, "b_good")
+    (make_task(tmp_path, "b_copy_error") / "fixture" / "dangling").symlink_to(tmp_path / "missing")
+    make_task(tmp_path, "c_good")
     assert validate.main(["--root", str(tmp_path)]) == 1
     tasks = json.loads(capsys.readouterr().out)["tasks"]
-    assert [t["status"] for t in tasks] == ["fail", "pass"]
+    assert [(t["id"], t["status"]) for t in tasks] == [("a_bad", "fail"), ("b_copy_error", "fail"), ("c_good", "pass")]
     assert "a_bad" in tasks[0]["error"]
+    assert "b_copy_error" in tasks[1]["error"]
+
+
+def _git_count(repo: Path) -> int:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    out = subprocess.run(
+        ["git", "-C", str(repo), "rev-list", "--count", "HEAD"], env=env, capture_output=True, text=True, check=True
+    )
+    return int(out.stdout)
+
+
+def test_inherited_git_env_does_not_redirect_commits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1", **validate.GIT_ENV}
+    for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "--no-gpg-sign", "-m", "outer"]):
+        subprocess.run(["git", *args], cwd=outer, env=env, check=True)
+    assert _git_count(outer) == 1
+    monkeypatch.setenv("GIT_DIR", str(outer / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(outer))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(outer / ".git" / "index"))
+    assert validate.validate_task(make_task(tmp_path / "t"), sys.executable)["status"] == "pass"
+    assert _git_count(outer) == 1
+
+
+def test_timeout_kills_grandchildren(tmp_path: Path) -> None:
+    pid_file = tmp_path / "kid.pid"
+    seed = (
+        "import subprocess, sys, time\n\ndef test_seed():\n"
+        "    kid = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        f"    open({str(pid_file)!r}, 'w').write(str(kid.pid))\n"
+        "    time.sleep(30)\n"
+    )
+    task = make_task(tmp_path, files={"tests/test_calc.py": seed}, meta={"timeout_seconds": 2})
+    started = time.monotonic()
+    with pytest.raises(validate.TaskInvalid, match="timed out"):
+        validate.validate_task(task, sys.executable)
+    # A surviving grandchild holds the output pipe open until its 30s sleep ends.
+    assert time.monotonic() - started < 15
+    pid = int(pid_file.read_text())
+    deadline = time.monotonic() + 5
+    alive = True
+    while alive and time.monotonic() < deadline:
+        try:
+            alive = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
+        except FileNotFoundError:
+            alive = False
+        time.sleep(0.1)
+    if alive:
+        os.kill(pid, 9)
+    assert not alive
 
 
 def test_main_single_task_passes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
