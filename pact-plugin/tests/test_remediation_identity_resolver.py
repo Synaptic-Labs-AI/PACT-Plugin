@@ -4707,11 +4707,10 @@ _DESCRIBED_PRINTED_CLAUSES = {
     # Why an origin declined as unrepresentable (unrepresentable_detail): no change to a `.git`.
     "GitHub serves no repository at its path": _OBSERVED,
     "a github.com id is exactly owner/repo of GitHub names, with no home-relative or /.git path and no repository name ending in .git": _OBSERVED,
-    "it names no portable repository": _OBSERVED,
     "its host is an IPv6 literal that names no portable server (this machine, an IPv4-mapped address or a zone index)": _OBSERVED,
     "its host is in the reserved .invalid namespace": _OBSERVED,
     "its host is not a valid host name": _OBSERVED,
-    "its host is this machine (a loopback or unspecified address)": _OBSERVED,
+    "its host is this machine (a loopback or unspecified address), which names no portable repository": _OBSERVED,
     "its path is empty or holds a segment an id cannot hold": _OBSERVED,
     "its port is not a valid port number (1-65535, no leading zero)": _OBSERVED,
     "its scheme is not one an id is read from (https, http, ssh, git, git+ssh, ssh+git)": _OBSERVED,

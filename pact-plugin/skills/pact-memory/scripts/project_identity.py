@@ -1354,7 +1354,7 @@ def unrepresentable_detail(url: Optional[str]) -> Optional[str]:
     if _reserved_host(host):
         if host == "invalid" or host.endswith(".invalid"):
             return "its host is in the reserved .invalid namespace"
-        return "its host is this machine (a loopback or unspecified address), so it names no portable repository"
+        return "its host is this machine (a loopback or unspecified address), which names no portable repository"
     if not _valid_host(host):
         return "its host is not a valid host name"
     if host in ("github.com", "www.github.com", _GITHUB_SSH_443_HOST):
