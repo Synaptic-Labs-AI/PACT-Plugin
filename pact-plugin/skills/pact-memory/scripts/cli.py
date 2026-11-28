@@ -1912,9 +1912,12 @@ def _project_id_rekey(args, db_path) -> NoReturn:
     if args.apply:
         # The move changed the bucket set this process cached.
         _invalidate_legacy_scope_cache()
+    # A PARTIAL MOVE (--only-placed-here) MOVES ONLY MEMORIES ITS OWN FILE
+    # ROWS PLACE HERE, so the bucket-wide count of memories no session wrote
+    # says nothing about what it moved: no note.
     unattributed = (
         (state.get("sessions") or {}).get("unattributed", 0)
-        if legacy_verdict is not None and not noop
+        if legacy_verdict is not None and not noop and placed_split is None
         else 0
     )
     if unattributed and not counters.get("from_bucket_empty") and not read_disclosed:

@@ -3062,3 +3062,38 @@ def test_only_placed_here_from_another_repositorys_canonical_id_needs_the_flag(
     code, applied = _cli([*base, "--only-placed-here", "--from-another-repository", "--apply"], capfd)
     assert code == 0 and applied["result"]["memories"] == 1, applied
     assert _placed_rows(store)["memories"] == {"placed001": "github.com/a/app", "away00001": "github.com/b/app"}
+
+
+def test_a_partial_move_prints_no_bucket_wide_unattributed_note(identity_env, store, monkeypatch, capfd):
+    """x/app's old 'app' bucket is verified by its file row here and holds
+    memories no recorded session wrote; a whole move says it moved them with
+    the bucket. --only-placed-here moves only memories its own file rows
+    place here, so it prints no such note. RED WHEN the partial move claims
+    it moved the bucket's unattributed memories."""
+    from scripts import memory_api
+    from scripts.cli import main
+
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    memory_api._UNPROVEN_WARNED.clear()
+    x = make_repo(identity_env / "x" / "app", remote="https://github.com/a/app.git")
+    (x / "f.py").write_text("x\n")
+    _seed_linked(store, "app", "mine00001", [str(x / "f.py")])
+    _seed_linked(store, "app", "bare00001", [])
+    monkeypatch.chdir(x)
+
+    def output(argv):
+        with pytest.raises(SystemExit):
+            main(argv)
+        captured = capfd.readouterr()
+        return captured.out + captured.err
+
+    import shutil
+
+    twin = store.with_name("twin.db")
+    shutil.copy(store, twin)
+    # --apply: the read's own disclosure is quiet then, so the rekey states it.
+    base = ["project-id", "rekey", "--from=app", "--to=github.com/a/app", "--apply"]
+    assert "came from no recorded session" in output([*base, "--db-path", str(twin)])
+    memory_api._LEGACY_SCOPE_CACHE.clear()
+    memory_api._UNPROVEN_WARNED.clear()
+    assert "came from no recorded session" not in output([*base, "--only-placed-here", "--db-path", str(store)])
