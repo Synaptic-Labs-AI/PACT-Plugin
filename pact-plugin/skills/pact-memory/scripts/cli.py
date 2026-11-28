@@ -1009,7 +1009,9 @@ def cmd_sync(args, db_path=None):
     `wrote`. `empty` means project identity is unresolved or the project has
     no records; the file was not touched. `project_id` is the id the records
     were selected under, so an `empty` can be checked against the project the
-    caller expected.
+    caller expected. A bucket the read left out is named beside `result`
+    (`_hidden_bucket_scope`), as `list` and `search` name it, so a sync that
+    projects 0 rows says why on stdout.
     """
     memory = PACTMemory(db_path=db_path)
     sync_kwargs = {}
@@ -1040,7 +1042,7 @@ def cmd_sync(args, db_path=None):
         # identity. A consumer counting this project's records must count
         # across all of it, not only `project_id`.
         "read_scope": list(memory._read_project_scopes()),
-    })
+    }, **_hidden_bucket_scope(memory))
 
 
 def cmd_project_file(args, db_path=None) -> NoReturn:

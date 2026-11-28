@@ -399,7 +399,7 @@ set, exactly one of `included`, `excluded` and `unproven` is true:
   not read and no rekey command is printed anywhere; `unproven_reason` is
   `foreign_rows` or `recorded_elsewhere`.
 - `unproven`: it is not read, and its `rekey` command is printed once per
-  process, with the cause. That line goes to stderr; `list` and `search` also put
+  process, with the cause. That line goes to stderr; `list`, `search` and `sync` also put
   the bucket's `legacy_scope` record on stdout, beside `result`, whenever a
   bucket is left out, and an `earlier_ids` list (`id`, `rekey`) for a bucket
   of this repository under an earlier canonical id.

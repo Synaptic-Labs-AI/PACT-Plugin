@@ -1,6 +1,6 @@
 """
 Location: pact-plugin/tests/test_hidden_bucket_on_stdout.py
-Summary: `list` and `search` put a hidden old folder-name bucket's
+Summary: `list`, `search` and `sync` put a hidden old folder-name bucket's
 `legacy_scope` record on stdout, beside an unchanged `result`, so a caller
 that reads only stdout sees why rows are missing; the stderr notice stays.
 Used by: pytest; runs the CLI in process against a real repository and store.
@@ -62,6 +62,28 @@ def test_a_hidden_bucket_is_named_on_stdout(repo_store, capfd, verb):
     scope = envelope["legacy_scope"]
     assert scope["candidate"] == "proj" and scope["unproven"] is True, scope
     assert scope["memory_count"] == 1 and "project-id rekey" in scope["rekey"], scope
+
+
+def test_the_first_sync_after_upgrade_names_the_hidden_bucket_on_stdout(repo_store, tmp_path, capfd):
+    """An old-code save filed a row under the folder name; the first new-code
+    sync projects nothing from it and says why on stdout, with the rekey
+    command. RED WHEN the sync envelope leaves the bucket to stderr."""
+    _add_old_row(repo_store)
+    root = tmp_path / "doc-root"
+    root.mkdir()
+    code, envelope = _cli(["sync", "--claude-md-root", str(root), "--db-path", str(repo_store)], capfd)
+    assert code == 0 and envelope["ok"] is True, envelope
+    assert envelope["result"]["projected"] == 0, envelope
+    scope = envelope["legacy_scope"]
+    assert scope["candidate"] == "proj" and scope["unproven"] is True, scope
+    assert scope["memory_count"] == 1 and "project-id rekey" in scope["rekey"], scope
+
+
+def test_control_a_sync_with_no_hidden_bucket_adds_no_key(repo_store, tmp_path, capfd):
+    root = tmp_path / "doc-root"
+    root.mkdir()
+    code, envelope = _cli(["sync", "--claude-md-root", str(root), "--db-path", str(repo_store)], capfd)
+    assert code == 0 and "legacy_scope" not in envelope, envelope
 
 
 @pytest.mark.parametrize("verb", [["list"], ["search", "old"]])
