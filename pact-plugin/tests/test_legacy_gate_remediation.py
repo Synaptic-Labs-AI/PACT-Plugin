@@ -13,6 +13,7 @@ import os
 import sqlite3
 import threading
 import time
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -1548,9 +1549,82 @@ def _hidden_bucket_session(tmp_path, monkeypatch):
     return memory, store
 
 
+def _store_capture(store, error):
+    """What a failed read of `store` saw: the files beside it with their
+    sizes, the database and WAL headers, this process's open handles on
+    them, an integrity check and the same read through an immutable open.
+    The files are copied beside the store too. Printed in the failure, since
+    the CI job keeps no artifacts."""
+    import shutil
+    import struct
+
+    lines = [f"read failed: {error!r}", f"sqlite {sqlite3.sqlite_version}"]
+    copies = store.parent / "store-capture"
+    copies.mkdir(exist_ok=True)
+    for path in sorted(store.parent.glob(store.name + "*")):
+        if path.is_file():
+            lines.append(f"{path.name}: {path.stat().st_size} bytes")
+            shutil.copy2(path, copies / path.name)
+    head = store.read_bytes()[:100]
+    if len(head) == 100:
+        lines.append(
+            "db header: page_size=%d change_counter=%d page_count=%d schema_cookie=%d "
+            "write_version=%d read_version=%d" % (
+                struct.unpack(">H", head[16:18])[0], struct.unpack(">I", head[24:28])[0],
+                struct.unpack(">I", head[28:32])[0], struct.unpack(">I", head[40:44])[0],
+                head[18], head[19],
+            )
+        )
+    wal = store.parent / (store.name + "-wal")
+    if wal.is_file() and wal.stat().st_size >= 32:
+        magic, version, page_size, checkpoint, salt1, salt2 = struct.unpack(">IIIIII", wal.read_bytes()[:24])
+        lines.append(f"wal header: magic={magic:#x} page_size={page_size} checkpoint={checkpoint} salts={salt1:#x},{salt2:#x}")
+    handles = []
+    for fd in Path("/proc/self/fd").iterdir():
+        try:
+            target = os.readlink(fd)
+        except OSError:
+            continue
+        if target.startswith(str(store)):
+            handles.append(f"fd {fd.name} -> {Path(target).name}")
+    lines.append("open handles: " + (", ".join(handles) or "none"))
+    for label, uri in (("integrity", store.as_uri() + "?mode=ro"), ("immutable read", store.as_uri() + "?mode=ro&immutable=1")):
+        try:
+            with closing(sqlite3.connect(uri, uri=True)) as conn:
+                if label == "integrity":
+                    lines.append("integrity_check: " + repr(conn.execute("PRAGMA integrity_check").fetchall()[:5]))
+                else:
+                    lines.append("immutable read: " + repr(conn.execute(
+                        "SELECT project_id FROM memories WHERE id = ?", (_ROW,)).fetchall()))
+        except sqlite3.DatabaseError as exc:
+            lines.append(f"{label}: {exc!r}")
+    lines.append(f"copies in {copies}")
+    return "\n".join(lines)
+
+
+def test_the_store_capture_reports_a_damaged_store(tmp_path):
+    """The on-failure capture runs to completion on a store that is not a
+    database, so a CI failure prints its evidence instead of a second error."""
+    store = tmp_path / "store.db"
+    store.write_bytes(b"SQLite format 3\x00" + b"\xff" * 4080)
+    try:
+        with closing(sqlite3.connect(str(store))) as conn:
+            conn.execute("SELECT 1 FROM memories").fetchall()
+    except sqlite3.DatabaseError as exc:
+        report = _store_capture(store, exc)
+    else:
+        pytest.fail("the damaged store read without error")
+    for part in ("store.db: 4096 bytes", "db header: page_size=", "open handles:", "integrity", "immutable read"):
+        assert part in report, report
+    assert (tmp_path / "store-capture" / "store.db").is_file()
+
+
 def _row_project(store):
-    with sqlite3.connect(str(store)) as conn:
-        return conn.execute("SELECT project_id FROM memories WHERE id = ?", (_ROW,)).fetchone()[0]
+    try:
+        with closing(sqlite3.connect(str(store))) as conn:
+            return conn.execute("SELECT project_id FROM memories WHERE id = ?", (_ROW,)).fetchone()[0]
+    except sqlite3.DatabaseError as exc:
+        pytest.fail(_store_capture(store, exc))
 
 
 def test_an_update_may_not_move_a_row_out_of_a_bucket_the_read_hides(
