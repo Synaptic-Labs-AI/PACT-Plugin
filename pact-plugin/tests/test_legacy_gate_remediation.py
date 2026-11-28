@@ -1519,6 +1519,48 @@ def test_a_github_payload_id_drops_a_default_port(canonical_session, capfd, payl
     assert (code, envelope.get("result", {}).get("to")) == (0, CANONICAL), envelope
 
 
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "ssh.github.com/Acme/Widget",
+        "SSH.GitHub.com:443/Acme/Widget",
+        "ssh.github.com:22/Acme/Widget",
+        "ssh.github.com/Acme/Widget.git",
+    ],
+)
+def test_ssh_github_com_folds_to_github_com_in_a_pin_a_payload_and_a_target(
+    canonical_session, capfd, spelling
+):
+    """An ssh or scp remote on ssh.github.com, on its own port or 443, takes
+    github.com's id, so a pin, a payload project_id and a rekey --to naming it
+    fold the same way. RED WHEN any of the three keeps ssh.github.com."""
+    from scripts.database import pin_file_value
+
+    assert pin_file_value(spelling.encode("utf-8")) == (CANONICAL, None)
+    repo, store = canonical_session
+    memory = PACTMemory(session_id="s", db_path=store)
+    memory.save({"context": "through the 443 host", "project_id": spelling})
+    with sqlite3.connect(str(store)) as conn:
+        filed = {row[0] for row in conn.execute("SELECT project_id FROM memories")}
+    assert filed == {CANONICAL}, filed
+    _seed(store, "oldbucket")
+    code, envelope = _rekey_cli(
+        ["project-id", "rekey", "--from=oldbucket", f"--to={spelling}", "--db-path", str(store)],
+        capfd,
+    )
+    assert (code, envelope.get("result", {}).get("to")) == (0, CANONICAL), envelope
+
+
+@pytest.mark.parametrize("spelling", ["ssh.github.com:8443/acme/widget", "ssh.github.com:9418/acme/widget"])
+def test_ssh_github_com_on_another_port_keeps_its_spelling(spelling):
+    """Only ssh's ports (22, 443) make ssh.github.com github.com. RED WHEN
+    another port folds."""
+    from scripts.database import folded_github_id, pin_file_value
+
+    assert pin_file_value(spelling.encode("utf-8")) == (spelling, None)
+    assert folded_github_id(spelling, "project_id") == spelling
+
+
 @pytest.mark.parametrize("payload", ["github.com/Acme/Widget.git", "github.com/acme/widget.GIT"])
 def test_a_github_payload_id_drops_its_git_suffix(canonical_session, payload):
     """A payload pasted from a remote url (`github.com/Acme/Widget.git`) files

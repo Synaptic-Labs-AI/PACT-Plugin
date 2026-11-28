@@ -2048,6 +2048,11 @@ def _github_folded_pin(candidate: str) -> Optional[str]:
     `www.github.com` included, exactly as a remote naming it does."""
     hostport, _, path = candidate.partition("/")
     host, colon, port = hostport.partition(":")
+    if host == "ssh.github.com" and port in ("", "22", "443"):
+        # GitHub's SSH-over-443 host is github.com itself, as an ssh or scp
+        # remote naming it folds (`project_identity._identifier`); an id holds
+        # no scheme, so a pin or payload naming it folds the same way.
+        host, colon, port = "github.com", "", ""
     host = github_folded_host(host, port)
     if host != "github.com":
         return candidate
@@ -2113,9 +2118,15 @@ def folded_github_id(value: Any, what: str) -> Any:
     value = value.strip(" ")
     hostport, slash, path = value.partition("/")
     host, colon, port = hostport.partition(":")
-    if host.lower() not in ("github.com", "www.github.com"):
+    if host.lower() not in ("github.com", "www.github.com", "ssh.github.com"):
         return value
-    if colon and (not port or port in {str(p) for p in SCHEME_DEFAULT_PORTS.values()}):
+    if (
+        host.lower() != "ssh.github.com"
+        and colon
+        and (not port or port in {str(p) for p in SCHEME_DEFAULT_PORTS.values()})
+    ):
+        # ssh.github.com's ports are the pin fold's (`_github_folded_pin`): it
+        # is github.com only over ssh, whose ports are 22 and 443.
         hostport = host
         value = hostport + slash + path
     pin_spelled, _ = pin_file_value(value.encode("utf-8"))
