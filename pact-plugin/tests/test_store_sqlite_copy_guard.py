@@ -171,8 +171,15 @@ def _probe_bypasses(tree):
     driver re-exported by another module, or importing one by name through
     `importlib.import_module` or `__import__`; and calling
     `<driver>.Connection(...)` anywhere, since the probe wraps `connect`
-    only. A call `<driver>.connect(...)` inside a function runs after the
-    fixture, so it is wrapped."""
+    only; reaching a driver's `dbapi2` attribute, whose `connect` is its own
+    binding; and a session- or package-scoped fixture, which runs before the
+    module's probe is installed. A driver is a name bound to one or a
+    module's `sqlite3` or `pysqlite3` attribute (`database.sqlite3`), and
+    `<driver>.Connection` taken at import time counts as `connect` does. A
+    call `<driver>.connect(...)` inside a function runs after the probe
+    installs, so it is wrapped. `getattr`, `sys.modules` and
+    `importlib.import_module` with a variable are left out: no good-faith
+    edit writes them to open a store."""
     found = []
     drivers = set()
     for node in ast.walk(tree):
@@ -194,13 +201,31 @@ def _probe_bypasses(tree):
                     found.append(f"line {node.lineno}: from {node.module} import {alias.name}")
         elif isinstance(node, ast.Call):
             func = node.func
-            dynamic = (isinstance(func, ast.Name) and func.id == "__import__") or (
+            dynamic = (isinstance(func, ast.Name) and func.id in ("__import__", "import_module")) or (
                 isinstance(func, ast.Attribute) and func.attr == "import_module"
             )
             if dynamic and node.args and isinstance(node.args[0], ast.Constant):
                 name = node.args[0].value
                 if isinstance(name, str) and (name in _DRIVER_MODULES or name.endswith(".dbapi2")):
                     found.append(f"line {node.lineno}: imports {name!r} by name")
+
+    def is_driver(node):
+        # A name bound to a driver, or a driver reached through a module's
+        # attribute (`database.sqlite3`, `scripts.database.sqlite3`).
+        return (isinstance(node, ast.Name) and node.id in drivers) or (
+            isinstance(node, ast.Attribute) and node.attr in ("sqlite3", "pysqlite3")
+        )
+
+    def is_fixture_scope_wider_than_module(decorator):
+        func = decorator.func if isinstance(decorator, ast.Call) else None
+        named = (isinstance(func, ast.Attribute) and func.attr == "fixture") or (
+            isinstance(func, ast.Name) and func.id == "fixture"
+        )
+        return named and any(
+            keyword.arg == "scope" and isinstance(keyword.value, ast.Constant)
+            and keyword.value.value in ("session", "package")
+            for keyword in decorator.keywords
+        )
 
     def import_time(node, called=False):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
@@ -216,12 +241,11 @@ def _probe_bypasses(tree):
             return
         if (
             isinstance(node, ast.Attribute)
-            and node.attr == "connect"
-            and isinstance(node.value, ast.Name)
-            and node.value.id in drivers
+            and node.attr in ("connect", "Connection")
+            and is_driver(node.value)
             and not called
         ):
-            found.append(f"line {node.lineno}: {node.value.id}.connect taken at import time")
+            found.append(f"line {node.lineno}: {ast.unparse(node)} taken at import time")
         for child in ast.iter_child_nodes(node):
             import_time(child)
 
@@ -232,12 +256,21 @@ def _probe_bypasses(tree):
             isinstance(node, ast.Call)
             and isinstance(func, ast.Attribute)
             and func.attr == "Connection"
-            and isinstance(func.value, ast.Name)
-            and func.value.id in drivers
+            and is_driver(func.value)
         ):
-            line = f"line {node.lineno}: {func.value.id}.Connection(...) called"
+            line = f"line {node.lineno}: {ast.unparse(func)}(...) called"
             if line not in found:
                 found.append(line)
+        if isinstance(node, ast.Attribute) and node.attr == "dbapi2" and is_driver(node.value):
+            # `sqlite3.dbapi2.connect` is its own binding, which the probe
+            # leaves unwrapped.
+            found.append(f"line {node.lineno}: {ast.unparse(node)} reached")
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for decorator in node.decorator_list:
+                if is_fixture_scope_wider_than_module(decorator):
+                    # A session or package fixture runs before the module's
+                    # probe is installed.
+                    found.append(f"line {node.lineno}: fixture {node.name} is wider than the module")
     return found
 
 
@@ -276,6 +309,19 @@ def test_the_bypass_scan_sees_each_form():
         "from scripts.database import sqlite3 as store\nc = None\ndef f(p):\n    return store.Connection(p)\n": True,
         "from scripts.database import sqlite3\n": False,
         "import importlib\ndef f():\n    return importlib.import_module('json')\n": False,
+        "import sqlite3\nConn = sqlite3.Connection\ndef f(p):\n    return Conn(p)\n": True,
+        "import sqlite3\nclass Sub(sqlite3.Connection):\n    pass\n": True,
+        "from importlib import import_module\ndef f():\n    return import_module('sqlite3')\n": True,
+        "import sqlite3\ndef f(p):\n    return sqlite3.dbapi2.connect(p)\n": True,
+        "from scripts import database\nopen_store = database.sqlite3.connect\n": True,
+        "import scripts.database\nopen_store = scripts.database.sqlite3.connect\n": True,
+        "from scripts import database\ndef f(p):\n    return database.sqlite3.Connection(p)\n": True,
+        "import pytest\n@pytest.fixture(scope='session')\ndef s():\n    pass\n": True,
+        "from pytest import fixture\n@fixture(scope='package')\ndef s():\n    pass\n": True,
+        "import pytest\n@pytest.fixture(scope='module')\ndef s():\n    pass\n": False,
+        "from scripts import database\ndef f(p):\n    return database.sqlite3.connect(p)\n": False,
+        "import sqlite3\ndef f():\n    class Sub(sqlite3.Connection):\n        pass\n    return sqlite3.connect(':memory:', factory=Sub)\n": False,
+        "import importlib\nNAME = 'sqlite3'\ndef f():\n    return importlib.import_module(NAME)\n": False,
     }
     for source, bypasses in cases.items():
         assert bool(_probe_bypasses(ast.parse(source))) is bypasses, source
