@@ -4243,9 +4243,12 @@ class PACTMemory:
                 "read sees while no project id resolves. Writing the canonical id "
                 "that names this repository to %r gives this checkout an id. Its "
                 "reads then include that bucket when its file rows or the "
-                "sessions recorded here place it in this repository; otherwise "
-                "they leave it out and print the `project-id rekey` command that "
-                "moves it.",
+                "sessions recorded here place it in this repository. Otherwise "
+                "they leave it out and say why: a bucket nothing places gets the "
+                "`project-id rekey` command that moves it, one shared with "
+                "another checkout gets the move of only the memories placed "
+                "here, and one whose rows are all another checkout's gets no "
+                "move.",
                 legacy,
                 count,
                 "y" if count == 1 else "ies",
