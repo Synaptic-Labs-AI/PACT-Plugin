@@ -93,7 +93,7 @@
           }
         ]
       },
-      "blocker": "Native eval Bash sandbox failed to initialize: 'Sandbox is required but failed to initialize: Failed to create bridge sockets after 5 attempts'. Cases requiring shell (bootstrap, memory-save) cannot be valid baseline evidence on this host.",
+      "blocker": "Native eval Bash sandbox failed to initialize: 'Sandbox is required but failed to initialize: Failed to create bridge sockets after 5 attempts'. Cases requiring shell (bootstrap, memory-save) cannot be valid baseline evidence on the measuring host.",
       "impact_triage_probe": {
         "case": "impact-triage",
         "with_score": 1.0,
@@ -173,7 +173,7 @@
       "max": 86606,
       "source": "PACT smoke subagent first assistant requests",
       "provider_probe_input_tokens": 19235,
-      "caveat": "Small n; reports tokens, not USD.",
+      "caveat": "Small n; reports tokens, not USD. The working directory of these runs is not recorded, so the samples may include project CLAUDE.md text.",
       "measurement_sources": [
         "per-subagent first assistant usage from agent-*.jsonl transcripts",
         "claude -p modelUsage aggregate from the provider probe"
@@ -260,7 +260,8 @@
     "Eval-bench and evolve were deferred; no judged scores are claimed for them.",
     "Token snapshot has n=2 subagent samples plus one provider aggregate.",
     "Coverage map 1.0.1 is independently reviewed (review note unpublished); native checks remain blocked/deferred.",
-    "Track B fixtures were validated out of tree and are not in this commit; no model runs have been executed."
+    "Track B fixtures were validated out of tree and are not in this commit; no model runs have been executed.",
+    "Where the orchestration smoke and the token snapshot were started is not recorded; if they ran inside the repository they loaded the project CLAUDE.md files, and the spawn-token numbers may include that text."
   ],
   "review": {
     "status": "complete",

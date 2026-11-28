@@ -15,7 +15,7 @@ No task directories are committed yet; they land in a follow-up PR. Until then
       fixture/            # seed repo, no .git, stdlib only
       hidden_tests/       # pytest tests, stored outside the agent workspace
       gold.patch          # git-format patch that applies to fixture/ and passes hidden tests
-      rubric.md           # optional blind quality rubric
+      rubric.md           # blind quality rubric (required; the validator checks it exists)
 
 ## task.json
 
@@ -85,11 +85,14 @@ Record the test counts and any issues in the final report.
 With no `--task` it validates every task under `--root` (default bench/tasks)
 and reports each one: a passing task carries `"status": "pass"`, a failing one
 `{"id", "path", "status": "fail", "error"}` (id from task.json, else the
-directory name). One task's failure, including a copy error, fails only that
-task; the run exits 1 if any task failed. `timeout_seconds` must be a positive
-integer and bounds each command; a command that times out has its whole
-process group killed. Git runs without the global or system config, with hooks
-off and with no inherited `GIT_*` variables. The hidden tests are snapshotted
+directory name). Any error in one task (an unreadable or non-UTF-8 task.json, a
+wrong field type, a copy error, anything unexpected) becomes that task's fail
+row and the run continues; an unexpected error reads
+`<id>: <ExceptionType>: <message>`. The run exits 1 if any task failed. `timeout_seconds` must be a positive
+integer and bounds each command; a command that times out, or a SIGTERM or
+SIGHUP to the validator, kills its whole process group. Git runs without the
+global or system config, with hooks off and with no inherited `GIT_*` variables;
+the child pytest gets no inherited `PYTEST_*` or `PYTHONPATH`. The hidden tests are snapshotted
 before the gold patch is applied, and any change to them (an edit, a deletion,
 a rename in or out, non-ASCII names included) rejects the task. A gold patch
 that only adds files is accepted, and the seed tests after the patch run with

@@ -20,7 +20,9 @@ plugin runtime behavior.
 
 The harness copies the env block from ~/.claude-deepseek/settings.json into a
 scratch config, minus every key whose name matches TOKEN, KEY, SECRET,
-PASSWORD, HEADERS or CREDENTIAL and the live session ids, and points
+PASSWORD, HEADERS or CREDENTIAL (except the token-count tuning keys matching
+^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$, which are kept) and the live session ids; manifest.json lists the dropped key names
+in settings.dropped_env_keys. It points
 CLAUDE_CONFIG_DIR at the scratch directory. It keeps the live teammateMode
 (in-process), sets permissions.additionalDirectories to the scratch teams,
 tasks and pact-sessions directories only, and does not copy live
@@ -40,6 +42,11 @@ harness, and the manifest records only the token file path, but run outputs
 (kept transcripts, captured output) can hold it: keep --out under bench/.runs/,
 which is gitignored. prepare warns when --out is inside the repository but
 outside bench/.runs/.
+
+Every child claude (prepare --verify, native-eval) runs from a fresh directory
+under --temp-root (default /tmp), which must be outside the repository with no
+CLAUDE.md, CLAUDE.local.md or .claude/CLAUDE.md in it or any parent, so no
+project or user CLAUDE.md is loaded into the run.
 
 ## Inspect-only first step
 

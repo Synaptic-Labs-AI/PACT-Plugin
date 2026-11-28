@@ -23,6 +23,8 @@ certification or merge gates.
   from this commit. No PACT-vs-solo runs have been executed, so this row makes
   no coding-outcome claim.
 - Spawn tokens are first-request subagent usage, n=2; not a statistical result.
+  Where those runs were started is not recorded, so they may include project
+  CLAUDE.md text (see the report's caveats).
 
 ## Run
 

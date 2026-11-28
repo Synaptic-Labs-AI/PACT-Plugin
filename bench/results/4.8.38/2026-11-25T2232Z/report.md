@@ -161,17 +161,31 @@ full PACT-vs-solo matrix with the scorecard; no coding-outcome claim is made.
 
 ## Reproduce
 
-These commands produce the raw runs under bench/.runs/; summary.json and this
-report are then written by hand from them.
+These commands produce the native-eval and PluginEval raw runs under
+bench/.runs/; summary.json and this report are then written by hand from them.
+`--plugin-ref` pins the evaluated plugin to this baseline's SHA; without it,
+prepare copies the current worktree.
 
     bench/bootstrap.sh
-    bench/pact-bench prepare --out bench/.runs/external/probe --verify
+    bench/pact-bench prepare --out bench/.runs/external/probe --plugin-ref 1befafb314dd8124ad9225b87d0d5b064f0a6af6 --verify
     bench/pact-bench native-eval --manifest bench/.runs/external/probe/manifest.json --runs 3
     bench/pact-bench plugin-eval --manifest bench/.runs/external/probe/manifest.json --plugin-eval-dir <pinned-plugin-eval>
 
+The other results came from manual steps, not commands. The token snapshot
+follows the recipe in bench/external/README.md ("Token snapshot"). The
+orchestration smoke has no committed recipe; what it checks is described in the
+coverage map's orchestration-smoke entry in bench/external/README.md. The P1
+status was read from the GitHub check runs named in summary.json.
+
 ## Caveats
 
-- Native eval is blocked on this host; no native score is claimed.
+- Native eval is blocked on the measuring host; no native score is claimed.
+- Where the orchestration smoke and the token snapshot were started is not
+  recorded. If they ran inside the repository, they loaded the project
+  CLAUDE.md files (claude reads CLAUDE.md from the working directory and every
+  parent), and the spawn-token numbers may include that text. The token-snapshot
+  recipe now runs from a directory outside the repository and $HOME, and the
+  harness's own child runs start from a clean temp directory.
 - Eval-bench and evolve were deferred; no judged scores are claimed.
 - Token sample n=2.
 - The coverage map 1.0.1 is independently reviewed (13/13 agree, no flips), but

@@ -11,7 +11,7 @@ not a second copy of that suite.
 | Field | Value |
 |---|---|
 | Map version | `1.0.2` (1.0.2 renamed `evalbench/review` to `evalbench/review-findings`, matching its prompt id; no decision changed. The 4.8.38 baseline was produced under 1.0.1.) |
-| Decision hash | `sha256:644c44d2413e405da20d9083251a3de23c3ff5c08e424eefb7156caecdb44afb` — sha256 of the sorted, newline-joined rows `check id|decision|status` (no trailing newline), exactly as listed in the summary table |
+| Decision hash | `sha256:644c44d2413e405da20d9083251a3de23c3ff5c08e424eefb7156caecdb44afb` — sha256 of the sorted, newline-joined rows `check id|decision|status` (no trailing newline), taken from the summary table with the `**` bold markers removed from the decision column |
 | Generated | 2026-11-25 |
 | Base commit | `1befafb314dd8124ad9225b87d0d5b064f0a6af6` (worktree HEAD at map time) |
 | Plugin under test | `pact-plugin` v4.8.38 |
@@ -99,7 +99,16 @@ native-eval results land under `<out>/native-eval/`. All three plugin sources
 `prepare` checks its inputs (a settings file holding a JSON object with an
 object `env`, a non-empty token file, `--plugin-dir`, a clean source unless
 `--allow-dirty`, and the `claude` binary with `--verify`) before it creates
-`<out>`; `--plugin-ref` and `--plugin-dir` cannot be combined. `--force` replaces only an `<out>`
+`<out>`; `--plugin-ref` and `--plugin-dir` cannot be combined.
+
+**Every child `claude` runs from a clean directory.** Claude Code reads
+`CLAUDE.md` from the working directory and every parent, so `prepare --verify`
+and `native-eval` start their child from a fresh directory under `--temp-root`
+(default `/tmp` for both). The temp root must be outside the repository, with
+no `CLAUDE.md`, `CLAUDE.local.md` or `.claude/CLAUDE.md` in it or any parent,
+and this is checked before anything is written. A temp root under `$HOME` fails
+the check when `~/.claude/CLAUDE.md` exists. `provider-check.json` and
+`native-eval/result.json` record the working directory as `cwd`. `--force` replaces only an `<out>`
 that holds a previous pact-bench output, and never `/`, `$HOME`, or the repo
 root or one of its ancestors.
 
@@ -117,25 +126,32 @@ inside the repository but outside `bench/.runs/`; it does not refuse.
 `prepare.py` copies the `env` block from `~/.claude-deepseek/settings.json`
 into a scratch config, minus every key whose name matches
 `TOKEN|KEY|SECRET|PASSWORD|HEADERS|CREDENTIAL` (case-insensitive) and the live
-session ids, and overrides the session plumbing; the live config is never read
+session ids. The token-count tuning keys (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`,
+`MAX_THINKING_TOKENS`, `MAX_MCP_OUTPUT_TOKENS`, any key matching
+`^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$`) are kept, and `manifest.json` lists the names
+(never the values) of every dropped key in `settings.dropped_env_keys`. It overrides the session plumbing; the live config is never read
 during a run.
 
 - **Endpoint:** `ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic`, or
   `--base-url`. `prepare` writes it into the scratch settings env (replacing any
   live value), so the settings env and the child env agree.
 - **Credential:** `ANTHROPIC_AUTH_TOKEN` read from `~/.claude-keys/deepseek`
-  (path overridable with `--token-file`); never written to disk, and the
-  manifest records only the file path.
+  (path overridable with `--token-file`). The harness never writes it to disk
+  itself and the manifest records only the file path, but run outputs can hold
+  it (see "Keep `--out` under `bench/.runs/`" above).
 - **Child environment (allowlist):** from the live environment the child gets
   only `PATH`, `LANG`, `TERM` and `LC_*`; then the scratch settings env,
   filtered by the same credential rule; then `CLAUDE_CONFIG_DIR`, `HOME`,
   `TMPDIR`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. No other live
   variable reaches it (no `CLAUDE*`, `GH_TOKEN`, `SSH_*`, `AWS_*` or
   `ANTHROPIC_API_KEY`). `plugin-eval` uses the same child environment.
-- **Model:** `deepseek-flash[1m]` via `ANTHROPIC_MODEL` and the
-  `ANTHROPIC_DEFAULT_*/CLAUDE_CODE_SUBAGENT_MODEL` aliases, all mapped to the
-  same DeepSeek alias. The model is fixed at prepare time: `prepare --model`
-  sets all five keys, and `native-eval` takes no `--model` or `--judge-model`;
+- **Model:** `deepseek-flash[1m]`, pinned in the scratch settings env on all 11
+  model-id keys: `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_MODEL`,
+  `ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL`,
+  `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
+  `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL` and
+  `CLAUDE_CODE_BG_CLASSIFIER_MODEL`. The model is fixed at prepare time:
+  `prepare --model` sets all of them, and `native-eval` takes no `--model` or `--judge-model`;
   it passes the manifest's model as both. `prepare --verify` checks the requested model
   (any `[..]` suffix stripped) against the reported usage keys.
 - **Scratch settings and env override:** `CLAUDE_CONFIG_DIR`, `HOME`, `TMPDIR`
@@ -148,7 +164,9 @@ during a run.
   `[claude-code:unrecognized_model]` on stderr yet exits 0 and reports a
   `deepseek-flash[1m]` usage key. Treat an exit code + `model_keys` mismatch as
   the failure, not that line. `<out>/provider-check.json` is written on every
-  outcome, including a missing binary and a timeout.
+  outcome, including a missing binary and a timeout. After a timeout kill the
+  remaining output is drained for at most 10 s; if a process outside the group
+  still holds the pipes, `output_complete` is false and a warning is printed.
 - **Costs:** `total_cost_usd`/`costUSD` are Anthropic list-price estimates over
   a DeepSeek connection (`costBasis: unknown`). Report **tokens**, never USD.
 - **Unattended caveat:** in-process teammate mode can stall when the lead waits
@@ -173,16 +191,19 @@ The runner copies `bench/external/native-evals/evals/` into the scratch plugin a
 model> --judge-model <manifest model>`.
 Case layout is the CLI's native format: `<eval dir>/**/case.yaml`, or
 `prompt.md` + `graders/*.md`. Results: `<out>/native-eval/result.json` (written
-on every exit once the manifest loads; a timeout records exit code 124),
-`report.json`, `report.html`, and `runs/`. The child's `HOME` and `TMPDIR` are
-`<temp-root>/pact-native-XXXXXXXX/{home,tmp}` (default `--temp-root` is
-`$HOME`); `TMPDIR` must be at most 51 characters, checked before anything is
+on every exit once the manifest loads; a timeout records exit code 124, and
+`error` is set for any exception or signal), `report.json`, `report.html`, and
+`runs/`. The eval runs from `<temp-root>/pact-native-XXXXXXXX/work`, and the
+child's `HOME` and `TMPDIR` are `<temp-root>/pact-native-XXXXXXXX/{home,tmp}`
+(default `--temp-root` is `/tmp`); `TMPDIR` must be at most 51 characters, checked before anything is
 created. `--keep-temp` scaffolds are moved to
 `<out>/native-eval/kept-temp/<run id>/`, any `evals/results/` the tool wrote to
 `<out>/native-eval/plugin-evals-results/<run id>/` (the run id is the
 `pact-native-XXXXXXXX` name), and the rest of the temp root is deleted. A
 previous run's `report.json` and `report.html` are deleted at the start of each
-run, so `result.json` names only reports this run wrote. A timeout kills the
+run, so `result.json` names only reports this run wrote. A SIGTERM or SIGHUP
+kills the eval's process group, records `terminated by SIGTERM` (or SIGHUP),
+still cleans up, and exits 143 (or 129). A timeout kills the
 eval's whole process group.
 
 The cases directory must be non-empty; the runner refuses an empty suite. The
@@ -208,7 +229,11 @@ file is an error.
 Results: `<out>/plugin-eval/result.json`, always written. A command that times
 out is recorded with exit code 124 and `timed_out: true` (its whole process
 group is killed) and the run continues; the runner exits 1 if any command
-failed, timed out or printed no JSON object. `complete` is true only when every
+failed, timed out or printed no JSON object. A timed-out record's `stdout_tail` and `stderr_tail` hold the output drained
+after the kill, `output_complete` is false if that bounded drain ran out, and the
+raw `.stdout.json`/`.stderr.txt` files are saved. An unexpected error in one
+command records `{label, command, exit_code: null, error}` and the run
+continues; a missing `uv` still aborts. `complete` is true only when every
 command was attempted. On an abort (missing `uv`, or a `uv sync` failure or
 timeout) `error` and `aborted_command` are set and `not_run` lists the commands
 never started; `sync` records the sync step (null with `--skip-sync`). PluginEval's judge layers are experimental and
@@ -240,11 +265,18 @@ reasoning quality, not field names or CLI output shapes.
 ### Token snapshot (runtime tokens)
 
 ```bash
-./bench/pact-bench prepare --out bench/.runs/external/token-snapshot --force
+snap="$PWD/bench/.runs/external/token-snapshot"
+./bench/pact-bench prepare --out "$snap" --force
+# Run from a directory outside the repository and outside $HOME: claude reads
+# CLAUDE.md from the working directory and every parent (and ~/.claude/CLAUDE.md
+# counts for any directory under $HOME), so their tokens would count in the
+# sample. Also run claude with the env from <snap>/config/settings.json and
+# HOME/CLAUDE_CONFIG_DIR pointed at <snap>/home and <snap>/config.
+cd "$(mktemp -d -p /tmp)"
 # For each of 3 runs: run the standard smoke prompt headlessly and keep the JSON.
 claude -p --output-format json --model deepseek-flash[1m] "<smoke prompt>" \
-  > bench/.runs/external/token-snapshot/run-N.json
-jq '{usage, modelUsage}' bench/.runs/external/token-snapshot/run-N.json
+  > "$snap/run-N.json"
+jq '{usage, modelUsage}' "$snap/run-N.json"
 ```
 
 Use the scratch env produced by `prepare` (same `HOME`/`CLAUDE_CONFIG_DIR`/
@@ -252,8 +284,8 @@ provider env as the native-eval child) so the runs are comparable. Record
 input, cache-read, cache-creation, output, and thinking tokens per run; report
 the median and spread over 3 runs. If `agentburn`/`pai` are supplied, point
 them at the transcripts under the scratch config's `projects/` directory and
-record the tool version/commit in the result; **neither tool is installed on
-this host** (verified absent from `PATH` and common checkouts), so the
+record the tool version/commit in the result; **neither tool was installed on
+the measuring host** (absent from `PATH` and common checkouts), so the
 `claude -p` usage fields are the fallback. This is distinct from the internal
 spawn-byte pin (`test_spawn_overhead_benchmark.py`), which measures static body
 bytes, not runtime tokens.
@@ -570,9 +602,9 @@ and `memory-save` (save then retrieve in one session).
   spawn-byte pin is a proxy only.
 - **Decision:** narrow — 3 runs of the smoke prompt in the prepared DeepSeek
   environment, report median/spread of token fields from `claude -p
-  --output-format json` (or `agentburn`/`pai` if supplied; neither tool is
-  installed on this host). Tokens only; no USD; one configuration (current
-  release) per run, with A/B reserved for `release.json`.
+  --output-format json` (or `agentburn`/`pai` if supplied; neither tool was
+  installed on the measuring host). Tokens only; no USD; one configuration
+  (current release) per run; a version A/B needs a second prepared run.
 - **Rationale:** cheap, real, and completely unproven internally; the main risk
   is tool availability, hence the fallback and the "narrow" label.
 - **Reviewer decision:** agree (see Reviewer status).
@@ -653,8 +685,9 @@ tests with parametrization):
   3-tier PR verification contract, and its Tier 1 includes the four
   `scripts/verify-*.sh` checks plus the pytest suite.
 - **Manual/live evidence (not CI):** four integration scenario runbooks in
-  `testing/scenario-*.md`, 20 live-probe runbooks in
-  `pact-plugin/tests/runbooks/` (bootstrap/secretary dispatch, dispatch gate,
+  `testing/scenario-*.md`, 20 runbook files in
+  `pact-plugin/tests/runbooks/` (live probes and their template, the run-dates
+  log, and manual trials: bootstrap/secretary dispatch, dispatch gate,
   team registration, config dir/env precedence, missed wake, structural wait,
   non-TTY harness, refresh checkpoint, task-claim gate, v4.0.0 launch), with
   run dates tracked in `runbooks/RUNBOOK_RUN_DATES.md`. These are precisely the
