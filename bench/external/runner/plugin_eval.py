@@ -4,9 +4,12 @@
 The tool is pinned by the caller via --plugin-eval-dir. This runner does not
 clone it; bench/external/README.md records the pinned commit and setup. It runs
 uv sync --frozen, then the whole-plugin quick score and the skill scores listed
-in plugin-eval-skills.txt (or --skills-file). Every uv command starts in a fresh
-cwd under --temp-root (refused by prepare.check_clean_root if that root is in the
-repo or below a Claude Code memory file), with the checkout passed as --project.
+in plugin-eval-skills.txt (or --skills-file). All uv commands of a run share one
+fresh cwd under --temp-root (refused by prepare.check_clean_root if that root is
+in the repo or below a Claude Code memory file), with the checkout passed as
+--project. The record names the checkout's git commit and whether it was dirty
+(null when it is not a git checkout); the runner does not enforce a pin.
+Output files a previous run left in plugin-eval/ are removed at the start.
 Score commands start with the provider token as ANTHROPIC_AUTH_TOKEN (with
 ANTHROPIC_BASE_URL); PluginEval's judge is expected to pass that environment to
 the claude CLI through claude-agent-sdk (not verified in this tree). uv sync
@@ -37,6 +40,8 @@ from . import prepare
 
 DEFAULT_SKILLS_FILE = prepare.REPO_ROOT / "bench" / "external" / "plugin-eval-skills.txt"
 TIMEOUT_EXIT_CODE = 124
+# Files this runner writes under plugin-eval/ besides result.json (rewritten every run).
+STALE_OUTPUT = re.compile(r"\d{2}-.+\.(stdout\.json|stderr\.txt)|sync\.(stdout|stderr)\.txt")
 
 
 def _parse_json(text: str) -> dict[str, Any]:
@@ -49,6 +54,16 @@ def _parse_json(text: str) -> dict[str, Any]:
         if isinstance(parsed, dict):
             return parsed
     raise ValueError("no JSON object in output")
+
+
+def _checkout_state(directory: Path) -> tuple[str | None, bool | None]:
+    """(HEAD commit, dirty) of the PluginEval checkout, or (None, None) if it is not a git checkout."""
+    try:
+        commit = prepare._git(directory, "rev-parse", "HEAD").strip()
+        dirty = bool(prepare._git(directory, "status", "--porcelain").strip())
+    except (SystemExit, OSError):
+        return None, None
+    return commit, dirty
 
 
 def load_skills(skills_file: Path) -> list[str]:
@@ -160,6 +175,8 @@ def run(args: argparse.Namespace) -> int:
     summary: dict[str, Any] = {
         "schema": "pact-bench/plugin-eval/1",
         "plugin_eval_dir": None,
+        "plugin_eval_commit": None,
+        "plugin_eval_dirty": None,
         "temp_root": None,
         "complete": False,
         "error": None,
@@ -172,10 +189,14 @@ def run(args: argparse.Namespace) -> int:
     cwd: Path | None = None
     try:
         with prepare._signals_kill_child():
+            for stale in out.iterdir():
+                if STALE_OUTPUT.fullmatch(stale.name) and (stale.is_file() or stale.is_symlink()):
+                    stale.unlink()
             plugin_eval_dir = Path(args.plugin_eval_dir).expanduser().resolve()
             summary["plugin_eval_dir"] = str(plugin_eval_dir)
             if not (plugin_eval_dir / "pyproject.toml").is_file():
                 raise SystemExit(f"not a PluginEval checkout: {plugin_eval_dir}")
+            summary["plugin_eval_commit"], summary["plugin_eval_dirty"] = _checkout_state(plugin_eval_dir)
             skills = load_skills(Path(args.skills_file).expanduser() if args.skills_file else DEFAULT_SKILLS_FILE)
             settings = json.loads((scratch / "config" / "settings.json").read_text(encoding="utf-8"))
             env = prepare.build_child_env(
@@ -246,7 +267,7 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument(
         "--temp-root",
         default=str(prepare.DEFAULT_TEMP_ROOT),
-        help="parent of the fresh cwd the uv commands run from (outside the repo, no CLAUDE.md above it)",
+        help="parent of the one fresh cwd the run's uv commands share (outside the repo, no memory file above it)",
     )
     return parser
 

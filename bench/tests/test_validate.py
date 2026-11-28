@@ -104,15 +104,6 @@ def test_seed_after_ignores_hidden_tests(tmp_path: Path) -> None:
     assert validate.validate_task(task, sys.executable)["status"] == "pass"
 
 
-def _hook_config(tmp_path: Path) -> Path:
-    hooks = tmp_path / "hooks"
-    _write(hooks / "pre-commit", "#!/bin/sh\nexit 1\n")
-    (hooks / "pre-commit").chmod(0o755)
-    config = tmp_path / "gitconfig"
-    _write(config, f"[core]\n\thooksPath = {hooks}\n")
-    return config
-
-
 def test_hidden_xfail_is_not_a_skip(tmp_path: Path) -> None:
     hidden = HIDDEN_TEST + "\n\nimport pytest\n\n\n@pytest.mark.xfail(strict=True)\ndef test_known_bug():\n    assert False\n"
     task = make_task(tmp_path, hidden={"test_hidden.py": hidden})
@@ -125,6 +116,24 @@ def test_symlink_inside_a_copied_dir_pointing_out_is_rejected(tmp_path: Path, wh
     _write(tmp_path / "outside.py", "X = 1\n")
     (task / where / "linked.py").symlink_to(tmp_path / "outside.py")
     with pytest.raises(validate.TaskInvalid, match=f"{where} has symlinks resolving outside"):
+        validate.validate_task(task, sys.executable)
+
+
+def test_outside_link_behind_an_inside_directory_link_is_rejected(tmp_path: Path) -> None:
+    # fixture/shared -> <task>/shared (inside), and <task>/shared/leak.txt -> a host file (outside).
+    task = make_task(tmp_path / "t")
+    _write(tmp_path / "secret.txt", "HOST-SECRET\n")
+    (task / "shared").mkdir()
+    (task / "shared" / "leak.txt").symlink_to(tmp_path / "secret.txt")
+    (task / "fixture" / "shared").symlink_to(task / "shared", target_is_directory=True)
+    with pytest.raises(validate.TaskInvalid, match="fixture has symlinks resolving outside"):
+        validate.validate_task(task, sys.executable)
+
+
+def test_directory_link_cycle_does_not_hang(tmp_path: Path) -> None:
+    task = make_task(tmp_path / "t")
+    (task / "fixture" / "loop").symlink_to(task / "fixture", target_is_directory=True)
+    with pytest.raises(Exception):  # copytree cannot copy a cycle; the scan itself must return
         validate.validate_task(task, sys.executable)
 
 
@@ -152,11 +161,46 @@ def test_global_git_config_does_not_leak(tmp_path: Path, monkeypatch: pytest.Mon
     assert validate.validate_task(make_task(tmp_path / "t"), sys.executable)["status"] == "pass"
 
 
-def test_hooks_path_is_disabled_against_inherited_git_c(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # GIT_CONFIG_PARAMETERS is how "git -c" reaches child gits; only -c core.hooksPath overrides it.
-    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", f"'core.hookspath'='{tmp_path / 'hooks'}'")
-    _hook_config(tmp_path)
+def _failing_hooks(directory: Path) -> Path:
+    _write(directory / "pre-commit", "#!/bin/sh\nexit 1\n")
+    (directory / "pre-commit").chmod(0o755)
+    return directory
+
+
+def test_inherited_git_config_parameters_do_not_reach_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # GIT_CONFIG_PARAMETERS is how "git -c" reaches child gits; the env allowlist drops it.
+    hooks = _failing_hooks(tmp_path / "hooks")
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", f"'core.hookspath'='{hooks}'")
     assert validate.validate_task(make_task(tmp_path / "t"), sys.executable)["status"] == "pass"
+
+
+def test_a_fixtures_own_git_hooks_do_not_run(tmp_path: Path) -> None:
+    task = make_task(tmp_path / "t")
+    env = {**os.environ, **validate.GIT_ENV}
+    subprocess.run(["git", "init", "-q"], cwd=task / "fixture", env=env, check=True)
+    _failing_hooks(task / "fixture" / ".git" / "hooks")
+    assert validate.validate_task(task, sys.executable)["status"] == "pass"
+
+
+def test_host_per_user_git_ignore_does_not_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The host's ~/.config/git/ignore hiding the file the patch adds would read as "changed nothing".
+    home = tmp_path / "home"
+    _write(home / ".config" / "git" / "ignore", "extra.py\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    task = make_task(
+        tmp_path / "t",
+        hidden={"test_hidden.py": "def test_fix():\n    from extra import X\n\n    assert X == 2\n"},
+        gold=_add_patch("extra.py", "X = 2\n"),
+    )
+    assert validate.validate_task(task, sys.executable)["status"] == "pass"
+
+
+def test_host_secrets_do_not_reach_task_code(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GH_TOKEN", "host-secret")
+    seed = "import os\n\ndef test_seed():\n    assert 'GH_TOKEN' not in os.environ\n"
+    task = make_task(tmp_path, files={"tests/test_calc.py": seed})
+    assert validate.validate_task(task, sys.executable)["status"] == "pass"
 
 
 @pytest.mark.parametrize(
@@ -246,7 +290,25 @@ BROKEN = {
     ),
     "patch_skips_seed_tests": (
         {"gold": GOLD + _add_patch("tests/conftest.py", SKIP_ALL)},
-        "the gold patch skipped seed tests",
+        "the gold patch removed or skipped seed tests",
+    ),
+    "patch_deletes_a_seed_test": (
+        {
+            "files": {"tests/test_extra.py": "def test_extra():\n    assert True\n"},
+            "gold": GOLD + "diff --git a/tests/test_extra.py b/tests/test_extra.py\ndeleted file mode 100644\n"
+            "--- a/tests/test_extra.py\n+++ /dev/null\n@@ -1,2 +0,0 @@\n-def test_extra():\n-    assert True\n",
+        },
+        "the gold patch removed or skipped seed tests",
+    ),
+    "patch_xfails_every_hidden_test": (
+        {
+            "gold": _patch("calc.py", "1", "3") + _add_patch(
+                "conftest.py",
+                "import pytest\n\n\ndef pytest_collection_modifyitems(items):\n"
+                "    for item in items:\n        item.add_marker(pytest.mark.xfail(reason='x'))\n",
+            ),
+        },
+        "must run and pass, none skipped: 0 passed, 0 skipped",
     ),
     "fixture_path_escapes": ({"meta": {"fixture": "../elsewhere"}}, "resolves outside the task directory"),
     "absolute_gold_path": ({"meta": {"gold_patch": "/etc/hostname"}}, "resolves outside the task directory"),

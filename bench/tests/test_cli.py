@@ -37,6 +37,8 @@ def test_cli_dispatches_each_subcommand_help(command: tuple[str, ...]) -> None:
     proc = _cli(*command, "--help")
     assert proc.returncode == 0, proc.stderr
     assert COMMANDS[command] in proc.stdout
+    # The usage line names the subcommand, so it can be pasted back as printed.
+    assert proc.stdout.startswith(f"usage: pact-bench {' '.join(command)} ")
 
 
 def test_cli_imports_the_validator_by_package_path() -> None:

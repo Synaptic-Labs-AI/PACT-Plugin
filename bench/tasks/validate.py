@@ -10,14 +10,17 @@ A task is valid only when:
   - the gold patch leaves hidden_tests/ alone, applies, changes the tree, makes
     at least one hidden test pass with none skipped (an xfail is not a skip), and
     keeps seed tests green with no fewer passing and no more skipped than before
-    (counted from pytest's JUnit report, which must be written). A patch that rewrites that report from a conftest can still
-    fool it; the check targets accidental skips, not a hostile patch.
+    (counted from pytest's JUnit report, which must be written). A patch that
+    rewrites that report from a conftest can still fool it; the check targets
+    accidental skips, not a hostile patch.
 
 Every task is validated and reported; the exit code is 1 if any task failed.
 Any Exception inside one task becomes that task's fail row.
-Git runs hermetically (no global/system config, no hooks, no inherited GIT_*),
-and child pytest gets no PYTEST_* or PYTHONPATH, so host settings cannot change
-the result.
+Children (git and pytest) get only PATH, LANG, TERM and LC_* from the host
+environment, with HOME and TMPDIR pointed at the task's temp dir. Git also runs
+with no global or system config and with hooks off. Not isolated: pytest's ini
+search still walks up from the temp dir, so an ini file there or above (e.g. a
+stray /tmp/pytest.ini) applies when the fixture has none of its own.
 """
 from __future__ import annotations
 
@@ -62,6 +65,7 @@ GIT_ENV = {
     "GIT_AUTHOR_DATE": "2000-01-01T00:00:00Z",
     "GIT_COMMITTER_DATE": "2000-01-01T00:00:00Z",
 }
+# A fixture that ships its own .git keeps that repo's config on git init; this turns its hooks off.
 GIT = ["git", "-c", "core.hooksPath=/dev/null"]
 
 
@@ -69,16 +73,16 @@ class TaskInvalid(SystemExit):
     """A task failed validation; main() reports it and moves to the next task."""
 
 
-def _child_env() -> dict[str, str]:
-    # Inherited GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE would redirect commits into another repo.
-    # PYTEST_* (ADDOPTS, PLUGINS) and PYTHONPATH would change what the child pytest runs.
+def _child_env(home: Path) -> dict[str, str]:
+    """An allowlist, not a denylist: task code runs here, and host secrets, GIT_DIR or
+    PYTEST_ADDOPTS must not reach it. HOME in the temp dir also hides the host's
+    per-user git ignore file."""
     env = {
         key: value
         for key, value in os.environ.items()
-        if not key.startswith(("GIT_", "PYTEST_")) and key != "PYTHONPATH"
+        if key in prepare.INHERITED_ENV_KEYS or key.startswith(prepare.INHERITED_ENV_PREFIXES)
     }
-    env["PYTHONDONTWRITEBYTECODE"] = "1"
-    env.update(GIT_ENV)
+    env.update(GIT_ENV, HOME=str(home), TMPDIR=str(home), PYTHONDONTWRITEBYTECODE="1")
     return env
 
 
@@ -86,7 +90,8 @@ def _run(cmd: list[str], cwd: Path, task_id: str, timeout: int) -> subprocess.Co
     """Run cmd in its own process group; a timeout or signal kills its grandchildren too."""
     try:
         return prepare.run_process_group(
-            cmd, timeout, cwd=str(cwd), env=_child_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            # cwd is <temp dir>/work, so its parent is this task's temp dir.
+            cmd, timeout, cwd=str(cwd), env=_child_env(cwd.parent), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True,
         )
     except OSError as exc:
@@ -224,7 +229,7 @@ def _check_in_temp(task_id: str, fixture: Path, hidden: Path, gold: Path, python
             raise TaskInvalid(f"{task_id}: seed tests failed after gold patch:\n{seed_after.stdout[-4000:]}")
         if seed_after_counts["passed"] < seed_counts["passed"] or seed_after_counts["skipped"] > seed_counts["skipped"]:
             raise TaskInvalid(
-                f"{task_id}: the gold patch skipped seed tests: {seed_counts} before, {seed_after_counts} after"
+                f"{task_id}: the gold patch removed or skipped seed tests: {seed_counts} before, {seed_after_counts} after"
             )
 
 
@@ -244,7 +249,9 @@ def _junit_counts(report: Path) -> dict[str, int]:
 def _outside_links(directory: Path, task_dir: Path) -> list[str]:
     """Symlinks under directory that resolve outside the task (copytree would copy their targets in)."""
     found = []
-    for root, dirs, files in os.walk(directory):
+    # followlinks matches copytree, which descends into directory links. A link cycle ends
+    # at the OS symlink-depth limit (ELOOP), which os.walk skips; test_directory_link_cycle_does_not_hang.
+    for root, dirs, files in os.walk(directory, followlinks=True):
         for name in (*dirs, *files):
             path = Path(root) / name
             if path.is_symlink() and not path.resolve().is_relative_to(task_dir):
@@ -272,7 +279,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate Track B tasks (every task under --root by default).")
     parser.add_argument("--root", default=None, help="task suite root (default bench/tasks)")
     parser.add_argument("--task", action="append", default=None, help="specific task directory (repeatable)")
-    parser.add_argument("--python", default=sys.executable)
+    parser.add_argument(
+        "--python",
+        default=sys.executable,
+        help="interpreter path for the task's pytest (default: this one); it runs with the allowlisted env, "
+        "so a shim that needs HOME or other host variables may not start",
+    )
     args = parser.parse_args(argv)
     root = Path(args.root).resolve() if args.root else Path(__file__).resolve().parent
     targets = [Path(item).resolve() for item in args.task] if args.task else discover(root)

@@ -283,6 +283,38 @@ def test_unexpected_error_fails_only_its_command(tmp_path: Path, monkeypatch: py
     assert summary["complete"] is True
 
 
+def test_previous_run_outputs_are_removed(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    out = manifest.parent / "plugin-eval"
+    out.mkdir()
+    for name in ("05-old.stdout.json", "05-old.stderr.txt", "sync.stderr.txt"):
+        (out / name).write_text("stale", encoding="utf-8")
+    (out / "notes.txt").write_text("mine", encoding="utf-8")
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills), "--skip-sync")) == 0
+    names = sorted(path.name for path in out.iterdir())
+    assert "05-old.stdout.json" not in names and "sync.stderr.txt" not in names
+    assert "notes.txt" in names  # files the runner does not write are left alone
+
+
+def test_record_names_the_plugin_eval_commit(tmp_path: Path) -> None:
+    manifest, tool, uv, skills = _setup(tmp_path, ["good"])
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
+    assert (_result(manifest)["plugin_eval_commit"], _result(manifest)["plugin_eval_dirty"]) == (None, None)
+    env = {
+        **os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@e.invalid", "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@e.invalid",
+    }
+    for cmd in (["init", "-q"], ["add", "-A"], ["commit", "-q", "--no-gpg-sign", "-m", "pin"]):
+        subprocess.run(["git", *cmd], cwd=tool, env=env, check=True)
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tool, env=env, capture_output=True, text=True).stdout.strip()
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
+    assert (_result(manifest)["plugin_eval_commit"], _result(manifest)["plugin_eval_dirty"]) == (head, False)
+    (tool / "local-edit.py").write_text("x = 1\n", encoding="utf-8")
+    assert plugin_eval.run(_args(manifest, tool, uv, "--skills-file", str(skills))) == 0
+    assert _result(manifest)["plugin_eval_dirty"] is True
+
+
 def test_output_file_names_are_distinct_and_bounded(tmp_path: Path) -> None:
     long_name = "y" * 300
     manifest, tool, uv, skills = _setup(tmp_path, ["a.b", "a_b", long_name])

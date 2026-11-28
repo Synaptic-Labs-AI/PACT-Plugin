@@ -23,6 +23,17 @@ USAGE = """usage: pact-bench prepare [args]
 Run any subcommand with --help for its arguments."""
 
 
+def _run_as(prog: str, entry, rest: list[str]) -> int:
+    """Run a subcommand with argparse's prog set to "pact-bench <subcommand>", so its
+    usage and --help lines can be pasted back as they are printed."""
+    saved = sys.argv[0]
+    sys.argv[0] = prog  # argparse takes prog from basename(sys.argv[0]); this one has no "/"
+    try:
+        return entry(rest)
+    finally:
+        sys.argv[0] = saved
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if not args or args[0] in ("-h", "--help"):
@@ -30,14 +41,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     command, rest = args[0], args[1:]
     if command == "prepare":
-        return prepare.main(rest)
+        return _run_as("pact-bench prepare", prepare.main, rest)
     if command == "native-eval":
-        return native_eval.main(rest)
+        return _run_as("pact-bench native-eval", native_eval.main, rest)
     if command == "plugin-eval":
-        return plugin_eval.main(rest)
+        return _run_as("pact-bench plugin-eval", plugin_eval.main, rest)
     if command == "tasks":
         if rest and rest[0] == "validate":
-            return tasks_validate_main(rest[1:])
+            return _run_as("pact-bench tasks validate", tasks_validate_main, rest[1:])
         print("usage: pact-bench tasks validate [args]", file=sys.stderr)
         return 2
     print(f"unknown command: {command}", file=sys.stderr)
