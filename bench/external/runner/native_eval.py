@@ -3,7 +3,15 @@
 
 Reads the prepare manifest, injects bench/external/native-evals/evals into the
 scratch plugin copy, runs claude plugin eval headlessly with the scratch
-DeepSeek environment, and records the command/result/exit code.
+DeepSeek environment, and records the command/result/exit code in
+<run>/native-eval/result.json on every exit path.
+
+Cleanup contract: the short TMPDIR/HOME root under --temp-root and the
+injected evals/ dir are removed on every exit path (an evals/results/ dir the
+tool wrote is moved to <run>/native-eval/plugin-evals-results/ first). The scaffold dirs that
+--keep-temp leaves under TMPDIR are moved to <run>/native-eval/kept-temp/
+first (the eval tool makes some of them read-only, so they are made writable
+before the move). A cleanup failure is recorded and makes the run exit 1.
 """
 from __future__ import annotations
 
@@ -11,6 +19,7 @@ import argparse
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -19,52 +28,56 @@ from typing import Any
 
 from . import prepare
 
+# Unix-socket path budget for the sandbox bridge, measured on TMPDIR itself.
+MAX_TMPDIR_CHARS = 51
+TEMP_PREFIX = "pact-native-"
+# tempfile.mkdtemp appends 8 random characters to the prefix.
+TEMP_SUFFIX_CHARS = 8
+TIMEOUT_EXIT_CODE = 124
+
 
 def _default_cases() -> Path:
     return prepare.REPO_ROOT / "bench" / "external" / "native-evals" / "evals"
 
 
-def run(args: argparse.Namespace) -> int:
-    manifest_path = Path(args.manifest).expanduser().resolve()
-    manifest: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
-    scratch = Path(manifest["paths"]["out"])
-    plugin = Path(manifest["paths"]["plugin"])
-    cases_dir = Path(args.cases_dir).expanduser().resolve() if args.cases_dir else _default_cases()
+def predicted_tmpdir_length(temp_parent: Path) -> int:
+    return len(str(temp_parent / (TEMP_PREFIX + "x" * TEMP_SUFFIX_CHARS) / "tmp"))
+
+
+def make_writable(root: Path) -> None:
+    """Give the owner rwx on every directory under root (top-down) so it can be moved or removed."""
+    if root.is_symlink() or not root.is_dir():
+        return
+    os.chmod(root, stat.S_IRWXU)
+    for dirpath, dirnames, _files in os.walk(root):
+        for name in dirnames:
+            child = Path(dirpath) / name
+            if not child.is_symlink():
+                os.chmod(child, stat.S_IRWXU)
+
+
+def _check_cases(cases_dir: Path) -> None:
     if not cases_dir.is_dir():
         raise SystemExit(f"native eval cases directory does not exist: {cases_dir}")
     if not any(cases_dir.iterdir()):
         raise SystemExit(f"native eval cases directory is empty: {cases_dir}")
 
+
+def _child_env(manifest: dict[str, Any], scratch: Path, model: str | None) -> dict[str, str]:
     settings = json.loads((scratch / "config" / "settings.json").read_text(encoding="utf-8"))
-    settings_env = dict(settings.get("env") or {})
-    token_file = Path(manifest["provider"]["token_file"])
-    base_url = str(manifest["provider"]["base_url"])
-    env = prepare.build_child_env(settings_env, scratch, token_file, base_url)
-    temp_parent = Path(args.temp_root).expanduser()
-    temp_parent.mkdir(parents=True, exist_ok=True)
-    short_root = Path(tempfile.mkdtemp(prefix="pact-native-", dir=str(temp_parent)))
-    for name in ("tmp", "home"):
-        (short_root / name).mkdir(parents=True, exist_ok=True)
-    short_tmp = short_root / "tmp"
-    if len(str(short_tmp)) > 51:
-        raise SystemExit(
-            "native eval TMPDIR is too long for the sandbox bridge: "
-            f"{len(str(short_tmp))} chars (max 51); choose a shorter --temp-root outside /tmp"
-        )
-    env["TMPDIR"] = str(short_tmp)
-    env["HOME"] = str(short_root / "home")
-    env.pop("TMP", None)
-    env.pop("TEMP", None)
+    env = prepare.build_child_env(
+        dict(settings.get("env") or {}),
+        scratch,
+        Path(manifest["provider"]["token_file"]),
+        str(manifest["provider"]["base_url"]),
+    )
+    if model:
+        for key in prepare.MODEL_ENV_KEYS:
+            env[key] = model
+    return env
 
-    injected = plugin / "evals"
-    if injected.exists():
-        shutil.rmtree(injected)
-    shutil.copytree(cases_dir, injected)
 
-    out = scratch / "native-eval"
-    out.mkdir(parents=True, exist_ok=True)
-    claude_bin = args.claude_bin or shutil.which("claude") or "claude"
-    model = args.model or manifest["provider"]["model"]
+def build_command(args: argparse.Namespace, claude_bin: str, plugin: Path, out: Path, model: str) -> list[str]:
     cmd = [
         claude_bin,
         "plugin",
@@ -90,6 +103,7 @@ def run(args: argparse.Namespace) -> int:
         "--output-dir",
         str(out / "runs"),
         "--keep-temp",
+        # Variadic (<tools...>): the list ends at the next option.
         "--allow-tools",
         "Bash",
         "Write",
@@ -101,41 +115,115 @@ def run(args: argparse.Namespace) -> int:
     ]
     if args.max_cost_usd is not None:
         cmd.extend(["--max-cost-usd", str(args.max_cost_usd)])
+    return cmd
 
-    stdout = (out / "stdout.txt").open("w", encoding="utf-8")
-    stderr = (out / "stderr.txt").open("w", encoding="utf-8")
-    timed_out = False
-    try:
-        proc = subprocess.run(
-            cmd,
-            cwd=str(scratch),
-            env=env,
-            stdout=stdout,
-            stderr=stderr,
-            timeout=args.timeout,
-        )
-        code = proc.returncode
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        code = 124
-    finally:
-        stdout.close()
-        stderr.close()
 
-    record = {
+def _launch(cmd: list[str], cwd: Path, env: dict[str, str], out: Path, timeout: int) -> tuple[int, bool]:
+    with (out / "stdout.txt").open("w", encoding="utf-8") as stdout, (out / "stderr.txt").open(
+        "w", encoding="utf-8"
+    ) as stderr:
+        try:
+            proc = subprocess.run(cmd, cwd=str(cwd), env=env, stdout=stdout, stderr=stderr, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            return TIMEOUT_EXIT_CODE, True
+        except OSError as exc:
+            raise SystemExit(f"could not launch {cmd[0]}: {exc}") from exc
+    return proc.returncode, False
+
+
+def _cleanup(short_root: Path | None, injected: Path | None, out: Path, record: dict[str, Any]) -> None:
+    """Keep the --keep-temp scaffolds, then remove the short root and the injected evals."""
+    errors: list[str] = []
+    if short_root is not None and short_root.exists():
+        try:
+            make_writable(short_root)
+            kept = short_root / "tmp"
+            if kept.is_dir() and any(kept.iterdir()):
+                target = out / "kept-temp" / short_root.name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(kept), str(target))
+                record["kept_temp"] = str(target)
+            shutil.rmtree(short_root)
+        except OSError as exc:
+            errors.append(f"temp root {short_root}: {exc}")
+    if injected is not None and injected.exists():
+        try:
+            make_writable(injected)
+            results = injected / "results"
+            if results.is_dir():
+                shutil.move(str(results), str(out / "plugin-evals-results"))
+                record["plugin_evals_results"] = str(out / "plugin-evals-results")
+            shutil.rmtree(injected)
+        except OSError as exc:
+            errors.append(f"injected evals {injected}: {exc}")
+    if errors:
+        record["cleanup_error"] = "; ".join(errors)
+        print(f"native eval cleanup failed: {record['cleanup_error']}", file=sys.stderr)
+
+
+def run(args: argparse.Namespace) -> int:
+    manifest_path = Path(args.manifest).expanduser().resolve()
+    manifest: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
+    scratch = Path(manifest["paths"]["out"])
+    plugin = Path(manifest["paths"]["plugin"])
+    cases_dir = Path(args.cases_dir).expanduser().resolve() if args.cases_dir else _default_cases()
+    temp_parent = Path(args.temp_root).expanduser().absolute()
+    out = scratch / "native-eval"
+    out.mkdir(parents=True, exist_ok=True)
+    model = args.model or manifest["provider"]["model"]
+    record: dict[str, Any] = {
         "schema": "pact-bench/native-eval/1",
-        "command": cmd,
+        "command": None,
         "cases_dir": str(cases_dir),
-        "temp_root": str(short_root),
-        "exit_code": code,
-        "timed_out": timed_out,
-        "report_json": str(out / "report.json") if (out / "report.json").is_file() else None,
-        "report_html": str(out / "report.html") if (out / "report.html").is_file() else None,
+        "temp_root": None,
+        "exit_code": None,
+        "timed_out": False,
+        "error": None,
+        "kept_temp": None,
+        "plugin_evals_results": None,
+        "cleanup_error": None,
+        "report_json": None,
+        "report_html": None,
     }
-    (out / "result.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    shutil.rmtree(short_root, ignore_errors=True)
+    short_root: Path | None = None
+    injected: Path | None = None
+    try:
+        _check_cases(cases_dir)
+        claude_bin = prepare.resolve_claude_bin(args.claude_bin)
+        if predicted_tmpdir_length(temp_parent) > MAX_TMPDIR_CHARS:
+            raise SystemExit(
+                "native eval TMPDIR is too long for the sandbox bridge: "
+                f"{predicted_tmpdir_length(temp_parent)} chars (max {MAX_TMPDIR_CHARS}); "
+                "choose a shorter --temp-root"
+            )
+        env = _child_env(manifest, scratch, args.model)
+        temp_parent.mkdir(parents=True, exist_ok=True)
+        short_root = Path(tempfile.mkdtemp(prefix=TEMP_PREFIX, dir=str(temp_parent)))
+        record["temp_root"] = str(short_root)
+        for name in ("tmp", "home"):
+            (short_root / name).mkdir()
+        env["TMPDIR"] = str(short_root / "tmp")
+        env["HOME"] = str(short_root / "home")
+
+        injected = plugin / "evals"
+        if injected.exists():
+            shutil.rmtree(injected)
+        shutil.copytree(cases_dir, injected)
+
+        cmd = build_command(args, claude_bin, plugin, out, model)
+        record["command"] = cmd
+        record["exit_code"], record["timed_out"] = _launch(cmd, scratch, env, out, args.timeout)
+    except SystemExit as exc:
+        record["error"] = str(exc)
+        raise
+    finally:
+        _cleanup(short_root, injected, out, record)
+        for key, name in (("report_json", "report.json"), ("report_html", "report.html")):
+            record[key] = str(out / name) if (out / name).is_file() else None
+        (out / "result.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(record, indent=2))
-    return 0 if code == 0 and not timed_out else 1
+    ok = record["exit_code"] == 0 and not record["timed_out"] and not record["cleanup_error"]
+    return 0 if ok else 1
 
 
 def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.ArgumentParser:
@@ -145,11 +233,12 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
     parser.add_argument(
         "--temp-root",
         default=str(Path.home()),
-        help="short writable parent for TMPDIR/HOME, outside /tmp; keeps sandbox bridge sockets under the Unix socket path limit",
+        help="short writable parent for TMPDIR/HOME; TMPDIR must stay within "
+        f"{MAX_TMPDIR_CHARS} chars to keep sandbox bridge sockets under the Unix socket path limit",
     )
     parser.add_argument("--runs", type=int, default=3)
     parser.add_argument("--concurrency", type=int, default=1)
-    parser.add_argument("--model", default=None)
+    parser.add_argument("--model", default=None, help="override the prepared model for lead, subagents and CLI")
     parser.add_argument("--judge-model", default=None)
     parser.add_argument("--max-cost-usd", type=float, default=None)
     parser.add_argument("--timeout", type=int, default=3600)
