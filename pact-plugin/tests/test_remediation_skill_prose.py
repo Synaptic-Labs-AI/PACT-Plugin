@@ -746,9 +746,10 @@ class TestLegacyScopeStatesAreDocumented:
         body = _body(SKILL)
         assert (
             "A session whose project id is a folder name (a repository with no "
-            "portable origin or with a remote-helper transport origin "
-            "(<helper>::<address>, or any <scheme>:// git does not transport "
-            "itself, such as s3://, hf://, rad:// or codecommit://), a non-git "
+            "portable origin or with a remote-helper or ftp transport origin "
+            "(<helper>::<address>, any <scheme>:// git does not transport "
+            "itself, such as s3://, hf://, rad:// or codecommit://, or ftp:// "
+            "and ftps://), a non-git "
             "project folder, the home-directory landing, or "
             "the user-scope project_id setting) reads and saves its same-name "
             "bucket, shared with every folder of the same name and every "

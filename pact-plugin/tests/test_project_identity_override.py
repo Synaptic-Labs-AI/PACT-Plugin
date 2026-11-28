@@ -469,7 +469,7 @@ class TestDeclaredDirectoryDecline:
         can re-derive — the silent-misscope class this change removes. RED
         WHEN the declared branch falls back to a basename on a decline.
         """
-        repo = make_repo(identity_env / "checkout", remote="ftp://host/o/r.git")
+        repo = make_repo(identity_env / "checkout", remote="https://host:0/o/r.git")
         workspace = identity_env / "workspace"
         workspace.mkdir()
         monkeypatch.chdir(workspace)

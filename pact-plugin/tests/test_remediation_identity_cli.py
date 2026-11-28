@@ -2559,7 +2559,6 @@ def test_the_legacy_write_refusal_says_the_printed_rekey_is_a_preview(identity_e
     ("https://localhost/o/r", "its host is this machine (a loopback or unspecified address)"),
     ("https://127.0.0.1/o/r", "its host is this machine (a loopback or unspecified address)"),
     ("https://h.invalid/o/r", "its host is in the reserved .invalid namespace"),
-    ("ftp://h.example/o/r", "its scheme is not one an id is read from"),
     ("https://h.example/o/r?x=1", "carries a query or fragment"),
     ("https://github.com/o/r.git.git", "GitHub serves no repository at its path"),
     ("git@github.com:~/o/r", "GitHub serves no repository at its path"),
@@ -3103,13 +3102,17 @@ def test_a_partial_move_prints_no_bucket_wide_unattributed_note(identity_env, st
     assert "came from no recorded session" not in output([*base, "--only-placed-here", "--db-path", str(store)])
 
 
-@pytest.mark.parametrize("remote", ["s3://my-bucket/widget", "hf://datasets/acme/widget"])
+@pytest.mark.parametrize("remote", [
+    "s3://my-bucket/widget", "hf://datasets/acme/widget",
+    "ftp://host.example/acme/widget", "ftps://host.example/acme/widget",
+])
 def test_a_save_from_a_remote_helper_scheme_origin_uses_the_folder_name(
     identity_env, store, monkeypatch, capfd, remote
 ):
-    """An origin on a scheme git hands to a helper (s3, hf) saves under the
-    checkout's folder name, with the remote-helper disclosure, as main did.
-    RED WHEN the save is refused as PROJECT_IDENTITY_UNRESOLVED."""
+    """An origin on a scheme git hands to a helper (s3, hf), or an ftp or
+    ftps origin, saves under the checkout's folder name, with the
+    remote-helper disclosure, as main did. RED WHEN the save is refused as
+    PROJECT_IDENTITY_UNRESOLVED."""
     repo = make_repo(identity_env / "widget", remote=remote)
     monkeypatch.chdir(repo)
     code, saved = _cli(["save", json.dumps({"context": "helper origin"}), "--db-path", str(store)], capfd)

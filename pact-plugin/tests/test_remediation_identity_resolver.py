@@ -4713,7 +4713,6 @@ _DESCRIBED_PRINTED_CLAUSES = {
     "its host is this machine (a loopback or unspecified address), which names no portable repository": _OBSERVED,
     "its path is empty or holds a segment an id cannot hold": _OBSERVED,
     "its port is not a valid port number (1-65535, no leading zero)": _OBSERVED,
-    "its scheme is not one an id is read from (https, http, ssh, git, git+ssh, ssh+git)": _OBSERVED,
     "the origin url carries a query or fragment ('?' or '#'), which names no repository": _OBSERVED,
     "the origin url holds a backslash or more than one '@'": _OBSERVED,
     "the origin url holds a control character": _OBSERVED,
@@ -4727,7 +4726,7 @@ _DESCRIBED_PRINTED_CLAUSES = {
     "a bucket shared with any folder of that name": "says what the folder-name id shares",
     "it uses its folder-name id (its folder's name, or its git dir's name for a "
     "--separate-git-dir repository)": "says which id it binds",
-    "its origin is a remote-helper transport, which has no portable id": _OBSERVED,
+    "its origin is a remote-helper or ftp transport, which has no portable id": _OBSERVED,
     "A `git init --separate-git-dir` layout of your own is a user decision":
         "names the user's own layout as theirs to decide",
     "A full 32-character id still resolves": "says which lookups still work",

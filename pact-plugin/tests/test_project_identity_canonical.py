@@ -5,7 +5,7 @@ surface: it must keep THREE outcomes distinct (canonical / no_portable_origin /
 decline). Collapsing decline into basename reintroduces the silent-mis-scope
 defect; collapsing no_portable_origin into decline breaks non-git folders.
 
-`git@host:repo` is CANONICAL and an unsupported network scheme DECLINES;
+`git@host:repo` is CANONICAL and an ftp origin has NO PORTABLE ORIGIN;
 both are asserted here as ruled.
 """
 
@@ -346,10 +346,10 @@ class TestClassifierOutcomes:
             pi.classify_remote_origin("git@github.com:owner/repo")
         )
 
-    def test_an_unsupported_network_scheme_declines(self):
-        """Catches a basename fallback for a real remote we cannot
-        represent."""
-        assert pi.classify_remote_origin("ftp://host/owner/repo") == (DECLINE, None)
+    def test_an_ftp_origin_has_no_portable_id(self):
+        """git fetches ftp:// and ftps:// itself, but no id is read from them:
+        the folder name, as a remote-helper origin takes."""
+        assert pi.classify_remote_origin("ftp://host/owner/repo") == (pi.OUTCOME_NO_PORTABLE_ORIGIN, None)
 
     @pytest.mark.parametrize(
         "url,rule",
@@ -570,7 +570,7 @@ class TestDetectIdForRoot:
         assert identity.id_shape == "basename"
 
     def test_an_unrepresentable_origin_declines(self, tmp_path):
-        repo = make_repo(tmp_path / "bad-remote", remote="ftp://host/o/r.git")
+        repo = make_repo(tmp_path / "bad-remote", remote="https://host:0/o/r.git")
         identity = pi.detect_id_for_root(repo, common_dir(repo))
         assert identity.project_id is None
         assert identity.source == "declined"

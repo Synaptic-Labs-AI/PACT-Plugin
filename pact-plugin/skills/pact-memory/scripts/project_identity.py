@@ -49,17 +49,12 @@ from urllib.parse import quote, unquote
 _ACCEPTED_SCHEMES = frozenset({"https", "http", "ssh", "git", "git+ssh", "ssh+git"})
 
 # Schemes that are NOT network remotes: a local path written in URL form. They
-# fall through to the basename. A scheme git handles itself but an id is not
-# read from (`_GIT_NATIVE_SCHEMES` outside the accepted set: ftp, ftps)
-# DECLINES, because a present network remote we cannot represent must not be
-# silently downgraded to a folder name; any other scheme is a remote helper.
+# fall through to the basename.
 _LOCAL_SCHEMES = frozenset({"file"})
 
-# Every scheme git transports itself (transport.c: file, git, ssh and its
-# aliases, and the curl transports http, https, ftp, ftps). git hands any
-# OTHER `<scheme>://` to `git-remote-<scheme>`, so that scheme is a
-# remote-helper transport (`_is_remote_helper`).
-_GIT_NATIVE_SCHEMES = _ACCEPTED_SCHEMES | _LOCAL_SCHEMES | frozenset({"ftp", "ftps"})
+# The schemes an id is read from or that name a local path. Every other valid
+# `<scheme>://` has no portable id (`_is_unportable_transport`): git hands it
+# to `git-remote-<scheme>`, or, for ftp and ftps, fetches it over curl.
 
 # `scheme://` — the scheme is matched here and validated against the accepted
 # set afterwards, so an unsupported scheme can be classified rather than
@@ -1243,8 +1238,8 @@ def _is_network_shaped(url: object) -> bool:
     `file://` and bare local paths are NOT network-shaped. Every other
     `scheme://` IS - including schemes outside the accepted set, because a
     present network remote we cannot represent must not be silently
-    downgraded to a folder name, so `ftp://` declines too. A remote-helper
-    scheme (`_is_remote_helper`) is classified before this is asked.
+    downgraded to a folder name. A remote-helper or ftp scheme
+    (`_is_unportable_transport`) is classified before this is asked.
 
     A scheme-less value whose PRE-SLASH prefix holds BOTH `@` and `:` is
     ALSO network-shaped. git's own scp heuristic reads the first `:` as the
@@ -1285,19 +1280,19 @@ def _is_network_shaped(url: object) -> bool:
     return "@" in prefix and ":" in prefix
 
 
-# REMOTE-HELPER TRANSPORTS. git hands `<helper>::<address>` to
+# TRANSPORTS WITH NO PORTABLE ID. git hands `<helper>::<address>` to
 # git-remote-<helper>, and every `<scheme>://` it does not transport itself
-# (`_GIT_NATIVE_SCHEMES`: s3, hf, rad, ipfs, codecommit, ...) to
-# git-remote-<scheme>. None of them has a portable id, so such an origin is NO
+# (s3, hf, rad, ipfs, codecommit, ...) to git-remote-<scheme>; ftp and ftps it
+# fetches over curl. None of them has a portable id, so such an origin is NO
 # PORTABLE ORIGIN: the folder name, disclosed (`REMOTE_HELPER_DETAIL`). The
 # helper name holds no `/`, `@`, `[` or `:`, so an IPv6 literal's `::`
 # never reads as one.
 _REMOTE_HELPER_FORM_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*::")
 
 # The `detail` for a folder-name id bound because the origin is a
-# remote-helper transport (`_is_remote_helper`).
+# remote-helper or ftp transport (`_is_unportable_transport`).
 REMOTE_HELPER_DETAIL = (
-    "its origin is a remote-helper transport, which has no portable id, so it "
+    "its origin is a remote-helper or ftp transport, which has no portable id, so it "
     "uses its folder-name id (its folder's name, or its git dir's name for a "
     "--separate-git-dir repository): a bucket shared with any folder of that "
     "name. A canonical id written to <git-common-dir>/pact-project-id gives it "
@@ -1305,19 +1300,21 @@ REMOTE_HELPER_DETAIL = (
 )
 
 
-def _is_remote_helper(url: str) -> bool:
-    """Whether an origin value names a remote-helper transport: the
-    `<helper>::<address>` form, or a `<scheme>://` git does not transport
-    itself (any scheme outside `_GIT_NATIVE_SCHEMES`). A
-    value with a control character, a leading BOM or leading whitespace is
-    not one (it declines as before)."""
+def _is_unportable_transport(url: str) -> bool:
+    """Whether an origin value names a transport with no portable id: the
+    `<helper>::<address>` form, or a `<scheme>://` outside the schemes an id
+    is read from and `file` (a remote helper's, or ftp and ftps). A value
+    with a control character, a leading BOM or leading whitespace is not one
+    (it declines as before)."""
     value = _strip_one_terminator(url)
     if _has_control_character(value) or value[:1] in ("\ufeff", " ", "\t"):
         return False
     if _REMOTE_HELPER_FORM_RE.match(value):
         return True
     scheme = _SCHEME_PREFIX_RE.match(value)
-    return scheme is not None and scheme.group("scheme").lower() not in _GIT_NATIVE_SCHEMES
+    return scheme is not None and scheme.group("scheme").lower() not in (
+        _ACCEPTED_SCHEMES | _LOCAL_SCHEMES
+    )
 
 
 def unrepresentable_detail(url: Optional[str]) -> Optional[str]:
@@ -1337,11 +1334,6 @@ def unrepresentable_detail(url: Optional[str]) -> Optional[str]:
         return "the origin url holds a backslash or more than one '@'"
     scheme_match = _SCHEME_PREFIX_RE.match(value)
     if scheme_match is not None:
-        if scheme_match.group("scheme").lower() not in _ACCEPTED_SCHEMES:
-            return (
-                "its scheme is not one an id is read from (https, http, ssh, git, "
-                "git+ssh, ssh+git)"
-            )
         authority = value[scheme_match.end():].partition("/")[0]
     else:
         scp_match = _scp_match(value)
@@ -1444,13 +1436,13 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
 
     - canonical: a network remote that parses under the canonical grammar.
     - no_portable_origin: no origin, an empty or whitespace-only string, a
-      local path or `file://`, or a remote-helper transport
-      (`_is_remote_helper`). The caller falls through to the basename.
+      local path or `file://`, or a remote-helper or ftp transport
+      (`_is_unportable_transport`). The caller falls through to the basename.
       (An empty value inside the url list never reaches this function:
       `read_origin` reports it as `empty_entry`, which declines. A
       whitespace-only value does reach it, as an ordinary first url.)
     - decline: a NETWORK remote that was present but cannot be a canonical id:
-      an unsupported scheme; a bad, zero, out-of-range or leading-zero port;
+      a malformed scheme; a bad, zero, out-of-range or leading-zero port;
       a backslash or more than one `@`; a host that is not ASCII, holds a
       character outside `[a-z0-9._-]` (an `_` is accepted: an ssh config alias
       or a docker service name holds one), does not start and end with a letter
@@ -1473,7 +1465,7 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
     identifier = normalize_remote_url(url)
     if identifier is not None:
         return OUTCOME_CANONICAL, identifier
-    if _is_remote_helper(url):
+    if _is_unportable_transport(url):
         return OUTCOME_NO_PORTABLE_ORIGIN, None
     if _is_network_shaped(url):
         return OUTCOME_DECLINE, None
@@ -2895,7 +2887,7 @@ def detect_id_for_root(
         )
     if submodule_controlled:
         return _refuse_submodule_basename(root, common_dir, override_ignored)
-    if _is_remote_helper(origin.value):
+    if _is_unportable_transport(origin.value):
         folder = repository_folder_name(root, common_dir)
         if folder is None:
             return _bare_unread_decline(override_ignored, override_path)
