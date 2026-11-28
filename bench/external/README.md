@@ -15,7 +15,7 @@ not a second copy of that suite.
 | Generated | 2026-11-25 |
 | Base commit | `1befafb314dd8124ad9225b87d0d5b064f0a6af6` (worktree HEAD at map time) |
 | Plugin under test | `pact-plugin` v4.8.38 |
-| Internal-suite fingerprint | `sha256:6f94098412764f598e6c312bf4e069c32564d00e54be32529e621cc8bed2d46c` — sha256 over `find pact-plugin/tests -type f | sort | xargs sha256sum` (775 files, 620 Python test files) |
+| Internal-suite fingerprint | `sha256:6f94098412764f598e6c312bf4e069c32564d00e54be32529e621cc8bed2d46c` — sha256 over `find pact-plugin/tests -type f | LC_ALL=C sort | xargs sha256sum`, run from the repo root (775 files, of which 620 are `.py` files and 556 of those are `test_*.py`; another locale's sort order gives a different hash) |
 | External tool pins | `claude` 2.1.332; PluginEval (`wshobson/agents`, `plugins/plugin-eval`) at `c96b5f6552dba32e4492307493ee613581430715` |
 | Decision counts | **keep 6**, **narrow 4**, **drop 3** (13 checks mapped; 2 of 5 PluginEval skills and 3 whole checks dropped) |
 | Reviewer status | reviewed 2026-11-25 by an independent coverage reviewer: 13/13 agree on direction, no flips; fixes required by the review were applied. The review note is unpublished, so the agreement cannot be verified from this tree. Native checks remain blocked/deferred. |
@@ -38,9 +38,9 @@ wrong tree.
   headless session, (2) external quality that a lint/unit test cannot judge,
   (3) version A/B comparisons, (4) runtime-token evidence. It is not an outcome
   benchmark; coding outcomes belong to Track B.
-- **No live model runs in CI.** Every proposed check here is validated against
-  the internal suite *before* it is allowed to call a model, and the internal
-  suite keeps running in CI unchanged.
+- **No live model runs in CI.** The bench CI workflow runs only the hermetic
+  harness tests, and the internal suite keeps running in CI unchanged. Each
+  check in this map was compared with the internal suite before being kept.
 
 ## Layout
 
@@ -54,7 +54,7 @@ bench/
     eval-bench/prompts.yaml     # eval-bench prompt + rubric inventory
     plugin-eval-skills.txt      # skill selection passed to plugin-eval
     runner/                     # prepare.py, native_eval.py, plugin_eval.py
-  tests/                        # hermetic harness tests: no model calls, no network
+  tests/                        # hermetic harness tests (fakes; no model or provider calls)
   .runs/                        # gitignored scratch homes, plugin copies, transcripts
   results/                      # committed per-run summaries only
 ```
@@ -101,14 +101,18 @@ object `env`, a non-empty token file, `--plugin-dir`, a clean source unless
 `--allow-dirty`, and the `claude` binary with `--verify`) before it creates
 `<out>`; `--plugin-ref` and `--plugin-dir` cannot be combined.
 
-**Every child `claude` runs from a clean directory.** Claude Code reads
-`CLAUDE.md` from the working directory and every parent, so `prepare --verify`
-and `native-eval` start their child from a fresh directory under `--temp-root`
-(default `/tmp` for both). The temp root must be outside the repository, with
-no `CLAUDE.md`, `CLAUDE.local.md` or `.claude/CLAUDE.md` in it or any parent,
-and this is checked before anything is written. A temp root under `$HOME` fails
-the check when `~/.claude/CLAUDE.md` exists. `provider-check.json` and
-`native-eval/result.json` record the working directory as `cwd`. `--force` replaces only an `<out>`
+**The harness starts each `claude` child from a clean directory.** Claude Code
+can load `CLAUDE.md` files from the working directory and its parents, so
+`prepare --verify` and `native-eval` start their child from a fresh directory
+under `--temp-root` (default `/tmp` for both). The temp root is resolved to its
+real path (symlinks followed) and refused if it resolves into the repository,
+has a `CLAUDE.md`, `CLAUDE.local.md` or `.claude/CLAUDE.md` in it or any parent,
+or exists and is not a directory. These three names are the ones the harness
+checks, not a list of every location Claude Code reads. A temp root under `$HOME` fails the check when
+`~/.claude/CLAUDE.md` exists. `provider-check.json` and
+`native-eval/result.json` record the real working directory as `cwd`. This
+covers the directory the harness chooses; sessions that `claude plugin eval`
+starts inside its own scaffolds choose their own directories. `--force` replaces only an `<out>`
 that holds a previous pact-bench output, and never `/`, `$HOME`, or the repo
 root or one of its ancestors.
 
@@ -145,8 +149,8 @@ during a run.
   `TMPDIR`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. No other live
   variable reaches it (no `CLAUDE*`, `GH_TOKEN`, `SSH_*`, `AWS_*` or
   `ANTHROPIC_API_KEY`). `plugin-eval` uses the same child environment.
-- **Model:** `deepseek-flash[1m]`, pinned in the scratch settings env on all 11
-  model-id keys: `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_MODEL`,
+- **Model:** `deepseek-flash[1m]`, pinned in the scratch settings env on the 11
+  model-id keys that the Claude Code 2.1.332 binary names: `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_MODEL`,
   `ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL`,
   `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
   `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL` and
@@ -191,23 +195,27 @@ The runner copies `bench/external/native-evals/evals/` into the scratch plugin a
 model> --judge-model <manifest model>`.
 Case layout is the CLI's native format: `<eval dir>/**/case.yaml`, or
 `prompt.md` + `graders/*.md`. Results: `<out>/native-eval/result.json` (written
-on every exit once the manifest loads; a timeout records exit code 124, and
-`error` is set for any exception or signal; an unreadable or incomplete prepare
-manifest fails with `cannot read prepare manifest …` before anything is
-written), `report.json`, `report.html`, and `runs/`. The eval runs from `<temp-root>/pact-native-XXXXXXXX/work`, and the
+on every exit path once the manifest is read and its run directory is writable;
+a timeout records exit code 124, and `error` is set for an exception; an
+unreadable or incomplete manifest, or one whose `paths.plugin` is not
+`<out>/pact-plugin`, fails with a message before anything is written), `report.json`, `report.html`, and `runs/`. The eval runs from `<temp-root>/pact-native-XXXXXXXX/work`, and the
 child's `HOME` and `TMPDIR` are `<temp-root>/pact-native-XXXXXXXX/{home,tmp}`
-(default `--temp-root` is `/tmp`); `TMPDIR` must be at most 51 characters, checked before anything is
-created. `--keep-temp` scaffolds are moved to
+(default `--temp-root` is `/tmp`); `TMPDIR` must be at most 51 characters, checked before the temp root
+is created. `--keep-temp` scaffolds are moved to
 `<out>/native-eval/kept-temp/<run id>/`, any `evals/results/` the tool wrote to
 `<out>/native-eval/plugin-evals-results/<run id>/` (the run id is the
-`pact-native-XXXXXXXX` name), and the rest of the temp root is deleted. A
+`pact-native-XXXXXXXX` name), and the temp root is then deleted, also when a
+move fails (for example across filesystems); a failure is recorded in
+`cleanup_error` and the run exits 1. A
 previous run's `report.json` and `report.html` are deleted at the start of each
-run, so `result.json` names only reports this run wrote. A SIGTERM or SIGHUP
-kills the eval's process group, records `terminated by SIGTERM` (or SIGHUP),
-still cleans up, and exits 143 (or 129); `provider-check.json` records a signal
-the same way. A Ctrl-C (SIGINT) also kills the group and is recorded as
-`KeyboardInterrupt`. A timeout kills the
-eval's whole process group.
+run, so `result.json` names only reports this run wrote. While the eval child
+runs, a SIGTERM or SIGHUP kills its process group, is recorded as
+`terminated by SIGTERM` (or SIGHUP), and the runner still cleans up and exits
+143 (or 129); `provider-check.json` records a signal during the verify call the
+same way. At any other moment those signals take their default action and no
+record is written. A timeout or Ctrl-C (SIGINT) also kills the child's process
+group. A grandchild that starts its own session leaves the group and is not
+killed. Undecodable child output is stored with replacement characters.
 
 The cases directory must be non-empty; the runner refuses an empty suite. The
 authored cases and the inventory they must meet are in
@@ -225,21 +233,28 @@ authored cases and the inventory they must meet are in
 Runs `uv sync --frozen --extra llm` (without the provider token), then
 `plugin-eval score <scratch plugin> --depth quick` (whole plugin; static layer
 only) and `plugin-eval score <scratch plugin>/skills/<skill> --depth standard`
-for each skill in the skills file (static + experimental LLM judge). The skills
-come only from `--skills-file` or, by default,
+for each skill in the skills file (static + experimental LLM judge). Each `uv`
+command starts in a fresh `<temp-root>/pact-plugin-eval-XXXXXXXX` directory
+(`--temp-root`, default `/tmp`, checked like the other runners' temp roots) with
+the checkout passed as `--project`; the directory is removed afterwards. The
+skills come only from `--skills-file` or, by default,
 `bench/external/plugin-eval-skills.txt` (`~` is expanded); a missing or empty
-file is an error.
-Results: `<out>/plugin-eval/result.json`, always written. A command that times
-out is recorded with exit code 124 and `timed_out: true` (its whole process
-group is killed) and the run continues; the runner exits 1 if any command
-failed, timed out or printed no JSON object. A timed-out record's `stdout_tail` and `stderr_tail` hold the output drained
-after the kill, `output_complete` is false if that bounded drain ran out, and the
-raw `.stdout.json`/`.stderr.txt` files are saved. An unexpected error in one
-command records `{label, command, exit_code: null, error}` and the run
-continues; a missing `uv` still aborts. `complete` is true only when every
-command was attempted. On an abort (missing `uv`, or a `uv sync` failure or
-timeout) `error` and `aborted_command` are set and `not_run` lists the commands
-never started; `sync` records the sync step (null with `--skip-sync`). PluginEval's judge layers are experimental and
+file, a duplicate entry, or an entry containing `/` or starting with `.` is an
+error.
+Results: `<out>/plugin-eval/result.json`. Once the manifest is read it is
+written when the run ends, fails a check (checkout, skills file, settings,
+token, temp root), times out, aborts, or gets a SIGTERM or SIGHUP; an unreadable
+manifest exits with `cannot read prepare manifest …` and leaves no record, and
+`plugin_eval_dir` and `temp_root` (the real path) are null when the run failed
+before they were resolved. A command
+that times out is recorded with exit code 124 and `timed_out: true`, with the
+output drained after the kill (`output_complete` false if that bounded drain ran
+out), and the run continues. An unexpected error in one command is recorded as
+`{label, command, exit_code: null, error}` and the run continues; a missing `uv`
+or a `uv sync` failure or timeout aborts, setting `error` and `aborted_command`
+and listing the rest in `not_run`. `complete` is true only when every command
+was attempted. The runner exits 1 if any command failed, timed out or printed no
+JSON object, or a cleanup failed (`cleanup_error`). PluginEval's judge layers are experimental and
 not human-validated; model labels are Anthropic-oriented. Use the judge score as
 a diagnostic, not a gate.
 
@@ -270,14 +285,14 @@ reasoning quality, not field names or CLI output shapes.
 ```bash
 snap="$PWD/bench/.runs/external/token-snapshot"
 ./bench/pact-bench prepare --out "$snap" --force
-# Run from a directory outside the repository and outside $HOME: claude reads
-# CLAUDE.md from the working directory and every parent (and ~/.claude/CLAUDE.md
-# counts for any directory under $HOME), so their tokens would count in the
+# Run from a directory outside the repository and outside $HOME: claude can load
+# CLAUDE.md files from the working directory and its parents (on this layout
+# ~/.claude/CLAUDE.md is one of them for any directory under $HOME), so their tokens would count in the
 # sample. Also run claude with the env from <snap>/config/settings.json and
 # HOME/CLAUDE_CONFIG_DIR pointed at <snap>/home and <snap>/config.
 cd "$(mktemp -d -p /tmp)"
 # For each of 3 runs: run the standard smoke prompt headlessly and keep the JSON.
-claude -p --output-format json --model deepseek-flash[1m] "<smoke prompt>" \
+claude -p --output-format json --model 'deepseek-flash[1m]' "<smoke prompt>" \
   > "$snap/run-N.json"
 jq '{usage, modelUsage}' "$snap/run-N.json"
 ```
@@ -658,9 +673,9 @@ Track A run without a new gap analysis.
 
 ## What the internal suite already covers
 
-Measured at the map baseline (`pact-plugin/tests`, 775 files, 620 Python test
-files, ~456k lines, ~15.9k `def test_` functions collecting to roughly 28k
-tests with parametrization):
+Measured at the map baseline (`pact-plugin/tests`, 775 files; 620 `.py` files,
+556 of them `test_*.py`, ~456k lines; ~15.7k `def test_` functions, more tests
+once parametrized):
 
 - **Unit and integration behavior** for every hook (bootstrap gate/marker,
   dispatch gate, task claim/lifecycle gates, handoff ordering/validation,

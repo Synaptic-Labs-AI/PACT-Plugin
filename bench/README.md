@@ -8,7 +8,8 @@ plugin runtime behavior.
 
 - external/ - native claude plugin eval cases, PluginEval skill selection,
   eval-bench prompts, and the isolated prepare/run wrapper.
-- tests/ - hermetic harness tests (no model calls, no network).
+- tests/ - hermetic harness tests: external tools are replaced by fakes, so
+  they make no model or provider calls.
 - results/ - committed per-run summaries only, assembled by hand from the raw
   runs under .runs/; tests/test_results.py checks them against BENCHMARKS.md.
 - .runs/ - gitignored scratch homes, configs, plugin copies, transcripts.
@@ -37,16 +38,17 @@ nothing else, then the scratch settings env, then:
 
 prepare writes ANTHROPIC_BASE_URL (--base-url) and the model (--model) into the
 scratch settings env, so the settings and the child agree; native-eval takes no
---model and uses the prepared model. The token is never written to disk by the
-harness, and the manifest records only the token file path, but run outputs
+--model and uses the prepared model. The harness itself writes the token to no
+file, and the manifest records only the token file path, but run outputs
 (kept transcripts, captured output) can hold it: keep --out under bench/.runs/,
 which is gitignored. prepare warns when --out is inside the repository but
 outside bench/.runs/.
 
-Every child claude (prepare --verify, native-eval) runs from a fresh directory
-under --temp-root (default /tmp), which must be outside the repository with no
-CLAUDE.md, CLAUDE.local.md or .claude/CLAUDE.md in it or any parent, so no
-project or user CLAUDE.md is loaded into the run.
+The harness starts each claude child (prepare --verify, native-eval) from a
+fresh directory under --temp-root (default /tmp). Its real path must be outside
+the repository with no CLAUDE.md, CLAUDE.local.md or .claude/CLAUDE.md in it or
+any parent. Sessions that claude plugin eval starts in its own scaffolds choose
+their own directories.
 
 ## Inspect-only first step
 

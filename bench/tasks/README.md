@@ -1,8 +1,9 @@
 # Track B task suite
 
-Each task is a small, deterministic Python 3.12 stdlib project. The agent under
-test receives fixture/ as its workspace, prompt.md as the request, and is scored
-against hidden_tests/ that are never present in its workspace.
+Each task is a small, deterministic Python 3.12 stdlib project. The design: the
+agent under test receives fixture/ as its workspace and prompt.md as the
+request, and is scored against hidden_tests/, which are kept out of its
+workspace. The runner that does this is not in this PR; only the validator is.
 
 No task directories are committed yet; they land in a follow-up PR. Until then
 `bench/pact-bench tasks validate` exits with "no tasks found".
@@ -47,7 +48,10 @@ No task directories are committed yet; they land in a follow-up PR. Until then
 ## Hidden tests
 
 - pytest files under hidden_tests/.
-- They must fail on the untouched fixture (at least one failure, non-vacuous).
+- They must fail on the untouched fixture with pytest exit status 1 (tests ran
+  and at least one failed). A collection error (2) or no tests (5) fails the
+  task, so a hidden test that imports a module the gold patch creates must
+  import it inside the test body.
 - They must pass after gold.patch applies.
 - They must not import or reference gold.patch, task.json, or the harness.
 - They test user-visible requirements from prompt.md, not implementation details.
@@ -89,8 +93,8 @@ directory name). Any error in one task (an unreadable or non-UTF-8 task.json, a
 wrong field type, a copy error, anything unexpected) becomes that task's fail
 row and the run continues; an unexpected error reads
 `<id>: <ExceptionType>: <message>`. The run exits 1 if any task failed. `timeout_seconds` must be a positive
-integer and bounds each command; a command that times out, or a SIGTERM or
-SIGHUP to the validator, kills its whole process group. Git runs without the
+integer and bounds each command; a command that times out has its process
+group killed (a grandchild that starts its own session is not killed). Git runs without the
 global or system config, with hooks off and with no inherited `GIT_*` variables;
 the child pytest gets no inherited `PYTEST_*` or `PYTHONPATH`. The hidden tests are snapshotted
 before the gold patch is applied, and any change to them (an edit, a deletion,
