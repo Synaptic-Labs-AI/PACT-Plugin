@@ -9,9 +9,13 @@ its run directory is writable. A
 SIGTERM/SIGHUP is recorded only while the eval child runs; at any other moment
 it gets the default action. The eval runs from <temp-root>/pact-native-XXXXXXXX/work
 (the temp root's real path), outside the repo and with no Claude Code memory
-file above it, checked before the temp root is created and again after the eval
-(a file that appeared meanwhile is listed in clean_root_changed and fails the
-run). The model (CLI --model and --judge-model) is the one fixed at prepare
+file above it, checked before the temp root is created and again after the eval from the
+eval's own cwd (work/, the run's temp root, --temp-root and its parents; a file
+that appeared meanwhile is listed in clean_root_changed and fails the run).
+Case files are injected with links kept as links; an absolute link or one out
+of the cases dir is refused. Outputs are created with umask 077 when run via
+main(). Stale report.json, report.html, stdout.txt and stderr.txt are removed
+at start. The model (CLI --model and --judge-model) is the one fixed at prepare
 time, read from the manifest. The eval's whole process group is killed when it
 ends, times out or is signalled. Its --output-dir is <run>/native-eval/runs/<run id>/.
 --threshold 0 is always passed, so the eval's pass/fail and exit code are not
@@ -297,7 +301,7 @@ def run(args: argparse.Namespace) -> int:
     out = scratch / "native-eval"
     out.mkdir(parents=True, exist_ok=True)
     # The reports are rewritten each run; a stale one must not be recorded as this run's.
-    for name in REPORT_FILES.values():
+    for name in (*REPORT_FILES.values(), "stdout.txt", "stderr.txt"):
         (out / name).unlink(missing_ok=True)
     record: dict[str, Any] = {
         "schema": "pact-bench/native-eval/1",
@@ -344,7 +348,10 @@ def run(args: argparse.Namespace) -> int:
         injected = plugin / "evals"
         if injected.exists():
             shutil.rmtree(injected)
-        shutil.copytree(cases_dir, injected)
+        # Same link rule as the plugin copy: absolute links and links out of the cases
+        # dir are refused, the rest are copied as links (no outside file is pulled in).
+        prepare._refuse_outside_links(cases_dir, lambda _directory, _names: set())
+        shutil.copytree(cases_dir, injected, symlinks=True)
 
         runs_dir = out / "runs" / short_root.name  # per run, so earlier runs never mix in
         record["runs_dir"] = str(runs_dir)
@@ -354,7 +361,8 @@ def run(args: argparse.Namespace) -> int:
         record["exit_code"], record["timed_out"] = _launch(cmd, cwd, env, out, args.timeout)
         # The clean-root check ran at start; a memory or settings file that appeared
         # during the run (e.g. another user writing to a shared /tmp) is recorded.
-        changed = prepare.memory_files_above(temp_parent)
+        # From the eval's cwd: covers work/, the run's temp root and --temp-root and its parents.
+        changed = prepare.memory_files_above(cwd)
         record["clean_root_changed"] = [str(path) for path in changed] or None
     except BaseException as exc:
         record["error"] = str(exc) if isinstance(exc, SystemExit) else f"{type(exc).__name__}: {exc}"
@@ -397,7 +405,8 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
 
 
 def main(argv: list[str] | None = None) -> int:
-    return run(build_parser().parse_args(argv))
+    with prepare.private_umask():
+        return run(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":

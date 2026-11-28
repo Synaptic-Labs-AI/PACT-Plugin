@@ -558,3 +558,58 @@ def test_native_eval_replaces_leftover_evals(tmp_path: Path, short_root: Path) -
     assert native_eval.run(_args(manifest, cases, fake, short_root)) == 0
     assert sorted(path.name for path in seen.iterdir()) == ["probe"]
     assert not (plugin / "evals").exists()
+
+
+
+def test_native_eval_fails_when_a_memory_file_appears_in_its_cwd(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    # CLAUDE.local.md stands in for every memory file name.
+    fake = _fake_claude(tmp_path, "open(os.path.join(os.getcwd(), 'CLAUDE.local.md'), 'w').write('late')\n")
+    assert native_eval.run(_args(manifest, cases, fake, short_root)) == 1
+    changed = _result(manifest)["clean_root_changed"]
+    assert len(changed) == 1 and changed[0].endswith("/work/CLAUDE.local.md")
+
+
+def test_native_eval_removes_stale_child_output_at_start(tmp_path: Path) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    out = manifest.parent / "native-eval"
+    out.mkdir()
+    for name in ("stdout.txt", "stderr.txt"):
+        (out / name).write_text("RUN-A-OUTPUT", encoding="utf-8")
+    with pytest.raises(SystemExit, match="too long"):
+        native_eval.run(_args(manifest, cases, _fake_claude(tmp_path), tmp_path / ("x" * 60)))
+    assert not (out / "stdout.txt").exists() and not (out / "stderr.txt").exists()
+
+
+def test_native_eval_refuses_a_case_link_out_of_the_cases_dir(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, plugin = _prepared(tmp_path)
+    canary = tmp_path / "canary.md"
+    canary.write_text("CANARY", encoding="utf-8")
+    (cases / "probe" / "graders.md").symlink_to("../../canary.md")
+    with pytest.raises(SystemExit, match="points outside"):
+        native_eval.run(_args(manifest, cases, _fake_claude(tmp_path), short_root))
+    assert not (plugin / "evals").exists()
+
+
+def test_native_eval_keeps_an_in_tree_case_link_as_a_link(tmp_path: Path, short_root: Path) -> None:
+    manifest, cases, plugin = _prepared(tmp_path)
+    (cases / "probe" / "alias.md").symlink_to("prompt.md")
+    seen = tmp_path / "seen.json"
+    fake = _fake_claude(
+        tmp_path,
+        f"link = {str(plugin / 'evals' / 'probe' / 'alias.md')!r}\n"
+        f"open({str(seen)!r}, 'w').write(json.dumps([os.path.islink(link), os.readlink(link)]))\n",
+    )
+    assert native_eval.run(_args(manifest, cases, fake, short_root)) == 0
+    assert json.loads(seen.read_text(encoding="utf-8")) == [True, "prompt.md"]
+
+
+@pytest.mark.parametrize(("cap", "tail"), [(1.5, ["--max-cost-usd", "1.5"]), (None, None)])
+def test_native_eval_forwards_the_cost_cap(tmp_path: Path, cap: float | None, tail: list[str] | None) -> None:
+    extra = ["--max-cost-usd", str(cap)] if cap is not None else []
+    args = native_eval.build_parser().parse_args(["--manifest", "m.json", *extra])
+    command = native_eval.build_command(args, "claude", tmp_path, tmp_path, "m", tmp_path / "runs", [])
+    if tail is None:
+        assert "--max-cost-usd" not in command
+    else:
+        assert command[-2:] == tail

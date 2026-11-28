@@ -982,9 +982,25 @@ def test_child_env_refilters_a_rewritten_settings_env(tmp_path: Path) -> None:
         ("BASH_MAX_TIMEOUT_MS", "600000", True),
         ("BASH_MAX_OUTPUT_LENGTH", "30000", True),
         ("API_TIMEOUT_MS", "600000", True),
-        ("ANTHROPIC_BEDROCK_BASE_URL", "https://x/?api_key=sk-live", False),
-        ("ANTHROPIC_BEDROCK_BASE_URL", "https://x/path?region=us&Signature=abc", False),
-        ("ANTHROPIC_BEDROCK_BASE_URL", "https://x/path?region=us", True),
+        ("ANTHROPIC_EXTRA_URL", "https://x/?api_key=sk-live", False),
+        ("ANTHROPIC_EXTRA_URL", "https://x/path?region=us&Signature=abc", False),
+        ("ANTHROPIC_EXTRA_URL", "https://x/path?region=us&X-Amz-Signature=abc", False),
+        ("ANTHROPIC_EXTRA_URL", "https://x/path?apikey=abc", False),
+        ("ANTHROPIC_EXTRA_URL", "https://x/path?region=us", True),
+        ("ANTHROPIC_EXTRA_URL", "https://x/path?design=1&monkey=2", True),  # sig/key inside words
+        # Names or values that point a child at live host state.
+        ("ANTHROPIC_BEDROCK_BASE_URL", "https://x/path", False),
+        ("CLAUDE_CODE_SHELL_PREFIX", "wrap", False),
+        ("CLAUDE_CODE_PLUGIN_DIRS", "x", False),
+        ("CLAUDE_CODE_HTTPS_PROXY", "http://proxy:8080", False),
+        ("CLAUDE_CODE_MANAGED_SETTINGS_PATH", "x", False),
+        ("CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD", "1", False),
+        ("ANTHROPIC_CONFIG_DIR", "x", False),
+        ("CLAUDE_CODE_TMPDIR", "x", False),
+        ("CLAUDE_CODE_HOST_CREDS_FILE", "x", False),
+        ("CLAUDE_CODE_FOO", "/home/u/live/thing", False),
+        ("CLAUDE_CODE_FOO", "~/live/thing", False),
+        ("CLAUDE_CODE_EFFORT_LEVEL", "max", True),
     ],
 )
 def test_live_env_names_and_values(key: str, value: str, kept: bool) -> None:
@@ -1023,3 +1039,76 @@ def test_positive_int_refuses_non_positive(text: str) -> None:
 
     with pytest.raises(argparse.ArgumentTypeError):
         prepare.positive_int(text)
+
+
+
+# The env names in today's live DeepSeek settings (names only): none may be dropped.
+LIVE_SETTINGS_NAMES = (
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_MODEL", "CLAUDE_CODE_ALWAYS_ENABLE_EFFORT", "CLAUDE_CODE_AUTO_COMPACT_WINDOW",
+    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+    "CLAUDE_CODE_EFFORT_LEVEL", "CLAUDE_CODE_ENABLE_TODO_TOOLS", "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS",
+    "CLAUDE_CODE_EXPERIMENTAL_CODE_MODE", "CLAUDE_CODE_MAX_OUTPUT_TOKENS", "CLAUDE_CODE_SUBAGENT_MODEL",
+    "DISABLE_AUTO_COMPACT", "MAX_THINKING_TOKENS",
+)
+
+
+@pytest.mark.parametrize("name", LIVE_SETTINGS_NAMES)
+def test_todays_live_settings_names_are_kept(name: str) -> None:
+    assert prepare.keeps_live_env(name, "1")
+
+
+def test_numeric_and_boolean_settings_values_reach_the_child_as_text(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    args = _prepare_args(tmp_path, out, "--verify")
+    seen = tmp_path / "env.json"
+    fake = _fake_claude(
+        tmp_path / "claude",
+        "import os\n"
+        f"open({str(seen)!r}, 'w').write(json.dumps({{k: os.environ.get(k) for k in ('MAX_THINKING_TOKENS', 'DISABLE_AUTO_COMPACT')}}))\n"
+        "print(json.dumps({'is_error': False, 'modelUsage': {'deepseek-flash': {}}}))\n",
+    )
+    args += ["--claude-bin", str(fake)]
+    (tmp_path / "live-settings.json").write_text(
+        json.dumps({"env": {"MAX_THINKING_TOKENS": 8000, "DISABLE_AUTO_COMPACT": True}}), encoding="utf-8"
+    )
+    assert prepare.main(args) == 0
+    assert json.loads(seen.read_text(encoding="utf-8")) == {"MAX_THINKING_TOKENS": "8000", "DISABLE_AUTO_COMPACT": "true"}
+
+
+@pytest.mark.parametrize("value", [[1, 2], {"a": 1}, None])
+def test_non_scalar_settings_values_are_refused_before_writing(tmp_path: Path, value: object) -> None:
+    out = tmp_path / "out"
+    args = _prepare_args(tmp_path, out)
+    (tmp_path / "live-settings.json").write_text(json.dumps({"env": {"CLAUDE_CODE_X": value}}), encoding="utf-8")
+    with pytest.raises(SystemExit, match="strings, numbers or booleans"):
+        prepare.main(args)
+    assert not out.exists()
+
+
+def test_main_creates_private_outputs_and_restores_the_umask(tmp_path: Path) -> None:
+    before = os.umask(0o022)
+    try:
+        out = tmp_path / "out"
+        assert prepare.main(_prepare_args(tmp_path, out)) == 0
+        assert (out / "manifest.json").stat().st_mode & 0o777 == 0o600
+        assert out.stat().st_mode & 0o777 == 0o700
+        assert os.umask(0o022) == 0o022  # restored
+    finally:
+        os.umask(before)
+
+
+def test_verify_reads_the_json_after_leading_log_lines(tmp_path: Path) -> None:
+    fake = _fake_claude(
+        tmp_path / "claude",
+        "print('starting up...')\nprint(json.dumps({'is_error': False, 'modelUsage': {'deepseek-flash': {}}}))\n",
+    )
+    out = _out(tmp_path)
+    assert prepare.verify_provider(out, out, str(fake), dict(os.environ))["resolved_model"] is True
+
+
+def test_live_teammate_mode_is_preserved(tmp_path: Path) -> None:
+    source = tmp_path / "settings.json"
+    source.write_text(json.dumps({"env": {}, "teammateMode": "tmux"}), encoding="utf-8")
+    settings, _env = prepare.build_scratch_settings(source, tmp_path / "config", tmp_path, "m")
+    assert settings["teammateMode"] == "tmux"

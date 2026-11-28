@@ -302,7 +302,8 @@ afterwards. The record notes the git checkout that holds `--plugin-eval-dir`
 (`plugin_eval_repo`, its top-level path; for the documented layout, the agents
 clone with the dir at `plugins/plugin-eval`), that checkout's HEAD
 (`plugin_eval_commit`), and whether files under the PluginEval dir have changes
-(`plugin_eval_dirty`; edits elsewhere in the clone do not count). All three are
+(`plugin_eval_dirty`; edits elsewhere in the clone and git-ignored files do not
+count). All three are
 null only if the dir is in no git checkout. The pin is recorded, not enforced,
 unless you pass `--expect-commit <full SHA>`, which compares it with that
 checkout's HEAD and refuses the run (recorded in `result.json`, before any

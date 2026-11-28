@@ -88,7 +88,15 @@ LIVE_ENV_PREFIXES = ("ANTHROPIC_", "CLAUDE_CODE_", "DISABLE_", "ENABLE_", "MAX_"
 # source a live file.
 LIVE_ENV_NAMES = ("API_TIMEOUT_MS", "BASH_DEFAULT_TIMEOUT_MS", "BASH_MAX_TIMEOUT_MS", "BASH_MAX_OUTPUT_LENGTH")
 # A credential-shaped URL query parameter (?api_key=, &token=, &sig=, ...).
-URL_QUERY_CREDENTIAL = re.compile(r"[?&][^=&#\s]*(key|token|secret|sig|password|auth)[^=&#\s]*=", re.IGNORECASE)
+# Matched as a whole word inside the parameter name (api_key, X-Amz-Signature), so
+# ordinary names like design= or monkey= are not caught.
+URL_QUERY_CREDENTIAL = re.compile(
+    r"[?&](?:[^=&#\s]*[_.-])?(?:api_?key|key|token|secret|sig|signature|password|auth)(?:[_.-][^=&#\s]*)?=",
+    re.IGNORECASE,
+)
+# Names that point a child at live host state (a shell wrapper, plugin or settings
+# location, proxy, endpoint, directory or certificate); dropped even with an allowed prefix.
+HOST_STATE_NAME = re.compile(r"SHELL|PLUGIN|SETTINGS|PROXY|COMMAND|SCRIPT|CERT|CREDS|BASE_URL|DIRECTOR|_DIRS?$|_PATH$|TMPDIR")
 URL_USERINFO = re.compile(r"://[^/\s@]+@")
 # The only live-environment keys a child inherits; everything else comes from
 # the scratch settings env or is set explicitly below.
@@ -305,12 +313,15 @@ def check_clean_root(root: Path) -> Path:
 def keeps_live_env(key: str, value: Any) -> bool:
     """True when a settings env entry may reach scratch settings.json or a child: its
     name is in LIVE_ENV_NAMES or has a LIVE_ENV_PREFIXES prefix, is not
-    credential-shaped (is_scratch_env_key), and its value carries no URL userinfo
-    (user:pass@) and no credential-shaped URL query parameter."""
+    credential-shaped (is_scratch_env_key) or host-state-shaped (HOST_STATE_NAME),
+    and its value is not a host path (starting with / or ~) and carries no URL
+    userinfo (user:pass@) and no credential-shaped URL query parameter."""
     text = str(value)
     return (
         (key in LIVE_ENV_NAMES or key.startswith(LIVE_ENV_PREFIXES))
         and is_scratch_env_key(key)
+        and not HOST_STATE_NAME.search(key)
+        and not text.startswith(("/", "~"))
         and not URL_USERINFO.search(text)
         and not URL_QUERY_CREDENTIAL.search(text)
     )
@@ -371,9 +382,9 @@ def _refuse_outside_links(src: Path, ignore: Any) -> None:
                 continue
             target = os.readlink(path)
             if os.path.isabs(target):
-                raise SystemExit(f"plugin source link {path} is absolute ({target}); use a relative link")
+                raise SystemExit(f"link {path} is absolute ({target}); use a relative link")
             if not path.resolve().is_relative_to(real):
-                raise SystemExit(f"plugin source link {path} points outside {src}: {target}")
+                raise SystemExit(f"link {path} points outside {src}: {target}")
 
 
 def plugin_version(repo: Path, sha: str | None, plugin_dir: Path | None) -> str:
@@ -542,7 +553,7 @@ def build_child_env(
         for key, value in os.environ.items()
         if key in INHERITED_ENV_KEYS or key.startswith(INHERITED_ENV_PREFIXES)
     }
-    env.update({key: value for key, value in settings_env.items() if keeps_live_env(key, value)})
+    env.update({key: env_text(value) for key, value in settings_env.items() if keeps_live_env(key, value)})
     env["CLAUDE_CONFIG_DIR"] = str(scratch / "config")
     env["HOME"] = str(scratch / "home")
     env["TMPDIR"] = str(scratch / "tmp")
@@ -689,7 +700,17 @@ def load_settings(source: Path) -> dict[str, Any]:
         raise SystemExit(f"--settings-source is not readable JSON: {source}: {exc}") from exc
     if not isinstance(data, dict) or not isinstance(data.get("env", {}), (dict, type(None))):
         raise SystemExit(f"--settings-source must be a JSON object with an object env: {source}")
+    bad = sorted(
+        key for key, value in (data.get("env") or {}).items() if not isinstance(value, (str, int, float, bool))
+    )
+    if bad:
+        raise SystemExit(f"--settings-source env values must be strings, numbers or booleans: {bad}")
     return data
+
+
+def env_text(value: Any) -> str:
+    """An env value as the text a child process gets (numbers and booleans as JSON)."""
+    return value if isinstance(value, str) else json.dumps(value)
 
 
 def out_location_warning(out: Path) -> str | None:
@@ -829,8 +850,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+@contextmanager
+def private_umask() -> Iterator[None]:
+    """Create files 0600 and dirs 0700 for the duration (outputs can hold the token),
+    then restore the caller's umask."""
+    previous = os.umask(0o077)
+    try:
+        yield
+    finally:
+        os.umask(previous)
+
+
 def main(argv: list[str] | None = None) -> int:
-    return prepare(build_parser().parse_args(argv))
+    with private_umask():
+        return prepare(build_parser().parse_args(argv))
 
 
 if __name__ == "__main__":
