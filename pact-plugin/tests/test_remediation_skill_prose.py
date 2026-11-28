@@ -7189,6 +7189,10 @@ class TestEveryRouteEntryConditionIsARoute:
             "classifies the bytes read_override already read from the pin file (database's one "
             "copy of the pin's text rule); it validates an id value and asks git nothing"
         ),
+        ("call", "folded_github_id"): (
+            "database's one copy of the github.com payload fold, applied to a project_id value "
+            "a caller passed; pure, it asks git nothing"
+        ),
         ("call", "<call to no function database: candidate.startswith>"): (
             "pin_file_value reads the text of a pin file read_override already read; a string "
             "test on that text, it asks git nothing"

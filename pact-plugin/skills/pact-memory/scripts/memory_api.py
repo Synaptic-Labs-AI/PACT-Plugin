@@ -68,7 +68,7 @@ from .database import (
     checkout_is_same_owner,
     common_dir_parent_name,
     origin_url_in_config,
-    pin_file_value,
+    folded_github_id,
     pre_change_name,
     pre_change_name_of_common,
     validate_identifier_for_write,
@@ -1305,37 +1305,13 @@ _REDIRECT_MOVED_REMEDY = (
 
 
 def _folded_payload_project(payload_id: Any) -> Any:
-    """A caller's github.com `project_id` spelled as a pin naming it is
-    (`database.pin_file_value`): host, owner and repository lower-cased and a
-    port-less `www.` host dropped, so `GitHub.com/Acme/Widget` names the
-    bucket `github.com/acme/widget` that repository's sessions read. A port
-    is kept: an id holds no scheme, so `github.com:443` is the id of an ssh
-    remote on port 443, not of an https one. A port-less one drops one
-    trailing `.git`, as a pin does. Any other host's value is returned
-    unchanged.
-
-    Raises ValueError for a port-less github.com value no pin may hold
-    (`github.com/Acme`, `github.com/o/r.git.git`): no GitHub remote gives
-    such an id, so a row filed under it is one no session reads."""
-    if not isinstance(payload_id, str):
-        return payload_id
-    hostport = payload_id.partition("/")[0]
-    host = hostport.partition(":")[0].lower()
-    if host not in ("github.com", "www.github.com"):
-        return payload_id
-    pin_spelled, _ = pin_file_value(payload_id.encode("utf-8"))
-    if pin_spelled is not None:
-        return pin_spelled
-    if ":" not in hostport:
-        raise GitHubPayloadIdRefusedError(
-            f"project_id {payload_id!r} names no GitHub repository: a "
-            "github.com id is exactly owner/repo. The owner holds only ASCII "
-            "letters, digits, hyphens and underscores, starts with a letter or "
-            "digit and is at most 39 characters; the repository holds only "
-            "ASCII letters, digits, '.', '-' and '_' and does not end in .git. "
-            "Nothing was written."
-        )
-    return payload_id
+    """A caller's `project_id` through `database.folded_github_id`, the fold
+    a rekey target takes too. Raises GitHubPayloadIdRefusedError for a
+    port-less github.com value no pin may hold."""
+    try:
+        return folded_github_id(payload_id, "project_id")
+    except ValueError as exc:
+        raise GitHubPayloadIdRefusedError(f"{exc} Nothing was written.") from None
 
 
 def _decline_cause(token: Optional[str], cause_detail: Optional[str]) -> Optional[str]:

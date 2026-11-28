@@ -2065,6 +2065,43 @@ def _github_folded_pin(candidate: str) -> Optional[str]:
     )
 
 
+# What a github.com id is, for a refusal that names the rule
+# (`folded_github_id`).
+GITHUB_ID_RULE = (
+    "a github.com id is exactly owner/repo. The owner holds only ASCII "
+    "letters, digits, hyphens and underscores, starts with a letter or "
+    "digit and is at most 39 characters; the repository holds only "
+    "ASCII letters, digits, '.', '-' and '_' and does not end in .git."
+)
+
+
+def folded_github_id(value: Any, what: str) -> Any:
+    """A caller-supplied github.com id spelled as a pin naming it is
+    (`pin_file_value`): host, owner and repository lower-cased, a port-less
+    `www.` host dropped and one trailing `.git` dropped, so
+    `GitHub.com/Acme/Widget` names the bucket `github.com/acme/widget` that
+    repository's sessions read. A port is kept (an id holds no scheme). Any
+    other host's value, and a non-string, is returned unchanged. THE ONE FOLD
+    for a save or update payload and a rekey target.
+
+    Raises ValueError naming `what` and `GITHUB_ID_RULE` for a port-less
+    github.com value no pin may hold (`github.com/Acme`,
+    `github.com/o/r.git.git`): no GitHub remote gives such an id, so rows
+    filed under it are rows no session reads."""
+    if not isinstance(value, str):
+        return value
+    hostport = value.partition("/")[0]
+    host = hostport.partition(":")[0].lower()
+    if host not in ("github.com", "www.github.com"):
+        return value
+    pin_spelled, _ = pin_file_value(value.encode("utf-8"))
+    if pin_spelled is not None:
+        return pin_spelled
+    if ":" not in hostport:
+        raise ValueError(f"{what} {value!r} names no GitHub repository: {GITHUB_ID_RULE}")
+    return value
+
+
 # The most bytes a `pact-project-id` pin file may hold (`pin_file_value`).
 PIN_FILE_MAX_BYTES = 4096
 
@@ -2542,6 +2579,13 @@ def rekey_project(
     """
     validate_identifier_for_write(from_id)
     validate_identifier_for_write(to_id)
+    # A github.com target takes the payload fold (`folded_github_id`), so the
+    # rows land in the bucket that repository's sessions read; `from_id` is
+    # not folded, since it names a stored bucket, whatever its spelling.
+    try:
+        to_id = folded_github_id(to_id, "the rekey target")
+    except ValueError as exc:
+        raise ValueError(f"{exc} Nothing was moved.") from None
     # THE LIBRARY ENFORCES THE CLI'S TARGET RULE: a rekey may move rows only
     # INTO a canonical bucket. Without this a library caller could create the
     # basename bucket the CLI refuses, which is the misfile the rekey command

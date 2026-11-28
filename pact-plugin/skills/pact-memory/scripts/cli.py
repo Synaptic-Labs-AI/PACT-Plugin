@@ -58,6 +58,7 @@ from scripts.database import (
     AmbiguousPrefixError,
     PrefixTooShortError,
     escape_for_envelope,
+    folded_github_id,
 )
 from scripts.memory_api import (
     GitHubPayloadIdRefusedError,
@@ -1401,6 +1402,14 @@ def _project_id_rekey(args, db_path) -> NoReturn:
             exit_code=2,
         )
 
+    if args.to_id:
+        # A github.com target is folded as a save or update payload's
+        # project_id is, so a case or www spelling names the bucket this
+        # repository's sessions read, and one no pin may hold is refused.
+        try:
+            args.to_id = folded_github_id(args.to_id, "--to")
+        except ValueError as exc:
+            _error("INVALID_INPUT", escape_for_envelope(f"{exc} Nothing was moved."), exit_code=2)
     store = Path(db_path) if db_path else resolve_db_path()
     memory = PACTMemory(db_path=db_path)
     if (

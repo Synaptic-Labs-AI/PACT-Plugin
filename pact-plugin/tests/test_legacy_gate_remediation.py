@@ -1527,6 +1527,68 @@ def test_other_payload_refusals_keep_their_envelope(canonical_session, capfd):
     assert "allowed_fields" in envelope and "Note:" not in envelope["message"], envelope
 
 
+def _rekey_cli(argv, capfd):
+    from scripts.cli import main
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(argv)
+    captured = capfd.readouterr()
+    return exit_info.value.code, json.loads(captured.out or captured.err)
+
+
+def test_a_rekey_target_is_folded_as_a_payload_is(canonical_session, capfd):
+    """From a checkout whose id is github.com/acme/widget,
+    --to=github.com/ACME/Widget names that same bucket: the move applies with
+    no --into-another-repository, the rows land under the folded id and a read
+    of the checkout sees them. RED WHEN the target is used as typed (refused
+    as another repository, or filed in a bucket no read sees)."""
+    repo, store = canonical_session
+    _seed(store, "oldbucket")
+    code, envelope = _rekey_cli(
+        ["project-id", "rekey", "--from=oldbucket", "--to=github.com/ACME/Widget",
+         "--apply", "--db-path", str(store)],
+        capfd,
+    )
+    assert code == 0, envelope
+    assert envelope["result"]["to"] == CANONICAL, envelope
+    with sqlite3.connect(str(store)) as conn:
+        assert {r[0] for r in conn.execute("SELECT project_id FROM memories")} == {CANONICAL}
+    assert [m.project_id for m in PACTMemory(session_id="s", db_path=store).list()] == [CANONICAL]
+
+
+@pytest.mark.parametrize("target", ["github.com/Acme", "github.com/a/b/c", "github.com/acme/widget.git.git", "github.com/-o/r"])
+def test_a_rekey_target_no_github_remote_gives_is_refused(canonical_session, capfd, target):
+    """The refusal is the payload's, naming the owner/repo rule, exit 2, and
+    nothing moves. RED WHEN such a target is applied."""
+    repo, store = canonical_session
+    _seed(store, "oldbucket")
+    code, envelope = _rekey_cli(
+        ["project-id", "rekey", "--from=oldbucket", f"--to={target}", "--apply",
+         "--into-another-repository", "--db-path", str(store)],
+        capfd,
+    )
+    assert code == 2 and envelope["error"] == "INVALID_INPUT", envelope
+    assert "names no GitHub repository" in envelope["message"], envelope
+    assert "Nothing was moved" in envelope["message"], envelope
+    with sqlite3.connect(str(store)) as conn:
+        assert {r[0] for r in conn.execute("SELECT project_id FROM memories")} == {"oldbucket"}
+
+
+def test_the_library_rekey_folds_its_target_too(tmp_path):
+    """database.rekey_project folds a github.com target and refuses one no
+    GitHub remote gives, as the CLI does."""
+    from scripts.database import rekey_project
+
+    store = tmp_path / "store.db"
+    _seed(store, "oldbucket")
+    with closing(sqlite3.connect(str(store))) as conn:
+        counters = rekey_project(conn, "oldbucket", "WWW.GitHub.com/Acme/Widget", dry_run=False)
+        assert counters["memories"] == 1, counters
+        assert {r[0] for r in conn.execute("SELECT project_id FROM memories")} == {CANONICAL}
+        with pytest.raises(ValueError, match="names no GitHub repository"):
+            rekey_project(conn, CANONICAL, "github.com/acme", dry_run=False)
+
+
 _ROW = "0123456789abcdef0123456789abcdef"
 
 
