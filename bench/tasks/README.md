@@ -6,7 +6,7 @@ request, and is scored against hidden_tests/, which are kept out of its
 workspace. The runner that does this is not in this PR; only the validator is.
 
 No task directories are committed yet; they land in a follow-up PR. Until then
-`bench/pact-bench tasks validate` exits with "no tasks found".
+`bench/.venv/bin/python bench/pact-bench tasks validate` exits with "no tasks found".
 
 ## Task directory layout
 
@@ -85,7 +85,7 @@ Record the test counts and any issues in the final report.
 
 ## Validator
 
-    bench/pact-bench tasks validate [--root DIR] [--task DIR ...]
+    bench/.venv/bin/python bench/pact-bench tasks validate [--root DIR] [--task DIR ...]
 
 With no `--task` it validates every task under `--root` (default bench/tasks)
 and reports each one: a passing task carries `"status": "pass"`, a failing one

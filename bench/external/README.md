@@ -15,7 +15,7 @@ not a second copy of that suite.
 | Generated | 2026-11-25 |
 | Base commit | `1befafb314dd8124ad9225b87d0d5b064f0a6af6` (worktree HEAD at map time) |
 | Plugin under test | `pact-plugin` v4.8.38 |
-| Internal-suite fingerprint | `sha256:6f94098412764f598e6c312bf4e069c32564d00e54be32529e621cc8bed2d46c` — sha256 over `find pact-plugin/tests -type f | LC_ALL=C sort | xargs sha256sum`, run from the repo root (775 files, of which 620 are `.py` files and 556 of those are `test_*.py`; another locale's sort order gives a different hash) |
+| Internal-suite fingerprint | `sha256:6f94098412764f598e6c312bf4e069c32564d00e54be32529e621cc8bed2d46c` — sha256 over `git ls-files pact-plugin/tests | LC_ALL=C sort | xargs sha256sum`, run from the repo root (tracked files only, so `__pycache__` from a test run does not change it) (775 files, of which 620 are `.py` files and 556 of those are `test_*.py`; another locale's sort order gives a different hash) |
 | External tool pins | `claude` 2.1.332; PluginEval (`wshobson/agents`, `plugins/plugin-eval`) at `c96b5f6552dba32e4492307493ee613581430715` |
 | Decision counts | **keep 6**, **narrow 4**, **drop 3** (13 checks mapped; 2 of 5 PluginEval skills and 3 whole checks dropped) |
 | Reviewer status | reviewed 2026-11-25 by an independent coverage reviewer: 13/13 agree on direction, no flips; fixes required by the review were applied. The review note is unpublished, so the agreement cannot be verified from this tree. Native checks remain blocked/deferred. |
@@ -65,7 +65,8 @@ Prerequisites: Python >= 3.12, `uv`, `git`, `claude` CLI (>= 2.1.332 for
 `claude plugin eval`), and a local PluginEval checkout for the skill-judge runs.
 
 ```bash
-# 1. Hermetic harness environment (verifier + hermetic tests only).
+# 1. The bench venv: the runtime for pact-bench (native-eval needs its PyYAML)
+#    and for the hermetic tests. Run every pact-bench command with this venv.
 ./bench/bootstrap.sh
 
 # 2. PluginEval (external tool; not vendored here, not cloned by the runner).
@@ -77,7 +78,7 @@ uv sync --frozen --extra llm
 # 3. Prepare an isolated run: copies current pact-plugin/ (without tests/ and
 #    caches at any depth, and without git-ignored files) into scratch, builds a scratch Claude settings.json from the live
 #    DeepSeek settings, runs a provider smoke check, writes manifest.json.
-./bench/pact-bench prepare --out bench/.runs/external/probe --verify
+bench/.venv/bin/python bench/pact-bench prepare --out bench/.runs/external/probe --verify
 
 # 4. Inspect before running anything that costs tokens.
 jq '{plugin, provider, settings: {model: .settings.model}}' \
@@ -104,11 +105,11 @@ The clean-source check counts every untracked file under `pact-plugin/`, and
 prepare's git commands ignore inherited `GIT_*` variables, the global and
 system git config, and every per-user ignore file (`core.excludesFile`,
 `~/.config/git/ignore`, `$XDG_CONFIG_HOME/git/ignore`), so an untracked file
-that only the repository's own `.gitignore` does not exclude counts as dirty (use `--allow-dirty` or a repository `.gitignore` entry), and a
+that the repository's own `.gitignore` or `.git/info/exclude` does not exclude counts as dirty (use `--allow-dirty` or one of those), and a
 repository trusted only through a global `safe.directory` entry fails with a git
-error. Symlinks in the plugin are copied as links in every source mode; a link
-that resolves outside the plugin source, or an unsafe entry in a `git archive`,
-is refused.
+error. Only relative symlinks that stay inside the plugin source are copied (as
+links, in every source mode); an absolute symlink, a relative one that leaves the
+plugin source, or an unsafe entry in a `git archive` is refused.
 
 **The harness starts each `claude` child from a clean directory.** Claude Code
 can load `CLAUDE.md` files from the working directory and its parents, so
@@ -144,9 +145,14 @@ inside the repository but outside `bench/.runs/`; it does not refuse.
 `prepare.py` copies keys from the `env` block of
 `~/.claude-deepseek/settings.json` into a scratch config only when the name has
 one of the prefixes `ANTHROPIC_`, `CLAUDE_CODE_`, `DISABLE_`, `ENABLE_`, `MAX_`,
-`BASH_`, `MCP_` or is `API_TIMEOUT_MS`, does not match
+`MCP_`, or is exactly `API_TIMEOUT_MS`, `BASH_DEFAULT_TIMEOUT_MS`,
+`BASH_MAX_TIMEOUT_MS` or `BASH_MAX_OUTPUT_LENGTH` (so `BASH_ENV` and
+`BASH_FUNC_*` are dropped), does not match
 `TOKEN|KEY|SECRET|PASSWORD|HEADERS|CREDENTIAL` (case-insensitive), is not a live
-session id, and the value carries no URL userinfo (`://user:pass@`). The token-count tuning keys (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`,
+session id, and the value carries no URL userinfo (`://user:pass@`) and no
+credential-shaped URL query parameter (a name containing key, token, secret,
+sig, password or auth). The same filter is applied again when the child env is
+built from the scratch `settings.json`, since a child can rewrite that file. The token-count tuning keys (`CLAUDE_CODE_MAX_OUTPUT_TOKENS`,
 `MAX_THINKING_TOKENS`, `MAX_MCP_OUTPUT_TOKENS`, any key matching
 `^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$`) are kept, and `manifest.json` lists the names
 (never the values) of every dropped key in `settings.dropped_env_keys`. It overrides the session plumbing; the live config is never read
@@ -165,7 +171,9 @@ during a run.
   filtered by the same credential rule; then `CLAUDE_CONFIG_DIR`, `HOME`,
   `TMPDIR`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. No other live
   variable reaches it (no `CLAUDE*`, `GH_TOKEN`, `SSH_*`, `AWS_*` or
-  `ANTHROPIC_API_KEY`). `plugin-eval` uses the same child environment.
+  `ANTHROPIC_API_KEY`). `plugin-eval` uses the same child environment. This
+  isolation is environment-only: the child's Read/Write/Edit tools can still
+  open absolute host paths such as `~/.claude-keys` or `~/.ssh`.
 - **Model:** `deepseek-flash[1m]`, pinned in the scratch settings env on 11
   model-selection keys that the Claude Code 2.1.332 binary names (other
   model-related keys, such as `ANTHROPIC_CUSTOM_MODEL_OPTION`, are not pinned): `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_MODEL`,
@@ -175,7 +183,8 @@ during a run.
   `CLAUDE_CODE_BG_CLASSIFIER_MODEL`. The model is fixed at prepare time:
   `prepare --model` sets all of them, and `native-eval` takes no `--model` or `--judge-model`;
   it passes the manifest's model as both. `prepare --verify` checks the requested model
-  (any `[..]` suffix stripped) against the reported usage keys.
+  (any `[..]` suffix stripped): it must equal a usage key's base name exactly, so
+  `deepseek-flash-pro` does not count for `deepseek-flash[1m]`.
 - **Scratch settings and env override:** `CLAUDE_CONFIG_DIR`, `HOME`, `TMPDIR`
   and the team/task/session dirs point inside the scratch `<out>/`, and
   `permissions.additionalDirectories` is exactly `<out>/teams`, `<out>/tasks`
@@ -202,7 +211,7 @@ during a run.
 ### Native claude plugin evals (Track A black-box cases)
 
 ```bash
-./bench/pact-bench native-eval \
+bench/.venv/bin/python bench/pact-bench native-eval \
   --manifest bench/.runs/external/probe/manifest.json \
   --cases-dir bench/external/native-evals/evals \
   --runs 3 --concurrency 1
@@ -222,10 +231,17 @@ shipped cases). Per the claude 2.1.332 CLI's own messages (not verified with a
 live run), a gated tool is usable in a case only if that case lists it and it is
 granted, so the run-wide grant does not widen any case: `impact-triage`, which
 lists no gated tool, gets none. Ungated tools follow each case's `allowed_tools`
-alone. A case whose `allowed_tools` is not an inline `[...]` list is refused
-before the run.
+alone. Cases are found at any depth (a directory holding `case.yaml` or
+`prompt.md`), and `allowed_tools` is read from `case.yaml` or the `prompt.md` front
+matter with a YAML parser: a list (block or flow), a single name, or one
+comma-separated string; absent or empty means no tools. Any other type, an
+unclosed front matter or unreadable YAML is refused before the run and recorded
+in `result.json` `error`.
 The runner always passes `--threshold 0`, so a case's pass or fail and the
-runner's exit code are not the signal; read the with/without delta.
+runner's exit code are not the signal; read the with/without delta. The runner
+exits 0 only if the eval exited 0, wrote `report.json` in this run, and cleanup
+and the post-eval clean-root re-check passed; `--timeout`, `--runs` and
+`--concurrency` must be at least 1.
 Case layout is the CLI's native format: `<eval dir>/**/case.yaml`, or
 `prompt.md` + `graders/*.md`. Results: `<out>/native-eval/result.json` (written
 on every exit path once the manifest is read and its run directory is writable;
@@ -265,7 +281,7 @@ authored cases and the inventory they must meet are in
 ### PluginEval (whole-plugin lint + per-skill judge)
 
 ```bash
-./bench/pact-bench plugin-eval \
+bench/.venv/bin/python bench/pact-bench plugin-eval \
   --manifest bench/.runs/external/probe/manifest.json \
   --plugin-eval-dir <agents-checkout>/plugins/plugin-eval \
   --skills-file bench/external/plugin-eval-skills.txt
@@ -276,15 +292,17 @@ commands get `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL`, which are expected
 to reach the `claude` CLI that PluginEval's judge runs, through claude-agent-sdk
 passing its inherited environment; this is not verified in this tree),
 then
-`plugin-eval score <scratch plugin> --depth quick` (whole plugin; static layer
+`uv run --frozen … plugin-eval score <scratch plugin> --depth quick` (whole plugin; static layer
 only) and `plugin-eval score <scratch plugin>/skills/<skill> --depth standard`
 for each skill in the skills file (static + experimental LLM judge). All `uv`
 commands of a run share one fresh `<temp-root>/pact-plugin-eval-XXXXXXXX`
 directory (`--temp-root`, default `/tmp`, checked like the other runners' temp
 roots) with the checkout passed as `--project`; the directory is removed
 afterwards. The record notes the checkout's HEAD (`plugin_eval_commit`) and
-whether it is dirty (`plugin_eval_dirty`), both null if it is not a git repo; the
-pin is recorded, not enforced. At the start of a run, the per-command and sync
+whether it is dirty (`plugin_eval_dirty`), both null unless `--plugin-eval-dir` is the top of a git
+checkout. The pin is recorded, not enforced, unless you pass
+`--expect-commit <full SHA>`, which refuses the run (recorded in `result.json`,
+before any command) unless the checkout is at that commit and clean. At the start of a run, the per-command and sync
 output files a previous run left in `plugin-eval/` are removed. The
 skills come only from `--skills-file` or, by default,
 `bench/external/plugin-eval-skills.txt` (`~` is expanded); a missing or empty
@@ -302,13 +320,14 @@ that times out is recorded with exit code 124 and `timed_out: true`, with the
 output drained after the kill (`output_complete` false if that bounded drain ran
 out, and `child_exit_code` set if the command itself had already exited), and
 the run continues. An unexpected error in one command is recorded as
-`{label, command, exit_code: null, error}` and the run continues. Each
+`{label, command, exit_code: null, error}` and the run continues. A score
+command whose JSON has no `composite` counts as failed (`parse_error`). Each
 command's raw output is saved as `<NN>-<slug>.stdout.json`/`.stderr.txt` (`NN` is
 its position, `00` the whole plugin; the record's `output_stem` names it); a missing `uv`
 or a `uv sync` failure or timeout aborts, setting `error` and `aborted_command`
 and listing the rest in `not_run`. `complete` is true only when every command
-was attempted. The runner exits 1 if any command failed, timed out or printed no
-JSON object, or a cleanup failed (`cleanup_error`). PluginEval's judge layers are experimental and
+was attempted. The runner exits 1 if any command failed, timed out, or printed no
+JSON object or one without a `composite` score, or a cleanup failed (`cleanup_error`). PluginEval's judge layers are experimental and
 not human-validated; model labels are Anthropic-oriented. Use the judge score as
 a diagnostic, not a gate.
 
@@ -325,7 +344,7 @@ and grade blind to condition:
    copies the current worktree, vs. a no-plugin
    scratch config that does not register PACT).
 2. For each prompt: `prompt.md` becomes the `claude -p --output-format json`
-   input; working directory is a scratch workspace copy; capture the full JSON.
+   input, run with the same `env -i …` prefix as the token snapshot below; working directory is a scratch workspace copy; capture the full JSON.
 3. Grade each transcript against the rubric **without** the plugin name or arm
    label visible. Keep raw JSONL/transcripts under `bench/.runs/` and only
    summaries under `bench/results/`.
@@ -338,15 +357,19 @@ reasoning quality, not field names or CLI output shapes.
 
 ```bash
 snap="$PWD/bench/.runs/external/token-snapshot"
-./bench/pact-bench prepare --out "$snap" --force
+bench/.venv/bin/python bench/pact-bench prepare --out "$snap" --force
 # Run from a directory outside the repository and outside $HOME: claude can load
 # CLAUDE.md files from the working directory and its parents (on this layout
 # ~/.claude/CLAUDE.md is one of them for any directory under $HOME), so their tokens would count in the
-# sample. Also run claude with the env from <snap>/config/settings.json and
-# HOME/CLAUDE_CONFIG_DIR pointed at <snap>/home and <snap>/config.
+# sample. env -i gives claude only the scratch HOME and config (whose
+# settings.json carries the scratch env) plus the provider variables.
 cd "$(mktemp -d -p /tmp)"
 # For each of 3 runs: run the standard smoke prompt headlessly and keep the JSON.
-claude -p --output-format json --model 'deepseek-flash[1m]' "<smoke prompt>" \
+env -i PATH="$PATH" HOME="$snap/home" TMPDIR="$snap/tmp" \
+  CLAUDE_CONFIG_DIR="$snap/config" \
+  ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic \
+  ANTHROPIC_AUTH_TOKEN="$(cat ~/.claude-keys/deepseek)" \
+  claude -p --output-format json --model 'deepseek-flash[1m]' "<smoke prompt>" \
   > "$snap/run-N.json"
 jq '{usage, modelUsage}' "$snap/run-N.json"
 ```

@@ -92,7 +92,7 @@
           }
         ]
       },
-      "blocker": "Native eval Bash sandbox failed to initialize: 'Sandbox is required but failed to initialize: Failed to create bridge sockets after 5 attempts'. Cases requiring shell (bootstrap, memory-save) cannot be valid baseline evidence on the measuring host.",
+      "blocker": "Sandbox confinement: the eval sandbox denies reading/executing the plugin-under-test scripts and writes to config/out, so cases requiring shell (bootstrap, memory-save) cannot be valid baseline evidence on the measuring host. The probe's first failure, 'Sandbox is required but failed to initialize: Failed to create bridge sockets after 5 attempts', was a socket-path bug fixed in the harness (see sandbox_diagnosis).",
       "impact_triage_probe": {
         "case": "impact-triage",
         "with_score": 1.0,

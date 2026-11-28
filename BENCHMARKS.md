@@ -1,7 +1,8 @@
 # PACT benchmarks
 
-Append-only tracking for external PACT evaluations. Each row points at a
-committed summary under bench/results/<version>/<run-id>/. Summaries are
+Append-only tracking for external PACT evaluations. Each row is matched to
+a committed summary under bench/results/<version>/<run-id>/ by version and plugin
+SHA, so the file holds one row per version and SHA. Summaries are
 assembled by hand from the raw runs; bench/tests/test_results.py checks each
 row against its summary. These are model-specific diagnostics, not
 certification or merge gates.

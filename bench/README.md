@@ -15,16 +15,17 @@ plugin runtime behavior.
 - .runs/ - gitignored scratch homes, configs, plugin copies, transcripts.
 - tasks/ - Track B task spec and validator; the task fixtures land in a
   follow-up PR.
-- score/ - Track B scorecard (added later).
 
 ## Provider setup
 
 The harness copies keys from the env block of ~/.claude-deepseek/settings.json
 into a scratch config only when the name has an allowed prefix (ANTHROPIC_,
-CLAUDE_CODE_, DISABLE_, ENABLE_, MAX_, BASH_, MCP_, or API_TIMEOUT_MS), is not
-credential-shaped (TOKEN, KEY, SECRET, PASSWORD, HEADERS or CREDENTIAL, except
-the token-count tuning keys matching ^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$), is
-not a live session id, and the value has no URL userinfo; manifest.json lists the dropped key names
+CLAUDE_CODE_, DISABLE_, ENABLE_, MAX_, MCP_) or is one of four named timeouts
+and limits (API_TIMEOUT_MS and three BASH_* keys), is not credential-shaped
+(TOKEN, KEY, SECRET, PASSWORD, HEADERS or CREDENTIAL, except the token-count
+tuning keys matching ^(CLAUDE_CODE_)?MAX_[A-Z0-9_]*TOKENS$), is not a live
+session id, and the value has no URL userinfo or credential-shaped URL query
+parameter; manifest.json lists the dropped key names
 in settings.dropped_env_keys. It points
 CLAUDE_CONFIG_DIR at the scratch directory. It keeps the live teammateMode
 (in-process), sets permissions.additionalDirectories to the scratch teams,
@@ -57,7 +58,9 @@ their own directories.
 ## Inspect-only first step
 
     bench/bootstrap.sh
-    python3 bench/pact-bench prepare --out bench/.runs/external/probe --verify
+    bench/.venv/bin/python bench/pact-bench prepare --out bench/.runs/external/probe --verify
+
+Run pact-bench with the bench venv: native-eval needs its PyYAML.
 
 That checks its inputs before writing anything, copies the current pact-plugin/
 (tracked and untracked-not-ignored files, without tests/ and caches at any
@@ -95,7 +98,10 @@ bench/tests/test_results.py requires these keys and checks that the
 BENCHMARKS.md row and report.md carry the summary's numbers: SHA, run id, date,
 P1 status, the native-eval blocked/pass verdict, the PluginEval status and
 composites, the spawn-token median and the smoke result; it checks the Track B column only when track_b.status is
-"authored_out_of_tree".
+"authored_out_of_tree". It also checks the probe case rows, Track B task rows,
+the tree SHA, the token min/max, the whole-plugin composite and the smoke
+counts in report.md, and scans BENCHMARKS.md and every file under bench/results
+for token shapes (sk-, eyJ, gh*_, Bearer) and /home or /Users paths.
 
 ## Limits
 

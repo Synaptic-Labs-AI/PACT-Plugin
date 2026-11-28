@@ -76,13 +76,18 @@ def test_benchmarks_rows_match_summaries_one_to_one() -> None:
 
         smoke = data["track_a"]["orchestration_smoke"]
         assert row["Orchestration smoke"].startswith(smoke["status"])
+        assert f"exit {smoke['exit_code']}" in row["Orchestration smoke"]
         assert f"{smoke['handoffs_valid']}/{smoke['handoffs']} HANDOFFs valid" in row["Orchestration smoke"]
 
-        native_blocked = data["track_a"]["native_eval"]["status"].startswith("blocked")
+        native_status = data["track_a"]["native_eval"]["status"]
+        native_blocked = native_status.startswith("blocked")
         assert row["Track A native eval"].startswith("blocked:") == native_blocked
+        if "sandbox_confinement" in native_status:
+            assert row["Track A native eval"].startswith("blocked: sandbox confinement")
 
         track_b = data["track_b"]
         if track_b["status"] == "authored_out_of_tree":
+            assert len(track_b["tasks"]) == track_b["tasks_authored"]
             assert row["Track B"].startswith(f"{track_b['tasks_authored']} tasks validated out of tree")
 
 
@@ -98,7 +103,41 @@ def test_reports_carry_their_summary_numbers() -> None:
         assert set(medians) == {f"{tokens['median_spawn_total']:,}"}, medians
         for skill in data["track_a"]["plugin_eval"]["selected"]:
             assert f"| {skill['skill']} | {skill['composite']:.2f} |" in report, skill["skill"]
-        native_blocked = data["track_a"]["native_eval"]["status"].startswith("blocked")
+        native = data["track_a"]["native_eval"]
+        native_blocked = native["status"].startswith("blocked")
         assert ("| A2 native eval | blocked:" in report) == native_blocked
+        if "sandbox_confinement" in native["status"]:
+            assert "| A2 native eval | blocked: sandbox confinement" in report
+        for case in native.get("probe", {}).get("cases", []):
+            assert f"| {case['name']} | {case['with']:.2f} | {case['without']:.2f} |" in report, case["name"]
+        assert f"Plugin tree: {data['plugin']['tree_sha']}" in report
+        assert f"{tokens['min']:,} and {tokens['max']:,}" in report
+        whole = data["track_a"]["plugin_eval"].get("whole_plugin_exploratory")
+        if whole:
+            assert f"whole-plugin static score ({whole['composite']:.2f}" in report
+        smoke = data["track_a"]["orchestration_smoke"]
+        assert f"{smoke['tasks_created']} tasks created; {smoke['handoffs']} HANDOFFs" in report
+        for task in data["track_b"].get("tasks", []):
+            assert f"| {task['id']} | {task['class']} | {task['variety']} |" in report, task["id"]
         plugin_eval_status = data["track_a"]["plugin_eval"]["status"]
         assert f"| A3 PluginEval | {plugin_eval_status}:" in report
+
+
+# Token shapes and host paths that must never land in a committed result file.
+LEAK_PATTERNS = (
+    re.compile(r"sk-[A-Za-z0-9_-]{16,}"),
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
+    re.compile(r"gh[opsu]_[A-Za-z0-9]{20,}"),
+    re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/-]{8,}"),
+    re.compile(r"(?<![\w.])/(?:home|Users)/[^/\s\"']+"),
+)
+
+
+def test_committed_results_carry_no_token_or_host_path() -> None:
+    files = [BENCHMARKS, *sorted(p for p in RESULTS.rglob("*") if p.is_file())]
+    assert len(files) > 1, "no committed result files found"
+    for path in files:
+        text = path.read_text(encoding="utf-8")
+        for pattern in LEAK_PATTERNS:
+            match = pattern.search(text)
+            assert match is None, f"{path}: {pattern.pattern} matched {match.group(0)[:12]!r}..."

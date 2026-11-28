@@ -15,12 +15,12 @@ bench/.runs/ (gitignored); no command generates them.
 |---|---|
 | P1 internal suite at evaluated SHA | green: full-suite and release checks succeeded on the GitHub commit checks |
 | A1 isolated prepare + provider check | pass: plugin copy, scratch config, DeepSeek model resolved (deepseek-flash[1m]) |
-| A2 native eval | blocked: eval Bash sandbox failed to initialize; probe produced no valid baseline case |
+| A2 native eval | blocked: sandbox confinement (the bridge-socket init failure was fixed); probe produced no valid baseline case |
 | A3 PluginEval | complete: 3 selected skills scored; whole-plugin result exploratory only |
 | A4 eval-bench | deferred: 4 prompt/rubric entries committed, no judged run claimed |
 | A5 evolve | skipped: conditional tool; no candidate change package above threshold |
 | A6 token snapshot | 2 spawn samples: 52,112 and 86,606 first-request tokens; median 69,359 |
-| A1 orchestration smoke | pass: exit 0, feature branch commit, 9 tasks, 3 valid HANDOFFs |
+| A7 orchestration smoke | pass: exit 0, feature branch commit, 9 tasks, 3 valid HANDOFFs |
 | P2 coverage map | version 1.0.1; independently reviewed, 13/13 agree, no flips (review note unpublished) |
 | Track B | 6 tasks authored and validated out of tree; fixtures land in a follow-up PR; no outcome runs executed |
 
@@ -172,9 +172,9 @@ and this report were written by hand from the recorded runs.
 prepare copies the current worktree.
 
     bench/bootstrap.sh
-    bench/pact-bench prepare --out bench/.runs/external/probe --plugin-ref 1befafb314dd8124ad9225b87d0d5b064f0a6af6 --verify
-    bench/pact-bench native-eval --manifest bench/.runs/external/probe/manifest.json --runs 3
-    bench/pact-bench plugin-eval --manifest bench/.runs/external/probe/manifest.json --plugin-eval-dir <pinned-plugin-eval>
+    bench/.venv/bin/python bench/pact-bench prepare --out bench/.runs/external/probe --plugin-ref 1befafb314dd8124ad9225b87d0d5b064f0a6af6 --verify
+    bench/.venv/bin/python bench/pact-bench native-eval --manifest bench/.runs/external/probe/manifest.json --runs 3
+    bench/.venv/bin/python bench/pact-bench plugin-eval --manifest bench/.runs/external/probe/manifest.json --plugin-eval-dir <pinned-plugin-eval>
 
 The other results came from manual steps, not commands. The token snapshot did
 not use the committed recipe: its two samples are the per-subagent first-request
