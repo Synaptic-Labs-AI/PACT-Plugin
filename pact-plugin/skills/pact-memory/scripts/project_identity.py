@@ -1367,41 +1367,53 @@ def unrepresentable_detail(url: Optional[str]) -> Optional[str]:
 
 
 # The `identity_detail` `project-id show` gives an ssh or scp origin whose host
-# looks like an ssh host alias (`ssh_alias_origin`).
+# looks like an ssh host alias (`ssh_alias_detail`): host-neutral, and with
+# github.com's id as the example for an alias of github.com.
 SSH_ALIAS_DETAIL = (
     "its origin's host looks like an ssh host alias (a name from an ssh config, "
-    "not a full host name or github.com itself), so the id is that alias's, and "
-    "clones of the same repository through the real host get another id. A "
-    "canonical id written to <git-common-dir>/pact-project-id (for a GitHub "
-    "repository, github.com/owner/repo) gives this clone the same id as theirs; "
+    "not a full host name), so the id is that alias's, and clones of the same "
+    "repository through the real host get another id. The canonical id that "
+    "names this repository, written to <git-common-dir>/pact-project-id, gives "
+    "this clone the same id as theirs; only the user writes it"
+)
+SSH_ALIAS_GITHUB_DETAIL = (
+    "its origin's host looks like an ssh host alias of github.com (a name from an "
+    "ssh config), so the id is that alias's, and clones of the same repository "
+    "through github.com get another id. The canonical id that names this "
+    "repository (github.com/owner/repo), written to "
+    "<git-common-dir>/pact-project-id, gives this clone the same id as theirs; "
     "only the user writes it"
 )
 
 
-def ssh_alias_origin(url: Optional[str]) -> bool:
-    """Whether `url` is an ssh or scp origin whose host looks like an ssh host
-    alias: a name with no dot (not a fully qualified host name), or one that
-    mentions github without being github.com, www.github.com or
-    ssh.github.com (`git@github.com-work:o/r`)."""
+def ssh_alias_detail(url: Optional[str]) -> Optional[str]:
+    """The note for an ssh or scp origin whose host looks like an ssh host
+    alias, or None: a host with no dot (not a fully qualified name), or one
+    that starts with `github.com` without being github.com, www.github.com or
+    ssh.github.com (`git@github.com-work:o/r`), which gets the github.com
+    example. A fully qualified host that merely contains "github" (a GitHub
+    Enterprise host such as `github.mycorp.com`) gets none."""
     if not isinstance(url, str):
-        return False
+        return None
     value = _strip_one_terminator(url)
     scheme_match = _SCHEME_PREFIX_RE.match(value)
     if scheme_match is not None:
         if scheme_match.group("scheme").lower() not in _HOME_RELATIVE_SCHEMES:
-            return False
+            return None
         host = value[scheme_match.end():].partition("/")[0].rpartition("@")[2].partition(":")[0]
     else:
         scp_match = _scp_match(value)
         if scp_match is None:
-            return False
+            return None
         host = scp_match.group("host")
     if not host.isascii():
-        return False
+        return None
     host = host.lower()
     if not host or host.startswith("[") or host in ("github.com", "www.github.com", _GITHUB_SSH_443_HOST):
-        return False
-    return "." not in host or "github" in host
+        return None
+    if host.startswith("github.com"):
+        return SSH_ALIAS_GITHUB_DETAIL
+    return SSH_ALIAS_DETAIL if "." not in host else None
 
 
 def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":

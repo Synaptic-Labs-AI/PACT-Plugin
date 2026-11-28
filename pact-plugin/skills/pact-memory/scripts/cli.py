@@ -86,9 +86,8 @@ from scripts.memory_api import (
 )
 from scripts.project_identity import (
     REMOTE_HELPER_DETAIL,
-    SSH_ALIAS_DETAIL,
     is_canonical,
-    ssh_alias_origin,
+    ssh_alias_detail,
 )
 from scripts.setup_memory import ensure_initialized, get_setup_status
 
@@ -1149,9 +1148,8 @@ def cmd_project_id(args, db_path=None) -> NoReturn:
                 "identity_detail": (
                     REMOTE_HELPER_DETAIL
                     if memory._project_id_source == "remote helper"
-                    else SSH_ALIAS_DETAIL
+                    else ssh_alias_detail(_origin_url_of(memory))
                     if memory._project_id_source == "origin remote"
-                    and ssh_alias_origin(_origin_url_of(memory))
                     else None
                 ),
                 # STRUCTURED DECLINE REASON, not just the warning. A repository

@@ -2565,21 +2565,28 @@ def test_a_declined_origin_names_its_reason_and_the_pin(tmp_path, monkeypatch, c
 
 
 @pytest.mark.parametrize("remote, noted", [
-    ("git@github.com-work:Owner/Repo.git", True),
-    ("git@gh_work:Owner/Repo.git", True),
-    ("ssh://git@githubwork/Owner/Repo", True),
-    ("git@github.com:Owner/Repo.git", False),
-    ("git@gitlab.example.com:Owner/Repo.git", False),
-    ("https://github.com/Owner/Repo", False),
+    ("git@github.com-work:Owner/Repo.git", "github"),
+    ("ssh://git@github.com-work/Owner/Repo", "github"),
+    ("git@gh_work:Owner/Repo.git", "neutral"),
+    ("ssh://git@githubwork/Owner/Repo", "neutral"),
+    ("git@github.mycorp.com:Owner/Repo.git", None),
+    ("git@github.com:Owner/Repo.git", None),
+    ("git@gitlab.example.com:Owner/Repo.git", None),
+    ("https://github.com/Owner/Repo", None),
 ])
 def test_show_notes_an_ssh_host_alias_origin(tmp_path, monkeypatch, capfd, remote, noted):
-    """An ssh or scp origin whose host looks like an ssh alias gets the alias's
-    id, so project-id show points to the pin that joins it to the github.com
-    clones. RED WHEN the note is missing, or given for a real host."""
+    """An ssh or scp origin whose host looks like an ssh alias (no dot, or a
+    name starting with github.com) gets the alias's id, so project-id show
+    points to the pin. Only an alias of github.com is given github.com's id as
+    the example; a GitHub Enterprise host such as github.mycorp.com gets no
+    note. RED WHEN the note is missing, is given for a real host, or names
+    github.com for a host that is not an alias of it."""
     from fixtures.identity_git import assert_outside_repository, make_repo
     from scripts.cli import main
     from scripts.database import db_connection, ensure_initialized
-    from scripts.project_identity import SSH_ALIAS_DETAIL
+    from scripts.project_identity import SSH_ALIAS_DETAIL, SSH_ALIAS_GITHUB_DETAIL
+
+    expected = {"github": SSH_ALIAS_GITHUB_DETAIL, "neutral": SSH_ALIAS_DETAIL, None: None}[noted]
 
     assert_outside_repository(tmp_path)
     repo = make_repo(tmp_path / "r", remote=remote)
@@ -2590,5 +2597,6 @@ def test_show_notes_an_ssh_host_alias_origin(tmp_path, monkeypatch, capfd, remot
     with pytest.raises(SystemExit):
         main(["project-id", "show", "--db-path", str(tmp_path / "store.db")])
     shown = json.loads(capfd.readouterr().out)["result"]
-    assert shown["identity_detail"] == (SSH_ALIAS_DETAIL if noted else None), shown
-    assert "pact-project-id" in SSH_ALIAS_DETAIL
+    assert shown["identity_detail"] == expected, shown
+    assert "pact-project-id" in SSH_ALIAS_DETAIL and "github.com" not in SSH_ALIAS_DETAIL
+    assert "github.com/owner/repo" in SSH_ALIAS_GITHUB_DETAIL

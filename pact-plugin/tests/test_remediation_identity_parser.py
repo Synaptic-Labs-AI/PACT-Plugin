@@ -3451,5 +3451,5 @@ def test_a_pin_or_alias_host_that_lower_cases_onto_ascii_is_refused():
 
     assert pin_file_value(f"{KELVIN}ex.com/o/r".encode("utf-8")) == (None, "not_canonical")
     assert pin_file_value(b"Kex.com/o/r") == ("kex.com/o/r", None)
-    assert pi.ssh_alias_origin(f"git@gh_wor{KELVIN}:o/r") is False
-    assert pi.ssh_alias_origin("git@gh_work:o/r") is True
+    assert pi.ssh_alias_detail(f"git@gh_wor{KELVIN}:o/r") is None
+    assert pi.ssh_alias_detail("git@gh_work:o/r") == pi.SSH_ALIAS_DETAIL

@@ -1618,7 +1618,8 @@ class TestNullOverridePathIsMeasured:
             "identity_detail names the remedy when source is remote helper (a "
             "folder-name id from a remote-helper origin), or when source is origin "
             "remote and the origin is an ssh or scp url whose host looks like an ssh "
-            "host alias (no dot, or github in a host other than github.com); else null."
+            "host alias (no dot, or a name starting with github.com that is not "
+            "github.com itself, such as github.com-work); else null."
         ) in _table_row(SKILL, "project-id show")
 
     def test_the_show_row_says_process_repo_root_is_the_main_checkout(self):
@@ -7279,10 +7280,6 @@ class TestEveryRouteEntryConditionIsARoute:
         ("call", "<name imported from a project module cli: REMOTE_HELPER_DETAIL>"): (
             "the identity layer's fixed remote-helper sentence, which project-id show reports for a "
             "'remote helper' source"
-        ),
-        ("call", "<name imported from a project module cli: SSH_ALIAS_DETAIL>"): (
-            "the identity layer's fixed ssh-alias sentence, which project-id show reports for an "
-            "'origin remote' source whose ssh host looks like an alias"
         ),
         ("call", "<name imported from a project module memory_api: project_identity.REMOTE_HELPER_DETAIL>"): (
             "the identity layer's fixed remote-helper sentence, compared to a detected detail to "
