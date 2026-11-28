@@ -103,9 +103,13 @@ object `env`, a non-empty token file, `--plugin-dir`, a clean source unless
 that holds a previous pact-bench output, and never `/`, `$HOME`, or the repo
 root or one of its ancestors.
 
-**Keep `--out` under `bench/.runs/`.** Run outputs (kept transcripts and
-scaffolds, `runs/`, captured stdout and stderr) can hold the provider token, and
-only `bench/.runs/` is gitignored. `prepare` warns on stderr when `--out` is
+**Keep `--out` under `bench/.runs/`.** The provider token is in every child
+process's environment, so any file that captures child output or session state
+can hold it if the model or a tool prints the environment. Under `<out>` that
+is `native-eval/kept-temp/`, `native-eval/runs/`, `report.json`/`report.html`,
+`native-eval/stdout.txt`/`stderr.txt`, `plugin-eval/*.stdout.json`/`*.stderr.txt`,
+`provider-check.json` and `config/` (session transcripts); `manifest.json` and
+`settings.json` never contain it. Only `bench/.runs/` is gitignored. `prepare` warns on stderr when `--out` is
 inside the repository but outside `bench/.runs/`; it does not refuse.
 
 ## Provider configuration (DeepSeek)
@@ -201,8 +205,12 @@ for each skill in the skills file (static + experimental LLM judge). The skills
 come only from `--skills-file` or, by default,
 `bench/external/plugin-eval-skills.txt`; a missing or empty file is an error.
 Results: `<out>/plugin-eval/result.json`, always written. A command that times
-out is recorded with exit code 124 and `timed_out: true` and the run continues;
-the runner exits 1 if any command failed, timed out or printed no JSON object. PluginEval's judge layers are experimental and
+out is recorded with exit code 124 and `timed_out: true` (its whole process
+group is killed) and the run continues; the runner exits 1 if any command
+failed, timed out or printed no JSON object. `complete` is true only when every
+command was attempted. On an abort (missing `uv`, or a `uv sync` failure or
+timeout) `error` and `aborted_command` are set and `not_run` lists the commands
+never started; `sync` records the sync step (null with `--skip-sync`). PluginEval's judge layers are experimental and
 not human-validated; model labels are Anthropic-oriented. Use the judge score as
 a diagnostic, not a gate.
 
