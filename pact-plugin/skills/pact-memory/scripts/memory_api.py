@@ -1310,17 +1310,29 @@ def _folded_payload_project(payload_id: Any) -> Any:
     port-less `www.` host dropped, so `GitHub.com/Acme/Widget` names the
     bucket `github.com/acme/widget` that repository's sessions read. A port
     is kept: an id holds no scheme, so `github.com:443` is the id of an ssh
-    remote on port 443, not of an https one. A
-    trailing `.git` is kept, as a pin keeps it, because
-    `github.com/o/r.git` is itself an id a remote gives. Any other value,
-    and a github.com value no pin may hold, is returned unchanged."""
+    remote on port 443, not of an https one. A port-less one drops one
+    trailing `.git`, as a pin does. Any other host's value is returned
+    unchanged.
+
+    Raises ValueError for a port-less github.com value no pin may hold
+    (`github.com/Acme`, `github.com/o/r.git.git`): no GitHub remote gives
+    such an id, so a row filed under it is one no session reads."""
     if not isinstance(payload_id, str):
         return payload_id
-    host = payload_id.partition("/")[0].partition(":")[0].lower()
+    hostport = payload_id.partition("/")[0]
+    host = hostport.partition(":")[0].lower()
     if host not in ("github.com", "www.github.com"):
         return payload_id
     pin_spelled, _ = pin_file_value(payload_id.encode("utf-8"))
-    return payload_id if pin_spelled is None else pin_spelled
+    if pin_spelled is not None:
+        return pin_spelled
+    if ":" not in hostport:
+        raise ValueError(
+            f"project_id {payload_id!r} names no GitHub repository: a "
+            "github.com id is exactly owner/repo, each a GitHub name. Nothing "
+            "was written."
+        )
+    return payload_id
 
 
 def _decline_cause(token: Optional[str], cause_detail: Optional[str]) -> Optional[str]:

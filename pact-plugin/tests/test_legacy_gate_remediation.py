@@ -1474,6 +1474,32 @@ def test_a_github_payload_id_drops_its_git_suffix(canonical_session, payload):
     assert filed == {CANONICAL}, filed
 
 
+@pytest.mark.parametrize("payload", ["github.com/Acme", "www.github.com/Acme", "github.com/a/b/c"])
+def test_a_github_payload_id_that_is_not_owner_repo_is_refused(canonical_session, capfd, payload):
+    """No GitHub remote gives a one-segment or deeper github.com id, so a
+    save or update naming one is refused as invalid input, as a pin holding
+    it is. RED WHEN it is stored, in a bucket no session reads."""
+    from scripts.database import pin_file_value
+
+    repo, store = canonical_session
+    memory = PACTMemory(session_id="s", db_path=store)
+    with pytest.raises(ValueError, match="names no GitHub repository"):
+        memory.save({"context": "c", "project_id": payload})
+    row = memory.save({"context": "mine"})
+    with pytest.raises(ValueError, match="names no GitHub repository"):
+        memory.update(row, {"project_id": payload})
+    with sqlite3.connect(str(store)) as conn:
+        assert {r[0] for r in conn.execute("SELECT project_id FROM memories")} == {CANONICAL}
+    code, envelope = _cli_err(
+        ["save", json.dumps({"context": "c", "project_id": payload}), "--db-path", str(store)],
+        capfd,
+    )
+    # The payload-validation envelope a control character in project_id gets.
+    assert code == 2 and envelope["error"] == "ValueError", envelope
+    assert "names no GitHub repository" in envelope["message"], envelope
+    assert pin_file_value((payload + "\n").encode()) == (None, "not_canonical")
+
+
 _ROW = "0123456789abcdef0123456789abcdef"
 
 
