@@ -47,16 +47,20 @@ def _steps() -> list[dict]:
     return jobs["hermetic"]["steps"]
 
 
-def _lock(path: Path) -> dict[str, str]:
-    """Name -> version for every pin; asserts each pin carries a hash line."""
-    lines = path.read_text(encoding="utf-8").splitlines()
-    pins: dict[str, str] = {}
-    for n, line in enumerate(lines):
+def _lock(path: Path) -> dict[str, tuple[str, frozenset[str]]]:
+    """Name -> (version, sha256 hashes) for every pin; asserts each pin has a hash."""
+    pins: dict[str, tuple[str, frozenset[str]]] = {}
+    name = None
+    for line in path.read_text(encoding="utf-8").splitlines():
         m = re.match(r"^([A-Za-z0-9._-]+)==([^\s;]+)", line)
         if m:
-            assert line.rstrip().endswith("\\"), f"{path.name}: {m.group(1)} has no hash"
-            assert lines[n + 1].strip().startswith("--hash=sha256:"), m.group(1)
-            pins[m.group(1).lower()] = m.group(2)
+            name = m.group(1).lower()
+            assert line.rstrip().endswith("\\"), f"{path.name}: {name} does not continue onto its hashes"
+            pins[name] = (m.group(2), frozenset())
+        elif name and (h := re.match(r"^\s+--hash=sha256:([0-9a-f]{64})", line)):
+            pins[name] = (pins[name][0], pins[name][1] | {h.group(1)})
+    unhashed = sorted(n for n, (_, hashes) in pins.items() if not hashes)
+    assert not unhashed, f"{path.name}: pins with no hash: {unhashed}"
     return pins
 
 
@@ -71,26 +75,29 @@ def test_workflow_triggers_and_paths() -> None:
     assert "github.ref" in doc["concurrency"]["group"]
 
 
-def _glob(pattern: str) -> re.Pattern[str]:
-    """GitHub's paths-filter glob for the subset PATHS may use: `**` crosses `/`,
-    `*` does not. Other glob syntax ([], !, +, ?) is refused, not guessed."""
-    assert not set(pattern) & set("[]!+?"), f"unsupported glob syntax in {pattern!r}"
-    parts = re.split(r"(\*\*|\*)", pattern)
-    table = {"**": ".*", "*": "[^/]*"}
-    return re.compile("".join(table.get(part, re.escape(part)) for part in parts))
+def _matches(rel: str, pattern: str) -> bool:
+    """Only the two pattern shapes PATHS uses: an exact path, or `<dir>/**` (every
+    file under <dir>, at any depth, dotfiles included). Anything else is refused."""
+    if pattern.endswith("/**"):
+        prefix = pattern[:-3]
+        assert prefix and not set(prefix) & set("*?[]!+"), f"unsupported pattern {pattern!r}"
+        return rel.startswith(prefix + "/")
+    assert not set(pattern) & set("*?[]!+"), f"unsupported pattern {pattern!r}"
+    return rel == pattern
 
 
 def _covered(rel: str, patterns: list[str] = PATHS) -> bool:
-    return any(_glob(pattern).fullmatch(rel) for pattern in patterns)
+    return any(_matches(rel, pattern) for pattern in patterns)
 
 
-def test_glob_matches_github_semantics() -> None:
+def test_path_matcher_shapes() -> None:
     assert _covered("bench/tests/x.py", ["bench/**"])
-    assert not _covered("bench/tests/x.py", ["bench/*"])
-    assert _covered("bench/x.py", ["bench/*"])
-    assert not _covered("a/b.md", ["*.md"])
+    assert _covered("bench/.venv/x", ["bench/**"])
+    assert not _covered("bench", ["bench/**"])
+    assert not _covered("benchmarks/x", ["bench/**"])
+    assert _covered("BENCHMARKS.md", ["BENCHMARKS.md"])
     assert not _covered("BENCHMARKSxmd", ["BENCHMARKS.md"])
-    for pattern in ("[ab]", "a?b", "!x", "a+"):
+    for pattern in ("bench/*", "*.md", "a?b", "[ab]", "!x", "a+", "**", "b*/**"):
         with pytest.raises(AssertionError, match="unsupported"):
             _covered("x", [pattern])
 
@@ -126,6 +133,7 @@ def test_workflow_steps_are_pinned_and_bracketed() -> None:
             assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", step["uses"]), step["uses"]
         else:
             assert not {"env", "shell", "continue-on-error", "working-directory"} & set(step), step
+    assert set(_workflow()["jobs"]["hermetic"]) == {"runs-on", "timeout-minutes", "steps"}
     assert steps[0]["with"]["persist-credentials"] is False
     assert steps[-1].get("if") == "always()"
     assert all("if" not in s for s in steps[:-1])
@@ -141,6 +149,8 @@ def test_run_hermetic_runs_only_bench_tests_from_repo_root() -> None:
     text = RUN_HERMETIC.read_text(encoding="utf-8")
     assert 'cd "$(dirname "$0")/.."' in text
     assert re.search(r'^exec "\$py" -m pytest bench/tests -q "\$@"$', text, re.M)
+    assert re.search(r'^py=bench/\.venv/bin/python$', text, re.M)
+    assert re.search(r'^\[ -x "\$py" \] \|\| py=python$', text, re.M)
     assert re.search(r'^command -v "\$py" >/dev/null 2>&1 \|\| py=python3$', text, re.M)
 
 
@@ -153,8 +163,8 @@ def test_bootstrap_installs_the_hashed_bench_lock() -> None:
     bench = _lock(BENCH_LOCK)
     assert {"pip", "pytest", "pyyaml"} <= set(bench)
     ci = _lock(CI_LOCK)
-    drift = {n: (v, ci[n]) for n, v in bench.items() if n in ci and ci[n] != v}
-    assert not drift, f"bench/constraints.txt drifted from constraints-ci.txt: {drift}"
+    drift = {n: (v[0], ci[n][0]) for n, v in bench.items() if n in ci and ci[n] != v}
+    assert not drift, f"bench/constraints.txt version or hashes differ from constraints-ci.txt: {drift}"
 
 
 def test_scaffold_seed_ignores_host_git_config_and_hooks(tmp_path: Path) -> None:
