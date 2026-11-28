@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ WORKFLOW = ROOT / ".github" / "workflows" / "bench-harness.yml"
 RUN_HERMETIC = ROOT / "bench" / "run_hermetic.sh"
 BOOTSTRAP = ROOT / "bench" / "bootstrap.sh"
 BENCH_LOCK = ROOT / "bench" / "constraints.txt"
+SCAFFOLD = ROOT / "bench" / "external" / "native-evals" / "evals" / "bootstrap" / "scaffold.sh"
 CI_LOCK = ROOT / "constraints-ci.txt"
 
 PATHS = [
@@ -27,6 +30,7 @@ STEPS = [
     ("uses", "actions/checkout"),
     ("uses", "actions/setup-python"),
     ("run", f"python -m pip install {HASHED_INSTALL} constraints-ci.txt"),
+    ("run", "ruff check --select F401,F821 --target-version py312 bench/"),
     ("run", VERIFY),
     ("run", "bash bench/run_hermetic.sh"),
     ("run", VERIFY),
@@ -69,10 +73,10 @@ def test_workflow_triggers_and_paths() -> None:
 
 def _glob(pattern: str) -> re.Pattern[str]:
     """GitHub's paths-filter glob for the subset PATHS may use: `**` crosses `/`,
-    `*` and `?` do not. Other glob syntax ([], !, +) is refused, not guessed."""
-    assert not set(pattern) & set("[]!+"), f"unsupported glob syntax in {pattern!r}"
-    parts = re.split(r"(\*\*|\*|\?)", pattern)
-    table = {"**": ".*", "*": "[^/]*", "?": "[^/]"}
+    `*` does not. Other glob syntax ([], !, +, ?) is refused, not guessed."""
+    assert not set(pattern) & set("[]!+?"), f"unsupported glob syntax in {pattern!r}"
+    parts = re.split(r"(\*\*|\*)", pattern)
+    table = {"**": ".*", "*": "[^/]*"}
     return re.compile("".join(table.get(part, re.escape(part)) for part in parts))
 
 
@@ -85,10 +89,10 @@ def test_glob_matches_github_semantics() -> None:
     assert not _covered("bench/tests/x.py", ["bench/*"])
     assert _covered("bench/x.py", ["bench/*"])
     assert not _covered("a/b.md", ["*.md"])
-    assert not _covered("a/b", ["a?b"])
     assert not _covered("BENCHMARKSxmd", ["BENCHMARKS.md"])
-    with pytest.raises(AssertionError, match="unsupported"):
-        _covered("x", ["[ab]"])
+    for pattern in ("[ab]", "a?b", "!x", "a+"):
+        with pytest.raises(AssertionError, match="unsupported"):
+            _covered("x", [pattern])
 
 
 def test_path_filter_covers_every_file_the_bench_tests_read(pytestconfig: pytest.Config) -> None:
@@ -136,7 +140,7 @@ def test_workflow_uses_no_secrets_or_model_calls() -> None:
 def test_run_hermetic_runs_only_bench_tests_from_repo_root() -> None:
     text = RUN_HERMETIC.read_text(encoding="utf-8")
     assert 'cd "$(dirname "$0")/.."' in text
-    assert re.search(r'^exec "\$py" -m pytest bench/tests -q$', text, re.M)
+    assert re.search(r'^exec "\$py" -m pytest bench/tests -q "\$@"$', text, re.M)
     assert re.search(r'^command -v "\$py" >/dev/null 2>&1 \|\| py=python3$', text, re.M)
 
 
@@ -144,9 +148,36 @@ def test_bootstrap_installs_the_hashed_bench_lock() -> None:
     text = BOOTSTRAP.read_text(encoding="utf-8")
     assert f'-m pip install {HASHED_INSTALL} "$here/constraints.txt"' in text
     assert "sys.version_info < (3, 12)" in text
+    assert 'python3 -m venv --clear "$venv"' in text
     assert "--upgrade" not in text
     bench = _lock(BENCH_LOCK)
     assert {"pip", "pytest", "pyyaml"} <= set(bench)
     ci = _lock(CI_LOCK)
     drift = {n: (v, ci[n]) for n, v in bench.items() if n in ci and ci[n] != v}
     assert not drift, f"bench/constraints.txt drifted from constraints-ci.txt: {drift}"
+
+
+def test_scaffold_seed_ignores_host_git_config_and_hooks(tmp_path: Path) -> None:
+    # One hostile input per isolation layer: a system and a global config that each
+    # ignore README.md (defeated by GIT_CONFIG_NOSYSTEM and GIT_CONFIG_GLOBAL=/dev/null),
+    # and a template dir whose pre-commit hook fails and leaves a marker (core.hooksPath).
+    marker = tmp_path / "hook-ran"
+    hooks = tmp_path / "template" / "hooks"
+    hooks.mkdir(parents=True)
+    hook = hooks / "pre-commit"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "ignore").write_text("README.md\n", encoding="utf-8")
+    ignore_cfg = f"[core]\n\texcludesFile = {home / 'ignore'}\n"
+    (home / ".gitconfig").write_text(ignore_cfg, encoding="utf-8")
+    (tmp_path / "system.gitconfig").write_text(ignore_cfg, encoding="utf-8")
+    work = tmp_path / "work"
+    work.mkdir()
+    env = {"PATH": os.environ["PATH"], "HOME": str(home), "GIT_TEMPLATE_DIR": str(tmp_path / "template"),
+           "GIT_CONFIG_SYSTEM": str(tmp_path / "system.gitconfig")}
+    subprocess.run(["bash", str(SCAFFOLD)], cwd=work, env=env, check=True)
+    assert not marker.exists()
+    log = subprocess.run(["git", "log", "--format=%s"], cwd=work, env=env, capture_output=True, text=True, check=True)
+    assert log.stdout.strip() == "seed"

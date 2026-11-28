@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Create the hermetic/verifier Python environment for bench/ from the hashed
-# lock in bench/constraints.txt (Python >= 3.12; pytest and pyyaml).
+# lock in bench/constraints.txt (Python >= 3.12; pytest and pyyaml). Every run
+# rebuilds bench/.venv from scratch, so it holds exactly the lock.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 venv="$here/.venv"
@@ -11,7 +12,7 @@ if sys.version_info < (3, 12):
     sys.exit(f"bench needs python3 >= 3.12, found {sys.version.split()[0]}")
 PY
 
-python3 -m venv "$venv"
+python3 -m venv --clear "$venv"
 "$venv/bin/python" -m pip install --only-binary=:all: --require-hashes -r "$here/constraints.txt"
 
 "$venv/bin/python" - <<'PY'
