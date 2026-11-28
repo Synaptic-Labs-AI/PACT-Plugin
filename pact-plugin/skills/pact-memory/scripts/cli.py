@@ -2083,9 +2083,13 @@ def build_parser():
         "sync": f'python3 "{prog}" sync',
         "project-file": f'python3 "{prog}" project-file',
         "project-id": f'python3 "{prog}" project-id show',
-        # THE SHARED HELPER RENDERS IT (shell-quoted: an unquoted `<id>` is a
-        # redirection), and a dry run is the default, so it names no --dry-run.
-        "project-id-rekey": render_rekey_command("<id>", "<canonical>", prog=prog),
+        # THE SHARED HELPER RENDERS IT, with the script path quoted as the
+        # other examples quote it (`example_prog`) and the placeholders
+        # shell-quoted (an unquoted `<id>` is a redirection); a dry run is
+        # the default, so it names no --dry-run.
+        "project-id-rekey": render_rekey_command(
+            "<id>", "<canonical>", prog=prog, example_prog=True
+        ),
     }
 
     parser = _TeachParser(

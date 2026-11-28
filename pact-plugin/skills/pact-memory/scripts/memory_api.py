@@ -1853,7 +1853,7 @@ def runnable_rekey_command(
 
 def render_rekey_command(
     from_id: str, to_id: str, db_path: Any = None, prog: Any = None,
-    only_placed: bool = False,
+    only_placed: bool = False, example_prog: bool = False,
 ) -> str:
     """The literal, SHELL-QUOTED AND RUNNABLE rekey command for one bucket.
 
@@ -1895,6 +1895,10 @@ def render_rekey_command(
         argv.append("--only-placed-here")
     if db_path is not None:
         argv.append("--db-path=" + str(db_path))
+    if example_prog:
+        # A --help example: the script path is double-quoted as every other
+        # example of the CLI writes it; the rest stays shell-quoted.
+        return f'python3 "{argv[1]}" ' + shlex.join(argv[2:])
     return shlex.join(argv)
 
 

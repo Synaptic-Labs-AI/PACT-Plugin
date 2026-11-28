@@ -678,7 +678,10 @@ def test_the_rekey_help_example_matches_the_other_examples():
 
     rekey = _rendered_help()["project-id rekey"]
     example = rekey.split("Examples:", 1)[1].strip()
-    assert example == render_rekey_command("<id>", "<canonical>", prog=sys.argv[0]), example
+    assert example == render_rekey_command(
+        "<id>", "<canonical>", prog=sys.argv[0], example_prog=True
+    ), example
+    assert example.startswith(f'python3 "{sys.argv[0]}" project-id rekey '), example
     assert "--dry-run" not in example
     assert f'python3 "{sys.argv[0]}" list' in _rendered_help()[""]
 

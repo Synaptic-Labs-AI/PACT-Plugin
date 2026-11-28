@@ -3341,6 +3341,19 @@ class TestCliHelpOutput:
         assert "error:" in captured.err
         assert self._example_lines()["save"] in captured.err
 
+    def test_every_help_example_is_quoted_alike(self, capsys):
+        """Every top-level example runs the script the same way, with its
+        path double-quoted, the rekey example included. RED WHEN one example
+        is quoted differently."""
+        with pytest.raises(SystemExit):
+            main(["--help"])
+        text = capsys.readouterr().out
+        examples = [line.strip() for line in text.split("Examples:", 1)[1].splitlines() if line.strip()]
+        prog = sys.argv[0]
+        assert len(examples) >= 10, examples
+        assert all(line.startswith(f'python3 "{prog}" ') for line in examples), examples
+        assert f"python3 \"{prog}\" project-id rekey '--from=<id>' '--to=<canonical>'" in examples
+
     @staticmethod
     def _example_lines():
         # Interpreter-prefixed, quoted script path, concrete flags: the exact
