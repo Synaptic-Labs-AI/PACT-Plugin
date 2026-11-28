@@ -139,6 +139,8 @@ def test_native_eval_has_no_model_overrides(flag: str, tmp_path: Path, short_roo
 
 def _dead(pid: int, wait: float = 5.0) -> bool:
     """True once pid is gone or a zombie (no longer running)."""
+    if not Path("/proc/self/stat").exists():
+        pytest.skip("the liveness check needs /proc; without it a surviving process would read as dead")
     deadline = time.monotonic() + wait
     while True:
         try:
@@ -389,3 +391,17 @@ def test_native_eval_refuses_a_manifest_whose_plugin_is_not_its_own_copy(tmp_pat
     with pytest.raises(SystemExit, match="not the run's own"):
         native_eval.run(_args(manifest, cases, _fake_claude(tmp_path), short_root))
     assert (elsewhere / "evals").is_dir()
+
+
+
+def test_native_eval_names_a_partial_keep(tmp_path: Path, short_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manifest, cases, _plugin = _prepared(tmp_path)
+    fake = _fake_claude(tmp_path, "os.makedirs(os.path.join(os.environ['TMPDIR'], 'claude-eval-x'))\n")
+
+    def partial_move(_source: str, target: str) -> None:
+        os.makedirs(target)  # the copy got this far, then failed
+        raise OSError("cross-device copy failed")
+
+    monkeypatch.setattr(native_eval.shutil, "move", partial_move)
+    assert native_eval.run(_args(manifest, cases, fake, short_root)) == 1
+    assert "partial copy left at" in _result(manifest)["cleanup_error"]

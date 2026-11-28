@@ -268,7 +268,8 @@ def build_parser(parser: argparse.ArgumentParser | None = None) -> argparse.Argu
         "--temp-root",
         default=str(prepare.DEFAULT_TEMP_ROOT),
         help="short writable parent for the eval's cwd, TMPDIR and HOME: outside the repo, with no "
-        "CLAUDE.md, CLAUDE.local.md or .claude/CLAUDE.md in it or its parents, and TMPDIR within "
+        "Claude Code memory or project-settings file (see prepare.check_clean_root) in it or its "
+        "parents, and TMPDIR within "
         f"{MAX_TMPDIR_CHARS} chars (sandbox bridge "
         "sockets must stay under the Unix socket path limit)",
     )

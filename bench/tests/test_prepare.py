@@ -389,6 +389,8 @@ def test_verify_provider_missing_binary_is_a_clear_failure(tmp_path: Path) -> No
 
 def _dead(pid: int, wait: float = 5.0) -> bool:
     """True once pid is gone or a zombie (reaped by nobody yet but no longer running)."""
+    if not Path("/proc/self/stat").exists():
+        pytest.skip("the liveness check needs /proc; without it a surviving process would read as dead")
     deadline = time.monotonic() + wait
     while True:
         try:
@@ -662,7 +664,7 @@ def test_provider_output_stays_out_of_the_manifest_and_stdout(
     assert token not in captured.out and token not in captured.err
     check = json.loads(manifest_text)["provider"]["check"]
     assert set(check) == {"path", *prepare.CHECK_SUMMARY_KEYS}
-    assert check["model_keys"] == ["deepseek-flash"] and check["exit_code"] == 0
+    assert check["resolved_model"] is True and check["exit_code"] == 0 and check["is_error"] is False
     # The full record, with the child's output tails, is only in provider-check.json.
     assert token in Path(check["path"]).read_text(encoding="utf-8")
 
@@ -673,3 +675,69 @@ def test_out_that_is_a_file_is_refused(tmp_path: Path) -> None:
     with pytest.raises(SystemExit, match="exists and is not a directory"):
         prepare.main(_prepare_args(tmp_path, out))
     assert out.read_text(encoding="utf-8") == "not a dir"
+
+
+
+def test_verify_failure_messages_hold_no_child_strings(tmp_path: Path) -> None:
+    out = _out(tmp_path)
+    leaky = _json_claude(tmp_path / "claude", {"is_error": False, "modelUsage": {"LEAK-usage-key": {}}})
+    with pytest.raises(SystemExit) as exc:
+        prepare.verify_provider(out, out, str(leaky), dict(os.environ))
+    assert "did not resolve deepseek-flash" in str(exc.value) and "LEAK" not in str(exc.value)
+    erroring = _json_claude(tmp_path / "claude2", {"is_error": "LEAK-error-text", "modelUsage": {}})
+    with pytest.raises(SystemExit) as exc:
+        prepare.verify_provider(out, out, str(erroring), dict(os.environ))
+    assert "is_error=True" in str(exc.value) and "LEAK" not in str(exc.value)
+
+
+def _dirty_probe_repo(tmp_path: Path) -> Path:
+    repo = _plugin_repo(tmp_path)
+    (repo / "pact-plugin" / "extra.py").write_text("x", encoding="utf-8")
+    return repo
+
+
+def test_untracked_file_is_dirty_whatever_the_repo_config(tmp_path: Path) -> None:
+    repo = _dirty_probe_repo(tmp_path)
+    _git(repo, "config", "status.showUntrackedFiles", "no")
+    with pytest.raises(SystemExit, match="dirty pact-plugin tree"):
+        prepare.check_source(repo, None, None, allow_dirty=False)
+
+
+def test_git_ignores_inherited_git_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _plugin_repo(tmp_path / "a")
+    other = _plugin_repo(tmp_path / "b")
+    # Give each repo a commit the other lacks (the two seed commits can be identical objects).
+    (repo / "pact-plugin" / "keep.txt").write_text("a-version", encoding="utf-8")
+    _git(repo, "commit", "-qam", "a", "--no-gpg-sign")
+    (other / "pact-plugin" / "keep.txt").write_text("changed", encoding="utf-8")
+    _git(other, "commit", "-qam", "other", "--no-gpg-sign")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    sha = prepare.check_source(repo, None, None, allow_dirty=False)["sha"]
+    out = tmp_path / "out"
+    out.mkdir()
+    prov = prepare.check_source(repo, "HEAD", None, allow_dirty=False)
+    dest, _ = prepare.materialize_plugin(repo, out, "HEAD", None, prov)  # git archive path
+    assert (dest / "keep.txt").read_text(encoding="utf-8") == "a-version"
+    monkeypatch.delenv("GIT_DIR")
+    expected = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+    assert sha == expected.stdout.strip()
+
+
+def test_clean_root_refuses_a_symlinked_rules_subdir(tmp_path: Path) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "r.md").write_text("rule", encoding="utf-8")
+    rules = tmp_path / "base" / ".claude" / "rules"
+    rules.mkdir(parents=True)
+    (rules / "linked").symlink_to(elsewhere)
+    with pytest.raises(SystemExit, match="memory files"):
+        prepare.check_clean_root(tmp_path / "base" / "a")
+
+
+# Literal names, not prepare.PROJECT_SETTINGS_NAMES, so dropping one fails a case.
+@pytest.mark.parametrize("name", [".claude/settings.json", ".claude/settings.local.json"])
+def test_clean_root_refuses_project_settings_in_parents(tmp_path: Path, name: str) -> None:
+    (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / name).write_text("{}", encoding="utf-8")
+    with pytest.raises(SystemExit, match="memory files or project settings"):
+        prepare.check_clean_root(tmp_path / "a")

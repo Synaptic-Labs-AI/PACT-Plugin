@@ -13,7 +13,9 @@ WHAT THIS OWNS
   - Verify the provider with a trivial headless claude -p call and record the
     resolved model. The child's output tails go only to provider-check.json.
   - Write a manifest with provenance. The harness never writes the provider
-    token itself, and manifest.json and stdout carry no child output.
+    token itself, and manifest.json, stdout and its error messages carry no child
+    output or child-reported string (the manifest's provider check is exit_code,
+    is_error as a bool, resolved_model and cwd).
     provider-check.json and the run transcripts kept under --out do carry child
     output, which can contain the token, so keep --out under bench/.runs
     (gitignored) when it is inside the repo (a warning says so).
@@ -91,10 +93,13 @@ RUNS_DIR = REPO_ROOT / "bench" / ".runs"
 DEFAULT_TEMP_ROOT = Path("/tmp")
 MEMORY_FILE_NAMES = ("CLAUDE.md", "CLAUDE.local.md", ".claude/CLAUDE.md")
 MEMORY_RULES_DIR = ".claude/rules"
+# Project settings Claude Code may read from a cwd or its parents (hooks, permissions).
+PROJECT_SETTINGS_NAMES = (".claude/settings.json", ".claude/settings.local.json")
 FORWARDED_SIGNALS = (signal.SIGTERM, signal.SIGHUP)
 KILL_DRAIN_SECONDS = 10
-# provider-check.json fields copied into manifest.json; none can hold child output.
-CHECK_SUMMARY_KEYS = ("exit_code", "model_keys", "is_error", "cwd")
+# provider-check.json fields copied into manifest.json: ours or derived, never a child string
+# (is_error is normalised to a bool when copied).
+CHECK_SUMMARY_KEYS = ("exit_code", "is_error", "resolved_model", "cwd")
 
 
 def utc_now() -> str:
@@ -109,6 +114,14 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _git_env() -> dict[str, str]:
+    """The host environment minus inherited GIT_*, with no global or system git config,
+    so a host setting (e.g. status.showUntrackedFiles) cannot change what git reports."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    return env
+
+
 def _git(repo: Path, *args: str) -> str:
     try:
         proc = subprocess.run(
@@ -116,6 +129,7 @@ def _git(repo: Path, *args: str) -> str:
             check=True,
             capture_output=True,
             text=True,
+            env=_git_env(),
         )
     except subprocess.CalledProcessError as exc:
         raise SystemExit(f"git {' '.join(args)} failed in {repo}: {exc.stderr.strip()}") from exc
@@ -214,24 +228,30 @@ def run_process_group(
 
 
 def _holds_files(directory: Path) -> bool:
-    """True when directory holds any file at any depth (symlinked subdirectories are
-    not followed); an unreadable one counts as holding files."""
+    """True when directory holds any file at any depth; an unreadable directory or a
+    symlinked subdirectory (not followed) counts as holding files."""
     def fail(exc: OSError) -> None:
         raise exc
 
     try:
         # os.walk, not Path.rglob: rglob silently skips a directory it cannot read.
-        return any(files for _root, _dirs, files in os.walk(directory, onerror=fail))
+        for root, dirs, files in os.walk(directory, onerror=fail):
+            # A symlinked subdirectory is not walked, so it counts as holding files.
+            if files or any(os.path.islink(os.path.join(root, name)) for name in dirs):
+                return True
+        return False
     except OSError:
         return True
 
 
 def memory_files_above(path: Path) -> list[Path]:
-    """The MEMORY_FILE_NAMES files, and any MEMORY_RULES_DIR holding files, in path
-    or any of its ancestors."""
+    """The MEMORY_FILE_NAMES and PROJECT_SETTINGS_NAMES files, and any MEMORY_RULES_DIR
+    holding files, in path or any of its ancestors."""
     found: list[Path] = []
     for directory in (path, *path.parents):
-        found.extend(directory / name for name in MEMORY_FILE_NAMES if (directory / name).is_file())
+        found.extend(
+            directory / name for name in (*MEMORY_FILE_NAMES, *PROJECT_SETTINGS_NAMES) if (directory / name).is_file()
+        )
         rules = directory / MEMORY_RULES_DIR
         if rules.is_dir() and _holds_files(rules):
             found.append(rules)
@@ -241,7 +261,8 @@ def memory_files_above(path: Path) -> list[Path]:
 def check_clean_root(root: Path) -> Path:
     """Return root's real path (symlinks resolved, as the child will see its cwd),
     refusing one inside the repo, one that exists but is not a directory, or one
-    below a memory file or a non-empty .claude/rules directory (memory_files_above)."""
+    below a memory file, project settings file or non-empty .claude/rules directory
+    (memory_files_above)."""
     root = root.expanduser().resolve()
     if root.exists() and not root.is_dir():
         raise SystemExit(f"--temp-root {root} is not a directory")
@@ -250,7 +271,7 @@ def check_clean_root(root: Path) -> Path:
     found = memory_files_above(root)
     if found:
         raise SystemExit(
-            f"--temp-root {root} has Claude Code memory files in it or its parents, which every "
+            f"--temp-root {root} has Claude Code memory files or project settings in it or its parents, which every "
             f"child session would load: {[str(path) for path in found]}; choose a --temp-root without them"
         )
     return root
@@ -321,7 +342,7 @@ def provenance(repo: Path, ref: str | None, plugin_dir: Path | None) -> dict[str
     if ref is None:
         sha = _git(repo, "rev-parse", "HEAD").strip()
         tree = _git(repo, "rev-parse", "HEAD:pact-plugin").strip()
-        status = _git(repo, "status", "--porcelain", "--", "pact-plugin")
+        status = _git(repo, "status", "--porcelain", "--untracked-files=all", "--", "pact-plugin")
         return {
             "source": "current-worktree",
             "sha": sha,
@@ -386,6 +407,7 @@ def materialize_plugin(
                     stdout=fh,
                     stderr=subprocess.PIPE,
                     text=True,
+                    env=_git_env(),
                 )
             if proc.returncode != 0:
                 raise SystemExit(f"git archive {prov['sha']} pact-plugin failed in {repo}: {proc.stderr.strip()}")
@@ -497,8 +519,8 @@ def verify_provider(
     model: str = DEFAULT_MODEL,
     temp_root: Path = DEFAULT_TEMP_ROOT,
 ) -> dict[str, Any]:
-    """Run a trivial headless call from a fresh cwd under temp_root (outside the
-    repo, with no memory files above it); write provider-check.json on every outcome."""
+    """Run a trivial headless call from a fresh cwd under temp_root (refused by
+    check_clean_root unless clean); write provider-check.json on every outcome."""
     record: dict[str, Any] = {"checked_at": utc_now(), "requested_model": model, "cwd": None}
     try:
         temp_root = check_clean_root(temp_root)
@@ -549,11 +571,17 @@ def verify_provider(
     record["is_error"] = parsed.get("is_error")
     record["num_turns"] = parsed.get("num_turns")
     _write_check(out, record)
+    # Messages hold only our own text: what the child reported stays in provider-check.json.
     if proc.returncode != 0 or parsed.get("is_error"):
-        raise SystemExit(f"provider verification exited {proc.returncode} (is_error={parsed.get('is_error')})")
+        raise SystemExit(
+            f"provider verification exited {proc.returncode} (is_error={bool(parsed.get('is_error'))}); "
+            f"see {out / 'provider-check.json'}"
+        )
     wanted = model_base(model)
-    if not any(wanted in str(key) for key in usage):
-        raise SystemExit(f"provider verification did not resolve {wanted}: {sorted(usage)}")
+    record["resolved_model"] = any(wanted in str(key) for key in usage)
+    _write_check(out, record)
+    if not record["resolved_model"]:
+        raise SystemExit(f"provider verification did not resolve {wanted}; see {out / 'provider-check.json'}")
     return record
 
 
@@ -677,6 +705,7 @@ def prepare(args: argparse.Namespace) -> int:
             "path": str(out / "provider-check.json"),
             **{key: check.get(key) for key in CHECK_SUMMARY_KEYS},
         }
+        manifest["provider"]["check"]["is_error"] = bool(check.get("is_error"))
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(manifest, indent=2))
     return 0
@@ -702,8 +731,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--temp-root",
         default=str(DEFAULT_TEMP_ROOT),
-        help="parent of the --verify call's cwd; must be outside the repo with no CLAUDE.md, "
-        "CLAUDE.local.md or .claude/CLAUDE.md in it or its parents",
+        help="parent of the --verify call's cwd; must be outside the repo with no Claude Code memory "
+        "or project-settings file (CLAUDE.md, CLAUDE.local.md, .claude/CLAUDE.md, .claude/rules/*, "
+        ".claude/settings*.json) in it or its parents",
     )
     parser.add_argument(
         "--force",
