@@ -261,7 +261,8 @@
     "Token snapshot has n=2 subagent samples plus one provider aggregate.",
     "Coverage map 1.0.1 is independently reviewed (review note unpublished); native checks remain blocked/deferred.",
     "Track B fixtures were validated out of tree and are not in this commit; no model runs have been executed.",
-    "Where the orchestration smoke and the token snapshot were started is not recorded; if they ran inside the repository they loaded the project CLAUDE.md files, and the spawn-token numbers may include that text."
+    "Where the orchestration smoke and the token snapshot were started is not recorded; if they ran inside the repository they loaded the project CLAUDE.md files, and the spawn-token numbers may include that text.",
+    "The shipped native-eval graders are attempt-based (tool_used) or output-based (llm on the last message); none checks an effect, so the cases cannot serve as evidence until effect-based graders replace them."
   ],
   "review": {
     "status": "complete",

@@ -99,16 +99,17 @@ native-eval results land under `<out>/native-eval/`. All three plugin sources
 `prepare` checks its inputs (a settings file holding a JSON object with an
 object `env`, a non-empty token file, `--plugin-dir`, a clean source unless
 `--allow-dirty`, and the `claude` binary with `--verify`) before it creates
-`<out>`; `--plugin-ref` and `--plugin-dir` cannot be combined.
+`<out>` (an `--out` that exists and is not a directory is refused first); `--plugin-ref` and `--plugin-dir` cannot be combined.
 
 **The harness starts each `claude` child from a clean directory.** Claude Code
 can load `CLAUDE.md` files from the working directory and its parents, so
 `prepare --verify` and `native-eval` start their child from a fresh directory
 under `--temp-root` (default `/tmp` for both). The temp root is resolved to its
 real path (symlinks followed) and refused if it resolves into the repository,
-has a `CLAUDE.md`, `CLAUDE.local.md` or `.claude/CLAUDE.md` in it or any parent,
-or exists and is not a directory. These three names are the ones the harness
-checks, not a list of every location Claude Code reads. A temp root under `$HOME` fails the check when
+has a `CLAUDE.md`, `CLAUDE.local.md` or `.claude/CLAUDE.md`, or a `.claude/rules`
+directory holding any file (an unreadable one counts), in it or any parent, or
+exists and is not a directory. These are the locations the harness checks, not
+a list of every location Claude Code reads. A temp root under `$HOME` fails the check when
 `~/.claude/CLAUDE.md` exists. `provider-check.json` and
 `native-eval/result.json` record the real working directory as `cwd`. This
 covers the directory the harness chooses; sessions that `claude plugin eval`
@@ -120,9 +121,12 @@ root or one of its ancestors.
 process's environment, so any file that captures child output or session state
 can hold it if the model or a tool prints the environment. Under `<out>` that
 is `native-eval/kept-temp/`, `native-eval/runs/`, `report.json`/`report.html`,
-`native-eval/stdout.txt`/`stderr.txt`, `plugin-eval/*.stdout.json`/`*.stderr.txt`,
-`provider-check.json` and `config/` (session transcripts); `manifest.json` and
-`settings.json` never contain it. Only `bench/.runs/` is gitignored. `prepare` warns on stderr when `--out` is
+`native-eval/stdout.txt`/`stderr.txt`, `plugin-eval/result.json`,
+`plugin-eval/*.stdout.json`/`*.stderr.txt`, `plugin-eval/sync.stdout.txt`/`sync.stderr.txt`,
+`provider-check.json` and `config/` (session transcripts). `manifest.json`,
+`settings.json` and `prepare`'s stdout carry no child output; the manifest's
+`provider.check` holds only `path`, `exit_code`, `model_keys`, `is_error` and
+`cwd`, and the full check record is in `provider-check.json`. Only `bench/.runs/` is gitignored. `prepare` warns on stderr when `--out` is
 inside the repository but outside `bench/.runs/`; it does not refuse.
 
 ## Provider configuration (DeepSeek)
@@ -141,16 +145,18 @@ during a run.
   live value), so the settings env and the child env agree.
 - **Credential:** `ANTHROPIC_AUTH_TOKEN` read from `~/.claude-keys/deepseek`
   (path overridable with `--token-file`). The harness never writes it to disk
-  itself and the manifest records only the file path, but run outputs can hold
-  it (see "Keep `--out` under `bench/.runs/`" above).
+  itself and the manifest records only the file path, but files holding child
+  output (`provider-check.json`, kept transcripts) can contain it (see "Keep
+  `--out` under `bench/.runs/`" above).
 - **Child environment (allowlist):** from the live environment the child gets
   only `PATH`, `LANG`, `TERM` and `LC_*`; then the scratch settings env,
   filtered by the same credential rule; then `CLAUDE_CONFIG_DIR`, `HOME`,
   `TMPDIR`, `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN`. No other live
   variable reaches it (no `CLAUDE*`, `GH_TOKEN`, `SSH_*`, `AWS_*` or
   `ANTHROPIC_API_KEY`). `plugin-eval` uses the same child environment.
-- **Model:** `deepseek-flash[1m]`, pinned in the scratch settings env on the 11
-  model-id keys that the Claude Code 2.1.332 binary names: `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_MODEL`,
+- **Model:** `deepseek-flash[1m]`, pinned in the scratch settings env on 11
+  model-selection keys that the Claude Code 2.1.332 binary names (other
+  model-related keys, such as `ANTHROPIC_CUSTOM_MODEL_OPTION`, are not pinned): `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_MODEL`,
   `ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL`,
   `ANTHROPIC_SMALL_FAST_MODEL`, `CLAUDE_CODE_SUBAGENT_MODEL`,
   `CLAUDE_CODE_WORKFLOW_SUBAGENT_MODEL`, `CLAUDE_CODE_AUTO_MODE_MODEL` and
@@ -206,7 +212,8 @@ is created. `--keep-temp` scaffolds are moved to
 `<out>/native-eval/plugin-evals-results/<run id>/` (the run id is the
 `pact-native-XXXXXXXX` name), and the temp root is then deleted, also when a
 move fails (for example across filesystems); a failure is recorded in
-`cleanup_error` and the run exits 1. A
+`cleanup_error`, which names the keep target and says when a partial copy was
+left there, and the run exits 1. A
 previous run's `report.json` and `report.html` are deleted at the start of each
 run, so `result.json` names only reports this run wrote. While the eval child
 runs, a SIGTERM or SIGHUP kills its process group, is recorded as
@@ -230,7 +237,10 @@ authored cases and the inventory they must meet are in
   --skills-file bench/external/plugin-eval-skills.txt
 ```
 
-Runs `uv sync --frozen --extra llm` (without the provider token), then
+Runs `uv sync --frozen --extra llm` (without the provider token; the score
+commands get `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_BASE_URL`, which PluginEval's
+judge passes to the `claude` CLI it runs, per its source at the pinned commit),
+then
 `plugin-eval score <scratch plugin> --depth quick` (whole plugin; static layer
 only) and `plugin-eval score <scratch plugin>/skills/<skill> --depth standard`
 for each skill in the skills file (static + experimental LLM judge). Each `uv`
@@ -241,7 +251,9 @@ skills come only from `--skills-file` or, by default,
 `bench/external/plugin-eval-skills.txt` (`~` is expanded); a missing or empty
 file, a duplicate entry, or an entry containing `/` or starting with `.` is an
 error.
-Results: `<out>/plugin-eval/result.json`. Once the manifest is read it is
+Results: `<out>/plugin-eval/result.json` (it holds child output and can contain
+the token; stdout prints only `plugin-eval: complete=<true|false> record=<path>`).
+Once the manifest is read it is
 written when the run ends, fails a check (checkout, skills file, settings,
 token, temp root), times out, aborts, or gets a SIGTERM or SIGHUP; an unreadable
 manifest exits with `cannot read prepare manifest …` and leaves no record, and

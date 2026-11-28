@@ -61,7 +61,8 @@ No task directories are committed yet; they land in a follow-up PR. Until then
 - A git-format patch relative to fixture/.
 - Apply with: git apply --directory=fixture gold.patch (or from a copy of fixture).
 - It must not modify hidden_tests/ in any way (edit, delete, rename in or out).
-- It must make hidden tests pass and keep seed tests passing.
+- It must make hidden tests pass (at least one passed, none skipped) and keep seed
+  tests passing (no fewer passed, no more skipped).
 
 ## Prompt
 
@@ -100,4 +101,9 @@ the child pytest gets no inherited `PYTEST_*` or `PYTHONPATH`. The hidden tests 
 before the gold patch is applied, and any change to them (an edit, a deletion,
 a rename in or out, non-ASCII names included) rejects the task. A gold patch
 that only adds files is accepted, and the seed tests after the patch run with
-`--ignore=hidden_tests`.
+`--ignore=hidden_tests`. After the patch, the hidden tests must have at least one
+test passed and none skipped, and the seed tests no fewer passed and no more
+skipped than before, counted from pytest's JUnit report; a patch whose conftest
+rewrites that report can still fool the check, which targets accidental skips.
+Every path in task.json must be a string that resolves inside the task directory
+(`../`, absolute paths and symlinks pointing out fail the task).

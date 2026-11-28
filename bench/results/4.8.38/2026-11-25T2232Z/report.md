@@ -56,8 +56,10 @@ any --temp-root short enough for the 51-character limit, /tmp included (see
 bench/external/README.md). Native eval is still not valid PACT baseline
 evidence: the eval sandbox denies reading/executing the plugin-under-test
 scripts and denies writes to config/out, so bootstrap and memory-save remain
-deferred. Attempt-based Bash graders can also pass on a failed sandbox call;
-effect-based graders are required.
+deferred. The shipped cases' graders are attempt-based (`tool_used`: a tool was
+called, which also passes on a failed sandbox call) or output-based (an LLM
+judge reads the last message); none checks an effect such as a written file.
+These cases cannot serve as evidence until effect-based graders replace them.
 
 Cases that need shell steps could not run their required PACT commands. The
 probe also exposed invalid case signals:
@@ -180,6 +182,8 @@ status was read from the GitHub check runs named in summary.json.
 ## Caveats
 
 - Native eval is blocked on the measuring host; no native score is claimed.
+- The shipped native-eval graders are attempt-based or output-based, not
+  effect-based, so the cases cannot serve as evidence until they are replaced.
 - Where the orchestration smoke and the token snapshot were started is not
   recorded. If they ran inside the repository, they loaded the project
   CLAUDE.md files (claude reads CLAUDE.md from the working directory and every
