@@ -3453,3 +3453,13 @@ def test_a_pin_or_alias_host_that_lower_cases_onto_ascii_is_refused():
     assert pin_file_value(b"Kex.com/o/r") == ("kex.com/o/r", None)
     assert pi.ssh_alias_detail(f"git@gh_wor{KELVIN}:o/r") is None
     assert pi.ssh_alias_detail("git@gh_work:o/r") == pi.SSH_ALIAS_DETAIL
+
+
+def test_the_classifier_docstring_states_the_host_rule_valid_host_applies():
+    """An `_` is a valid host character (an ssh alias, a docker service
+    name), so the classifier's decline list must not say a host outside
+    [a-z0-9.-] declines. RED WHEN the docstring and _valid_host disagree."""
+    doc = " ".join((pi.classify_remote_origin.__doc__ or "").split())
+    assert pi._valid_host("gh_work") and pi._valid_host("gitea_server")
+    assert "outside `[a-z0-9.-]`" not in doc
+    assert "outside `[a-z0-9._-]`" in doc

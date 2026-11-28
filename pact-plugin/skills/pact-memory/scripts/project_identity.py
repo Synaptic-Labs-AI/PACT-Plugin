@@ -1441,12 +1441,16 @@ def classify_remote_origin(url: Optional[str]) -> "tuple[str, Optional[str]]":
       whitespace-only value does reach it, as an ordinary first url.)
     - decline: a NETWORK remote that was present but cannot be a canonical id:
       an unsupported scheme; a bad, zero, out-of-range or leading-zero port;
-      a backslash or more than one `@`; a host outside `[a-z0-9.-]`, with a
-      leading or trailing `.`/`-` or with an empty label (`a..b`); an empty
+      a backslash or more than one `@`; a host that is not ASCII, holds a
+      character outside `[a-z0-9._-]` (an `_` is accepted: an ssh config alias
+      or a docker service name holds one), does not start and end with a letter
+      or digit, or has an empty label (`a..b`), or is a loopback, unspecified
+      or `.invalid` host (`_reserved_host`); an empty
       path or an empty, `.` or `..` segment (including `%2E%2E`); whitespace,
       `@`, `?`, `#` or a control character in a path segment; a `%` not followed by two hex digits; an
       undecodable byte; a leading BOM; or an id over the length cap. A
-      non-ASCII character or a sub-delimiter does NOT decline: it is kept in
+      non-ASCII character or a sub-delimiter in a path segment does NOT
+      decline: it is kept in
       percent-encoded form (`_normalize_segment`). No id is produced and no
       basename is used; the override is the remedy.
 
