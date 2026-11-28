@@ -2742,3 +2742,24 @@ def test_a_declined_identity_names_its_folder_name_bucket_and_the_pin(
     warned = " ".join(record.getMessage() for record in caplog.records)
     assert "this checkout's folder-name bucket 'repoL' holds 1 memory" in warned, warned
     assert "pact-project-id" in warned and "another project root" not in warned, warned
+
+
+@pytest.mark.parametrize("verb", [["list"], ["search", "old"], ["status"]])
+def test_every_read_from_a_declined_checkout_names_its_folder_name_bucket(
+    identity_env, store, monkeypatch, capfd, caplog, verb
+):
+    """list and search return before any scope read when no id resolves, and
+    must still say that this checkout's folder-name bucket holds memories no
+    read sees. RED WHEN a read prints only the decline warning."""
+    import logging
+
+    from scripts import memory_api
+
+    memory_api._DECLINED_BUCKET_WARNED.clear()
+    repo = make_repo(identity_env / "repoL", remote="http://localhost:3000/o/repoL")
+    _seed(store, "repoL", memory_id="old000001", path="a.py")
+    monkeypatch.chdir(repo)
+    with caplog.at_level(logging.WARNING):
+        _cli([*verb, "--db-path", str(store)], capfd)
+    warned = " ".join(record.getMessage() for record in caplog.records)
+    assert "this checkout's folder-name bucket 'repoL' holds 1 memory" in warned, warned

@@ -6014,6 +6014,9 @@ class PACTMemory:
         # that returns nothing must not initialize the store either.
         project_scope = self._project_scope()
         if project_scope is None:
+            # No read sees this checkout's folder-name bucket while its
+            # identity declines; every read says so (`_declined_folder_bucket`).
+            self._declined_legacy = self._declined_folder_bucket()
             return []
         # A READ MUST NOT INITIALISE THE STORE. Checked before
         # `_ensure_ready()` and before any read-write connection, so a 0-byte
@@ -6086,6 +6089,9 @@ class PACTMemory:
         # initialize the store.
         project_scope = self._project_scope()
         if project_scope is None:
+            # No read sees this checkout's folder-name bucket while its
+            # identity declines; every read says so (`_declined_folder_bucket`).
+            self._declined_legacy = self._declined_folder_bucket()
             return []
         # A READ MUST NOT INITIALISE THE STORE (see `search`).
         if not self._schema_present():
@@ -6826,6 +6832,9 @@ class PACTMemory:
         # no-op call must not initialize the store.
         project_scope = self._project_scope()
         if project_scope is None:
+            # No read sees this checkout's folder-name bucket while its
+            # identity declines; every read says so (`_declined_folder_bucket`).
+            self._declined_legacy = self._declined_folder_bucket()
             return []
         # THIS READ BINDS THE SESSION ID ONLY WHEN `session_only` IS ASKED
         # FOR, and an unusable DETECTED id must not gate it. No row can
