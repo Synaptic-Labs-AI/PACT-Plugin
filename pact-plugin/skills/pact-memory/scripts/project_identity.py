@@ -728,15 +728,23 @@ def _normalize_segment(raw: str) -> Optional[str]:
     return segment
 
 
-def _ssh_path_as_git_sends_it(path: str) -> str:
+def _ssh_path_as_git_sends_it(path: str) -> Optional[str]:
     """An ssh url's path decoded as git decodes it, then put back in the
     form `_normalize_segment` reads: every character a segment may not hold
-    raw is escaped again (`%20` stays `%20`, a decoded `%` is `%25`)."""
-    return quote(
-        unquote(path, errors="surrogateescape"),
-        safe="/" + "".join(sorted(_SEGMENT_RAW_CHARS)),
-        errors="surrogateescape",
-    )
+    raw is escaped again (`%20` stays `%20`, a decoded `%` is `%25`).
+    None for a path holding a lone surrogate (an undecodable byte from
+    `os.fsdecode`, or any other), which `_normalize_segment` declines in
+    the scp and https spellings of the same path."""
+    if any("\ud800" <= char <= "\udfff" for char in path):
+        return None
+    try:
+        return quote(
+            unquote(path, errors="surrogateescape"),
+            safe="/" + "".join(sorted(_SEGMENT_RAW_CHARS)),
+            errors="surrogateescape",
+        )
+    except UnicodeEncodeError:
+        return None
 
 
 def _strip_path_suffixes(path: str) -> str:
@@ -1069,6 +1077,8 @@ def normalize_remote_url(url: object) -> Optional[str]:
         sent_path = (
             _ssh_path_as_git_sends_it(path) if scheme in _HOME_RELATIVE_SCHEMES else path
         )
+        if sent_path is None:
+            return None
         github_unserved = _github_does_not_serve(sent_path)
         path = _strip_path_suffixes(sent_path)
         segments = _split_path(path)

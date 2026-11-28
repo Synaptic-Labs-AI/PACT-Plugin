@@ -3357,3 +3357,40 @@ class TestTheSubmoduleWorktreeCheckNamesItsCause:
             if answer != pi.CORE_WORKTREE_UNREAD_DETAIL:
                 wrong[(code, output)] = answer
         assert wrong == {}, wrong
+
+
+# ---------------------------------------------------------------------------
+# A lone surrogate in a path declines in every spelling, and nothing raises
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("url", [
+    "ssh://host/o/a\udce9", "host:o/a\udce9", "https://host/o/a\udce9",
+    "ssh://host/o/a\ud800", "host:o/a\ud800", "https://host/o/a\ud800",
+])
+def test_a_lone_surrogate_in_the_path_declines_in_every_spelling(url):
+    """An undecodable byte (os.fsdecode's \udce9) or any other lone surrogate
+    declines in the ssh://, scp and https spellings alike. RED WHEN the ssh://
+    spelling re-encodes it into an id or raises UnicodeEncodeError."""
+    from scripts.project_identity import classify_remote_origin, normalize_remote_url
+
+    assert normalize_remote_url(url) is None
+    assert classify_remote_origin(url)[0] == "decline"
+
+
+def test_the_url_readers_never_raise_on_random_text():
+    """normalize_remote_url and classify_remote_origin are total: seeded
+    random strings built from url pieces, escapes and surrogates answer
+    without raising."""
+    import random
+
+    from scripts.project_identity import classify_remote_origin, normalize_remote_url
+
+    pieces = ["ssh://", "https://", "git@", "h", ":", "/", "~", "%", "%E9", "%2F",
+              "%ED%A0%80", "[", "]", "::1", "@", ".git", "o", "r", " ", "\x00",
+              "\udce9", "\ud800", "\udfff", "é", "443", "github.com", "www."]
+    rng = random.Random(1677)
+    for _ in range(3000):
+        url = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 12)))
+        normalize_remote_url(url)
+        classify_remote_origin(url)
